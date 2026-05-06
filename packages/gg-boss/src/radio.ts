@@ -126,6 +126,11 @@ interface PlayResult {
  * Detect WSL via $WSL_DISTRO_NAME or /proc/sys/fs/binfmt_misc/WSLInterop.
  */
 function isWsl(): boolean {
+  // WSL env vars can leak into a Windows shell launched from a WSL session,
+  // but process.platform stays "win32" there. Anchor detection to platform
+  // so isWsl() means "I am running on a Linux distro inside WSL", never
+  // "WSL env vars happen to be set somewhere upstream".
+  if (process.platform !== "linux") return false;
   return !!process.env.WSL_DISTRO_NAME || existsSync("/proc/sys/fs/binfmt_misc/WSLInterop");
 }
 

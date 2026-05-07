@@ -51,7 +51,18 @@ function ensureLoaded(): HighlightModule | undefined {
   // Kick off async load for next call
   import("cli-highlight").then(
     (m) => {
-      hlModule = m;
+      // Bundler interop: when tsup bundles cli-highlight as CJS into a chunk
+      // (gg-boss does this), dynamic ESM `import()` returns
+      // `{ default: { supportsLanguage, highlight, ... } }` with no named
+      // exports at the top level. Native Node ESM loader DOES mirror named
+      // exports up, so probing for the actual method works in both modes.
+      const candidate = m as unknown as HighlightModule & { default?: HighlightModule };
+      if (typeof candidate.supportsLanguage === "function") {
+        hlModule = candidate;
+      } else if (candidate.default && typeof candidate.default.supportsLanguage === "function") {
+        hlModule = candidate.default;
+      }
+      // else: shape we don't recognise — stay undefined, fall back to plain text.
     },
     () => {
       // Failed to load — will fall back to plain text permanently

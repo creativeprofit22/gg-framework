@@ -26,6 +26,14 @@ import {
 } from "./sessions.js";
 import type { BossEvent, ProjectSpec, WorkerTurnSummary } from "./types.js";
 
+// ── Watchdog tuning ──────────────────────────────────────────
+/** How often the stuck-worker watchdog ticks. */
+const WATCHDOG_INTERVAL_MS = 30_000;
+/** Silent for this long with no event → ping the boss. */
+const SILENT_THRESHOLD_SEC = 90;
+/** Running this long total → ping the boss even if events are still flowing. */
+const WORKING_THRESHOLD_SEC = 600;
+
 export interface GGBossOptions {
   bossProvider: Provider;
   bossModel: string;
@@ -86,6 +94,23 @@ export class GGBoss {
    * message that didn't dispatch any workers.
    */
   private hadWorkerActivitySinceReady = false;
+  /**
+   * Watchdog for stuck workers. Fires every WATCHDOG_INTERVAL_MS; if any
+   * "working" worker has been silent past SILENT_THRESHOLD_SEC or running
+   * past WORKING_THRESHOLD_SEC, push a `worker_stuck` event onto the queue.
+   * The boss processes it like any other event — AFTER its current turn
+   * (queue is FIFO, boss is single-event-at-a-time), so this never
+   * interrupts an in-flight boss turn.
+   */
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Per-project debounce. Stores the worker's lastEventAtMs at the moment we
+   * pushed the stuck event. If the worker's lastEventAt advances past that,
+   * we know the worker recovered (emitted a new event), so we clear the entry
+   * and become eligible to fire again on the next stall. Also cleared on
+   * worker_turn_complete / worker_error.
+   */
+  private stuckPushedAt = new Map<string, number | null>();
 
   constructor(opts: GGBossOptions) {
     this.opts = opts;
@@ -430,6 +455,7 @@ export class GGBoss {
 
   async run(): Promise<void> {
     this.running = true;
+    this.startWatchdog();
     while (this.running) {
       try {
         await this.runIteration();
@@ -465,6 +491,7 @@ export class GGBoss {
     // (chain off). Lives outside the `if` so it stays in scope down below.
     let finishedTaskId: string | null = null;
     if (event.kind === "worker_turn_complete") {
+      this.stuckPushedAt.delete(event.summary.project);
       // Play the completion chime — fire-and-forget. Multiple workers
       // finishing in quick succession will layer their sounds, which is
       // fine: it's a chime, not a long jingle.
@@ -507,6 +534,7 @@ export class GGBoss {
     }
     if (event.kind === "worker_error") {
       this.hadWorkerActivitySinceReady = true;
+      this.stuckPushedAt.delete(event.project);
       log("ERROR", "worker_error", event.message, { project: event.project });
       const taskId = this.inFlightTaskByProject.get(event.project);
       if (taskId) {
@@ -516,6 +544,16 @@ export class GGBoss {
           notes: `Worker error: ${event.message}`,
         });
       }
+    }
+    if (event.kind === "worker_stuck") {
+      log("WARN", "worker_stuck", `worker silent—pinging boss`, {
+        project: event.project,
+        reason: event.reason,
+        silentSeconds: event.snapshot.silentSeconds,
+        workingSeconds: event.snapshot.workingSeconds,
+      });
+      // No task-state mutation — the worker is still in-flight; we're just
+      // notifying the boss so it can decide whether to peek/cancel/wait.
     }
 
     // Auto-compact when over 80% of context — mirrors AgentSession.runLoop.
@@ -679,8 +717,71 @@ export class GGBoss {
     this.pendingAutoChainNotices.push({ project, title: next.title });
   }
 
+  /**
+   * Start the stuck-worker watchdog. Idempotent.
+   *
+   * Safety properties:
+   *  - Pushes onto the same FIFO queue the boss already drains, so the boss
+   *    never gets interrupted mid-turn — stuck pings are processed AFTER
+   *    whatever it's currently doing.
+   *  - Per-worker debounce (`stuckPushedAt`) prevents spam; a worker only
+   *    gets re-flagged after it emits a new event AND stalls again, or after
+   *    it completes/errors and stalls on a fresh turn.
+   */
+  private startWatchdog(): void {
+    if (this.watchdogTimer) return;
+    this.watchdogTimer = setInterval(() => {
+      try {
+        this.checkStuckWorkers();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log("ERROR", "watchdog", "tick threw", { message });
+      }
+    }, WATCHDOG_INTERVAL_MS);
+    // Don't keep the event loop alive just for this timer.
+    this.watchdogTimer.unref?.();
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+  }
+
+  private checkStuckWorkers(): void {
+    for (const [name, worker] of this.workers) {
+      const decision = decideStuckEvent({
+        status: worker.getStatus(),
+        activity: worker.getStatus() === "working" ? worker.getActivity() : null,
+        lastPushedAt: this.stuckPushedAt.has(name)
+          ? (this.stuckPushedAt.get(name) ?? null)
+          : undefined,
+        silentThresholdSec: SILENT_THRESHOLD_SEC,
+        workingThresholdSec: WORKING_THRESHOLD_SEC,
+      });
+
+      if (decision.kind === "clear_debounce") {
+        this.stuckPushedAt.delete(name);
+        continue;
+      }
+      if (decision.kind === "skip") continue;
+
+      // decision.kind === "push"
+      this.stuckPushedAt.set(name, decision.lastEventAtMs);
+      this.queue.push({
+        kind: "worker_stuck",
+        project: name,
+        reason: decision.reason,
+        snapshot: decision.snapshot,
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+
   async dispose(): Promise<void> {
     this.running = false;
+    this.stopWatchdog();
     this.ac.abort();
     // Wake the queue if it's blocked on next() so the run loop can exit.
     this.queue.push({
@@ -729,6 +830,80 @@ export function reportedToTaskStatus(
   return anyToolFailed ? "blocked" : "done";
 }
 
+// ── Stuck-worker decision (pure, testable) ─────────────────────────────────────────
+import type { WorkerActivity } from "./worker.js";
+import type { WorkerStatus, WorkerStuckSnapshot } from "./types.js";
+
+export interface StuckDecisionInput {
+  status: WorkerStatus;
+  activity: WorkerActivity | null;
+  /**
+   * Debounce state. `undefined` = no entry; `null` = entry exists but worker
+   * had no events at push time; `number` = lastEventAtMs at push time.
+   */
+  lastPushedAt: number | null | undefined;
+  silentThresholdSec: number;
+  workingThresholdSec: number;
+}
+
+export type StuckDecision =
+  | { kind: "skip" }
+  | { kind: "clear_debounce" }
+  | {
+      kind: "push";
+      reason: "silent" | "long_running";
+      lastEventAtMs: number | null;
+      snapshot: WorkerStuckSnapshot;
+    };
+
+/**
+ * Pure decision: should we push a `worker_stuck` event for this worker?
+ *
+ * - Worker not `working` → clear any leftover debounce, then skip.
+ * - Already debounced and worker hasn't emitted new activity since the push
+ *   → skip (don't spam).
+ * - Already debounced but worker emitted new activity since → fall through
+ *   and re-evaluate against thresholds.
+ * - Crosses silent OR long-running threshold → push.
+ */
+export function decideStuckEvent(input: StuckDecisionInput): StuckDecision {
+  const { status, activity, lastPushedAt, silentThresholdSec, workingThresholdSec } = input;
+
+  if (status !== "working" || !activity) {
+    return lastPushedAt !== undefined ? { kind: "clear_debounce" } : { kind: "skip" };
+  }
+
+  // Already flagged — only re-flag once worker has emitted new activity since.
+  if (lastPushedAt !== undefined) {
+    const lastEvent = activity.lastEventAtMs;
+    if (lastEvent === null || lastPushedAt === null || lastEvent <= lastPushedAt) {
+      return { kind: "skip" };
+    }
+    // Worker resumed and stalled again — fall through to re-evaluate.
+  }
+
+  let reason: "silent" | "long_running" | null = null;
+  if (activity.lastEventAtMs !== null && activity.silentSeconds >= silentThresholdSec) {
+    reason = "silent";
+  } else if (activity.workingSeconds >= workingThresholdSec) {
+    reason = "long_running";
+  }
+  if (!reason) return { kind: "skip" };
+
+  return {
+    kind: "push",
+    reason,
+    lastEventAtMs: activity.lastEventAtMs,
+    snapshot: {
+      workingSeconds: activity.workingSeconds,
+      silentSeconds: activity.silentSeconds,
+      activeTools: activity.activeTools,
+      completedTools: activity.completedTools,
+      textTail: activity.textTail,
+    },
+  };
+}
+
 function formatEventForBoss(
   event: BossEvent,
   workerSnapshot: { name: string; status: string }[],
@@ -767,8 +942,24 @@ tools_used: ${tools}
 final_text:
 ${s.finalText || "(empty)"}${renderOthers(s.project)}${renderAutoChain()}`;
   }
-  return `[event:worker_error] project="${event.project}" timestamp=${event.timestamp}
+  if (event.kind === "worker_error") {
+    return `[event:worker_error] project="${event.project}" timestamp=${event.timestamp}
 ${event.message}${renderOthers(event.project)}${renderAutoChain()}`;
+  }
+  // worker_stuck — informational ping, queued; boss decides whether to act.
+  const s = event.snapshot;
+  const completed =
+    s.completedTools.length > 0
+      ? s.completedTools.map((t) => `${t.ok ? "✓" : "✗"}${t.name}`).join(", ")
+      : "(none)";
+  const active = s.activeTools.length > 0 ? s.activeTools.join(", ") : "(none)";
+  return `[event:worker_stuck] project="${event.project}" reason=${event.reason} timestamp=${event.timestamp}
+working_seconds: ${s.workingSeconds}
+silent_seconds: ${s.silentSeconds}
+active_tools: ${active}
+completed_this_turn: ${completed}
+text_tail:
+${s.textTail || "(no text yet)"}${renderOthers(event.project)}${renderAutoChain()}`;
 }
 
 /**

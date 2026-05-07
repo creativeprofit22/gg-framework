@@ -35,4 +35,18 @@ export class EventQueue {
   size(): number {
     return this.user.length + this.rest.length;
   }
+
+  /**
+   * Drop any queued `worker_stuck` events for the given project. Called when a
+   * `worker_turn_complete` or `worker_error` fires — the worker is no longer
+   * running, so any pending stuck ping is now stale and would mislead the boss
+   * (e.g. tell it to cancel a worker that already finished).
+   *
+   * Returns the number of events dropped.
+   */
+  removeStuckFor(project: string): number {
+    const before = this.rest.length;
+    this.rest = this.rest.filter((e) => !(e.kind === "worker_stuck" && e.project === project));
+    return before - this.rest.length;
+  }
 }

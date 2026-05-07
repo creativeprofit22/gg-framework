@@ -69,6 +69,15 @@ const promptWorkerParams = z.object({
 const getWorkerSummaryParams = z.object({
   project: z.string().describe("Project name as listed by list_workers."),
 });
+const getWorkerActivityParams = z.object({
+  project: z.string().describe("Project name as listed by list_workers."),
+});
+const cancelWorkerParams = z.object({
+  project: z.string().describe("Project name as listed by list_workers."),
+});
+const resetWorkerParams = z.object({
+  project: z.string().describe("Project name as listed by list_workers."),
+});
 
 export function createBossTools(deps: BossToolDeps): AgentTool[] {
   const { workers, lastSummaries } = deps;
@@ -149,5 +158,68 @@ ${summary.finalText || "(empty)"}`;
     },
   };
 
-  return [listWorkers, getWorkerStatus, promptWorker, getWorkerSummary];
+  const getWorkerActivity: AgentTool<typeof getWorkerActivityParams> = {
+    name: "get_worker_activity",
+    description:
+      "Peek at what a worker is doing RIGHT NOW (mid-turn). Returns working/silent durations in seconds, currently-running tool names, completed tools so far, and the tail of its streamed text. Use this when a worker has been `working` for a long time to decide whether it's making progress, hung, or worth cancelling.",
+    parameters: getWorkerActivityParams,
+    execute(args) {
+      const w = workers.get(args.project);
+      if (!w) return `Unknown project: ${args.project}`;
+      const a = w.getActivity();
+      const lines = [
+        `Project: ${args.project}`,
+        `Status: ${a.status}`,
+        `Working: ${a.workingSeconds}s (last event ${a.silentSeconds}s ago)`,
+        `Active tools: ${a.activeTools.length > 0 ? a.activeTools.join(", ") : "(none)"}`,
+        `Completed this turn: ${
+          a.completedTools.length > 0
+            ? a.completedTools.map((t) => `${t.ok ? "✓" : "✗"}${t.name}`).join(", ")
+            : "(none)"
+        }`,
+        "",
+        "Text tail:",
+        a.textTail || "(no text yet)",
+      ];
+      return lines.join("\n");
+    },
+  };
+
+  const cancelWorker: AgentTool<typeof cancelWorkerParams> = {
+    name: "cancel_worker",
+    description:
+      "Abort a worker's current turn. Other workers are untouched. The cancelled worker emits a `worker_error` event with message 'Cancelled by boss.' so any in-flight task is cleared. After cancelling, you can re-prompt or reset the worker. No-op if the worker isn't `working`.",
+    parameters: cancelWorkerParams,
+    execute(args) {
+      const w = workers.get(args.project);
+      if (!w) return `Unknown project: ${args.project}`;
+      const cancelled = w.cancel();
+      return cancelled
+        ? `Cancellation requested for "${args.project}". A worker_error event will arrive shortly.`
+        : `Worker "${args.project}" is not working — nothing to cancel (status: ${w.getStatus()}).`;
+    },
+  };
+
+  const resetWorker: AgentTool<typeof resetWorkerParams> = {
+    name: "reset_worker",
+    description:
+      "Hard reset: cancel any in-flight turn, wipe conversation history, force status back to idle. Use as a last resort when a worker is wedged in `error` or its context is so polluted that re-prompting won't recover. Equivalent to `fresh: true` plus a forced unstuck. After reset, the worker is ready for a new prompt_worker call.",
+    parameters: resetWorkerParams,
+    async execute(args) {
+      const w = workers.get(args.project);
+      if (!w) return `Unknown project: ${args.project}`;
+      await w.reset();
+      return `Worker "${args.project}" reset — status is idle, history wiped.`;
+    },
+  };
+
+  return [
+    listWorkers,
+    getWorkerStatus,
+    promptWorker,
+    getWorkerSummary,
+    getWorkerActivity,
+    cancelWorker,
+    resetWorker,
+  ];
 }

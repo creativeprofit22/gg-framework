@@ -21,16 +21,17 @@ That workflow:
 1. Saves a backup patch and git status under `.gg/local-fixes/backups/`.
 2. Stashes local tracked and untracked work.
 3. Fetches the selected remote and branch.
-4. Fast-forwards the checkout only if it is safe to do so.
+4. Fast-forwards when possible, or creates a backup branch and merge-commits the update when committed local fixes are ahead.
 5. Pops the stash to reapply your local fixes.
-6. Runs app and sidecar checks.
-7. Builds a new local-patched installer.
+6. Refreshes platform-specific dependencies so Windows/WSL optional packages don't block the build.
+7. Runs app and sidecar checks.
+8. Builds a new local-patched installer.
 
 Useful options:
 
 ```bash
 pnpm --filter gg-app update:local-fixes -- --remote origin --branch main
-pnpm --filter gg-app update:local-fixes -- --no-build
+pnpm --filter gg-app update:local-fixes -- --no-install --no-build
 pnpm --filter gg-app update:local-fixes -- --dry-run --no-build
 ```
 
@@ -39,6 +40,7 @@ pnpm --filter gg-app update:local-fixes -- --dry-run --no-build
 Conflicts mean the official update touched the same files as your local fixes. Resolve them manually, then run:
 
 ```bash
+pnpm install --frozen-lockfile
 pnpm --filter gg-app check
 pnpm --filter @kenkaiiii/ggcoder check
 pnpm --filter gg-app build:local-patched

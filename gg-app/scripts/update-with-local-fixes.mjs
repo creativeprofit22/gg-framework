@@ -15,7 +15,8 @@ function usage() {
 
 Options:
   --remote <name>   Git remote to fetch from (default: upstream remote, then origin)
-  --branch <name>   Branch to fast-forward from (default: upstream branch, then main)
+  --branch <name>   Branch to update from (default: upstream branch, then main)
+  --no-install      Skip refreshing platform-specific dependencies
   --no-build        Skip building the local-patched installer after checks
   --no-check        Skip TypeScript checks after reapplying local fixes
   --dry-run         Print the planned workflow without mutating the repository
@@ -27,6 +28,7 @@ function parseArgs(args) {
   const options = {
     remote: null,
     branch: null,
+    install: true,
     build: true,
     check: true,
     dryRun: false,
@@ -44,6 +46,8 @@ function parseArgs(args) {
       if (!value) throw new Error("--branch requires a value");
       options.branch = value;
       i += 1;
+    } else if (arg === "--no-install") {
+      options.install = false;
     } else if (arg === "--no-build") {
       options.build = false;
     } else if (arg === "--no-check") {
@@ -79,6 +83,7 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: repoRoot,
     encoding: "utf8",
+    env: { ...process.env, ...(options.env ?? {}) },
     shell: shouldUseShell(command),
     stdio: options.capture ? "pipe" : "inherit",
     maxBuffer: 256 * 1024 * 1024,
@@ -215,6 +220,7 @@ async function main() {
   console.log("GG local-fixes update workflow");
   console.log(`Repository: ${rootResult.stdout.trim()}`);
   console.log(`Update target: ${target}`);
+  console.log(`Dependency refresh: ${options.install ? "enabled" : "skipped"}`);
   console.log(`Checks: ${options.check ? "enabled" : "skipped"}`);
   console.log(`Build: ${options.build ? "enabled" : "skipped"}`);
 
@@ -286,6 +292,16 @@ async function main() {
         `Local fixes conflicted while applying the stash. Resolve conflicts manually, then use the backup patch if needed: ${backupPatchPath}`,
       );
     }
+  }
+
+  if (options.install) {
+    requireSuccess(
+      run(pnpm, ["install", "--frozen-lockfile"], {
+        ...options,
+        env: { CI: "true" },
+      }),
+      "Dependency refresh failed after updating source.",
+    );
   }
 
   if (options.check) {

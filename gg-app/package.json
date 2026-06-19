@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:local-patched": "node scripts/build-local-hotfix.mjs",
+    "build:local-hotfix": "pnpm build:local-patched",
+    "update:local-fixes": "node scripts/update-with-local-fixes.mjs",
     "check": "tsc --noEmit",
     "lint": "eslint --cache 'src/**/*.{ts,tsx}'",
     "lint:fix": "eslint --cache 'src/**/*.{ts,tsx}' --fix",

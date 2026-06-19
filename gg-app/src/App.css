@@ -3040,6 +3040,11 @@ body {
   letter-spacing: 0.06em;
   padding: 2px 8px 6px;
 }
+.slash-section {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 6px 8px 3px;
+}
 .slash-item {
   display: flex;
   align-items: baseline;
@@ -3066,6 +3071,15 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.slash-scope {
+  border: 1px solid;
+  border-radius: 999px;
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  text-transform: uppercase;
 }
 
 /* ── @-mention file picker (reuses .slash-menu chrome) ── */
@@ -3260,6 +3274,31 @@ body {
 .update-banner-busy {
   cursor: default;
   filter: saturate(0.7) brightness(0.92);
+}
+.update-banner-error {
+  background: linear-gradient(135deg, #f87171 0%, #fb923c 100%);
+}
+.update-banner-completed {
+  background: linear-gradient(135deg, #8bda84 0%, #36c489 100%);
+}
+.update-banner-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.update-banner-log {
+  max-width: min(920px, 92vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.72;
 }
 .update-banner-dot {
   width: 8px;

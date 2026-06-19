@@ -365,13 +365,14 @@ export class AgentSession {
           }
         }
 
-        // Add custom commands from .gg/commands/
+        // Add custom commands from ~/.gg/commands/ and project .gg/commands/
         const customCmds = await loadCustomCommands(cwd);
         if (customCmds.length > 0) {
           lines.push("");
           lines.push("Custom commands:");
           for (const cmd of customCmds) {
-            lines.push(`  /${cmd.name} — ${cmd.description}`);
+            const scope = cmd.scope === "global" ? "global" : "project";
+            lines.push(`  /${cmd.name} — ${cmd.description} (${scope})`);
           }
         }
 

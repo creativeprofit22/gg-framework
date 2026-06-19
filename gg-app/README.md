@@ -1,6 +1,6 @@
-# Tauri + React + Typescript
+# GG App
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Tauri desktop app for GG Coder. For locally patched builds and the safe update workflow that preserves source fixes, see [LOCAL_FIXES.md](./LOCAL_FIXES.md).
 
 ## Recommended IDE Setup
 

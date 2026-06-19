@@ -18,6 +18,7 @@ export async function ensureAppDirs(): Promise<AppPaths> {
   await fs.mkdir(paths.agentDir, { recursive: true, mode: 0o700 });
   await fs.mkdir(paths.sessionsDir, { recursive: true, mode: 0o700 });
   await fs.mkdir(paths.skillsDir, { recursive: true, mode: 0o700 });
+  await fs.mkdir(path.join(paths.agentDir, "commands"), { recursive: true, mode: 0o700 });
   await fs.mkdir(paths.extensionsDir, { recursive: true, mode: 0o700 });
   await fs.mkdir(paths.agentsDir, { recursive: true, mode: 0o700 });
   await seedDefaultAgents(paths.agentsDir);

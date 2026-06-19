@@ -10,6 +10,7 @@
     "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}' && pnpm --filter gg-app format",
     "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}' && pnpm --filter gg-app format:check",
     "test": "pnpm -r test",
+    "app:update:local-fixes": "pnpm --filter gg-app update:local-fixes",
     "prepare": "pnpm build"
   },
   "devDependencies": {

@@ -1,15 +1,22 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
+use std::time::SystemTime;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 use futures_util::StreamExt;
-use tauri::{Emitter, EventTarget, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    Emitter, EventTarget, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 use tauri_plugin_opener::OpenerExt;
 
 /// One Node agent sidecar, owned by a single window. Each window runs its own
@@ -62,6 +69,14 @@ struct FocusedWindow(Mutex<Option<String>>);
 /// fires the broadcast — earlier moves are superseded.
 #[derive(Default)]
 struct MoveDebounce(Mutex<Option<std::time::Instant>>);
+
+/// App-wide guard for the local-patched source update workflow. It rebuilds the
+/// app installer from the source checkout, so only one run should mutate/build at
+/// a time even when multiple project windows are open.
+#[derive(Default)]
+struct LocalPatchedUpdate {
+    running: Mutex<bool>,
+}
 
 fn sidecar_base(port: u16) -> String {
     format!("http://127.0.0.1:{port}")
@@ -418,7 +433,9 @@ async fn agent_state(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: submit a prompt (optionally with attachments). The reply streams back
@@ -455,7 +472,9 @@ async fn agent_history(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: start a fresh session (clears history) for this window's project.
@@ -488,7 +507,9 @@ async fn agent_auth_apikey(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: begin an OAuth login. Progress streams back via `agent-event`
@@ -506,7 +527,9 @@ async fn agent_auth_oauth_start(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: submit a pasted OAuth code to an in-flight login.
@@ -523,7 +546,9 @@ async fn agent_auth_oauth_code(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: disconnect a provider (clear its stored credentials).
@@ -540,7 +565,9 @@ async fn agent_auth_logout(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: stop a background task by id. Returns `{ message }`.
@@ -557,7 +584,9 @@ async fn agent_kill_task(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: radio state for THIS window's sidecar — `{ stations, current }`.
@@ -574,7 +603,9 @@ async fn agent_radio_state(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: play a station by id, or stop with `station = "off"`. Returns
@@ -620,7 +651,9 @@ async fn agent_tasks(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: run one task (`id`) or run-all (`all = true`, starting from the next
@@ -640,7 +673,9 @@ async fn agent_run_tasks(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: delete a task by id. Returns the remaining `{ tasks }`.
@@ -657,7 +692,9 @@ async fn agent_delete_task(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: accept the pending plan — bakes its `## Steps` into the system prompt
@@ -706,7 +743,9 @@ async fn agent_commands(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: list models available to the logged-in providers.
@@ -721,7 +760,9 @@ async fn agent_models(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: switch the active model. Returns the new provider/model + thinking state.
@@ -738,7 +779,9 @@ async fn agent_switch_model(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: cycle the reasoning/thinking level to the next supported value.
@@ -754,7 +797,9 @@ async fn agent_cycle_thinking(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: read gg-app settings (e.g. the projects root folder).
@@ -769,7 +814,9 @@ async fn agent_settings(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: save gg-app settings.
@@ -786,7 +833,9 @@ async fn agent_save_settings(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ── Native app settings (~/.gg/gg-app.json) ───────────────────────────────
@@ -917,7 +966,11 @@ fn app_create_project(name: String) -> Result<serde_json::Value, String> {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 struct WorkspaceEntry {
     cwd: String,
-    #[serde(rename = "sessionPath", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "sessionPath",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     session_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     x: Option<i32>,
@@ -1380,7 +1433,9 @@ async fn agent_telegram_get(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: save Telegram config (bot token + user id). Verifies the token via
@@ -1426,7 +1481,9 @@ async fn agent_serve_status(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: start the Telegram serve loop. Returns `{ running }` or an error.
@@ -1468,7 +1525,9 @@ async fn agent_serve_stop(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: list MCP servers with live connection status (`{ servers: […] }`).
@@ -1485,7 +1544,9 @@ async fn agent_mcp_list(
         req = req.query(&[("cwd", c)]);
     }
     let res = req.send().await.map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: add an MCP server from a pasted `claude mcp add …` line. Returns
@@ -1539,7 +1600,9 @@ async fn agent_mcp_remove(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: create a new project folder under the configured projects root.
@@ -1584,7 +1647,9 @@ async fn agent_projects(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: list recent sessions for a project cwd.
@@ -1601,7 +1666,9 @@ async fn agent_sessions(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: search project files for the chat input's `@` picker. Empty `query`
@@ -1619,7 +1686,9 @@ async fn agent_files(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Minimal percent-encoding for a filesystem path in a query string.
@@ -1634,6 +1703,275 @@ fn urlencoding(s: &str) -> String {
         }
     }
     out
+}
+
+const LOCAL_PATCHED_UPDATE_EVENT: &str = "local-patched-update";
+
+/// Start the safe local-patched update workflow from the source checkout. This
+/// intentionally does NOT call Tauri's updater `downloadAndInstall()`; it runs
+/// the repo script that fetches source, reapplies local work, checks, and builds
+/// a new local-patched installer.
+#[tauri::command]
+fn app_local_patched_update_start(
+    app: tauri::AppHandle,
+    update_state: State<'_, LocalPatchedUpdate>,
+    repo_root: String,
+) -> Result<serde_json::Value, String> {
+    let repo = resolve_local_update_repo_root(repo_root)?;
+    {
+        let mut running = update_state.running.lock().unwrap();
+        if *running {
+            return Err("A local-patched update is already running.".into());
+        }
+        *running = true;
+    }
+
+    std::thread::spawn(move || run_local_patched_update(app, repo));
+    Ok(serde_json::json!({ "started": true }))
+}
+
+fn resolve_local_update_repo_root(repo_root: String) -> Result<PathBuf, String> {
+    let raw = if repo_root.trim().is_empty() {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    } else {
+        PathBuf::from(repo_root)
+    };
+    let repo = std::fs::canonicalize(&raw).map_err(|e| {
+        format!(
+            "Could not find the local source checkout at {}: {e}",
+            raw.display()
+        )
+    })?;
+    if !repo.join("package.json").is_file() || !repo.join("gg-app/package.json").is_file() {
+        return Err(format!(
+            "{} does not look like the gg-framework checkout. Rebuild the local-patched app from the repo, then try again.",
+            repo.display()
+        ));
+    }
+    Ok(repo)
+}
+
+fn emit_local_patched_update(app: &tauri::AppHandle, payload: serde_json::Value) {
+    let _ = app.emit(LOCAL_PATCHED_UPDATE_EVENT, payload);
+}
+
+fn run_local_patched_update(app: tauri::AppHandle, repo: PathBuf) {
+    emit_local_patched_update(
+        &app,
+        serde_json::json!({
+            "type": "started",
+            "repoRoot": repo.to_string_lossy(),
+            "message": "Starting safe local-patched update: updating source, reapplying fixes, checking, then building a patched installer.",
+        }),
+    );
+
+    let mut cmd = local_patched_update_command();
+    cmd.current_dir(&repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            finish_local_patched_update(
+                &app,
+                serde_json::json!({
+                    "type": "error",
+                    "message": format!("Failed to start pnpm --filter gg-app update:local-fixes: {e}"),
+                }),
+            );
+            return;
+        }
+    };
+
+    let mut readers: Vec<JoinHandle<()>> = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        readers.push(stream_local_update_output(app.clone(), "stdout", stdout));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        readers.push(stream_local_update_output(app.clone(), "stderr", stderr));
+    }
+
+    let status = child.wait();
+    for reader in readers {
+        let _ = reader.join();
+    }
+
+    match status {
+        Ok(status) if status.success() => {
+            let installer = newest_rebuilt_installer(&repo);
+            let windows_opened =
+                open_rebuilt_installer_on_windows(&app, installer.as_deref(), &repo);
+            emit_local_patched_update(
+                &app,
+                serde_json::json!({
+                    "type": "completed",
+                    "exitCode": status.code().unwrap_or(0),
+                    "installerPath": installer.map(|p| p.to_string_lossy().to_string()),
+                    "opened": windows_opened,
+                    "message": completed_local_update_message(windows_opened),
+                }),
+            );
+            clear_local_patched_update_running(&app);
+        }
+        Ok(status) => {
+            finish_local_patched_update(
+                &app,
+                serde_json::json!({
+                    "type": "error",
+                    "exitCode": status.code(),
+                    "message": format!(
+                        "Local-patched update failed with exit code {}. Review the streamed output for conflicts or check/build errors.",
+                        status.code().map_or_else(|| "unknown".into(), |c| c.to_string())
+                    ),
+                }),
+            );
+        }
+        Err(e) => {
+            finish_local_patched_update(
+                &app,
+                serde_json::json!({
+                    "type": "error",
+                    "message": format!("Local-patched update process failed: {e}"),
+                }),
+            );
+        }
+    }
+}
+
+fn local_patched_update_command() -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "pnpm", "--filter", "gg-app", "update:local-fixes"]);
+        cmd
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut cmd = Command::new("pnpm");
+        cmd.args(["--filter", "gg-app", "update:local-fixes"]);
+        cmd
+    }
+}
+
+fn stream_local_update_output<R: Read + Send + 'static>(
+    app: tauri::AppHandle,
+    stream: &'static str,
+    reader: R,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let reader = BufReader::new(reader);
+        for line in reader.lines().map_while(Result::ok) {
+            emit_local_patched_update(
+                &app,
+                serde_json::json!({
+                    "type": "line",
+                    "stream": stream,
+                    "line": line,
+                }),
+            );
+        }
+    })
+}
+
+fn newest_rebuilt_installer(repo: &Path) -> Option<PathBuf> {
+    let bundle = repo.join("gg-app/src-tauri/target/release/bundle");
+    let candidates = [bundle.join("nsis"), bundle.join("msi")];
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for dir in candidates {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_installer = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("exe") || ext.eq_ignore_ascii_case("msi")
+                });
+            if !is_installer {
+                continue;
+            }
+            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(time, _)| modified > *time) {
+                newest = Some((modified, path));
+            }
+        }
+    }
+    newest.map(|(_, path)| path)
+}
+
+#[cfg(target_os = "windows")]
+fn open_rebuilt_installer_on_windows(
+    app: &tauri::AppHandle,
+    installer: Option<&Path>,
+    repo: &Path,
+) -> &'static str {
+    if let Some(installer) = installer {
+        if app
+            .opener()
+            .open_path(installer.to_string_lossy().to_string(), None::<String>)
+            .is_ok()
+        {
+            return "installer";
+        }
+        if let Some(parent) = installer.parent() {
+            if app
+                .opener()
+                .open_path(parent.to_string_lossy().to_string(), None::<String>)
+                .is_ok()
+            {
+                return "folder";
+            }
+        }
+    }
+
+    let bundle = repo.join("gg-app/src-tauri/target/release/bundle");
+    if app
+        .opener()
+        .open_path(bundle.to_string_lossy().to_string(), None::<String>)
+        .is_ok()
+    {
+        "folder"
+    } else {
+        "none"
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_rebuilt_installer_on_windows(
+    _app: &tauri::AppHandle,
+    _installer: Option<&Path>,
+    _repo: &Path,
+) -> &'static str {
+    "none"
+}
+
+fn completed_local_update_message(opened: &str) -> &'static str {
+    match opened {
+        "installer" => "Patched installer built and launched. Finish the installer to update this local-patched app.",
+        "folder" => "Patched installer built. Opened the folder containing it.",
+        _ => "Patched installer built. Open the generated installer from gg-app/src-tauri/target/release/bundle.",
+    }
+}
+
+fn finish_local_patched_update(app: &tauri::AppHandle, payload: serde_json::Value) {
+    emit_local_patched_update(app, payload);
+    clear_local_patched_update_running(app);
+}
+
+fn clear_local_patched_update_running(app: &tauri::AppHandle) {
+    let update_state: State<LocalPatchedUpdate> = app.state();
+    let mut running = update_state.running.lock().unwrap();
+    *running = false;
 }
 
 /// App background (#111317) painted on the native window + webview BEFORE the
@@ -1935,7 +2273,12 @@ fn tile_rects(count: usize, ox: i32, oy: i32, w: i32, h: i32) -> Vec<(i32, i32, 
         .map(|i| {
             let col = i % cols;
             let row = i / cols;
-            (ox + col * cell_w, oy + row * cell_h, cell_w as u32, cell_h as u32)
+            (
+                ox + col * cell_w,
+                oy + row * cell_h,
+                cell_w as u32,
+                cell_h as u32,
+            )
         })
         .collect()
 }
@@ -2208,7 +2551,10 @@ fn pick_node(env_override: Option<String>, is_dev: bool, exe_dir: Option<&Path>)
 fn resolve_sidecar(app: &tauri::AppHandle) -> PathBuf {
     let resource = app
         .path()
-        .resolve("sidecar/app-sidecar.mjs", tauri::path::BaseDirectory::Resource)
+        .resolve(
+            "sidecar/app-sidecar.mjs",
+            tauri::path::BaseDirectory::Resource,
+        )
         .ok();
     pick_sidecar(
         std::env::var("GG_SIDECAR_PATH").ok(),
@@ -2270,7 +2616,12 @@ fn home_dir() -> PathBuf {
 ///   `/Users/runner/work/...`) which doesn't exist on the user's machine — the
 ///   sidecar would crash with EACCES trying to use it. Home always exists and
 ///   is writable; the project picker re-points the window immediately anyway.
-fn pick_cwd(env_override: Option<String>, is_dev: bool, dev_root: PathBuf, home: PathBuf) -> PathBuf {
+fn pick_cwd(
+    env_override: Option<String>,
+    is_dev: bool,
+    dev_root: PathBuf,
+    home: PathBuf,
+) -> PathBuf {
     if let Some(p) = env_override {
         return PathBuf::from(p);
     }
@@ -2472,6 +2823,7 @@ pub fn run() {
         .manage(AppExiting::default())
         .manage(FocusedWindow::default())
         .manage(MoveDebounce::default())
+        .manage(LocalPatchedUpdate::default())
         .manage(reqwest::Client::new())
         .invoke_handler(tauri::generate_handler![
             sidecar_port,
@@ -2508,6 +2860,7 @@ pub fn run() {
             app_settings_get,
             app_settings_save,
             app_create_project,
+            app_local_patched_update_start,
             app_auth_status,
             app_auth_apikey,
             app_auth_logout,
@@ -2684,7 +3037,10 @@ mod tests {
         // Still on the default boot cwd (picker) → excluded.
         assert!(!keep_for_snapshot(Some(Path::new("/home/user")), default));
         // A real project → kept.
-        assert!(keep_for_snapshot(Some(Path::new("/home/user/proj")), default));
+        assert!(keep_for_snapshot(
+            Some(Path::new("/home/user/proj")),
+            default
+        ));
     }
 
     #[test]
@@ -2736,8 +3092,7 @@ mod tests {
     #[test]
     fn workspace_parses_minimal_entry() {
         // Forward/backward compat: a bare { cwd } entry still loads.
-        let ws: Workspace =
-            serde_json::from_str(r#"{ "windows": [{ "cwd": "/p/a" }] }"#).unwrap();
+        let ws: Workspace = serde_json::from_str(r#"{ "windows": [{ "cwd": "/p/a" }] }"#).unwrap();
         assert_eq!(ws.windows.len(), 1);
         assert_eq!(ws.windows[0].cwd, "/p/a");
         assert_eq!(ws.windows[0].session_path, None);
@@ -2924,7 +3279,12 @@ mod tests {
 
     #[test]
     fn pick_cwd_dev_uses_workspace_root() {
-        let got = pick_cwd(None, true, PathBuf::from("/repo"), PathBuf::from("/home/user"));
+        let got = pick_cwd(
+            None,
+            true,
+            PathBuf::from("/repo"),
+            PathBuf::from("/home/user"),
+        );
         assert_eq!(got, PathBuf::from("/repo"));
     }
 
@@ -2958,7 +3318,10 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         buf.extend_from_slice(b"data: one\n\ndata: two\n\ndata: par");
         let frames = drain_sse_frames(&mut buf);
-        assert_eq!(frames, vec!["data: one".to_string(), "data: two".to_string()]);
+        assert_eq!(
+            frames,
+            vec!["data: one".to_string(), "data: two".to_string()]
+        );
         // The unterminated "data: par" stays buffered for the next chunk.
         assert_eq!(buf, b"data: par");
     }
@@ -2985,7 +3348,11 @@ mod tests {
             frames.extend(drain_sse_frames(&mut buf));
         }
         assert_eq!(frames, vec![payload.to_string()]);
-        assert!(!frames[0].contains('\u{FFFD}'), "no replacement chars: {:?}", frames[0]);
+        assert!(
+            !frames[0].contains('\u{FFFD}'),
+            "no replacement chars: {:?}",
+            frames[0]
+        );
         assert!(buf.is_empty());
     }
 
@@ -3071,7 +3438,10 @@ mod tests {
         // A vite process with a dead parent does NOT match any pattern → excluded.
         let snap = vec![proc(800, 1, "node vite")];
         let ks = orphan_killset(&snap, 100);
-        assert!(ks.is_empty(), "non-matching process must not be killed: {ks:?}");
+        assert!(
+            ks.is_empty(),
+            "non-matching process must not be killed: {ks:?}"
+        );
     }
 
     #[test]
@@ -3300,7 +3670,7 @@ mod tests {
         assert_eq!(rects.len(), 5);
         let cell_w = 3000 / 3; // 1000
         let cell_h = 1000 / 2; // 500
-        // Indices 3 & 4 are the bottom row — they must be sized to the cell.
+                               // Indices 3 & 4 are the bottom row — they must be sized to the cell.
         assert_eq!(rects[3], (0, cell_h, cell_w as u32, cell_h as u32));
         assert_eq!(rects[4], (cell_w, cell_h, cell_w as u32, cell_h as u32));
     }

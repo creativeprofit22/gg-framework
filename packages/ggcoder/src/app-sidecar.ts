@@ -69,7 +69,11 @@ import {
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
-import { discoverProjects, listRecentSessions } from "./core/project-discovery.js";
+import {
+  discoverProjects,
+  listRecentSessions,
+  type DiscoveredProject,
+} from "./core/project-discovery.js";
 import {
   loadTasksSync,
   saveTasksSync,
@@ -321,6 +325,80 @@ interface HistoryEntryForWire {
     status: "done" | "error";
     toolUseCount: number;
   }>;
+}
+
+/**
+ * Existing folders under the configured projects root are also projects, even
+ * before they have GG/Claude/Codex session history. Scan direct child folders so
+ * moved repos such as C:\\ggcoder-projects\\hoard-goblin appear in the picker.
+ */
+async function discoverProjectsRootFolders(): Promise<DiscoveredProject[]> {
+  const { projectsRoot } = await loadAppSettings();
+  let entries;
+  try {
+    entries = await fs.readdir(projectsRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const out: DiscoveredProject[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = path.join(projectsRoot, entry.name);
+    try {
+      const stat = await fs.stat(dir);
+      out.push({
+        name: entry.name,
+        path: dir,
+        lastActiveMs: stat.mtimeMs,
+        lastActiveDisplay: formatRelativeTime(stat.mtimeMs),
+        sources: ["ggcoder"],
+      });
+    } catch {
+      // Skip unreadable folders.
+    }
+  }
+  return out;
+}
+
+function discoveryPathKey(projectPath: string): string {
+  const resolved = path.resolve(projectPath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function mergeDiscoveredProjects(projects: DiscoveredProject[]): DiscoveredProject[] {
+  const byPath = new Map<string, DiscoveredProject>();
+  for (const p of projects) {
+    const key = discoveryPathKey(p.path);
+    const existing = byPath.get(key);
+    if (!existing) {
+      byPath.set(key, p);
+      continue;
+    }
+    const lastActiveMs = Math.max(existing.lastActiveMs, p.lastActiveMs);
+    byPath.set(key, {
+      ...existing,
+      lastActiveMs,
+      lastActiveDisplay: formatRelativeTime(lastActiveMs),
+      sources: Array.from(new Set([...existing.sources, ...p.sources])),
+    });
+  }
+  return Array.from(byPath.values()).sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+}
+
+function formatRelativeTime(ms: number): string {
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return "just now";
+  const min = 60_000;
+  const hour = 60 * min;
+  const day = 24 * hour;
+  const week = 7 * day;
+  const month = 30 * day;
+  if (diff < hour) return `${Math.floor(diff / min)}m ago`;
+  if (diff < day) return `${Math.floor(diff / hour)}h ago`;
+  if (diff < week) return `${Math.floor(diff / day)}d ago`;
+  if (diff < month) return `${Math.floor(diff / week)}w ago`;
+  return `${Math.floor(diff / month)}mo ago`;
 }
 
 // ── Chat attachments (images / videos / files dropped into the input) ──────
@@ -2086,9 +2164,14 @@ async function createSession(
     }
 
     if (method === "GET" && url === "/projects") {
-      // Scan ggcoder + Claude Code + Codex session stores for known projects.
-      void discoverProjects()
-        .then((projects) => json(res, 200, { projects }))
+      // Scan ggcoder + Claude Code + Codex session stores, plus direct children
+      // of the configured projects root for existing/moved repos with no history.
+      void Promise.all([discoverProjects(), discoverProjectsRootFolders()])
+        .then(([historyProjects, rootProjects]) =>
+          json(res, 200, {
+            projects: mergeDiscoveredProjects([...historyProjects, ...rootProjects]),
+          }),
+        )
         .catch((err) => {
           log("ERROR", "app-sidecar", "discoverProjects failed", {
             message: err instanceof Error ? err.message : String(err),
@@ -2135,7 +2218,10 @@ async function createSession(
       // ImageContent in the tool result, downsampling on the sidecar side and
       // extracting the path from the text block ("Generated image → /path").
       void (async () => {
-        const commandCandidates = [...PROMPT_COMMANDS, ...(await loadCustomCommands(cwd))];
+        const customCandidates = (await loadCustomCommands(cwd)).filter(
+          (c) => !PROMPT_COMMANDS.some((b) => b.name === c.name),
+        );
+        const commandCandidates = [...PROMPT_COMMANDS, ...customCandidates];
         const messages = session.getMessages();
 
         // Pre-index tool results by toolCallId so we can pair tool calls with
@@ -2433,26 +2519,40 @@ async function createSession(
     }
 
     if (method === "GET" && url === "/commands") {
-      // Workflow commands with agent functionality: built-in prompt templates +
-      // the user's own `.gg/commands/*.md`. UI commands (model/quit/etc.) are
-      // handled webview-side and intentionally excluded.
+      // All slash commands the sidecar can execute, classified like the terminal
+      // palette: registry commands are built-in, prompt templates are workflows,
+      // and `.gg/commands/*.md` entries are custom (global or project-local).
       void (async () => {
-        const builtins = PROMPT_COMMANDS.map((c) => ({
+        const workflows = PROMPT_COMMANDS.map((c) => ({
           name: c.name,
           aliases: c.aliases,
           description: c.description,
-          source: "built-in" as const,
+          source: "workflow" as const,
         }));
         const custom = (await loadCustomCommands(cwd))
-          // A custom command can't shadow a built-in name.
+          // A custom command can't shadow a built-in prompt command.
           .filter((c) => !PROMPT_COMMANDS.some((b) => b.name === c.name))
           .map((c) => ({
             name: c.name,
             aliases: [] as string[],
             description: c.description,
             source: "custom" as const,
+            scope: c.scope,
           }));
-        json(res, 200, { commands: [...builtins, ...custom] });
+        const promptNames = new Set([
+          ...workflows.map((c) => c.name),
+          ...custom.map((c) => c.name),
+        ]);
+        const builtins = session.slashCommands
+          .getAll()
+          .filter((c) => !promptNames.has(c.name))
+          .map((c) => ({
+            name: c.name,
+            aliases: c.aliases,
+            description: c.description,
+            source: "built-in" as const,
+          }));
+        json(res, 200, { commands: [...builtins, ...workflows, ...custom] });
       })();
       return;
     }
@@ -2534,8 +2634,8 @@ async function createSession(
           } else {
             // Pass the raw text straight through. AgentSession.prompt() is the
             // single source of truth for slash-command expansion (built-in +
-            // `.gg/commands/*.md` custom), so the agent gets the right body
-            // while the webview keeps showing the short `/name`.
+            // global/project `.gg/commands/*.md` custom), so the agent gets the
+            // right body while the webview keeps showing the short `/name`.
             await session.prompt(text);
           }
         });

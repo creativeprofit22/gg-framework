@@ -66,7 +66,7 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
     // the agent is slow/crashed (the original bug, now also covering providers).
     const [settings, providers] = await Promise.all([getSettings(), authStatus()]);
     // Prefer the explicit `configured` flag; fall back to a non-empty root so an
-    // older sidecar (one that predates the flag) degrades to "set" instead of
+    // older shell (one that predates the flag) degrades to "set" instead of
     // dimming forever.
     setFolderSet(settings?.configured ?? Boolean(settings?.projectsRoot));
     setProviderCount(providers.filter((p) => p.connected).length);
@@ -139,15 +139,15 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
     <div className="home" data-tauri-drag-region>
       <HomeBackdrop />
       <MemeLayer />
-      {appUpdate.phase === "available" || appUpdate.phase === "installing" ? (
+      {["available", "installing", "completed", "error"].includes(appUpdate.phase) ? (
         <button
           className="home-update"
-          disabled={appUpdate.phase === "installing"}
-          title={`Update to ${appUpdate.version} — installs and restarts the app`}
+          disabled={appUpdate.phase === "installing" || appUpdate.phase === "completed"}
+          title={appUpdate.statusMessage ?? appUpdate.installTitle}
           onClick={() => void appUpdate.install()}
         >
           <Download size={14} strokeWidth={2.25} aria-hidden="true" />
-          {appUpdate.phase === "installing" ? "Installing\u2026" : `Update to ${appUpdate.version}`}
+          {appUpdate.installLabel}
         </button>
       ) : (
         version && (

@@ -30,6 +30,27 @@ export interface SidecarEvent {
   data: unknown;
 }
 
+export interface LocalPatchedUpdateEvent {
+  type: "started" | "line" | "completed" | "error";
+  message?: string;
+  line?: string;
+  stream?: "stdout" | "stderr";
+  exitCode?: number | null;
+  installerPath?: string | null;
+}
+
+export async function startLocalPatchedUpdate(repoRoot: string): Promise<void> {
+  await invoke("app_local_patched_update_start", { repoRoot });
+}
+
+export async function listenLocalPatchedUpdate(
+  onEvent: (event: LocalPatchedUpdateEvent) => void,
+): Promise<() => void> {
+  return appWindow.listen<LocalPatchedUpdateEvent>("local-patched-update", (event) => {
+    onEvent(event.payload);
+  });
+}
+
 /** A background process (bash run_in_background), mirrored from the sidecar. */
 export interface BackgroundTask {
   id: string;
@@ -130,8 +151,10 @@ export interface SlashCommand {
   name: string;
   aliases: string[];
   description: string;
-  /** "built-in" prompt template or a user ".gg/commands" custom command. */
-  source?: "built-in" | "custom";
+  /** Terminal-style command group shown in the slash palette. */
+  source?: "built-in" | "workflow" | "custom";
+  /** Custom command scope; project means it only exists in the current project. */
+  scope?: "global" | "project";
 }
 
 export interface DiscoveredProject {
@@ -629,7 +652,7 @@ export async function cycleThinking(): Promise<ThinkingState | null> {
   }
 }
 
-/** List workflow (prompt-template) slash commands the agent can run. */
+/** List slash commands the agent can run, grouped by terminal-style source. */
 export async function listCommands(): Promise<SlashCommand[]> {
   try {
     const res = await invoke<{ commands: SlashCommand[] }>("agent_commands");

@@ -1223,16 +1223,13 @@ function App(): React.ReactElement {
       ? Math.min(100, Math.round((contextTokens / state.contextWindow) * 100))
       : 0;
 
-  // Workflow commands matching the current `/prefix` (only while the input is a
+  // Slash commands matching the current `/prefix` (only while the input is a
   // single `/token` with no space yet). Empty when not in slash mode.
   const slashQuery =
     input.startsWith("/") && !input.includes(" ") ? input.slice(1).toLowerCase() : null;
-  // Commit lives in the top-right button, not the slash menu.
-  const COMMIT_NAMES = ["commit", "setup-commit"];
-  const menuCommands = commands.filter((c) => !COMMIT_NAMES.includes(c.name));
   const slashMatches =
     slashQuery !== null
-      ? menuCommands.filter(
+      ? commands.filter(
           (c) =>
             c.name.toLowerCase().startsWith(slashQuery) ||
             c.aliases.some((a) => a.toLowerCase().startsWith(slashQuery)),
@@ -1264,7 +1261,7 @@ function App(): React.ReactElement {
   // running (exited tasks shouldn't keep the bar item around).
   const runningTaskCount = tasks.filter((t) => t.exitCode === null).length;
 
-  // True when `text` is a known workflow command invocation (first token).
+  // True when `text` is a known slash command invocation (first token).
   function isWorkflowCommand(text: string): boolean {
     if (!text.startsWith("/")) return false;
     const name = text.slice(1).split(" ")[0]?.toLowerCase() ?? "";
@@ -2383,17 +2380,34 @@ function App(): React.ReactElement {
       {appUpdate.phase === "available" && (
         <button
           className="update-banner"
-          title={`Update to ${appUpdate.version} — installs and restarts the app`}
+          title={appUpdate.installTitle}
           onClick={() => void appUpdate.install()}
         >
           <span className="update-banner-dot" />
-          {`Ken just pushed a new update (${appUpdate.version}) — click here to install`}
+          {appUpdate.localPatched
+            ? `Update available (${appUpdate.version}). Click to update source, reapply fixes, and build a patched installer.`
+            : `Ken just pushed a new update (${appUpdate.version}) — click here to install`}
         </button>
       )}
-      {appUpdate.phase === "installing" && (
-        <div className="update-banner update-banner-busy">
+      {(appUpdate.phase === "installing" ||
+        appUpdate.phase === "completed" ||
+        appUpdate.phase === "error") && (
+        <div className={`update-banner update-banner-busy update-banner-${appUpdate.phase}`}>
           <span className="update-banner-dot" />
-          {"Installing update\u2026 the app will restart automatically."}
+          <span className="update-banner-content">
+            <span>
+              {appUpdate.localPatched
+                ? (appUpdate.statusMessage ?? "Updating source and building a patched installer…")
+                : appUpdate.phase === "error"
+                  ? (appUpdate.statusMessage ?? "Update install failed.")
+                  : "Installing update… the app will restart automatically."}
+            </span>
+            {appUpdate.localPatched && appUpdate.progressLines.length > 0 && (
+              <span className="update-banner-log">
+                {appUpdate.progressLines[appUpdate.progressLines.length - 1]}
+              </span>
+            )}
+          </span>
         </div>
       )}
 

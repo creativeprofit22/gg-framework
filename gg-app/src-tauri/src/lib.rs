@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -938,6 +938,108 @@ fn default_projects_root() -> PathBuf {
     home_dir().join("gg-projects")
 }
 
+fn relative_time(ms: u128) -> String {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(ms);
+    let diff = now_ms.saturating_sub(ms);
+    let minute = 60_000;
+    let hour = 60 * minute;
+    let day = 24 * hour;
+    if diff < minute {
+        "just now".to_string()
+    } else if diff < hour {
+        format!("{}m ago", diff / minute)
+    } else if diff < day {
+        format!("{}h ago", diff / hour)
+    } else {
+        format!("{}d ago", diff / day)
+    }
+}
+
+fn native_projects_root_folders() -> Vec<serde_json::Value> {
+    let settings = app_settings_get();
+    let root = settings
+        .get("projectsRoot")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(default_projects_root);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut projects = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+        let last_active_ms = modified
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project")
+            .to_string();
+        projects.push(serde_json::json!({
+            "name": name,
+            "path": path.to_string_lossy().to_string(),
+            "lastActiveMs": last_active_ms as f64,
+            "lastActiveDisplay": relative_time(last_active_ms),
+            "sources": ["ggcoder"],
+        }));
+    }
+    projects.sort_by(|a, b| {
+        let ams = a
+            .get("lastActiveMs")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let bms = b
+            .get("lastActiveMs")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        bms.partial_cmp(&ams).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    projects
+}
+
+fn merge_project_lists(mut sidecar_projects: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    for native in native_projects_root_folders() {
+        let Some(native_path) = native.get("path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if sidecar_projects.iter().any(|p| {
+            p.get("path")
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| p.eq_ignore_ascii_case(native_path))
+        }) {
+            continue;
+        }
+        sidecar_projects.push(native);
+    }
+    sidecar_projects.sort_by(|a, b| {
+        let ams = a
+            .get("lastActiveMs")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let bms = b
+            .get("lastActiveMs")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        bms.partial_cmp(&ams).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    sidecar_projects
+}
+
 /// Validate a project folder name: lowercase letters, digits, single dashes
 /// between segments (mirrors the sidecar's isValidProjectName).
 fn is_valid_project_name(name: &str) -> bool {
@@ -1003,7 +1105,12 @@ fn app_settings_save(projects_root: String) -> Result<serde_json::Value, String>
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let body = serde_json::json!({ "projectsRoot": trimmed });
+    let mut body = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    body["projectsRoot"] = serde_json::json!(trimmed);
     let pretty = serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?;
     std::fs::write(&path, pretty).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "projectsRoot": trimmed }))
@@ -1781,23 +1888,34 @@ async fn agent_create_project(
     Ok(body)
 }
 
-/// Proxy: discover known projects across ggcoder/Claude Code/Codex stores.
+/// Discover known projects across ggcoder/Claude Code/Codex stores, plus direct
+/// children of the configured project folder natively. The native merge keeps
+/// existing repos visible even if the sidecar is still booting or is reading an
+/// older settings view.
 #[tauri::command]
 async fn agent_projects(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
-    let res = client
-        .get(format!("{}/projects", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    let sidecar_projects = match (port_for(&webview), session_for(&webview)) {
+        (Some(port), Some(gg_sid)) => match client
+            .get(format!("{}/projects", sidecar_base(port)))
+            .header("x-gg-session", &gg_sid)
+            .send()
+            .await
+            .and_then(|res| res.error_for_status())
+        {
+            Ok(res) => res
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| body.get("projects").and_then(|v| v.as_array()).cloned())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    Ok(serde_json::json!({ "projects": merge_project_lists(sidecar_projects) }))
 }
 
 /// Proxy: list recent sessions for a project cwd.

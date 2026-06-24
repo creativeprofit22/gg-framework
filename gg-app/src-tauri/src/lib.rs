@@ -19,22 +19,34 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 
-/// One Node agent sidecar, owned by a single window. Each window runs its own
-/// agent against its own project cwd, so windows never share state. `cwd` and
-/// `session_path` mirror what the window's sidecar was spawned with, so the
-/// workspace snapshot (restore-on-restart) can be written from this map alone.
+/// The single shared Node daemon process. Every window's `AgentSession` lives
+/// inside this one process as an in-process object, addressed by a session id
+/// (see `Windows`). Replaces the old one-sidecar-process-per-window model: one
+/// Node runtime + one module graph for all windows, instead of N.
 #[derive(Default)]
-struct SidecarInstance {
-    child: Option<Child>,
-    port: Option<u16>,
+struct Daemon {
+    /// The daemon child process (process-group leader). `None` until spawned.
+    child: Mutex<Option<Child>>,
+    /// The daemon's HTTP port, learned from its `GG_APP_LISTENING` handshake.
+    /// `None` until ready; reset to `None` across a crash-respawn.
+    port: Mutex<Option<u16>>,
+}
+
+/// One window's session inside the shared daemon. `session_id` is the id the
+/// daemon returned from `POST /session` (`None` until it does). `cwd` and
+/// `session_path` mirror what the session was created with, so the workspace
+/// snapshot (restore-on-restart) + crash-respawn can be driven from this map.
+#[derive(Default, Clone)]
+struct WindowSession {
+    session_id: Option<String>,
     cwd: Option<PathBuf>,
     session_path: Option<String>,
 }
 
-/// Per-window sidecar registry, keyed by window label.
+/// Per-window session registry, keyed by window label.
 #[derive(Default)]
-struct Sidecars {
-    map: Mutex<HashMap<String, SidecarInstance>>,
+struct Windows {
+    map: Mutex<HashMap<String, WindowSession>>,
 }
 
 /// True once the app has begun quitting. Set on `ExitRequested` so the cascade
@@ -86,8 +98,8 @@ fn sidecar_base(port: u16) -> String {
 /// children (spawned without `detached`, so they share the sidecar's process
 /// group) die with it — no orphans on window-close/project-switch/quit.
 ///
-/// On Unix the sidecar is spawned as a process-group leader (see
-/// `spawn_sidecar_with_session`), so sending signals to `-pid` (negative pid =
+/// On Unix the daemon is spawned as a process-group leader (see
+/// `spawn_daemon`), so sending signals to `-pid` (negative pid =
 /// the whole group) reaps every descendant in one shot. We SIGTERM the group so
 /// the sidecar's SIGTERM handler can run `session.dispose()`, poll `try_wait()`
 /// for up to ~3s, then SIGKILL the group and `wait()` to reap the direct child
@@ -344,22 +356,48 @@ fn sweep_orphan_sidecars() {
     }
 }
 
-/// Resolve the sidecar port for the window that issued a command.
+/// The shared daemon port (same for every window). Named `port_for` so the ~35
+/// proxy commands keep their call shape; the per-window routing is the session
+/// id (`session_for`), attached as the `x-gg-session` header.
 fn port_for(webview: &WebviewWindow) -> Option<u16> {
-    let state: State<Sidecars> = webview.state();
-    let map = state.map.lock().unwrap();
-    map.get(webview.label()).and_then(|i| i.port)
+    let daemon: State<Daemon> = webview.state();
+    let port = *daemon.port.lock().unwrap();
+    port
+}
+
+/// The daemon session id for the window that issued a command, or `None` until
+/// the daemon's `POST /session` has returned for this window.
+fn session_for(webview: &WebviewWindow) -> Option<String> {
+    let windows: State<Windows> = webview.state();
+    let map = windows.map.lock().unwrap();
+    map.get(webview.label()).and_then(|w| w.session_id.clone())
 }
 
 fn cwd_for(webview: &WebviewWindow) -> Option<PathBuf> {
-    let state: State<Sidecars> = webview.state();
-    let map = state.map.lock().unwrap();
-    map.get(webview.label()).and_then(|i| i.cwd.clone())
+    let windows: State<Windows> = webview.state();
+    let map = windows.map.lock().unwrap();
+    map.get(webview.label()).and_then(|w| w.cwd.clone())
 }
 
-/// Frontend polls this until it returns a port (mirrors the `sidecar-ready` event).
+/// Await the daemon's HTTP port (set by its `GG_APP_LISTENING` handshake),
+/// polling up to ~30s. Returns `None` if the daemon never came up. Mirrors the
+/// webview's `waitForReady` poll cadence.
+async fn await_daemon_port(app: &tauri::AppHandle) -> Option<u16> {
+    for _ in 0..600 {
+        if let Some(p) = *app.state::<Daemon>().port.lock().unwrap() {
+            return Some(p);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    None
+}
+
+/// Frontend polls this until it returns a port. Returns the daemon port only
+/// once THIS window has a session (so `waitForReady` still gates correctly:
+/// a window isn't "ready" until its session exists), mirroring `sidecar-ready`.
 #[tauri::command]
 fn sidecar_port(webview: WebviewWindow) -> Option<u16> {
+    session_for(&webview)?;
     port_for(&webview)
 }
 
@@ -427,9 +465,11 @@ async fn agent_state(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/state", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -447,9 +487,11 @@ async fn agent_prompt(
     text: String,
     attachments: Option<serde_json::Value>,
 ) -> Result<(), String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     client
         .post(format!("{}/prompt", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({
             "text": text,
             "attachments": attachments.unwrap_or(serde_json::Value::Array(vec![])),
@@ -466,9 +508,11 @@ async fn agent_history(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/history", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -483,9 +527,11 @@ async fn agent_new_session(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<(), String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     client
         .post(format!("{}/new-session", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -500,9 +546,11 @@ async fn agent_auth_apikey(
     provider: String,
     key: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/apikey", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "provider": provider, "key": key }))
         .send()
         .await
@@ -520,9 +568,11 @@ async fn agent_auth_oauth_start(
     client: State<'_, reqwest::Client>,
     provider: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/oauth/start", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "provider": provider }))
         .send()
         .await
@@ -539,9 +589,11 @@ async fn agent_auth_oauth_code(
     client: State<'_, reqwest::Client>,
     code: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/oauth/code", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "code": code }))
         .send()
         .await
@@ -558,9 +610,11 @@ async fn agent_auth_logout(
     client: State<'_, reqwest::Client>,
     provider: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/logout", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "provider": provider }))
         .send()
         .await
@@ -577,9 +631,11 @@ async fn agent_kill_task(
     client: State<'_, reqwest::Client>,
     id: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/kill", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "id": id }))
         .send()
         .await
@@ -597,9 +653,11 @@ async fn agent_radio_state(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/radio", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -616,9 +674,11 @@ async fn agent_radio_set(
     client: State<'_, reqwest::Client>,
     station: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/radio", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "station": station }))
         .send()
         .await
@@ -645,9 +705,11 @@ async fn agent_tasks(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/tasks", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -666,9 +728,11 @@ async fn agent_run_tasks(
     id: Option<String>,
     all: bool,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/tasks/run", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "id": id, "all": all }))
         .send()
         .await
@@ -685,9 +749,11 @@ async fn agent_delete_task(
     client: State<'_, reqwest::Client>,
     id: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/tasks/delete", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "id": id }))
         .send()
         .await
@@ -706,9 +772,11 @@ async fn agent_accept_plan(
     client: State<'_, reqwest::Client>,
     plan_path: Option<String>,
 ) -> Result<(), String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     client
         .post(format!("{}/plan/accept", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "planPath": plan_path }))
         .send()
         .await
@@ -722,9 +790,11 @@ async fn agent_cancel(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<(), String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     client
         .post(format!("{}/cancel", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -737,9 +807,11 @@ async fn agent_commands(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/commands", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -754,9 +826,11 @@ async fn agent_models(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/models", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -772,9 +846,11 @@ async fn agent_switch_model(
     client: State<'_, reqwest::Client>,
     model: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/model", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "model": model }))
         .send()
         .await
@@ -791,9 +867,11 @@ async fn agent_cycle_thinking(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/thinking", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -808,9 +886,11 @@ async fn agent_settings(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/settings", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -826,9 +906,11 @@ async fn agent_save_settings(
     client: State<'_, reqwest::Client>,
     projects_root: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/settings", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "projectsRoot": projects_root }))
         .send()
         .await
@@ -1035,13 +1117,13 @@ fn filter_restorable<F: Fn(&str) -> bool>(
         .collect()
 }
 
-/// Walk every live window + its `Sidecars` entry and write a fresh snapshot.
-/// Picker-only windows (still at the default boot cwd) are excluded. Geometry is
-/// captured from each window's current outer position + inner size.
+/// Walk every live window + its `Windows` session entry and write a fresh
+/// snapshot. Picker-only windows (still at the default boot cwd) are excluded.
+/// Geometry is captured from each window's current outer position + inner size.
 fn snapshot_workspace(app: &tauri::AppHandle) {
     let default = default_cwd();
     let windows = app.webview_windows();
-    let state: State<Sidecars> = app.state();
+    let state: State<Windows> = app.state();
     let map = state.map.lock().unwrap();
 
     // Deterministic order: main first, then project-N ascending, so the first
@@ -1085,7 +1167,7 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
 /// the window's recorded cwd, since the snapshot has no labels.
 fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str) {
     let cwd = {
-        let state: State<Sidecars> = app.state();
+        let state: State<Windows> = app.state();
         let map = state.map.lock().unwrap();
         map.get(label)
             .and_then(|i| i.cwd.as_ref())
@@ -1214,6 +1296,14 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         description: "Qwen3.6-Plus, multi-provider gateway",
         methods: &["apikey"],
         api_key_label: Some("OpenRouter"),
+        api_key_base_url: None,
+    },
+    ProviderMeta {
+        value: "sakana",
+        label: "Sakana (Fugu)",
+        description: "Fugu, Fugu Ultra",
+        methods: &["apikey"],
+        api_key_label: Some("Sakana"),
         api_key_base_url: None,
     },
 ];
@@ -1427,9 +1517,11 @@ async fn agent_telegram_get(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/telegram", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1447,9 +1539,11 @@ async fn agent_telegram_save(
     bot_token: String,
     user_id: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/telegram", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "botToken": bot_token, "userId": user_id }))
         .send()
         .await
@@ -1475,9 +1569,11 @@ async fn agent_serve_status(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/serve", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1492,9 +1588,11 @@ async fn agent_serve_start(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/serve/start", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1519,9 +1617,11 @@ async fn agent_serve_stop(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/serve/stop", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1538,8 +1638,11 @@ async fn agent_mcp_list(
     client: State<'_, reqwest::Client>,
     cwd: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
-    let mut req = client.get(format!("{}/mcp", sidecar_base(port)));
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let mut req = client
+        .get(format!("{}/mcp", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid);
     if let Some(c) = cwd.as_deref().filter(|c| !c.trim().is_empty()) {
         req = req.query(&[("cwd", c)]);
     }
@@ -1561,9 +1664,11 @@ async fn agent_mcp_add(
     scope: String,
     cwd: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/mcp/add", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "line": line, "scope": scope, "cwd": cwd }))
         .send()
         .await
@@ -1593,9 +1698,11 @@ async fn agent_mcp_remove(
     scope: String,
     cwd: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/mcp/remove", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "name": name, "scope": scope, "cwd": cwd }))
         .send()
         .await
@@ -1603,6 +1710,43 @@ async fn agent_mcp_remove(
     res.json::<serde_json::Value>()
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Proxy: begin an interactive OAuth login for a remote (HTTP) MCP server.
+/// Returns 202 immediately; progress + outcome stream back via `agent-event`
+/// (`mcp_auth_url`, `mcp_auth_status`, `mcp_auth_done`, `mcp_auth_error`). The
+/// webview opens the browser when it receives `mcp_auth_url`.
+/// `cwd` is required for project scope (the target project path).
+#[tauri::command]
+async fn agent_mcp_login(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    name: String,
+    scope: String,
+    cwd: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/mcp/login", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "name": name, "scope": scope, "cwd": cwd }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("failed to start MCP login");
+        return Err(msg.to_string());
+    }
+    Ok(body)
 }
 
 /// Proxy: create a new project folder under the configured projects root.
@@ -1613,9 +1757,11 @@ async fn agent_create_project(
     client: State<'_, reqwest::Client>,
     name: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/create-project", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "name": name }))
         .send()
         .await
@@ -1641,9 +1787,11 @@ async fn agent_projects(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/projects", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1659,10 +1807,12 @@ async fn agent_sessions(
     client: State<'_, reqwest::Client>,
     cwd: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let encoded = urlencoding(&cwd);
     let res = client
         .get(format!("{}/sessions?cwd={}", sidecar_base(port), encoded))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -1679,10 +1829,12 @@ async fn agent_files(
     client: State<'_, reqwest::Client>,
     query: String,
 ) -> Result<serde_json::Value, String> {
-    let port = port_for(&webview).ok_or("sidecar not ready")?;
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
     let encoded = urlencoding(&query);
     let res = client
         .get(format!("{}/files?q={}", sidecar_base(port), encoded))
+        .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -2057,7 +2209,7 @@ async fn setup_windows(app: tauri::AppHandle, count: usize) -> Result<(), String
         // chrome (Overlay is a no-op / unsupported there) and the webview CSS
         // drops the mac traffic-light insets via the `.platform-*` class.
         let win = build_app_window(&app, &label)?;
-        spawn_sidecar(app.clone(), label, default_cwd());
+        start_window_session(app.clone(), label, default_cwd(), None);
         let _ = win.set_focus();
     }
     arrange_windows(&app, count);
@@ -2075,7 +2227,7 @@ async fn setup_windows(app: tauri::AppHandle, count: usize) -> Result<(), String
 async fn new_window(app: tauri::AppHandle) -> Result<(), String> {
     let label = next_window_label(&app);
     let win = build_app_window(&app, &label)?;
-    spawn_sidecar(app.clone(), label, default_cwd());
+    start_window_session(app.clone(), label, default_cwd(), None);
     let _ = win.set_focus();
     broadcast_window_order(&app);
     Ok(())
@@ -2147,9 +2299,10 @@ async fn arrange_all(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Re-point THIS window's agent at a chosen project: kill its sidecar and spawn
-/// a fresh one at `cwd`, optionally resuming the session file `session_path`.
-/// The webview re-runs its ready flow against the new sidecar.
+/// Re-point THIS window's agent at a chosen project: dispose its current daemon
+/// session and create a fresh one at `cwd`, optionally resuming the session file
+/// `session_path`. No process is killed — only one session in the shared daemon
+/// is swapped. The webview re-runs its ready flow against the new session.
 #[tauri::command]
 fn select_project(
     webview: WebviewWindow,
@@ -2158,17 +2311,24 @@ fn select_project(
     session_path: Option<String>,
 ) -> Result<(), String> {
     let label = webview.label().to_string();
-    {
-        let state: State<Sidecars> = app.state();
-        let mut map = state.map.lock().unwrap();
-        if let Some(inst) = map.get_mut(&label) {
-            inst.port = None;
-            if let Some(child) = inst.child.take() {
-                terminate_child(child);
-            }
+    // Take the old session id (and clear it) so the old SSE bridge retires.
+    let old_id = {
+        let windows: State<Windows> = app.state();
+        let mut map = windows.map.lock().unwrap();
+        map.get_mut(&label).and_then(|w| w.session_id.take())
+    };
+    // Dispose the old session on the daemon (best-effort, off-thread).
+    if let Some(id) = old_id {
+        if let Some(port) = port_for(&webview) {
+            let app2 = app.clone();
+            tauri::async_runtime::spawn(async move {
+                daemon_delete_session(&app2, port, &id).await;
+            });
         }
     }
-    spawn_sidecar_with_session(app.clone(), label, PathBuf::from(cwd), session_path);
+    // Create the new session for this window (records cwd/session_path, awaits
+    // the daemon, starts the bridge, emits sidecar-ready).
+    start_window_session(app.clone(), label, PathBuf::from(cwd), session_path);
     // The map now reflects this window's new project/session; persist the
     // workspace so a restart reopens it here.
     snapshot_workspace(&app);
@@ -2445,24 +2605,26 @@ fn drain_sse_frames(buf: &mut Vec<u8>) -> Vec<String> {
 /// window (`emit_to` the window label) as `agent-event`, so windows never see
 /// each other's agent activity. Rust has no mixed-content restriction, so the
 /// webview never touches plain HTTP directly. Reconnects on stream end.
-fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16) {
+fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16, session_id: String) {
     // Reuse the app's shared HTTP client (cheap Arc clone) so the SSE connect
     // shares the connection pool with the proxy commands.
     let client = app.state::<reqwest::Client>().inner().clone();
     tauri::async_runtime::spawn(async move {
         loop {
-            // Stop once this window's active sidecar port has moved on (project
-            // switch respawned the sidecar) or the window is gone — otherwise the
-            // old bridge would reconnect to a dead port forever.
+            // Stop once this window's active session has moved on (project switch
+            // created a new session) or the window is gone — otherwise the old
+            // bridge would reconnect to a stale session forever. Session routing
+            // is by id now (the daemon port is shared across all windows).
             {
-                let state: State<Sidecars> = app.state();
+                let state: State<Windows> = app.state();
                 let map = state.map.lock().unwrap();
-                if map.get(&label).and_then(|i| i.port) != Some(port) {
-                    log::debug!("event bridge for {label}:{port} retired");
+                if map.get(&label).and_then(|w| w.session_id.clone()) != Some(session_id.clone()) {
+                    log::debug!("event bridge for {label} session {session_id} retired");
                     return;
                 }
             }
-            let url = format!("{}/events", sidecar_base(port));
+            // The daemon adds this response to the target session's SSE clients.
+            let url = format!("{}/events?session={}", sidecar_base(port), urlencoding(&session_id));
             match client.get(&url).send().await {
                 Ok(res) => {
                     let mut stream = res.bytes_stream();
@@ -2631,110 +2793,215 @@ fn pick_cwd(
     home
 }
 
-/// Spawn a Node agent sidecar bound to one window (`label`) + project `cwd`.
-/// Port/ready/error/event traffic is routed only to that window.
-fn spawn_sidecar(app: tauri::AppHandle, label: String, cwd: PathBuf) {
-    spawn_sidecar_with_session(app, label, cwd, None);
-}
-
-/// Like `spawn_sidecar`, but optionally resumes an existing session file.
-fn spawn_sidecar_with_session(
-    app: tauri::AppHandle,
-    label: String,
-    cwd: PathBuf,
-    session_path: Option<String>,
-) {
+/// Spawn the ONE shared Node daemon. Reads its `GG_APP_LISTENING` handshake to
+/// learn the shared port; on an unexpected exit (its stdout closes while the app
+/// is NOT quitting) it respawns the daemon and re-creates every live window's
+/// session from its stored `{cwd, session_path}` (Step 9 crash recovery).
+///
+/// The daemon is a process-group leader (Unix), so `terminate_child` reaps its
+/// entire descendant tree (every session's MCP stdio children + LSP servers) in
+/// one group-kill — no orphans on quit.
+fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     let script = resolve_sidecar(&app);
     let node = resolve_node(&app);
-    log::info!(
-        "spawning sidecar for {label}: {} {} (cwd={})",
-        node.display(),
-        script.display(),
-        cwd.display()
-    );
+    log::info!("spawning daemon: {} {}", node.display(), script.display());
 
     let mut cmd = Command::new(node);
     cmd.arg(&script)
         // Port 0 → the OS assigns a free port, reported back via the
-        // GG_APP_LISTENING handshake. Avoids EADDRINUSE across windows.
+        // GG_APP_LISTENING handshake.
         .env("GG_APP_PORT", "0")
-        .env("GG_APP_CWD", &cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // Make the sidecar a process-group leader so a single group-kill
-    // (`kill(-pid)`) in `terminate_child` reaps its entire descendant tree
-    // (MCP stdio children, LSP servers) — no orphans on close/switch/quit.
     #[cfg(unix)]
     cmd.process_group(0);
-    if let Some(sp) = &session_path {
-        cmd.env("GG_APP_SESSION_ID", sp);
-    }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            log::error!("failed to spawn sidecar: {e}");
-            let _ = app.emit_to(
-                EventTarget::webview_window(label.clone()),
-                "sidecar-error",
-                format!("failed to spawn sidecar: {e}"),
-            );
+            log::error!("failed to spawn daemon: {e}");
+            // Surface to every open window so they don't hang on waitForReady.
+            for label in app.webview_windows().keys() {
+                let _ = app.emit_to(
+                    EventTarget::webview_window(label.clone()),
+                    "sidecar-error",
+                    format!("failed to spawn daemon: {e}"),
+                );
+            }
             return;
         }
     };
 
     if let Some(stdout) = child.stdout.take() {
         let app2 = app.clone();
-        let label2 = label.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().map_while(Result::ok) {
                 if let Some(rest) = line.strip_prefix("GG_APP_LISTENING ") {
                     if let Ok(port) = rest.trim().parse::<u16>() {
-                        log::info!("sidecar for {label2} listening on port {port}");
-                        {
-                            let state: State<Sidecars> = app2.state();
-                            let mut map = state.map.lock().unwrap();
-                            map.entry(label2.clone()).or_default().port = Some(port);
+                        log::info!("daemon listening on port {port}");
+                        *app2.state::<Daemon>().port.lock().unwrap() = Some(port);
+                        // On a respawn the windows already exist with (now
+                        // stale) sessions — re-create them all. On the initial
+                        // spawn `restore_or_default_windows` drives creation.
+                        // (We can't infer respawn from prior port state: the
+                        // crash handler resets it to None before respawning so
+                        // proxy commands fail fast while the daemon is down.)
+                        if is_respawn {
+                            recreate_all_window_sessions(app2.clone());
                         }
-                        start_event_bridge(app2.clone(), label2.clone(), port);
-                        let _ = app2.emit_to(
-                            EventTarget::webview_window(label2.clone()),
-                            "sidecar-ready",
-                            port,
-                        );
                     }
                 } else {
-                    log::debug!("[sidecar:{label2}] {line}");
+                    log::debug!("[daemon] {line}");
                 }
+            }
+            // stdout closed → the daemon process exited. If the app isn't
+            // quitting, this is a crash: respawn + rehydrate every window.
+            let exiting = app2.state::<AppExiting>().0.load(Ordering::SeqCst);
+            if !exiting {
+                log::warn!("daemon exited unexpectedly — respawning");
+                {
+                    let daemon: State<Daemon> = app2.state();
+                    *daemon.port.lock().unwrap() = None;
+                }
+                spawn_daemon(app2.clone(), true);
             }
         });
     }
 
     if let Some(stderr) = child.stderr.take() {
         let app3 = app.clone();
-        let label3 = label.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
-                log::error!("[sidecar:{label3}:stderr] {line}");
+                log::error!("[daemon:stderr] {line}");
                 if line.starts_with("GG_APP_FATAL") {
-                    let _ = app3.emit_to(
-                        EventTarget::webview_window(label3.clone()),
-                        "sidecar-error",
-                        line,
-                    );
+                    for label in app3.webview_windows().keys() {
+                        let _ = app3.emit_to(
+                            EventTarget::webview_window(label.clone()),
+                            "sidecar-error",
+                            line.clone(),
+                        );
+                    }
                 }
             }
         });
     }
 
-    let state: State<Sidecars> = app.state();
-    let mut map = state.map.lock().unwrap();
-    let inst = map.entry(label).or_default();
-    inst.child = Some(child);
-    inst.cwd = Some(cwd);
-    inst.session_path = session_path;
+    let daemon: State<Daemon> = app.state();
+    *daemon.child.lock().unwrap() = Some(child);
+}
+
+/// POST /session to the daemon for `cwd` (+ optional resume `session_path`);
+/// returns the new session id, or `None` on failure.
+async fn daemon_create_session(
+    app: &tauri::AppHandle,
+    port: u16,
+    cwd: &Path,
+    session_path: Option<&str>,
+) -> Option<String> {
+    let client = app.state::<reqwest::Client>().inner().clone();
+    let body = serde_json::json!({
+        "cwd": cwd.to_string_lossy(),
+        "sessionPath": session_path,
+    });
+    let res = client
+        .post(format!("{}/session", sidecar_base(port)))
+        .json(&body)
+        .send()
+        .await
+        .ok()?;
+    let value = res.json::<serde_json::Value>().await.ok()?;
+    value
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// DELETE /session/:id on the daemon (best-effort, fire-and-forget).
+async fn daemon_delete_session(app: &tauri::AppHandle, port: u16, id: &str) {
+    let client = app.state::<reqwest::Client>().inner().clone();
+    let _ = client
+        .delete(format!("{}/session/{}", sidecar_base(port), urlencoding(id)))
+        .send()
+        .await;
+}
+
+/// Create (or re-point) one window's session: record `{cwd, session_path}`,
+/// await the daemon, `POST /session`, store the returned id, start the SSE
+/// bridge, and emit `sidecar-ready`. Fire-and-forget (spawns its own task) so
+/// callers in sync contexts (setup/restore) don't block. Replaces the old
+/// per-window `spawn_sidecar` (now one shared daemon).
+fn start_window_session(
+    app: tauri::AppHandle,
+    label: String,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) {
+    // Record the target up front so snapshot/restore + crash-respawn can see it
+    // even before the daemon answers.
+    {
+        let windows: State<Windows> = app.state();
+        let mut map = windows.map.lock().unwrap();
+        let entry = map.entry(label.clone()).or_default();
+        entry.cwd = Some(cwd.clone());
+        entry.session_path = session_path.clone();
+        entry.session_id = None;
+    }
+    tauri::async_runtime::spawn(async move {
+        let Some(port) = await_daemon_port(&app).await else {
+            log::error!("daemon never came up; session for {label} not created");
+            let _ = app.emit_to(
+                EventTarget::webview_window(label.clone()),
+                "sidecar-error",
+                "daemon did not start in time",
+            );
+            return;
+        };
+        match daemon_create_session(&app, port, &cwd, session_path.as_deref()).await {
+            Some(id) => {
+                {
+                    let windows: State<Windows> = app.state();
+                    let mut map = windows.map.lock().unwrap();
+                    let entry = map.entry(label.clone()).or_default();
+                    entry.session_id = Some(id.clone());
+                    entry.cwd = Some(cwd.clone());
+                    entry.session_path = session_path.clone();
+                }
+                start_event_bridge(app.clone(), label.clone(), port, id);
+                let _ = app.emit_to(
+                    EventTarget::webview_window(label.clone()),
+                    "sidecar-ready",
+                    port,
+                );
+            }
+            None => {
+                log::error!("daemon POST /session failed for {label}");
+                let _ = app.emit_to(
+                    EventTarget::webview_window(label.clone()),
+                    "sidecar-error",
+                    "failed to create agent session",
+                );
+            }
+        }
+    });
+}
+
+/// After a daemon respawn, re-create a session for every live window from its
+/// stored `{cwd, session_path}` so each webview re-hydrates (history survives
+/// via the JSONL session files). Skips windows with no recorded project (still
+/// on the picker).
+fn recreate_all_window_sessions(app: tauri::AppHandle) {
+    let targets: Vec<(String, PathBuf, Option<String>)> = {
+        let windows: State<Windows> = app.state();
+        let map = windows.map.lock().unwrap();
+        map.iter()
+            .filter_map(|(label, w)| w.cwd.clone().map(|c| (label.clone(), c, w.session_path.clone())))
+            .collect()
+    };
+    for (label, cwd, session_path) in targets {
+        start_window_session(app.clone(), label, cwd, session_path);
+    }
 }
 
 /// Boot the app's windows. If a workspace snapshot has restorable windows (each
@@ -2748,7 +3015,7 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
     if entries.is_empty() {
         // Fresh boot / nothing to restore: the usual single main window.
         build_app_window(app, "main")?;
-        spawn_sidecar(app.clone(), "main".into(), default_cwd());
+        start_window_session(app.clone(), "main".into(), default_cwd(), None);
         broadcast_window_order(app);
         return Ok(());
     }
@@ -2763,7 +3030,7 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
             format!("project-{i}")
         };
         let win = build_app_window(app, &label)?;
-        spawn_sidecar_with_session(
+        start_window_session(
             app.clone(),
             label.clone(),
             PathBuf::from(&entry.cwd),
@@ -2818,7 +3085,8 @@ pub fn run() {
                 ))
                 .build(),
         )
-        .manage(Sidecars::default())
+        .manage(Daemon::default())
+        .manage(Windows::default())
         .manage(RestoreTargets::default())
         .manage(AppExiting::default())
         .manage(FocusedWindow::default())
@@ -2872,6 +3140,7 @@ pub fn run() {
             agent_mcp_list,
             agent_mcp_add,
             agent_mcp_remove,
+            agent_mcp_login,
             gaze_focus,
             focus_window_by_offset,
             arrange_all,
@@ -2883,6 +3152,10 @@ pub fn run() {
             // accumulate forever across launches. Best-effort + logged.
             // Cross-platform: uses `ps` on Unix, PowerShell CIM on Windows.
             sweep_orphan_sidecars();
+            // Spawn the ONE shared Node daemon before any window asks for a
+            // session. Window session creation (in restore/setup) awaits its
+            // `GG_APP_LISTENING` port via `await_daemon_port`.
+            spawn_daemon(app.handle().clone(), false);
             // Restore the previous session's windows (each at its project +
             // session) when a workspace snapshot exists; otherwise build the
             // single default `main` window. Windows are built in code (not from
@@ -2900,16 +3173,18 @@ pub fn run() {
                 if !exiting {
                     remove_window_from_workspace(app, window.label());
                 }
-                // Kill only THIS window's sidecar so other projects keep running.
-                let state: State<Sidecars> = window.state();
-                let child = state
-                    .map
-                    .lock()
-                    .unwrap()
-                    .remove(window.label())
-                    .and_then(|mut i| i.child.take());
-                if let Some(child) = child {
-                    terminate_child(child);
+                // Dispose only THIS window's session in the shared daemon so
+                // other projects keep running. The daemon process itself is
+                // never killed here (that happens only on app exit).
+                let state: State<Windows> = window.state();
+                let session_id = state.map.lock().unwrap().remove(window.label()).and_then(|w| w.session_id);
+                if let Some(id) = session_id {
+                    if let Some(port) = *app.state::<Daemon>().port.lock().unwrap() {
+                        let app2 = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            daemon_delete_session(&app2, port, &id).await;
+                        });
+                    }
                 }
                 // Update peers: the closed window is gone from the reading order.
                 broadcast_window_order(app);
@@ -2958,36 +3233,47 @@ pub fn run() {
                 app.state::<AppExiting>().0.store(true, Ordering::SeqCst);
                 refresh_live_sessions(app);
                 snapshot_workspace(app);
+                // Terminate the daemon's process group once — reaps every
+                // session's MCP/LSP children in one shot (no orphans).
+                let child = app.state::<Daemon>().child.lock().unwrap().take();
+                if let Some(child) = child {
+                    terminate_child(child);
+                }
             }
         });
 }
 
-/// Before the final exit snapshot, re-read each live sidecar's `/state` so a
-/// window that started a new session mid-run (changing its session file) is
-/// recorded at its CURRENT session, not the one it was spawned with. Best-effort
-/// + time-boxed: any window we can't reach keeps its last-known session_path.
+/// Before the final exit snapshot, re-read each live session's `/state` (via the
+/// shared daemon, keyed by the window's `x-gg-session` header) so a window that
+/// started a new session mid-run (changing its session file) is recorded at its
+/// CURRENT session, not the one it was created with. Best-effort + time-boxed:
+/// any window we can't reach keeps its last-known session_path.
 fn refresh_live_sessions(app: &tauri::AppHandle) {
-    let ports: Vec<(String, u16)> = {
-        let state: State<Sidecars> = app.state();
+    let Some(port) = *app.state::<Daemon>().port.lock().unwrap() else {
+        return;
+    };
+    let targets: Vec<(String, String)> = {
+        let state: State<Windows> = app.state();
         let map = state.map.lock().unwrap();
         map.iter()
-            .filter_map(|(label, inst)| inst.port.map(|p| (label.clone(), p)))
+            .filter_map(|(label, w)| w.session_id.clone().map(|id| (label.clone(), id)))
             .collect()
     };
-    if ports.is_empty() {
+    if targets.is_empty() {
         return;
     }
     let client = app.state::<reqwest::Client>().inner().clone();
     // The exit callback runs on the main event-loop thread (outside the async
     // runtime), so block_on is safe here. Each request is time-boxed so a hung
-    // sidecar can't stall quit.
+    // session can't stall quit.
     let results: Vec<(String, Option<String>, Option<PathBuf>)> =
         tauri::async_runtime::block_on(async {
-            let mut out = Vec::with_capacity(ports.len());
-            for (label, port) in ports {
+            let mut out = Vec::with_capacity(targets.len());
+            for (label, sid) in targets {
                 let url = format!("{}/state", sidecar_base(port));
                 let req = client
                     .get(&url)
+                    .header("x-gg-session", &sid)
                     .timeout(std::time::Duration::from_millis(400))
                     .send()
                     .await;
@@ -3011,7 +3297,7 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
             }
             out
         });
-    let state: State<Sidecars> = app.state();
+    let state: State<Windows> = app.state();
     let mut map = state.map.lock().unwrap();
     for (label, session_path, cwd) in results {
         if let Some(inst) = map.get_mut(&label) {
@@ -3678,5 +3964,77 @@ mod tests {
     #[test]
     fn tile_rects_empty_is_empty() {
         assert!(tile_rects(0, 0, 0, 1920, 1080).is_empty());
+    }
+
+    // ── Window↔session map (daemon model) ──────────────────────────────────
+    // The `Windows` map replaces the old per-window `Sidecars` registry. These
+    // lock in the three mutations the lifecycle relies on: a window gets a
+    // session id once the daemon answers, `select_project` re-points it to a
+    // fresh session (old id taken so its SSE bridge retires), and a window
+    // close removes its entry entirely (peers untouched).
+
+    #[test]
+    fn window_session_records_project_before_daemon_answers() {
+        // start_window_session records cwd/session_path up front, session_id None
+        // until POST /session returns — so snapshot/restore can see the target.
+        let mut map: HashMap<String, WindowSession> = HashMap::new();
+        map.insert(
+            "main".into(),
+            WindowSession {
+                session_id: None,
+                cwd: Some(PathBuf::from("/p/a")),
+                session_path: Some("/s/a.jsonl".into()),
+            },
+        );
+        let w = map.get("main").unwrap();
+        assert!(w.session_id.is_none());
+        assert_eq!(w.cwd.as_deref(), Some(Path::new("/p/a")));
+        assert_eq!(w.session_path.as_deref(), Some("/s/a.jsonl"));
+    }
+
+    #[test]
+    fn select_project_repoints_to_a_fresh_session() {
+        // Mirrors select_project: take the old id (retires its bridge), then the
+        // new session id + cwd land on the SAME window entry.
+        let mut map: HashMap<String, WindowSession> = HashMap::new();
+        map.insert(
+            "main".into(),
+            WindowSession {
+                session_id: Some("old-id".into()),
+                cwd: Some(PathBuf::from("/p/a")),
+                session_path: None,
+            },
+        );
+        // select_project takes the old id so the old SSE bridge retires.
+        let old = map.get_mut("main").and_then(|w| w.session_id.take());
+        assert_eq!(old.as_deref(), Some("old-id"));
+        assert!(map.get("main").unwrap().session_id.is_none());
+        // start_window_session then records the new project + session id.
+        let entry = map.get_mut("main").unwrap();
+        entry.cwd = Some(PathBuf::from("/p/b"));
+        entry.session_id = Some("new-id".into());
+        let w = map.get("main").unwrap();
+        assert_eq!(w.session_id.as_deref(), Some("new-id"));
+        assert_eq!(w.cwd.as_deref(), Some(Path::new("/p/b")));
+    }
+
+    #[test]
+    fn closing_one_window_leaves_peers_intact() {
+        // Destroyed removes only the closed window's entry; other windows keep
+        // their sessions (the shared daemon process is never touched here).
+        let mut map: HashMap<String, WindowSession> = HashMap::new();
+        map.insert(
+            "main".into(),
+            WindowSession { session_id: Some("id-1".into()), cwd: Some(PathBuf::from("/p/a")), session_path: None },
+        );
+        map.insert(
+            "project-1".into(),
+            WindowSession { session_id: Some("id-2".into()), cwd: Some(PathBuf::from("/p/b")), session_path: None },
+        );
+        let removed = map.remove("main").and_then(|w| w.session_id);
+        assert_eq!(removed.as_deref(), Some("id-1"));
+        assert!(map.get("main").is_none());
+        // Peer survives with its own session.
+        assert_eq!(map.get("project-1").unwrap().session_id.as_deref(), Some("id-2"));
     }
 }

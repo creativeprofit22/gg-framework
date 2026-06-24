@@ -87,6 +87,10 @@ export function fromStoredEntry(name: string, entry: StoredServerEntry): MCPServ
   if (entry.url) {
     config.url = entry.url;
     if (entry.headers) config.headers = entry.headers;
+    // Preserve an explicit transport hint so the client knows whether to try
+    // Streamable HTTP or go straight to legacy SSE.
+    if (entry.type === "sse") config.transport = "sse";
+    else if (entry.type === "http" || entry.type === "streamable-http") config.transport = "http";
   } else if (entry.command) {
     config.command = entry.command;
     if (entry.args) config.args = entry.args;
@@ -101,7 +105,7 @@ export function fromStoredEntry(name: string, entry: StoredServerEntry): MCPServ
 export function toStoredEntry(config: MCPServerConfig): StoredServerEntry {
   const entry: StoredServerEntry = {};
   if (config.url) {
-    entry.type = "http";
+    entry.type = config.transport ?? "http";
     entry.url = config.url;
     if (config.headers) entry.headers = config.headers;
   } else if (config.command) {

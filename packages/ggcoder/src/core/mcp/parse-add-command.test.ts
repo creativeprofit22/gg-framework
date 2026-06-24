@@ -6,13 +6,19 @@ describe("parseMcpAddCommand", () => {
     const r = parseMcpAddCommand("--transport http notion https://mcp.notion.com/mcp");
     expect(r).toEqual({
       ok: true,
-      value: { config: { name: "notion", url: "https://mcp.notion.com/mcp" } },
+      value: {
+        config: { name: "notion", url: "https://mcp.notion.com/mcp", transport: "http" },
+      },
     });
   });
 
   it("parses an sse server (Asana docs example)", () => {
     const r = parseMcpAddCommand("--transport sse asana https://mcp.asana.com/sse");
-    expect(r.ok && r.value.config).toEqual({ name: "asana", url: "https://mcp.asana.com/sse" });
+    expect(r.ok && r.value.config).toEqual({
+      name: "asana",
+      url: "https://mcp.asana.com/sse",
+      transport: "sse",
+    });
   });
 
   it("parses a stdio server with --env (Airtable docs example)", () => {

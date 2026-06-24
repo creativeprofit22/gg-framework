@@ -3,10 +3,12 @@ import { Settings, Download } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AsciiLogo } from "./AsciiLogo";
+import { HomeBackdrop } from "./HomeBackdrop";
 import { MemeLayer } from "./MemeLayer";
 import { SettingsModal } from "./SettingsModal";
 import { TelegramSettingsModal } from "./TelegramSettingsModal";
 import { McpModal } from "./McpModal";
+import { SoundButton } from "./SoundButton";
 import {
   waitForReady,
   getSettings,
@@ -124,6 +126,7 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
 
   return (
     <div className="home" data-tauri-drag-region>
+      <HomeBackdrop />
       <MemeLayer />
       {["available", "installing", "completed", "error"].includes(appUpdate.phase) ? (
         <button
@@ -174,6 +177,7 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
           >
             Your Projects
           </button>
+          <SoundButton />
           <button
             className="btn btn-ghost btn-icon home-settings"
             title="Settings"

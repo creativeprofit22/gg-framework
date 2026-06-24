@@ -300,20 +300,32 @@ export function fuzzyFindText(
 
   // Fuzzy match line-by-line so stripped trailing whitespace in earlier lines
   // cannot shift offsets and make us replace the wrong byte range.
+  //
+  // Performance: use a lazy normalization cache — each content line is
+  // normalized on first access and cached, so lines before the match are
+  // normalized exactly once (not once per window), and lines after the
+  // match are never touched.  This gives O(n+m) worst-case (no match)
+  // while avoiding wasted work when the match is found early.
   const oldLines = oldText.split("\n");
   const contentLines = content.split("\n");
-  const normalizedOldLines = oldLines.map(normalizeForFuzzyMatch);
+  const normalizedOldJoined = oldLines.map(normalizeForFuzzyMatch).join("\n");
+  const normalizedCache: string[] = new Array(contentLines.length);
 
   for (let startLine = 0; startLine + oldLines.length <= contentLines.length; startLine++) {
-    const candidateLines = contentLines.slice(startLine, startLine + oldLines.length);
-    const normalizedCandidate = candidateLines.map(normalizeForFuzzyMatch);
-    if (normalizedCandidate.join("\n") !== normalizedOldLines.join("\n")) continue;
+    // Build the normalized candidate window using the lazy cache
+    let normalizedCandidate = "";
+    for (let j = startLine; j < startLine + oldLines.length; j++) {
+      normalizedCandidate += normalizedCache[j] ??= normalizeForFuzzyMatch(contentLines[j]!);
+      if (j < startLine + oldLines.length - 1) normalizedCandidate += "\n";
+    }
+    if (normalizedCandidate !== normalizedOldJoined) continue;
 
     let actualIndex = 0;
     for (let i = 0; i < startLine; i++) {
-      actualIndex += contentLines[i].length + 1; // +1 for \n
+      actualIndex += contentLines[i]!.length + 1; // +1 for \n
     }
 
+    const candidateLines = contentLines.slice(startLine, startLine + oldLines.length);
     return {
       found: true,
       index: actualIndex,
@@ -354,11 +366,14 @@ export function countOccurrences(content: string, oldText: string): number {
 
   const oldLines = oldText.split("\n");
   const contentLines = content.split("\n");
+  // Lazy normalization cache (same optimization as fuzzyFindText).
+  const normalizedCache: string[] = new Array(contentLines.length);
   for (let startLine = 0; startLine + oldLines.length <= contentLines.length; startLine++) {
-    const normalizedCandidate = contentLines
-      .slice(startLine, startLine + oldLines.length)
-      .map(normalizeForFuzzyMatch)
-      .join("\n");
+    let normalizedCandidate = "";
+    for (let j = startLine; j < startLine + oldLines.length; j++) {
+      normalizedCandidate += normalizedCache[j] ??= normalizeForFuzzyMatch(contentLines[j]!);
+      if (j < startLine + oldLines.length - 1) normalizedCandidate += "\n";
+    }
     if (normalizedCandidate === normalizedOld) count++;
   }
   return count;

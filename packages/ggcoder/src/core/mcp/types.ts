@@ -1,6 +1,6 @@
 export interface MCPServerConfig {
   name: string;
-  /** Streamable HTTP endpoint URL */
+  /** HTTP endpoint URL (Streamable HTTP or SSE) */
   url?: string;
   headers?: Record<string, string>;
   /** Stdio server: command to spawn */
@@ -11,4 +11,8 @@ export interface MCPServerConfig {
   env?: Record<string, string>;
   timeout?: number;
   enabled?: boolean;
+  /** Explicit HTTP transport hint. "http" tries Streamable HTTP first (SSE
+   *  fallback); "sse" connects via the legacy SSE transport directly. When
+   *  unset, both are tried (Streamable HTTP → SSE). */
+  transport?: "http" | "sse";
 }

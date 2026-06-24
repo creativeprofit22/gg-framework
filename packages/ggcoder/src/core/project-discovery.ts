@@ -4,6 +4,7 @@ import readline from "node:readline";
 import os from "node:os";
 import path from "node:path";
 import { getAppPaths } from "../config.js";
+import { encodeCwd } from "./encode-cwd.js";
 
 export type ProjectSource = "ggcoder" | "claude-code" | "codex";
 
@@ -371,7 +372,7 @@ export interface RecentSession {
  */
 export async function listRecentSessions(cwd: string, limit = 5): Promise<RecentSession[]> {
   const sessionsDir = getAppPaths().sessionsDir;
-  const dir = path.join(sessionsDir, encodeCwdForSessions(cwd));
+  const dir = path.join(sessionsDir, encodeCwd(cwd));
   const files = await collectJsonlFiles(dir, 1);
   if (files.length === 0) return [];
   files.sort((a, b) => b.mtime - a.mtime);
@@ -383,15 +384,6 @@ export async function listRecentSessions(cwd: string, limit = 5): Promise<Recent
     if (parsed && parsed.messageCount > 0) out.push(parsed);
   }
   return out;
-}
-
-/**
- * Encode a cwd to its session directory name. Mirrors SessionManager's encoding
- * (leading slash dropped, remaining slashes → underscores) so we resolve the
- * same per-project folder without instantiating the manager.
- */
-function encodeCwdForSessions(cwd: string): string {
-  return cwd.replace(/[\\/]/g, "_").replace(/:/g, "").replace(/^_/, "");
 }
 
 /** Single-pass parse of one session file: header id + count + activity + preview. */

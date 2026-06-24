@@ -1,7 +1,9 @@
 // Cross-OS distribution smoke test: spawn the BUNDLED node runtime running the
-// BUNDLED sidecar, wait for the GG_APP_LISTENING handshake, hit /state, then
-// terminate and assert a clean shutdown. Proves the per-platform runtime +
-// single-file bundle + copied native deps (sharp) actually load on this OS.
+// BUNDLED daemon, wait for the GG_APP_LISTENING handshake, create a session
+// (POST /session), hit /state for that session, then terminate and assert a
+// clean shutdown. Proves the per-platform runtime + single-file bundle + copied
+// native deps (sharp) actually load on this OS, AND that the shared-daemon
+// session protocol works in the bundle.
 //
 // Run AFTER `stage:node` + `bundle:sidecar`. Exits non-zero on any failure so
 // it can gate CI.
@@ -94,17 +96,42 @@ async function main() {
   });
 
   if (port === LOADED_BUT_UNAUTHED) {
-    console.log(
-      "smoke: bundle loaded cleanly (sidecar reached auth check; no credentials on CI)",
-    );
+    console.log("smoke: bundle loaded cleanly (sidecar reached auth check; no credentials on CI)");
     console.log("SMOKE PASS");
     process.exit(0);
+  }
+
+  // The daemon holds sessions as in-process objects keyed by id. Create one
+  // (POST /session), then read its /state via the `x-gg-session` header — the
+  // same protocol the Rust shell uses. This proves both the bundle loads AND
+  // the session multiplexing works on this OS.
+  let sessionId;
+  try {
+    const mk = await fetch(`http://127.0.0.1:${port}/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cwd: process.cwd() }),
+    });
+    if (mk.status !== 200) {
+      child.kill("SIGKILL");
+      fail(`POST /session returned ${mk.status}`);
+    }
+    sessionId = (await mk.json()).sessionId;
+    if (!sessionId) {
+      child.kill("SIGKILL");
+      fail(`POST /session returned no sessionId`);
+    }
+  } catch (err) {
+    child.kill("SIGKILL");
+    fail(`POST /session failed: ${err.message}`);
   }
 
   // /state must answer 200 with a JSON body carrying a `ready` field.
   let res;
   try {
-    res = await fetch(`http://127.0.0.1:${port}/state`);
+    res = await fetch(`http://127.0.0.1:${port}/state`, {
+      headers: { "x-gg-session": sessionId },
+    });
   } catch (err) {
     child.kill("SIGKILL");
     fail(`GET /state failed: ${err.message}`);
@@ -118,7 +145,7 @@ async function main() {
     child.kill("SIGKILL");
     fail(`/state body missing "ready": ${JSON.stringify(body)}`);
   }
-  console.log(`smoke: /state 200 ready=${body.ready}`);
+  console.log(`smoke: session ${sessionId.slice(0, 8)} /state 200 ready=${body.ready}`);
 
   // Clean shutdown: SIGTERM (SIGKILL fallback on Windows) and wait for exit.
   const exited = new Promise((resolve) => child.on("exit", resolve));

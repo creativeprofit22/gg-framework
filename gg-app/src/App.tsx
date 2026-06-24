@@ -46,7 +46,9 @@ import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./
 import { ContextMeter } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { TasksModal } from "./TasksModal";
+import { NotesModal } from "./NotesModal";
 import { ShimmerText } from "./ShimmerText";
+import { WakeScreen } from "./WakeScreen";
 import { ConfirmModal } from "./ConfirmModal";
 import { InitGitModal } from "./InitGitModal";
 import { PlanModeLogo } from "./PlanModeLogo";
@@ -242,6 +244,13 @@ function hasDraggedFiles(dataTransfer: DataTransfer | null): boolean {
 function App(): React.ReactElement {
   const [items, setItems] = useState<Item[]>([]);
   const [input, setInput] = useState("");
+  // Shell-style prompt history for ↑/↓ recall in the chat input. Newest entries
+  // last. `historyIndex` is null while editing a fresh draft; stepping ↑ walks
+  // backwards into history, ↓ forwards. `historyDraftRef` stashes the in-progress
+  // text so stepping ↓ past the newest entry restores what was being typed.
+  const promptHistoryRef = useRef<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const historyDraftRef = useRef("");
   // Staged attachments (paste / attach button / whole-window drag-drop) shown above the input.
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [isFileDragOver, setIsFileDragOver] = useState(false);
@@ -293,6 +302,9 @@ function App(): React.ReactElement {
   // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
   const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
   const [showTasks, setShowTasks] = useState(false);
+  // Free-form per-project notes, persisted to localStorage keyed by project cwd.
+  const [showNotes, setShowNotes] = useState(false);
+  const [notes, setNotes] = useState("");
   // Every window picks a project before connecting — on app load and on each new
   // window. The picker re-points this window's agent at the chosen cwd/session.
   const [needsProject, setNeedsProject] = useState(true);
@@ -335,6 +347,28 @@ function App(): React.ReactElement {
   const toggleNav = useCallback(
     () => setNavHiddenPersisted(!navHidden),
     [navHidden, setNavHiddenPersisted],
+  );
+  // Hide/show the live tool panel (the rolling feed above the activity bar).
+  // Mirrors navHidden: persisted across reloads, and auto-enabled when windows
+  // are tiled (tight space) so freshly opened windows boot with it collapsed.
+  const [toolsHidden, setToolsHidden] = useState(() => {
+    try {
+      return localStorage.getItem("gg-tools-hidden") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const setToolsHiddenPersisted = useCallback((hidden: boolean) => {
+    try {
+      localStorage.setItem("gg-tools-hidden", hidden ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+    setToolsHidden(hidden);
+  }, []);
+  const toggleTools = useCallback(
+    () => setToolsHiddenPersisted(!toolsHidden),
+    [toolsHidden, setToolsHiddenPersisted],
   );
   const [newSessionBusy, setNewSessionBusy] = useState(false);
   // App self-update (GitHub releases). Drives the footer update banner.
@@ -418,6 +452,31 @@ function App(): React.ReactElement {
   useLayoutEffect(() => {
     maybeScrollToBottom();
   }, [items, liveToolFeed, running, doneStatus, queuedCount, maybeScrollToBottom]);
+
+  // Settle the scroll position after a session hydrates. The single layout-effect
+  // scroll above runs the instant `items` is set, but the transcript keeps
+  // growing afterward — web fonts swap in (FOUT reflows text taller), code blocks
+  // and markdown finish laying out — which leaves the view pinned a little above
+  // the true bottom. Re-pin across the next two frames and once fonts are ready,
+  // gated on stick-to-bottom so it never yanks the view if the user scrolled up.
+  useEffect(() => {
+    if (!hydrated) return;
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = requestAnimationFrame(() => {
+      maybeScrollToBottom();
+      raf2 = requestAnimationFrame(maybeScrollToBottom);
+    });
+    let cancelled = false;
+    void document.fonts?.ready.then(() => {
+      if (!cancelled) maybeScrollToBottom();
+    });
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf1);
+      cancelAnimationFrame(raf2);
+    };
+  }, [hydrated, hydrateNonce, maybeScrollToBottom]);
 
   useEffect(() => {
     stateRef.current = state;
@@ -581,19 +640,69 @@ function App(): React.ReactElement {
 
   // Side effects (nextId, ref mutation) happen outside the updater — updaters
   // must stay pure since React may invoke them more than once.
-  const appendAssistant = useCallback((text: string) => {
+  //
+  // Throttled via requestAnimationFrame: text_delta events arrive at 50-100/sec.
+  // Without throttling, each triggers a full React re-render + markdown re-parse.
+  // We buffer chunks in a ref and flush once per animation frame (~16ms),
+  // reducing re-renders by 5-10× with no visible difference.
+  const pendingChunksRef = useRef<string>("");
+  const rafIdRef = useRef<number | null>(null);
+
+  const flushChunks = useCallback(() => {
+    rafIdRef.current = null;
+    const chunk = pendingChunksRef.current;
+    if (!chunk) return;
+    pendingChunksRef.current = "";
     const current = streamingIdRef.current;
-    if (current === null) {
-      const id = nextId();
-      streamingIdRef.current = id;
-      setItems((prev) => [...prev, { kind: "assistant", id, text }]);
-    } else {
-      setItems((prev) =>
-        prev.map((it) =>
-          it.kind === "assistant" && it.id === current ? { ...it, text: it.text + text } : it,
-        ),
-      );
+    if (current === null) return; // streaming ended while waiting
+    setItems((prev) =>
+      prev.map((it) =>
+        it.kind === "assistant" && it.id === current ? { ...it, text: it.text + chunk } : it,
+      ),
+    );
+  }, []);
+
+  const appendAssistant = useCallback(
+    (text: string) => {
+      const current = streamingIdRef.current;
+      if (current === null) {
+        // First token of a new assistant turn: create immediately (no delay
+        // on first paint — the user should see the bubble appear right away).
+        const id = nextId();
+        streamingIdRef.current = id;
+        setItems((prev) => [...prev, { kind: "assistant", id, text }]);
+      } else {
+        // Subsequent tokens: buffer and flush via rAF
+        pendingChunksRef.current += text;
+        if (rafIdRef.current === null) {
+          rafIdRef.current = requestAnimationFrame(flushChunks);
+        }
+      }
+    },
+    [flushChunks],
+  );
+
+  // Flush any pending buffered text and end the current streaming section.
+  // Called whenever streaming transitions to tool calls, a new prompt, etc.
+  // Without this, the last few buffered tokens (waiting for rAF) would be lost.
+  const endStreamingText = useCallback(() => {
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
     }
+    if (pendingChunksRef.current) {
+      const chunk = pendingChunksRef.current;
+      pendingChunksRef.current = "";
+      const current = streamingIdRef.current;
+      if (current !== null) {
+        setItems((prev) =>
+          prev.map((it) =>
+            it.kind === "assistant" && it.id === current ? { ...it, text: it.text + chunk } : it,
+          ),
+        );
+      }
+    }
+    streamingIdRef.current = null;
   }, []);
 
   const pushItem = useCallback((item: Item) => {
@@ -625,7 +734,7 @@ function App(): React.ReactElement {
           break;
         case "run_start":
           setRunning(true);
-          streamingIdRef.current = null;
+          endStreamingText();
           subagentGroupIdRef.current = null;
           compactionIdRef.current = null;
           runStartRef.current = Date.now();
@@ -678,13 +787,13 @@ function App(): React.ReactElement {
           // assistant bubble so the post-tool text starts a fresh paragraph
           // instead of gluing onto the pre-tool text ("…command.Let me pull…").
           finalizeThinking();
-          streamingIdRef.current = null;
+          endStreamingText();
           assistantTextRef.current = "";
           break;
         }
         case "tool_call_start": {
           finalizeThinking();
-          streamingIdRef.current = null;
+          endStreamingText();
           const toolCallId = String(d.toolCallId ?? "");
           const name = String(d.name ?? "tool");
           const args = (d.args as Record<string, unknown>) ?? {};
@@ -720,7 +829,7 @@ function App(): React.ReactElement {
             } else {
               const id = nextId();
               subagentGroupIdRef.current = id;
-              streamingIdRef.current = null;
+              endStreamingText();
               pushItem({ kind: "subagent_group", id, agents: [newAgent] });
             }
           }
@@ -728,7 +837,7 @@ function App(): React.ReactElement {
           // tool runs. It gets replaced by the real image on tool_call_end.
           if (name === "generate_image") {
             const prompt = typeof args.prompt === "string" ? args.prompt : "generating image…";
-            streamingIdRef.current = null;
+            endStreamingText();
             pushItem({ kind: "generating_image", id: nextId(), prompt });
           }
           break;
@@ -821,7 +930,7 @@ function App(): React.ReactElement {
           const previews = (details as { imagePreviews?: ImagePreview[] } | undefined)
             ?.imagePreviews;
           if (Array.isArray(previews) && previews.length > 0) {
-            streamingIdRef.current = null;
+            endStreamingText();
             pushItem({
               kind: "images",
               id: nextId(),
@@ -872,7 +981,7 @@ function App(): React.ReactElement {
         case "compaction_start": {
           const id = nextId();
           compactionIdRef.current = id;
-          streamingIdRef.current = null;
+          endStreamingText();
           pushItem({ kind: "compaction", id, status: "running" });
           break;
         }
@@ -899,7 +1008,7 @@ function App(): React.ReactElement {
           break;
         case "run_end": {
           setRunning(false);
-          streamingIdRef.current = null;
+          endStreamingText();
           finalizeThinking();
           // The queue drained into this run — un-dim any messages that were
           // waiting, since the agent has now consumed them.
@@ -1010,7 +1119,7 @@ function App(): React.ReactElement {
         case "hook": {
           const kind = String(d.kind ?? "ideal") as HookKind;
           if (kind in HOOK_PRESENTATION) {
-            streamingIdRef.current = null;
+            endStreamingText();
             pushItem({ kind: "hook", id: nextId(), hook: kind });
           }
           break;
@@ -1031,7 +1140,7 @@ function App(): React.ReactElement {
           setPlanDone(new Set());
           setAttachments([]);
           setQueuedCount(0);
-          streamingIdRef.current = null;
+          endStreamingText();
           subagentGroupIdRef.current = null;
           break;
         case "session_title":
@@ -1053,7 +1162,7 @@ function App(): React.ReactElement {
           break;
       }
     },
-    [appendAssistant, pushItem, finalizeThinking],
+    [appendAssistant, pushItem, finalizeThinking, endStreamingText],
   );
 
   // Run the connect/ready flow against the current sidecar and hydrate state,
@@ -1083,6 +1192,17 @@ function App(): React.ReactElement {
       if (history.length > 0) {
         // A freshly hydrated session lands at the bottom (newest message).
         stickToBottomRef.current = true;
+        // Seed ↑/↓ recall from the resumed prompts (chronological), so history
+        // works after reopening a session — not just within the live one. App-
+        // button prompts (shimmer labels) weren't typed by the user, so skip
+        // them; everything else the user actually entered is included.
+        promptHistoryRef.current = history
+          .filter((h) => h.role === "user" && !(!h.command && recoverPromptLabel(h.text)))
+          .map((h) => {
+            const parsed = !h.command ? parseReferencedFiles(h.text) : null;
+            return (parsed ? parsed.text : h.text).trim();
+          })
+          .filter((t, i, a) => t.length > 0 && a[i - 1] !== t);
         setItems(
           history.map((h): Item => {
             // Tool-produced images (screenshots, generate_image) — reconstructed
@@ -1200,11 +1320,42 @@ function App(): React.ReactElement {
     void deleteTask(id).then(setProjectTasks);
   }, []);
 
+  // Per-project notes: load from localStorage whenever the active project (cwd)
+  // changes, and write back on every edit. Keyed by cwd so each project keeps
+  // its own notebook; windows pointed at the same project share one.
+  const notesKey = state?.cwd ? `gg-notes:${state.cwd}` : null;
+  useEffect(() => {
+    if (!notesKey) {
+      setNotes("");
+      return;
+    }
+    try {
+      setNotes(localStorage.getItem(notesKey) ?? "");
+    } catch {
+      setNotes("");
+    }
+  }, [notesKey]);
+
+  const handleNotesChange = useCallback(
+    (value: string) => {
+      setNotes(value);
+      if (!notesKey) return;
+      try {
+        localStorage.setItem(notesKey, value);
+      } catch {
+        // Storage full/unavailable — keep the in-memory value for this session.
+      }
+    },
+    [notesKey],
+  );
+
   function onSelectModel(modelId: string): void {
     setModelMenuOpen(false);
     if (state && modelId === state.model) return;
     void switchModel(modelId).then((res) => {
       if (res) {
+        // Sakana Fugu easter egg: blow the fugu horn when a Fugu model is picked.
+        if (res.model.startsWith("fugu")) playSound("fugu");
         setState((s) =>
           s
             ? {
@@ -1364,8 +1515,63 @@ function App(): React.ReactElement {
     });
     setInput("");
     setSlashIndex(0);
-    streamingIdRef.current = null;
+    endStreamingText();
     void sendPrompt(trimmed);
+  }
+
+  // Record a sent prompt for ↑/↓ recall (skips consecutive duplicates, capped).
+  function recordHistory(text: string): void {
+    const h = promptHistoryRef.current;
+    if (text && h[h.length - 1] !== text) h.push(text);
+    if (h.length > 200) h.shift();
+    setHistoryIndex(null);
+    historyDraftRef.current = "";
+  }
+
+  // Replace the input with a recalled history entry and park the caret at the end.
+  function applyHistory(text: string): void {
+    setInput(text);
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (el) el.selectionStart = el.selectionEnd = el.value.length;
+    });
+  }
+
+  // Walk prompt history with ↑ (dir -1, older) / ↓ (dir +1, newer). Returns true
+  // when it consumed the key. Only triggers when the caret is on the first line
+  // (↑) or last line (↓) so multi-line editing still moves the cursor normally.
+  function navigateHistory(dir: -1 | 1, el: HTMLTextAreaElement): boolean {
+    const hist = promptHistoryRef.current;
+    if (hist.length === 0) return false;
+    const collapsed = el.selectionStart === el.selectionEnd;
+    const caret = el.selectionStart ?? 0;
+    if (dir === -1) {
+      const onFirstLine = collapsed && !el.value.slice(0, caret).includes("\n");
+      if (!onFirstLine) return false;
+      if (historyIndex === null) {
+        historyDraftRef.current = el.value;
+        const idx = hist.length - 1;
+        setHistoryIndex(idx);
+        applyHistory(hist[idx]);
+      } else if (historyIndex > 0) {
+        const idx = historyIndex - 1;
+        setHistoryIndex(idx);
+        applyHistory(hist[idx]);
+      }
+      return true; // consume even at the oldest entry
+    }
+    if (historyIndex === null) return false; // not navigating — let ↓ move the caret
+    const onLastLine = collapsed && !el.value.slice(caret).includes("\n");
+    if (!onLastLine) return false;
+    if (historyIndex < hist.length - 1) {
+      const idx = historyIndex + 1;
+      setHistoryIndex(idx);
+      applyHistory(hist[idx]);
+    } else {
+      setHistoryIndex(null);
+      applyHistory(historyDraftRef.current);
+    }
+    return true;
   }
 
   // Submit the current input together with any staged attachments. Images are
@@ -1374,6 +1580,7 @@ function App(): React.ReactElement {
     const trimmed = input.trim();
     if (!readyRef.current) return;
     if (!trimmed && attachments.length === 0 && mentionedPaths.length === 0) return;
+    recordHistory(trimmed);
     // A user send always re-pins to the bottom — they want to see their message.
     stickToBottomRef.current = true;
     // Referenced files are appended to the prompt as a small block so the agent
@@ -1429,7 +1636,7 @@ function App(): React.ReactElement {
     setSlashIndex(0);
     setMention(null);
     setMentionedPaths([]);
-    streamingIdRef.current = null;
+    endStreamingText();
     void sendPrompt(prompt, wire);
   }
 
@@ -1485,7 +1692,7 @@ function App(): React.ReactElement {
     setPlanReview(null);
     if (!readyRef.current || running) return;
     pushItem({ kind: "info", id: nextId(), text: info });
-    streamingIdRef.current = null;
+    endStreamingText();
     void sendPrompt(prompt);
   }
 
@@ -1581,9 +1788,10 @@ function App(): React.ReactElement {
         ) : (
           <ProjectPicker
             onChosen={onProjectChosen}
-            // Secondary windows start on the picker and have no home screen, so
-            // they get no "back" affordance; the main window returns home.
-            onClose={isSecondaryWindow ? undefined : () => setEntryView("home")}
+            // Every window can return to the home screen (it shows global
+            // settings/auth, nothing window-specific) — secondary windows just
+            // default to opening on the picker.
+            onClose={() => setEntryView("home")}
           />
         )}
         <Toaster />
@@ -1606,15 +1814,11 @@ function App(): React.ReactElement {
           }}
           onClose={() => {
             setShowPicker(false);
-            // Secondary windows have no home screen — bouncing them "home" lands
-            // on a Projects picker whose back button is suppressed (the
-            // isSecondaryWindow guard below), stranding the user. The picker is
-            // only reachable here from an already-open project, so just close it
-            // to return to that project. The main window keeps going home.
-            if (!isSecondaryWindow) {
-              setNeedsProject(true);
-              setEntryView("home");
-            }
+            // Back from the over-a-project picker returns to the home screen for
+            // every window (the entry picker now offers a back-to-home button,
+            // so secondary windows are no longer stranded there).
+            setNeedsProject(true);
+            setEntryView("home");
           }}
         />
       </div>
@@ -1692,6 +1896,13 @@ function App(): React.ReactElement {
               </button>
               <button
                 className="btn btn-sm btn-ghost"
+                title="Open your notes for this project"
+                onClick={() => setShowNotes(true)}
+              >
+                Notes
+              </button>
+              <button
+                className="btn btn-sm btn-ghost"
                 title="View and run this project's tasks"
                 onClick={openTasks}
               >
@@ -1699,6 +1910,14 @@ function App(): React.ReactElement {
                   ? `Tasks (${projectTasks.filter((t) => t.status !== "done").length})`
                   : "Tasks"}
               </button>
+              <RadioButton />
+              {/* <GazeButton /> */}
+              <WindowLayoutButton
+                onArrange={() => {
+                  setNavHiddenPersisted(true);
+                  setToolsHiddenPersisted(true);
+                }}
+              />
               {needsGitInit ? (
                 <button
                   className="btn btn-sm btn-ghost"
@@ -1725,9 +1944,6 @@ function App(): React.ReactElement {
                   </button>
                 )
               )}
-              <RadioButton />
-              {/* <GazeButton /> */}
-              <WindowLayoutButton onArrange={() => setNavHiddenPersisted(true)} />
             </span>
           </div>
         )}
@@ -1738,13 +1954,14 @@ function App(): React.ReactElement {
           <TranscriptSkeleton />
         ) : (
           <>
-            {items.length === 0 && (
-              <div className="line transcript-reveal" style={{ color: theme.textDim }}>
-                {status === "ready"
-                  ? "Ready. Type a message below to start coding."
-                  : `\u273b ${status}`}
-              </div>
-            )}
+            {items.length === 0 &&
+              (status === "ready" ? (
+                <WakeScreen />
+              ) : (
+                <div className="line transcript-reveal" style={{ color: theme.textDim }}>
+                  {`\u273b ${status}`}
+                </div>
+              ))}
             {items.map((it) => (
               <TranscriptRow key={it.id} item={it} onImageLoad={maybeScrollToBottom} />
             ))}
@@ -1753,7 +1970,7 @@ function App(): React.ReactElement {
       </div>
 
       <div className="liveregion">
-        <LiveToolPanel entries={liveToolFeed} />
+        {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
         <ActivityBar
           running={running}
           tokens={tokens}
@@ -1764,6 +1981,9 @@ function App(): React.ReactElement {
           planTotal={planTotal}
           planDone={Math.min(planDone.size, planTotal)}
           onCancel={() => void cancel()}
+          toolsHidden={toolsHidden}
+          hasToolFeed={liveToolFeed.length > 0}
+          onToggleTools={toggleTools}
         />
       </div>
 
@@ -1835,6 +2055,8 @@ function App(): React.ReactElement {
             onChange={(e) => {
               setInput(e.target.value);
               setSlashIndex(0);
+              // Typing exits history-recall mode so ↑/↓ start fresh next time.
+              if (historyIndex !== null) setHistoryIndex(null);
               updateMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
             }}
             onClick={(e) => {
@@ -1867,6 +2089,14 @@ function App(): React.ReactElement {
                 e.preventDefault();
                 const cmd = slashMatches[clampedSlashIndex];
                 if (cmd) pickSlashCommand(cmd);
+              } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                // Menus are closed here (handled above), so arrows recall sent
+                // prompts shell-style — unless the caret is mid-text in a
+                // multi-line draft, where navigateHistory declines and the
+                // cursor moves normally.
+                if (navigateHistory(e.key === "ArrowUp" ? -1 : 1, e.currentTarget)) {
+                  e.preventDefault();
+                }
               } else if (e.key === "Enter" && !e.shiftKey) {
                 // Enter sends; Shift+Enter inserts a newline (textarea default).
                 e.preventDefault();
@@ -2036,6 +2266,14 @@ function App(): React.ReactElement {
           onAccept={acceptPlan}
           onFeedback={sendPlanFeedback}
           onReject={rejectPlan}
+        />
+      )}
+
+      {showNotes && (
+        <NotesModal
+          value={notes}
+          onChange={handleNotesChange}
+          onClose={() => setShowNotes(false)}
         />
       )}
 

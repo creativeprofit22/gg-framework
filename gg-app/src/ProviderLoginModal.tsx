@@ -134,22 +134,10 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
       {/* Method picker — only when the provider supports both. */}
       {!single && !method && (
         <div className="login-method-row">
-          <button
-            className="modal-btn primary"
-            style={{
-              color: theme.background,
-              background: theme.primary,
-              borderColor: theme.primary,
-            }}
-            onClick={() => setMethod("oauth")}
-          >
+          <button className="modal-btn primary" onClick={() => setMethod("oauth")}>
             Sign in with OAuth
           </button>
-          <button
-            className="modal-btn"
-            style={{ color: theme.text, borderColor: theme.border }}
-            onClick={() => setMethod("apikey")}
-          >
+          <button className="modal-btn" onClick={() => setMethod("apikey")}>
             Use API key
           </button>
         </div>
@@ -220,24 +208,19 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
         {provider.connected && (
           <button
             className="modal-btn"
-            style={{ color: theme.error, borderColor: theme.border, marginRight: "auto" }}
+            style={{ color: theme.error, marginRight: "auto" }}
             disabled={busy}
             onClick={() => void disconnect()}
           >
             Disconnect
           </button>
         )}
-        <button className="modal-btn" style={{ color: theme.textMuted }} onClick={onClose}>
+        <button className="modal-btn" onClick={onClose}>
           {needCode || busy ? "Cancel" : "Close"}
         </button>
         {method === "apikey" && (
           <button
             className="modal-btn primary"
-            style={{
-              color: apiKey.trim() ? theme.background : theme.textDim,
-              background: apiKey.trim() ? theme.primary : "transparent",
-              borderColor: apiKey.trim() ? theme.primary : theme.border,
-            }}
             disabled={!apiKey.trim() || busy}
             onClick={() => void submitApiKey()}
           >
@@ -247,11 +230,6 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
         {method === "oauth" && needCode && (
           <button
             className="modal-btn primary"
-            style={{
-              color: theme.background,
-              background: theme.primary,
-              borderColor: theme.primary,
-            }}
             disabled={!code.trim()}
             onClick={() => void submitCode()}
           >
@@ -259,16 +237,7 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
           </button>
         )}
         {method === "oauth" && !needCode && (
-          <button
-            className="modal-btn primary"
-            style={{
-              color: theme.background,
-              background: theme.primary,
-              borderColor: theme.primary,
-            }}
-            disabled={busy}
-            onClick={() => void startOAuth()}
-          >
+          <button className="modal-btn primary" disabled={busy} onClick={() => void startOAuth()}>
             {busy ? "Waiting…" : "Continue"}
           </button>
         )}

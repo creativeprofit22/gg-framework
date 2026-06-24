@@ -181,35 +181,79 @@ pnpm --filter @kenkaiiii/gg-agent build
 pnpm --filter @kenkaiiii/ggcoder build
 ```
 
-## Publishing to npm (Changesets)
+## Releasing
 
-Versioning + publishing is managed by [Changesets](https://github.com/changesets/changesets).
-Manual multi-package version bumping is gone — do **not** hand-edit `version` fields.
+There are **two independent release tracks**. The `/release` command (project-local,
+lives in `.gg/commands/release.md`) orchestrates both in the correct order — prefer it
+over running the steps by hand.
 
-The framework spine — `@kenkaiiii/gg-ai`, `@kenkaiiii/gg-agent`, `@kenkaiiii/gg-core`,
-`@kenkaiiii/ggcoder`, `@kenkaiiii/gg-boss` — is a **fixed group** in
-`.changeset/config.json`: a changeset touching any one bumps them all to the same
+- **Track A — npm framework packages** (`@kenkaiiii/gg-ai`, `gg-agent`, `gg-core`,
+  `ggcoder`, `gg-boss`, + dependents) via **Changesets**. This is the CLI engine.
+- **Track B — gg-app desktop** (`gg-app`, the `0.1.x` line, `private: true`, never on
+  npm). Released by pushing a `v*` git tag, which fires
+  `.github/workflows/release.yml` to build/sign/notarize installers and publish a
+  **non-draft** GitHub release + updater `latest.json`.
+
+### How gg-app consumes the packages
+
+gg-app does **not** depend on the published npm versions. Its CI runs
+`pnpm install --frozen-lockfile` (resolving `workspace:*` locally), builds gg-ai →
+gg-agent → ggcoder **from source**, then bundles `packages/ggcoder/dist/app-sidecar.js`
+into the Tauri app. So a desktop release ships whatever is in the workspace at tag time —
+npm need not be published first for the app to build. Still, publish npm first (Track A
+then Track B) so the shipped CLI and app stay in lockstep.
+
+### Track A — npm packages (Changesets)
+
+Manual multi-package version bumping is gone — do **not** hand-edit package `version`
+fields. The framework spine — `@kenkaiiii/gg-ai`, `@kenkaiiii/gg-agent`,
+`@kenkaiiii/gg-core`, `@kenkaiiii/ggcoder`, `@kenkaiiii/gg-boss` — is a **fixed group**
+in `.changeset/config.json`: a changeset touching any one bumps them all to the same
 version together (this is what kept drifting before). Dependents like gg-editor /
 gg-voice get an automatic patch bump.
-
-### Flow
 
 ```bash
 pnpm changeset            # describe the change; pick bump level (patch/minor/major)
 pnpm changeset version    # apply bumps + update internal deps + write changelogs
 pnpm build                # rebuild with the new versions
-pnpm changeset publish    # publishes in topological order (uses pnpm under the hood)
+git commit -am "Version packages"   # COMMIT BEFORE PUBLISH — publish tags HEAD
+pnpm changeset publish    # publishes in topological order + creates git tags
+git push --follow-tags    # push the version commit + the new tags
 ```
 
+Commit the version bump **before** `pnpm changeset publish` — publish creates git tags
+at `HEAD`, so an uncommitted bump tags the wrong commit and publishes from a dirty tree.
 `pnpm changeset status` shows the pending release graph at any time.
 
-### Auth
+### Track B — gg-app desktop (tag-triggered)
+
+The desktop version lives in **four files that must stay in lockstep**:
+`gg-app/package.json`, `gg-app/src-tauri/tauri.conf.json`, `gg-app/src-tauri/Cargo.toml`,
+and `gg-app/src-tauri/Cargo.lock`. **Never hand-edit them** — use the helper, which
+bumps all four at once and prints the new version:
+
+```bash
+pnpm --filter gg-app bump <patch|minor|major|x.y.z>   # scripts/bump-version.mjs
+git add gg-app/package.json gg-app/src-tauri/tauri.conf.json \
+        gg-app/src-tauri/Cargo.toml gg-app/src-tauri/Cargo.lock
+git commit -m "Update gg-app to v<NEW>"
+git push
+git tag v<NEW> && git push origin v<NEW>   # fires release.yml
+gh run list --workflow=release.yml --limit 1   # confirm the build kicked off
+```
+
+The workflow has `releaseDraft: false` — it publishes a **live, non-draft** release
+automatically when the build finishes; there is no manual publish step. It builds for
+macOS (arm64) + Windows only (Linux/Intel-mac legs are intentionally omitted — see the
+comments in `release.yml`).
+
+### npm auth (Track A)
 
 - npm granular access token must be set: `npm set //registry.npmjs.org/:_authToken=<token>`
 - `access: public` is set in `.changeset/config.json` (and each package's `publishConfig`), required for scoped packages.
 - `workspace:*` references resolve to real versions at publish time because changesets publishes via pnpm.
 
-### Verify
+### Verify a published npm release (Track A)
 
 ```bash
 npm view @kenkaiiii/ggcoder versions --json   # check published versions

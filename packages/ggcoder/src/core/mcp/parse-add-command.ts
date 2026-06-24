@@ -210,6 +210,7 @@ export function parseMcpAddCommand(input: string): Result<ParsedAddCommand, stri
       };
     }
     config.url = url;
+    config.transport = effectiveTransport;
     if (Object.keys(headers).length > 0) config.headers = headers;
   } else {
     // stdio

@@ -1,9 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { theme } from "./theme";
 
-// Sparkle ping-pong spinner — mirrors the TUI ActivityIndicator sparkle.
-const FRAMES = ["\u00b7", "\u2722", "\u2733", "\u2736", "\u273d", "\u273d"];
-const FRAME_MS = 120;
+// Braille rotation spinner — the native language of CLI coding tools (ora,
+// npm, cargo). Smooth, monospace, and unmistakably "ours" rather than the
+// Matrix-flavored sparkle it replaces.
+const FRAMES = [
+  "\u280b",
+  "\u2819",
+  "\u2839",
+  "\u2838",
+  "\u283c",
+  "\u2834",
+  "\u2826",
+  "\u2827",
+  "\u2807",
+  "\u280f",
+];
+const FRAME_MS = 80;
 
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
@@ -38,6 +51,46 @@ interface Props {
   /** Completed plan steps so far. */
   planDone?: number;
   onCancel: () => void;
+  /** Whether the live tool panel is currently collapsed. */
+  toolsHidden?: boolean;
+  /** True when there are tool entries to show (gates the toggle's visibility). */
+  hasToolFeed?: boolean;
+  /** Toggle the live tool panel's collapsed state. */
+  onToggleTools?: () => void;
+}
+
+// Chevron toggle for the live tool panel — mirrors the nav-toggle chevron up
+// top. Down chevron = panel shown (click to hide), up chevron = panel hidden
+// (click to show). Rendered in the activity bar so it's always reachable.
+function ToolsToggle({
+  hidden,
+  onToggle,
+}: {
+  hidden: boolean;
+  onToggle: () => void;
+}): React.ReactElement {
+  return (
+    <button
+      className="nav-toggle tools-toggle"
+      title={hidden ? "Show tool panel" : "Hide tool panel"}
+      aria-label={hidden ? "Show tool panel" : "Hide tool panel"}
+      onClick={onToggle}
+    >
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={{ display: "block" }}
+      >
+        <polyline points={hidden ? "6 15 12 9 18 15" : "6 9 12 15 18 9"} />
+      </svg>
+    </button>
+  );
 }
 
 /**
@@ -55,7 +108,16 @@ export function ActivityBar({
   planTotal = 0,
   planDone = 0,
   onCancel,
+  toolsHidden = false,
+  hasToolFeed = false,
+  onToggleTools,
 }: Props): React.ReactElement {
+  // Show the toggle when there's tool activity to collapse, when the panel is
+  // already hidden (so it can be brought back), or right after a run finishes
+  // (doneStatus) so it stays reachable in the "Built & ran in 4m" bar for the
+  // next run. Only the bare idle "Ready for work" line stays uncluttered.
+  const showToolsToggle =
+    Boolean(onToggleTools) && (hasToolFeed || toolsHidden || Boolean(doneStatus));
   const [frame, setFrame] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [, setNow] = useState(0);
@@ -100,21 +162,28 @@ export function ActivityBar({
       <div className="statusrow" style={{ color: theme.textDim }}>
         {doneStatus ? (
           <span className="statusrow-left">
-            <span style={{ color: theme.success }}>
-              {"\u273b "}
-              {doneHead}
+            <span className="statusrow-icon" style={{ color: theme.success }}>
+              {"\u273b"}
             </span>
+            <span style={{ color: theme.success }}>{doneHead}</span>
             {doneTail.length > 0 && (
               <span style={{ color: theme.textDim }}>{` \u2022 ${doneTail.join(" \u2022 ")}`}</span>
             )}
           </span>
         ) : (
           <span className="statusrow-ready">
-            <span style={{ color: theme.accent }}>{"\u273b"}</span>
+            <span className="statusrow-icon" style={{ color: theme.accent }}>
+              {"\u276f"}
+            </span>
             <span>Ready for work</span>
           </span>
         )}
         {planBadge && <span style={{ marginLeft: "auto" }}>{planBadge}</span>}
+        {showToolsToggle && onToggleTools && (
+          <span className="statusrow-tools-toggle" style={{ marginLeft: planBadge ? 8 : "auto" }}>
+            <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
+          </span>
+        )}
       </div>
     );
   }
@@ -141,7 +210,7 @@ export function ActivityBar({
   return (
     <div className="statusrow running" style={{ color: theme.textMuted }}>
       <span className="statusrow-left">
-        <span className="spinner" style={{ color: theme.primary }}>
+        <span className="statusrow-icon spinner" style={{ color: theme.primary }}>
           {FRAMES[frame]}
         </span>
         <span className="working" style={{ color: theme.text }}>
@@ -169,9 +238,14 @@ export function ActivityBar({
         </span>
       </span>
       {planBadge && <span className="plan-steps-running">{planBadge}</span>}
-      <button className="cancel" style={{ color: theme.error }} onClick={onCancel}>
-        esc to cancel
-      </button>
+      <span className="statusrow-right">
+        {showToolsToggle && onToggleTools && (
+          <ToolsToggle hidden={toolsHidden} onToggle={onToggleTools} />
+        )}
+        <button className="cancel" style={{ color: theme.error }} onClick={onCancel}>
+          esc to cancel
+        </button>
+      </span>
     </div>
   );
 }

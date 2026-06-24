@@ -31,11 +31,18 @@
   --radius-card: 10px;
   --radius-pill: 9999px;
 
-  /* Motion — color-only hover (Warp/Resend). NO movement on buttons. */
+  /* Motion — brightness-on-hover (no movement). */
   --t-fast: 0.15s ease;
 
-  /* Button system — gradient-filled primary, glass ghost. No glows. */
+  /* Button system — glossy capsule pills. Vertical light→dark gradient and a
+     white inner top-highlight for sheen. No colored glow behind the pill. */
   --grad-primary: linear-gradient(135deg, #4d9dff 0%, #9b8cf7 100%);
+  --gloss-primary: linear-gradient(180deg, #6fb1ff 0%, #7d7bf3 100%);
+  --gloss-neutral: linear-gradient(180deg, #2a2e3a 0%, #1a1d26 100%);
+  --gloss-success: linear-gradient(180deg, #4ad69b 0%, #2fb87f 100%);
+  --gloss-shadow-primary: 0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  --gloss-shadow-neutral: 0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  --gloss-shadow-success: 0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.28);
 
   /* Fonts — same-family Geist Sans + Geist Mono. */
   --sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
@@ -43,16 +50,17 @@
 }
 
 /* ── Button system (shared) ───────────────────────────────────────────────
-   .btn is the base; pair with .btn-primary (gradient fill), .btn-ghost (glass
-   outline), or .btn-success. Pill-shaped. Hover changes color/border/tint only
-   — NO movement and NO glow change. */
+   .btn is the base; pair with .btn-primary (glossy violet pill), .btn-ghost
+   (glossy neutral pill), or .btn-success (glossy green pill). Pill-shaped, with
+   a vertical light→dark gradient, white inner top-highlight, and soft drop
+   shadow. Hover brightens the whole pill — no movement, no color swap. */
 .btn {
   position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid transparent;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-pill);
   font-family: var(--sans);
   font-size: 13px;
@@ -61,48 +69,49 @@
   padding: 8px 18px;
   cursor: pointer;
   white-space: nowrap;
-  /* Color only — NO movement, no scale, no hover glow. */
+  /* Brightness-on-hover — no movement, no scale. */
   transition:
-    background-color var(--t-fast),
-    border-color var(--t-fast),
-    color var(--t-fast);
+    filter var(--t-fast),
+    box-shadow var(--t-fast);
 }
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: default;
   pointer-events: none;
 }
 
-/* Primary — gradient fill, white text. Brightens slightly on hover, no glow. */
+/* Primary — glossy violet pill. Brightens on hover. */
 .btn-primary {
-  background: var(--grad-primary);
-  color: #fff;
+  background: var(--gloss-primary);
+  color: #f4f8ff;
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: var(--gloss-shadow-primary);
 }
 .btn-primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, #5ba6ff 0%, #a698f9 100%);
+  filter: brightness(1.08);
 }
 
-/* Success — ghost variant tinted green (e.g. an active /commit). */
+/* Success — glossy green pill (e.g. an active /commit or live serve). */
 .btn-success {
-  background: color-mix(in srgb, var(--success) 12%, var(--surface-1));
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+  background: var(--gloss-success);
+  color: #f0fbf5;
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: var(--gloss-shadow-success);
 }
 .btn-success:hover:not(:disabled) {
-  border-color: var(--success);
-  background: color-mix(in srgb, var(--success) 20%, var(--surface-1));
+  filter: brightness(1.08);
 }
 
-/* Ghost — glass outline; fills with a faint accent tint on hover. */
+/* Ghost — glossy neutral pill with the same depth, no color. */
 .btn-ghost {
-  background: color-mix(in srgb, var(--surface-1) 70%, transparent);
+  background: var(--gloss-neutral);
   color: var(--text-secondary);
-  border-color: var(--border);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: var(--gloss-shadow-neutral);
 }
 .btn-ghost:hover:not(:disabled) {
+  filter: brightness(1.18);
   color: var(--text);
-  border-color: color-mix(in srgb, var(--secondary) 55%, var(--border));
-  background: color-mix(in srgb, var(--secondary) 12%, var(--surface-1));
 }
 
 /* Size modifiers. */
@@ -359,6 +368,19 @@ body {
   text-align: center;
   overflow: hidden;
 }
+/* Ambient constellation backdrop — the lowest layer, under the meme cards and
+   all content. Vignette-masked so it fades at the edges. Non-interactive. */
+.home-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  opacity: 0.55;
+  pointer-events: none;
+  mask-image: radial-gradient(ellipse 75% 75% at 50% 50%, #000 30%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 75% 75% at 50% 50%, #000 30%, transparent 100%);
+}
 /* Decorative floating meme cards — behind the logo/buttons, non-interactive. */
 .meme-layer {
   position: absolute;
@@ -555,19 +577,18 @@ body {
   width: 48px;
   height: 48px;
 }
-/* Serve button while live: green tint + dot, so "on" reads at a glance. */
+/* Serve button while live: glossy green pill, so "on" reads at a glance. */
 .home-serve-active {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 45%, transparent);
-}
-.home-serve-active:hover {
-  border-color: var(--success);
+  background: var(--gloss-success);
+  color: #f0fbf5;
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: var(--gloss-shadow-success);
 }
 /* Dimmed (prerequisites unmet): muted but still clickable so it can toast.
-   Keep the gradient flat on hover so it reads as inactive, not interactive. */
+   Hold brightness flat on hover so it reads as inactive, not interactive. */
 .btn-primary.is-dimmed,
 .btn-primary.is-dimmed:hover {
-  background: var(--grad-primary);
+  filter: grayscale(0.4);
 }
 .is-dimmed {
   opacity: 0.45;
@@ -669,13 +690,17 @@ body {
      box deform). row-gap spaces the wrapped rows. */
   flex-wrap: wrap;
   row-gap: 8px;
-  /* Native chrome (Windows/Linux): no overlay title bar to clear. */
-  padding: 12px 20px;
+  /* Total header height is locked to the chat view's .chat-head (38px strip +
+     42px nav row + 1px border = 81px) so navigating session ↔ picker never
+     shifts the layout. With a 28px-tall control row + 1px border, that means
+     40px top + 12px bottom padding. */
+  padding: 40px 20px 12px;
   border-bottom: 1px solid var(--border);
 }
-/* macOS overlay title bar: top padding clears the traffic-light buttons. */
+/* macOS overlay title bar: the 40px top padding also clears the traffic-light
+   buttons (same role the .chat-head strip plays in the chat view). */
 .platform-macos .picker-head {
-  padding: 34px 20px 12px;
+  padding: 40px 20px 12px;
 }
 .picker-title {
   font-size: 15px;
@@ -851,11 +876,43 @@ body {
   background: var(--border);
   border-radius: 4px;
 }
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
 .modal-title {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.02em;
-  margin-bottom: 20px;
+}
+.modal-close {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 20px;
+  line-height: 1;
+  padding: 0;
+  transition:
+    background var(--t-fast),
+    border-color var(--t-fast),
+    color var(--t-fast);
+}
+.modal-close:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: var(--text);
 }
 .modal-label {
   display: block;
@@ -864,8 +921,8 @@ body {
   margin-top: 22px;
   margin-bottom: 10px;
 }
-/* The first label shouldn't double up the title's bottom margin. */
-.modal-title + .modal-label {
+/* The first label shouldn't double up the title row's bottom margin. */
+.modal-head + .modal-label {
   margin-top: 4px;
 }
 .modal-input {
@@ -926,29 +983,62 @@ body {
   gap: 10px;
   margin-top: 26px;
 }
+/* Modal actions are glossy pills: neutral by default, .primary = violet. */
 .modal-btn {
-  background: transparent;
-  border: 1px solid transparent;
+  background: var(--gloss-neutral);
+  color: var(--text-secondary);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-button);
+  box-shadow: var(--gloss-shadow-neutral);
   font-family: var(--sans);
   font-size: 13px;
   font-weight: 600;
   padding: 8px 16px;
   cursor: pointer;
   transition:
-    color var(--t-fast),
-    background-color var(--t-fast),
-    border-color var(--t-fast);
+    filter var(--t-fast),
+    box-shadow var(--t-fast);
 }
 .modal-btn:hover:not(:disabled) {
-  background: var(--surface-1);
+  filter: brightness(1.18);
+  color: var(--text);
+}
+.modal-btn.primary {
+  background: var(--gloss-primary);
+  color: #f4f8ff;
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: var(--gloss-shadow-primary);
 }
 .modal-btn.primary:hover:not(:disabled) {
   filter: brightness(1.08);
+  color: #f4f8ff;
 }
 .modal-btn:disabled {
   cursor: default;
-  opacity: 0.7;
+  opacity: 0.4;
+}
+
+/* ── Notes modal (free-form per-project notebook) ── */
+.notes-input {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  /* Fill most of the viewport so it reads as a full notebook, not a chat box.
+     Scrolls internally once the notes outgrow the area. */
+  height: min(72vh, 680px);
+  resize: none;
+  border: 1px solid;
+  border-radius: var(--radius-card);
+  padding: 14px 16px;
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.6;
+  outline: none;
+  overflow-y: auto;
+}
+/* The notes modal is a workspace, not a small dialog — give it room. */
+.notes-modal {
+  width: min(900px, 94vw);
 }
 
 /* ── Tasks modal (project task list → run one / run all) ── */
@@ -1064,9 +1154,11 @@ body {
 }
 .mcp-dot {
   flex: 0 0 auto;
-  font-size: 12px;
-  width: 14px;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
 }
 .mcp-name {
   flex: 1 1 auto;
@@ -1357,19 +1449,14 @@ body {
   word-break: break-word;
 }
 
-/* Long-session perf: let the engine skip layout/paint/style for off-screen
-   transcript rows. Rows are block-level and stack (no flex/gap on children), so
-   this is a pure rendering optimization — the scroll container, pin-to-bottom
-   logic, and DOM order are all untouched. `contain-intrinsic-size: auto <len>`
-   reserves estimated height for skipped rows AND remembers each row's real size
-   after its first render, so scrolling up stays stable. Bottom rows are always
-   on-screen (rendered real-sized), so streaming auto-scroll lands exactly at the
-   true bottom. Unsupported engines simply ignore it and render every row as
-   before — no behavioral change, graceful degradation. */
-.transcript > * {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 48px;
-}
+/* NOTE: `content-visibility: auto` was tried here as a long-session perf win but
+   caused jaggedy upward scrolling. Skipped off-screen rows reserve only an
+   estimated height (`contain-intrinsic-size`), and `auto` remembers a row's real
+   size only AFTER it has rendered once. Scrolling up re-enters rows above the
+   viewport whose tall real heights (code blocks, markdown, images) replace the
+   placeholder estimate, shifting everything below and jumping the scroll
+   position. Plain rows render fine even in long sessions, so it's not worth the
+   jank — leave it off. */
 
 .transcript::-webkit-scrollbar {
   width: 8px;
@@ -1587,6 +1674,10 @@ body {
 .assistant-dot {
   flex: 0 0 auto;
   line-height: 1.55;
+  /* Same fixed gutter the activity bar's status icon uses, so the assistant dot
+     and the done/idle status icon share one left column. */
+  width: 16px;
+  text-align: left;
 }
 .assistant-text {
   flex: 1 1 auto;
@@ -1684,23 +1775,81 @@ body {
   word-break: break-word;
 }
 /* Code blocks: deeper inset surface + border so the block reads as a distinct
-   panel against the message background. */
-.markdown pre {
+   panel against the message background. The wrapper hosts the hover copy
+   button; the <pre> keeps the scroll + selection behavior. */
+.markdown .code-block {
+  position: relative;
   margin: 0.6em 0;
-  padding: 12px 14px;
+}
+.markdown pre {
+  margin: 0;
+  padding: 12px 36px 12px 14px;
   background: #0b0d11;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  overflow-x: auto;
-}
-.markdown pre code {
-  background: transparent;
-  border: none;
-  padding: 0;
   color: var(--text-secondary);
   font-size: 0.88em;
   line-height: 1.55;
-  white-space: pre;
+  /* Wrap long lines instead of overflowing to a single clipped row. pre-wrap
+     keeps the code's own newlines/indentation; overflow-wrap breaks runs wider
+     than the panel. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* Selection is allowed; double-click word selection is handled in JS
+     (Markdown.tsx selectWordAtPoint) because the macOS WKWebView otherwise
+     selects the whole preformatted block by paragraph granularity. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+/* Override highlight.js's `pre code.hljs { display:block; padding:1em }` too
+   (matches the .hljs selector specificity) so language-tagged blocks keep the
+   inline, word-selectable structure as well. */
+.markdown pre code,
+.markdown pre code.hljs {
+  display: inline;
+  background: transparent;
+  border: none;
+  padding: 0;
+  overflow-x: visible;
+  font-size: inherit;
+  color: inherit;
+  white-space: inherit;
+  user-select: text;
+  -webkit-user-select: text;
+}
+/* Copy button: pinned top-right, faint until the block is hovered. */
+.markdown .code-copy {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--surface-2) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--t-fast),
+    color var(--t-fast),
+    border-color var(--t-fast),
+    background var(--t-fast);
+}
+.markdown .code-block:hover .code-copy,
+.markdown .code-copy:focus-visible {
+  opacity: 1;
+}
+.markdown .code-copy:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--surface-2);
 }
 .markdown table {
   border-collapse: collapse;
@@ -1834,12 +1983,19 @@ body {
   min-width: 0;
 }
 
-.spinner {
-  /* Fixed width so varying glyph widths between animation frames don't reflow
-     the rest of the status row. */
+/* Status indicator gutter (idle caret / running spinner / done sparkle). Shares
+   the SAME fixed px width + left-align + gap as the assistant message dot, so
+   the icon left edge AND the label both line up with the transcript rows above
+   — a px gutter (not em) keeps that true across the bar's smaller font size. */
+.statusrow-icon {
   display: inline-block;
-  width: 1.2em;
-  text-align: center;
+  width: 16px;
+  text-align: left;
+  flex: 0 0 auto;
+}
+.spinner {
+  /* Brand-blue glow ties the working indicator to the wake-screen aesthetic. */
+  text-shadow: 0 0 8px rgba(77, 157, 255, 0.55);
 }
 
 @keyframes ggblink {
@@ -1916,11 +2072,12 @@ body {
   font-feature-settings: "tnum";
 }
 
-/* Idle "ready" line: icon + label aligned with a clean gap. */
+/* Idle "ready" line: icon + label aligned with a clean gap. The 6px gap matches
+   the assistant message row so the label column lines up. */
 .statusrow-ready {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 /* Plan-step progress badge in the activity bar (amber "Plan Steps n/total"). */
@@ -1947,13 +2104,35 @@ body {
   padding-left: 12px;
   flex: 0 0 auto;
 }
+/* Right-side cluster (tool-panel toggle + cancel) in the running state. Pinned
+   right as a group; the inner cancel no longer needs its own auto margin. */
+.statusrow-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.statusrow.running .statusrow-right .cancel {
+  margin-left: 0;
+  padding-left: 0;
+}
+/* The tool-panel chevron lives in the activity bar (idle + running). Inherits
+   the nav-toggle look; nudge it to align with the bar's text baseline. */
+.statusrow-tools-toggle {
+  display: inline-flex;
+  align-items: center;
+}
+.tools-toggle {
+  flex: 0 0 auto;
+}
 .statusrow-left {
   min-width: 0;
   display: flex;
   align-items: center;
-  /* Flex collapses inter-element whitespace, so space the spinner / "Working…"
-     / meta group explicitly. */
-  gap: 8px;
+  /* 6px gap matches the assistant row so the done/working label column lines up
+     with the message text above (and spaces the spinner / "Working…" / meta). */
+  gap: 6px;
 }
 
 .inputwrap {
@@ -2300,11 +2479,11 @@ body {
   font-family: var(--mono);
   font-weight: 700;
   color: var(--user-text);
-  /* Match the textarea's first-line metrics exactly (15px / 1.5) so the ">"
+  /* Match the textarea's first-line metrics exactly (14px / 1.5) so the ">"
      prompt sits on the same baseline as the placeholder and typed text.
      The row is align-items:flex-start (pinned to the first line), so without
-     this the chevron inherited 14px / 1.55 and floated a hair high + small. */
-  font-size: 15px;
+     this the chevron inherited the app's 14px / 1.55 and floated a hair high + small. */
+  font-size: 14px;
   line-height: 1.5;
 }
 
@@ -2317,7 +2496,7 @@ body {
   /* User's own text matches the user-message identity color (mirrors TUI). */
   color: var(--user-text);
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: 14px;
   /* Auto-growing multi-line input: JS sets height to fit content; cap growth
      here and scroll past the cap. No manual resize handle, wrap long lines. */
   resize: none;
@@ -2535,6 +2714,55 @@ body {
 }
 .transcript-reveal {
   animation: reveal-up 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ── Wake screen: Matrix-style empty state (the app addressing the user) ──
+   Fills the transcript area: faint brand-tinted digital rain behind a single
+   line of terminal text that types itself out and rests on the invitation. */
+.wake-screen {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  width: 100%;
+  overflow: hidden;
+  user-select: none;
+}
+.wake-rain {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* Sit behind the text and never bleed past readable contrast. */
+  opacity: 0.32;
+  pointer-events: none;
+  mask-image: radial-gradient(ellipse 70% 80% at 50% 50%, #000 35%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 80% at 50% 50%, #000 35%, transparent 100%);
+}
+.wake-text {
+  position: relative;
+  z-index: 1;
+  font-family: var(--mono);
+  font-size: 18px;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  text-shadow: 0 0 12px rgba(77, 157, 255, 0.35);
+  white-space: pre;
+}
+.wake-cursor {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--primary);
+  animation: ggblink 1s step-end infinite;
+}
+.wake-cursor-rest {
+  color: var(--secondary);
+}
+@media (prefers-reduced-motion: reduce) {
+  .wake-cursor {
+    animation: none;
+  }
 }
 
 /* ── Skeletons: shape-preserving placeholders that crossfade to real content ──

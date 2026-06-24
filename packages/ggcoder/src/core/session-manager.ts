@@ -5,6 +5,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import type { Message, Provider } from "@kenkaiiii/gg-ai";
 import { log } from "./logger.js";
+import { encodeCwd } from "./encode-cwd.js";
 import type { CompletedItem } from "../ui/app-items.js";
 
 // ── Entry Types ────────────────────────────────────────────
@@ -125,10 +126,6 @@ export interface BranchInfo {
 }
 
 // ── Session Manager ────────────────────────────────────────
-
-function encodeCwd(cwd: string): string {
-  return cwd.replace(/[\\/]/g, "_").replace(/:/g, "").replace(/^_/, "");
-}
 
 export class SessionManager {
   private sessionsDir: string;

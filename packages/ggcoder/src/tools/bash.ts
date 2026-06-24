@@ -3,6 +3,7 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import { killProcessTree } from "../utils/process.js";
 import { truncateTail } from "./truncate.js";
+import { compressToolOutput } from "./compress.js";
 import { writeOverflow } from "./overflow.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import { getSafeToolEnv } from "./safe-env.js";
@@ -131,13 +132,20 @@ export function createBashTool(
           const result = truncateTail(rawOutput);
 
           let output = result.content;
+          const capNotice = outputCapped
+            ? `[Output capped at ${MAX_OUTPUT_BYTES / 1024 / 1024} MB to prevent memory exhaustion]\n`
+            : "";
           if (outputCapped) {
-            output = `[Output capped at ${MAX_OUTPUT_BYTES / 1024 / 1024} MB to prevent memory exhaustion]\n${output}`;
+            output = `${capNotice}${output}`;
           }
           if (result.truncated) {
+            // Over-limit: a blind tail slice would drop the head and any
+            // mid-stream error. Compress instead (keeps errors + head/tail,
+            // collapses repeats); the overflow file preserves the original.
             const overflowPath = await writeOverflow(rawOutput, "bash").catch(() => null);
             const overflowNotice = overflowPath ? ` Full output: ${overflowPath}` : "";
-            output = `[Truncated: showing last ${result.keptLines} of ${result.totalLines} lines.${overflowNotice}]\n${output}`;
+            const c = compressToolOutput(rawOutput);
+            output = `${capNotice}[${c.notice}${overflowNotice}]\n${c.content}`;
           }
           // Windows without Git Bash: commands ran under cmd.exe, NOT bash. Tell
           // the model so it uses cmd syntax (no `ls`/`grep`/pipes/single-quotes)

@@ -422,6 +422,22 @@ export async function* agentLoop(
   // unreachability doesn't cause multi-minute hangs, but not so aggressively
   // that slow-but-healthy backends get killed.
   const NON_STREAMING_HARD_TIMEOUT_MS = 300_000; // 5min for full non-streaming response
+  // Sakana Fugu is a multi-agent system that reasons silently server-side and
+  // emits NO reasoning/thinking deltas over the wire -- so its pre-output phase
+  // looks like dead air to the stall detector and never earns the thinking-model
+  // timeout extension. Give it a reasoning-sized budget BEFORE the first event so
+  // heavy fugu-ultra turns don't trip the 45s first-event / 90s hard caps, get
+  // aborted, and fall back to non-streaming (which dumps the whole reply at once,
+  // exactly the abruptness we're avoiding). Sakana's own Codex config bumps the
+  // idle timeout to 2h for the same reason. Once output starts flowing, the
+  // normal mid-stream idle/hard timeouts take over unchanged.
+  const isSakana = options.provider === "sakana";
+  const firstEventTimeoutMs = isSakana
+    ? STREAM_THINKING_IDLE_TIMEOUT_MS // 5min before first token
+    : STREAM_FIRST_EVENT_TIMEOUT_MS; // 45s
+  const initialHardTimeoutMs = isSakana
+    ? STREAM_THINKING_HARD_TIMEOUT_MS // 10min absolute cap before output
+    : STREAM_HARD_TIMEOUT_MS; // 90s
   // Runaway tool-call circuit breaker. When a model glitches mid-tool-call it
   // can emit tens of thousands of toolcall_delta events without ever closing,
   // burning the entire stall-retry budget (~25 min) on what is clearly a
@@ -436,24 +452,29 @@ export async function* agentLoop(
       options.signal?.throwIfAborted();
       turn++;
 
-      // Estimate message payload size for diagnostics
-      let msgChars = 0;
-      for (const m of messages) {
-        if (typeof m.content === "string") msgChars += m.content.length;
-        else if (Array.isArray(m.content)) {
-          for (const p of m.content) {
-            if ("text" in p && typeof p.text === "string") msgChars += p.text.length;
-            if ("content" in p && typeof p.content === "string") msgChars += p.content.length;
+      // Estimate message payload size for diagnostics.
+      // Gated behind _diagFn — the char-counting loop is O(n) over the
+      // full message history and runs every turn. Skip it entirely when
+      // no diagnostic callback is registered (production default).
+      if (_diagFn) {
+        let msgChars = 0;
+        for (const m of messages) {
+          if (typeof m.content === "string") msgChars += m.content.length;
+          else if (Array.isArray(m.content)) {
+            for (const p of m.content) {
+              if ("text" in p && typeof p.text === "string") msgChars += p.text.length;
+              if ("content" in p && typeof p.content === "string") msgChars += p.content.length;
+            }
           }
         }
+        diag("turn_start", {
+          turn,
+          messages: messages.length,
+          chars: msgChars,
+          provider: options.provider,
+          model: options.model,
+        });
       }
-      diag("turn_start", {
-        turn,
-        messages: messages.length,
-        chars: msgChars,
-        provider: options.provider,
-        model: options.model,
-      });
 
       // ── Initial steering poll: catch messages queued before the first LLM call ──
       if (firstTurn && options.getSteeringMessages) {
@@ -537,7 +558,7 @@ export async function* agentLoop(
           ? STREAM_IDLE_TIMEOUT_MS
           : hasReceivedThinking
             ? STREAM_THINKING_IDLE_TIMEOUT_MS
-            : STREAM_FIRST_EVENT_TIMEOUT_MS;
+            : firstEventTimeoutMs;
         idleTimer = setTimeout(() => {
           diag("idle_timeout_fired", {
             events: streamEventCount,
@@ -563,7 +584,7 @@ export async function* agentLoop(
       // to observe -- just wait for the full response up to the cap.
       let hardTimeoutMs = useNonStreamingFallback
         ? NON_STREAMING_HARD_TIMEOUT_MS
-        : STREAM_HARD_TIMEOUT_MS;
+        : initialHardTimeoutMs;
       hardTimer = setTimeout(() => {
         diag("hard_timeout_fired", {
           events: typeof streamEventCount !== "undefined" ? streamEventCount : 0,
@@ -1172,7 +1193,7 @@ export async function* agentLoop(
         (toolCall) => toolMap.get(toolCall.name)?.executionMode === "sequential",
       );
       const executionResult = hasSequentialToolCall
-        ? yield* executeToolCallsSequential(toolCalls, toolResults, executionOptions)
+        ? yield* executeToolCallsMixed(toolCalls, toolResults, executionOptions)
         : yield* executeToolCallsParallel(toolCalls, toolResults, executionOptions);
       messages.push({ role: "tool", content: executionResult.toolResults });
       const toolsAborted = executionResult.aborted;
@@ -1285,8 +1306,14 @@ async function executeSingleToolCall(
   } else {
     try {
       const parsed = tool.parameters.parse(toolCall.args);
+      // Per-tool timeout: combine the caller's signal with a 5-minute
+      // timeout so no single tool can block the agent loop indefinitely.
+      // When the caller has no signal, AbortSignal.timeout is used alone.
+      // AbortSignal.any() merges them — either firing aborts the tool.
+      const callerSignal = options.signal;
+      const toolTimeout = AbortSignal.timeout(300_000);
       const ctx: ToolContext = {
-        signal: options.signal ?? AbortSignal.timeout(300_000),
+        signal: callerSignal ? AbortSignal.any([callerSignal, toolTimeout]) : toolTimeout,
         toolCallId: toolCall.id,
         onUpdate: (update: unknown) => {
           pushEvent({
@@ -1346,7 +1373,20 @@ async function executeSingleToolCall(
   return { toolCallId: toolCall.id, content: resultContent, isError };
 }
 
-async function* executeToolCallsSequential(
+/**
+ * Mixed-mode execution: when a batch contains both parallel-safe and
+ * sequential tools, group consecutive parallel-safe tools into batches
+ * that run concurrently, and execute sequential tools one-at-a-time in
+ * their original position. This preserves ordering semantics (a read
+ * before a write sees pre-write content) while avoiding the latency
+ * penalty of serializing independent read-only tools.
+ *
+ * Example: [grep, grep, write, grep] →
+ *   Phase 1: grep + grep concurrently
+ *   Phase 2: write (sequential)
+ *   Phase 3: grep (sequential — alone in its batch)
+ */
+async function* executeToolCallsMixed(
   toolCalls: ToolCall[],
   initialToolResults: ToolResult[],
   options: ToolBatchExecutionOptions,
@@ -1357,14 +1397,55 @@ async function* executeToolCallsSequential(
   const abortHandler = () => eventStream.abort(new Error("aborted"));
   options.signal?.addEventListener("abort", abortHandler, { once: true });
 
+  // Partition tool calls into phases: each phase is either a group of
+  // parallel-safe tools (run concurrently) or a single sequential tool.
+  const phases: { parallel: ToolCall[]; sequential: ToolCall | null }[] = [];
+  let currentParallel: ToolCall[] = [];
+  for (const toolCall of toolCalls) {
+    const isSequential = options.toolMap.get(toolCall.name)?.executionMode === "sequential";
+    if (isSequential) {
+      // Flush accumulated parallel tools before the sequential one
+      if (currentParallel.length > 0) {
+        phases.push({ parallel: currentParallel, sequential: null });
+        currentParallel = [];
+      }
+      phases.push({ parallel: [], sequential: toolCall });
+    } else {
+      currentParallel.push(toolCall);
+    }
+  }
+  // Flush trailing parallel tools
+  if (currentParallel.length > 0) {
+    phases.push({ parallel: currentParallel, sequential: null });
+  }
+
   void (async () => {
     try {
-      for (const toolCall of toolCalls) {
+      for (const phase of phases) {
         if (options.signal?.aborted) break;
-        const record = await executeSingleToolCall(toolCall, options, (event) =>
-          pushToolEvent(eventStream, state, event),
-        );
-        resultsById.set(record.toolCallId, record);
+        if (phase.sequential) {
+          // Single sequential tool
+          const record = await executeSingleToolCall(phase.sequential, options, (event) =>
+            pushToolEvent(eventStream, state, event),
+          );
+          resultsById.set(record.toolCallId, record);
+        } else if (phase.parallel.length === 1) {
+          // Single parallel tool — no need for Promise.all overhead
+          const record = await executeSingleToolCall(phase.parallel[0]!, options, (event) =>
+            pushToolEvent(eventStream, state, event),
+          );
+          resultsById.set(record.toolCallId, record);
+        } else {
+          // Multiple parallel tools — run concurrently
+          await Promise.all(
+            phase.parallel.map(async (toolCall) => {
+              const record = await executeSingleToolCall(toolCall, options, (event) =>
+                pushToolEvent(eventStream, state, event),
+              );
+              resultsById.set(record.toolCallId, record);
+            }),
+          );
+        }
       }
       if (!state.finalized) eventStream.close();
     } catch (err) {

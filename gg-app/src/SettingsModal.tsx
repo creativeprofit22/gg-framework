@@ -61,24 +61,15 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
           placeholder="C:\\Users\\you\\Projects"
           onChange={(e) => setProjectsRoot(e.target.value)}
         />
-        <button
-          className="modal-btn"
-          style={{ color: theme.textMuted }}
-          onClick={() => void browse()}
-        >
+        <button className="modal-btn" onClick={() => void browse()}>
           {"Browse\u2026"}
         </button>
       </div>
       <div className="modal-actions">
-        <button className="modal-btn" style={{ color: theme.textMuted }} onClick={onClose}>
+        <button className="modal-btn" onClick={onClose}>
           Cancel
         </button>
-        <button
-          className="modal-btn primary"
-          style={{ color: theme.background, background: theme.primary, borderColor: theme.primary }}
-          disabled={busy}
-          onClick={() => void save()}
-        >
+        <button className="modal-btn primary" disabled={busy} onClick={() => void save()}>
           {busy ? "Saving\u2026" : "Save"}
         </button>
       </div>

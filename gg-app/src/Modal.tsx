@@ -9,10 +9,13 @@ export function Modal({
   title,
   children,
   onClose,
+  className,
 }: {
   title: string;
   children: React.ReactNode;
   onClose: () => void;
+  /** Extra class on the `.modal` box (e.g. width overrides). */
+  className?: string;
 }): React.ReactElement {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -25,12 +28,23 @@ export function Modal({
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div
-        className="modal"
+        className={className ? `modal ${className}` : "modal"}
         style={{ background: theme.surface2, borderColor: theme.border }}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="modal-title" style={{ color: theme.text }}>
-          {title}
+        <div className="modal-head">
+          <div className="modal-title" style={{ color: theme.text }}>
+            {title}
+          </div>
+          <button
+            className="modal-close"
+            type="button"
+            aria-label="Close"
+            title="Close"
+            onClick={onClose}
+          >
+            {"\u00d7"}
+          </button>
         </div>
         {children}
       </div>

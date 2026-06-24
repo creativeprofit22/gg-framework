@@ -113,16 +113,11 @@ export function TelegramSettingsModal({ onClose, onSaved }: Props): React.ReactE
         </div>
       )}
       <div className="modal-actions">
-        <button className="modal-btn" style={{ color: theme.textMuted }} onClick={onClose}>
+        <button className="modal-btn" onClick={onClose}>
           Cancel
         </button>
         <button
           className="modal-btn primary"
-          style={{
-            color: canSave ? theme.background : theme.textDim,
-            background: canSave ? theme.primary : "transparent",
-            borderColor: canSave ? theme.primary : theme.border,
-          }}
           disabled={!canSave || busy}
           onClick={() => void save()}
         >

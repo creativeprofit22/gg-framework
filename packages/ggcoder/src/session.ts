@@ -4,12 +4,9 @@ import os from "node:os";
 import crypto from "node:crypto";
 import type { Message } from "@kenkaiiii/gg-ai";
 import type { SessionHeader, SessionMessageEntry, SessionEntry, SessionInfo } from "./types.js";
+import { encodeCwd } from "./core/encode-cwd.js";
 
 const SESSION_DIR = path.join(os.homedir(), ".gg", "sessions");
-
-function encodeCwd(cwd: string): string {
-  return cwd.replace(/[\\/]/g, "_").replace(/:/g, "").replace(/^_/, "");
-}
 
 function sessionDirForCwd(cwd: string): string {
   return path.join(SESSION_DIR, encodeCwd(cwd));

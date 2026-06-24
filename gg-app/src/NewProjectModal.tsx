@@ -66,19 +66,10 @@ export function NewProjectModal({ projectsRoot, onClose, onCreated }: Props): Re
         </div>
       )}
       <div className="modal-actions">
-        <button className="modal-btn" style={{ color: theme.textMuted }} onClick={onClose}>
+        <button className="modal-btn" onClick={onClose}>
           Cancel
         </button>
-        <button
-          className="modal-btn primary"
-          style={{
-            color: canCreate ? theme.background : theme.textDim,
-            background: canCreate ? theme.primary : "transparent",
-            borderColor: canCreate ? theme.primary : theme.border,
-          }}
-          disabled={!canCreate}
-          onClick={() => void create()}
-        >
+        <button className="modal-btn primary" disabled={!canCreate} onClick={() => void create()}>
           {busy ? "Creating\u2026" : "Create"}
         </button>
       </div>

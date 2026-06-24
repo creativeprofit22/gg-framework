@@ -31,19 +31,10 @@ export function ConfirmModal({
         {message}
       </div>
       <div className="modal-actions">
-        <button className="modal-btn" style={{ color: theme.textMuted }} onClick={onClose}>
+        <button className="modal-btn" onClick={onClose}>
           {cancelLabel}
         </button>
-        <button
-          className="modal-btn primary"
-          style={{
-            color: theme.background,
-            background: theme.primary,
-            borderColor: theme.primary,
-          }}
-          disabled={busy}
-          onClick={onConfirm}
-        >
+        <button className="modal-btn primary" disabled={busy} onClick={onConfirm}>
           {busy ? "\u2026" : confirmLabel}
         </button>
       </div>

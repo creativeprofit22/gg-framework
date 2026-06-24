@@ -10,8 +10,9 @@
     "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}' && pnpm --filter gg-app format",
     "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}' && pnpm --filter gg-app format:check",
     "test": "pnpm -r test",
-    "app:update:local-fixes": "pnpm --filter gg-app update:local-fixes",
-    "prepare": "pnpm build"
+    "prepare": "pnpm build",
+    "bench": "pnpm build && npx tsx benchmarks/run-comparison.ts",
+    "app:update:local-fixes": "pnpm --filter gg-app update:local-fixes"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
@@ -39,6 +40,7 @@
     }
   },
   "dependencies": {
+    "marked": "^15.0.12",
     "playwright": "^1.60.0"
   }
 }

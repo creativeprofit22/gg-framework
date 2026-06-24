@@ -8,8 +8,13 @@ import { log } from "./logger.js";
  * radio so the gg-app windows offer the same curated, royalty-free, no-API-key
  * streams (SomaFM started in 2000, Radio Paradise in 2006).
  *
- * Playback runs inside the per-window app sidecar process, so each window's
- * radio is fully independent — opening more windows never duplicates audio.
+ * Playback uses module-level singletons (`currentChild` / `currentStationId`),
+ * so in the shared gg-app daemon — where every window's session lives in ONE
+ * process — radio is APP-WIDE: there is a single stream across all windows.
+ * Starting a station in any window replaces whatever was playing, and every
+ * window's footer reflects the same state. This intentionally prevents
+ * duplicate audio across windows. (To restore per-window radio, key playback
+ * by sessionId instead of these module globals.)
  *
  * Player binary detection: mpv > ffplay > mpg123 > cvlc. macOS's built-in
  * afplay isn't a streaming player, so users without any of those get a one-line

@@ -1,6 +1,7 @@
 import { agentLoop, isAbortError, type AgentEvent, type AgentTool } from "@kenkaiiii/gg-agent";
 import {
   ProviderError,
+  prewarmAnthropicCache,
   type Message,
   type Provider,
   type ThinkingLevel,
@@ -98,6 +99,16 @@ export interface AgentSessionOptions {
    */
   transient?: boolean;
   /**
+   * If true, `initialize()` returns WITHOUT waiting for MCP servers to connect —
+   * the connection runs in the background and tools are appended when ready.
+   * Hosts whose readiness is gated on `initialize()` (the gg-app sidecar, which
+   * can't emit its listening handshake until init resolves) set this so a slow
+   * or hanging stdio MCP server (e.g. a first-run `npx -y …` download) can't
+   * delay the session from becoming usable. Default (false) keeps the CLI's
+   * connect-before-ready behavior so MCP tools are present on the first turn.
+   */
+  backgroundMcpConnect?: boolean;
+  /**
    * Plan-mode callbacks. When provided, the `enter_plan`/`exit_plan` tools are
    * registered and the session manages plan-mode restrictions + system-prompt
    * rebuilds. Hosts (e.g. the gg-app sidecar) use these to surface plan-mode
@@ -162,6 +173,9 @@ export class AgentSession {
   private regroundingInjected = false;
   private compactionOccurred = false;
   private originalRequest = "";
+  /** True after the cache has been pre-warmed for this session. Ensures we only
+   *  fire the warm-up call once (before the first real turn). */
+  private cachePrewarmed = false;
   // Messages queued by the user while a run is in flight. Drained at the
   // mid-loop steering boundary (user steering wins over the hooks), mirroring
   // the TUI's getSteeringMessages. Each entry carries its own attachments so a
@@ -281,28 +295,18 @@ export class AgentSession {
     this.processManager = processManager;
     this.lspManager = lspManager;
 
-    // Connect MCP servers (non-blocking — failures are logged and skipped)
+    // Connect MCP servers. The connect attempt itself can block for up to the
+    // per-server connect timeout (~30s) — a slow stdio server such as a
+    // first-run `npx -y @playwright/mcp` download stalls here. When the host
+    // gates its own readiness on initialize() (the gg-app sidecar can't emit
+    // its listening handshake until this resolves), `backgroundMcpConnect`
+    // moves the connect off the critical path so the session becomes usable
+    // immediately and tools are appended whenever the servers come up.
     this.mcpManager = new MCPClientManager();
-    try {
-      let apiKey: string | undefined;
-      if (this.provider === "glm") {
-        try {
-          const glmCreds = await this.authStorage.resolveCredentials("glm");
-          apiKey = glmCreds.accessToken;
-        } catch {
-          // GLM not configured — skip Z.AI MCP servers
-        }
-      }
-      const mcpTools = await this.mcpManager.connectAll(
-        await getAllMcpServers(this.provider, apiKey, this.cwd),
-      );
-      this.tools.push(...mcpTools);
-    } catch (err) {
-      log(
-        "WARN",
-        "mcp",
-        `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    if (this.opts.backgroundMcpConnect) {
+      void this.connectMcpServers();
+    } else {
+      await this.connectMcpServers();
     }
 
     const basePrompt =
@@ -391,6 +395,51 @@ export class AgentSession {
     await this.extensionLoader.loadAll(paths.extensionsDir, extContext);
 
     this.eventBus.emit("session_start", { sessionId: this.sessionId });
+  }
+
+  /**
+   * Connect all configured MCP servers and append their tools to `this.tools`.
+   * Resolves the GLM api key first (Z.AI's bundled servers need it). Never
+   * throws — a failed connect is logged and skipped — so it is safe to either
+   * `await` (CLI: tools ready before the first turn) or fire-and-forget
+   * (sidecar: `backgroundMcpConnect`, so a slow stdio server can't stall
+   * startup). Tools are pushed onto the live array the agent loop reads each
+   * turn, so background-connected servers become available on the next prompt.
+   */
+  private async connectMcpServers(): Promise<void> {
+    if (!this.mcpManager) return;
+    try {
+      let apiKey: string | undefined;
+      if (this.provider === "glm") {
+        try {
+          const glmCreds = await this.authStorage.resolveCredentials("glm");
+          apiKey = glmCreds.accessToken;
+        } catch {
+          // GLM not configured — skip Z.AI MCP servers
+        }
+      }
+      const mcpTools = await this.mcpManager.connectAll(
+        await getAllMcpServers(this.provider, apiKey, this.cwd),
+      );
+      this.tools.push(...mcpTools);
+      // Background connect resolves AFTER initialize() has already built the
+      // system prompt (the default path awaits this before buildSystemPrompt,
+      // so its prompt already lists the tools). Refresh messages[0] so the
+      // model is also told about the MCP tools by name on its next turn —
+      // mirrors the TUI's replaceSystemPrompt after connectInitialMcpTools.
+      // Safe ordering: this method's first await yields before initialize()
+      // sets `messages`, and connectAll (process spawn / network) always
+      // resolves long after the local-only remainder of init has finished.
+      if (this.opts.backgroundMcpConnect && mcpTools.length > 0) {
+        await this.rebuildSystemPromptInPlace();
+      }
+    } catch (err) {
+      log(
+        "WARN",
+        "mcp",
+        `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -718,7 +767,9 @@ export class AgentSession {
           this.provider === "moonshot" && isKimiCodingEndpoint(effectiveBaseUrl)
             ? kimiCodingHeaders()
             : undefined,
-        cacheRetention: "short",
+        // speedProfile "optimized": 1-h cache TTL (survives turns >5 min apart)
+        // + pre-warm before the first turn. "baseline": current 5-min default.
+        cacheRetention: this.isSpeedOptimized() ? "long" : "short",
         promptCacheKey: this.getPromptCacheKey(),
         supportsImages: modelInfo?.supportsImages,
         supportsVideo: modelInfo?.supportsVideo,
@@ -741,6 +792,11 @@ export class AgentSession {
     };
 
     try {
+      // Fire cache pre-warm before the first turn (Anthropic + speedProfile optimized).
+      // Runs concurrently with nothing — it must complete before runAgentLoop so
+      // the cache is warm when the real request arrives. Best-effort: swallowed
+      // inside maybePrewarmCache/prewarmAnthropicCache.
+      await this.maybePrewarmCache(creds);
       await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);
     } catch (err) {
       // Abort errors are expected (user cancellation) — don't retry or re-throw
@@ -1118,6 +1174,49 @@ export class AgentSession {
   /** Replace the abort signal (e.g. after cancellation). */
   setSignal(signal: AbortSignal): void {
     this.opts = { ...this.opts, signal };
+  }
+
+  /** True when speedProfile is "optimized" (1-h cache TTL + pre-warm). */
+  private isSpeedOptimized(): boolean {
+    return this.settingsManager?.get("speedProfile") === "optimized";
+  }
+
+  /** Fire a cache pre-warm request for Anthropic so the first real turn is a
+   *  cache read instead of a cold write. No-op for other providers and when
+   *  speedProfile is not "optimized". Entirely best-effort — any failure is
+   *  swallowed so prewarm never blocks or aborts the real prompt. */
+  private async maybePrewarmCache(creds: {
+    accessToken: string;
+    accountId?: string;
+    baseUrl?: string;
+  }): Promise<void> {
+    if (this.cachePrewarmed || !this.isSpeedOptimized() || this.provider !== "anthropic") {
+      return;
+    }
+    this.cachePrewarmed = true;
+    try {
+      const userAgent = await getClaudeCliUserAgent();
+      const systemText =
+        typeof this.messages[0]?.content === "string" ? this.messages[0].content : "";
+      if (!systemText) return;
+      await prewarmAnthropicCache({
+        apiKey: creds.accessToken,
+        model: this.model,
+        system: systemText,
+        tools: this.tools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+          ...(t.rawInputSchema ? { rawInputSchema: t.rawInputSchema } : {}),
+        })),
+        baseUrl: this.baseUrl ?? creds.baseUrl,
+        userAgent,
+        cacheRetention: "long",
+        signal: this.opts.signal,
+      });
+    } catch {
+      // Best-effort — prewarm failure must never block the session.
+    }
   }
 
   private getPromptCacheKey(): string | undefined {

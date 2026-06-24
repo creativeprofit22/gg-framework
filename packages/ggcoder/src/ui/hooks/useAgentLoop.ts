@@ -1060,14 +1060,13 @@ export function useAgentLoop(
       // Run the initial message.
       // On 401, force-refresh the OAuth token and retry once — the provider may
       // have revoked the token server-side before the stored expiry.
-      let aborted: boolean;
       try {
-        aborted = await runSingle(userContent);
+        await runSingle(userContent);
       } catch (err) {
         if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
           // Pop the user message we pushed — runSingle will re-push it
           messages.current.pop();
-          aborted = await runSingle(userContent, { forceRefresh: true });
+          await runSingle(userContent, { forceRefresh: true });
         } else {
           throw err;
         }
@@ -1077,7 +1076,17 @@ export function useAgentLoop(
       // Most queued messages are consumed mid-run via getSteeringMessages, but
       // messages that arrive after the agent finishes (no more tool calls to
       // trigger steering) land here. Batch all remaining into a single run.
-      if (!aborted && queueRef.current.length > 0) {
+      //
+      // This drains even when the run was aborted. After an interrupt, the
+      // teardown (process kills, stream finish, finally block, React commit of
+      // isRunning=false) is async — during that window a reprompt sees
+      // isRunning still true and gets queued instead of run. Pre-abort queued
+      // messages were already restored to the composer by handleAbort's
+      // drainQueuedText (and reset()/abort paths clear the queue), so anything
+      // left here arrived *after* the abort and is a fresh user intent. Without
+      // this it would be orphaned in the queue forever with no loop to pick it
+      // up.
+      if (queueRef.current.length > 0) {
         const batch = queueRef.current.splice(0);
         setQueuedCount(0);
         const merged = mergeUserContent(batch.map((q) => q.content));

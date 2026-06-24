@@ -38,16 +38,21 @@ export function createLsTool(
         lines.push(`d  -        ${dir.name}/`);
       }
 
-      for (const file of files) {
-        try {
-          const stat = await ops.stat(path.join(resolved, file.name));
-          const size = formatSize(stat.size);
-          const type = file.isSymbolicLink() ? "l" : "f";
-          lines.push(`${type}  ${size.padStart(8)}  ${file.name}`);
-        } catch {
-          lines.push(`?  -        ${file.name}`);
-        }
-      }
+      // Stat all files in parallel — each stat() is an independent syscall,
+      // so batching them avoids serial I/O latency on large directories.
+      const fileLines = await Promise.all(
+        files.map(async (file) => {
+          try {
+            const stat = await ops.stat(path.join(resolved, file.name));
+            const size = formatSize(stat.size);
+            const type = file.isSymbolicLink() ? "l" : "f";
+            return `${type}  ${size.padStart(8)}  ${file.name}`;
+          } catch {
+            return `?  -        ${file.name}`;
+          }
+        }),
+      );
+      lines.push(...fileLines);
 
       if (lines.length === 0) return "Empty directory.";
       return lines.join("\n");

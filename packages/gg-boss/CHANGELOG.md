@@ -1,5 +1,34 @@
 # @kenkaiiii/gg-boss
 
+## 4.14.1
+
+## 4.14.0
+
+## 4.13.3
+
+## 4.13.2
+
+## 4.13.1
+
+## 4.13.0
+
+### Minor Changes
+
+- Update system prompt talk section for ADHD-readable responses
+
+  Rewrite `renderTalkSection()` so every reply leads with the outcome word
+  (Fixed/Done/Broken/Failed), enforces bottom-line-first scanning, one idea
+  per line, pick-don't-menu, concrete metrics, no unresolved it-depends, and
+  affirmative phrasing. Designed for fast scanning and low working memory.
+
+## 4.12.2
+
+### Patch Changes
+
+- Fix Windows sidecar crash: the session-folder name encoder (`encodeCwd`) now strips Windows extended-length path prefixes (`\\?\` and `\\?\UNC\`) and all reserved filename characters (`<>:"|?*`). Previously, Windows canonicalized cwds (`\\?\C:\Users\brams`) produced illegal folder names containing `?`, causing `mkdir` ENOENT and a fatal sidecar crash on startup — blocking OAuth/login for all Windows users.
+
+## 4.12.1
+
 ## 4.12.0
 
 ### Minor Changes

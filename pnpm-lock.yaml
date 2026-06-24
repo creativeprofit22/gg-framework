@@ -17,6 +17,9 @@ importers:
 
   .:
     dependencies:
+      marked:
+        specifier: ^15.0.12
+        version: 15.0.12
       playwright:
         specifier: ^1.60.0
         version: 1.60.0
@@ -169,6 +172,9 @@ importers:
       lucide-react:
         specifier: ^1.18.0
         version: 1.18.0(react@19.2.6)
+      marked:
+        specifier: ^15.0.12
+        version: 15.0.12
       react:
         specifier: ^19.1.0
         version: 19.2.6
@@ -495,6 +501,9 @@ importers:
       '@kenkaiiii/gg-pixel':
         specifier: workspace:*
         version: link:../gg-pixel
+      '@kenkaiiii/kencode-search':
+        specifier: ^0.1.17
+        version: 0.1.17
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
@@ -2139,6 +2148,11 @@ packages:
         optional: true
       react-devtools-core:
         optional: true
+
+  '@kenkaiiii/kencode-search@0.1.17':
+    resolution: {integrity: sha512-iqWo97ArxyaFOR/yXQmdwm5nPLgCyHEMVqqH9uGoWZ1lH87Lx10Xv/Y1aSDczpyCRMP7IHQ82aYV6K3cyA/GDQ==}
+    engines: {node: '>=20'}
+    hasBin: true
 
   '@malept/cross-spawn-promise@2.0.0':
     resolution: {integrity: sha512-1DpKU0Z5ThltBwjNySMC14g0CkbyhCaz9FkhxqNsZI6uAPJXFS8cMXlBKo26FJ8ZuW6S9GCMcR9IO5k2X5/9Fg==}
@@ -7683,6 +7697,14 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
+
+  '@kenkaiiii/kencode-search@0.1.17':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.29.0(zod@4.4.3)
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - supports-color
 
   '@malept/cross-spawn-promise@2.0.0':
     dependencies:

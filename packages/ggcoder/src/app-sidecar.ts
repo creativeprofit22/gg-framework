@@ -15,6 +15,7 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import type { ToolResultContent } from "@kenkaiiii/gg-ai";
 import type { AddressInfo } from "node:net";
@@ -62,8 +63,10 @@ import {
   loadServers,
   addServer,
   removeServer,
+  getServer,
   parseMcpAddCommand,
   MCPClientManager,
+  McpOAuthStore,
   type MCPScope,
   type MCPServerConfig,
 } from "./core/mcp/index.js";
@@ -78,6 +81,7 @@ const ALL_PROVIDERS: Provider[] = [
   "minimax",
   "deepseek",
   "openrouter",
+  "sakana",
 ];
 
 // ── gg-app settings (~/.gg/gg-app.json) ────────────────────
@@ -469,6 +473,8 @@ interface McpWireRow {
   error?: string;
   kind: "stdio" | "http";
   summary: string;
+  /** True when the server needs an interactive OAuth login before it connects. */
+  requiresAuth?: boolean;
 }
 
 /** A short transport summary for display (URL for http/sse, command+args for stdio). */
@@ -497,6 +503,7 @@ async function buildMcpRows(cwd: string): Promise<McpWireRow[]> {
         error: result?.error,
         kind: s.config.url ? "http" : "stdio",
         summary: mcpRowSummary(s.config),
+        requiresAuth: result?.requiresAuth,
       };
     });
   } finally {
@@ -509,11 +516,16 @@ async function buildMcpRows(cwd: string): Promise<McpWireRow[]> {
  *  still be saved. Mirrors the CLI's probeServer. */
 async function probeMcp(
   config: MCPServerConfig,
-): Promise<{ ok: boolean; toolCount: number; error?: string }> {
+): Promise<{ ok: boolean; toolCount: number; error?: string; requiresAuth?: boolean }> {
   const manager = new MCPClientManager();
   try {
     const result = await manager.probe(config);
-    return { ok: result.ok, toolCount: result.toolCount, error: result.error };
+    return {
+      ok: result.ok,
+      toolCount: result.toolCount,
+      error: result.error,
+      requiresAuth: result.requiresAuth,
+    };
   } finally {
     await manager.dispose();
   }
@@ -564,11 +576,30 @@ async function runJsonModeIfRequested(): Promise<boolean> {
   return true;
 }
 
+// ── Daemon-level HTTP helpers (shared by the session-management routes) ─────
+// The per-session route table has its own local copies; these serve the
+// daemon's own POST /session / DELETE /session routes.
+function daemonReadBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c) => chunks.push(c as Buffer));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("error", reject);
+  });
+}
+
+function daemonJson(res: http.ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "access-control-allow-origin": "*",
+  });
+  res.end(JSON.stringify(body));
+}
+
 async function main(): Promise<void> {
   // Sub-agent JSON-mode dispatch must win before any sidecar/server setup.
   if (await runJsonModeIfRequested()) return;
 
-  const cwd = process.env.GG_APP_CWD ?? process.cwd();
   // Default to an ephemeral port (0) so concurrent/orphaned instances never
   // collide on a fixed port. The actual port is reported via the
   // GG_APP_LISTENING handshake and consumed by the shell.
@@ -581,6 +612,26 @@ async function main(): Promise<void> {
   const sidecarLog = path.join(paths.agentDir, "gg-app-sidecar.log");
   initLogger(sidecarLog);
 
+  // Global last-resort guards, installed as early as the logger allows so they
+  // cover the WHOLE lifecycle — including startup/initialize, the phase the
+  // "sidecar did not start in time" bug lives in. The sidecar is a long-lived
+  // HTTP server the Rust shell can respawn: a stray rejection or thrown error
+  // from one request (e.g. an MCP probe spawning a misbehaving child) must not
+  // tear down the whole process and strand the window on its next call. Log and
+  // keep serving (mirrors astro/vscode/gstack long-lived-server handlers).
+  process.on("unhandledRejection", (reason) => {
+    log("ERROR", "app-sidecar", "unhandledRejection", {
+      message: reason instanceof Error ? reason.message : String(reason),
+      stack: reason instanceof Error ? reason.stack : undefined,
+    });
+  });
+  process.on("uncaughtException", (err) => {
+    log("ERROR", "app-sidecar", "uncaughtException", {
+      message: err.message,
+      stack: err.stack,
+    });
+  });
+
   // The packaged desktop app launches from Finder/Dock with a minimal PATH that
   // omits Homebrew/Cargo/version-manager dirs, so the agent can't find node,
   // git, python, rg, etc. Enrich process.env.PATH from the login shell once,
@@ -590,6 +641,146 @@ async function main(): Promise<void> {
 
   const auth = new AuthStorage(paths.authFile);
   await auth.load();
+
+  // Every window's session lives here as an in-process object, keyed by the id
+  // the daemon hands back from POST /session. The Rust shell routes each proxy
+  // request to its window's session via the `x-gg-session` header (and the
+  // `?session=` query for the SSE /events stream).
+  const sessions = new Map<string, SessionContext>();
+
+  /** Resolve the target session id: the `x-gg-session` header, else a
+   *  `?session=` query param (used by the SSE /events connection). */
+  function sessionIdFromReq(req: http.IncomingMessage, url: string): string | null {
+    const header = req.headers["x-gg-session"];
+    if (typeof header === "string" && header.length > 0) return header;
+    try {
+      return new URL(url, `http://${host}`).searchParams.get("session");
+    } catch {
+      return null;
+    }
+  }
+
+  const server = http.createServer((req, res) => {
+    const url = req.url ?? "/";
+    const method = req.method ?? "GET";
+
+    // CORS preflight — the webview origin differs from 127.0.0.1.
+    if (method === "OPTIONS") {
+      res.writeHead(204, {
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+        "access-control-allow-headers": "content-type, x-gg-session",
+      });
+      res.end();
+      return;
+    }
+
+    // ── Daemon-level routes (session lifecycle) ──────────────────────────
+    // Create a session for a window: { cwd, sessionPath? } → { sessionId }.
+    if (method === "POST" && url === "/session") {
+      void daemonReadBody(req).then(async (raw) => {
+        let body: { cwd?: unknown; sessionPath?: unknown } = {};
+        try {
+          body = raw ? (JSON.parse(raw) as typeof body) : {};
+        } catch {
+          /* empty/invalid body → defaults below */
+        }
+        const sessionCwd =
+          typeof body.cwd === "string" && body.cwd
+            ? body.cwd
+            : (process.env.GG_APP_CWD ?? process.cwd());
+        const sessionPath =
+          typeof body.sessionPath === "string" && body.sessionPath ? body.sessionPath : undefined;
+        const id = randomUUID();
+        try {
+          const ctx = await createSession({ auth, paths }, { id, cwd: sessionCwd, sessionPath });
+          sessions.set(id, ctx);
+          log("INFO", "app-sidecar", "session created", { id, cwd: sessionCwd });
+          daemonJson(res, 200, { sessionId: id });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          log("ERROR", "app-sidecar", "session create failed", { message });
+          daemonJson(res, 500, { error: message });
+        }
+      });
+      return;
+    }
+
+    // Dispose a session: DELETE /session/:id.
+    if (method === "DELETE" && url.startsWith("/session/")) {
+      const id = decodeURIComponent(url.slice("/session/".length));
+      const ctx = sessions.get(id);
+      if (ctx) {
+        sessions.delete(id);
+        void ctx.dispose().catch(() => {});
+        log("INFO", "app-sidecar", "session disposed", { id });
+      }
+      daemonJson(res, 200, { ok: true });
+      return;
+    }
+
+    // ── Per-session delegation ───────────────────────────────────────────
+    const id = sessionIdFromReq(req, url);
+    const ctx = id ? sessions.get(id) : undefined;
+    if (!ctx) {
+      daemonJson(res, 404, { error: "unknown session" });
+      return;
+    }
+    ctx.handle(req, res, url, method);
+  });
+  server.listen(port, host, () => {
+    const addr = server.address() as AddressInfo;
+    // The Rust shell reads this line to learn the daemon port.
+    process.stdout.write(`GG_APP_LISTENING ${addr.port}\n`);
+    log("INFO", "app-sidecar", "daemon listening", { port: String(addr.port), host });
+  });
+
+  const shutdown = async (): Promise<void> => {
+    // Radio playback is app-wide (one stream across all windows), so it stops
+    // at the daemon level, not per session.
+    stopRadio();
+    await Promise.all([...sessions.values()].map((c) => c.dispose().catch(() => {})));
+    server.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
+}
+
+interface SessionContext {
+  id: string;
+  cwd: string;
+  sessionPath?: string;
+  session: AgentSession;
+  clients: Set<SseClient>;
+  broadcast: (type: string, data: unknown) => void;
+  /** Handle one HTTP request for this session. Owns its own 404 fallthrough. */
+  handle: (
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: string,
+    method: string,
+  ) => void;
+  dispose: () => Promise<void>;
+}
+
+/**
+ * Build one in-process agent session: its AgentSession, SSE client set, event
+ * bridge, task runner, auth/login bridge, and the full HTTP route table exposed
+ * as a `handle()` method. Many of these live inside one daemon process, fully
+ * isolated (separate AgentSession, cwd, history, model) — only the HTTP server,
+ * logger, PATH, shared auth file, and radio live at the daemon level.
+ */
+async function createSession(
+  deps: { auth: AuthStorage; paths: Awaited<ReturnType<typeof ensureAppDirs>> },
+  opts: { id: string; cwd: string; sessionPath?: string },
+): Promise<SessionContext> {
+  const { auth } = deps;
+  const paths = deps.paths;
+  const cwd = opts.cwd;
+  // Base host for parsing request-URL query params (value is irrelevant to
+  // parsing); the daemon owns the real listen host.
+  const host = "127.0.0.1";
 
   const saved = loadSavedSettings(paths.settingsFile);
   // Per-project model/thinking prefs win over the shared global settings.json:
@@ -630,9 +821,9 @@ async function main(): Promise<void> {
     for (const c of clients) c.res.write(frame);
   }
 
-  // When the shell respawns this sidecar for a chosen project, it passes the
-  // session file path to resume; empty/unset starts a fresh session.
-  const resumeSessionPath = process.env.GG_APP_SESSION_ID || undefined;
+  // The session file path to resume (passed by the daemon's POST /session);
+  // empty/unset starts a fresh session.
+  const resumeSessionPath = opts.sessionPath;
 
   let abort = new AbortController();
   const session = new AgentSession({
@@ -642,6 +833,12 @@ async function main(): Promise<void> {
     thinkingLevel,
     sessionId: resumeSessionPath,
     signal: abort.signal,
+    // The shell gates window readiness on the GG_APP_LISTENING handshake, which
+    // can't fire until initialize() resolves. Connect MCP in the background so a
+    // slow or hanging stdio server (e.g. a first-run `npx -y @playwright/mcp`
+    // download) can't delay the sidecar past the webview's startup timeout
+    // ("sidecar did not start in time"). Tools attach when the servers come up.
+    backgroundMcpConnect: true,
     // Plan mode: the agent's enter_plan/exit_plan tools drive these. We flip
     // session plan state (rebuilds the system prompt + enforces read-only
     // tools) and surface the transition to the webview.
@@ -691,12 +888,32 @@ async function main(): Promise<void> {
     };
   }
 
+  // tool_call_end carries no tool name (only the id), so remember each call's
+  // name from tool_call_start to log a useful line on completion. Mirrors the
+  // CLI's logging so the app sidecar's ~/.gg/gg-app-sidecar.log records tool
+  // failures (e.g. repeated invalid-argument errors) instead of leaving the
+  // fatal-abort path with no forensic trail.
+  const toolCallNames = new Map<string, string>();
+
   // Forward every relevant bus event to the webview.
   session.eventBus.on("text_delta", (d) => broadcast("text_delta", d));
   session.eventBus.on("thinking_delta", (d) => broadcast("thinking_delta", d));
-  session.eventBus.on("tool_call_start", (d) => broadcast("tool_call_start", d));
+  session.eventBus.on("tool_call_start", (d) => {
+    toolCallNames.set(d.toolCallId, d.name);
+    broadcast("tool_call_start", d);
+  });
   session.eventBus.on("tool_call_update", (d) => broadcast("tool_call_update", d));
-  session.eventBus.on("tool_call_end", (d) => broadcast("tool_call_end", d));
+  session.eventBus.on("tool_call_end", (d) => {
+    const name = toolCallNames.get(d.toolCallId) ?? "unknown";
+    toolCallNames.delete(d.toolCallId);
+    log(d.isError ? "ERROR" : "INFO", "tool", `Tool call ended: ${name}`, {
+      id: d.toolCallId,
+      durationMs: String(d.durationMs),
+      isError: String(d.isError),
+      ...(d.isError ? { result: d.result.slice(0, 500) } : {}),
+    });
+    broadcast("tool_call_end", d);
+  });
   // Native server tools (e.g. Anthropic web_search) do NOT end the turn — text
   // streams before and after them in the SAME turn. The webview must reset its
   // streaming bubble here, or the two text blocks concatenate with no separator
@@ -704,9 +921,11 @@ async function main(): Promise<void> {
   session.eventBus.on("server_tool_call", (d) => broadcast("server_tool_call", d));
   session.eventBus.on("turn_end", (d) => broadcast("turn_end", d));
   session.eventBus.on("agent_done", (d) => broadcast("agent_done", d));
-  session.eventBus.on("error", (d) =>
-    broadcast("error", { message: d.error instanceof Error ? d.error.message : String(d.error) }),
-  );
+  session.eventBus.on("error", (d) => {
+    const message = d.error instanceof Error ? d.error.message : String(d.error);
+    log("ERROR", "app-sidecar", "agent error", { message });
+    broadcast("error", { message });
+  });
   session.eventBus.on("model_change", (d) => broadcast("model_change", d));
   session.eventBus.on("hook", (d) => broadcast("hook", d));
   session.eventBus.on("compaction_start", (d) => broadcast("compaction_start", d));
@@ -886,21 +1105,13 @@ async function main(): Promise<void> {
     res.end(payload);
   }
 
-  const server = http.createServer((req, res) => {
-    const url = req.url ?? "/";
-    const method = req.method ?? "GET";
-
-    // CORS preflight — the webview origin differs from 127.0.0.1.
-    if (method === "OPTIONS") {
-      res.writeHead(204, {
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, POST, OPTIONS",
-        "access-control-allow-headers": "content-type",
-      });
-      res.end();
-      return;
-    }
-
+  // OPTIONS/CORS preflight is handled at the daemon level before delegation.
+  function handle(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: string,
+    method: string,
+  ): void {
     if (method === "GET" && url === "/state") {
       const st = session.getState();
       json(res, 200, {
@@ -915,7 +1126,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (method === "GET" && url === "/events") {
+    if (method === "GET" && (url === "/events" || url.startsWith("/events?"))) {
       res.writeHead(200, {
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
@@ -1312,9 +1523,14 @@ async function main(): Promise<void> {
       return;
     }
 
-    // ── Radio ─────────────────────────────────────────────────
-    // Playback runs in THIS sidecar process, which is unique per window, so a
-    // station only plays in the window that started it.
+    // ── Radio (app-wide) ──────────────────────────────────────
+    // Radio is now APP-WIDE: all windows share one daemon process, and the
+    // player lives in `core/radio.ts` module-level singletons (one stream for
+    // the whole app). Any window's /radio reads/controls that single stream —
+    // starting a station in one window replaces whatever was playing, and every
+    // window's footer reflects the same `current`. This intentionally prevents
+    // duplicate audio across windows (the original per-window goal), now for
+    // free. (To restore per-window radio, key playback by sessionId.)
     if (method === "GET" && url === "/radio") {
       json(res, 200, { stations: RADIO_STATIONS, current: getCurrentStation() });
       return;
@@ -1836,21 +2052,31 @@ async function main(): Promise<void> {
           return;
         }
         const config = parsed.value.config;
-        // Best-effort probe — never blocks the save. A failed connect is surfaced
-        // to the UI but the config is still persisted (mirrors the CLI).
-        const probe = await probeMcp(config);
-        const saved = await addServer(config, scope, targetCwd, true);
-        if (!saved.ok) {
-          json(res, 400, { error: saved.error });
-          return;
+        try {
+          // Best-effort probe — never blocks the save. A failed connect is
+          // surfaced to the UI but the config is still persisted (mirrors the
+          // CLI). probeMcp swallows connect errors; the try/catch guards the
+          // persist step so a write failure returns a 500 instead of becoming
+          // an unhandled rejection that would crash the sidecar.
+          const probe = await probeMcp(config);
+          const saved = await addServer(config, scope, targetCwd, true);
+          if (!saved.ok) {
+            json(res, 400, { error: saved.error });
+            return;
+          }
+          json(res, 200, {
+            ok: true,
+            name: config.name,
+            connected: probe.ok,
+            toolCount: probe.toolCount,
+            error: probe.error,
+            requiresAuth: probe.requiresAuth,
+          });
+        } catch (err) {
+          json(res, 500, {
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
-        json(res, 200, {
-          ok: true,
-          name: config.name,
-          connected: probe.ok,
-          toolCount: probe.toolCount,
-          error: probe.error,
-        });
       });
       return;
     }
@@ -1884,35 +2110,93 @@ async function main(): Promise<void> {
         }
         const targetCwd = bodyCwd ?? cwd;
         const removed = await removeServer(name, scope, targetCwd);
+        // Drop any saved OAuth tokens for this server so a re-add starts clean.
+        await new McpOAuthStore().clear(name).catch(() => {});
         json(res, 200, { removed });
       });
       return;
     }
 
+    // Interactive OAuth login for a remote (HTTP) MCP server. The browser is
+    // opened by the webview in response to the broadcast `mcp_auth_url` event;
+    // progress + outcome stream via `mcp_auth_status` / `mcp_auth_done` /
+    // `mcp_auth_error`. Responds 202 immediately and runs the flow in the
+    // background (the browser round-trip can take a while).
+    if (method === "POST" && url === "/mcp/login") {
+      void readBody(req).then(async (raw) => {
+        let name: string;
+        let scopeValue: string;
+        let bodyCwd: string | undefined;
+        try {
+          const body = JSON.parse(raw) as { name?: string; scope?: string; cwd?: string };
+          name = body.name ?? "";
+          scopeValue = body.scope ?? "global";
+          bodyCwd = body.cwd;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        if (!name.trim()) {
+          json(res, 400, { error: "missing server name" });
+          return;
+        }
+        const scope: MCPScope = scopeValue === "project" ? "project" : "global";
+        const targetCwd = bodyCwd ?? cwd;
+        const scoped = await getServer(name, targetCwd);
+        if (!scoped || scoped.scope !== scope) {
+          json(res, 404, { error: `No "${name}" server found.` });
+          return;
+        }
+        if (!scoped.config.url) {
+          json(res, 400, { error: "Login is only supported for HTTP MCP servers." });
+          return;
+        }
+        json(res, 202, { accepted: true });
+        broadcast("mcp_auth_status", { name, message: "Starting login\u2026" });
+        const manager = new MCPClientManager();
+        try {
+          const result = await manager.login(scoped.config, (authUrl) => {
+            broadcast("mcp_auth_url", { name, url: authUrl });
+          });
+          if (result.ok) {
+            broadcast("mcp_auth_done", { name, toolCount: result.toolCount });
+          } else {
+            broadcast("mcp_auth_error", { name, message: result.error ?? "Login failed." });
+          }
+        } catch (err) {
+          broadcast("mcp_auth_error", {
+            name,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          await manager.dispose().catch(() => {});
+        }
+      });
+      return;
+    }
+
     json(res, 404, { error: "not found" });
-  });
+  }
 
-  server.listen(port, host, () => {
-    const addr = server.address() as AddressInfo;
-    // The Rust shell reads this line to learn the port.
-    process.stdout.write(`GG_APP_LISTENING ${addr.port}\n`);
-    log("INFO", "app-sidecar", "listening", { port: String(addr.port), host });
-  });
-
-  const shutdown = async (): Promise<void> => {
+  async function dispose(): Promise<void> {
     tasksPollStopped = true;
     if (tasksPoll) clearTimeout(tasksPoll);
-    // Kill any playing radio so the stream dies with its window.
-    stopRadio();
     // Stop the Telegram serve loop + dispose its per-chat sessions.
     if (serveController) await serveController.stop().catch(() => {});
     for (const c of clients) c.res.end();
-    server.close();
     await session.dispose().catch(() => {});
-    process.exit(0);
+  }
+
+  return {
+    id: opts.id,
+    cwd,
+    sessionPath: opts.sessionPath,
+    session,
+    clients,
+    broadcast,
+    handle,
+    dispose,
   };
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
 }
 
 main().catch((err) => {

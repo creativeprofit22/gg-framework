@@ -2,11 +2,21 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { z } from "zod";
+import http from "node:http";
 import os from "node:os";
 import { log } from "../logger.js";
 import type { MCPServerConfig } from "./types.js";
+import {
+  McpOAuthProvider,
+  MCP_OAUTH_CALLBACK_PORT,
+  MCP_OAUTH_CALLBACK_PATH,
+} from "./oauth-provider.js";
+import { McpOAuthStore } from "./oauth-store.js";
+import { isLocalhost, alternateLoopback, isNetworkError } from "./loopback.js";
+import { resolveStdioCommand } from "./resolve-stdio.js";
 
 interface ConnectedServer {
   name: string;
@@ -21,6 +31,16 @@ export interface MCPConnectResult {
   ok: boolean;
   toolCount: number;
   tools: AgentTool[];
+  error?: string;
+  /** True when the server returned 401/Unauthorized and an OAuth login is
+   *  required before it can connect. The UI surfaces this as "requires login". */
+  requiresAuth?: boolean;
+}
+
+/** Outcome of an interactive remote-MCP OAuth login. */
+export interface MCPLoginResult {
+  ok: boolean;
+  toolCount: number;
   error?: string;
 }
 
@@ -48,9 +68,10 @@ export class MCPClientManager {
       if (result.status === "fulfilled") {
         return { name, ok: true, toolCount: result.value.length, tools: result.value };
       }
-      const error = formatConnectError(result.reason);
+      const requiresAuth = isUnauthorized(result.reason);
+      const error = requiresAuth ? "Requires login." : formatConnectError(result.reason);
       log("WARN", "mcp", `Failed to connect to MCP server "${name}"`, { error });
-      return { name, ok: false, toolCount: 0, tools: [], error };
+      return { name, ok: false, toolCount: 0, tools: [], error, requiresAuth };
     });
 
     const connected = results.filter((r) => r.ok).length;
@@ -78,8 +99,144 @@ export class MCPClientManager {
       }
       return { name: config.name, ok: true, toolCount: tools.length, tools };
     } catch (err) {
-      const error = formatConnectError(err);
-      return { name: config.name, ok: false, toolCount: 0, tools: [], error };
+      const requiresAuth = isUnauthorized(err);
+      const error = requiresAuth ? "Requires login." : formatConnectError(err);
+      return { name: config.name, ok: false, toolCount: 0, tools: [], error, requiresAuth };
+    }
+  }
+
+  /**
+   * Run the interactive OAuth login for one remote MCP server end-to-end:
+   * start a loopback callback server, let the SDK open the browser via
+   * `onAuthorizationUrl`, capture the redirect, exchange the code, then verify
+   * the authorized connection by listing tools. Tokens are persisted by the
+   * provider so later (non-interactive) connects succeed silently.
+   *
+   * `onAuthorizationUrl` is invoked with the authorize URL so the host can open
+   * it (the gg-app broadcasts it to the webview, which opens the system
+   * browser; the CLI prints it). Never throws — returns `{ ok:false, error }`.
+   */
+  async login(
+    config: MCPServerConfig,
+    onAuthorizationUrl: (url: string) => void,
+    timeoutMs = 180_000,
+  ): Promise<MCPLoginResult> {
+    if (!config.url) {
+      return { ok: false, toolCount: 0, error: "Login is only supported for HTTP MCP servers." };
+    }
+    const url = new URL(config.url);
+    const store = new McpOAuthStore();
+    // Fresh PKCE/state for this attempt so a previous half-finished login can't
+    // poison the exchange.
+    await store.patch(config.name, { codeVerifier: undefined, state: undefined });
+
+    let codeResolve: ((code: string) => void) | undefined;
+    let codeReject: ((err: Error) => void) | undefined;
+    const codePromise = new Promise<string>((resolve, reject) => {
+      codeResolve = resolve;
+      codeReject = reject;
+    });
+
+    const provider = new McpOAuthProvider({
+      serverName: config.name,
+      store,
+      onRedirect: (authUrl) => onAuthorizationUrl(authUrl.toString()),
+    });
+    const expectedState = await provider.state();
+
+    // Loopback server that receives the OAuth redirect. Bound to the fixed
+    // callback port that the registered redirect_uri points at.
+    const server = http.createServer((req, res) => {
+      const reqUrl = new URL(req.url || "", `http://localhost:${MCP_OAUTH_CALLBACK_PORT}`);
+      if (reqUrl.pathname !== MCP_OAUTH_CALLBACK_PATH) {
+        res.statusCode = 404;
+        res.end("Not found");
+        return;
+      }
+      const err = reqUrl.searchParams.get("error");
+      const code = reqUrl.searchParams.get("code");
+      const state = reqUrl.searchParams.get("state");
+      res.writeHead(200, { "Content-Type": "text/html" });
+      if (err) {
+        res.end(`<html><body><h1>Login failed</h1><p>${escapeHtml(err)}</p></body></html>`);
+        codeReject?.(new Error(`Authorization failed: ${err}`));
+        return;
+      }
+      if (!code) {
+        res.end("<html><body><h1>Login failed</h1><p>No authorization code.</p></body></html>");
+        codeReject?.(new Error("No authorization code in callback."));
+        return;
+      }
+      if (state !== expectedState) {
+        res.end("<html><body><h1>Login failed</h1><p>State mismatch.</p></body></html>");
+        codeReject?.(new Error("OAuth state mismatch."));
+        return;
+      }
+      res.end(
+        "<html><body><h1>Login successful!</h1><p>You can close this tab and return to GG Coder.</p></body></html>",
+      );
+      codeResolve?.(code);
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(MCP_OAUTH_CALLBACK_PORT, "127.0.0.1", () => resolve());
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const hint =
+        msg.includes("EADDRINUSE") || msg.includes("in use")
+          ? `Port ${MCP_OAUTH_CALLBACK_PORT} is in use — close whatever is using it and retry.`
+          : msg;
+      return { ok: false, toolCount: 0, error: `Could not start login callback server: ${hint}` };
+    }
+
+    const overallTimeout = setTimeout(() => {
+      codeReject?.(new Error("Login timed out waiting for the browser callback."));
+    }, timeoutMs);
+    overallTimeout.unref();
+
+    try {
+      // First connect triggers the redirect (browser opens) then throws
+      // UnauthorizedError — that's the expected, not a failure.
+      const loginTransport = new StreamableHTTPClientTransport(url, {
+        requestInit: config.headers ? { headers: config.headers } : undefined,
+        authProvider: provider,
+      });
+      const loginClient = new Client({ name: "ggcoder", version: "1.0.0" });
+      try {
+        await loginClient.connect(loginTransport);
+        // Already authorized (had valid tokens) — nothing more to do.
+        const { tools } = await loginClient.listTools();
+        await loginClient.close().catch(() => {});
+        return { ok: true, toolCount: tools.length };
+      } catch (err) {
+        if (!isUnauthorized(err)) throw err;
+      }
+
+      const code = await codePromise;
+      // Exchange the code for tokens (persisted via provider.saveTokens).
+      await loginTransport.finishAuth(code);
+      await loginClient.close().catch(() => {});
+
+      // Verify the authorized connection on a fresh transport + list tools.
+      const verifyTransport = new StreamableHTTPClientTransport(url, {
+        requestInit: config.headers ? { headers: config.headers } : undefined,
+        authProvider: provider,
+      });
+      const verifyClient = new Client({ name: "ggcoder", version: "1.0.0" });
+      await verifyClient.connect(verifyTransport);
+      const { tools } = await verifyClient.listTools();
+      await verifyClient.close().catch(() => {});
+      return { ok: true, toolCount: tools.length };
+    } catch (err) {
+      return { ok: false, toolCount: 0, error: formatConnectError(err) };
+    } finally {
+      clearTimeout(overallTimeout);
+      server.close();
+      // Clear the now-consumed in-flight PKCE/state so the store only keeps tokens.
+      await store.patch(config.name, { codeVerifier: undefined, state: undefined });
     }
   }
 
@@ -95,9 +252,17 @@ export class MCPClientManager {
       // package.json names the same package as the MCP server makes
       // `npx -y <pkg>` self-resolve to the local source (no built bin
       // shim) and fail with "command not found".
+      //
+      // For an `npx -y <pkg>` of a package that ships as a ggcoder dependency
+      // (e.g. the default kencode-search), rewrite to a direct
+      // `node <binScript>` invocation. `npx` otherwise spawns a ~100 MB Node
+      // wrapper whose only job is to resolve+launch the real server, doubling
+      // memory per connection. Non-resolvable / non-npx commands pass through
+      // unchanged. Mirrors the LSP `process.execPath`+bin pattern.
+      const resolved = resolveStdioCommand(config.command, config.args);
       transport = new StdioClientTransport({
-        command: config.command,
-        args: config.args,
+        command: resolved.command,
+        args: resolved.args,
         env: { ...process.env, ...config.env } as Record<string, string>,
         cwd: os.homedir(),
         stderr: "pipe",
@@ -121,28 +286,30 @@ export class MCPClientManager {
         throw err;
       }
     } else {
-      // HTTP transport — try StreamableHTTP first, fall back to SSE
+      // HTTP transport (Streamable HTTP or SSE). See connectHttp for the
+      // transport-selection + auth logic.
       const url = new URL(config.url!);
-      const reqInit = config.headers ? { headers: config.headers } : undefined;
+      const isLocal = isLocalhost(url);
 
       try {
-        transport = new StreamableHTTPClientTransport(url, {
-          requestInit: reqInit,
+        const r = await this.connectHttp(url, config, isLocal, timeout);
+        client = r.client;
+        transport = r.transport;
+      } catch (err) {
+        // Windows 11 resolves `localhost` → ::1 (IPv6) first; if the server
+        // binds IPv4-only (127.0.0.1) the first fetch gets ECONNREFUSED.
+        // Retry once with the alternate loopback hostname. macOS resolves
+        // both stacks so this only bites Windows/Linux in practice.
+        const alt = isLocal ? alternateLoopback(url.hostname) : undefined;
+        if (!alt || !isNetworkError(err)) throw err;
+        log("INFO", "mcp", `localhost connect failed for "${config.name}", retrying as ${alt}`, {
+          error: String(err),
         });
-        client = new Client({ name: "ggcoder", version: "1.0.0" });
-        await client.connect(transport, { timeout });
-      } catch (streamableErr) {
-        log("INFO", "mcp", `StreamableHTTP failed for "${config.name}", trying SSE fallback`, {
-          error: String(streamableErr),
-        });
-        transport = new SSEClientTransport(url, {
-          eventSourceInit: config.headers
-            ? { fetch: createHeaderFetch(config.headers) }
-            : undefined,
-          requestInit: reqInit,
-        });
-        client = new Client({ name: "ggcoder", version: "1.0.0" });
-        await client.connect(transport, { timeout });
+        const altUrl = new URL(url);
+        altUrl.hostname = alt;
+        const r = await this.connectHttp(altUrl, config, isLocal, timeout);
+        client = r.client;
+        transport = r.transport;
       }
     }
 
@@ -201,6 +368,65 @@ export class MCPClientManager {
     });
   }
 
+  /**
+   * Connect a single HTTP (Streamable HTTP or SSE) server and return the live
+   * client + transport. Transport selection:
+   * - `transport === "sse"` → legacy SSE directly (Playwright MCP `--port`).
+   * - otherwise → Streamable HTTP first, SSE fallback for older servers.
+   *
+   * An OAuth provider is attached only for REMOTE servers — localhost never
+   * needs OAuth and attaching it there is dead weight that can misdiagnose a
+   * protocol mismatch as a login requirement.
+   */
+  private async connectHttp(
+    url: URL,
+    config: MCPServerConfig,
+    isLocal: boolean,
+    timeout: number,
+  ): Promise<{
+    client: Client;
+    transport: StreamableHTTPClientTransport | SSEClientTransport;
+  }> {
+    const reqInit = config.headers ? { headers: config.headers } : undefined;
+    const authProvider = isLocal ? undefined : new McpOAuthProvider({ serverName: config.name });
+    const sseTransport = (): SSEClientTransport =>
+      new SSEClientTransport(url, {
+        eventSourceInit: config.headers ? { fetch: createHeaderFetch(config.headers) } : undefined,
+        requestInit: reqInit,
+        authProvider,
+      });
+
+    if (config.transport === "sse") {
+      const transport = sseTransport();
+      const client = new Client({ name: "ggcoder", version: "1.0.0" });
+      await client.connect(transport, { timeout });
+      return { client, transport };
+    }
+
+    try {
+      const transport = new StreamableHTTPClientTransport(url, {
+        requestInit: reqInit,
+        authProvider,
+      });
+      const client = new Client({ name: "ggcoder", version: "1.0.0" });
+      await client.connect(transport, { timeout });
+      return { client, transport };
+    } catch (streamableErr) {
+      // For localhost, always try the SSE fallback — a 401 from localhost is
+      // almost certainly a protocol mismatch (e.g. Playwright MCP serves SSE),
+      // not an auth requirement. For remote servers, a 401 means OAuth is needed
+      // so skip the fallback and surface "requires login".
+      if (!isLocal && isUnauthorized(streamableErr)) throw streamableErr;
+      log("INFO", "mcp", `StreamableHTTP failed for "${config.name}", trying SSE fallback`, {
+        error: String(streamableErr),
+      });
+      const transport = sseTransport();
+      const client = new Client({ name: "ggcoder", version: "1.0.0" });
+      await client.connect(transport, { timeout });
+      return { client, transport };
+    }
+  }
+
   async dispose(): Promise<void> {
     for (const server of this.servers) {
       try {
@@ -214,11 +440,6 @@ export class MCPClientManager {
 }
 
 /**
- * Create a custom fetch wrapper that injects extra headers into every request.
- * Used for SSEClientTransport's eventSourceInit to pass auth headers
- * on the initial SSE GET connection (which doesn't use requestInit).
- */
-/**
  * Turn a thrown connection error into a short human-readable string. Surfaces
  * the common rate-limit case explicitly; otherwise the underlying message.
  */
@@ -230,6 +451,36 @@ function formatConnectError(reason: unknown): string {
   return msg;
 }
 
+/**
+ * Whether a connect error means the server needs OAuth login. The SDK throws
+ * its typed `UnauthorizedError` when auth is required, but a raw 401 from the
+ * initial request (before the auth machinery engages) can also surface as a
+ * plain error message — so we check both.
+ */
+function isUnauthorized(reason: unknown): boolean {
+  if (reason instanceof UnauthorizedError) return true;
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  return (
+    msg.includes("Unauthorized") ||
+    msg.includes("401") ||
+    msg.toLowerCase().includes("invalid_token")
+  );
+}
+
+/** Minimal HTML-escape for echoing an OAuth error string into the callback page. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * Create a custom fetch wrapper that injects extra headers into every request.
+ * Used for SSEClientTransport's eventSourceInit to pass auth headers
+ * on the initial SSE GET connection (which doesn't use requestInit).
+ */
 function createHeaderFetch(extraHeaders: Record<string, string>) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (url: string | URL, init: any): Promise<Response> => {

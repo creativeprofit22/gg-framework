@@ -1,5 +1,107 @@
 # @kenkaiiii/ggcoder
 
+## 4.14.1
+
+### Patch Changes
+
+- Fix Anthropic 1h prompt-cache TTL by sending the extended-cache-ttl beta header on the streaming and prewarm paths, so `cacheRetention: "long"` no longer silently falls back to the 5-minute default.
+  - @kenkaiiii/gg-ai@4.14.1
+  - @kenkaiiii/gg-agent@4.14.1
+  - @kenkaiiii/gg-core@4.14.1
+
+## 4.14.0
+
+### Minor Changes
+
+- Add Sakana Fugu provider (Fugu, Fugu Ultra) with API-key login, high/xhigh reasoning, and a silent-reasoning stream-timeout extension.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@4.14.0
+- @kenkaiiii/gg-agent@4.14.0
+- @kenkaiiii/gg-core@4.14.0
+
+## 4.13.3
+
+### Patch Changes
+
+- Fix orphaned queued messages after an abort — drain the post-abort queue even when the run was interrupted, so a reprompt during async teardown isn't stranded.
+  - @kenkaiiii/gg-ai@4.13.3
+  - @kenkaiiii/gg-agent@4.13.3
+  - @kenkaiiii/gg-core@4.13.3
+
+## 4.13.2
+
+### Patch Changes
+
+- Add tool-call and error logging to the gg-app sidecar event bridge so fatal "invalid tool arguments" aborts leave a forensic trail in `~/.gg/gg-app-sidecar.log` (tool name, isError, result preview, and agent error events) instead of failing silently.
+  - @kenkaiiii/gg-ai@4.13.2
+  - @kenkaiiii/gg-agent@4.13.2
+  - @kenkaiiii/gg-core@4.13.2
+
+## 4.13.1
+
+### Patch Changes
+
+- Spawn dependency-backed stdio MCP servers (e.g. the default kencode-search)
+  directly via `node <binScript>` instead of `npx -y <pkg>`, removing the ~100 MB
+  `npm exec` wrapper process per MCP connection. Non-dependency / non-npx servers
+  pass through unchanged.
+
+  Also ships content-aware compression for bash/task_output truncation (preserves
+  errors over blind tail slices) and the gg-app shared-daemon backend refactor.
+  - @kenkaiiii/gg-ai@4.13.1
+  - @kenkaiiii/gg-agent@4.13.1
+  - @kenkaiiii/gg-core@4.13.1
+
+## 4.13.0
+
+### Minor Changes
+
+- Update system prompt talk section for ADHD-readable responses
+
+  Rewrite `renderTalkSection()` so every reply leads with the outcome word
+  (Fixed/Done/Broken/Failed), enforces bottom-line-first scanning, one idea
+  per line, pick-don't-menu, concrete metrics, no unresolved it-depends, and
+  affirmative phrasing. Designed for fast scanning and low working memory.
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.13.0
+  - @kenkaiiii/gg-agent@4.13.0
+  - @kenkaiiii/gg-core@4.13.0
+
+## 4.12.2
+
+### Patch Changes
+
+- Fix Windows sidecar crash: the session-folder name encoder (`encodeCwd`) now strips Windows extended-length path prefixes (`\\?\` and `\\?\UNC\`) and all reserved filename characters (`<>:"|?*`). Previously, Windows canonicalized cwds (`\\?\C:\Users\brams`) produced illegal folder names containing `?`, causing `mkdir` ENOENT and a fatal sidecar crash on startup — blocking OAuth/login for all Windows users.
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.12.2
+  - @kenkaiiii/gg-agent@4.12.2
+  - @kenkaiiii/gg-core@4.12.2
+
+## 4.12.1
+
+### Patch Changes
+
+- Add performance benchmarks and optimize streaming, tool execution, and rendering pipeline
+  - edit-diff: lazy normalization cache for fuzzy matching (5-7× faster on large files)
+  - ls: parallel stat() via Promise.all (3.7-5.5× faster on large dirs)
+  - StreamResult: backpressure with high/low-water marks to bound memory (10× reduction)
+  - agent-loop: mixed-mode tool execution batches consecutive parallel-safe tools (2-10× faster)
+  - agent-loop: per-tool timeout isolation via AbortSignal.any (prevents indefinite hangs)
+  - agent-loop: gate diagnostic char-counting behind \_diagFn (eliminates per-turn overhead)
+  - Markdown.tsx: block-level memoization via marked.lexer (only active block re-parses)
+  - App.tsx: requestAnimationFrame-throttled appendAssistant (5-10× fewer re-renders)
+  - benchmarks: full harness with before/after comparison tables (pnpm bench)
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@4.12.1
+  - @kenkaiiii/gg-agent@4.12.1
+  - @kenkaiiii/gg-core@4.12.1
+
 ## 4.12.0
 
 ### Minor Changes

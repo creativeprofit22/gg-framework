@@ -101,19 +101,10 @@ export function InitGitModal({ defaultName, onClose, onInitialize }: Props): Rea
       </div>
 
       <div className="modal-actions">
-        <button className="modal-btn" style={{ color: theme.textMuted }} onClick={onClose}>
+        <button className="modal-btn" onClick={onClose}>
           Cancel
         </button>
-        <button
-          className="modal-btn primary"
-          style={{
-            color: canInit ? theme.background : theme.textDim,
-            background: canInit ? theme.primary : "transparent",
-            borderColor: canInit ? theme.primary : theme.border,
-          }}
-          disabled={!canInit}
-          onClick={initialize}
-        >
+        <button className="modal-btn primary" disabled={!canInit} onClick={initialize}>
           Initialize
         </button>
       </div>

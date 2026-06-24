@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import {
   waitForReady,
@@ -132,6 +133,22 @@ export function ProjectPicker({
       .catch(() => setBusy(false));
   }
 
+  // Open an existing folder from disk as a project. The native folder picker is
+  // directories-only (that's where projects live); a chosen path re-points this
+  // window's agent exactly like selecting a discovered project.
+  function openExisting(): void {
+    if (busy) return;
+    void openFolderDialog({
+      directory: true,
+      multiple: false,
+      title: "Open existing project",
+    })
+      .then((picked) => {
+        if (typeof picked === "string") choose(picked);
+      })
+      .catch(() => {});
+  }
+
   return (
     <div className="picker">
       <div className="picker-head" data-tauri-drag-region>
@@ -162,9 +179,19 @@ export function ProjectPicker({
               {"+ New session"}
             </button>
           ) : (
-            <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
-              {"+ New project"}
-            </button>
+            <>
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={busy}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={openExisting}
+              >
+                {"Open existing"}
+              </button>
+              <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
+                {"+ New project"}
+              </button>
+            </>
           )}
           <RadioButton />
           <WindowLayoutButton />
@@ -177,9 +204,19 @@ export function ProjectPicker({
           {!loading && projects.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No projects yet.</span>
-              <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
-                {"+ New project"}
-              </button>
+              <span style={{ display: "flex", gap: 8 }}>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={openExisting}
+                >
+                  {"Open existing"}
+                </button>
+                <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
+                  {"+ New project"}
+                </button>
+              </span>
             </div>
           )}
           {!loading && projects.length > 0 && filteredProjects.length === 0 && (

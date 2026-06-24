@@ -52,7 +52,10 @@ describe("mcp store", () => {
 
     const servers = await loadServers(tmpProject);
     expect(servers).toEqual([
-      { config: { name: "notion", url: "https://mcp.notion.com/mcp" }, scope: "global" },
+      {
+        config: { name: "notion", url: "https://mcp.notion.com/mcp", transport: "http" },
+        scope: "global",
+      },
     ]);
 
     // On-disk shape uses Claude's `type` field.
@@ -129,6 +132,7 @@ describe("mcp store", () => {
     expect(fromStoredEntry("n", { type: "http", url: "https://x/mcp" })).toEqual({
       name: "n",
       url: "https://x/mcp",
+      transport: "http",
     });
     expect(
       fromStoredEntry("s", {
@@ -136,6 +140,11 @@ describe("mcp store", () => {
         url: "https://x/sse",
         headers: { Authorization: "Bearer t" },
       }),
-    ).toEqual({ name: "s", url: "https://x/sse", headers: { Authorization: "Bearer t" } });
+    ).toEqual({
+      name: "s",
+      url: "https://x/sse",
+      headers: { Authorization: "Bearer t" },
+      transport: "sse",
+    });
   });
 });

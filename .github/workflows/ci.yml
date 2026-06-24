@@ -43,6 +43,7 @@ jobs:
         run: |
           pnpm --filter @kenkaiiii/gg-ai build
           pnpm --filter @kenkaiiii/gg-agent build
+          pnpm --filter @kenkaiiii/gg-core build
           pnpm --filter @kenkaiiii/ggcoder build
           pnpm --filter @kenkaiiii/gg-boss build
 
@@ -50,6 +51,7 @@ jobs:
         run: |
           pnpm --filter @kenkaiiii/gg-ai check
           pnpm --filter @kenkaiiii/gg-agent check
+          pnpm --filter @kenkaiiii/gg-core check
           pnpm --filter @kenkaiiii/ggcoder check
           pnpm --filter @kenkaiiii/gg-boss check
 
@@ -103,6 +105,7 @@ jobs:
         run: |
           pnpm --filter @kenkaiiii/gg-ai build
           pnpm --filter @kenkaiiii/gg-agent build
+          pnpm --filter @kenkaiiii/gg-core build
           pnpm --filter @kenkaiiii/ggcoder build
 
       - name: Stage node runtime + bundle sidecar

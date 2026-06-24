@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -115,6 +115,238 @@ function requireSuccess(result, message) {
   }
 }
 
+function normalizeLineEndings(text) {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function writeFileLf(filePath, text) {
+  writeFileSync(filePath, normalizeLineEndings(text));
+}
+
+function normalizeFileLf(relativePath, options) {
+  if (options.dryRun) {
+    console.log(`[dry-run] normalize ${relativePath} to LF line endings`);
+    return;
+  }
+
+  const filePath = join(repoRoot, relativePath);
+  const text = readFileSync(filePath, "utf8");
+  const normalized = normalizeLineEndings(text);
+  if (normalized === text) return;
+
+  writeFileSync(filePath, normalized);
+  console.log(`Normalized ${relativePath} to LF line endings.`);
+}
+
+function isPlainObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stableJson(value) {
+  return JSON.stringify(value);
+}
+
+function orderedUniqueKeys(...objects) {
+  const keys = [];
+  const seen = new Set();
+  for (const object of objects) {
+    if (!isPlainObject(object)) continue;
+    for (const key of Object.keys(object)) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+function mergeJsonValue(base, ours, theirs) {
+  if (isPlainObject(ours) && isPlainObject(theirs)) {
+    const merged = {};
+    for (const key of orderedUniqueKeys(base, theirs, ours)) {
+      const baseValue = isPlainObject(base) ? base[key] : undefined;
+      const ourValue = ours[key];
+      const theirValue = theirs[key];
+      const oursChanged = stableJson(ourValue) !== stableJson(baseValue);
+      const theirsChanged = stableJson(theirValue) !== stableJson(baseValue);
+
+      if (oursChanged && theirsChanged) {
+        merged[key] =
+          stableJson(ourValue) === stableJson(theirValue)
+            ? theirValue
+            : mergeJsonValue(baseValue, ourValue, theirValue);
+      } else if (theirsChanged) {
+        merged[key] = theirValue;
+      } else if (oursChanged) {
+        merged[key] = ourValue;
+      } else if (theirValue !== undefined) {
+        merged[key] = theirValue;
+      } else if (ourValue !== undefined) {
+        merged[key] = ourValue;
+      }
+    }
+    return merged;
+  }
+
+  if (theirs !== undefined) return theirs;
+  return ours;
+}
+
+function stagedJson(stage, filePath, options) {
+  const result = capture("git", ["show", `:${stage}:${filePath}`], {
+    ...options,
+    allowFailure: true,
+  });
+  if (result.status !== 0) return null;
+  return JSON.parse(result.stdout);
+}
+
+function unresolvedConflictFiles(options) {
+  const result = capture("git", ["diff", "--name-only", "--diff-filter=U"], {
+    ...options,
+    allowFailure: true,
+  });
+  if (result.status !== 0) return [];
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function localUpdateGitCommitArgs(args) {
+  return [
+    "-c",
+    "user.name=GG Local Update",
+    "-c",
+    "user.email=local-update@ggcoder.local",
+    ...args,
+  ];
+}
+
+// Known safe merge: upstream added root scripts/deps while the local-patched
+// branch added the app:update:local-fixes helper. Keep both maps.
+function tryResolveRootPackageJsonConflict(options) {
+  const conflicts = unresolvedConflictFiles(options);
+  if (conflicts.length !== 1 || conflicts[0] !== "package.json") {
+    return false;
+  }
+
+  const base = stagedJson(1, "package.json", options);
+  const ours = stagedJson(2, "package.json", options);
+  const theirs = stagedJson(3, "package.json", options);
+  if (!base || !ours || !theirs) {
+    return false;
+  }
+
+  console.log(
+    "Auto-resolving package.json by keeping upstream package changes and local update scripts.",
+  );
+  const merged = mergeJsonValue(base, ours, theirs);
+  writeFileLf(join(repoRoot, "package.json"), `${JSON.stringify(merged, null, 2)}\n`);
+  requireSuccess(run("git", ["add", "package.json"], options), "Failed to stage package.json.");
+  requireSuccess(
+    run("git", localUpdateGitCommitArgs(["commit", "--no-edit"]), options),
+    "Failed to finish the auto-resolved update merge.",
+  );
+  return true;
+}
+
+function resolvedAgentProjectsBody() {
+  return `    let sidecar_projects = match (port_for(&webview), session_for(&webview)) {
+        (Some(port), Some(gg_sid)) => match client
+            .get(format!("{}/projects", sidecar_base(port)))
+            .header("x-gg-session", &gg_sid)
+            .send()
+            .await
+            .and_then(|res| res.error_for_status())
+        {
+            Ok(res) => res
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| body.get("projects").and_then(|v| v.as_array()).cloned())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    Ok(serde_json::json!({ "projects": merge_project_lists(sidecar_projects) }))`;
+}
+
+// Known safe stash-pop conflict: upstream added daemon session routing while a
+// local fix made project listing tolerant of a slow/crashed sidecar.
+function tryResolveAgentProjectsConflict(options) {
+  const conflicts = unresolvedConflictFiles(options);
+  if (conflicts.length !== 1 || conflicts[0] !== "gg-app/src-tauri/src/lib.rs") {
+    return false;
+  }
+
+  const filePath = join(repoRoot, "gg-app/src-tauri/src/lib.rs");
+  const text = readFileSync(filePath, "utf8");
+  const functionStart = text.indexOf("async fn agent_projects(");
+  if (functionStart < 0) return false;
+
+  const markerStart = text.indexOf("<<<<<<< Updated upstream", functionStart);
+  const separator = text.indexOf("=======", markerStart);
+  const markerEnd = text.indexOf(">>>>>>> Stashed changes", separator);
+  if (markerStart < 0 || separator < 0 || markerEnd < 0) return false;
+
+  const conflictText = text.slice(markerStart, markerEnd);
+  if (!conflictText.includes("x-gg-session") || !conflictText.includes("sidecar_projects")) {
+    return false;
+  }
+
+  const afterMarkerLine = text.indexOf("\n", markerEnd);
+  if (afterMarkerLine < 0) return false;
+
+  const resolved = `${text.slice(0, markerStart)}${resolvedAgentProjectsBody()}${text.slice(
+    afterMarkerLine,
+  )}`;
+  writeFileLf(filePath, resolved);
+  requireSuccess(
+    run("git", ["add", "gg-app/src-tauri/src/lib.rs"], options),
+    "Failed to mark the gg-app Rust project-list conflict as resolved.",
+  );
+  requireSuccess(
+    run("git", ["restore", "--staged", "gg-app/src-tauri/src/lib.rs"], options),
+    "Failed to leave the resolved gg-app Rust project-list change unstaged.",
+  );
+  console.log(
+    "Auto-resolved gg-app/src-tauri/src/lib.rs by keeping upstream session routing and local project-list fallback.",
+  );
+  return true;
+}
+
+function stashRefForMessage(stashMessage, options) {
+  const result = capture("git", ["stash", "list", "--format=%gd%x00%s"], {
+    ...options,
+    allowFailure: true,
+  });
+  if (result.status !== 0) return null;
+
+  for (const line of result.stdout.split("\n")) {
+    const [ref, subject] = line.split("\0");
+    if (ref && subject?.endsWith(`: ${stashMessage}`)) {
+      return ref;
+    }
+  }
+  return null;
+}
+
+function dropAutoResolvedStash(stashMessage, options) {
+  const stashRef = stashRefForMessage(stashMessage, options);
+  if (!stashRef) {
+    throw new Error(
+      "Auto-resolved stash was applied, but its matching stash entry was not found.",
+    );
+  }
+
+  requireSuccess(
+    run("git", ["stash", "drop", stashRef], options),
+    "Auto-resolved stash was applied, but could not drop its matching stash entry.",
+  );
+}
+
 function currentUpstream() {
   const result = capture("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
     allowFailure: true,
@@ -175,8 +407,16 @@ function mergeUpdateTarget(target, options) {
     `Fast-forward is not possible; merging ${target} so committed local fixes stay on top of the update.`,
   );
   const backupBranch = createBackupBranch(options);
-  requireSuccess(
-    run("git", ["merge", "--no-edit", "--no-ff", target], options),
+  const merge = run(
+    "git",
+    localUpdateGitCommitArgs(["merge", "--no-edit", "--no-ff", target]),
+    options,
+  );
+  if (merge.status === 0) return;
+
+  if (tryResolveRootPackageJsonConflict(options)) return;
+
+  throw new Error(
     `Automatic merge from ${target} failed. Resolve conflicts, then run checks/build. Your pre-update HEAD is saved at ${backupBranch}.`,
   );
 }
@@ -187,7 +427,7 @@ function writeBackups(statusText) {
 
   const patchPath = join(backupDir, `${timestamp}.patch`);
   const statusPath = join(backupDir, `${timestamp}-status.txt`);
-  const diff = capture("git", ["diff", "--binary"]).stdout;
+  const diff = capture("git", ["diff", "--binary", "HEAD"]).stdout;
 
   writeFileSync(patchPath, diff);
   writeFileSync(statusPath, statusText);
@@ -288,11 +528,16 @@ async function main() {
   if (hasLocalWork) {
     const popResult = run("git", ["stash", "pop"], options);
     if (popResult.status !== 0) {
-      throw new Error(
-        `Local fixes conflicted while applying the stash. Resolve conflicts manually, then use the backup patch if needed: ${backupPatchPath}`,
-      );
+      if (!tryResolveAgentProjectsConflict(options)) {
+        throw new Error(
+          `Local fixes conflicted while applying the stash. Resolve conflicts manually, then use the backup patch if needed: ${backupPatchPath}`,
+        );
+      }
+      dropAutoResolvedStash(stashMessage, options);
     }
   }
+
+  normalizeFileLf("gg-app/src-tauri/src/lib.rs", options);
 
   if (options.install) {
     requireSuccess(
@@ -301,6 +546,13 @@ async function main() {
         env: { CI: "true" },
       }),
       "Dependency refresh failed after updating source.",
+    );
+  }
+
+  if (options.check || options.build) {
+    requireSuccess(
+      run(pnpm, ["--filter", "@kenkaiiii/gg-core", "build"], options),
+      "@kenkaiiii/gg-core build failed after reapplying local fixes.",
     );
   }
 

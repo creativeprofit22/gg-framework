@@ -77,6 +77,7 @@ if (!env.GG_NODE_SOURCE) {
   }
 }
 
+requireSuccess(run(pnpm, ["--filter", "@kenkaiiii/gg-core", "build"]));
 requireSuccess(run(pnpm, ["--filter", "@kenkaiiii/ggcoder", "build"]));
 requireSuccess(run(pnpm, ["--filter", "gg-app", "bundle:sidecar"]));
 const bundleBuildStartedAt = Date.now();

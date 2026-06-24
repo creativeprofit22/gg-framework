@@ -37,6 +37,7 @@ export interface LocalPatchedUpdateEvent {
   stream?: "stdout" | "stderr";
   exitCode?: number | null;
   installerPath?: string | null;
+  opened?: "installer" | "folder" | "none";
 }
 
 export async function startLocalPatchedUpdate(repoRoot: string): Promise<void> {

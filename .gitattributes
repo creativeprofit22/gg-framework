@@ -1,0 +1,3 @@
+gg-app/src-tauri/src/lib.rs text eol=lf
+gg-app/scripts/update-with-local-fixes.mjs text eol=lf
+gg-app/scripts/build-local-hotfix.mjs text eol=lf

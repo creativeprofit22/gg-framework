@@ -13,6 +13,46 @@ export interface CustomCommand {
   scope: CustomCommandScope;
 }
 
+function windowsHomeToWslMount(home: string): string | null {
+  if (process.platform === "win32") return null;
+  const match = /^([a-zA-Z]):[\\/](.*)$/.exec(home);
+  const drive = match?.[1]?.toLowerCase();
+  if (!drive) return null;
+  const rest = (match?.[2] ?? "")
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .join("/");
+  return `/mnt/${drive}${rest ? `/${rest}` : ""}`;
+}
+
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const candidate of paths) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    result.push(candidate);
+  }
+  return result;
+}
+
+function commandDirsForHome(home: string | undefined): string[] {
+  if (!home) return [];
+  const dirs = [path.join(home, ".gg", "commands")];
+  const wslMount = windowsHomeToWslMount(home);
+  if (wslMount) dirs.push(path.join(wslMount, ".gg", "commands"));
+  return dirs;
+}
+
+function getGlobalCommandDirs(): string[] {
+  const primary = path.join(getAppPaths().agentDir, "commands");
+  return uniquePaths([
+    primary,
+    ...commandDirsForHome(process.env.HOME),
+    ...commandDirsForHome(process.env.USERPROFILE),
+  ]);
+}
+
 async function loadCommandsFromDir(
   commandsDir: string,
   scope: CustomCommandScope,
@@ -50,21 +90,24 @@ async function loadCommandsFromDir(
 }
 
 /**
- * Load custom slash commands from ~/.gg/commands/*.md and {cwd}/.gg/commands/*.md.
- * Each .md file becomes a slash command. Frontmatter provides name/description,
- * and the body becomes the prompt injected into the agent. Project commands take
- * precedence over global commands with the same name.
+ * Load custom slash commands from global ~/.gg/commands/*.md and
+ * {cwd}/.gg/commands/*.md. Each .md file becomes a slash command.
+ * Frontmatter provides name/description, and the body becomes the prompt
+ * injected into the agent. Project commands take precedence over global
+ * commands with the same name.
  */
 export async function loadCustomCommands(cwd: string): Promise<CustomCommand[]> {
-  const globalCommandsDir = path.join(getAppPaths().agentDir, "commands");
+  const globalCommandDirs = getGlobalCommandDirs();
   const projectCommandsDir = path.join(cwd, ".gg", "commands");
-  const [globalCommands, projectCommands] = await Promise.all([
-    loadCommandsFromDir(globalCommandsDir, "global"),
+  const [globalCommandGroups, projectCommands] = await Promise.all([
+    Promise.all(globalCommandDirs.map((dir) => loadCommandsFromDir(dir, "global"))),
     loadCommandsFromDir(projectCommandsDir, "project"),
   ]);
 
   const commandsByName = new Map<string, CustomCommand>();
-  for (const command of globalCommands) commandsByName.set(command.name, command);
+  for (const command of globalCommandGroups.flat()) {
+    if (!commandsByName.has(command.name)) commandsByName.set(command.name, command);
+  }
   for (const command of projectCommands) commandsByName.set(command.name, command);
   return [...commandsByName.values()];
 }

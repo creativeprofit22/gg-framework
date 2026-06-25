@@ -14,6 +14,11 @@ function stubHome(home: string): void {
   vi.stubEnv("USERPROFILE", home);
 }
 
+function stubHomes(home: string, userProfile: string): void {
+  vi.stubEnv("HOME", home);
+  vi.stubEnv("USERPROFILE", userProfile);
+}
+
 describe("loadCustomCommands", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -38,6 +43,37 @@ describe("loadCustomCommands", () => {
     expect(commands.map((command) => command.name)).toEqual(["global", "project"]);
     expect(commands.find((command) => command.name === "global")?.scope).toBe("global");
     expect(commands.find((command) => command.name === "project")?.scope).toBe("project");
+  });
+
+  it("also loads global commands from USERPROFILE when it differs from HOME", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "gg-home-"));
+    const userProfile = await fs.mkdtemp(path.join(os.tmpdir(), "gg-userprofile-"));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gg-project-"));
+    stubHomes(home, userProfile);
+
+    await writeCommand(
+      path.join(home, ".gg", "commands", "home.md"),
+      "---\nname: home\ndescription: Home command\n---\nRun from HOME.",
+    );
+    await writeCommand(
+      path.join(userProfile, ".gg", "commands", "profile.md"),
+      "---\nname: profile\ndescription: Profile command\n---\nRun from USERPROFILE.",
+    );
+    await writeCommand(
+      path.join(userProfile, ".gg", "commands", "home.md"),
+      "---\nname: home\ndescription: Profile duplicate\n---\nDo not override HOME.",
+    );
+
+    const commands = await loadCustomCommands(cwd);
+
+    expect(commands.map((command) => command.name)).toEqual(
+      expect.arrayContaining(["home", "profile"]),
+    );
+    expect(commands.find((command) => command.name === "home")).toMatchObject({
+      description: "Home command",
+      scope: "global",
+    });
+    expect(commands.find((command) => command.name === "profile")?.scope).toBe("global");
   });
 
   it("lets project commands override global commands with the same name", async () => {

@@ -1067,9 +1067,7 @@ function App(): React.ReactElement {
             // A run may have created/removed `.gg/commands/*.md` (e.g.
             // /setup-commit writing commit.md). Refresh so the top-right
             // commit button flips /setup-commit → /commit without a restart.
-            void listCommands().then((cmds) => {
-              if (cmds.length > 0) setCommands(cmds);
-            });
+            void listCommands().then(setCommands);
           }
           break;
         }
@@ -1183,7 +1181,7 @@ function App(): React.ReactElement {
       const available = await listModels();
       if (available.length > 0) setModels(available);
       const cmds = await listCommands();
-      if (cmds.length > 0) setCommands(cmds);
+      setCommands(cmds);
       // Project task list for the Tasks modal + nav button.
       setProjectTasks(await listTasks());
       // Hydrate the transcript when resuming an existing session — the webview
@@ -1754,6 +1752,7 @@ function App(): React.ReactElement {
     setLiveToolFeed([]);
     setState(null);
     setTasks([]);
+    setCommands([]);
     setContextTokens(0);
     setSessionTitle(null);
     setPlanReview(null);

@@ -8,6 +8,7 @@ import { MemeLayer } from "./MemeLayer";
 import { SettingsModal } from "./SettingsModal";
 import { TelegramSettingsModal } from "./TelegramSettingsModal";
 import { McpModal } from "./McpModal";
+import { ConfirmModal } from "./ConfirmModal";
 import { SoundButton } from "./SoundButton";
 import {
   waitForReady,
@@ -23,6 +24,12 @@ import {
 import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
 import { useAppUpdate } from "./update";
+import {
+  LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL,
+  LOCAL_UPDATE_CONFIRMATION_MESSAGE,
+  LOCAL_UPDATE_CONFIRMATION_TITLE,
+  shouldConfirmLocalUpdate,
+} from "./local-update-confirmation";
 import { formatVersionLabel } from "./build-info";
 import { toast } from "./toast";
 
@@ -43,6 +50,7 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
   const [showSettings, setShowSettings] = useState(false);
   const [showTelegram, setShowTelegram] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
+  const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
   const [serving, setServing] = useState(false);
   const [telegramConfigured, setTelegramConfigured] = useState(false);
   const [serveBusy, setServeBusy] = useState(false);
@@ -136,6 +144,19 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
     }
   }
 
+  function handleUpdateClick(): void {
+    if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+      setShowLocalUpdateConfirm(true);
+      return;
+    }
+    void appUpdate.install();
+  }
+
+  function confirmLocalUpdate(): void {
+    setShowLocalUpdateConfirm(false);
+    void appUpdate.install();
+  }
+
   return (
     <div className="home" data-tauri-drag-region>
       <HomeBackdrop />
@@ -145,7 +166,7 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
           className="home-update"
           disabled={appUpdate.phase === "installing" || appUpdate.phase === "completed"}
           title={appUpdate.statusMessage ?? appUpdate.installTitle}
-          onClick={() => void appUpdate.install()}
+          onClick={handleUpdateClick}
         >
           <Download size={14} strokeWidth={2.25} aria-hidden="true" />
           {appUpdate.installLabel}
@@ -263,6 +284,15 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
       {showMcp && <McpModal onClose={() => setShowMcp(false)} />}
       {showScorecard && progress && (
         <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
+      )}
+      {showLocalUpdateConfirm && (
+        <ConfirmModal
+          title={LOCAL_UPDATE_CONFIRMATION_TITLE}
+          message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
+          confirmLabel={LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL}
+          onConfirm={confirmLocalUpdate}
+          onClose={() => setShowLocalUpdateConfirm(false)}
+        />
       )}
     </div>
   );

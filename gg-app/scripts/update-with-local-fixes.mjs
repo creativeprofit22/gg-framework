@@ -15,10 +15,11 @@ function usage() {
 
 Options:
   --remote <name>   Git remote to fetch from (default: upstream remote, then origin)
-  --branch <name>   Branch to update from (default: upstream branch, then main)
+  --branch <name>   Branch to update from (default: selected remote's default branch, then main)
   --no-install      Skip refreshing platform-specific dependencies
-  --no-build        Skip building the local-patched installer after checks
-  --no-check        Skip TypeScript checks after reapplying local fixes
+  --no-build        Skip building the local-patched installer after updates
+  --check           Run TypeScript checks after reapplying local fixes
+  --no-check        Keep TypeScript checks skipped (default)
   --dry-run         Print the planned workflow without mutating the repository
   -h, --help        Show this help
 `;
@@ -30,7 +31,7 @@ function parseArgs(args) {
     branch: null,
     install: true,
     build: true,
-    check: true,
+    check: false,
     dryRun: false,
   };
 
@@ -50,6 +51,8 @@ function parseArgs(args) {
       options.install = false;
     } else if (arg === "--no-build") {
       options.build = false;
+    } else if (arg === "--check") {
+      options.check = true;
     } else if (arg === "--no-check") {
       options.check = false;
     } else if (arg === "--dry-run") {
@@ -362,6 +365,42 @@ function currentUpstream() {
   };
 }
 
+function gitRemotes() {
+  const result = capture("git", ["remote"], { allowFailure: true });
+  if (result.status !== 0) return [];
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function remoteDefaultBranch(remote) {
+  const result = capture("git", ["symbolic-ref", `refs/remotes/${remote}/HEAD`], {
+    allowFailure: true,
+  });
+  const ref = result.stdout.trim();
+  const prefix = `refs/remotes/${remote}/`;
+  if (result.status !== 0 || !ref.startsWith(prefix)) return null;
+  return ref.slice(prefix.length);
+}
+
+function defaultUpdateTarget() {
+  const remotes = gitRemotes();
+  const upstream = currentUpstream();
+  const remote = remotes.includes("upstream")
+    ? "upstream"
+    : remotes.includes("origin")
+      ? "origin"
+      : upstream?.remote;
+  if (!remote) {
+    throw new Error("No git remote found. Pass --remote and --branch to choose an update target.");
+  }
+  return {
+    remote,
+    branch: remoteDefaultBranch(remote) ?? "main",
+  };
+}
+
 function hasUnresolvedConflicts() {
   const result = capture("git", ["diff", "--name-only", "--diff-filter=U"]);
   return result.stdout.trim().length > 0;
@@ -444,6 +483,16 @@ function printNativeDependencyHint(error) {
   }
 }
 
+function buildWorkspaceSpine(options) {
+  const packages = ["@kenkaiiii/gg-ai", "@kenkaiiii/gg-agent", "@kenkaiiii/gg-core"];
+  for (const packageName of packages) {
+    requireSuccess(
+      run(pnpm, ["--filter", packageName, "build"], options),
+      `${packageName} build failed after reapplying local fixes.`,
+    );
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
 
@@ -452,9 +501,9 @@ async function main() {
     throw new Error("This script must be run inside a git worktree.");
   }
 
-  const upstream = currentUpstream();
-  const remote = options.remote ?? upstream?.remote ?? "origin";
-  const branch = options.branch ?? upstream?.branch ?? "main";
+  const defaults = defaultUpdateTarget();
+  const remote = options.remote ?? defaults.remote;
+  const branch = options.branch ?? remoteDefaultBranch(remote) ?? defaults.branch;
   const target = `${remote}/${branch}`;
 
   console.log("GG local-fixes update workflow");
@@ -541,7 +590,7 @@ async function main() {
 
   if (options.install) {
     requireSuccess(
-      run(pnpm, ["install", "--frozen-lockfile"], {
+      run(pnpm, ["install", "--frozen-lockfile", "--ignore-scripts"], {
         ...options,
         env: { CI: "true" },
       }),
@@ -550,10 +599,7 @@ async function main() {
   }
 
   if (options.check || options.build) {
-    requireSuccess(
-      run(pnpm, ["--filter", "@kenkaiiii/gg-core", "build"], options),
-      "@kenkaiiii/gg-core build failed after reapplying local fixes.",
-    );
+    buildWorkspaceSpine(options);
   }
 
   if (options.check) {

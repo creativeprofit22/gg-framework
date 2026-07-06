@@ -2276,9 +2276,10 @@ function App(): React.ReactElement {
               )}
               {state?.planMode && (
                 <>
-                  {(appBuildInfo.customLabel || state?.cwd || state?.gitBranch || runningTaskCount > 0) && (
-                    <FooterSep />
-                  )}
+                  {(appBuildInfo.customLabel ||
+                    state?.cwd ||
+                    state?.gitBranch ||
+                    runningTaskCount > 0) && <FooterSep />}
                   <span className="footer-plan">
                     <ShimmerText base={theme.secondary} bright="#ddd6fe">
                       {"\u25C6 plan mode"}

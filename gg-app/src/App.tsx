@@ -88,6 +88,7 @@ import { Markdown, PromptSendProvider } from "./Markdown";
 import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { recoverPromptLabel } from "./prompt-labels";
+import { appBuildInfo } from "./build-info";
 import { playSound } from "./sounds";
 import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
 import { Paperclip, AtSign } from "lucide-react";
@@ -2253,6 +2254,9 @@ function App(): React.ReactElement {
         ) : (
           <>
             <span className="footer-left footer-reveal" style={{ fontFamily: "var(--mono)" }}>
+              {appBuildInfo.customLabel && (
+                <span className="footer-custom-build">{`◆ ${appBuildInfo.customLabel}`}</span>
+              )}
               {state?.cwd && (
                 <span className="footer-cwd" style={{ color: theme.textDim }}>
                   {basename(state.cwd)}
@@ -2260,19 +2264,21 @@ function App(): React.ReactElement {
               )}
               {state?.gitBranch && (
                 <>
-                  {state?.cwd && <FooterSep />}
+                  {(appBuildInfo.customLabel || state?.cwd) && <FooterSep />}
                   <span style={{ color: theme.secondary }}>{`\u2387 ${state.gitBranch}`}</span>
                 </>
               )}
               {runningTaskCount > 0 && (
                 <>
-                  {(state?.cwd || state?.gitBranch) && <FooterSep />}
+                  {(appBuildInfo.customLabel || state?.cwd || state?.gitBranch) && <FooterSep />}
                   <BackgroundTasksButton tasks={tasks} />
                 </>
               )}
               {state?.planMode && (
                 <>
-                  {(state?.cwd || state?.gitBranch || runningTaskCount > 0) && <FooterSep />}
+                  {(appBuildInfo.customLabel || state?.cwd || state?.gitBranch || runningTaskCount > 0) && (
+                    <FooterSep />
+                  )}
                   <span className="footer-plan">
                     <ShimmerText base={theme.secondary} bright="#ddd6fe">
                       {"\u25C6 plan mode"}

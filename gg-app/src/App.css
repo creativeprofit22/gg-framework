@@ -3587,6 +3587,12 @@ body {
   overflow: hidden;
   white-space: nowrap;
 }
+.footer-custom-build {
+  flex: 0 0 auto;
+  color: var(--secondary);
+  font-weight: 600;
+}
+
 /* Dividers sit flush (no flex gap) so ` │ ` reads as one separator unit. */
 .footer-sep {
   flex: 0 0 auto;

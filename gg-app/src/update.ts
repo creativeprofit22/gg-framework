@@ -7,6 +7,8 @@ import {
   startLocalPatchedUpdate,
   type LocalPatchedUpdateEvent,
 } from "./agent";
+import { appBuildInfo } from "./build-info";
+import { installUpdateForBuild } from "./update-policy";
 
 /**
  * App self-update, driven by the Tauri updater plugin (GitHub releases of this
@@ -55,8 +57,6 @@ const MAX_PROGRESS_LINES = 8;
  */
 const DEV_FAKE_UPDATE = false;
 const devFakeEnabled = import.meta.env.DEV && DEV_FAKE_UPDATE;
-const localPatchedBuild = import.meta.env.VITE_GG_LOCAL_PATCHED === "1";
-const localSourceRoot = import.meta.env.VITE_GG_SOURCE_ROOT ?? "";
 const LOCAL_UPDATE_COMMAND = "pnpm --filter gg-app update:local-fixes";
 const FAKE_VERSION = "9.9.9";
 
@@ -122,7 +122,7 @@ export function useAppUpdate(): UpdateInfo {
   }, [runCheck]);
 
   useEffect(() => {
-    if (!localPatchedBuild) return undefined;
+    if (!appBuildInfo.localPatched) return undefined;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void listenLocalPatchedUpdate((payload: LocalPatchedUpdateEvent) => {
@@ -178,7 +178,7 @@ export function useAppUpdate(): UpdateInfo {
       logInfo("[dev] Fake install done (no relaunch in dev).");
       return;
     }
-    if (localPatchedBuild) {
+    if (appBuildInfo.localPatched) {
       setPhase("installing");
       setProgressLines([]);
       setInstallerPath(null);
@@ -186,39 +186,42 @@ export function useAppUpdate(): UpdateInfo {
       logInfo(
         `Local-patched build detected. Running ${LOCAL_UPDATE_COMMAND} to update source, reapply local fixes, and build a patched installer.`,
       );
-      try {
-        await startLocalPatchedUpdate(localSourceRoot);
-      } catch (e) {
-        setPhase("error");
-        setStatusMessage(`Could not start local-patched update: ${String(e)}`);
-        logError(`Local-patched update start failed: ${String(e)}`);
-      }
-      return;
+    } else if (update) {
+      setPhase("installing");
     }
-    if (!update) return;
-    setPhase("installing");
+
     try {
-      await update.downloadAndInstall();
-      await relaunch();
+      await installUpdateForBuild({
+        localPatched: appBuildInfo.localPatched,
+        sourceRoot: appBuildInfo.sourceRoot,
+        update,
+        startLocalPatchedUpdate,
+        relaunch,
+      });
     } catch (e) {
       setPhase("error");
-      setStatusMessage(`Update install failed: ${String(e)}`);
-      logError(`Update install failed: ${String(e)}`);
+      if (appBuildInfo.localPatched) {
+        setStatusMessage(`Could not start local-patched update: ${String(e)}`);
+        logError(`Local-patched update start failed: ${String(e)}`);
+      } else {
+        setStatusMessage(`Update install failed: ${String(e)}`);
+        logError(`Update install failed: ${String(e)}`);
+      }
     }
   }, [update]);
 
   const version = update?.version ?? fakeVersion;
-  const installCommand = localPatchedBuild ? LOCAL_UPDATE_COMMAND : null;
+  const installCommand = appBuildInfo.localPatched ? LOCAL_UPDATE_COMMAND : null;
   const installLabel = useMemo(() => {
-    if (localPatchedBuild && phase === "installing") return "Building patched installer…";
-    if (localPatchedBuild && phase === "completed") return "Patched installer built";
-    if (localPatchedBuild && phase === "error") return "Local update failed";
-    if (localPatchedBuild)
+    if (appBuildInfo.localPatched && phase === "installing") return "Building patched installer…";
+    if (appBuildInfo.localPatched && phase === "completed") return "Patched installer built";
+    if (appBuildInfo.localPatched && phase === "error") return "Local update failed";
+    if (appBuildInfo.localPatched)
       return version ? `Update v${version} (local fixes)` : "Update (local fixes)";
     if (phase === "installing") return "Installing…";
     return version ? `Update to ${version}` : "Update";
   }, [phase, version]);
-  const installTitle = localPatchedBuild
+  const installTitle = appBuildInfo.localPatched
     ? `Runs ${LOCAL_UPDATE_COMMAND}: updates source, reapplies local fixes, checks, and builds a patched installer instead of installing the official binary.`
     : version
       ? `Update to ${version} — installs and restarts the app`
@@ -228,7 +231,7 @@ export function useAppUpdate(): UpdateInfo {
     update,
     version,
     phase,
-    localPatched: localPatchedBuild,
+    localPatched: appBuildInfo.localPatched,
     installLabel,
     installTitle,
     installCommand,

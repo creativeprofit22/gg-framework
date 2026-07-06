@@ -8,6 +8,12 @@ Local-patched builds solve the safe path differently:
 - They do **not** install the official updater binary directly.
 - When an update appears, update your source tree, reapply your local fixes, run checks, and build a new local-patched installer.
 
+## Fork auto-detection
+
+This fork auto-enables local-patched mode for normal dev/build commands when the checkout looks like `creativeprofit22/gg-framework` or the current branch is `custom/local-customizations`. That means plain `pnpm --filter gg-app build` and Tauri dev builds visibly identify as a custom fork and route installs through the safe source-update workflow.
+
+The safe update workflow targets the branch configured in git by default. In this checkout, `custom/local-customizations` tracks `origin/custom/local-customizations`, so that is the default source update target unless you pass explicit overrides.
+
 ## Safe update command
 
 From the repository root, run:

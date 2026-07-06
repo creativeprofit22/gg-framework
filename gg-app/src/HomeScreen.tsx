@@ -23,6 +23,7 @@ import {
 import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
 import { useAppUpdate } from "./update";
+import { formatVersionLabel } from "./build-info";
 import { toast } from "./toast";
 
 interface Props {
@@ -152,7 +153,7 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
       ) : (
         version && (
           <div className="home-version-row">
-            <span className="home-version">{`v${version}`}</span>
+            <span className="home-version">{formatVersionLabel(version)}</span>
             <RankBadge
               snapshot={progress}
               onClick={() => setShowScorecard(true)}

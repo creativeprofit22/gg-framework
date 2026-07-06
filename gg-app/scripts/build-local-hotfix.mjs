@@ -2,7 +2,7 @@
 // checks visible while blocking direct official updater installs. This does not
 // change release builds: the guard is enabled through VITE_GG_LOCAL_PATCHED=1.
 import { spawnSync, execFileSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -68,6 +68,25 @@ function stagedNodePath() {
   return join(srcTauri, "binaries", `ggnode-${hostTriple()}${ext}`);
 }
 
+function localTauriConfigPath() {
+  const configDir = join(repoRoot, ".gg", "local-fixes");
+  const configPath = join(configDir, "tauri-local-patched.conf.json");
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    configPath,
+    `${JSON.stringify(
+      {
+        bundle: {
+          createUpdaterArtifacts: false,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return configPath;
+}
+
 if (!env.GG_NODE_SOURCE) {
   const stagedNode = stagedNodePath();
   if (existsSync(stagedNode)) {
@@ -77,16 +96,26 @@ if (!env.GG_NODE_SOURCE) {
   }
 }
 
+requireSuccess(run(pnpm, ["--filter", "@kenkaiiii/gg-ai", "build"]));
+requireSuccess(run(pnpm, ["--filter", "@kenkaiiii/gg-agent", "build"]));
 requireSuccess(run(pnpm, ["--filter", "@kenkaiiii/gg-core", "build"]));
 requireSuccess(run(pnpm, ["--filter", "@kenkaiiii/ggcoder", "build"]));
 requireSuccess(run(pnpm, ["--filter", "gg-app", "bundle:sidecar"]));
 const bundleBuildStartedAt = Date.now();
-const buildStatus = run(pnpm, ["--filter", "gg-app", "tauri", "build"]);
+const buildStatus = run(pnpm, [
+  "--filter",
+  "gg-app",
+  "tauri",
+  "build",
+  "--no-sign",
+  "--config",
+  localTauriConfigPath(),
+]);
 if (buildStatus !== 0 && !localBundlesWereUpdatedAfter(bundleBuildStartedAt)) {
   process.exit(buildStatus);
 }
 if (buildStatus !== 0) {
   console.log(
-    "Local bundles were produced; ignoring updater signing failure for this local-patched build.",
+    "Local bundles were produced; ignoring updater/code signing failure for this local-patched build.",
   );
 }

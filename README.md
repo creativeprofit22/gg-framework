@@ -59,6 +59,21 @@ pnpm install
 pnpm build
 ```
 
+### Cleanup generated artifacts
+
+Use the root cleanup scripts for repeatable build-artifact cleanup. Add `-- --dry-run` to preview any command before deleting files.
+
+| Command                                  | Removes                                                 | Regenerate with                                                            |
+| ---------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `pnpm clean:web`                         | `gg-app/dist`                                           | `pnpm --filter gg-app build`                                               |
+| `pnpm clean:tauri`                       | `gg-app/src-tauri/target`                               | `pnpm --filter gg-app tauri build`                                         |
+| `pnpm clean:tauri-schemas`               | `gg-app/src-tauri/gen/schemas`                          | `pnpm --filter gg-app tauri build`                                         |
+| `pnpm clean:cache`                       | `.eslintcache`, `gg-app/.eslintcache`                   | `pnpm lint`                                                                |
+| `pnpm clean:packages`                    | `packages/*/dist`                                       | `pnpm build` or a package build                                            |
+| `pnpm clean:app-bundle-inputs:dangerous` | `gg-app/src-tauri/sidecar`, `gg-app/src-tauri/binaries` | `pnpm --filter @kenkaiiii/ggcoder build && pnpm --filter gg-app prebundle` |
+
+The cleanup script never removes `.gg`. Bundle inputs are intentionally behind the explicit `clean:app-bundle-inputs:dangerous` command because they are required for app packaging.
+
 TypeScript 5.9 + pnpm workspaces + Ink 6 + React 19 + Vitest 4 + Zod v4
 
 ---

@@ -12,7 +12,13 @@
     "test": "pnpm -r test",
     "bench": "pnpm build && npx tsx benchmarks/run-comparison.ts",
     "app:update:local-fixes": "pnpm --filter gg-app update:local-fixes",
-    "prepare": "pnpm build"
+    "prepare": "pnpm build",
+    "clean:web": "node scripts/clean-generated.mjs web",
+    "clean:tauri": "node scripts/clean-generated.mjs tauri",
+    "clean:tauri-schemas": "node scripts/clean-generated.mjs tauri-schemas",
+    "clean:cache": "node scripts/clean-generated.mjs cache",
+    "clean:packages": "node scripts/clean-generated.mjs packages",
+    "clean:app-bundle-inputs:dangerous": "node scripts/clean-generated.mjs app-bundle-inputs-dangerous"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",

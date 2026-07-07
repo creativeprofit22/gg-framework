@@ -12,9 +12,10 @@ describe("local update confirmation", () => {
     expect(shouldConfirmLocalUpdate(false, "available")).toBe(false);
   });
 
-  it("explains the safe source-update workflow", () => {
-    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("update source");
-    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("reapply your local fixes");
+  it("explains the safe rebase workflow", () => {
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("rebase");
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("custom/local-customizations");
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("backup");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("build a patched installer");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("not install the official binary");
   });

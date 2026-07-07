@@ -2747,7 +2747,7 @@ fn apply_mac_overlay<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
 /// the native title, since there's no runtime `set_hidden_title` setter.
 fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
-        .title("GG Coder")
+        .title("Supah Coder")
         .inner_size(1024.0, 720.0)
         .min_inner_size(480.0, 360.0)
         .background_color(APP_BG);

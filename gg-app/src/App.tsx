@@ -88,6 +88,13 @@ import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { recoverPromptLabel } from "./prompt-labels";
 import { formatBuildIdentity } from "./build-info";
+import {
+  LEGACY_MENTOR_HANDLE,
+  MENTOR_DISPLAY_NAME,
+  MENTOR_HANDLE,
+  PRODUCT_DISPLAY_NAME,
+  PRODUCT_SHORT_NAME,
+} from "./brand";
 import { playSound } from "./sounds";
 import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
 import { Paperclip, AtSign } from "lucide-react";
@@ -98,15 +105,27 @@ import { toast } from "./toast";
 import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
 import "./App.css";
 
-const DEFAULT_INPUT_PLACEHOLDER = "Type a message, / commands, @ files, @Ken for help";
+const MENTOR_ADDRESS_HANDLES = [MENTOR_HANDLE, LEGACY_MENTOR_HANDLE] as const;
+const MENTOR_ADDRESS_SOURCE = MENTOR_ADDRESS_HANDLES.map((handle) =>
+  handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+).join("|");
+const MENTOR_ADDRESS_RE = new RegExp(`^(?:${MENTOR_ADDRESS_SOURCE})\\b`, "i");
+const MENTOR_SUBMIT_RE = new RegExp(`^(?:${MENTOR_ADDRESS_SOURCE})\\b:?\\s*`, "i");
+const MENTOR_INPUT_PARTS_RE = new RegExp(`^(\\s*)(${MENTOR_ADDRESS_SOURCE})`, "i");
+
+function displayMentorPrompt(text: string): string {
+  return text.replace(/^(@ken)\b/i, MENTOR_HANDLE);
+}
+
+const DEFAULT_INPUT_PLACEHOLDER = `Type a message, / commands, @ files, ${MENTOR_HANDLE} for help`;
 const INPUT_PLACEHOLDERS = [
   DEFAULT_INPUT_PLACEHOLDER,
-  "Need a second opinion? Ask @Ken",
-  "Stuck on what to do next? Ask @Ken",
+  `Need a second opinion? Ask ${MENTOR_HANDLE}`,
+  `Stuck on what to do next? Ask ${MENTOR_HANDLE}`,
   DEFAULT_INPUT_PLACEHOLDER,
-  "Want a second set of eyes? Ask @Ken",
-  "Unsure how to proceed? Ask @Ken",
-  "Need a quick review? Ask @Ken",
+  `Want a second set of eyes? Ask ${MENTOR_HANDLE}`,
+  `Unsure how to proceed? Ask ${MENTOR_HANDLE}`,
+  `Need a quick review? Ask ${MENTOR_HANDLE}`,
 ] as const;
 const RUNNING_INPUT_PLACEHOLDERS = [
   "Agent is working. Add a follow-up if you want",
@@ -751,7 +770,7 @@ function App(): React.ReactElement {
   // "GG Coder" (home/picker/login screens, and while the session picker is open).
   useEffect(() => {
     const inProject = !needsProject && !showPicker;
-    setWindowTitle(inProject && sessionTitle ? sessionTitle : "GG Coder");
+    setWindowTitle(inProject && sessionTitle ? sessionTitle : PRODUCT_DISPLAY_NAME);
   }, [needsProject, showPicker, sessionTitle]);
 
   // Auto-grow the chat textarea to fit its content (up to a CSS max-height,
@@ -1019,7 +1038,7 @@ function App(): React.ReactElement {
             if (h.error) {
               const prefix =
                 h.error.scope === "ken_error"
-                  ? "Ken: "
+                  ? `${MENTOR_DISPLAY_NAME}: `
                   : h.error.scope === "autopilot_error"
                     ? "Autopilot: "
                     : "";
@@ -1041,7 +1060,7 @@ function App(): React.ReactElement {
             // the `@Ken` question as a Ken-tinted user bubble (matches live).
             if (h.ken && h.role === "assistant") return { kind: "ken", id: nextId(), text: h.text };
             if (h.ken && h.role === "user")
-              return { kind: "user", id: nextId(), text: h.text, ken: true };
+              return { kind: "user", id: nextId(), text: displayMentorPrompt(h.text), ken: true };
             // Persisted autopilot verdict marker: render identically to the
             // live item so a resumed session never shows the raw verdict text
             // (e.g. "ALL_CLEAR") the model actually replied with.
@@ -1245,12 +1264,12 @@ function App(): React.ReactElement {
   // with it (case-insensitive, word-boundary so `@kennedy.ts` still picks files),
   // Ken is "active": the file picker is suppressed and the input is tinted in
   // Ken's color with a shimmering marker, so it's obvious the message goes to Ken.
-  const kenActive = /^@ken\b/i.test(input.trimStart());
+  const kenActive = MENTOR_ADDRESS_RE.test(input.trimStart());
   // Split the input for the `@Ken` highlight overlay: any leading whitespace,
   // the literal `@Ken` token (preserving the user's casing), then the rest. Only
   // the token shimmers; lead+rest render in the normal input color.
   const kenInputParts = (() => {
-    const m = /^(\s*)(@ken)/i.exec(input);
+    const m = MENTOR_INPUT_PARTS_RE.exec(input);
     if (!m) return null;
     return { lead: m[1], token: m[2], rest: input.slice(m[1].length + m[2].length) };
   })();
@@ -1555,13 +1574,14 @@ function App(): React.ReactElement {
     // `@Ken <prompt>` (case-insensitive, optional colon) routes to Ken Kai, the
     // read-only mentor agent — NOT GG Coder. Ken runs concurrently with any
     // build run; his reply streams into a magenta bubble via ken_* events.
-    const kenMatch = /^@ken\b:?\s*/i.exec(trimmed);
+    const kenMatch = MENTOR_SUBMIT_RE.exec(trimmed);
     if (kenMatch) {
       const question = trimmed.slice(kenMatch[0].length).trim();
       if (!question) return;
-      recordHistory(trimmed);
+      const displayPrompt = `${MENTOR_HANDLE} ${question}`;
+      recordHistory(displayPrompt);
       stickToBottomRef.current = true;
-      pushItem({ kind: "user", id: nextId(), text: trimmed, ken: true });
+      pushItem({ kind: "user", id: nextId(), text: displayPrompt, ken: true });
       setInput("");
       setSlashIndex(0);
       setMention(null);
@@ -1873,7 +1893,7 @@ function App(): React.ReactElement {
               the cursor has it, and a bare child would otherwise block dragging
               across the whole bar. */}
           <span className="chat-head-title" data-tauri-drag-region>
-            {sessionTitle ?? "GG Coder"}
+            {sessionTitle ?? PRODUCT_DISPLAY_NAME}
           </span>
           {windowTotal > 1 && windowIndex !== null && (
             <span
@@ -2328,17 +2348,17 @@ function App(): React.ReactElement {
                     currentModel={state?.model ?? ""}
                     onSelect={onSelectModel}
                     onClose={() => setModelMenuOpen(false)}
-                    title="GG Coder model"
+                    title={`${PRODUCT_DISPLAY_NAME} model`}
                   />
                 )}
                 <span className="model-label" style={{ color: theme.text }}>
-                  GG
+                  {PRODUCT_SHORT_NAME}
                 </span>
                 <button
                   className="model-button"
                   style={{ color: theme.text }}
                   disabled={running || models.length === 0}
-                  title="Switch GG Coder's model"
+                  title={`Switch ${PRODUCT_DISPLAY_NAME}'s model`}
                   onClick={() => {
                     setKenModelMenuOpen(false);
                     setModelMenuOpen((o) => !o);
@@ -2355,13 +2375,13 @@ function App(): React.ReactElement {
                     currentModel={state?.kenModel ?? state?.model ?? ""}
                     onSelect={(id) => onSelectKenModel(id)}
                     onClose={() => setKenModelMenuOpen(false)}
-                    title="Ken's model"
+                    title={`${MENTOR_DISPLAY_NAME}'s model`}
                     onSelectFollow={() => onSelectKenModel(null)}
                     followActive={!state?.kenModelOverride}
                   />
                 )}
                 <span className="model-label" style={{ color: theme.ken }}>
-                  Ken
+                  {MENTOR_DISPLAY_NAME}
                 </span>
                 <button
                   className="model-button"
@@ -2369,8 +2389,8 @@ function App(): React.ReactElement {
                   disabled={models.length === 0}
                   title={
                     state?.kenModelOverride
-                      ? "Ken is pinned to his own model — click to change"
-                      : "Ken follows GG Coder's model — click to pin one"
+                      ? `${MENTOR_DISPLAY_NAME} is pinned to their own model — click to change`
+                      : `${MENTOR_DISPLAY_NAME} follows ${PRODUCT_DISPLAY_NAME}'s model — click to pin one`
                   }
                   onClick={() => {
                     setModelMenuOpen(false);
@@ -2394,7 +2414,7 @@ function App(): React.ReactElement {
           <span className="update-banner-dot" />
           {appUpdate.localPatched
             ? `Update available (${appUpdate.version}). Click to rebase local customizations and build a patched installer.`
-            : `Ken just pushed a new update (${appUpdate.version}) — click here to install`}
+            : `New ${PRODUCT_DISPLAY_NAME} update (${appUpdate.version}) — click here to install`}
         </button>
       )}
       {(appUpdate.phase === "installing" ||
@@ -2503,7 +2523,7 @@ const TranscriptRow = memo(function TranscriptRow({
         return (
           <div className="user-msg command labelled user-ken-sent">
             <span className="command-shimmer" style={{ color: theme.ken }}>
-              Sent to GG Coder
+              Sent to Supah Coder
             </span>
           </div>
         );
@@ -2602,8 +2622,8 @@ const TranscriptRow = memo(function TranscriptRow({
       // repeating the exact same sentence turn after turn.
       const copy: Record<Extract<Item, { kind: "autopilot" }>["phase"], string> = {
         prompted: item.body?.trim()
-          ? `Sending GG Coder back in:\n\n${item.body.trim()}`
-          : "Sending GG Coder back in for another pass.",
+          ? `Sending ${PRODUCT_DISPLAY_NAME} back in:\n\n${item.body.trim()}`
+          : `Sending ${PRODUCT_DISPLAY_NAME} back in for another pass.`,
         done: allClearCopy(item.copySeed, item.id),
         human: item.reason?.trim() ? item.reason.trim() : "Need you to weigh in on this one.",
         capped: "Paused autopilot after 3 rounds. Take a look before I keep going.",

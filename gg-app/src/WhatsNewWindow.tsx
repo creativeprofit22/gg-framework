@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { theme } from "./theme";
+import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { recentChangelog } from "./changelog";
 import { Confetti } from "./Confetti";
 import { ShimmerText } from "./ShimmerText";
@@ -37,7 +38,7 @@ export function WhatsNewWindow(): React.ReactElement {
       <div className="modal-head">
         <div className="modal-title">
           <ShimmerText base={theme.success} bright="#a7f3d0">
-            What&apos;s new with GG Coder (last 50 updates)
+            What&apos;s new with {PRODUCT_DISPLAY_NAME} (last 50 updates)
           </ShimmerText>
         </div>
         <button

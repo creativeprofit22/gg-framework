@@ -6,7 +6,7 @@ import react from "@vitejs/plugin-react";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(configDir, "..");
-const customBuildLabel = "GG Coder Local Fork";
+const customBuildLabel = "Supah Coder Local Fork";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;

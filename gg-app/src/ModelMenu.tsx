@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { PRODUCT_DISPLAY_NAME, MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
 import type { ModelOption } from "./agent";
 
@@ -66,9 +67,9 @@ export function ModelMenu({
             background: followActive ? theme.surface2 : "transparent",
           }}
           onClick={onSelectFollow}
-          title="Ken adopts whatever model GG Coder is using"
+          title={`${MENTOR_DISPLAY_NAME} adopts whatever model ${PRODUCT_DISPLAY_NAME} is using`}
         >
-          Follow GG Coder
+          Follow {PRODUCT_DISPLAY_NAME}
         </button>
       )}
       <div className="model-menu-grid">

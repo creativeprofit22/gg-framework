@@ -88,7 +88,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.14.11",
     date: "2026-07-07",
     items: [
-      "Kencode search is back. My code search engine that digs through millions of real repositories was silently failing to start inside the app, and every session quietly lost it. I traced it deep into the build pipeline, fixed it at the root, and confirmed live searches flow again.",
+      "Code search is back. My code search engine that digs through millions of real repositories was silently failing to start inside the app, and every session quietly lost it. I traced it deep into the build pipeline, fixed it at the root, and confirmed live searches flow again.",
       "I also wired a tripwire into every future build that refuses to ship if this ever breaks again. You get the fix today and the insurance forever.",
     ],
   },
@@ -105,16 +105,16 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.14.9",
     date: "2026-07-06",
     items: [
-      "Your session list is yours again. Ken's silent autopilot reviews were quietly leaving behind a fake 2-message session every few minutes, burying your real work under a wall of clones. I plugged the leak for good, so what you see in the picker is exactly what you built. Nothing else.",
-      "Autopilot got tougher to derail. When Ken hands GG Coder the next move, the app now catches his instruction even when he wraps it in chatter, so autopilot keeps rolling instead of stopping to ask you about something it could handle itself.",
-      "I also drilled Ken on keeping his reviews clean and machine-tight, so autopilot cycles run leaner and stall less.",
+      "Your session list is yours again. Supah's silent autopilot reviews were quietly leaving behind a fake 2-message session every few minutes, burying your real work under a wall of clones. I plugged the leak for good, so what you see in the picker is exactly what you built. Nothing else.",
+      "Autopilot got tougher to derail. When Supah hands Supah Coder the next move, the app now catches his instruction even when he wraps it in chatter, so autopilot keeps rolling instead of stopping to ask you about something it could handle itself.",
+      "I also drilled Supah on keeping his reviews clean and machine-tight, so autopilot cycles run leaner and stall less.",
     ],
   },
   {
     version: "0.14.8",
     date: "2026-07-05",
     items: [
-      "Your search and tool helpers just went on a diet. Each one used to drag along a chunky launcher that ate around 90 MB for no reason, and with a few windows open that really added up. I taught GG Coder to run the real thing directly and skip the dead weight, so you get the same power for a fraction of the memory.",
+      "Your search and tool helpers just went on a diet. Each one used to drag along a chunky launcher that ate around 90 MB for no reason, and with a few windows open that really added up. I taught Supah Coder to run the real thing directly and skip the dead weight, so you get the same power for a fraction of the memory.",
       "This covers every tool, not just mine. Whatever MCP tools you plug in, they now start lean instead of hauling that extra baggage, so your machine stays snappy no matter how loaded up you get.",
     ],
   },
@@ -122,24 +122,24 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.14.7",
     date: "2026-07-05",
     items: [
-      "Your machine breathes easier now. GG Coder used to leave stray search and tool helpers running every time you closed a project, and they quietly piled up and ate your memory for days. I taught it to hunt down every one of those leftovers on startup, no matter which tools you plugged in, so your RAM stays yours.",
-      "This works for any tool you add, not just the ones I ship. However exotic your setup gets, GG Coder now cleans up after itself instead of slowly bogging down your computer in the background.",
-      "Ken gives sharper advice. He now knows exactly what GG Coder can do under the hood, so his guidance is grounded in the real tools at hand instead of guesses, and his handoffs back to the agent come through clean.",
+      "Your machine breathes easier now. Supah Coder used to leave stray search and tool helpers running every time you closed a project, and they quietly piled up and ate your memory for days. I taught it to hunt down every one of those leftovers on startup, no matter which tools you plugged in, so your RAM stays yours.",
+      "This works for any tool you add, not just the ones I ship. However exotic your setup gets, Supah Coder now cleans up after itself instead of slowly bogging down your computer in the background.",
+      "Supah gives sharper advice. He now knows exactly what Supah Coder can do under the hood, so his guidance is grounded in the real tools at hand instead of guesses, and his handoffs back to the agent come through clean.",
     ],
   },
   {
     version: "0.14.6",
     date: "2026-07-05",
     items: [
-      "Autopilot just got a lot more independent. When Ken sends GG Coder back in, it now knows nobody is looking over its shoulder, so it proves its own work before calling it done instead of stopping to check with a human who isn't there.",
-      "Fewer pointless pauses. GG Coder stops asking permission for the obvious next step when it's already clear what you want, so autopilot keeps moving and finishes more in one run.",
+      "Autopilot just got a lot more independent. When Supah sends Supah Coder back in, it now knows nobody is looking over its shoulder, so it proves its own work before calling it done instead of stopping to check with a human who isn't there.",
+      "Fewer pointless pauses. Supah Coder stops asking permission for the obvious next step when it's already clear what you want, so autopilot keeps moving and finishes more in one run.",
     ],
   },
   {
     version: "0.14.5",
     date: "2026-07-04",
     items: [
-      "Your research helpers just got faster and cheaper. When GG Coder sends a scout off to read your code or dig through the project, I now put it on the quickest model for the job. Answers come back sooner and cost you less.",
+      "Your research helpers just got faster and cheaper. When Supah Coder sends a scout off to read your code or dig through the project, I now put it on the quickest model for the job. Answers come back sooner and cost you less.",
       "No tradeoff on quality. The helpers that actually change your code still run on the big brain, so your edits stay sharp while the quick lookups fly.",
     ],
   },
@@ -158,7 +158,7 @@ export const CHANGELOG: ChangelogEntry[] = [
       "Big tool catalogs no longer slow down your first reply. I keep the essentials ready, then pull in the heavy stuff only when you actually need it.",
       "Connection hiccups feel way less annoying now. If a reply gets cut off after real progress, I keep what you already saw and continue instead of making you watch the same answer again.",
       "Streaming feels calmer and lighter. I tuned the live text updates so long answers stay smooth without making your machine work so hard.",
-      "I trimmed the instruction stack again. GG Coder spends less attention on boilerplate and more attention on your code.",
+      "I trimmed the instruction stack again. Supah Coder spends less attention on boilerplate and more attention on your code.",
     ],
   },
   {
@@ -182,10 +182,10 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.14.0",
     date: "2026-07-03",
     items: [
-      "Autopilot can handle plans on its own now. When GG Coder drafts a solid plan, I review it, approve it, and kick off the build without making you babysit the button.",
-      "Bad plans get bounced back cleanly. I send GG Coder the exact revision it needs, then review the new plan again until it is ready to ship.",
+      "Autopilot can handle plans on its own now. When Supah Coder drafts a solid plan, I review it, approve it, and kick off the build without making you babysit the button.",
+      "Bad plans get bounced back cleanly. I send Supah Coder the exact revision it needs, then review the new plan again until it is ready to ship.",
       "Plan popups stay out of your way when Autopilot is on. You still get the normal review screen when you are driving manually, but when I am on watch I keep the flow moving.",
-      "I got better at spotting fake blockers. If GG Coder asks permission for safe work that is already implied by your request, I tell it to keep going instead of dragging you back in.",
+      "I got better at spotting fake blockers. If Supah Coder asks permission for safe work that is already implied by your request, I tell it to keep going instead of dragging you back in.",
     ],
   },
   {
@@ -219,9 +219,9 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.12.2",
     date: "2026-07-02",
     items: [
-      "Autopilot is calmer and harder to fool now. I judge GG Coder against your original request, not my own follow-up nudges, so I stop inventing extra work after the job is already done.",
-      "When GG Coder asks you a question or puts a plan in front of you, I keep my hands off the wheel. I will call for you instead of answering on your behalf.",
-      "Ken gets his own model switch. Pin me to a different brain or let me follow GG Coder, right from the footer.",
+      "Autopilot is calmer and harder to fool now. I judge Supah Coder against your original request, not my own follow-up nudges, so I stop inventing extra work after the job is already done.",
+      "When Supah Coder asks you a question or puts a plan in front of you, I keep my hands off the wheel. I will call for you instead of answering on your behalf.",
+      "Supah gets his own model switch. Pin me to a different brain or let me follow Supah Coder, right from the footer.",
       "Queued messages land cleaner now. If you send one while I am reviewing and there is no live run to steer, I treat it as a fresh turn instead of mixing it into the next unrelated job.",
     ],
   },
@@ -229,7 +229,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.12.1",
     date: "2026-07-02",
     items: [
-      "Squashed a bug in the brand new KEN IS ON banner: in a scrolled-down session it was flashing up above your chat instead of right over it. I pinned it to what you are actually looking at, every time, no matter how deep you have scrolled.",
+      "Squashed a bug in the brand new SUPAH IS ON banner: in a scrolled-down session it was flashing up above your chat instead of right over it. I pinned it to what you are actually looking at, every time, no matter how deep you have scrolled.",
       "Also polished off a hairline sliver of chat text that could peek through the top edge of the banner. Full coverage now, clean every time.",
     ],
   },
@@ -239,7 +239,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     items: [
       'Autopilot got sharper. I now know the difference between real work and a quick hello. Small talk, a plain answer, or a routine commit and push no longer get a pointless "all clear" from me, I just stay quiet and let you keep moving.',
       "Flipping Autopilot mid-run is off the table now, and that is a good thing. The switch locks while I am working or reviewing so you never yank the rug out from under your own build.",
-      "You'll know exactly when I'm watching. A bold KEN IS ON banner flashes across the chat the moment you flip Autopilot on, and KEN IS OFF when you pull me back, so there is never any doubt whose eyes are on the work.",
+      "You'll know exactly when I'm watching. A bold SUPAH IS ON banner flashes across the chat the moment you flip Autopilot on, and SUPAH IS OFF when you pull me back, so there is never any doubt whose eyes are on the work.",
     ],
   },
   {
@@ -254,10 +254,10 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.11.0",
     date: "2026-07-02",
     items: [
-      "Meet Autopilot. Flip it on and I stay in the room after every job, reviewing what GG Coder just built the moment it finishes. If something is broken or half-done I send it right back in with a sharp fix, if it nailed it I call it clear, and if it is a real judgment call I tap you on the shoulder. You get a second set of eyes on every single turn without lifting a finger.",
-      "You can watch me work now too. While I review, a little Ken line lights up in the status bar, and my verdict lands right in the chat like I am talking straight to you. No mystery, no black box.",
+      "Meet Autopilot. Flip it on and I stay in the room after every job, reviewing what Supah Coder just built the moment it finishes. If something is broken or half-done I send it right back in with a sharp fix, if it nailed it I call it clear, and if it is a real judgment call I tap you on the shoulder. You get a second set of eyes on every single turn without lifting a finger.",
+      "You can watch me work now too. While I review, a little Supah line lights up in the status bar, and my verdict lands right in the chat like I am talking straight to you. No mystery, no black box.",
       "Your workspace tidies itself. The second a task is done it slips out of your Tasks list on its own, so all you ever see is what still needs doing. No more hunting for the checkbox.",
-      "Un-minimizing one window now brings the whole crew back. Click a single GG Coder window back up and its siblings rise with it, so you are never left digging through the dock for the rest.",
+      "Un-minimizing one window now brings the whole crew back. Click a single Supah Coder window back up and its siblings rise with it, so you are never left digging through the dock for the rest.",
     ],
   },
   {
@@ -266,15 +266,15 @@ export const CHANGELOG: ChangelogEntry[] = [
     items: [
       "Your helper agents just got a lot more capable. I gave them room to run five times longer, so instead of quitting halfway through a real job they now see it all the way to the finish. And if one ever does run out of road, it tells you straight up instead of handing back a mysterious blank.",
       "Read-only agents are now genuinely read-only. When I send a scout out to explore your code, it physically cannot touch or change a thing. Peace of mind baked right in.",
-      "The tips GG Coder gives you now actually match the app. No more being told to press some terminal shortcut that does not exist here. It points you at the real buttons you can see and click.",
+      "The tips Supah Coder gives you now actually match the app. No more being told to press some terminal shortcut that does not exist here. It points you at the real buttons you can see and click.",
     ],
   },
   {
     version: "0.10.2",
     date: "2026-07-01",
     items: [
-      "Anthropic occasionally drops a tool call mid-stream with nothing in it, and it used to make GG Coder throw up its hands and blame itself. I taught it to recognize that exact glitch and just quietly pick the work back up, so a rare hiccup doesn't kill your session anymore.",
-      "When something really does go wrong, I fixed the message so it points at the actual culprit instead of guessing it's a GG Coder bug. Clearer errors, less confusion about who to blame.",
+      "Anthropic occasionally drops a tool call mid-stream with nothing in it, and it used to make Supah Coder throw up its hands and blame itself. I taught it to recognize that exact glitch and just quietly pick the work back up, so a rare hiccup doesn't kill your session anymore.",
+      "When something really does go wrong, I fixed the message so it points at the actual culprit instead of guessing it's a Supah Coder bug. Clearer errors, less confusion about who to blame.",
     ],
   },
   {
@@ -313,25 +313,25 @@ export const CHANGELOG: ChangelogEntry[] = [
     version: "0.7.2",
     date: "2026-06-30",
     items: [
-      "GG Coder just got faster at the boring part. When it needs to read a few files or search around, it now grabs them all at once instead of one at a time. Less waiting on every step, more time actually building.",
+      "Supah Coder just got faster at the boring part. When it needs to read a few files or search around, it now grabs them all at once instead of one at a time. Less waiting on every step, more time actually building.",
     ],
   },
   {
     version: "0.7.1",
     date: "2026-06-30",
     items: [
-      "I made @Ken much easier to remember right when you are about to type. The input now quietly rotates in helpful Ken hints, then shuffles into place instead of snapping.",
-      "Ken now follows your model switch. Pick a new model and @Ken uses it too, so his advice comes from the same brain you chose for the main agent.",
+      "I made @Supah much easier to remember right when you are about to type. The input now quietly rotates in helpful Supah hints, then shuffles into place instead of snapping.",
+      "Supah now follows your model switch. Pick a new model and @Supah uses it too, so his advice comes from the same brain you chose for the main agent.",
     ],
   },
   {
     version: "0.7.0",
     date: "2026-06-30",
     items: [
-      "Say hey to Ken. I put myself right inside the app as your mentor. Type @Ken and I'll tell you what to build next, call out when something is off, and hand you the exact prompt to run. I am not the one writing the code, I am the one keeping you on the rails.",
+      "Say hey to Supah. I put myself right inside the app as your mentor. Type @Supah and I'll tell you what to build next, call out when something is off, and hand you the exact prompt to run. I am not the one writing the code, I am the one keeping you on the rails.",
       "I do not guess and I do not just nod along. When I size up your code or a plan I actually go check it. I search real shipping repos and read the live docs before I answer, and if something smells unverified I dig in and tell you what I found.",
       "I have taste and I am hard on tools. Ask me what to use and I will not parrot whatever is trendy. I research what is actually good right now and steer you to the lean pick that fits your project, not the bloated mainstream one.",
-      "Every prompt I write comes with a Send to GG Coder button. One click and it runs. No copy paste, no fuss. I keep it one focused step at a time so nothing snowballs into a mess.",
+      "Every prompt I write comes with a Send to Supah Coder button. One click and it runs. No copy paste, no fuss. I keep it one focused step at a time so nothing snowballs into a mess.",
       "Our chats stick around. Close the app, come back later, and my advice plus everything you sent is right where you left it.",
     ],
   },

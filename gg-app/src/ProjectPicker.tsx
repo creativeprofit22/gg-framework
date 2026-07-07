@@ -18,6 +18,7 @@ import { BackButton } from "./BackButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
+import { formatBuildIdentity } from "./build-info";
 
 interface Props {
   /** Called after the agent has been re-pointed at `cwd` (+ optional session). */
@@ -52,6 +53,7 @@ export function ProjectPicker({
   const [projectsRoot, setProjectsRoot] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [query, setQuery] = useState("");
+  const buildIdentity = formatBuildIdentity();
 
   const q = query.trim().toLowerCase();
   const filteredProjects = q
@@ -158,6 +160,11 @@ export function ProjectPicker({
           <BackButton label="Back" onClick={onClose} />
         ) : null}
         <span className="picker-title">{selected ? selected.name : "Choose a project"}</span>
+        {buildIdentity && (
+          <span className="picker-build-identity" title={buildIdentity}>
+            {buildIdentity}
+          </span>
+        )}
         {!selected && !loading && <Badge>{projects.length}</Badge>}
         {!selected && !loading && projects.length > 0 && (
           <input

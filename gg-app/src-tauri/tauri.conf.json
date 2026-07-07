@@ -19,7 +19,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "externalBin": ["binaries/ggnode"],
     "resources": ["sidecar/"],
     "macOS": {
@@ -36,7 +36,8 @@
         "headerImage": "../installer/out/nsis-header.bmp",
         "sidebarImage": "../installer/out/nsis-sidebar.bmp",
         "installerIcon": "icons/icon.ico",
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "windows/nsis-hooks.nsh"
       }
     },
     "icon": [
@@ -50,9 +51,7 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBMDFGMkNBNjdFNUQzMkQKUldRdDArVm55dklCMmhWUWdmVjJpNWljUE5sTjNLM0RBWitkbmFIb0hjZXZxNmROd21BUEpydFkK",
-      "endpoints": [
-        "https://github.com/KenKaiii/gg-framework/releases/latest/download/latest.json"
-      ]
+      "endpoints": ["https://example.invalid/gg-coder-local-fork/latest.json"]
     }
   }
 }

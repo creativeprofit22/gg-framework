@@ -2395,7 +2395,7 @@ function App(): React.ReactElement {
         >
           <span className="update-banner-dot" />
           {appUpdate.localPatched
-            ? `Update available (${appUpdate.version}). Click to update source, reapply fixes, and build a patched installer.`
+            ? `Update available (${appUpdate.version}). Click to rebase local customizations and build a patched installer.`
             : `Ken just pushed a new update (${appUpdate.version}) — click here to install`}
         </button>
       )}
@@ -2407,7 +2407,8 @@ function App(): React.ReactElement {
           <span className="update-banner-content">
             <span>
               {appUpdate.localPatched
-                ? (appUpdate.statusMessage ?? "Updating source and building a patched installer…")
+                ? (appUpdate.statusMessage ??
+                  "Rebasing local customizations and building a patched installer…")
                 : appUpdate.phase === "error"
                   ? (appUpdate.statusMessage ?? "Update install failed.")
                   : "Installing update… the app will restart automatically."}

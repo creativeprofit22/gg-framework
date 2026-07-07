@@ -16,7 +16,7 @@ import { installUpdateForBuild } from "./update-policy";
  * the footer banner and the home-screen button: it polls for an update on mount
  * + hourly, and `install()` downloads → installs → relaunches the app. Local-patched
  * builds still check for official updates, but block direct official binary installs;
- * their install action runs the source-update workflow that reapplies local fixes
+ * their install action rebases the local branch on upstream, reapplies work,
  * and builds a new patched installer.
  */
 
@@ -34,11 +34,11 @@ export interface UpdateInfo {
   installLabel: string;
   /** Tooltip/title explaining what the install action does. */
   installTitle: string;
-  /** Safe source-update workflow command for local-patched builds. */
+  /** Safe local-branch rebase workflow command for local-patched builds. */
   installCommand: string | null;
-  /** User-facing status for source update progress/errors/completion. */
+  /** User-facing status for rebase/build progress/errors/completion. */
   statusMessage: string | null;
-  /** Recent streamed lines from the local source-update workflow. */
+  /** Recent streamed lines from the local rebase/build workflow. */
   progressLines: string[];
   /** Rebuilt installer, when the local-patched workflow reports one. */
   installerPath: string | null;
@@ -57,7 +57,7 @@ const MAX_PROGRESS_LINES = 8;
  */
 const DEV_FAKE_UPDATE = false;
 const devFakeEnabled = import.meta.env.DEV && DEV_FAKE_UPDATE;
-const LOCAL_UPDATE_COMMAND = "pnpm --filter gg-app update:local-fixes";
+const LOCAL_UPDATE_COMMAND = "pnpm --filter gg-app update:local-fixes -- --check";
 const FAKE_VERSION = "9.9.9";
 
 function appendProgress(lines: string[], line: string): string[] {
@@ -67,9 +67,9 @@ function appendProgress(lines: string[], line: string): string[] {
 }
 
 function describeLocalProgress(line: string): string | null {
-  if (line.includes("git fetch")) return "Updating the source checkout from git…";
-  if (line.includes("git merge --ff-only")) return "Fast-forwarding source safely…";
-  if (line.includes("git stash pop")) return "Reapplying your local fixes…";
+  if (line.includes("git fetch")) return "Fetching upstream source…";
+  if (line.includes("git rebase")) return "Rebasing local customizations on upstream…";
+  if (line.includes("git stash pop")) return "Reapplying your local work…";
   if (line.includes(" gg-app check") || line.includes("@kenkaiiii/ggcoder check")) {
     return "Checking the patched source…";
   }
@@ -133,7 +133,7 @@ export function useAppUpdate(): UpdateInfo {
         setProgressLines([]);
         setStatusMessage(
           payload.message ??
-            "Updating source, reapplying local fixes, checking, then building a patched installer…",
+            "Rebasing local branch on upstream, reapplying work, checking, then building a patched installer…",
         );
         return;
       }
@@ -182,9 +182,9 @@ export function useAppUpdate(): UpdateInfo {
       setPhase("installing");
       setProgressLines([]);
       setInstallerPath(null);
-      setStatusMessage("Starting source update — this will not install the official binary.");
+      setStatusMessage("Starting local rebase — this will not install the official binary.");
       logInfo(
-        `Local-patched build detected. Running ${LOCAL_UPDATE_COMMAND} to update source, reapply local fixes, and build a patched installer.`,
+        `Local-patched build detected. Running ${LOCAL_UPDATE_COMMAND} to rebase local branch on upstream, reapply work, and build a patched installer.`,
       );
     } else if (update) {
       setPhase("installing");
@@ -222,7 +222,7 @@ export function useAppUpdate(): UpdateInfo {
     return version ? `Update to ${version}` : "Update";
   }, [phase, version]);
   const installTitle = appBuildInfo.localPatched
-    ? `Runs ${LOCAL_UPDATE_COMMAND}: updates source, reapplies local fixes, checks, and builds a patched installer instead of installing the official binary.`
+    ? `Runs ${LOCAL_UPDATE_COMMAND}: rebases the local branch on upstream, reapplies work, checks, and builds a patched installer instead of installing the official binary.`
     : version
       ? `Update to ${version} — installs and restarts the app`
       : "Install update and restart the app";

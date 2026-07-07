@@ -2466,8 +2466,8 @@ const LOCAL_PATCHED_UPDATE_EVENT: &str = "local-patched-update";
 
 /// Start the safe local-patched update workflow from the source checkout. This
 /// intentionally does NOT call Tauri's updater `downloadAndInstall()`; it runs
-/// the repo script that fetches source, reapplies local work, checks, and builds
-/// a new local-patched installer.
+/// the repo script that rebases local customizations on upstream, reapplies work,
+/// checks, and builds a new local-patched installer.
 #[tauri::command]
 fn app_local_patched_update_start(
     app: tauri::AppHandle,
@@ -2518,7 +2518,7 @@ fn run_local_patched_update(app: tauri::AppHandle, repo: PathBuf) {
         serde_json::json!({
             "type": "started",
             "repoRoot": repo.to_string_lossy(),
-            "message": "Starting safe local-patched update: updating source, reapplying fixes, checking, then building a patched installer.",
+            "message": "Starting safe local-patched update: rebasing local customizations on upstream, reapplying work, checking, then building a patched installer.",
         }),
     );
 
@@ -2539,7 +2539,7 @@ fn run_local_patched_update(app: tauri::AppHandle, repo: PathBuf) {
                 &app,
                 serde_json::json!({
                     "type": "error",
-                    "message": format!("Failed to start pnpm --filter gg-app update:local-fixes: {e}"),
+                    "message": format!("Failed to start pnpm --filter gg-app update:local-fixes -- --check: {e}"),
                 }),
             );
             return;
@@ -2583,7 +2583,7 @@ fn run_local_patched_update(app: tauri::AppHandle, repo: PathBuf) {
                     "type": "error",
                     "exitCode": status.code(),
                     "message": format!(
-                        "Local-patched update failed with exit code {}. Review the streamed output for conflicts or check/build errors.",
+                        "Local-patched update failed with exit code {}. Review the streamed output for rebase conflicts, manual-resolution instructions, or check/build errors.",
                         status.code().map_or_else(|| "unknown".into(), |c| c.to_string())
                     ),
                 }),
@@ -2605,13 +2605,13 @@ fn local_patched_update_command() -> Command {
     #[cfg(target_os = "windows")]
     {
         let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "pnpm", "--filter", "gg-app", "update:local-fixes"]);
+        cmd.args(["/C", "pnpm", "--filter", "gg-app", "update:local-fixes", "--", "--check"]);
         cmd
     }
     #[cfg(not(target_os = "windows"))]
     {
         let mut cmd = Command::new("pnpm");
-        cmd.args(["--filter", "gg-app", "update:local-fixes"]);
+        cmd.args(["--filter", "gg-app", "update:local-fixes", "--", "--check"]);
         cmd
     }
 }

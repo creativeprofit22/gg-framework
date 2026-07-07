@@ -6,53 +6,69 @@ Local-patched builds solve the safe path differently:
 
 - They still check the official release feed and show when an update is available.
 - They do **not** install the official updater binary directly.
-- When an update appears, update your source tree, reapply your local fixes, run checks, and build a new local-patched installer.
+- When an update appears, rebase your local source branch on upstream, reapply work, run checks, and build a new local-patched installer.
 
 ## Fork auto-detection
 
 This fork auto-enables local-patched mode for normal dev/build commands when the checkout looks like `creativeprofit22/gg-framework` or the current branch is `custom/local-customizations`. That means plain `pnpm --filter gg-app build` and Tauri dev builds visibly identify as a custom fork and route installs through the safe source-update workflow.
 
-The safe update workflow targets the branch configured in git by default. In this checkout, `custom/local-customizations` tracks `origin/custom/local-customizations`, so that is the default source update target unless you pass explicit overrides.
+The safe update workflow is intentionally tied to `custom/local-customizations` by default. Use `--allow-other-branch` only when you intentionally want the same rebase workflow on another branch.
 
 ## Safe update command
 
 From the repository root, run:
 
 ```bash
-pnpm --filter gg-app update:local-fixes
+git fetch --multiple upstream origin --tags --prune
+git switch custom/local-customizations
+pnpm --filter gg-app update:local-fixes -- --check
 ```
 
-That workflow:
+That workflow rebases `custom/local-customizations` on `upstream/main` by default and refuses automatic merge commits.
 
-1. Saves a backup patch and git status under `.gg/local-fixes/backups/`.
-2. Stashes local tracked and untracked work.
-3. Fetches the selected remote and branch.
-4. Fast-forwards when possible, or creates a backup branch and merge-commits the update when committed local fixes are ahead.
-5. Pops the stash to reapply your local fixes.
-6. Refreshes platform-specific dependencies so Windows/WSL optional packages don't block the build.
-7. Runs app and sidecar checks.
-8. Builds a new local-patched installer.
+It:
+
+1. Refuses to start during unresolved conflicts, rebase, merge, or cherry-pick operations.
+2. Saves a backup patch and git status under `.gg/local-fixes/backups/`.
+3. Stashes local tracked and untracked work.
+4. Fetches the selected remote and branch.
+5. Creates a backup branch at the pre-update `HEAD`.
+6. Rebases on the selected target and stops for manual conflict resolution when needed.
+7. Pops the stash to reapply your local work after a successful rebase.
+8. Refreshes platform-specific dependencies so Windows/WSL optional packages don't block the build.
+9. Runs app and sidecar checks when `--check` is passed.
+10. Builds a new local-patched installer unless `--no-build` is passed.
 
 Useful options:
 
 ```bash
-pnpm --filter gg-app update:local-fixes -- --remote origin --branch main
+pnpm --filter gg-app update:local-fixes -- --remote upstream --branch main
 pnpm --filter gg-app update:local-fixes -- --no-install --no-build
 pnpm --filter gg-app update:local-fixes -- --dry-run --no-build
+pnpm --filter gg-app update:local-fixes -- --allow-other-branch --check
 ```
 
 ## If conflicts happen
 
-Conflicts mean the official update touched the same files as your local fixes. Resolve them manually, then run:
+Conflicts mean the official update touched the same files as your local fixes. Resolve them manually, then continue the rebase:
 
 ```bash
+git add <files>
+git rebase --continue
+git stash pop  # only if the script reported stashed local work
 pnpm install --frozen-lockfile
 pnpm --filter gg-app check
 pnpm --filter @kenkaiiii/ggcoder check
 pnpm --filter gg-app build:local-patched
 ```
 
-If you need to recover your previous local edits, use the backup patch path printed by the script.
+To abort and recover instead, run:
+
+```bash
+git rebase --abort
+```
+
+Then use the backup branch or backup patch path printed by the script.
 
 ## Building local-patched installers
 

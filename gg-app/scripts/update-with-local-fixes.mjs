@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -13,15 +13,19 @@ const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 function usage() {
   return `Usage: node gg-app/scripts/update-with-local-fixes.mjs [options]
 
+Rebases custom/local-customizations on the selected upstream target, then reapplies
+local work and optionally checks/builds the patched installer.
+
 Options:
-  --remote <name>   Git remote to fetch from (default: upstream remote, then origin)
-  --branch <name>   Branch to update from (default: selected remote's default branch, then main)
-  --no-install      Skip refreshing platform-specific dependencies
-  --no-build        Skip building the local-patched installer after updates
-  --check           Run TypeScript checks after reapplying local fixes
-  --no-check        Keep TypeScript checks skipped (default)
-  --dry-run         Print the planned workflow without mutating the repository
-  -h, --help        Show this help
+  --remote <name>        Git remote to fetch from (default: upstream, then origin)
+  --branch <name>        Branch to rebase onto (default: main)
+  --allow-other-branch   Allow running outside custom/local-customizations
+  --no-install           Skip refreshing platform-specific dependencies
+  --no-build             Skip building the local-patched installer after updates
+  --check                Run TypeScript checks after reapplying local fixes
+  --no-check             Keep TypeScript checks skipped (default)
+  --dry-run              Print the planned workflow without mutating the repository
+  -h, --help             Show this help
 `;
 }
 
@@ -29,6 +33,7 @@ function parseArgs(args) {
   const options = {
     remote: null,
     branch: null,
+    allowOtherBranch: false,
     install: true,
     build: true,
     check: false,
@@ -37,6 +42,9 @@ function parseArgs(args) {
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
+    if (arg === "--") {
+      continue;
+    }
     if (arg === "--remote") {
       const value = args[i + 1];
       if (!value) throw new Error("--remote requires a value");
@@ -47,6 +55,8 @@ function parseArgs(args) {
       if (!value) throw new Error("--branch requires a value");
       options.branch = value;
       i += 1;
+    } else if (arg === "--allow-other-branch") {
+      options.allowOtherBranch = true;
     } else if (arg === "--no-install") {
       options.install = false;
     } else if (arg === "--no-build") {
@@ -122,10 +132,6 @@ function normalizeLineEndings(text) {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function writeFileLf(filePath, text) {
-  writeFileSync(filePath, normalizeLineEndings(text));
-}
-
 function normalizeFileLf(relativePath, options) {
   if (options.dryRun) {
     console.log(`[dry-run] normalize ${relativePath} to LF line endings`);
@@ -141,228 +147,27 @@ function normalizeFileLf(relativePath, options) {
   console.log(`Normalized ${relativePath} to LF line endings.`);
 }
 
-function isPlainObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+const SAFE_LOCAL_BRANCH = "custom/local-customizations";
+const DEFAULT_REMOTE = "upstream";
+const FALLBACK_REMOTE = "origin";
+const DEFAULT_BRANCH = "main";
+
+function currentBranch() {
+  return capture("git", ["branch", "--show-current"]).stdout.trim();
 }
 
-function stableJson(value) {
-  return JSON.stringify(value);
-}
-
-function orderedUniqueKeys(...objects) {
-  const keys = [];
-  const seen = new Set();
-  for (const object of objects) {
-    if (!isPlainObject(object)) continue;
-    for (const key of Object.keys(object)) {
-      if (seen.has(key)) continue;
-      seen.add(key);
-      keys.push(key);
-    }
-  }
-  return keys;
-}
-
-function mergeJsonValue(base, ours, theirs) {
-  if (isPlainObject(ours) && isPlainObject(theirs)) {
-    const merged = {};
-    for (const key of orderedUniqueKeys(base, theirs, ours)) {
-      const baseValue = isPlainObject(base) ? base[key] : undefined;
-      const ourValue = ours[key];
-      const theirValue = theirs[key];
-      const oursChanged = stableJson(ourValue) !== stableJson(baseValue);
-      const theirsChanged = stableJson(theirValue) !== stableJson(baseValue);
-
-      if (oursChanged && theirsChanged) {
-        merged[key] =
-          stableJson(ourValue) === stableJson(theirValue)
-            ? theirValue
-            : mergeJsonValue(baseValue, ourValue, theirValue);
-      } else if (theirsChanged) {
-        merged[key] = theirValue;
-      } else if (oursChanged) {
-        merged[key] = ourValue;
-      } else if (theirValue !== undefined) {
-        merged[key] = theirValue;
-      } else if (ourValue !== undefined) {
-        merged[key] = ourValue;
-      }
-    }
-    return merged;
+function ensureSafeBranch(options) {
+  if (options.allowOtherBranch) {
+    console.log(`Branch safety override enabled: running outside ${SAFE_LOCAL_BRANCH}.`);
+    return;
   }
 
-  if (theirs !== undefined) return theirs;
-  return ours;
-}
-
-function stagedJson(stage, filePath, options) {
-  const result = capture("git", ["show", `:${stage}:${filePath}`], {
-    ...options,
-    allowFailure: true,
-  });
-  if (result.status !== 0) return null;
-  return JSON.parse(result.stdout);
-}
-
-function unresolvedConflictFiles(options) {
-  const result = capture("git", ["diff", "--name-only", "--diff-filter=U"], {
-    ...options,
-    allowFailure: true,
-  });
-  if (result.status !== 0) return [];
-  return result.stdout
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-}
-
-function localUpdateGitCommitArgs(args) {
-  return [
-    "-c",
-    "user.name=GG Local Update",
-    "-c",
-    "user.email=local-update@ggcoder.local",
-    ...args,
-  ];
-}
-
-// Known safe merge: upstream added root scripts/deps while the local-patched
-// branch added the app:update:local-fixes helper. Keep both maps.
-function tryResolveRootPackageJsonConflict(options) {
-  const conflicts = unresolvedConflictFiles(options);
-  if (conflicts.length !== 1 || conflicts[0] !== "package.json") {
-    return false;
-  }
-
-  const base = stagedJson(1, "package.json", options);
-  const ours = stagedJson(2, "package.json", options);
-  const theirs = stagedJson(3, "package.json", options);
-  if (!base || !ours || !theirs) {
-    return false;
-  }
-
-  console.log(
-    "Auto-resolving package.json by keeping upstream package changes and local update scripts.",
-  );
-  const merged = mergeJsonValue(base, ours, theirs);
-  writeFileLf(join(repoRoot, "package.json"), `${JSON.stringify(merged, null, 2)}\n`);
-  requireSuccess(run("git", ["add", "package.json"], options), "Failed to stage package.json.");
-  requireSuccess(
-    run("git", localUpdateGitCommitArgs(["commit", "--no-edit"]), options),
-    "Failed to finish the auto-resolved update merge.",
-  );
-  return true;
-}
-
-function resolvedAgentProjectsBody() {
-  return `    let sidecar_projects = match (port_for(&webview), session_for(&webview)) {
-        (Some(port), Some(gg_sid)) => match client
-            .get(format!("{}/projects", sidecar_base(port)))
-            .header("x-gg-session", &gg_sid)
-            .send()
-            .await
-            .and_then(|res| res.error_for_status())
-        {
-            Ok(res) => res
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|body| body.get("projects").and_then(|v| v.as_array()).cloned())
-                .unwrap_or_default(),
-            Err(_) => Vec::new(),
-        },
-        _ => Vec::new(),
-    };
-    Ok(serde_json::json!({ "projects": merge_project_lists(sidecar_projects) }))`;
-}
-
-// Known safe stash-pop conflict: upstream added daemon session routing while a
-// local fix made project listing tolerant of a slow/crashed sidecar.
-function tryResolveAgentProjectsConflict(options) {
-  const conflicts = unresolvedConflictFiles(options);
-  if (conflicts.length !== 1 || conflicts[0] !== "gg-app/src-tauri/src/lib.rs") {
-    return false;
-  }
-
-  const filePath = join(repoRoot, "gg-app/src-tauri/src/lib.rs");
-  const text = readFileSync(filePath, "utf8");
-  const functionStart = text.indexOf("async fn agent_projects(");
-  if (functionStart < 0) return false;
-
-  const markerStart = text.indexOf("<<<<<<< Updated upstream", functionStart);
-  const separator = text.indexOf("=======", markerStart);
-  const markerEnd = text.indexOf(">>>>>>> Stashed changes", separator);
-  if (markerStart < 0 || separator < 0 || markerEnd < 0) return false;
-
-  const conflictText = text.slice(markerStart, markerEnd);
-  if (!conflictText.includes("x-gg-session") || !conflictText.includes("sidecar_projects")) {
-    return false;
-  }
-
-  const afterMarkerLine = text.indexOf("\n", markerEnd);
-  if (afterMarkerLine < 0) return false;
-
-  const resolved = `${text.slice(0, markerStart)}${resolvedAgentProjectsBody()}${text.slice(
-    afterMarkerLine,
-  )}`;
-  writeFileLf(filePath, resolved);
-  requireSuccess(
-    run("git", ["add", "gg-app/src-tauri/src/lib.rs"], options),
-    "Failed to mark the gg-app Rust project-list conflict as resolved.",
-  );
-  requireSuccess(
-    run("git", ["restore", "--staged", "gg-app/src-tauri/src/lib.rs"], options),
-    "Failed to leave the resolved gg-app Rust project-list change unstaged.",
-  );
-  console.log(
-    "Auto-resolved gg-app/src-tauri/src/lib.rs by keeping upstream session routing and local project-list fallback.",
-  );
-  return true;
-}
-
-function stashRefForMessage(stashMessage, options) {
-  const result = capture("git", ["stash", "list", "--format=%gd%x00%s"], {
-    ...options,
-    allowFailure: true,
-  });
-  if (result.status !== 0) return null;
-
-  for (const line of result.stdout.split("\n")) {
-    const [ref, subject] = line.split("\0");
-    if (ref && subject?.endsWith(`: ${stashMessage}`)) {
-      return ref;
-    }
-  }
-  return null;
-}
-
-function dropAutoResolvedStash(stashMessage, options) {
-  const stashRef = stashRefForMessage(stashMessage, options);
-  if (!stashRef) {
+  const branch = currentBranch();
+  if (branch !== SAFE_LOCAL_BRANCH) {
     throw new Error(
-      "Auto-resolved stash was applied, but its matching stash entry was not found.",
+      `Refusing to update branch ${branch || "(detached HEAD)"}. Switch to ${SAFE_LOCAL_BRANCH}, or pass --allow-other-branch if you intentionally want to rebase this branch.`,
     );
   }
-
-  requireSuccess(
-    run("git", ["stash", "drop", stashRef], options),
-    "Auto-resolved stash was applied, but could not drop its matching stash entry.",
-  );
-}
-
-function currentUpstream() {
-  const result = capture("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], {
-    allowFailure: true,
-  });
-  const upstream = result.stdout.trim();
-  if (result.status !== 0 || !upstream || !upstream.includes("/")) {
-    return null;
-  }
-  const slash = upstream.indexOf("/");
-  return {
-    remote: upstream.slice(0, slash),
-    branch: upstream.slice(slash + 1),
-  };
 }
 
 function gitRemotes() {
@@ -374,30 +179,19 @@ function gitRemotes() {
     .filter(Boolean);
 }
 
-function remoteDefaultBranch(remote) {
-  const result = capture("git", ["symbolic-ref", `refs/remotes/${remote}/HEAD`], {
-    allowFailure: true,
-  });
-  const ref = result.stdout.trim();
-  const prefix = `refs/remotes/${remote}/`;
-  if (result.status !== 0 || !ref.startsWith(prefix)) return null;
-  return ref.slice(prefix.length);
-}
-
 function defaultUpdateTarget() {
   const remotes = gitRemotes();
-  const upstream = currentUpstream();
-  const remote = remotes.includes("upstream")
-    ? "upstream"
-    : remotes.includes("origin")
-      ? "origin"
-      : upstream?.remote;
+  const remote = remotes.includes(DEFAULT_REMOTE)
+    ? DEFAULT_REMOTE
+    : remotes.includes(FALLBACK_REMOTE)
+      ? FALLBACK_REMOTE
+      : null;
   if (!remote) {
     throw new Error("No git remote found. Pass --remote and --branch to choose an update target.");
   }
   return {
     remote,
-    branch: remoteDefaultBranch(remote) ?? "main",
+    branch: DEFAULT_BRANCH,
   };
 }
 
@@ -406,12 +200,41 @@ function hasUnresolvedConflicts() {
   return result.stdout.trim().length > 0;
 }
 
-function mergeInProgress() {
+function resolveGitPath(gitPath) {
+  return isAbsolute(gitPath) ? gitPath : join(repoRoot, gitPath);
+}
+
+function gitPathExists(name) {
+  const result = capture("git", ["rev-parse", "--git-path", name], { allowFailure: true });
+  if (result.status !== 0) return false;
+  const path = result.stdout.trim();
+  return path ? existsSync(resolveGitPath(path)) : false;
+}
+
+function rebaseInProgress() {
   return (
-    capture("git", ["rev-parse", "--verify", "MERGE_HEAD"], {
+    gitPathExists("rebase-merge") ||
+    gitPathExists("rebase-apply") ||
+    capture("git", ["rev-parse", "--verify", "REBASE_HEAD"], {
       allowFailure: true,
     }).status === 0
   );
+}
+
+function operationInProgress() {
+  if (rebaseInProgress()) return "rebase";
+  if (
+    capture("git", ["rev-parse", "--verify", "MERGE_HEAD"], { allowFailure: true }).status === 0
+  ) {
+    return "merge";
+  }
+  if (
+    capture("git", ["rev-parse", "--verify", "CHERRY_PICK_HEAD"], { allowFailure: true }).status ===
+    0
+  ) {
+    return "cherry-pick";
+  }
+  return null;
 }
 
 function gitStatusPorcelain() {
@@ -432,31 +255,13 @@ function createBackupBranch(options) {
   return branchName;
 }
 
-function mergeUpdateTarget(target, options) {
-  const fastForward = run("git", ["merge", "--ff-only", target], {
-    ...options,
-    capture: true,
-  });
-  if (fastForward.status === 0) {
-    if (fastForward.stdout.trim()) console.log(fastForward.stdout.trim());
-    return;
-  }
-
-  console.log(
-    `Fast-forward is not possible; merging ${target} so committed local fixes stay on top of the update.`,
-  );
+function rebaseUpdateTarget(target, options, backupPatchPath) {
   const backupBranch = createBackupBranch(options);
-  const merge = run(
-    "git",
-    localUpdateGitCommitArgs(["merge", "--no-edit", "--no-ff", target]),
-    options,
-  );
-  if (merge.status === 0) return;
-
-  if (tryResolveRootPackageJsonConflict(options)) return;
+  const rebase = run("git", ["rebase", target], options);
+  if (rebase.status === 0) return backupBranch;
 
   throw new Error(
-    `Automatic merge from ${target} failed. Resolve conflicts, then run checks/build. Your pre-update HEAD is saved at ${backupBranch}.`,
+    `Rebase onto ${target} stopped for manual resolution. Resolve conflicts, run \`git add <files>\`, then \`git rebase --continue\`. If the script reported stashed local work, run \`git stash pop\` after the rebase completes. To recover instead, run \`git rebase --abort\`, switch back to the printed backup branch (${backupBranch}), or apply the backup patch at ${backupPatchPath}.`,
   );
 }
 
@@ -503,18 +308,26 @@ async function main() {
 
   const defaults = defaultUpdateTarget();
   const remote = options.remote ?? defaults.remote;
-  const branch = options.branch ?? remoteDefaultBranch(remote) ?? defaults.branch;
+  const branch = options.branch ?? defaults.branch;
   const target = `${remote}/${branch}`;
 
-  console.log("GG local-fixes update workflow");
+  console.log("GG local-fixes rebase workflow");
   console.log(`Repository: ${rootResult.stdout.trim()}`);
   console.log(`Update target: ${target}`);
+  console.log(`Protected branch: ${SAFE_LOCAL_BRANCH}`);
   console.log(`Dependency refresh: ${options.install ? "enabled" : "skipped"}`);
   console.log(`Checks: ${options.check ? "enabled" : "skipped"}`);
   console.log(`Build: ${options.build ? "enabled" : "skipped"}`);
 
+  ensureSafeBranch(options);
+  const inProgress = operationInProgress();
+  if (inProgress) {
+    throw new Error(
+      `A git ${inProgress} is already in progress. Finish or abort it before updating.`,
+    );
+  }
   if (hasUnresolvedConflicts()) {
-    throw new Error("Unresolved merge conflicts are present. Resolve them before updating.");
+    throw new Error("Unresolved conflicts are present. Resolve them before updating.");
   }
 
   const statusText = gitStatusPorcelain();
@@ -550,15 +363,19 @@ async function main() {
 
   try {
     requireSuccess(
-      run("git", ["fetch", remote, branch], options),
+      run(
+        "git",
+        ["fetch", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
+        options,
+      ),
       `Failed to fetch ${remote} ${branch}. Check the remote/branch names and network connection.`,
     );
-    mergeUpdateTarget(target, options);
+    rebaseUpdateTarget(target, options, backupPatchPath);
   } catch (error) {
     if (hasLocalWork) {
-      if (mergeInProgress() || hasUnresolvedConflicts()) {
+      if (rebaseInProgress() || hasUnresolvedConflicts()) {
         console.error(
-          `Update stopped during an automatic merge. Your local work is still stashed as: ${stashMessage}`,
+          `Update stopped during a rebase. Your local work is still stashed as: ${stashMessage}`,
         );
         console.error(`Your tracked diff backup is available at: ${backupPatchPath}`);
       } else {
@@ -577,12 +394,9 @@ async function main() {
   if (hasLocalWork) {
     const popResult = run("git", ["stash", "pop"], options);
     if (popResult.status !== 0) {
-      if (!tryResolveAgentProjectsConflict(options)) {
-        throw new Error(
-          `Local fixes conflicted while applying the stash. Resolve conflicts manually, then use the backup patch if needed: ${backupPatchPath}`,
-        );
-      }
-      dropAutoResolvedStash(stashMessage, options);
+      throw new Error(
+        `Local work conflicted while applying the stash. Resolve conflicts manually; git should keep the stash for recovery, and the backup patch is available if needed: ${backupPatchPath}`,
+      );
     }
   }
 
@@ -620,7 +434,7 @@ async function main() {
     );
   }
 
-  console.log("Local fixes update workflow completed.");
+  console.log("Local fixes rebase workflow completed.");
 }
 
 main().catch((error) => {

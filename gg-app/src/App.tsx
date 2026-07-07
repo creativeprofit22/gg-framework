@@ -87,7 +87,7 @@ import { Markdown, PromptSendProvider } from "./Markdown";
 import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { recoverPromptLabel } from "./prompt-labels";
-import { appBuildInfo } from "./build-info";
+import { formatBuildIdentity } from "./build-info";
 import { playSound } from "./sounds";
 import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
 import { Paperclip, AtSign } from "lucide-react";
@@ -119,6 +119,7 @@ const INPUT_PLACEHOLDER_INTERVAL_MS = 12_000;
 const PLACEHOLDER_SHUFFLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const PLACEHOLDER_SHUFFLE_FRAMES = 18;
 const PLACEHOLDER_SHUFFLE_FRAME_MS = 24;
+const BUILD_IDENTITY = formatBuildIdentity();
 
 // Autopilot Ken's "all clear" line, rotated so the auto-review loop doesn't
 // repeat the exact same sentence every time GG Coder's work checks out.
@@ -2252,8 +2253,8 @@ function App(): React.ReactElement {
         ) : (
           <>
             <span className="footer-left footer-reveal" style={{ fontFamily: "var(--mono)" }}>
-              {appBuildInfo.customLabel && (
-                <span className="footer-custom-build">{`◆ ${appBuildInfo.customLabel}`}</span>
+              {BUILD_IDENTITY && (
+                <span className="footer-custom-build">{`◆ ${BUILD_IDENTITY}`}</span>
               )}
               {state?.cwd && (
                 <span className="footer-cwd" style={{ color: theme.textDim }}>
@@ -2262,22 +2263,21 @@ function App(): React.ReactElement {
               )}
               {state?.gitBranch && (
                 <>
-                  {(appBuildInfo.customLabel || state?.cwd) && <FooterSep />}
+                  {(BUILD_IDENTITY || state?.cwd) && <FooterSep />}
                   <span style={{ color: theme.secondary }}>{`\u2387 ${state.gitBranch}`}</span>
                 </>
               )}
               {runningTaskCount > 0 && (
                 <>
-                  {(appBuildInfo.customLabel || state?.cwd || state?.gitBranch) && <FooterSep />}
+                  {(BUILD_IDENTITY || state?.cwd || state?.gitBranch) && <FooterSep />}
                   <BackgroundTasksButton tasks={tasks} />
                 </>
               )}
               {state?.planMode && (
                 <>
-                  {(appBuildInfo.customLabel ||
-                    state?.cwd ||
-                    state?.gitBranch ||
-                    runningTaskCount > 0) && <FooterSep />}
+                  {(BUILD_IDENTITY || state?.cwd || state?.gitBranch || runningTaskCount > 0) && (
+                    <FooterSep />
+                  )}
                   <span className="footer-plan">
                     <ShimmerText base={theme.secondary} bright="#ddd6fe">
                       {"\u25C6 plan mode"}

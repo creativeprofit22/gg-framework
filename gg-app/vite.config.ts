@@ -6,14 +6,18 @@ import react from "@vitejs/plugin-react";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(configDir, "..");
-const customBuildLabel = "Custom fork";
+const customBuildLabel = "GG Coder Local Fork";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 function git(args: string[]): string | null {
   try {
-    return execFileSync("git", args, { cwd: sourceRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return execFileSync("git", args, {
+      cwd: sourceRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
   } catch {
     return null;
   }
@@ -22,22 +26,27 @@ function git(args: string[]): string | null {
 function isCustomForkCheckout(): boolean {
   const origin = git(["config", "--get", "remote.origin.url"]);
   const branch = git(["branch", "--show-current"]);
-  return Boolean(origin?.includes("creativeprofit22/gg-framework") || branch === "custom/local-customizations");
+  return Boolean(
+    origin?.includes("creativeprofit22/gg-framework") || branch === "custom/local-customizations",
+  );
 }
 
 function buildEnvDefines(): Record<string, string> {
   // @ts-expect-error process is a nodejs global
   const env = process.env;
   const detected = isCustomForkCheckout();
+  const gitShortSha = env.VITE_GG_GIT_SHA ?? git(["rev-parse", "--short", "HEAD"]);
   const localPatched = env.VITE_GG_LOCAL_PATCHED ?? (detected ? "1" : undefined);
   const envSourceRoot = env.VITE_GG_SOURCE_ROOT ?? (detected ? sourceRoot : undefined);
   const label = env.VITE_GG_CUSTOM_BUILD_LABEL ?? (detected ? customBuildLabel : undefined);
+  const shortSha = env.VITE_GG_GIT_SHA ?? (detected ? gitShortSha : undefined);
 
   return Object.fromEntries(
     Object.entries({
       "import.meta.env.VITE_GG_LOCAL_PATCHED": localPatched,
       "import.meta.env.VITE_GG_SOURCE_ROOT": envSourceRoot,
       "import.meta.env.VITE_GG_CUSTOM_BUILD_LABEL": label,
+      "import.meta.env.VITE_GG_GIT_SHA": shortSha,
     })
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => [key, JSON.stringify(value)]),

@@ -20,11 +20,18 @@ export interface UseProjectNotesOptions {
   repository?: NotesRepository;
   eventTarget?: StorageEventTarget;
   clock?: () => string;
+  idFactory?: () => string;
 }
 
 export interface UseProjectNotesResult {
   value: string;
   onChange(value: string): void;
+  document: NotesDocumentV2;
+  createTask(text: string): void;
+  editTask(id: string, text: string): void;
+  toggleTask(id: string): void;
+  archiveTask(id: string): void;
+  changeHandoff(text: string): void;
   diagnostics: {
     load: NotesLoadResult | null;
     save: NotesSaveResult | null;
@@ -38,6 +45,10 @@ export function useProjectNotes(
   options: UseProjectNotesOptions = {},
 ): UseProjectNotesResult {
   const clock = options.clock ?? systemClock;
+  const idFactory = useMemo(
+    () => options.idFactory ?? (() => crypto.randomUUID()),
+    [options.idFactory],
+  );
   const storage = useMemo(() => options.storage ?? browserStorage(), [options.storage]);
   const repository = useMemo(
     () => options.repository ?? createNotesRepository(storage, clock),
@@ -115,24 +126,135 @@ export function useProjectNotes(
     return () => eventTarget.removeEventListener("storage", onStorage);
   }, [applyLoad, cwd, eventTarget]);
 
-  const onChange = useCallback(
-    (value: string) => {
-      if (cwd === null || activeCwdRef.current !== cwd) return;
-      const nextDocument = {
-        ...documentRef.current,
-        reference: value,
-        updatedAt: clock(),
-      };
+  const commitDocument = useCallback(
+    (projectCwd: string, update: (current: NotesDocumentV2) => NotesDocumentV2 | null) => {
+      if (activeCwdRef.current !== projectCwd) return;
+      const nextDocument = update(documentRef.current);
+      if (nextDocument === null || activeCwdRef.current !== projectCwd) return;
       documentRef.current = nextDocument;
       setDocument(nextDocument);
-      setSaveDiagnostics(repository.save(cwd, nextDocument));
+      setSaveDiagnostics(repository.save(projectCwd, nextDocument));
     },
-    [clock, cwd, repository],
+    [repository],
+  );
+
+  const onChange = useCallback(
+    (value: string) => {
+      if (cwd === null) return;
+      commitDocument(cwd, (current) => ({ ...current, reference: value, updatedAt: clock() }));
+    },
+    [clock, commitDocument, cwd],
+  );
+
+  const createTask = useCallback(
+    (text: string) => {
+      if (cwd === null) return;
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      commitDocument(cwd, (current) => {
+        const now = clock();
+        return {
+          ...current,
+          tasks: [
+            ...current.tasks,
+            {
+              id: idFactory(),
+              text: trimmed,
+              status: "todo",
+              createdAt: now,
+              updatedAt: now,
+              completedAt: null,
+              archivedAt: null,
+            },
+          ],
+          updatedAt: now,
+        };
+      });
+    },
+    [clock, commitDocument, cwd, idFactory],
+  );
+
+  const editTask = useCallback(
+    (id: string, text: string) => {
+      if (cwd === null) return;
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      commitDocument(cwd, (current) => {
+        const index = current.tasks.findIndex((task) => task.id === id);
+        const task = current.tasks[index];
+        if (!task || task.archivedAt !== null || task.text === trimmed) return null;
+        const now = clock();
+        const tasks = [...current.tasks];
+        tasks[index] = { ...task, text: trimmed, updatedAt: now };
+        return { ...current, tasks, updatedAt: now };
+      });
+    },
+    [clock, commitDocument, cwd],
+  );
+
+  const toggleTask = useCallback(
+    (id: string) => {
+      if (cwd === null) return;
+      commitDocument(cwd, (current) => {
+        const index = current.tasks.findIndex((task) => task.id === id);
+        const task = current.tasks[index];
+        if (!task) return null;
+        const now = clock();
+        const done = task.status === "todo";
+        const tasks = [...current.tasks];
+        tasks[index] = {
+          ...task,
+          status: done ? "done" : "todo",
+          completedAt: done ? now : null,
+          updatedAt: now,
+        };
+        return { ...current, tasks, updatedAt: now };
+      });
+    },
+    [clock, commitDocument, cwd],
+  );
+
+  const archiveTask = useCallback(
+    (id: string) => {
+      if (cwd === null) return;
+      commitDocument(cwd, (current) => {
+        const index = current.tasks.findIndex((task) => task.id === id);
+        const task = current.tasks[index];
+        if (!task || task.archivedAt !== null) return null;
+        const now = clock();
+        const tasks = [...current.tasks];
+        tasks[index] = { ...task, archivedAt: now, updatedAt: now };
+        return { ...current, tasks, updatedAt: now };
+      });
+    },
+    [clock, commitDocument, cwd],
+  );
+
+  const changeHandoff = useCallback(
+    (text: string) => {
+      if (cwd === null) return;
+      commitDocument(cwd, (current) => {
+        if (current.handoff.text === text) return null;
+        const now = clock();
+        return {
+          ...current,
+          handoff: { text, updatedAt: now, readAt: null },
+          updatedAt: now,
+        };
+      });
+    },
+    [clock, commitDocument, cwd],
   );
 
   return {
     value: document.reference,
     onChange,
+    document,
+    createTask,
+    editTask,
+    toggleTask,
+    archiveTask,
+    changeHandoff,
     diagnostics: { load: loadDiagnostics, save: saveDiagnostics },
   };
 }

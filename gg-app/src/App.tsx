@@ -464,9 +464,18 @@ function App(): React.ReactElement {
   // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
   const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
   const [showTasks, setShowTasks] = useState(false);
-  // Free-form per-project notes, persisted through the versioned repository.
+  // Per-project Notes command center, persisted through the versioned repository.
   const [showNotes, setShowNotes] = useState(false);
-  const { value: notes, onChange: handleNotesChange } = useProjectNotes(state?.cwd ?? null);
+  const {
+    value: notes,
+    onChange: handleNotesChange,
+    document: notesDocument,
+    createTask: createNotesTask,
+    editTask: editNotesTask,
+    toggleTask: toggleNotesTask,
+    archiveTask: archiveNotesTask,
+    changeHandoff: changeNotesHandoff,
+  } = useProjectNotes(state?.cwd ?? null);
   // Every window picks a project before connecting — on app load and on each new
   // window. The picker re-points this window's agent at the chosen cwd/session.
   const [needsProject, setNeedsProject] = useState(true);
@@ -2452,6 +2461,13 @@ function App(): React.ReactElement {
         <NotesModal
           value={notes}
           onChange={handleNotesChange}
+          tasks={notesDocument.tasks}
+          handoff={notesDocument.handoff.text}
+          onCreateTask={createNotesTask}
+          onEditTask={editNotesTask}
+          onToggleTask={toggleNotesTask}
+          onArchiveTask={archiveNotesTask}
+          onChangeHandoff={changeNotesHandoff}
           onClose={() => setShowNotes(false)}
         />
       )}

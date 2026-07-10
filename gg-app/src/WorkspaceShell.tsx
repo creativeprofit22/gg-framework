@@ -35,6 +35,7 @@ import {
   resolveWorkspaceLayoutTargets,
   saveWorkspaceLayout,
   type WorkspaceLayout,
+  type WorkspacePaneId,
 } from "./workspace-layout";
 
 const PANE_IDS = [PRIMARY_PANE_ID, SECONDARY_PANE_ID] as const;
@@ -87,7 +88,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   );
   const [layoutReady, setLayoutReady] = useState(!layoutManaged);
   const [rejectedLayoutChanged, setRejectedLayoutChanged] = useState(false);
-  const [focusedPaneId, setFocusedPaneId] = useState<string>(PRIMARY_PANE_ID);
+  const [focusedPaneId, setFocusedPaneId] = useState<WorkspacePaneId>(
+    loadedLayout.layout.focusedPaneId,
+  );
   const [secondaryOpen, setSecondaryOpen] = useState(loadedLayout.layout.secondaryOpen);
   const [confirmSecondaryClose, setConfirmSecondaryClose] = useState(false);
   const focusedPaneIdRef = useRef(focusedPaneId);
@@ -105,8 +108,10 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const appUpdate = useAppUpdate();
   const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress();
   const focusPane = useCallback((paneId: string): void => {
-    focusedPaneIdRef.current = paneId;
-    setFocusedPaneId(paneId);
+    const resolvedPaneId: WorkspacePaneId =
+      paneId === SECONDARY_PANE_ID ? SECONDARY_PANE_ID : PRIMARY_PANE_ID;
+    focusedPaneIdRef.current = resolvedPaneId;
+    setFocusedPaneId(resolvedPaneId);
   }, []);
   const markLayoutChanged = useCallback((): void => setRejectedLayoutChanged(true), []);
 
@@ -157,6 +162,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         setPaneTargets(resolved.panes);
         setPrimaryPaneRatio(resolved.splitRatio);
         setSecondaryOpen(resolved.secondaryOpen);
+        focusPane(resolved.focusedPaneId);
         setLayoutReady(true);
       })
       .catch(() => {
@@ -164,12 +170,13 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         setPaneTargets(loadedLayout.layout.panes);
         setPrimaryPaneRatio(loadedLayout.layout.splitRatio);
         setSecondaryOpen(loadedLayout.layout.secondaryOpen);
+        focusPane(loadedLayout.layout.focusedPaneId);
         setLayoutReady(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [layoutManaged, loadedLayout]);
+  }, [focusPane, layoutManaged, loadedLayout]);
 
   useEffect(() => {
     if (!layoutReady || !snapshots[PRIMARY_PANE_ID]?.restoreChecked) return;
@@ -179,9 +186,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       version: WORKSPACE_LAYOUT_VERSION,
       splitRatio: primaryPaneRatio,
       secondaryOpen,
+      focusedPaneId,
       panes: paneTargets,
     });
   }, [
+    focusedPaneId,
     layoutReady,
     loadedLayout.status,
     paneTargets,

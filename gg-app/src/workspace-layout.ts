@@ -1,4 +1,4 @@
-export const WORKSPACE_LAYOUT_VERSION = 2;
+export const WORKSPACE_LAYOUT_VERSION = 3;
 export const DEFAULT_SPLIT_RATIO = 50;
 export const MIN_SPLIT_RATIO = 10;
 export const MAX_SPLIT_RATIO = 90;
@@ -14,6 +14,7 @@ export interface WorkspaceLayout {
   version: typeof WORKSPACE_LAYOUT_VERSION;
   splitRatio: number;
   secondaryOpen: boolean;
+  focusedPaneId: WorkspacePaneId;
   panes: Record<WorkspacePaneId, WorkspacePaneTarget | null>;
 }
 
@@ -57,6 +58,7 @@ export function defaultWorkspaceLayout(): WorkspaceLayout {
     version: WORKSPACE_LAYOUT_VERSION,
     splitRatio: DEFAULT_SPLIT_RATIO,
     secondaryOpen: true,
+    focusedPaneId: "primary",
     panes: { primary: null, secondary: null },
   };
 }
@@ -89,6 +91,10 @@ function parseTarget(
   };
 }
 
+function normalizeFocusedPaneId(value: unknown, secondaryOpen: boolean): WorkspacePaneId {
+  return value === "secondary" && secondaryOpen ? "secondary" : "primary";
+}
+
 function parseCurrent(value: Record<string, unknown>): WorkspaceLayout | null {
   if (typeof value.panes !== "object" || value.panes === null) return null;
   if (typeof value.secondaryOpen !== "boolean") return null;
@@ -100,8 +106,14 @@ function parseCurrent(value: Record<string, unknown>): WorkspaceLayout | null {
     version: WORKSPACE_LAYOUT_VERSION,
     splitRatio: clampStoredSplitRatio(value.splitRatio),
     secondaryOpen: value.secondaryOpen,
+    focusedPaneId: normalizeFocusedPaneId(value.focusedPaneId, value.secondaryOpen),
     panes: { primary, secondary },
   };
+}
+
+function migrateVersionTwo(value: Record<string, unknown>): WorkspaceLayout | null {
+  const layout = parseCurrent(value);
+  return layout ? { ...layout, focusedPaneId: "primary" } : null;
 }
 
 function migrateVersionOne(value: Record<string, unknown>): WorkspaceLayout | null {
@@ -114,6 +126,7 @@ function migrateVersionOne(value: Record<string, unknown>): WorkspaceLayout | nu
     version: WORKSPACE_LAYOUT_VERSION,
     splitRatio: clampStoredSplitRatio(value.splitRatio),
     secondaryOpen: true,
+    focusedPaneId: "primary",
     panes: { primary, secondary },
   };
 }
@@ -126,6 +139,7 @@ function migrateLegacy(value: LegacyWorkspaceLayout): WorkspaceLayout | null {
     version: WORKSPACE_LAYOUT_VERSION,
     splitRatio: clampStoredSplitRatio(value.ratio),
     secondaryOpen: true,
+    focusedPaneId: "primary",
     panes: { primary, secondary },
   };
 }
@@ -146,6 +160,12 @@ export function parseWorkspaceLayout(raw: string): WorkspaceLayoutLoadResult {
     const layout = parseCurrent(record);
     return layout
       ? { layout, status: "valid" }
+      : { layout: defaultWorkspaceLayout(), status: "corrupt" };
+  }
+  if (record.version === 2) {
+    const layout = migrateVersionTwo(record);
+    return layout
+      ? { layout, status: "migrated" }
       : { layout: defaultWorkspaceLayout(), status: "corrupt" };
   }
   if (record.version === 1) {
@@ -196,7 +216,11 @@ export function saveWorkspaceLayout(
   layout: WorkspaceLayout,
 ): boolean {
   try {
-    storage.setItem(workspaceLayoutKey(windowLabel), JSON.stringify(layout));
+    const normalizedLayout = {
+      ...layout,
+      focusedPaneId: normalizeFocusedPaneId(layout.focusedPaneId, layout.secondaryOpen),
+    };
+    storage.setItem(workspaceLayoutKey(windowLabel), JSON.stringify(normalizedLayout));
     return true;
   } catch {
     return false;
@@ -224,5 +248,9 @@ export async function resolveWorkspaceLayoutTargets(
     }),
   );
 
-  return { ...layout, panes: Object.fromEntries(entries) as WorkspaceLayout["panes"] };
+  return {
+    ...layout,
+    focusedPaneId: normalizeFocusedPaneId(layout.focusedPaneId, layout.secondaryOpen),
+    panes: Object.fromEntries(entries) as WorkspaceLayout["panes"],
+  };
 }

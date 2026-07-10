@@ -195,6 +195,37 @@ describe("WorkspaceShell pane routing", () => {
     await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/primary"));
   });
 
+  it("restores secondary focus, title, and Notes after target hydration without remounting panes", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 3,
+        splitRatio: 58,
+        secondaryOpen: true,
+        focusedPaneId: "secondary",
+        panes: {
+          primary: { cwd: "/saved/a", sessionPath: "/sessions/a.jsonl" },
+          secondary: { cwd: "/saved/b", sessionPath: "/sessions/b.jsonl" },
+        },
+      }),
+    );
+    const mounts = { primary: vi.fn(), secondary: vi.fn() };
+    function MountCountingPane(props: AgentPaneProps): React.ReactElement {
+      useEffect(() => mounts[props.kind](), [props.kind]);
+      return <FakePane {...props} />;
+    }
+
+    render(<WorkspaceShell renderPane={(props) => <MountCountingPane {...props} />} />);
+
+    expect(await screen.findByTestId("pane-secondary")).toBeTruthy();
+    expect(screen.getByTestId("pane-primary").dataset.focused).toBe("false");
+    expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("true");
+    await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/secondary"));
+    await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("secondary"));
+    expect(mounts.primary).toHaveBeenCalledTimes(1);
+    expect(mounts.secondary).toHaveBeenCalledTimes(1);
+  });
+
   it("moves one focus by pointer, focus, and Ctrl/Cmd+1/2 and gives Notes the focused cwd", async () => {
     render(<WorkspaceShell renderPane={renderPane} />);
     const primary = screen.getByRole("textbox", { name: "primary input" });
@@ -263,20 +294,29 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
     expect(document.querySelector(".workspace-grid")?.getAttribute("data-pane-count")).toBe("1");
   });
 
-  it("persists one-pane mode across restart and reopens into project selection", async () => {
+  it("persists primary focus in one-pane mode and restores it across restart", async () => {
     const first = render(<WorkspaceShell renderPane={renderPane} />);
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+    expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
 
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
-      expect(saved).toMatchObject({ version: 2, secondaryOpen: false });
+      expect(saved).toMatchObject({
+        version: 3,
+        secondaryOpen: false,
+        focusedPaneId: "primary",
+      });
       expect(saved.panes.secondary).toBeNull();
     });
     first.unmount();
 
     render(<WorkspaceShell renderPane={renderPane} />);
-    await screen.findByTestId("pane-primary");
+    const primary = await screen.findByTestId("pane-primary");
+    expect(primary.dataset.focused).toBe("true");
     expect(screen.queryByTestId("pane-secondary")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/primary"));
+    await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("primary"));
 
     fireEvent.click(screen.getByRole("button", { name: "Open secondary pane" }));
     const secondary = await screen.findByTestId("pane-secondary");
@@ -346,6 +386,49 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
 });
 
 describe("WorkspaceShell layout recovery", () => {
+  it.each([
+    ["absent", undefined],
+    ["malformed", 42],
+    ["unknown", "tertiary"],
+  ])("falls back to primary focus for %s persisted focus", async (_label, focusedPaneId) => {
+    const record: Record<string, unknown> = {
+      version: 3,
+      splitRatio: 50,
+      secondaryOpen: true,
+      focusedPaneId,
+      panes: {
+        primary: { cwd: "/saved/a", sessionPath: null },
+        secondary: { cwd: "/saved/b", sessionPath: null },
+      },
+    };
+    if (focusedPaneId === undefined) delete record.focusedPaneId;
+    localStorage.setItem("gg-workspace-layout:main", JSON.stringify(record));
+
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect((await screen.findByTestId("pane-primary")).dataset.focused).toBe("true");
+    expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("false");
+    await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/primary"));
+  });
+
+  it("falls back to one focused primary pane for stale closed-secondary focus", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 3,
+        splitRatio: 50,
+        secondaryOpen: false,
+        focusedPaneId: "secondary",
+        panes: { primary: { cwd: "/saved/a", sessionPath: null }, secondary: null },
+      }),
+    );
+
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect((await screen.findByTestId("pane-primary")).dataset.focused).toBe("true");
+    expect(screen.queryByTestId("pane-secondary")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/primary"));
+  });
   it.each([
     ["malformed", "not-json"],
     ["future", JSON.stringify({ version: 99, panes: {} })],

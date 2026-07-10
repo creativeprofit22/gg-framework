@@ -34,9 +34,10 @@ describe("workspace layout storage", () => {
 
     expect(result.status).toBe("migrated");
     expect(result.layout).toEqual({
-      version: 2,
+      version: 3,
       splitRatio: 90,
       secondaryOpen: true,
+      focusedPaneId: "primary",
       panes: {
         primary: target("/project/a"),
         secondary: target("/project/b", "/sessions/b.jsonl"),
@@ -94,18 +95,90 @@ describe("workspace layout storage", () => {
 
     expect(result.status).toBe("migrated");
     expect(result.layout.splitRatio).toBe(10);
+    expect(result.layout.focusedPaneId).toBe("primary");
     expect(result.layout.panes.secondary?.cwd).toBe("/project/b");
+  });
+
+  it("migrates v2 records with primary focus while preserving pane state", () => {
+    const result = parseWorkspaceLayout(
+      JSON.stringify({
+        version: 2,
+        splitRatio: 63,
+        secondaryOpen: false,
+        panes: {
+          primary: target("/project/a", "/sessions/a.jsonl"),
+          secondary: target("/project/b", "/sessions/b.jsonl"),
+        },
+      }),
+    );
+
+    expect(result).toEqual({
+      status: "migrated",
+      layout: {
+        version: 3,
+        splitRatio: 63,
+        secondaryOpen: false,
+        focusedPaneId: "primary",
+        panes: {
+          primary: target("/project/a", "/sessions/a.jsonl"),
+          secondary: target("/project/b", "/sessions/b.jsonl"),
+        },
+      },
+    });
+  });
+
+  it("restores valid secondary focus from v3", () => {
+    const parsed = parseWorkspaceLayout(JSON.stringify(layout({ focusedPaneId: "secondary" })));
+
+    expect(parsed.status).toBe("valid");
+    expect(parsed.layout.focusedPaneId).toBe("secondary");
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["non-string", 42],
+    ["unknown", "tertiary"],
+  ])(
+    "normalizes %s v3 focus to primary without rejecting pane targets",
+    (_label, focusedPaneId) => {
+      const record: Record<string, unknown> = { ...layout(), focusedPaneId };
+      if (focusedPaneId === undefined) delete record.focusedPaneId;
+
+      const parsed = parseWorkspaceLayout(JSON.stringify(record));
+
+      expect(parsed.status).toBe("valid");
+      expect(parsed.layout.focusedPaneId).toBe("primary");
+      expect(parsed.layout.panes.primary).toEqual(target("/project/a", "/sessions/a.jsonl"));
+    },
+  );
+
+  it("normalizes secondary focus to primary when the secondary pane is closed", () => {
+    const parsed = parseWorkspaceLayout(
+      JSON.stringify(
+        layout({
+          secondaryOpen: false,
+          focusedPaneId: "secondary",
+          panes: { primary: target("/a"), secondary: target("/b") },
+        }),
+      ),
+    );
+
+    expect(parsed.status).toBe("valid");
+    expect(parsed.layout.focusedPaneId).toBe("primary");
+    expect(parsed.layout.panes.secondary).toEqual(target("/b"));
   });
 
   it("round-trips whether the secondary pane is closed", () => {
     const closed = layout({
       secondaryOpen: false,
+      focusedPaneId: "primary",
       panes: { primary: target("/a"), secondary: null },
     });
     const parsed = parseWorkspaceLayout(JSON.stringify(closed));
 
     expect(parsed.status).toBe("valid");
     expect(parsed.layout.secondaryOpen).toBe(false);
+    expect(parsed.layout.focusedPaneId).toBe("primary");
     expect(parsed.layout.panes.secondary).toBeNull();
   });
 
@@ -195,5 +268,17 @@ describe("workspace layout restore", () => {
 
     expect(restored.panes.primary).toBeNull();
     expect(restored.panes.secondary).toEqual(target("/project/b"));
+  });
+
+  it("defensively falls back to primary focus for a closed secondary during resolution", async () => {
+    const saved = layout({
+      secondaryOpen: false,
+      focusedPaneId: "secondary",
+      panes: { primary: target("/project/a"), secondary: null },
+    });
+
+    const restored = await resolveWorkspaceLayoutTargets(saved, vi.fn());
+
+    expect(restored.focusedPaneId).toBe("primary");
   });
 });

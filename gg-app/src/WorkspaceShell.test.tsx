@@ -4,7 +4,10 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { useEffect, useRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentPaneProps } from "./AgentPane";
+import type * as WorkspaceLayout from "./workspace-layout";
 import { WorkspaceShell } from "./WorkspaceShell";
+
+const workspaceLayoutMock = vi.hoisted(() => ({ rejectResolution: false }));
 
 const bridge = vi.hoisted(() => ({
   arrangeAllWindows: vi.fn(() => Promise.resolve()),
@@ -17,6 +20,19 @@ const bridge = vi.hoisted(() => ({
   ),
   onDragDropEvent: vi.fn(() => Promise.resolve(() => undefined)),
 }));
+
+vi.mock("./workspace-layout", async () => {
+  const actual = await vi.importActual<typeof WorkspaceLayout>("./workspace-layout");
+  return {
+    ...actual,
+    resolveWorkspaceLayoutTargets: (
+      ...args: Parameters<typeof actual.resolveWorkspaceLayoutTargets>
+    ) =>
+      workspaceLayoutMock.rejectResolution
+        ? Promise.reject(new Error("layout resolution failed"))
+        : actual.resolveWorkspaceLayoutTargets(...args),
+  };
+});
 
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: bridge.onDragDropEvent }),
@@ -151,6 +167,7 @@ function setWorkspaceWidth(container: HTMLElement, width: number): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  workspaceLayoutMock.rejectResolution = false;
   localStorage.clear();
 });
 
@@ -282,6 +299,29 @@ describe("WorkspaceShell layout recovery", () => {
     expect(divider.getAttribute("aria-valuenow")).toBe("50");
     expect(divider.parentElement?.getAttribute("data-split-ratio")).toBe("64");
     expect(bridge.validateWorkspaceTarget).toHaveBeenCalledTimes(2);
+  });
+
+  it("mounts the saved targets when layout validation fails unexpectedly", async () => {
+    workspaceLayoutMock.rejectResolution = true;
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 1,
+        splitRatio: 64,
+        panes: {
+          primary: { cwd: "/saved/a", sessionPath: "/sessions/a.jsonl" },
+          secondary: { cwd: "/saved/b", sessionPath: "/sessions/b.jsonl" },
+        },
+      }),
+    );
+
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect((await screen.findByTestId("pane-primary")).dataset.initialCwd).toBe("/saved/a");
+    expect(screen.getByTestId("pane-secondary").dataset.initialCwd).toBe("/saved/b");
+    expect(screen.getByRole("separator").parentElement?.getAttribute("data-split-ratio")).toBe(
+      "64",
+    );
   });
 });
 

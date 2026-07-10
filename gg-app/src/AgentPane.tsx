@@ -226,6 +226,7 @@ export interface PaneSnapshot {
   sessionTitle: string | null;
   projectBound: boolean;
   restoreChecked: boolean;
+  activeWork: boolean;
 }
 
 export interface PaneInputActions {
@@ -879,12 +880,16 @@ export function AgentPane({
       sessionTitle,
       projectBound: !needsProject,
       restoreChecked,
+      activeWork: running || kenRunning || autopilotReviewing,
     });
   }, [
+    autopilotReviewing,
+    kenRunning,
     needsProject,
     onSnapshot,
     paneId,
     restoreChecked,
+    running,
     sessionTitle,
     state?.cwd,
     state?.sessionPath,

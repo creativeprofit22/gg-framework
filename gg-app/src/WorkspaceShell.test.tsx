@@ -91,6 +91,7 @@ function FakePane({
       sessionTitle: paneId,
       projectBound: true,
       restoreChecked: true,
+      activeWork: false,
     });
     return () => registerInput(paneId, null);
   }, [onSnapshot, paneId, registerInput]);
@@ -133,6 +134,7 @@ function NativeRestoreBoundaryPane({
       sessionTitle: null,
       projectBound: recoveredTarget !== null,
       restoreChecked: true,
+      activeWork: false,
     });
   }, [onSnapshot, paneId, recoveredTarget]);
 
@@ -237,6 +239,109 @@ describe("WorkspaceShell pane routing", () => {
     expect(bridge.focusWindowByOffset).toHaveBeenNthCalledWith(2, -1);
     expect(bridge.focusWindowByOffset).toHaveBeenCalledTimes(2);
     expect(bridge.arrangeAllWindows).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WorkspaceShell secondary pane lifecycle", () => {
+  it("disposes only secondary listeners/session state and restores primary focus", async () => {
+    const disposed = { primary: vi.fn(), secondary: vi.fn() };
+    function DisposablePane(props: AgentPaneProps): React.ReactElement {
+      useEffect(() => () => disposed[props.kind](), [props.kind]);
+      return <FakePane {...props} />;
+    }
+
+    render(<WorkspaceShell renderPane={(props) => <DisposablePane {...props} />} />);
+    const primaryInput = screen.getByRole("textbox", { name: "primary input" });
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+
+    await waitFor(() => expect(disposed.secondary).toHaveBeenCalledTimes(1));
+    expect(disposed.primary).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.activeElement).toBe(primaryInput));
+    expect(screen.queryByTestId("pane-secondary")).toBeNull();
+    expect(document.querySelector(".workspace-grid")?.getAttribute("data-pane-count")).toBe("1");
+  });
+
+  it("persists one-pane mode across restart and reopens into project selection", async () => {
+    const first = render(<WorkspaceShell renderPane={renderPane} />);
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
+      expect(saved).toMatchObject({ version: 2, secondaryOpen: false });
+      expect(saved.panes.secondary).toBeNull();
+    });
+    first.unmount();
+
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-primary");
+    expect(screen.queryByTestId("pane-secondary")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open secondary pane" }));
+    const secondary = await screen.findByTestId("pane-secondary");
+    expect(secondary.dataset.initialMode).toBe("picker");
+    expect(screen.getByRole("button", { name: "Close secondary pane" })).toBeTruthy();
+  });
+
+  it("supports repeated close and reopen without duplicating secondary mounts", async () => {
+    const mounts = vi.fn();
+    const disposals = vi.fn();
+    function CountingPane(props: AgentPaneProps): React.ReactElement {
+      useEffect(() => {
+        if (props.kind === "secondary") mounts();
+        return () => {
+          if (props.kind === "secondary") disposals();
+        };
+      }, [props.kind]);
+      return <FakePane {...props} />;
+    }
+
+    render(<WorkspaceShell renderPane={(props) => <CountingPane {...props} />} />);
+    expect(mounts).toHaveBeenCalledTimes(1);
+
+    for (let cycle = 1; cycle <= 2; cycle += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+      await waitFor(() => expect(disposals).toHaveBeenCalledTimes(cycle));
+      fireEvent.click(screen.getByRole("button", { name: "Open secondary pane" }));
+      await screen.findByTestId("pane-secondary");
+      expect(mounts).toHaveBeenCalledTimes(cycle + 1);
+      expect(screen.getAllByTestId("pane-secondary")).toHaveLength(1);
+    }
+  });
+
+  it("requires confirmation before closing active work and keeps both panes on cancel", async () => {
+    function ActivePane({ kind, onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
+      useEffect(() => {
+        onSnapshot({
+          paneId,
+          cwd: `/work/${paneId}`,
+          sessionPath: `/sessions/${paneId}.jsonl`,
+          sessionTitle: paneId,
+          projectBound: true,
+          restoreChecked: true,
+          activeWork: kind === "secondary",
+        });
+      }, [kind, onSnapshot, paneId]);
+      return <div data-testid={`active-${paneId}`} />;
+    }
+
+    render(<WorkspaceShell renderPane={(props) => <ActivePane {...props} />} />);
+    await screen.findByTestId("active-secondary");
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+
+    expect(
+      screen.getByText(
+        "Work is active in the secondary pane. Closing it will stop that session. Close anyway?",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByTestId("active-secondary")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
+    await waitFor(() => expect(screen.queryByTestId("active-secondary")).toBeNull());
+    expect(screen.getByTestId("active-primary")).toBeTruthy();
   });
 });
 

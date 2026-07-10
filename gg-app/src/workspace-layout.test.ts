@@ -34,8 +34,9 @@ describe("workspace layout storage", () => {
 
     expect(result.status).toBe("migrated");
     expect(result.layout).toEqual({
-      version: 1,
+      version: 2,
       splitRatio: 90,
+      secondaryOpen: true,
       panes: {
         primary: target("/project/a"),
         secondary: target("/project/b", "/sessions/b.jsonl"),
@@ -82,7 +83,7 @@ describe("workspace layout storage", () => {
     });
   });
 
-  it("clamps valid records with damaged ratios without losing pane selections", () => {
+  it("migrates v1 records with damaged ratios without losing pane selections", () => {
     const result = parseWorkspaceLayout(
       JSON.stringify({
         version: 1,
@@ -91,9 +92,21 @@ describe("workspace layout storage", () => {
       }),
     );
 
-    expect(result.status).toBe("valid");
+    expect(result.status).toBe("migrated");
     expect(result.layout.splitRatio).toBe(10);
     expect(result.layout.panes.secondary?.cwd).toBe("/project/b");
+  });
+
+  it("round-trips whether the secondary pane is closed", () => {
+    const closed = layout({
+      secondaryOpen: false,
+      panes: { primary: target("/a"), secondary: null },
+    });
+    const parsed = parseWorkspaceLayout(JSON.stringify(closed));
+
+    expect(parsed.status).toBe("valid");
+    expect(parsed.layout.secondaryOpen).toBe(false);
+    expect(parsed.layout.panes.secondary).toBeNull();
   });
 
   it("handles unavailable storage without throwing", () => {

@@ -329,6 +329,23 @@ body {
   user-select: none;
 }
 
+.workspace-secondary-open {
+  padding: 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.workspace-secondary-open:hover,
+.workspace-secondary-open:focus-visible {
+  color: var(--text);
+  border-color: var(--primary);
+}
+
 .workspace-grid {
   display: grid;
   min-height: 0;
@@ -337,9 +354,33 @@ body {
 }
 
 .workspace-pane-slot {
+  position: relative;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.workspace-secondary-close {
+  position: absolute;
+  z-index: 8;
+  top: 5px;
+  right: 8px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: transparent;
+  font: 18px/1 var(--sans);
+  cursor: pointer;
+}
+
+.workspace-secondary-close:hover,
+.workspace-secondary-close:focus-visible {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--surface-2);
 }
 
 .workspace-divider {

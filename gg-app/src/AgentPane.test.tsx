@@ -172,6 +172,9 @@ describe("AgentPane pane isolation and lifecycle", () => {
         }),
       ),
     );
+    expect(paneProps.onSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ paneId: "primary", activeWork: false }),
+    );
   });
 
   it("keeps primary and secondary drafts and subscriptions independent", async () => {

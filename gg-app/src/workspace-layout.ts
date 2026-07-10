@@ -1,4 +1,4 @@
-export const WORKSPACE_LAYOUT_VERSION = 1;
+export const WORKSPACE_LAYOUT_VERSION = 2;
 export const DEFAULT_SPLIT_RATIO = 50;
 export const MIN_SPLIT_RATIO = 10;
 export const MAX_SPLIT_RATIO = 90;
@@ -13,6 +13,7 @@ export interface WorkspacePaneTarget {
 export interface WorkspaceLayout {
   version: typeof WORKSPACE_LAYOUT_VERSION;
   splitRatio: number;
+  secondaryOpen: boolean;
   panes: Record<WorkspacePaneId, WorkspacePaneTarget | null>;
 }
 
@@ -55,6 +56,7 @@ export function defaultWorkspaceLayout(): WorkspaceLayout {
   return {
     version: WORKSPACE_LAYOUT_VERSION,
     splitRatio: DEFAULT_SPLIT_RATIO,
+    secondaryOpen: true,
     panes: { primary: null, secondary: null },
   };
 }
@@ -89,6 +91,7 @@ function parseTarget(
 
 function parseCurrent(value: Record<string, unknown>): WorkspaceLayout | null {
   if (typeof value.panes !== "object" || value.panes === null) return null;
+  if (typeof value.secondaryOpen !== "boolean") return null;
   const panes = value.panes as Record<string, unknown>;
   const primary = parseTarget(panes.primary);
   const secondary = parseTarget(panes.secondary);
@@ -96,6 +99,21 @@ function parseCurrent(value: Record<string, unknown>): WorkspaceLayout | null {
   return {
     version: WORKSPACE_LAYOUT_VERSION,
     splitRatio: clampStoredSplitRatio(value.splitRatio),
+    secondaryOpen: value.secondaryOpen,
+    panes: { primary, secondary },
+  };
+}
+
+function migrateVersionOne(value: Record<string, unknown>): WorkspaceLayout | null {
+  if (typeof value.panes !== "object" || value.panes === null) return null;
+  const panes = value.panes as Record<string, unknown>;
+  const primary = parseTarget(panes.primary);
+  const secondary = parseTarget(panes.secondary);
+  if (primary === undefined || secondary === undefined) return null;
+  return {
+    version: WORKSPACE_LAYOUT_VERSION,
+    splitRatio: clampStoredSplitRatio(value.splitRatio),
+    secondaryOpen: true,
     panes: { primary, secondary },
   };
 }
@@ -107,6 +125,7 @@ function migrateLegacy(value: LegacyWorkspaceLayout): WorkspaceLayout | null {
   return {
     version: WORKSPACE_LAYOUT_VERSION,
     splitRatio: clampStoredSplitRatio(value.ratio),
+    secondaryOpen: true,
     panes: { primary, secondary },
   };
 }
@@ -127,6 +146,12 @@ export function parseWorkspaceLayout(raw: string): WorkspaceLayoutLoadResult {
     const layout = parseCurrent(record);
     return layout
       ? { layout, status: "valid" }
+      : { layout: defaultWorkspaceLayout(), status: "corrupt" };
+  }
+  if (record.version === 1) {
+    const layout = migrateVersionOne(record);
+    return layout
+      ? { layout, status: "migrated" }
       : { layout: defaultWorkspaceLayout(), status: "corrupt" };
   }
   if (record.version === 0) {

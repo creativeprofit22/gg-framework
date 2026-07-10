@@ -16,6 +16,7 @@ import {
   type PaneSnapshot,
 } from "./AgentPane";
 import { Confetti } from "./Confetti";
+import { ConfirmModal } from "./ConfirmModal";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { PRIMARY_PANE_ID, SECONDARY_PANE_ID } from "./pane-routing";
 import { ProjectNotes } from "./ProjectNotes";
@@ -30,6 +31,7 @@ import { useProgress } from "./useProgress";
 import {
   loadWorkspaceLayout,
   preserveRejectedWorkspaceLayout,
+  WORKSPACE_LAYOUT_VERSION,
   resolveWorkspaceLayoutTargets,
   saveWorkspaceLayout,
   type WorkspaceLayout,
@@ -86,6 +88,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const [layoutReady, setLayoutReady] = useState(!layoutManaged);
   const [rejectedLayoutChanged, setRejectedLayoutChanged] = useState(false);
   const [focusedPaneId, setFocusedPaneId] = useState<string>(PRIMARY_PANE_ID);
+  const [secondaryOpen, setSecondaryOpen] = useState(loadedLayout.layout.secondaryOpen);
+  const [confirmSecondaryClose, setConfirmSecondaryClose] = useState(false);
   const focusedPaneIdRef = useRef(focusedPaneId);
   const [windowFocused, setWindowFocused] = useState(true);
   const [snapshots, setSnapshots] = useState<Record<string, PaneSnapshot>>({});
@@ -114,7 +118,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         current.sessionPath === snapshot.sessionPath &&
         current.sessionTitle === snapshot.sessionTitle &&
         current.projectBound === snapshot.projectBound &&
-        current.restoreChecked === snapshot.restoreChecked
+        current.restoreChecked === snapshot.restoreChecked &&
+        current.activeWork === snapshot.activeWork
       ) {
         return previous;
       }
@@ -151,12 +156,14 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         if (cancelled) return;
         setPaneTargets(resolved.panes);
         setPrimaryPaneRatio(resolved.splitRatio);
+        setSecondaryOpen(resolved.secondaryOpen);
         setLayoutReady(true);
       })
       .catch(() => {
         if (cancelled) return;
         setPaneTargets(loadedLayout.layout.panes);
         setPrimaryPaneRatio(loadedLayout.layout.splitRatio);
+        setSecondaryOpen(loadedLayout.layout.secondaryOpen);
         setLayoutReady(true);
       });
     return () => {
@@ -165,11 +172,13 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   }, [layoutManaged, loadedLayout]);
 
   useEffect(() => {
-    if (!layoutReady || PANE_IDS.some((paneId) => !snapshots[paneId]?.restoreChecked)) return;
+    if (!layoutReady || !snapshots[PRIMARY_PANE_ID]?.restoreChecked) return;
+    if (secondaryOpen && !snapshots[SECONDARY_PANE_ID]?.restoreChecked) return;
     if (loadedLayout.status === "corrupt" && !rejectedLayoutChanged) return;
     saveWorkspaceLayout(localStorage, windowLabel, {
-      version: 1,
+      version: WORKSPACE_LAYOUT_VERSION,
       splitRatio: primaryPaneRatio,
+      secondaryOpen,
       panes: paneTargets,
     });
   }, [
@@ -178,6 +187,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     paneTargets,
     primaryPaneRatio,
     rejectedLayoutChanged,
+    secondaryOpen,
     snapshots,
   ]);
 
@@ -197,7 +207,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         event.preventDefault();
         focusPane(PRIMARY_PANE_ID);
         inputActionsRef.current.get(PRIMARY_PANE_ID)?.focus();
-      } else if (!event.shiftKey && event.key === "2") {
+      } else if (!event.shiftKey && event.key === "2" && secondaryOpen) {
         event.preventDefault();
         focusPane(SECONDARY_PANE_ID);
         inputActionsRef.current.get(SECONDARY_PANE_ID)?.focus();
@@ -214,7 +224,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focusPane]);
+  }, [focusPane, secondaryOpen]);
 
   useEffect(() => {
     const restoreFocusedInput = (): void => {
@@ -381,6 +391,42 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     [primaryPaneRatio],
   );
 
+  const closeSecondary = useCallback((): void => {
+    stopPointerResizeRef.current();
+    setConfirmSecondaryClose(false);
+    setRejectedLayoutChanged(true);
+    setSecondaryOpen(false);
+    setPaneTargets((previous) => ({ ...previous, secondary: null }));
+    setSnapshots((previous) => {
+      const { secondary: _secondary, ...remaining } = previous;
+      return remaining;
+    });
+    focusPane(PRIMARY_PANE_ID);
+    requestAnimationFrame(() => inputActionsRef.current.get(PRIMARY_PANE_ID)?.focus());
+  }, [focusPane]);
+
+  const requestSecondaryClose = useCallback((): void => {
+    if (snapshots[SECONDARY_PANE_ID]?.activeWork) {
+      setConfirmSecondaryClose(true);
+      return;
+    }
+    closeSecondary();
+  }, [closeSecondary, snapshots]);
+
+  const reopenSecondary = useCallback((): void => {
+    setRejectedLayoutChanged(true);
+    setPaneTargets((previous) => ({ ...previous, secondary: null }));
+    setSecondaryOpen(true);
+    focusPane(SECONDARY_PANE_ID);
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(
+          "#workspace-pane-secondary button, #workspace-pane-secondary input",
+        )
+        ?.focus();
+    });
+  }, [focusPane]);
+
   const focusedSnapshot = snapshots[focusedPaneId];
   const visiblePaneRatio = clampRatio(primaryPaneRatio, workspaceWidth);
   return (
@@ -390,6 +436,15 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       <div className="workspace-toolbar" data-tauri-drag-region>
         <RankBadge snapshot={progress} onClick={() => setShowScorecard(true)} />
         <ProjectNotes cwd={focusedSnapshot?.cwd ?? null} />
+        {!secondaryOpen && (
+          <button
+            className="workspace-secondary-open"
+            aria-controls="workspace-pane-secondary"
+            onClick={reopenSecondary}
+          >
+            Open secondary pane
+          </button>
+        )}
         {windowTotal > 1 && windowIndex !== null && (
           <span
             className="window-index"
@@ -401,59 +456,74 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         className="workspace-grid"
         data-split-ratio={primaryPaneRatio}
         ref={workspaceGridRef}
+        data-pane-count={secondaryOpen ? "2" : "1"}
         style={{
-          gridTemplateColumns: `minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${primaryPaneRatio}fr) ${DIVIDER_WIDTH_PX}px minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${100 - primaryPaneRatio}fr)`,
+          gridTemplateColumns: secondaryOpen
+            ? `minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${primaryPaneRatio}fr) ${DIVIDER_WIDTH_PX}px minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${100 - primaryPaneRatio}fr)`
+            : "minmax(0, 1fr)",
         }}
       >
-        {PANE_IDS.map((paneId, index) => (
-          <div
-            className="workspace-pane-slot"
-            data-pane-id={paneId}
-            id={`workspace-pane-${paneId}`}
-            key={paneId}
-            onPointerDownCapture={() => focusPane(paneId)}
-            onFocusCapture={() => focusPane(paneId)}
-          >
-            {layoutReady && (
-              <PaneContent
-                renderPane={renderPane}
-                paneProps={{
-                  paneId,
-                  kind: index === 0 ? "primary" : "secondary",
-                  focused: focusedPaneId === paneId,
-                  windowFocused,
-                  initialTarget: layoutManaged ? paneTargets[paneId] : undefined,
-                  onFocus: focusPane,
-                  onSnapshot: updateSnapshot,
-                  onUserTargetChange: markLayoutChanged,
-                  registerInput,
-                }}
-              />
-            )}
-          </div>
-        )).flatMap((pane, index) =>
-          index === 0
-            ? [
-                pane,
-                <div
-                  aria-controls="workspace-pane-primary workspace-pane-secondary"
-                  aria-label="Resize workspace panes"
-                  aria-orientation="vertical"
-                  aria-valuemax={Math.round(ratioBounds(workspaceWidth).max)}
-                  aria-valuemin={Math.round(ratioBounds(workspaceWidth).min)}
-                  aria-valuenow={Math.round(visiblePaneRatio)}
-                  className="workspace-divider"
-                  key="workspace-divider"
-                  onKeyDown={resizeByKeyboard}
-                  onPointerDown={startPointerResize}
-                  role="separator"
-                  tabIndex={0}
+        {PANE_IDS.filter((paneId) => paneId === PRIMARY_PANE_ID || secondaryOpen)
+          .map((paneId, index) => (
+            <div
+              className="workspace-pane-slot"
+              data-pane-id={paneId}
+              id={`workspace-pane-${paneId}`}
+              key={paneId}
+              onPointerDownCapture={() => focusPane(paneId)}
+              onFocusCapture={() => focusPane(paneId)}
+            >
+              {layoutReady && (
+                <PaneContent
+                  renderPane={renderPane}
+                  paneProps={{
+                    paneId,
+                    kind: index === 0 ? "primary" : "secondary",
+                    focused: focusedPaneId === paneId,
+                    windowFocused,
+                    initialTarget: layoutManaged ? paneTargets[paneId] : undefined,
+                    onFocus: focusPane,
+                    onSnapshot: updateSnapshot,
+                    onUserTargetChange: markLayoutChanged,
+                    registerInput,
+                  }}
+                />
+              )}
+              {paneId === SECONDARY_PANE_ID && (
+                <button
+                  className="workspace-secondary-close"
+                  aria-label="Close secondary pane"
+                  title="Close secondary pane"
+                  onClick={requestSecondaryClose}
                 >
-                  <span className="workspace-divider-line" />
-                </div>,
-              ]
-            : [pane],
-        )}
+                  <span aria-hidden="true">×</span>
+                </button>
+              )}
+            </div>
+          ))
+          .flatMap((pane, index) =>
+            index === 0 && secondaryOpen
+              ? [
+                  pane,
+                  <div
+                    aria-controls="workspace-pane-primary workspace-pane-secondary"
+                    aria-label="Resize workspace panes"
+                    aria-orientation="vertical"
+                    aria-valuemax={Math.round(ratioBounds(workspaceWidth).max)}
+                    aria-valuemin={Math.round(ratioBounds(workspaceWidth).min)}
+                    aria-valuenow={Math.round(visiblePaneRatio)}
+                    className="workspace-divider"
+                    key="workspace-divider"
+                    onKeyDown={resizeByKeyboard}
+                    onPointerDown={startPointerResize}
+                    role="separator"
+                    tabIndex={0}
+                  >
+                    <span className="workspace-divider-line" />
+                  </div>,
+                ]
+              : [pane],
+          )}
       </div>
 
       {appUpdate.phase === "available" && (
@@ -487,6 +557,15 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
             )}
           </span>
         </div>
+      )}
+      {confirmSecondaryClose && (
+        <ConfirmModal
+          title="Close Secondary Pane"
+          message="Work is active in the secondary pane. Closing it will stop that session. Close anyway?"
+          confirmLabel="Close Pane"
+          onConfirm={closeSecondary}
+          onClose={() => setConfirmSecondaryClose(false)}
+        />
       )}
       {showScorecard && progress && (
         <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />

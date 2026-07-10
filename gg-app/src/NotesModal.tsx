@@ -15,6 +15,7 @@ interface Props {
   onCreateTask(text: string): void;
   onEditTask(id: string, text: string): void;
   onToggleTask(id: string): void;
+  onMoveTask(id: string, direction: "up" | "down"): void;
   onArchiveTask(id: string): void;
   onRestoreTask(id: string): void;
   onChangeHandoff(text: string): void;
@@ -31,6 +32,7 @@ export function NotesModal({
   onCreateTask,
   onEditTask,
   onToggleTask,
+  onMoveTask,
   onArchiveTask,
   onRestoreTask,
   onChangeHandoff,
@@ -66,6 +68,7 @@ export function NotesModal({
             onCreateTask={onCreateTask}
             onEditTask={onEditTask}
             onToggleTask={onToggleTask}
+            onMoveTask={onMoveTask}
             onArchiveTask={onArchiveTask}
           />
         </section>

@@ -31,6 +31,7 @@ export interface UseProjectNotesResult {
   createTask(text: string): void;
   editTask(id: string, text: string): void;
   toggleTask(id: string): void;
+  moveTask(id: string, direction: "up" | "down"): void;
   archiveTask(id: string): void;
   restoreTask(id: string): void;
   changeHandoff(text: string): void;
@@ -227,6 +228,29 @@ export function useProjectNotes(
     [clock, commitDocument, cwd],
   );
 
+  const moveTask = useCallback(
+    (id: string, direction: "up" | "down") => {
+      if (cwd === null) return;
+      commitDocument(cwd, (current) => {
+        const activeIndexes = current.tasks
+          .map((task, index) => (task.archivedAt === null ? index : -1))
+          .filter((index) => index !== -1);
+        const activePosition = activeIndexes.findIndex((index) => current.tasks[index]?.id === id);
+        const targetPosition = activePosition + (direction === "up" ? -1 : 1);
+        if (activePosition === -1 || targetPosition < 0 || targetPosition >= activeIndexes.length) {
+          return null;
+        }
+
+        const sourceIndex = activeIndexes[activePosition]!;
+        const targetIndex = activeIndexes[targetPosition]!;
+        const tasks = [...current.tasks];
+        [tasks[sourceIndex], tasks[targetIndex]] = [tasks[targetIndex]!, tasks[sourceIndex]!];
+        return { ...current, tasks, updatedAt: clock() };
+      });
+    },
+    [clock, commitDocument, cwd],
+  );
+
   const archiveTask = useCallback(
     (id: string) => {
       if (cwd === null) return;
@@ -283,6 +307,7 @@ export function useProjectNotes(
     createTask,
     editTask,
     toggleTask,
+    moveTask,
     archiveTask,
     restoreTask,
     changeHandoff,

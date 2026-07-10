@@ -405,6 +405,87 @@ describe("useProjectNotes", () => {
     expect(storage.getItem(v2NotesKey(otherCwd))).toBe(otherStoredDocument);
   });
 
+  it("persists active task order while archived tasks and boundary moves stay out of ordering", () => {
+    const cwd = "/work/project";
+    const storage = new ObservableStorage();
+    let now = NOW;
+    let id = 0;
+    const clock = (): string => now;
+    const hookOptions = {
+      storage,
+      repository: createNotesRepository(storage, clock),
+      eventTarget: new FakeStorageEvents(),
+      clock,
+      idFactory: () => `task-${++id}`,
+    };
+    const { result } = renderHook(() => useProjectNotes(cwd, hookOptions));
+    act(() => result.current.createTask("first"));
+    act(() => result.current.createTask("archived middle"));
+    act(() => result.current.createTask("third"));
+    act(() => result.current.archiveTask("task-2"));
+    now = LATER;
+
+    act(() => result.current.moveTask("task-3", "up"));
+
+    expect(result.current.document.tasks.map(({ id: taskId }) => taskId)).toEqual([
+      "task-3",
+      "task-2",
+      "task-1",
+    ]);
+    expect(result.current.document.tasks[1]?.archivedAt).toBe(NOW);
+    expect(result.current.document.updatedAt).toBe(LATER);
+    expect(JSON.parse(storage.getItem(v2NotesKey(cwd))!).tasks).toEqual(
+      result.current.document.tasks,
+    );
+    const reopened = renderHook(() => useProjectNotes(cwd, hookOptions));
+    expect(reopened.result.current.document.tasks.map(({ id: taskId }) => taskId)).toEqual([
+      "task-3",
+      "task-2",
+      "task-1",
+    ]);
+
+    const writes = storage.writeCount;
+    act(() => {
+      result.current.moveTask("task-3", "up");
+      result.current.moveTask("task-1", "down");
+      result.current.moveTask("task-2", "up");
+      result.current.moveTask("missing", "down");
+    });
+
+    expect(storage.writeCount).toBe(writes);
+    expect(result.current.document.tasks.map(({ id: taskId }) => taskId)).toEqual([
+      "task-3",
+      "task-2",
+      "task-1",
+    ]);
+  });
+
+  it("syncs reordered tasks across equivalent project windows without changing another project", () => {
+    const cwd = "C:\\Work\\Project";
+    const otherCwd = "C:\\Work\\Other";
+    const storage = new ObservableStorage();
+    const events = new FakeStorageEvents();
+    let id = 0;
+    const hookOptions = { ...options(storage, events), idFactory: () => `task-${++id}` };
+    const first = renderHook(() => useProjectNotes(cwd, hookOptions));
+    const sameProject = renderHook(() => useProjectNotes("c:/work/project/", hookOptions));
+    const otherProject = renderHook(() => useProjectNotes(otherCwd, hookOptions));
+    const otherStoredDocument = storage.getItem(v2NotesKey(otherCwd));
+    act(() => first.result.current.createTask("first"));
+    act(() => first.result.current.createTask("second"));
+    act(() => events.dispatch(v2NotesKey(cwd), storage.getItem(v2NotesKey(cwd))));
+
+    act(() => first.result.current.moveTask("task-2", "up"));
+    act(() => events.dispatch(v2NotesKey(cwd), storage.getItem(v2NotesKey(cwd))));
+
+    expect(sameProject.result.current.document.tasks.map(({ id: taskId }) => taskId)).toEqual([
+      "task-2",
+      "task-1",
+    ]);
+    expect(otherProject.result.current.document.tasks).toEqual([]);
+    expect(storage.getItem(v2NotesKey(otherCwd))).toBe(otherStoredDocument);
+  });
+
   it("preserves handoff bytes and clears its read timestamp", () => {
     const cwd = "/work/project";
     const storage = new ObservableStorage();
@@ -476,6 +557,7 @@ describe("useProjectNotes", () => {
       create: result.current.createTask,
       edit: result.current.editTask,
       toggle: result.current.toggleTask,
+      move: result.current.moveTask,
       archive: result.current.archiveTask,
       restore: result.current.restoreTask,
       currentFocus: result.current.changeCurrentFocus,
@@ -488,6 +570,7 @@ describe("useProjectNotes", () => {
       retained.create("stale");
       retained.edit("missing", "stale");
       retained.toggle("missing");
+      retained.move("missing", "down");
       retained.archive("missing");
       retained.restore("missing");
       retained.currentFocus("stale focus");

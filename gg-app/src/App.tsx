@@ -474,6 +474,7 @@ function App(): React.ReactElement {
     createTask: createNotesTask,
     editTask: editNotesTask,
     toggleTask: toggleNotesTask,
+    moveTask: moveNotesTask,
     archiveTask: archiveNotesTask,
     restoreTask: restoreNotesTask,
     changeHandoff: changeNotesHandoff,
@@ -2470,6 +2471,7 @@ function App(): React.ReactElement {
           onCreateTask={createNotesTask}
           onEditTask={editNotesTask}
           onToggleTask={toggleNotesTask}
+          onMoveTask={moveNotesTask}
           onArchiveTask={archiveNotesTask}
           onRestoreTask={restoreNotesTask}
           onChangeHandoff={changeNotesHandoff}

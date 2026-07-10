@@ -35,9 +35,15 @@ interface HarnessProps {
   onCurrentFocus?: (text: string) => void;
   onHandoff?: (text: string) => void;
   onReference?: (text: string) => void;
+  onMoveTask?: (id: string, direction: "up" | "down") => void;
 }
 
-function Harness({ onCurrentFocus, onHandoff, onReference }: HarnessProps): React.ReactElement {
+function Harness({
+  onCurrentFocus,
+  onHandoff,
+  onReference,
+  onMoveTask,
+}: HarnessProps): React.ReactElement {
   const [currentFocus, setCurrentFocus] = useState("Ship current focus");
   const [tasks, setTasks] = useState([TODO, DONE, ARCHIVED]);
   const [handoff, setHandoff] = useState("handoff 😀");
@@ -73,6 +79,31 @@ function Harness({ onCurrentFocus, onHandoff, onReference }: HarnessProps): Reac
           ),
         )
       }
+      onMoveTask={(id, direction) => {
+        onMoveTask?.(id, direction);
+        setTasks((current) => {
+          const activeIndexes = current
+            .map((task, index) => (task.archivedAt === null ? index : -1))
+            .filter((index) => index !== -1);
+          const activePosition = activeIndexes.findIndex((index) => current[index]?.id === id);
+          const targetPosition = activePosition + (direction === "up" ? -1 : 1);
+          if (
+            activePosition === -1 ||
+            targetPosition < 0 ||
+            targetPosition >= activeIndexes.length
+          ) {
+            return current;
+          }
+          const reordered = [...current];
+          const sourceIndex = activeIndexes[activePosition]!;
+          const targetIndex = activeIndexes[targetPosition]!;
+          [reordered[sourceIndex], reordered[targetIndex]] = [
+            reordered[targetIndex]!,
+            reordered[sourceIndex]!,
+          ];
+          return reordered;
+        });
+      }}
       onArchiveTask={(id) =>
         setTasks((current) =>
           current.map((task) =>
@@ -136,6 +167,32 @@ describe("NotesModal", () => {
     expect((screen.getByRole("button", { name: "Add task" }) as HTMLButtonElement).disabled).toBe(
       true,
     );
+  });
+
+  it("offers accessible boundary-safe move controls and excludes archived tasks from ordering", () => {
+    const onMoveTask = vi.fn();
+    render(<Harness onMoveTask={onMoveTask} />);
+
+    const firstUp = screen.getByRole("button", { name: "Move task up: Write tests" });
+    const firstDown = screen.getByRole("button", { name: "Move task down: Write tests" });
+    const lastDown = screen.getByRole("button", { name: "Move task down: Ship feature" });
+    expect((firstUp as HTMLButtonElement).disabled).toBe(true);
+    expect((firstDown as HTMLButtonElement).disabled).toBe(false);
+    expect((lastDown as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(firstUp);
+    expect(onMoveTask).not.toHaveBeenCalled();
+    fireEvent.click(firstDown);
+
+    expect(onMoveTask).toHaveBeenCalledWith("todo", "down");
+    const activeRows = document.querySelectorAll(".notes-task-list .notes-task-row");
+    expect(activeRows[0]?.textContent).toContain("Ship feature");
+    expect(activeRows[1]?.textContent).toContain("Write tests");
+    expect(screen.getByRole("status").textContent).toBe("Moved task down: Write tests");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show archived tasks (1)" }));
+    expect(screen.queryByRole("button", { name: "Move task up: Hidden task" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Move task down: Hidden task" })).toBeNull();
   });
 
   it("toggles through a native checkbox with the correct accessible state and name", () => {

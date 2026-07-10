@@ -7,6 +7,7 @@ interface Props {
   onCreateTask(text: string): void;
   onEditTask(id: string, text: string): void;
   onToggleTask(id: string): void;
+  onMoveTask(id: string, direction: "up" | "down"): void;
   onArchiveTask(id: string): void;
 }
 
@@ -16,6 +17,7 @@ export function NotesTaskList({
   onCreateTask,
   onEditTask,
   onToggleTask,
+  onMoveTask,
   onArchiveTask,
 }: Props): React.ReactElement {
   const activeTasks = tasks.filter((task) => task.archivedAt === null);
@@ -81,7 +83,7 @@ export function NotesTaskList({
 
       <div className="notes-task-list">
         {activeTasks.length === 0 && <p className="notes-empty">No active tasks.</p>}
-        {activeTasks.map((task) => (
+        {activeTasks.map((task, index) => (
           <div
             className={`notes-task-row${task.status === "done" ? " is-done" : ""}`}
             key={task.id}
@@ -133,6 +135,28 @@ export function NotesTaskList({
                   <span>{task.text}</span>
                 </label>
                 <div className="notes-task-actions">
+                  <button
+                    type="button"
+                    aria-label={`Move task up: ${task.text}`}
+                    disabled={index === 0}
+                    onClick={() => {
+                      onMoveTask(task.id, "up");
+                      setAnnouncement(`Moved task up: ${task.text}`);
+                    }}
+                  >
+                    Move up
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Move task down: ${task.text}`}
+                    disabled={index === activeTasks.length - 1}
+                    onClick={() => {
+                      onMoveTask(task.id, "down");
+                      setAnnouncement(`Moved task down: ${task.text}`);
+                    }}
+                  >
+                    Move down
+                  </button>
                   <button
                     ref={(element) => {
                       if (element) editButtonRefs.current.set(task.id, element);

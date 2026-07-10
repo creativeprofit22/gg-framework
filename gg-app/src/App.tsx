@@ -470,6 +470,7 @@ function App(): React.ReactElement {
     value: notes,
     onChange: handleNotesChange,
     document: notesDocument,
+    changeCurrentFocus: changeNotesCurrentFocus,
     createTask: createNotesTask,
     editTask: editNotesTask,
     toggleTask: toggleNotesTask,
@@ -2461,8 +2462,10 @@ function App(): React.ReactElement {
         <NotesModal
           value={notes}
           onChange={handleNotesChange}
+          currentFocus={notesDocument.currentFocus}
           tasks={notesDocument.tasks}
           handoff={notesDocument.handoff.text}
+          onChangeCurrentFocus={changeNotesCurrentFocus}
           onCreateTask={createNotesTask}
           onEditTask={editNotesTask}
           onToggleTask={toggleNotesTask}

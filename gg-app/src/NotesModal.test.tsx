@@ -32,11 +32,13 @@ const ARCHIVED: NotesTask = {
 };
 
 interface HarnessProps {
+  onCurrentFocus?: (text: string) => void;
   onHandoff?: (text: string) => void;
   onReference?: (text: string) => void;
 }
 
-function Harness({ onHandoff, onReference }: HarnessProps): React.ReactElement {
+function Harness({ onCurrentFocus, onHandoff, onReference }: HarnessProps): React.ReactElement {
+  const [currentFocus, setCurrentFocus] = useState("Ship current focus");
   const [tasks, setTasks] = useState([TODO, DONE, ARCHIVED]);
   const [handoff, setHandoff] = useState("handoff 😀");
   const [reference, setReference] = useState("reference text");
@@ -48,8 +50,13 @@ function Harness({ onHandoff, onReference }: HarnessProps): React.ReactElement {
         setReference(text);
         onReference?.(text);
       }}
+      currentFocus={currentFocus}
       tasks={tasks}
       handoff={handoff}
+      onChangeCurrentFocus={(text) => {
+        setCurrentFocus(text);
+        onCurrentFocus?.(text);
+      }}
       onCreateTask={(text) =>
         setTasks((current) => [
           ...current,
@@ -86,6 +93,10 @@ describe("NotesModal", () => {
   it("renders active task state, Handoff, and Reference while omitting archived tasks", () => {
     render(<Harness />);
 
+    expect((screen.getByLabelText("Current focus") as HTMLInputElement).value).toBe(
+      "Ship current focus",
+    );
+    expect(document.activeElement).toBe(screen.getByLabelText("Current focus"));
     expect(screen.getByText("Write tests")).toBeTruthy();
     expect(screen.getByText("Ship feature")).toBeTruthy();
     expect(screen.queryByText("Hidden task")).toBeNull();
@@ -167,24 +178,34 @@ describe("NotesModal", () => {
     expect(document.activeElement).toBe(screen.getByLabelText("Add a Notes task"));
   });
 
-  it("forwards distinct multiline Unicode Handoff and Reference values", () => {
+  it("forwards distinct Now, Handoff, and Reference values", () => {
+    const onCurrentFocus = vi.fn();
     const onHandoff = vi.fn();
     const onReference = vi.fn();
-    render(<Harness onHandoff={onHandoff} onReference={onReference} />);
+    render(
+      <Harness onCurrentFocus={onCurrentFocus} onHandoff={onHandoff} onReference={onReference} />,
+    );
+    const currentFocus = "Fix cross-window sync 😀";
     const handoff = "handoff\nمرحبا 😀";
     const reference = "reference\n日本語 ✨";
 
+    fireEvent.change(screen.getByLabelText("Current focus"), {
+      target: { value: currentFocus },
+    });
     fireEvent.change(screen.getByLabelText("Handoff notes"), { target: { value: handoff } });
     fireEvent.change(screen.getByLabelText("Reference notes"), { target: { value: reference } });
 
+    expect(onCurrentFocus).toHaveBeenCalledWith(currentFocus);
     expect(onHandoff).toHaveBeenCalledWith(handoff);
     expect(onReference).toHaveBeenCalledWith(reference);
+    expect(onCurrentFocus).not.toHaveBeenCalledWith(handoff);
     expect(onHandoff).not.toHaveBeenCalledWith(reference);
   });
 
   it("uses labelled sections and no routine alerts", () => {
     render(<Harness />);
 
+    expect(screen.getByRole("heading", { name: "Now" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Next" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Handoff" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Reference" })).toBeTruthy();

@@ -93,6 +93,24 @@ describe("useProjectNotes", () => {
     expect(JSON.parse(storage.getItem(v2NotesKey(cwd))!).reference).toBe("edited\r\n😀\n");
   });
 
+  it("persists current focus in v2 without changing the legacy Reference", () => {
+    const cwd = "/work/project";
+    const storage = new ObservableStorage();
+    storage.setItem(legacyNotesKey(cwd), "reference bytes");
+    const hookOptions = { ...options(storage), clock: () => LATER };
+    hookOptions.repository = createNotesRepository(storage, hookOptions.clock);
+    const { result } = renderHook(() => useProjectNotes(cwd, hookOptions));
+
+    act(() => result.current.changeCurrentFocus("Ship the Now slice 😀"));
+
+    expect(result.current.document.currentFocus).toBe("Ship the Now slice 😀");
+    expect(result.current.document.updatedAt).toBe(LATER);
+    expect(JSON.parse(storage.getItem(v2NotesKey(cwd))!).currentFocus).toBe(
+      "Ship the Now slice 😀",
+    );
+    expect(storage.getItem(legacyNotesKey(cwd))).toBe("reference bytes");
+  });
+
   it("retains an edit in memory when both storage writes fail", () => {
     const cwd = "/work/project";
     const storage = new ObservableStorage();
@@ -149,6 +167,22 @@ describe("useProjectNotes", () => {
     expect([...storage.values.keys()].filter((key) => key.startsWith("gg-notes-v2:"))).toEqual([
       v2NotesKey(firstCwd),
     ]);
+  });
+
+  it("syncs current focus between equivalent project windows through the v2 event", () => {
+    const firstCwd = "C:\\Work\\Project\\";
+    const secondCwd = "c:/work/project";
+    const storage = new ObservableStorage();
+    const events = new FakeStorageEvents();
+    const hookOptions = options(storage, events);
+    const first = renderHook(() => useProjectNotes(firstCwd, hookOptions));
+    const second = renderHook(() => useProjectNotes(secondCwd, hookOptions));
+
+    act(() => first.result.current.changeCurrentFocus("Cross-window focus"));
+    act(() => events.dispatch(v2NotesKey(firstCwd), storage.getItem(v2NotesKey(firstCwd))));
+
+    expect(second.result.current.document.currentFocus).toBe("Cross-window focus");
+    expect(second.result.current.document).toEqual(first.result.current.document);
   });
 
   it.each(["{", JSON.stringify({ version: 999 })])(
@@ -385,6 +419,7 @@ describe("useProjectNotes", () => {
       edit: result.current.editTask,
       toggle: result.current.toggleTask,
       archive: result.current.archiveTask,
+      currentFocus: result.current.changeCurrentFocus,
       handoff: result.current.changeHandoff,
     };
     rerender({ cwd: "/work/b" });
@@ -395,10 +430,12 @@ describe("useProjectNotes", () => {
       retained.edit("missing", "stale");
       retained.toggle("missing");
       retained.archive("missing");
+      retained.currentFocus("stale focus");
       retained.handoff("stale");
     });
 
     expect(result.current.document.tasks).toEqual([]);
+    expect(result.current.document.currentFocus).toBe("");
     expect(result.current.document.handoff.text).toBe("");
     expect(storage.writeCount).toBe(writes);
   });

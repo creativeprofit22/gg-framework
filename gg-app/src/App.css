@@ -1206,6 +1206,7 @@ body {
 }
 .notes-add-controls input,
 .notes-edit-form input,
+.notes-current-focus input,
 .notes-field textarea {
   box-sizing: border-box;
   width: 100%;
@@ -1220,7 +1221,8 @@ body {
   outline: none;
 }
 .notes-add-controls input,
-.notes-edit-form input {
+.notes-edit-form input,
+.notes-current-focus input {
   padding: 8px 10px;
 }
 .notes-add-controls input {

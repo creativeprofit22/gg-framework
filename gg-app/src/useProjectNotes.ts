@@ -27,6 +27,7 @@ export interface UseProjectNotesResult {
   value: string;
   onChange(value: string): void;
   document: NotesDocumentV2;
+  changeCurrentFocus(value: string): void;
   createTask(text: string): void;
   editTask(id: string, text: string): void;
   toggleTask(id: string): void;
@@ -146,6 +147,17 @@ export function useProjectNotes(
     [clock, commitDocument, cwd],
   );
 
+  const changeCurrentFocus = useCallback(
+    (value: string) => {
+      if (cwd === null) return;
+      commitDocument(cwd, (current) => {
+        if (current.currentFocus === value) return null;
+        return { ...current, currentFocus: value, updatedAt: clock() };
+      });
+    },
+    [clock, commitDocument, cwd],
+  );
+
   const createTask = useCallback(
     (text: string) => {
       if (cwd === null) return;
@@ -250,6 +262,7 @@ export function useProjectNotes(
     value: document.reference,
     onChange,
     document,
+    changeCurrentFocus,
     createTask,
     editTask,
     toggleTask,

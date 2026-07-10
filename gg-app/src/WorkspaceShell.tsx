@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   arrangeAllWindows,
@@ -28,6 +28,22 @@ import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
 
 const PANE_IDS = [PRIMARY_PANE_ID, SECONDARY_PANE_ID] as const;
+const DIVIDER_WIDTH_PX = 9;
+const MIN_PANE_WIDTH_PX = 280;
+const KEYBOARD_RESIZE_STEP_PX = 24;
+
+function ratioBounds(containerWidth: number): { min: number; max: number } {
+  const availableWidth = Math.max(0, containerWidth - DIVIDER_WIDTH_PX);
+  if (availableWidth === 0) return { min: 50, max: 50 };
+  const effectiveMinimum = Math.min(MIN_PANE_WIDTH_PX, availableWidth / 2);
+  const min = (effectiveMinimum / availableWidth) * 100;
+  return { min, max: 100 - min };
+}
+
+function clampRatio(ratio: number, containerWidth: number): number {
+  const { min, max } = ratioBounds(containerWidth);
+  return Math.min(max, Math.max(min, ratio));
+}
 
 export interface WorkspaceShellProps {
   renderPane?: (props: AgentPaneProps) => React.ReactNode;
@@ -63,9 +79,12 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const [windowTotal, setWindowTotal] = useState(1);
   const [showScorecard, setShowScorecard] = useState(false);
   const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
+  const [primaryPaneRatio, setPrimaryPaneRatio] = useState(50);
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
+  const workspaceGridRef = useRef<HTMLDivElement>(null);
+  const stopPointerResizeRef = useRef<() => void>(() => undefined);
   const appUpdate = useAppUpdate();
   const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress();
-
   const focusPane = useCallback((paneId: string): void => {
     focusedPaneIdRef.current = paneId;
     setFocusedPaneId(paneId);
@@ -211,8 +230,85 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     return () => window.clearTimeout(timer);
   }, [levelUp, levelUpNonce, levelUpOrigin]);
 
-  const focusedSnapshot = snapshots[focusedPaneId];
+  useEffect(() => () => stopPointerResizeRef.current(), []);
 
+  useLayoutEffect(() => {
+    const measureWorkspace = (): void => {
+      setWorkspaceWidth(workspaceGridRef.current?.getBoundingClientRect().width ?? 0);
+    };
+    measureWorkspace();
+    window.addEventListener("resize", measureWorkspace);
+    return () => window.removeEventListener("resize", measureWorkspace);
+  }, []);
+
+  const resizeByKeyboard = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>): void => {
+      const containerWidth = workspaceGridRef.current?.getBoundingClientRect().width ?? 0;
+      setWorkspaceWidth(containerWidth);
+      const availableWidth = Math.max(0, containerWidth - DIVIDER_WIDTH_PX);
+      let nextRatio: number | null = null;
+
+      if (event.key === "Home") nextRatio = ratioBounds(containerWidth).min;
+      else if (event.key === "End") nextRatio = ratioBounds(containerWidth).max;
+      else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        const direction = event.key === "ArrowLeft" ? -1 : 1;
+        const step = event.shiftKey ? KEYBOARD_RESIZE_STEP_PX * 4 : KEYBOARD_RESIZE_STEP_PX;
+        nextRatio =
+          primaryPaneRatio + direction * (availableWidth > 0 ? (step / availableWidth) * 100 : 0);
+      }
+
+      if (nextRatio === null) return;
+      event.preventDefault();
+      setPrimaryPaneRatio(clampRatio(nextRatio, containerWidth));
+    },
+    [primaryPaneRatio],
+  );
+
+  const startPointerResize = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>): void => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.currentTarget.focus();
+      stopPointerResizeRef.current();
+
+      const pointerId = event.pointerId;
+      const startX = event.clientX;
+      const startRatio = primaryPaneRatio;
+      const containerWidth = workspaceGridRef.current?.getBoundingClientRect().width ?? 0;
+      setWorkspaceWidth(containerWidth);
+      const availableWidth = Math.max(0, containerWidth - DIVIDER_WIDTH_PX);
+      const previousCursor = document.body.style.cursor;
+      const previousUserSelect = document.body.style.userSelect;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+
+      const stop = (): void => {
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerEnd);
+        window.removeEventListener("pointercancel", onPointerEnd);
+        document.body.style.cursor = previousCursor;
+        document.body.style.userSelect = previousUserSelect;
+        stopPointerResizeRef.current = () => undefined;
+      };
+      const onPointerMove = (moveEvent: PointerEvent): void => {
+        if (moveEvent.pointerId !== pointerId || availableWidth === 0) return;
+        const deltaRatio = ((moveEvent.clientX - startX) / availableWidth) * 100;
+        setPrimaryPaneRatio(clampRatio(startRatio + deltaRatio, containerWidth));
+      };
+      const onPointerEnd = (endEvent: PointerEvent): void => {
+        if (endEvent.pointerId === pointerId) stop();
+      };
+
+      stopPointerResizeRef.current = stop;
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", onPointerEnd);
+      window.addEventListener("pointercancel", onPointerEnd);
+    },
+    [primaryPaneRatio],
+  );
+
+  const focusedSnapshot = snapshots[focusedPaneId];
+  const visiblePaneRatio = clampRatio(primaryPaneRatio, workspaceWidth);
   return (
     <div className="workspace-shell" style={{ background: theme.background }}>
       {confettiNonce && <Confetti key={confettiNonce} />}
@@ -227,11 +323,18 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           >{`${windowIndex}/${windowTotal}`}</span>
         )}
       </div>
-      <div className="workspace-grid">
+      <div
+        className="workspace-grid"
+        ref={workspaceGridRef}
+        style={{
+          gridTemplateColumns: `minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${primaryPaneRatio}fr) ${DIVIDER_WIDTH_PX}px minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${100 - primaryPaneRatio}fr)`,
+        }}
+      >
         {PANE_IDS.map((paneId, index) => (
           <div
             className="workspace-pane-slot"
             data-pane-id={paneId}
+            id={`workspace-pane-${paneId}`}
             key={paneId}
             onPointerDownCapture={() => focusPane(paneId)}
             onFocusCapture={() => focusPane(paneId)}
@@ -249,7 +352,29 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
               }}
             />
           </div>
-        ))}
+        )).flatMap((pane, index) =>
+          index === 0
+            ? [
+                pane,
+                <div
+                  aria-controls="workspace-pane-primary workspace-pane-secondary"
+                  aria-label="Resize workspace panes"
+                  aria-orientation="vertical"
+                  aria-valuemax={Math.round(ratioBounds(workspaceWidth).max)}
+                  aria-valuemin={Math.round(ratioBounds(workspaceWidth).min)}
+                  aria-valuenow={Math.round(visiblePaneRatio)}
+                  className="workspace-divider"
+                  key="workspace-divider"
+                  onKeyDown={resizeByKeyboard}
+                  onPointerDown={startPointerResize}
+                  role="separator"
+                  tabIndex={0}
+                >
+                  <span className="workspace-divider-line" />
+                </div>,
+              ]
+            : [pane],
+        )}
       </div>
 
       {appUpdate.phase === "available" && (

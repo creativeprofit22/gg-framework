@@ -331,7 +331,6 @@ body {
 
 .workspace-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   min-height: 0;
   flex: 1;
   overflow: hidden;
@@ -343,8 +342,41 @@ body {
   overflow: hidden;
 }
 
-.workspace-pane-slot + .workspace-pane-slot {
-  border-left: 1px solid var(--border-strong);
+.workspace-divider {
+  position: relative;
+  z-index: 2;
+  min-width: 9px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-divider-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: var(--border-strong);
+  transition:
+    width var(--t-fast),
+    background-color var(--t-fast),
+    box-shadow var(--t-fast);
+}
+
+.workspace-divider:hover .workspace-divider-line,
+.workspace-divider:focus-visible .workspace-divider-line {
+  left: 3px;
+  width: 3px;
+  background: var(--primary);
+}
+
+.workspace-divider:focus-visible .workspace-divider-line {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 28%, transparent);
 }
 
 .agent-pane {

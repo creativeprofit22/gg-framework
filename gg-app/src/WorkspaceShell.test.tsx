@@ -86,11 +86,30 @@ function FakePane({
 
 const renderPane = (props: AgentPaneProps): React.ReactNode => <FakePane {...props} />;
 
+function setWorkspaceWidth(container: HTMLElement, width: number): void {
+  const grid = container.querySelector<HTMLElement>(".workspace-grid");
+  if (!grid) throw new Error("Workspace grid not found");
+  vi.spyOn(grid, "getBoundingClientRect").mockReturnValue({
+    width,
+    height: 700,
+    top: 0,
+    right: width,
+    bottom: 700,
+    left: 0,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("WorkspaceShell pane routing", () => {
   it("renders exactly two stable primary/secondary columns with primary initially focused", async () => {
@@ -153,5 +172,76 @@ describe("WorkspaceShell pane routing", () => {
     expect(bridge.focusWindowByOffset).toHaveBeenNthCalledWith(2, -1);
     expect(bridge.focusWindowByOffset).toHaveBeenCalledTimes(2);
     expect(bridge.arrangeAllWindows).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WorkspaceShell pane resizing", () => {
+  it("applies pointer drag deltas relative to the available pane width", () => {
+    const { container } = render(<WorkspaceShell renderPane={renderPane} />);
+    setWorkspaceWidth(container, 1009);
+    const divider = screen.getByRole("separator", { name: "Resize workspace panes" });
+
+    fireEvent.pointerDown(divider, { button: 0, clientX: 500, pointerId: 7 });
+    fireEvent.pointerMove(window, { clientX: 600, pointerId: 7 });
+
+    expect(divider.getAttribute("aria-orientation")).toBe("vertical");
+    expect(divider.getAttribute("aria-valuenow")).toBe("60");
+  });
+
+  it("clamps pointer resizing to a 280px minimum for each pane", () => {
+    const { container } = render(<WorkspaceShell renderPane={renderPane} />);
+    setWorkspaceWidth(container, 1009);
+    const divider = screen.getByRole("separator", { name: "Resize workspace panes" });
+
+    fireEvent.pointerDown(divider, { button: 0, clientX: 500, pointerId: 8 });
+    fireEvent.pointerMove(window, { clientX: -5_000, pointerId: 8 });
+    expect(divider.getAttribute("aria-valuenow")).toBe("28");
+
+    fireEvent.pointerMove(window, { clientX: 5_000, pointerId: 8 });
+    expect(divider.getAttribute("aria-valuenow")).toBe("72");
+  });
+
+  it("supports arrow, accelerated arrow, Home, and End keyboard controls", () => {
+    const { container } = render(<WorkspaceShell renderPane={renderPane} />);
+    setWorkspaceWidth(container, 1009);
+    const divider = screen.getByRole("separator", { name: "Resize workspace panes" });
+
+    fireEvent.keyDown(divider, { key: "ArrowRight" });
+    expect(divider.getAttribute("aria-valuenow")).toBe("52");
+    fireEvent.keyDown(divider, { key: "ArrowRight", shiftKey: true });
+    expect(divider.getAttribute("aria-valuenow")).toBe("62");
+    fireEvent.keyDown(divider, { key: "Home" });
+    expect(divider.getAttribute("aria-valuenow")).toBe("28");
+    fireEvent.keyDown(divider, { key: "End" });
+    expect(divider.getAttribute("aria-valuenow")).toBe("72");
+  });
+
+  it("removes global pointer listeners when dragging ends and when the shell unmounts", () => {
+    const addListener = vi.spyOn(window, "addEventListener");
+    const removeListener = vi.spyOn(window, "removeEventListener");
+    const { container, unmount } = render(<WorkspaceShell renderPane={renderPane} />);
+    setWorkspaceWidth(container, 1009);
+    const divider = screen.getByRole("separator", { name: "Resize workspace panes" });
+    addListener.mockClear();
+    removeListener.mockClear();
+
+    fireEvent.pointerDown(divider, { button: 0, clientX: 500, pointerId: 9 });
+    expect(addListener).toHaveBeenCalledWith("pointermove", expect.any(Function));
+    expect(addListener).toHaveBeenCalledWith("pointerup", expect.any(Function));
+    expect(addListener).toHaveBeenCalledWith("pointercancel", expect.any(Function));
+
+    fireEvent.pointerUp(window, { pointerId: 9 });
+    expect(removeListener).toHaveBeenCalledWith("pointermove", expect.any(Function));
+    expect(removeListener).toHaveBeenCalledWith("pointerup", expect.any(Function));
+    expect(removeListener).toHaveBeenCalledWith("pointercancel", expect.any(Function));
+
+    removeListener.mockClear();
+    fireEvent.pointerDown(divider, { button: 0, clientX: 500, pointerId: 10 });
+    unmount();
+    expect(removeListener).toHaveBeenCalledWith("pointermove", expect.any(Function));
+    expect(removeListener).toHaveBeenCalledWith("pointerup", expect.any(Function));
+    expect(removeListener).toHaveBeenCalledWith("pointercancel", expect.any(Function));
+    expect(document.body.style.cursor).toBe("");
+    expect(document.body.style.userSelect).toBe("");
   });
 });

@@ -230,6 +230,29 @@ describe("AgentPane pane isolation and lifecycle", () => {
     expect(primary.cancel).not.toHaveBeenCalled();
   });
 
+  it("restores a persisted secondary target without opening its picker", async () => {
+    const secondary = client("secondary");
+    const catalog = client("catalog");
+    agentMocks.createPaneAgentClient.mockImplementation((id: string) =>
+      id === "secondary" ? secondary : catalog,
+    );
+
+    render(
+      <AgentPane
+        {...props("secondary", "secondary")}
+        initialTarget={{ cwd: "/saved/project", sessionPath: "/saved/session.jsonl" }}
+      />,
+    );
+
+    await waitFor(() => expect(secondary.getState).toHaveBeenCalled());
+    expect(agentMocks.createPaneSession).toHaveBeenCalledWith(
+      "secondary",
+      "/saved/project",
+      "/saved/session.jsonl",
+    );
+    expect(screen.queryByRole("button", { name: "Choose test project" })).toBeNull();
+  });
+
   it("creates, waits, hydrates, and focuses a secondary pane", async () => {
     const secondary = client("secondary");
     const catalog = client("catalog");

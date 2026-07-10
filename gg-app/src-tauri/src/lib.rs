@@ -866,6 +866,21 @@ fn agent_pane_status(
     Ok(status)
 }
 
+/// Filesystem-only validation for a persisted webview layout target. This stays
+/// independent of daemon readiness so a stale session cannot block recovery.
+#[tauri::command]
+fn workspace_target_status(cwd: String, session_path: Option<String>) -> serde_json::Value {
+    let project_exists = Path::new(&cwd).is_dir();
+    let session_exists = session_path
+        .as_deref()
+        .map(|path| Path::new(path).is_file())
+        .unwrap_or(true);
+    serde_json::json!({
+        "projectExists": project_exists,
+        "sessionExists": session_exists,
+    })
+}
+
 #[tauri::command]
 fn dropped_path_info(paths: Vec<String>) -> Vec<DroppedPathInfo> {
     paths
@@ -4344,6 +4359,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             sidecar_port,
             agent_pane_status,
+            workspace_target_status,
             agent_pane_create,
             agent_pane_dispose,
             dropped_path_info,

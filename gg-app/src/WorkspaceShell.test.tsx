@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentPaneProps } from "./AgentPane";
 import { WorkspaceShell } from "./WorkspaceShell";
@@ -12,6 +12,9 @@ const bridge = vi.hoisted(() => ({
   newWindow: vi.fn(() => Promise.resolve()),
   onWindowOrder: vi.fn(() => Promise.resolve(() => undefined)),
   setWindowTitle: vi.fn(),
+  validateWorkspaceTarget: vi.fn(() =>
+    Promise.resolve({ projectExists: true, sessionExists: true }),
+  ),
   onDragDropEvent: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 
@@ -24,6 +27,7 @@ vi.mock("./agent", () => ({
   newWindow: bridge.newWindow,
   onWindowOrder: bridge.onWindowOrder,
   setWindowTitle: bridge.setWindowTitle,
+  validateWorkspaceTarget: bridge.validateWorkspaceTarget,
   windowLabel: "main",
 }));
 vi.mock("./update", () => ({
@@ -52,11 +56,13 @@ function FakePane({
   paneId,
   kind,
   focused,
+  initialTarget,
   onFocus,
   onSnapshot,
   registerInput,
 }: AgentPaneProps): React.ReactElement {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [mountedTarget] = useState(initialTarget);
   useEffect(() => {
     registerInput(paneId, {
       focus: () => inputRef.current?.focus(),
@@ -65,8 +71,10 @@ function FakePane({
     onSnapshot({
       paneId,
       cwd: `/work/${paneId}`,
+      sessionPath: `/sessions/${paneId}.jsonl`,
       sessionTitle: paneId,
       projectBound: true,
+      restoreChecked: true,
     });
     return () => registerInput(paneId, null);
   }, [onSnapshot, paneId, registerInput]);
@@ -76,6 +84,11 @@ function FakePane({
       data-testid={`pane-${paneId}`}
       data-kind={kind}
       data-focused={String(focused)}
+      data-initial-mode={
+        mountedTarget === undefined ? "native" : mountedTarget === null ? "picker" : "managed"
+      }
+      data-initial-cwd={mountedTarget?.cwd ?? ""}
+      data-initial-session={mountedTarget?.sessionPath ?? ""}
       onPointerDown={() => onFocus(paneId)}
       onFocusCapture={() => onFocus(paneId)}
     >
@@ -85,6 +98,40 @@ function FakePane({
 }
 
 const renderPane = (props: AgentPaneProps): React.ReactNode => <FakePane {...props} />;
+
+const nativePrimaryTarget = { cwd: "/native/project", sessionPath: "/native/session.jsonl" };
+
+function NativeRestoreBoundaryPane({
+  kind,
+  initialTarget,
+  onSnapshot,
+  paneId,
+}: AgentPaneProps): React.ReactElement {
+  const recoveredTarget =
+    kind === "primary" && initialTarget === undefined ? nativePrimaryTarget : null;
+  useEffect(() => {
+    onSnapshot({
+      paneId,
+      cwd: recoveredTarget?.cwd ?? null,
+      sessionPath: recoveredTarget?.sessionPath ?? null,
+      sessionTitle: null,
+      projectBound: recoveredTarget !== null,
+      restoreChecked: true,
+    });
+  }, [onSnapshot, paneId, recoveredTarget]);
+
+  return (
+    <div
+      data-testid={`restore-pane-${paneId}`}
+      data-source={recoveredTarget ? "native" : "picker"}
+      data-cwd={recoveredTarget?.cwd ?? ""}
+    />
+  );
+}
+
+const renderNativeRestorePane = (props: AgentPaneProps): React.ReactNode => (
+  <NativeRestoreBoundaryPane {...props} />
+);
 
 function setWorkspaceWidth(container: HTMLElement, width: number): void {
   const grid = container.querySelector<HTMLElement>(".workspace-grid");
@@ -104,6 +151,7 @@ function setWorkspaceWidth(container: HTMLElement, width: number): void {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
 });
 
 afterEach(() => {
@@ -172,6 +220,68 @@ describe("WorkspaceShell pane routing", () => {
     expect(bridge.focusWindowByOffset).toHaveBeenNthCalledWith(2, -1);
     expect(bridge.focusWindowByOffset).toHaveBeenCalledTimes(2);
     expect(bridge.arrangeAllWindows).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WorkspaceShell layout recovery", () => {
+  it.each([
+    ["malformed", "not-json"],
+    ["future", JSON.stringify({ version: 99, panes: {} })],
+  ])("recovers the native primary and secondary picker for %s layouts", async (_label, raw) => {
+    localStorage.setItem("gg-workspace-layout:main", raw);
+
+    render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
+
+    const primary = await screen.findByTestId("restore-pane-primary");
+    expect(primary.dataset.source).toBe("native");
+    expect(primary.dataset.cwd).toBe(nativePrimaryTarget.cwd);
+    expect(screen.getByTestId("restore-pane-secondary").dataset.source).toBe("picker");
+    expect(screen.getByRole("separator").parentElement?.getAttribute("data-split-ratio")).toBe(
+      "50",
+    );
+    expect(bridge.validateWorkspaceTarget).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(raw);
+      expect(localStorage.getItem("gg-workspace-layout:main")).toBe(raw);
+    });
+  });
+
+  it("recovers the native primary when reading layout storage fails", async () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage blocked");
+    });
+
+    render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
+
+    expect((await screen.findByTestId("restore-pane-primary")).dataset.source).toBe("native");
+    expect(screen.getByTestId("restore-pane-secondary").dataset.source).toBe("picker");
+    expect(bridge.validateWorkspaceTarget).not.toHaveBeenCalled();
+    expect(getItem).toHaveBeenCalledWith("gg-workspace-layout:main");
+  });
+
+  it("restores the saved ratio and both pane targets before mounting panes", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 1,
+        splitRatio: 64,
+        panes: {
+          primary: { cwd: "/saved/a", sessionPath: "/sessions/a.jsonl" },
+          secondary: { cwd: "/saved/b", sessionPath: "/sessions/b.jsonl" },
+        },
+      }),
+    );
+
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    const divider = await screen.findByRole("separator", { name: "Resize workspace panes" });
+    await waitFor(() =>
+      expect(screen.getByTestId("pane-primary").dataset.initialCwd).toBe("/saved/a"),
+    );
+    expect(screen.getByTestId("pane-secondary").dataset.initialSession).toBe("/sessions/b.jsonl");
+    expect(divider.getAttribute("aria-valuenow")).toBe("50");
+    expect(divider.parentElement?.getAttribute("data-split-ratio")).toBe("64");
+    expect(bridge.validateWorkspaceTarget).toHaveBeenCalledTimes(2);
   });
 });
 

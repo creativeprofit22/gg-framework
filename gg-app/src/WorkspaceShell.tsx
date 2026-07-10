@@ -6,6 +6,7 @@ import {
   newWindow,
   onWindowOrder,
   setWindowTitle,
+  validateWorkspaceTarget,
   windowLabel,
 } from "./agent";
 import {
@@ -26,6 +27,13 @@ import { toast } from "./toast";
 import { Toaster } from "./Toaster";
 import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
+import {
+  loadWorkspaceLayout,
+  preserveRejectedWorkspaceLayout,
+  resolveWorkspaceLayoutTargets,
+  saveWorkspaceLayout,
+  type WorkspaceLayout,
+} from "./workspace-layout";
 
 const PANE_IDS = [PRIMARY_PANE_ID, SECONDARY_PANE_ID] as const;
 const DIVIDER_WIDTH_PX = 9;
@@ -70,6 +78,13 @@ function canRestorePaneInput(): boolean {
 }
 
 export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.ReactElement {
+  const [loadedLayout] = useState(() => loadWorkspaceLayout(localStorage, windowLabel));
+  const layoutManaged = loadedLayout.status === "valid" || loadedLayout.status === "migrated";
+  const [paneTargets, setPaneTargets] = useState<WorkspaceLayout["panes"]>(
+    loadedLayout.layout.panes,
+  );
+  const [layoutReady, setLayoutReady] = useState(!layoutManaged);
+  const [rejectedLayoutChanged, setRejectedLayoutChanged] = useState(false);
   const [focusedPaneId, setFocusedPaneId] = useState<string>(PRIMARY_PANE_ID);
   const focusedPaneIdRef = useRef(focusedPaneId);
   const [windowFocused, setWindowFocused] = useState(true);
@@ -79,7 +94,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const [windowTotal, setWindowTotal] = useState(1);
   const [showScorecard, setShowScorecard] = useState(false);
   const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
-  const [primaryPaneRatio, setPrimaryPaneRatio] = useState(50);
+  const [primaryPaneRatio, setPrimaryPaneRatio] = useState(loadedLayout.layout.splitRatio);
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const workspaceGridRef = useRef<HTMLDivElement>(null);
   const stopPointerResizeRef = useRef<() => void>(() => undefined);
@@ -89,25 +104,82 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     focusedPaneIdRef.current = paneId;
     setFocusedPaneId(paneId);
   }, []);
+  const markLayoutChanged = useCallback((): void => setRejectedLayoutChanged(true), []);
 
   const updateSnapshot = useCallback((snapshot: PaneSnapshot): void => {
     setSnapshots((previous) => {
       const current = previous[snapshot.paneId];
       if (
         current?.cwd === snapshot.cwd &&
+        current.sessionPath === snapshot.sessionPath &&
         current.sessionTitle === snapshot.sessionTitle &&
-        current.projectBound === snapshot.projectBound
+        current.projectBound === snapshot.projectBound &&
+        current.restoreChecked === snapshot.restoreChecked
       ) {
         return previous;
       }
       return { ...previous, [snapshot.paneId]: snapshot };
     });
+    if (snapshot.projectBound && snapshot.cwd) {
+      setPaneTargets((previous) => ({
+        ...previous,
+        [snapshot.paneId]: { cwd: snapshot.cwd!, sessionPath: snapshot.sessionPath },
+      }));
+    } else if (snapshot.restoreChecked) {
+      setPaneTargets((previous) => ({ ...previous, [snapshot.paneId]: null }));
+    }
   }, []);
 
   const registerInput = useCallback((paneId: string, actions: PaneInputActions | null): void => {
     if (actions) inputActionsRef.current.set(paneId, actions);
     else inputActionsRef.current.delete(paneId);
   }, []);
+
+  useEffect(() => {
+    if (loadedLayout.status === "corrupt" && loadedLayout.rejectedRaw !== undefined) {
+      preserveRejectedWorkspaceLayout(localStorage, windowLabel, loadedLayout.rejectedRaw);
+    }
+  }, [loadedLayout]);
+
+  useEffect(() => {
+    if (!layoutManaged) return;
+    let cancelled = false;
+    void resolveWorkspaceLayoutTargets(loadedLayout.layout, (target) =>
+      validateWorkspaceTarget(target.cwd, target.sessionPath),
+    )
+      .then((resolved) => {
+        if (cancelled) return;
+        setPaneTargets(resolved.panes);
+        setPrimaryPaneRatio(resolved.splitRatio);
+        setLayoutReady(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPaneTargets(loadedLayout.layout.panes);
+        setPrimaryPaneRatio(loadedLayout.layout.splitRatio);
+        setLayoutReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [layoutManaged, loadedLayout]);
+
+  useEffect(() => {
+    if (!layoutReady || PANE_IDS.some((paneId) => !snapshots[paneId]?.restoreChecked)) return;
+    if (loadedLayout.status === "corrupt" && !rejectedLayoutChanged) return;
+    saveWorkspaceLayout(localStorage, windowLabel, {
+      version: 1,
+      splitRatio: primaryPaneRatio,
+      panes: paneTargets,
+    });
+  }, [
+    layoutReady,
+    loadedLayout.status,
+    paneTargets,
+    primaryPaneRatio,
+    rejectedLayoutChanged,
+    snapshots,
+  ]);
 
   useEffect(() => {
     focusedPaneIdRef.current = focusedPaneId;
@@ -259,6 +331,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
 
       if (nextRatio === null) return;
       event.preventDefault();
+      setRejectedLayoutChanged(true);
       setPrimaryPaneRatio(clampRatio(nextRatio, containerWidth));
     },
     [primaryPaneRatio],
@@ -293,6 +366,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       const onPointerMove = (moveEvent: PointerEvent): void => {
         if (moveEvent.pointerId !== pointerId || availableWidth === 0) return;
         const deltaRatio = ((moveEvent.clientX - startX) / availableWidth) * 100;
+        setRejectedLayoutChanged(true);
         setPrimaryPaneRatio(clampRatio(startRatio + deltaRatio, containerWidth));
       };
       const onPointerEnd = (endEvent: PointerEvent): void => {
@@ -325,6 +399,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       </div>
       <div
         className="workspace-grid"
+        data-split-ratio={primaryPaneRatio}
         ref={workspaceGridRef}
         style={{
           gridTemplateColumns: `minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${primaryPaneRatio}fr) ${DIVIDER_WIDTH_PX}px minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${100 - primaryPaneRatio}fr)`,
@@ -339,18 +414,22 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
             onPointerDownCapture={() => focusPane(paneId)}
             onFocusCapture={() => focusPane(paneId)}
           >
-            <PaneContent
-              renderPane={renderPane}
-              paneProps={{
-                paneId,
-                kind: index === 0 ? "primary" : "secondary",
-                focused: focusedPaneId === paneId,
-                windowFocused,
-                onFocus: focusPane,
-                onSnapshot: updateSnapshot,
-                registerInput,
-              }}
-            />
+            {layoutReady && (
+              <PaneContent
+                renderPane={renderPane}
+                paneProps={{
+                  paneId,
+                  kind: index === 0 ? "primary" : "secondary",
+                  focused: focusedPaneId === paneId,
+                  windowFocused,
+                  initialTarget: layoutManaged ? paneTargets[paneId] : undefined,
+                  onFocus: focusPane,
+                  onSnapshot: updateSnapshot,
+                  onUserTargetChange: markLayoutChanged,
+                  registerInput,
+                }}
+              />
+            )}
           </div>
         )).flatMap((pane, index) =>
           index === 0

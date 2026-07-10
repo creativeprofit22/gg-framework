@@ -18,6 +18,7 @@ import {
   type PromptSegment,
 } from "./agent";
 import { PRIMARY_PANE_ID } from "./pane-routing";
+import type { WorkspacePaneTarget } from "./workspace-layout";
 import { PaneHeader } from "./PaneHeader";
 import { ActivityBar } from "./ActivityBar";
 import { KenActivityBar } from "./KenActivityBar";
@@ -221,8 +222,10 @@ function canHandleWindowFileDrop(): boolean {
 export interface PaneSnapshot {
   paneId: string;
   cwd: string | null;
+  sessionPath: string | null;
   sessionTitle: string | null;
   projectBound: boolean;
+  restoreChecked: boolean;
 }
 
 export interface PaneInputActions {
@@ -235,8 +238,10 @@ export interface AgentPaneProps {
   kind: "primary" | "secondary";
   focused: boolean;
   windowFocused: boolean;
+  initialTarget?: WorkspacePaneTarget | null;
   onFocus: (paneId: string) => void;
   onSnapshot: (snapshot: PaneSnapshot) => void;
+  onUserTargetChange?: () => void;
   registerInput: (paneId: string, actions: PaneInputActions | null) => void;
 }
 
@@ -245,8 +250,10 @@ export function AgentPane({
   kind,
   focused,
   windowFocused,
+  initialTarget,
   onFocus,
   onSnapshot,
+  onUserTargetChange,
   registerInput,
 }: AgentPaneProps): React.ReactElement {
   const agentClient = useMemo(() => createPaneAgentClient(paneId), [paneId]);
@@ -395,7 +402,9 @@ export function AgentPane({
   // False until the boot-time workspace-restore check resolves. Gates the entry
   // render so a window reopened from the saved workspace (after a restart /
   // update) never flashes the picker before jumping into its restored project.
-  const [restoreChecked, setRestoreChecked] = useState(kind === "secondary");
+  const [restoreChecked, setRestoreChecked] = useState(
+    kind === "secondary" && initialTarget === undefined,
+  );
   const primaryCatalogClient = useMemo(() => createPaneAgentClient(PRIMARY_PANE_ID), []);
   // Entry-screen routing while no project is open: the home landing, the
   // project chooser, or the provider login hub. Secondary windows (opened via
@@ -849,38 +858,86 @@ export function AgentPane({
   }, [agentClient, getState, listCommands, listHistory, listModels, listTasks]);
 
   useEffect(() => {
-    const unsub = subscribe(handleEvent);
+    const unsub = subscribe((event) => {
+      handleEvent(event);
+      if (event.type === "session_reset" || event.type === "run_end") {
+        void getState()
+          .then((nextState) => {
+            if (!disposedRef.current) setState(nextState);
+          })
+          .catch(() => {});
+      }
+    });
     return () => unsub();
-  }, [handleEvent, subscribe]);
+  }, [getState, handleEvent, subscribe]);
 
   useEffect(() => {
     onSnapshot({
       paneId,
       cwd: state?.cwd ?? null,
+      sessionPath: state?.sessionPath || null,
       sessionTitle,
       projectBound: !needsProject,
+      restoreChecked,
     });
-  }, [needsProject, onSnapshot, paneId, sessionTitle, state?.cwd]);
+  }, [
+    needsProject,
+    onSnapshot,
+    paneId,
+    restoreChecked,
+    sessionTitle,
+    state?.cwd,
+    state?.sessionPath,
+  ]);
 
-  // Boot-time workspace restore: if Rust reopened THIS window from the saved
-  // workspace (after a restart / update), its sidecar is already spawned at the
-  // restored project + session. Skip the picker and hydrate straight in, exactly
-  // like a completed project choice. Consume-once on the Rust side, so this runs
-  // a single time on mount. Always flips `restoreChecked` so the entry render is
-  // unblocked whether or not this was a restored window.
+  // Restore the persisted internal-pane target after the native primary restore
+  // target has been consumed. A matching primary is already running; every other
+  // target is bound explicitly to its owning pane.
   useEffect(() => {
-    if (kind === "secondary") {
-      setRestoreChecked(true);
-      return;
-    }
-    // Primary alone consumes the native window restore target.
-    void restoreTarget()
-      .then((target) => {
-        if (target) onProjectChosen();
+    let cancelled = false;
+    void (async () => {
+      const nativeTarget = kind === "primary" ? await restoreTarget() : null;
+      if (cancelled) return;
+
+      if (initialTarget === undefined) {
+        if (nativeTarget) onProjectChosen();
+        return;
+      }
+      if (!initialTarget) return;
+
+      if (
+        kind === "primary" &&
+        nativeTarget?.cwd === initialTarget.cwd &&
+        (nativeTarget.sessionPath ?? null) === initialTarget.sessionPath
+      ) {
+        onProjectChosen();
+        return;
+      }
+
+      if (kind === "primary") {
+        await selectProject(initialTarget.cwd, initialTarget.sessionPath ?? undefined);
+      } else {
+        secondaryCreateStartedRef.current = true;
+        await createPaneSession(paneId, initialTarget.cwd, initialTarget.sessionPath ?? undefined);
+        secondaryCreatedRef.current = true;
+        await agentClient.waitForReady();
+      }
+      if (!cancelled && !disposedRef.current) onProjectChosen();
+    })()
+      .catch(() => {
+        // A target can disappear between validation and binding. Leave this pane
+        // at the picker instead of blocking the rest of the workspace.
       })
-      .finally(() => setRestoreChecked(true));
-    // Mount-only: the restore target is consume-once.
-  }, [kind]);
+      .finally(() => {
+        if (!cancelled) setRestoreChecked(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // Mount-only: pane IDs and initial restore targets are immutable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     // Only the main window auto-connects to its default project. Secondary
@@ -1601,7 +1658,10 @@ export function AgentPane({
           <LoginScreen onClose={() => setEntryView("home")} />
         ) : (
           <ProjectPicker
-            onChosen={onProjectChosen}
+            onChosen={() => {
+              onUserTargetChange?.();
+              onProjectChosen();
+            }}
             waitForCatalogReady={primaryCatalogClient.waitForReady}
             discoverProjects={primaryCatalogClient.listProjects}
             discoverSessions={primaryCatalogClient.listSessions}
@@ -1633,6 +1693,7 @@ export function AgentPane({
           showWindowControls={kind === "primary"}
           onChosen={() => {
             setShowPicker(false);
+            onUserTargetChange?.();
             onProjectChosen();
           }}
           onClose={() => {

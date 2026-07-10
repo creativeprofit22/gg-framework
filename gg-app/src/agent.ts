@@ -78,6 +78,7 @@ export interface AgentState {
   provider: string;
   model: string;
   cwd: string;
+  sessionPath: string;
   running: boolean;
   /** Current reasoning level, or null when thinking is off. May be absent on
    * frames from older sidecars / partial model_change spreads. */
@@ -1172,6 +1173,18 @@ export function subscribe(
 export interface AgentPaneStatus {
   ready: boolean;
   error: string | null;
+}
+
+export interface WorkspaceTargetStatus {
+  projectExists: boolean;
+  sessionExists: boolean;
+}
+
+export function validateWorkspaceTarget(
+  cwd: string,
+  sessionPath: string | null,
+): Promise<WorkspaceTargetStatus> {
+  return invoke<WorkspaceTargetStatus>("workspace_target_status", { cwd, sessionPath });
 }
 
 function startupErrorMessage(payload: unknown): string {

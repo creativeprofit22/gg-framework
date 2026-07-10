@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import {
@@ -21,17 +21,15 @@ import { NewProjectModal } from "./NewProjectModal";
 import { formatBuildIdentity } from "./build-info";
 import { toast } from "./toast";
 
-interface Props {
-  /** Called after the agent has been re-pointed at `cwd` (+ optional session). */
+export interface ProjectPickerProps {
+  /** Called after the selected project/session has been bound to the owning pane. */
   onChosen: (cwd: string) => void;
-  /**
-   * When set, open straight to this project's session list (used by the "back
-   * to sessions" affordance from inside a project). Falls back to the full
-   * project list if the path isn't among the discovered projects.
-   */
   initialProjectPath?: string | null;
-  /** Shown when the picker is reachable from an open project (enables "back"). */
   onClose?: () => void;
+  waitForCatalogReady?: () => Promise<void>;
+  discoverProjects?: () => Promise<DiscoveredProject[]>;
+  discoverSessions?: (cwd: string) => Promise<RecentSession[]>;
+  bindProject?: (cwd: string, sessionPath?: string) => Promise<void>;
 }
 
 /**
@@ -44,7 +42,11 @@ export function ProjectPicker({
   onChosen,
   initialProjectPath,
   onClose,
-}: Props): React.ReactElement {
+  waitForCatalogReady = waitForReady,
+  discoverProjects = listProjects,
+  discoverSessions = listSessions,
+  bindProject = selectProject,
+}: ProjectPickerProps): React.ReactElement {
   const [projects, setProjects] = useState<DiscoveredProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<DiscoveredProject | null>(null);
@@ -54,6 +56,7 @@ export function ProjectPicker({
   const [projectsRoot, setProjectsRoot] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [query, setQuery] = useState("");
+  const sessionRequestRef = useRef(0);
   const buildIdentity = formatBuildIdentity();
 
   const q = query.trim().toLowerCase();
@@ -92,11 +95,37 @@ export function ProjectPicker({
     };
   }, []);
 
+  const openProject = useCallback(
+    (project: DiscoveredProject): void => {
+      const requestId = ++sessionRequestRef.current;
+      setSelected(project);
+      setSessions([]);
+      setSessionsLoading(true);
+      void discoverSessions(project.path)
+        .then((nextSessions) => {
+          if (requestId === sessionRequestRef.current) setSessions(nextSessions);
+        })
+        .catch(() => {
+          if (requestId === sessionRequestRef.current) setSessions([]);
+        })
+        .finally(() => {
+          if (requestId === sessionRequestRef.current) setSessionsLoading(false);
+        });
+    },
+    [discoverSessions],
+  );
+
+  useEffect(() => {
+    return () => {
+      sessionRequestRef.current += 1;
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     // The window's sidecar serves project discovery; wait for it before asking.
-    void waitForReady()
-      .then(() => listProjects())
+    void waitForCatalogReady()
+      .then(() => discoverProjects())
       .then((p) => {
         if (cancelled) return;
         setProjects(p);
@@ -118,25 +147,12 @@ export function ProjectPicker({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function openProject(project: DiscoveredProject): void {
-    setSelected(project);
-    setSessions([]);
-    setSessionsLoading(true);
-    void listSessions(project.path).then((s) => {
-      setSessions(s);
-      setSessionsLoading(false);
-    });
-  }
+  }, [discoverProjects, initialProjectPath, openProject, waitForCatalogReady]);
 
   function choose(cwd: string, sessionPath?: string): void {
     if (busy) return;
     setBusy(true);
-    // Re-point this window's agent (respawns the sidecar), then let App re-run
-    // its ready flow against the new sidecar.
-    void selectProject(cwd, sessionPath)
+    void bindProject(cwd, sessionPath)
       .then(() => onChosen(cwd))
       .catch(() => setBusy(false));
   }
@@ -161,7 +177,13 @@ export function ProjectPicker({
     <div className="picker">
       <div className="picker-head" data-tauri-drag-region>
         {selected ? (
-          <BackButton label="All projects" onClick={() => setSelected(null)} />
+          <BackButton
+            label="All projects"
+            onClick={() => {
+              sessionRequestRef.current += 1;
+              setSelected(null);
+            }}
+          />
         ) : onClose ? (
           <BackButton label="Back" onClick={onClose} />
         ) : null}
@@ -314,6 +336,7 @@ export function ProjectPicker({
         <NewProjectModal
           projectsRoot={projectsRoot}
           onClose={() => setShowNew(false)}
+          bindProject={(cwd) => bindProject(cwd)}
           onCreated={(cwd) => {
             setShowNew(false);
             onChosen(cwd);

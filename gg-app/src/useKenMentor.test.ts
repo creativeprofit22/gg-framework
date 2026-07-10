@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { useKenMentor } from "./useKenMentor";
-import type { Item } from "./App";
+import type { Item } from "./transcript-types";
 import type { SidecarEvent } from "./agent";
 
 /**

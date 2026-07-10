@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { SidecarEvent } from "./agent";
-import type { Item } from "./App";
+import type { Item } from "./transcript-types";
 
 /**
  * Autopilot Ken (auto-reviewer) event handling, extracted from App.tsx and

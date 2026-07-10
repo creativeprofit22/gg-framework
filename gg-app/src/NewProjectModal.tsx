@@ -3,12 +3,14 @@ import { theme } from "./theme";
 import { Modal } from "./Modal";
 import { createProject, selectProject } from "./agent";
 
-interface Props {
+export interface NewProjectModalProps {
   /** Where new projects are created — shown so the user knows the destination. */
   projectsRoot: string;
   onClose: () => void;
-  /** Called after the project is created + this window re-pointed at it. */
+  /** Called after the project is created and bound to the owning pane. */
   onCreated: (cwd: string) => void;
+  createFolder?: (name: string) => Promise<string>;
+  bindProject?: (cwd: string) => Promise<void>;
 }
 
 /** Normalize freeform input toward a valid folder name (lowercase, dashes). */
@@ -19,7 +21,13 @@ function slugify(input: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-export function NewProjectModal({ projectsRoot, onClose, onCreated }: Props): React.ReactElement {
+export function NewProjectModal({
+  projectsRoot,
+  onClose,
+  onCreated,
+  createFolder = createProject,
+  bindProject = (cwd) => selectProject(cwd),
+}: NewProjectModalProps): React.ReactElement {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,8 +40,8 @@ export function NewProjectModal({ projectsRoot, onClose, onCreated }: Props): Re
     setBusy(true);
     setError(null);
     try {
-      const cwd = await createProject(slug);
-      await selectProject(cwd);
+      const cwd = await createFolder(slug);
+      await bindProject(cwd);
       onCreated(cwd);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

@@ -13,7 +13,7 @@ vi.mock("./sounds", () => ({ playSound: vi.fn() }));
 vi.mock("./agent", () => ({ listCommands: vi.fn().mockResolvedValue([]) }));
 
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
-import type { Item } from "./App";
+import type { Item } from "./transcript-types";
 import type { AgentState, SidecarEvent } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
 
@@ -85,6 +85,7 @@ function setup(
     setQueuedCount: noop as unknown as AgentEventsDeps["setQueuedCount"],
     setAttachments: noop as unknown as AgentEventsDeps["setAttachments"],
     setCommands: noop as unknown as AgentEventsDeps["setCommands"],
+    listCommands: vi.fn().mockResolvedValue([]),
     stateRef,
     planDoneRef: { current: new Set<number>() },
     planTotalRef: { current: 0 },

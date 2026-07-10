@@ -1,8 +1,7 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { theme } from "./theme";
 import {
-  listCommands,
   type SidecarEvent,
   type AgentState,
   type BackgroundTask,
@@ -15,7 +14,7 @@ import { type SubAgentLine } from "./SubAgentFeed";
 import { playSound } from "./sounds";
 import { findCompletedSteps, countPlanSteps } from "./plan-steps";
 import type { PendingAttachment } from "./attachments";
-import type { Item } from "./App";
+import type { Item } from "./transcript-types";
 
 /**
  * Build-session SSE event handling + assistant-streaming helpers, extracted from
@@ -137,6 +136,7 @@ export interface AgentEventsDeps {
   setQueuedCount: Dispatch<SetStateAction<number>>;
   setAttachments: Dispatch<SetStateAction<PendingAttachment[]>>;
   setCommands: Dispatch<SetStateAction<SlashCommand[]>>;
+  listCommands: () => Promise<SlashCommand[]>;
 
   stateRef: MutableRefObject<AgentState | null>;
   planDoneRef: MutableRefObject<Set<number>>;
@@ -180,6 +180,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setQueuedCount,
     setAttachments,
     setCommands,
+    listCommands,
     stateRef,
     planDoneRef,
     planTotalRef,
@@ -836,6 +837,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setQueuedCount,
       setAttachments,
       setCommands,
+      listCommands,
       stateRef,
       planDoneRef,
       planTotalRef,
@@ -843,6 +845,18 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       pendingPlanTotalRef,
       stickToBottomRef,
     ],
+  );
+
+  useEffect(
+    () => () => {
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      pendingChunksRef.current = "";
+      streamingIdRef.current = null;
+    },
+    [],
   );
 
   return { handleEvent, pushItem, endStreamingText };

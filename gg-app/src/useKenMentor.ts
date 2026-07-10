@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import type { Dispatch, SetStateAction } from "react";
 import type { SidecarEvent } from "./agent";
-import type { Item } from "./App";
+import type { Item } from "./transcript-types";
 
 /**
  * Ken Kai (mentor agent) client state + event handling, extracted from App.tsx.

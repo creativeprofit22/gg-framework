@@ -1,4 +1,5 @@
 export const PRIMARY_PANE_ID = "primary";
+export const SECONDARY_PANE_ID = "secondary";
 
 export interface PaneTaggedEvent {
   paneId?: string;

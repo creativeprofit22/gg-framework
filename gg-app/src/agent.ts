@@ -1271,3 +1271,160 @@ export function createPaneSession(
 export function disposePaneSession(paneId: string): Promise<void> {
   return invoke("agent_pane_dispose", { paneId });
 }
+
+/** Pane-bound session API used by AgentPane. Every sidecar-backed call carries
+ * the explicit pane ID, preventing secondary panes from falling through to the
+ * primary compatibility wrappers. */
+export interface PaneAgentClient {
+  readonly paneId: string;
+  subscribe(listener: (event: SidecarEvent) => void, activeSessionId?: string): () => void;
+  getStatus(): Promise<AgentPaneStatus>;
+  waitForReady(): Promise<void>;
+  getState(): Promise<AgentState>;
+  sendPrompt(text: string, attachments?: Attachment[], meta?: PromptMeta): Promise<void>;
+  sendKenPrompt(text: string): Promise<void>;
+  cancel(): Promise<void>;
+  cancelKen(): Promise<void>;
+  setAutopilot(enabled: boolean): Promise<boolean>;
+  acceptPlan(planPath: string | null): Promise<void>;
+  newSession(): Promise<void>;
+  listHistory(): Promise<HistoryEntry[]>;
+  cycleThinking(): Promise<ThinkingState | null>;
+  listModels(): Promise<ModelOption[]>;
+  switchModel(model: string): Promise<SwitchModelResult | null>;
+  switchKenModel(model: string | null): Promise<SwitchKenModelResult | null>;
+  listCommands(): Promise<SlashCommand[]>;
+  searchFiles(query: string): Promise<FileHit[]>;
+  enhancePrompt(text: string): Promise<EnhanceResult>;
+  listTasks(): Promise<ProjectTask[]>;
+  runTask(id: string): Promise<void>;
+  runAllTasks(): Promise<void>;
+  deleteTask(id: string): Promise<ProjectTask[]>;
+  listProjects(): Promise<DiscoveredProject[]>;
+  listSessions(cwd: string): Promise<RecentSession[]>;
+  selectProject(cwd: string, sessionPath?: string): Promise<void>;
+  openProjectPath(path: string): Promise<void>;
+}
+
+export function createPaneAgentClient(paneId: string): PaneAgentClient {
+  const call = <T>(command: string, args: Record<string, unknown> = {}): Promise<T> =>
+    invokeForPane<T>(command, args, paneId);
+  const arrayResult = async <T>(
+    command: string,
+    key: string,
+    args: Record<string, unknown> = {},
+  ): Promise<T[]> => {
+    try {
+      const result = await call<Record<string, T[]>>(command, args);
+      return result[key] ?? [];
+    } catch (error) {
+      await logError(`${command} failed: ${String(error)}`);
+      return [];
+    }
+  };
+
+  return {
+    paneId,
+    subscribe: (listener, activeSessionId) => subscribe(paneId, listener, activeSessionId),
+    getStatus: () => getPaneStatus(paneId),
+    waitForReady: () => waitForPaneReady(paneId),
+    getState: () => call<AgentState>("agent_state"),
+    async sendPrompt(text, attachments = [], meta) {
+      await logInfo(
+        `prompt: ${text.slice(0, 80)}${attachments.length ? ` (+${attachments.length} att)` : ""}`,
+      );
+      await call("agent_prompt", { text, attachments, meta: meta ?? null });
+    },
+    async sendKenPrompt(text) {
+      await logInfo(`ken prompt: ${text.slice(0, 80)}`);
+      await waitForPaneReady(paneId);
+      await call("agent_ken_prompt", { text });
+    },
+    async cancel() {
+      try {
+        await call("agent_cancel");
+      } catch (error) {
+        await logError(`agent_cancel failed: ${String(error)}`);
+      }
+    },
+    async cancelKen() {
+      try {
+        await waitForPaneReady(paneId);
+        await call("agent_ken_cancel");
+      } catch (error) {
+        await logError(`agent_ken_cancel failed: ${String(error)}`);
+      }
+    },
+    async setAutopilot(enabled) {
+      try {
+        await waitForPaneReady(paneId);
+        const result = await call<{ autopilot?: boolean }>("agent_autopilot_set", { enabled });
+        return result.autopilot ?? enabled;
+      } catch (error) {
+        await logError(`agent_autopilot_set failed: ${String(error)}`);
+        return enabled;
+      }
+    },
+    async acceptPlan(planPath) {
+      try {
+        await call("agent_accept_plan", { planPath });
+      } catch (error) {
+        await logError(`agent_accept_plan failed: ${String(error)}`);
+      }
+    },
+    newSession: () => call("agent_new_session"),
+    listHistory: () => arrayResult<HistoryEntry>("agent_history", "history"),
+    async cycleThinking() {
+      try {
+        return await call<ThinkingState>("agent_cycle_thinking");
+      } catch (error) {
+        await logError(`agent_cycle_thinking failed: ${String(error)}`);
+        return null;
+      }
+    },
+    listModels: () => arrayResult<ModelOption>("agent_models", "models"),
+    async switchModel(model) {
+      try {
+        return await call<SwitchModelResult>("agent_switch_model", { model });
+      } catch (error) {
+        await logError(`agent_switch_model failed: ${String(error)}`);
+        return null;
+      }
+    },
+    async switchKenModel(model) {
+      try {
+        return await call<SwitchKenModelResult>("agent_switch_ken_model", { model });
+      } catch (error) {
+        await logError(`agent_switch_ken_model failed: ${String(error)}`);
+        return null;
+      }
+    },
+    listCommands: () => arrayResult<SlashCommand>("agent_commands", "commands"),
+    searchFiles: (query) => arrayResult<FileHit>("agent_files", "files", { query }),
+    async enhancePrompt(text) {
+      await waitForPaneReady(paneId);
+      return call<EnhanceResult>("agent_enhance_prompt", { text });
+    },
+    listTasks: () => arrayResult<ProjectTask>("agent_tasks", "tasks"),
+    runTask: (id) => call("agent_run_tasks", { id, all: false }),
+    runAllTasks: () => call("agent_run_tasks", { id: null, all: true }),
+    deleteTask: (id) => arrayResult<ProjectTask>("agent_delete_task", "tasks", { id }),
+    listProjects: () => arrayResult<DiscoveredProject>("agent_projects", "projects"),
+    listSessions: (cwd) => arrayResult<RecentSession>("agent_sessions", "sessions", { cwd }),
+    selectProject: (cwd, sessionPath) =>
+      call("select_project", { cwd, sessionPath: sessionPath ?? null }),
+    async openProjectPath(path) {
+      let decoded = path;
+      try {
+        decoded = decodeURIComponent(path);
+      } catch {
+        // Preserve malformed paths and let the native opener report the error.
+      }
+      try {
+        await call("open_project_path", { path: decoded });
+      } catch (error) {
+        await logError(`open_project_path failed: ${String(error)}`);
+      }
+    },
+  };
+}

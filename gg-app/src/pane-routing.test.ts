@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   PRIMARY_PANE_ID,
+  SECONDARY_PANE_ID,
   createPaneEventFanout,
   matchesPaneEvent,
   type PaneTaggedEvent,
@@ -24,9 +25,10 @@ describe("pane event routing", () => {
     expect(matchesPaneEvent(event("pane-b", "b"), PRIMARY_PANE_ID)).toBe(false);
   });
 
-  it("routes a secondary pane only to its exact ID", () => {
-    expect(matchesPaneEvent(event("pane-b", "b"), "pane-b")).toBe(true);
-    expect(matchesPaneEvent(event(PRIMARY_PANE_ID, "a"), "pane-b")).toBe(false);
+  it("routes the fixed secondary pane only to its exact ID", () => {
+    expect(SECONDARY_PANE_ID).toBe("secondary");
+    expect(matchesPaneEvent(event(SECONDARY_PANE_ID, "b"), SECONDARY_PANE_ID)).toBe(true);
+    expect(matchesPaneEvent(event(PRIMARY_PANE_ID, "a"), SECONDARY_PANE_ID)).toBe(false);
   });
 
   it("accepts an untagged legacy event only for primary", () => {
@@ -39,12 +41,12 @@ describe("pane event routing", () => {
     const primary: string[] = [];
     const paneB: string[] = [];
     fanout.subscribe(PRIMARY_PANE_ID, (value) => primary.push(value.data));
-    fanout.subscribe("pane-b", (value) => paneB.push(value.data));
+    fanout.subscribe(SECONDARY_PANE_ID, (value) => paneB.push(value.data));
 
     fanout.dispatch(event(PRIMARY_PANE_ID, "a1"));
-    fanout.dispatch(event("pane-b", "b1"));
+    fanout.dispatch(event(SECONDARY_PANE_ID, "b1"));
     fanout.dispatch(event(PRIMARY_PANE_ID, "a2"));
-    fanout.dispatch(event("pane-b", "b2"));
+    fanout.dispatch(event(SECONDARY_PANE_ID, "b2"));
 
     expect(primary).toEqual(["a1", "a2"]);
     expect(paneB).toEqual(["b1", "b2"]);
@@ -54,16 +56,16 @@ describe("pane event routing", () => {
     const fanout = createPaneEventFanout<TestEvent>();
     const paneBListener = vi.fn();
     const primaryListener = vi.fn();
-    fanout.subscribe("pane-b", paneBListener, "session-new");
+    fanout.subscribe(SECONDARY_PANE_ID, paneBListener, "session-new");
     fanout.subscribe(PRIMARY_PANE_ID, primaryListener, "primary-session");
 
-    fanout.dispatch(event("pane-b", "stale", "session-old"));
-    fanout.dispatch(event("pane-b", "missing-session"));
-    fanout.dispatch(event("pane-b", "current", "session-new"));
+    fanout.dispatch(event(SECONDARY_PANE_ID, "stale", "session-old"));
+    fanout.dispatch(event(SECONDARY_PANE_ID, "missing-session"));
+    fanout.dispatch(event(SECONDARY_PANE_ID, "current", "session-new"));
     fanout.dispatch(event(undefined, "legacy"));
 
     expect(paneBListener).toHaveBeenCalledTimes(1);
-    expect(paneBListener).toHaveBeenCalledWith(event("pane-b", "current", "session-new"));
+    expect(paneBListener).toHaveBeenCalledWith(event(SECONDARY_PANE_ID, "current", "session-new"));
     expect(primaryListener).toHaveBeenCalledWith(event(undefined, "legacy"));
   });
 });

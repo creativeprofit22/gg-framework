@@ -62,6 +62,7 @@ import { ContextMeter } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { TasksModal } from "./TasksModal";
 import { NotesModal } from "./NotesModal";
+import { useProjectNotes } from "./useProjectNotes";
 import { ShimmerText } from "./ShimmerText";
 import { WakeScreen } from "./WakeScreen";
 import { ConfirmModal } from "./ConfirmModal";
@@ -463,9 +464,9 @@ function App(): React.ReactElement {
   // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
   const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
   const [showTasks, setShowTasks] = useState(false);
-  // Free-form per-project notes, persisted to localStorage keyed by project cwd.
+  // Free-form per-project notes, persisted through the versioned repository.
   const [showNotes, setShowNotes] = useState(false);
-  const [notes, setNotes] = useState("");
+  const { value: notes, onChange: handleNotesChange } = useProjectNotes(state?.cwd ?? null);
   // Every window picks a project before connecting — on app load and on each new
   // window. The picker re-points this window's agent at the chosen cwd/session.
   const [needsProject, setNeedsProject] = useState(true);
@@ -1163,35 +1164,6 @@ function App(): React.ReactElement {
   const handleDeleteTask = useCallback((id: string) => {
     void deleteTask(id).then(setProjectTasks);
   }, []);
-
-  // Per-project notes: load from localStorage whenever the active project (cwd)
-  // changes, and write back on every edit. Keyed by cwd so each project keeps
-  // its own notebook; windows pointed at the same project share one.
-  const notesKey = state?.cwd ? `gg-notes:${state.cwd}` : null;
-  useEffect(() => {
-    if (!notesKey) {
-      setNotes("");
-      return;
-    }
-    try {
-      setNotes(localStorage.getItem(notesKey) ?? "");
-    } catch {
-      setNotes("");
-    }
-  }, [notesKey]);
-
-  const handleNotesChange = useCallback(
-    (value: string) => {
-      setNotes(value);
-      if (!notesKey) return;
-      try {
-        localStorage.setItem(notesKey, value);
-      } catch {
-        // Storage full/unavailable — keep the in-memory value for this session.
-      }
-    },
-    [notesKey],
-  );
 
   // Pin Ken to a model (or null → clear the pin, follow GG Coder). The
   // sidecar's ken_model_change broadcast updates state; the .then is just a

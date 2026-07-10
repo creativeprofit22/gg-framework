@@ -302,6 +302,12 @@ Start with one native window containing one `AgentPane`, but make identity expli
 
 Extend the existing shared daemon bridge so one native webview can own multiple daemon sessions. Existing per-window IPC remains a compatibility path; new pane-aware commands take an explicit `paneId` or opaque pane session handle and validate ownership in Rust.
 
+### Status (through `c2adb9f`)
+
+- [x] Pane-aware Rust/sidecar routing, ownership validation, SSE tagging, cancellation isolation, and independent disposal (`f9fcb88`).
+- [x] Daemon recovery recreates each owned pane session without crossing pane state (`f9fcb88`).
+- [x] `AgentPane` and `WorkspaceShell` provide the reusable pane boundary while preserving native multi-window workflows (`29eed34`).
+
 ### Non-goals
 
 - No visible split controls or drag resizing yet.
@@ -402,6 +408,18 @@ Ship the actual single-window workspace:
 - move a pane to a new native window and open a project directly in a new native window
 
 Use app-owned resizable wrappers so a dependency can be upgraded/replaced without leaking its API throughout GG App.
+
+### Status (through `c2adb9f`)
+
+- [x] Fixed primary/secondary two-column workspace with independent project/session selection and pane-scoped controls (`29eed34`, `b94e420`).
+- [x] Click/focus and Ctrl/Cmd+1/2 routing target one pane; the native title and Notes follow the focused pane (`29eed34`, `c2adb9f`).
+- [x] Pointer and keyboard resizing use an accessible divider, enforce minimum widths, and preserve mounted pane/session state (`b36ec25`).
+- [x] Versioned fixed-layout restoration validates records, clamps ratios, restores both pane targets, handles missing projects, preserves rejected corrupt data, and persists the split ratio (`c9d86c1`, `84599e0`).
+- [x] The secondary pane closes idle, confirms active work, disposes only its session, restores primary focus, reopens to the picker, survives repeated cycles, and persists one-pane mode across restart (`6a59a0c`).
+- [x] Persist and restore the focused pane ID across reload/restart, normalizing stale or malformed focus to primary (`c2adb9f`).
+- [ ] Replace the fixed two-column model with recursive horizontal/vertical `SplitNode | LeafNode` splitting, normalization, and a conservative pane cap.
+- [ ] Move/open a pane in a native window without duplicate live ownership.
+- [ ] Surface a concise recoverable warning when a malformed/stale layout falls back.
 
 ### Non-goals
 

@@ -600,6 +600,157 @@ describe("useProjectNotes", () => {
     expect(second.result.current.document.handoff.text).toBe("external\n😀");
   });
 
+  it("acknowledges only the matching unread Handoff generation and persists its read timestamp", () => {
+    const cwd = "/work/project";
+    const storage = new ObservableStorage();
+    let now = NOW;
+    const clock = (): string => now;
+    const hookOptions = {
+      storage,
+      repository: createNotesRepository(storage, clock),
+      eventTarget: new FakeStorageEvents(),
+      clock,
+    };
+    const { result } = renderHook(() => useProjectNotes(cwd, hookOptions));
+
+    act(() => result.current.changeHandoff("Continue here"));
+    expect(result.current.document.handoff).toEqual({
+      text: "Continue here",
+      updatedAt: NOW,
+      readAt: null,
+    });
+    expect(JSON.parse(storage.getItem(v2NotesKey(cwd))!).handoff.readAt).toBeNull();
+
+    now = LATER;
+    act(() => result.current.markHandoffPresented("Continue here", NOW));
+
+    expect(result.current.document.handoff).toEqual({
+      text: "Continue here",
+      updatedAt: NOW,
+      readAt: LATER,
+    });
+    expect(result.current.document.updatedAt).toBe(LATER);
+    expect(JSON.parse(storage.getItem(v2NotesKey(cwd))!).handoff.readAt).toBe(LATER);
+  });
+
+  it("does not write for empty, unversioned, or already-read Handoffs", () => {
+    const cwd = "/work/project";
+    const storage = new ObservableStorage();
+    const hookOptions = options(storage);
+    const { result } = renderHook(() => useProjectNotes(cwd, hookOptions));
+    let writes = storage.writeCount;
+
+    act(() => {
+      result.current.markHandoffPresented("", null);
+      result.current.markHandoffPresented("", NOW);
+    });
+    expect(storage.writeCount).toBe(writes);
+
+    act(() => result.current.changeHandoff("Read once"));
+    act(() => result.current.markHandoffPresented("Read once", NOW));
+    writes = storage.writeCount;
+    act(() => result.current.markHandoffPresented("Read once", NOW));
+
+    expect(storage.writeCount).toBe(writes);
+  });
+
+  it("rejects stale presentation callbacks after a newer edit and a project switch", () => {
+    const cwdA = "/work/a";
+    const cwdB = "/work/b";
+    const storage = new ObservableStorage();
+    let now = NOW;
+    const clock = (): string => now;
+    const hookOptions = {
+      storage,
+      repository: createNotesRepository(storage, clock),
+      eventTarget: new FakeStorageEvents(),
+      clock,
+    };
+    const { result, rerender } = renderHook(
+      ({ cwd }: { cwd: string }) => useProjectNotes(cwd, hookOptions),
+      { initialProps: { cwd: cwdA } },
+    );
+    act(() => result.current.changeHandoff("generation A"));
+    const stalePresentation = result.current.markHandoffPresented;
+    now = LATER;
+    act(() => result.current.changeHandoff("generation B"));
+    const writesBeforeStaleGeneration = storage.writeCount;
+
+    act(() => result.current.markHandoffPresented("generation A", NOW));
+    expect(storage.writeCount).toBe(writesBeforeStaleGeneration);
+    expect(result.current.document.handoff.readAt).toBeNull();
+
+    rerender({ cwd: cwdB });
+    const writesBeforeSwitchCallback = storage.writeCount;
+    act(() => stalePresentation("generation A", NOW));
+
+    expect(storage.writeCount).toBe(writesBeforeSwitchCallback);
+    expect(JSON.parse(storage.getItem(v2NotesKey(cwdA))!).handoff.readAt).toBeNull();
+    expect(result.current.document.handoff.text).toBe("");
+  });
+
+  it("syncs unread and shared read acknowledgement across same-project windows only", () => {
+    const cwd = "C:\\Work\\Project";
+    const alias = "c:/work/project/";
+    const otherCwd = "C:\\Work\\Other";
+    const storage = new ObservableStorage();
+    const events = new FakeStorageEvents();
+    let now = NOW;
+    const clock = (): string => now;
+    const hookOptions = {
+      storage,
+      repository: createNotesRepository(storage, clock),
+      eventTarget: events,
+      clock,
+    };
+    const first = renderHook(() => useProjectNotes(cwd, hookOptions));
+    const second = renderHook(() => useProjectNotes(alias, hookOptions));
+    const other = renderHook(() => useProjectNotes(otherCwd, hookOptions));
+    const otherBefore = storage.getItem(v2NotesKey(otherCwd));
+
+    act(() => first.result.current.changeHandoff("Shared handoff"));
+    act(() => events.dispatch(v2NotesKey(cwd), storage.getItem(v2NotesKey(cwd))));
+    expect(second.result.current.document.handoff.readAt).toBeNull();
+
+    now = LATER;
+    act(() => second.result.current.markHandoffPresented("Shared handoff", NOW));
+    act(() => events.dispatch(v2NotesKey(alias), storage.getItem(v2NotesKey(alias))));
+
+    expect(first.result.current.document.handoff.readAt).toBe(LATER);
+    expect(second.result.current.document.handoff.readAt).toBe(LATER);
+    expect(other.result.current.document.handoff.text).toBe("");
+    expect(storage.getItem(v2NotesKey(otherCwd))).toBe(otherBefore);
+  });
+
+  it("restores unread and read Handoff state across remounts", () => {
+    const cwd = "/work/project";
+    const storage = new ObservableStorage();
+    let now = NOW;
+    const clock = (): string => now;
+    const hookOptions = {
+      storage,
+      repository: createNotesRepository(storage, clock),
+      eventTarget: new FakeStorageEvents(),
+      clock,
+    };
+    const first = renderHook(() => useProjectNotes(cwd, hookOptions));
+    act(() => first.result.current.changeHandoff("Persist me"));
+    first.unmount();
+
+    const unreadRestart = renderHook(() => useProjectNotes(cwd, hookOptions));
+    expect(unreadRestart.result.current.document.handoff.readAt).toBeNull();
+    now = LATER;
+    act(() => unreadRestart.result.current.markHandoffPresented("Persist me", NOW));
+    unreadRestart.unmount();
+
+    const readRestart = renderHook(() => useProjectNotes(cwd, hookOptions));
+    expect(readRestart.result.current.document.handoff).toEqual({
+      text: "Persist me",
+      updatedAt: NOW,
+      readAt: LATER,
+    });
+  });
+
   it("removes its storage listener on unmount", () => {
     const storage = new ObservableStorage();
     const events = new FakeStorageEvents();

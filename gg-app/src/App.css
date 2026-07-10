@@ -1160,6 +1160,19 @@ body {
   opacity: 0.4;
 }
 
+.notes-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.notes-status-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+}
+
 /* ── Notes command center ── */
 .notes-modal {
   width: min(900px, 94vw);

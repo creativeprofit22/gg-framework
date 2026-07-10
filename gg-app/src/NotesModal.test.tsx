@@ -32,22 +32,27 @@ const ARCHIVED: NotesTask = {
 };
 
 interface HarnessProps {
+  handoffGeneration?: { text: string; updatedAt: string | null; unread: boolean };
   onCurrentFocus?: (text: string) => void;
   onHandoff?: (text: string) => void;
+  onHandoffPresented?: (text: string, updatedAt: string) => void;
   onReference?: (text: string) => void;
   onMoveTask?: (id: string, direction: "up" | "down") => void;
 }
 
 function Harness({
+  handoffGeneration,
   onCurrentFocus,
   onHandoff,
+  onHandoffPresented,
   onReference,
   onMoveTask,
 }: HarnessProps): React.ReactElement {
   const [currentFocus, setCurrentFocus] = useState("Ship current focus");
   const [tasks, setTasks] = useState([TODO, DONE, ARCHIVED]);
-  const [handoff, setHandoff] = useState("handoff 😀");
+  const [localHandoff, setLocalHandoff] = useState("handoff 😀");
   const [reference, setReference] = useState("reference text");
+  const handoff = handoffGeneration?.text ?? localHandoff;
 
   return (
     <NotesModal
@@ -59,6 +64,8 @@ function Harness({
       currentFocus={currentFocus}
       tasks={tasks}
       handoff={handoff}
+      handoffUpdatedAt={handoffGeneration?.updatedAt ?? null}
+      handoffUnread={handoffGeneration?.unread ?? false}
       onChangeCurrentFocus={(text) => {
         setCurrentFocus(text);
         onCurrentFocus?.(text);
@@ -117,9 +124,10 @@ function Harness({
         )
       }
       onChangeHandoff={(text) => {
-        setHandoff(text);
+        setLocalHandoff(text);
         onHandoff?.(text);
       }}
+      onHandoffPresented={(text, updatedAt) => onHandoffPresented?.(text, updatedAt)}
       onClose={() => undefined}
     />
   );
@@ -280,6 +288,76 @@ describe("NotesModal", () => {
     expect(onReference).toHaveBeenCalledWith(reference);
     expect(onCurrentFocus).not.toHaveBeenCalledWith(handoff);
     expect(onHandoff).not.toHaveBeenCalledWith(reference);
+  });
+
+  it("acknowledges an unread Handoff only after its generation is committed to the textarea", () => {
+    const onHandoffPresented = vi.fn((text: string, updatedAt: string) => {
+      expect((screen.getByLabelText("Handoff notes") as HTMLTextAreaElement).value).toBe(text);
+      expect(updatedAt).toBe(TODO.updatedAt);
+    });
+
+    render(
+      <Harness
+        handoffGeneration={{ text: "Unread generation", updatedAt: TODO.updatedAt, unread: true }}
+        onHandoffPresented={onHandoffPresented}
+      />,
+    );
+
+    expect(onHandoffPresented).toHaveBeenCalledTimes(1);
+    expect(onHandoffPresented).toHaveBeenCalledWith("Unread generation", TODO.updatedAt);
+  });
+
+  it("does not acknowledge already-read, empty, or unversioned Handoffs", () => {
+    const onHandoffPresented = vi.fn();
+    const { rerender } = render(
+      <Harness
+        handoffGeneration={{ text: "Already read", updatedAt: TODO.updatedAt, unread: false }}
+        onHandoffPresented={onHandoffPresented}
+      />,
+    );
+
+    rerender(
+      <Harness
+        handoffGeneration={{ text: "  \n", updatedAt: TODO.updatedAt, unread: true }}
+        onHandoffPresented={onHandoffPresented}
+      />,
+    );
+    rerender(
+      <Harness
+        handoffGeneration={{ text: "No timestamp", updatedAt: null, unread: true }}
+        onHandoffPresented={onHandoffPresented}
+      />,
+    );
+
+    expect(onHandoffPresented).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges each newer unread generation once while mounted", () => {
+    const onHandoffPresented = vi.fn();
+    const first = { text: "Generation one", updatedAt: TODO.updatedAt, unread: true };
+    const second = { text: "Generation two", updatedAt: DONE.updatedAt, unread: true };
+    const { rerender } = render(
+      <Harness handoffGeneration={first} onHandoffPresented={onHandoffPresented} />,
+    );
+    expect(onHandoffPresented).toHaveBeenCalledTimes(1);
+
+    rerender(<Harness handoffGeneration={first} onHandoffPresented={onHandoffPresented} />);
+    expect(onHandoffPresented).toHaveBeenCalledTimes(1);
+
+    rerender(<Harness handoffGeneration={second} onHandoffPresented={onHandoffPresented} />);
+    expect((screen.getByLabelText("Handoff notes") as HTMLTextAreaElement).value).toBe(
+      "Generation two",
+    );
+    expect(onHandoffPresented).toHaveBeenCalledTimes(2);
+    expect(onHandoffPresented).toHaveBeenLastCalledWith("Generation two", DONE.updatedAt);
+
+    rerender(
+      <Harness
+        handoffGeneration={{ ...second, unread: false }}
+        onHandoffPresented={onHandoffPresented}
+      />,
+    );
+    expect(onHandoffPresented).toHaveBeenCalledTimes(2);
   });
 
   it("uses labelled sections and no routine alerts", () => {

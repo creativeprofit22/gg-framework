@@ -11,6 +11,8 @@ interface Props {
   currentFocus: string;
   tasks: NotesTask[];
   handoff: string;
+  handoffUpdatedAt: string | null;
+  handoffUnread: boolean;
   onChangeCurrentFocus(value: string): void;
   onCreateTask(text: string): void;
   onEditTask(id: string, text: string): void;
@@ -19,6 +21,7 @@ interface Props {
   onArchiveTask(id: string): void;
   onRestoreTask(id: string): void;
   onChangeHandoff(text: string): void;
+  onHandoffPresented(text: string, updatedAt: string): void;
   onClose(): void;
 }
 
@@ -28,6 +31,8 @@ export function NotesModal({
   currentFocus,
   tasks,
   handoff,
+  handoffUpdatedAt,
+  handoffUnread,
   onChangeCurrentFocus,
   onCreateTask,
   onEditTask,
@@ -36,6 +41,7 @@ export function NotesModal({
   onArchiveTask,
   onRestoreTask,
   onChangeHandoff,
+  onHandoffPresented,
   onClose,
 }: Props): React.ReactElement {
   const currentFocusInputRef = useRef<HTMLInputElement>(null);
@@ -75,7 +81,13 @@ export function NotesModal({
 
         <section className="notes-section" aria-labelledby="notes-handoff-heading">
           <h2 id="notes-handoff-heading">Handoff</h2>
-          <NotesHandoff value={handoff} onChange={onChangeHandoff} />
+          <NotesHandoff
+            value={handoff}
+            updatedAt={handoffUpdatedAt}
+            unread={handoffUnread}
+            onChange={onChangeHandoff}
+            onPresented={onHandoffPresented}
+          />
         </section>
 
         <section

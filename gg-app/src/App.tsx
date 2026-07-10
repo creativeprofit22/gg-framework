@@ -61,8 +61,7 @@ import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./
 import { ContextMeter } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { TasksModal } from "./TasksModal";
-import { NotesModal } from "./NotesModal";
-import { useProjectNotes } from "./useProjectNotes";
+import { ProjectNotes } from "./ProjectNotes";
 import { ShimmerText } from "./ShimmerText";
 import { WakeScreen } from "./WakeScreen";
 import { ConfirmModal } from "./ConfirmModal";
@@ -464,21 +463,6 @@ function App(): React.ReactElement {
   // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
   const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
   const [showTasks, setShowTasks] = useState(false);
-  // Per-project Notes command center, persisted through the versioned repository.
-  const [showNotes, setShowNotes] = useState(false);
-  const {
-    value: notes,
-    onChange: handleNotesChange,
-    document: notesDocument,
-    changeCurrentFocus: changeNotesCurrentFocus,
-    createTask: createNotesTask,
-    editTask: editNotesTask,
-    toggleTask: toggleNotesTask,
-    moveTask: moveNotesTask,
-    archiveTask: archiveNotesTask,
-    restoreTask: restoreNotesTask,
-    changeHandoff: changeNotesHandoff,
-  } = useProjectNotes(state?.cwd ?? null);
   // Every window picks a project before connecting — on app load and on each new
   // window. The picker re-points this window's agent at the chosen cwd/session.
   const [needsProject, setNeedsProject] = useState(true);
@@ -1954,13 +1938,7 @@ function App(): React.ReactElement {
               >
                 {"+ New"}
               </button>
-              <button
-                className="btn btn-sm btn-ghost"
-                title="Open your notes for this project"
-                onClick={() => setShowNotes(true)}
-              >
-                Notes
-              </button>
+              <ProjectNotes cwd={state?.cwd ?? null} />
               <button
                 className="btn btn-sm btn-ghost"
                 title="View and run this project's tasks"
@@ -2457,25 +2435,6 @@ function App(): React.ReactElement {
           onAccept={acceptPlan}
           onFeedback={sendPlanFeedback}
           onReject={rejectPlan}
-        />
-      )}
-
-      {showNotes && (
-        <NotesModal
-          value={notes}
-          onChange={handleNotesChange}
-          currentFocus={notesDocument.currentFocus}
-          tasks={notesDocument.tasks}
-          handoff={notesDocument.handoff.text}
-          onChangeCurrentFocus={changeNotesCurrentFocus}
-          onCreateTask={createNotesTask}
-          onEditTask={editNotesTask}
-          onToggleTask={toggleNotesTask}
-          onMoveTask={moveNotesTask}
-          onArchiveTask={archiveNotesTask}
-          onRestoreTask={restoreNotesTask}
-          onChangeHandoff={changeNotesHandoff}
-          onClose={() => setShowNotes(false)}
         />
       )}
 

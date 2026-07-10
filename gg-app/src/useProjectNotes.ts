@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isNotesHandoffUnread } from "./notes-status";
 import type { NotesDocumentV2, NotesLoadResult, NotesSaveResult } from "./notes-types";
 import {
   canonicalProjectKey,
@@ -35,6 +36,7 @@ export interface UseProjectNotesResult {
   archiveTask(id: string): void;
   restoreTask(id: string): void;
   changeHandoff(text: string): void;
+  markHandoffPresented(expectedText: string, expectedUpdatedAt: string | null): void;
   diagnostics: {
     load: NotesLoadResult | null;
     save: NotesSaveResult | null;
@@ -299,6 +301,28 @@ export function useProjectNotes(
     [clock, commitDocument, cwd],
   );
 
+  const markHandoffPresented = useCallback(
+    (expectedText: string, expectedUpdatedAt: string | null) => {
+      if (cwd === null || expectedUpdatedAt === null) return;
+      commitDocument(cwd, (current) => {
+        if (
+          current.handoff.text !== expectedText ||
+          current.handoff.updatedAt !== expectedUpdatedAt ||
+          !isNotesHandoffUnread(current)
+        ) {
+          return null;
+        }
+        const now = clock();
+        return {
+          ...current,
+          handoff: { ...current.handoff, readAt: now },
+          updatedAt: now,
+        };
+      });
+    },
+    [clock, commitDocument, cwd],
+  );
+
   return {
     value: document.reference,
     onChange,
@@ -311,6 +335,7 @@ export function useProjectNotes(
     archiveTask,
     restoreTask,
     changeHandoff,
+    markHandoffPresented,
     diagnostics: { load: loadDiagnostics, save: saveDiagnostics },
   };
 }

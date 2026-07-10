@@ -475,6 +475,7 @@ function App(): React.ReactElement {
     editTask: editNotesTask,
     toggleTask: toggleNotesTask,
     archiveTask: archiveNotesTask,
+    restoreTask: restoreNotesTask,
     changeHandoff: changeNotesHandoff,
   } = useProjectNotes(state?.cwd ?? null);
   // Every window picks a project before connecting — on app load and on each new
@@ -2470,6 +2471,7 @@ function App(): React.ReactElement {
           onEditTask={editNotesTask}
           onToggleTask={toggleNotesTask}
           onArchiveTask={archiveNotesTask}
+          onRestoreTask={restoreNotesTask}
           onChangeHandoff={changeNotesHandoff}
           onClose={() => setShowNotes(false)}
         />

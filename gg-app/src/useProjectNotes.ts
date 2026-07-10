@@ -32,6 +32,7 @@ export interface UseProjectNotesResult {
   editTask(id: string, text: string): void;
   toggleTask(id: string): void;
   archiveTask(id: string): void;
+  restoreTask(id: string): void;
   changeHandoff(text: string): void;
   diagnostics: {
     load: NotesLoadResult | null;
@@ -242,6 +243,22 @@ export function useProjectNotes(
     [clock, commitDocument, cwd],
   );
 
+  const restoreTask = useCallback(
+    (id: string) => {
+      if (cwd === null) return;
+      commitDocument(cwd, (current) => {
+        const index = current.tasks.findIndex((task) => task.id === id);
+        const task = current.tasks[index];
+        if (!task || task.archivedAt === null) return null;
+        const now = clock();
+        const tasks = [...current.tasks];
+        tasks[index] = { ...task, archivedAt: null, updatedAt: now };
+        return { ...current, tasks, updatedAt: now };
+      });
+    },
+    [clock, commitDocument, cwd],
+  );
+
   const changeHandoff = useCallback(
     (text: string) => {
       if (cwd === null) return;
@@ -267,6 +284,7 @@ export function useProjectNotes(
     editTask,
     toggleTask,
     archiveTask,
+    restoreTask,
     changeHandoff,
     diagnostics: { load: loadDiagnostics, save: saveDiagnostics },
   };

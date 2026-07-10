@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Modal } from "./Modal";
 import { NotesCurrentFocus } from "./NotesCurrentFocus";
 import { NotesHandoff } from "./NotesHandoff";
@@ -16,6 +16,7 @@ interface Props {
   onEditTask(id: string, text: string): void;
   onToggleTask(id: string): void;
   onArchiveTask(id: string): void;
+  onRestoreTask(id: string): void;
   onChangeHandoff(text: string): void;
   onClose(): void;
 }
@@ -31,11 +32,14 @@ export function NotesModal({
   onEditTask,
   onToggleTask,
   onArchiveTask,
+  onRestoreTask,
   onChangeHandoff,
   onClose,
 }: Props): React.ReactElement {
   const currentFocusInputRef = useRef<HTMLInputElement>(null);
   const addInputRef = useRef<HTMLInputElement>(null);
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedTasks = tasks.filter((task) => task.archivedAt !== null);
 
   return (
     <Modal
@@ -71,7 +75,10 @@ export function NotesModal({
           <NotesHandoff value={handoff} onChange={onChangeHandoff} />
         </section>
 
-        <section className="notes-section" aria-labelledby="notes-reference-heading">
+        <section
+          className="notes-section notes-reference-section"
+          aria-labelledby="notes-reference-heading"
+        >
           <h2 id="notes-reference-heading">Reference</h2>
           <div className="notes-field">
             <label htmlFor="notes-reference">Reference notes</label>
@@ -81,6 +88,40 @@ export function NotesModal({
               onChange={(event) => onChange(event.target.value)}
               spellCheck={true}
             />
+          </div>
+        </section>
+
+        <section className="notes-section notes-archive" aria-labelledby="notes-archive-heading">
+          <h2 id="notes-archive-heading">Done / Archive</h2>
+          <button
+            type="button"
+            className="notes-archive-toggle"
+            aria-expanded={showArchived}
+            aria-controls="notes-archive-list"
+            onClick={() => setShowArchived((visible) => !visible)}
+          >
+            {showArchived ? "Hide" : "Show"} archived tasks ({archivedTasks.length})
+          </button>
+          <div id="notes-archive-list" className="notes-task-list" hidden={!showArchived}>
+            {showArchived && (
+              <>
+                {archivedTasks.length === 0 && <p className="notes-empty">No archived tasks.</p>}
+                {archivedTasks.map((task) => (
+                  <div className="notes-task-row notes-archived-task" key={task.id}>
+                    <span>{task.text}</span>
+                    <div className="notes-task-actions">
+                      <button
+                        type="button"
+                        aria-label={`Restore task: ${task.text}`}
+                        onClick={() => onRestoreTask(task.id)}
+                      >
+                        Restore
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
           </div>
         </section>
       </div>

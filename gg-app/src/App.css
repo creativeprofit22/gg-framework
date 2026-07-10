@@ -1236,12 +1236,13 @@ body {
   overflow: auto;
   padding: 10px 12px;
 }
-.notes-section:last-child .notes-field textarea {
+.notes-reference-section .notes-field textarea {
   min-height: 150px;
   max-height: 300px;
 }
 .notes-add-controls button,
-.notes-task-actions button {
+.notes-task-actions button,
+.notes-archive-toggle {
   flex: 0 0 auto;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-button);
@@ -1255,12 +1256,14 @@ body {
   cursor: pointer;
 }
 .notes-add-controls button:hover:not(:disabled),
-.notes-task-actions button:hover:not(:disabled) {
+.notes-task-actions button:hover:not(:disabled),
+.notes-archive-toggle:hover:not(:disabled) {
   filter: brightness(1.18);
   color: var(--text);
 }
 .notes-add-controls button:disabled,
-.notes-task-actions button:disabled {
+.notes-task-actions button:disabled,
+.notes-archive-toggle:disabled {
   cursor: default;
   opacity: 0.4;
 }
@@ -1311,6 +1314,19 @@ body {
   width: 100%;
   min-width: 0;
   gap: 8px;
+}
+.notes-archive-toggle {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-secondary);
+  padding: 0;
+}
+.notes-archived-task > span {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .notes-empty {
   margin: 0;

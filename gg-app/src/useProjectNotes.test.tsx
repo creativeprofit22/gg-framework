@@ -7,6 +7,7 @@ import { useProjectNotes } from "./useProjectNotes";
 
 const NOW = "2026-07-09T12:00:00.000Z";
 const LATER = "2026-07-09T12:01:00.000Z";
+const RESTORED = "2026-07-09T12:02:00.000Z";
 const fixedClock = (): string => NOW;
 
 class ObservableStorage implements Storage {
@@ -347,6 +348,63 @@ describe("useProjectNotes", () => {
     );
   });
 
+  it("restores an archived task in place with the same identity and persists it", () => {
+    const cwd = "/work/project";
+    const storage = new ObservableStorage();
+    let now = NOW;
+    const clock = (): string => now;
+    const hookOptions = {
+      storage,
+      repository: createNotesRepository(storage, clock),
+      eventTarget: new FakeStorageEvents(),
+      clock,
+      idFactory: () => "task-1",
+    };
+    const { result } = renderHook(() => useProjectNotes(cwd, hookOptions));
+    act(() => result.current.createTask("restore me"));
+    const created = result.current.document.tasks[0]!;
+    now = LATER;
+    act(() => result.current.archiveTask(created.id));
+    now = RESTORED;
+
+    act(() => result.current.restoreTask(created.id));
+
+    expect(result.current.document.tasks).toHaveLength(1);
+    expect(result.current.document.tasks[0]).toEqual({
+      ...created,
+      archivedAt: null,
+      updatedAt: RESTORED,
+    });
+    expect(result.current.document.updatedAt).toBe(RESTORED);
+    expect(JSON.parse(storage.getItem(v2NotesKey(cwd))!).tasks[0]).toEqual(
+      result.current.document.tasks[0],
+    );
+  });
+
+  it("syncs a restored task only across windows for the same project", () => {
+    const cwd = "C:\\Work\\Project";
+    const otherCwd = "C:\\Work\\Other";
+    const storage = new ObservableStorage();
+    const events = new FakeStorageEvents();
+    const hookOptions = { ...options(storage, events), idFactory: () => "task-1" };
+    const first = renderHook(() => useProjectNotes(cwd, hookOptions));
+    const second = renderHook(() => useProjectNotes("c:/work/project/", hookOptions));
+    const other = renderHook(() => useProjectNotes(otherCwd, hookOptions));
+    const otherStoredDocument = storage.getItem(v2NotesKey(otherCwd));
+    act(() => first.result.current.createTask("shared archived task"));
+    act(() => first.result.current.archiveTask("task-1"));
+    act(() => events.dispatch(v2NotesKey(cwd), storage.getItem(v2NotesKey(cwd))));
+    expect(second.result.current.document.tasks[0]?.archivedAt).toBe(NOW);
+
+    act(() => first.result.current.restoreTask("task-1"));
+    act(() => events.dispatch(v2NotesKey(cwd), storage.getItem(v2NotesKey(cwd))));
+
+    expect(second.result.current.document.tasks[0]).toEqual(first.result.current.document.tasks[0]);
+    expect(second.result.current.document.tasks[0]?.archivedAt).toBeNull();
+    expect(other.result.current.document.tasks).toEqual([]);
+    expect(storage.getItem(v2NotesKey(otherCwd))).toBe(otherStoredDocument);
+  });
+
   it("preserves handoff bytes and clears its read timestamp", () => {
     const cwd = "/work/project";
     const storage = new ObservableStorage();
@@ -419,6 +477,7 @@ describe("useProjectNotes", () => {
       edit: result.current.editTask,
       toggle: result.current.toggleTask,
       archive: result.current.archiveTask,
+      restore: result.current.restoreTask,
       currentFocus: result.current.changeCurrentFocus,
       handoff: result.current.changeHandoff,
     };
@@ -430,6 +489,7 @@ describe("useProjectNotes", () => {
       retained.edit("missing", "stale");
       retained.toggle("missing");
       retained.archive("missing");
+      retained.restore("missing");
       retained.currentFocus("stale focus");
       retained.handoff("stale");
     });

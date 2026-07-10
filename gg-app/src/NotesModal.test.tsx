@@ -80,6 +80,11 @@ function Harness({ onCurrentFocus, onHandoff, onReference }: HarnessProps): Reac
           ),
         )
       }
+      onRestoreTask={(id) =>
+        setTasks((current) =>
+          current.map((task) => (task.id === id ? { ...task, archivedAt: null } : task)),
+        )
+      }
       onChangeHandoff={(text) => {
         setHandoff(text);
         onHandoff?.(text);
@@ -178,6 +183,24 @@ describe("NotesModal", () => {
     expect(document.activeElement).toBe(screen.getByLabelText("Add a Notes task"));
   });
 
+  it("reveals archived history on demand and restores a task to Next", () => {
+    render(<Harness />);
+    const toggle = screen.getByRole("button", { name: "Show archived tasks (1)" });
+
+    expect(screen.queryByText("Hidden task")).toBeNull();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+
+    expect(screen.getByText("Hidden task")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Hide archived tasks (1)" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Restore task: Hidden task" }));
+
+    expect(screen.getByText("Hidden task")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Restore task: Hidden task" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Hide archived tasks (0)" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Archive task: Hidden task" })).toBeTruthy();
+  });
+
   it("forwards distinct Now, Handoff, and Reference values", () => {
     const onCurrentFocus = vi.fn();
     const onHandoff = vi.fn();
@@ -209,6 +232,7 @@ describe("NotesModal", () => {
     expect(screen.getByRole("heading", { name: "Next" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Handoff" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Reference" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Done / Archive" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });

@@ -66,6 +66,42 @@ jobs:
         run: node packages/gg-boss/dist/cli.js --help
         shell: bash
 
+  # Deterministic source-quality gates run once on Linux instead of multiplying
+  # identical lint, formatting, and frontend typecheck work across the OS matrix.
+  quality:
+    name: quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.x
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend typecheck
+        run: pnpm --filter gg-app check
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Prettier check
+        run: pnpm format:check
+
+      - name: Rust format check
+        run: cargo fmt --manifest-path gg-app/src-tauri/Cargo.toml -- --check
+
   # Distribution-critical cross-OS job: stages the per-platform Node runtime,
   # bundles the sidecar, boots it with the bundled runtime (smoke), and runs the
   # Rust unit tests that gate path/window-chrome resolution. The full

@@ -31,23 +31,270 @@ struct Daemon {
     /// The daemon's HTTP port, learned from its `GG_APP_LISTENING` handshake.
     /// `None` until ready; reset to `None` across a crash-respawn.
     port: Mutex<Option<u16>>,
+    /// Persistent daemon-global startup failure, visible to every owned pane.
+    startup_error: Mutex<Option<String>>,
 }
 
-/// One window's session inside the shared daemon. `session_id` is the id the
-/// daemon returned from `POST /session` (`None` until it does). `cwd` and
-/// `session_path` mirror what the session was created with, so the workspace
-/// snapshot (restore-on-restart) + crash-respawn can be driven from this map.
-#[derive(Default, Clone)]
-struct WindowSession {
+const PRIMARY_PANE_ID: &str = "primary";
+const MAX_PANE_ID_LEN: usize = 64;
+
+/// One pane's session inside the shared daemon. Pane IDs are scoped by their
+/// owning native window; daemon session IDs remain opaque runtime identities.
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+struct PaneSession {
     session_id: Option<String>,
     cwd: Option<PathBuf>,
     session_path: Option<String>,
+    generation: u64,
+    startup_error: Option<String>,
 }
 
-/// Per-window session registry, keyed by window label.
+#[derive(Default)]
+struct PaneRegistry {
+    windows: HashMap<String, HashMap<String, PaneSession>>,
+    next_generation: u64,
+}
+
+impl PaneRegistry {
+    #[cfg(test)]
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl std::ops::Deref for PaneRegistry {
+    type Target = HashMap<String, HashMap<String, PaneSession>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.windows
+    }
+}
+
+impl std::ops::DerefMut for PaneRegistry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.windows
+    }
+}
+
+/// Per-window pane registry, keyed first by owner window label, then pane ID.
 #[derive(Default)]
 struct Windows {
-    map: Mutex<HashMap<String, WindowSession>>,
+    map: Mutex<PaneRegistry>,
+}
+
+fn validate_pane_id(pane_id: &str) -> Result<(), String> {
+    if pane_id.is_empty() || pane_id.len() > MAX_PANE_ID_LEN {
+        return Err("pane id must contain 1-64 characters".into());
+    }
+    if !pane_id
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err("pane id contains unsupported characters".into());
+    }
+    Ok(())
+}
+
+fn pane_id_or_primary(pane_id: Option<&str>) -> Result<&str, String> {
+    let pane_id = pane_id.unwrap_or(PRIMARY_PANE_ID);
+    validate_pane_id(pane_id)?;
+    Ok(pane_id)
+}
+
+fn resolve_owned_pane<'a>(
+    registry: &'a PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+) -> Option<&'a PaneSession> {
+    registry.get(owner_label)?.get(pane_id)
+}
+
+fn record_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) -> u64 {
+    // Keep generation history outside pane entries so disposal + recreation of
+    // the same ID cannot let an old async POST /session bind to the new target.
+    registry.next_generation = registry.next_generation.saturating_add(1);
+    let generation = registry.next_generation;
+    let panes = registry.entry(owner_label.to_string()).or_default();
+    panes.insert(
+        pane_id.to_string(),
+        PaneSession {
+            session_id: None,
+            cwd: Some(cwd),
+            session_path,
+            generation,
+            startup_error: None,
+        },
+    );
+    generation
+}
+
+fn create_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) -> Result<u64, String> {
+    validate_pane_id(pane_id)?;
+    if resolve_owned_pane(registry, owner_label, pane_id).is_some() {
+        return Err(format!("pane '{pane_id}' already exists"));
+    }
+    Ok(record_pane_target(
+        registry,
+        owner_label,
+        pane_id,
+        cwd,
+        session_path,
+    ))
+}
+
+fn dispose_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    allow_primary: bool,
+) -> Result<PaneSession, String> {
+    validate_pane_id(pane_id)?;
+    if pane_id == PRIMARY_PANE_ID && !allow_primary {
+        return Err("primary pane cannot be disposed".into());
+    }
+    take_pane_session(registry, owner_label, pane_id)
+        .ok_or_else(|| format!("pane '{pane_id}' does not exist"))
+}
+
+fn bind_pane_session(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    generation: u64,
+    session_id: String,
+) -> bool {
+    let Some(pane) = registry
+        .get_mut(owner_label)
+        .and_then(|panes| panes.get_mut(pane_id))
+    else {
+        return false;
+    };
+    if pane.generation != generation || pane.session_id.is_some() {
+        return false;
+    }
+    pane.session_id = Some(session_id);
+    pane.startup_error = None;
+    true
+}
+
+fn record_pane_startup_error(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    generation: u64,
+    message: String,
+) -> bool {
+    let Some(pane) = registry
+        .get_mut(owner_label)
+        .and_then(|panes| panes.get_mut(pane_id))
+    else {
+        return false;
+    };
+    if pane.generation != generation || pane.session_id.is_some() {
+        return false;
+    }
+    pane.startup_error = Some(message);
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PaneStartupStatus {
+    ready: bool,
+    error: Option<String>,
+}
+
+fn pane_startup_status(
+    registry: &PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    daemon_error: Option<&str>,
+) -> Result<PaneStartupStatus, String> {
+    validate_pane_id(pane_id)?;
+    let pane = resolve_owned_pane(registry, owner_label, pane_id)
+        .ok_or_else(|| format!("pane '{pane_id}' does not exist"))?;
+    let error = daemon_error
+        .map(str::to_string)
+        .or_else(|| pane.startup_error.clone());
+    Ok(PaneStartupStatus {
+        ready: error.is_none() && pane.session_id.is_some(),
+        error,
+    })
+}
+
+fn take_pane_session(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+) -> Option<PaneSession> {
+    let panes = registry.get_mut(owner_label)?;
+    let pane = panes.remove(pane_id);
+    if panes.is_empty() {
+        registry.remove(owner_label);
+    }
+    pane
+}
+
+fn take_window_panes(registry: &mut PaneRegistry, owner_label: &str) -> Vec<PaneSession> {
+    registry
+        .remove(owner_label)
+        .map(|panes| panes.into_values().collect())
+        .unwrap_or_default()
+}
+
+/// Clear daemon-owned runtime identity after a crash without changing any
+/// durable pane target or its generation. Holding the registry lock around this
+/// helper makes every old bridge become stale before recovery starts.
+fn clear_runtime_session_ids(registry: &mut PaneRegistry) -> usize {
+    let mut cleared = 0;
+    for pane in registry.values_mut().flat_map(HashMap::values_mut) {
+        if pane.session_id.take().is_some() {
+            cleared += 1;
+        }
+    }
+    cleared
+}
+
+fn enumerate_pane_targets(
+    registry: &PaneRegistry,
+) -> Vec<(String, String, PathBuf, Option<String>)> {
+    registry
+        .iter()
+        .flat_map(|(label, panes)| {
+            panes.iter().filter_map(move |(pane_id, pane)| {
+                pane.cwd.clone().map(|cwd| {
+                    (
+                        label.clone(),
+                        pane_id.clone(),
+                        cwd,
+                        pane.session_path.clone(),
+                    )
+                })
+            })
+        })
+        .collect()
+}
+
+fn pane_bridge_is_active(
+    registry: &PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    session_id: &str,
+) -> bool {
+    resolve_owned_pane(registry, owner_label, pane_id).and_then(|pane| pane.session_id.as_deref())
+        == Some(session_id)
 }
 
 /// True once the app has begun quitting. Set on `ExitRequested` so the cascade
@@ -351,7 +598,12 @@ fn parse_ps_output(stdout: &str) -> Vec<ProcInfo> {
             // Pattern matching uses .contains(), so rejoining with single
             // spaces is fine.
             let command = parts.collect::<Vec<_>>().join(" ");
-            Some(ProcInfo { pid, ppid, pgid, command })
+            Some(ProcInfo {
+                pid,
+                ppid,
+                pgid,
+                command,
+            })
         })
         .collect()
 }
@@ -550,18 +802,22 @@ fn port_for(webview: &WebviewWindow) -> Option<u16> {
     port
 }
 
-/// The daemon session id for the window that issued a command, or `None` until
-/// the daemon's `POST /session` has returned for this window.
-fn session_for(webview: &WebviewWindow) -> Option<String> {
+fn pane_session_for(webview: &WebviewWindow, pane_id: Option<&str>) -> Option<String> {
+    let pane_id = pane_id_or_primary(pane_id).ok()?;
     let windows: State<Windows> = webview.state();
     let map = windows.map.lock().unwrap();
-    map.get(webview.label()).and_then(|w| w.session_id.clone())
+    resolve_owned_pane(&map, webview.label(), pane_id)?
+        .session_id
+        .clone()
 }
 
-fn cwd_for(webview: &WebviewWindow) -> Option<PathBuf> {
+fn pane_cwd_for(webview: &WebviewWindow, pane_id: Option<&str>) -> Option<PathBuf> {
+    let pane_id = pane_id_or_primary(pane_id).ok()?;
     let windows: State<Windows> = webview.state();
     let map = windows.map.lock().unwrap();
-    map.get(webview.label()).and_then(|w| w.cwd.clone())
+    resolve_owned_pane(&map, webview.label(), pane_id)?
+        .cwd
+        .clone()
 }
 
 /// Await the daemon's HTTP port (set by its `GG_APP_LISTENING` handshake),
@@ -577,13 +833,37 @@ async fn await_daemon_port(app: &tauri::AppHandle) -> Option<u16> {
     None
 }
 
-/// Frontend polls this until it returns a port. Returns the daemon port only
-/// once THIS window has a session (so `waitForReady` still gates correctly:
-/// a window isn't "ready" until its session exists), mirroring `sidecar-ready`.
+/// Frontend polls this until it returns a port. An omitted pane id preserves the
+/// legacy primary-pane readiness seam.
 #[tauri::command]
-fn sidecar_port(webview: WebviewWindow) -> Option<u16> {
-    session_for(&webview)?;
+fn sidecar_port(webview: WebviewWindow, pane_id: Option<String>) -> Option<u16> {
+    pane_session_for(&webview, pane_id.as_deref())?;
     port_for(&webview)
+}
+
+/// Stable, ownership-checked readiness state. Unlike startup events, this cannot
+/// be missed when the webview subscribes after a fast daemon/session failure.
+#[tauri::command]
+fn agent_pane_status(
+    webview: WebviewWindow,
+    pane_id: Option<String>,
+) -> Result<PaneStartupStatus, String> {
+    let pane_id = pane_id_or_primary(pane_id.as_deref())?;
+    let daemon_error = webview
+        .state::<Daemon>()
+        .startup_error
+        .lock()
+        .unwrap()
+        .clone();
+    let mut status = {
+        let windows: State<Windows> = webview.state();
+        let registry = windows.map.lock().unwrap();
+        pane_startup_status(&registry, webview.label(), pane_id, daemon_error.as_deref())?
+    };
+    // A bound session ID is stale during the brief crash window before registry
+    // invalidation; readiness also requires the daemon's live listening port.
+    status.ready &= port_for(&webview).is_some();
+    Ok(status)
 }
 
 #[tauri::command]
@@ -591,7 +871,9 @@ fn dropped_path_info(paths: Vec<String>) -> Vec<DroppedPathInfo> {
     paths
         .into_iter()
         .map(|path| {
-            let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+            let is_dir = std::fs::metadata(&path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
             DroppedPathInfo { path, is_dir }
         })
         .collect()
@@ -680,8 +962,12 @@ fn strip_file_location_suffix(path: &str) -> &str {
 /// Open a project file linked from the chat. Relative paths resolve against this
 /// window's sidecar cwd; `:line[:col]` and `#Lline` decorations are tolerated.
 #[tauri::command]
-fn open_project_path(webview: WebviewWindow, path: String) -> Result<(), String> {
-    let cwd = cwd_for(&webview).ok_or("sidecar not ready")?;
+fn open_project_path(
+    webview: WebviewWindow,
+    path: String,
+    pane_id: Option<String>,
+) -> Result<(), String> {
+    let cwd = pane_cwd_for(&webview, pane_id.as_deref()).ok_or("sidecar not ready")?;
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("empty path".into());
@@ -721,16 +1007,19 @@ fn open_project_path(webview: WebviewWindow, path: String) -> Result<(), String>
 async fn agent_state(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/state", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: current XP/rank progress snapshot (Ranks system).
@@ -763,7 +1052,11 @@ async fn agent_usage(
         return Err("unsupported usage provider".into());
     }
     let res = client
-        .get(format!("{}/usage?provider={}", sidecar_base(port), provider))
+        .get(format!(
+            "{}/usage?provider={}",
+            sidecar_base(port),
+            provider
+        ))
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -791,9 +1084,10 @@ async fn agent_prompt(
     text: String,
     attachments: Option<serde_json::Value>,
     meta: Option<serde_json::Value>,
+    pane_id: Option<String>,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     client
         .post(format!("{}/prompt", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -813,9 +1107,10 @@ async fn agent_prompt(
 async fn agent_history(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/history", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -832,9 +1127,10 @@ async fn agent_history(
 async fn agent_new_session(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     client
         .post(format!("{}/new-session", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -851,9 +1147,10 @@ async fn agent_auth_apikey(
     client: State<'_, reqwest::Client>,
     provider: String,
     key: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/apikey", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -873,9 +1170,10 @@ async fn agent_auth_oauth_start(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     provider: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/oauth/start", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -894,9 +1192,10 @@ async fn agent_auth_oauth_code(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     code: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/oauth/code", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -915,9 +1214,10 @@ async fn agent_auth_logout(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     provider: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/auth/logout", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -936,9 +1236,10 @@ async fn agent_kill_task(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     id: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/kill", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -958,9 +1259,10 @@ async fn agent_kill_task(
 async fn agent_radio_state(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/radio", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -979,9 +1281,10 @@ async fn agent_radio_set(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     station: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/radio", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1010,9 +1313,10 @@ async fn agent_radio_set(
 async fn agent_tasks(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/tasks", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1033,9 +1337,10 @@ async fn agent_run_tasks(
     client: State<'_, reqwest::Client>,
     id: Option<String>,
     all: bool,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/tasks/run", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1054,9 +1359,10 @@ async fn agent_delete_task(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     id: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/tasks/delete", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1077,9 +1383,10 @@ async fn agent_accept_plan(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     plan_path: Option<String>,
+    pane_id: Option<String>,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     client
         .post(format!("{}/plan/accept", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1095,9 +1402,10 @@ async fn agent_accept_plan(
 async fn agent_cancel(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     client
         .post(format!("{}/cancel", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1114,9 +1422,10 @@ async fn agent_ken_prompt(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     text: String,
+    pane_id: Option<String>,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     client
         .post(format!("{}/ken/prompt", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1132,9 +1441,10 @@ async fn agent_ken_prompt(
 async fn agent_ken_cancel(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     client
         .post(format!("{}/ken/cancel", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1151,9 +1461,10 @@ async fn agent_autopilot_set(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     enabled: bool,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/autopilot", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1161,7 +1472,9 @@ async fn agent_autopilot_set(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: list workflow (prompt-template) slash commands.
@@ -1169,9 +1482,10 @@ async fn agent_autopilot_set(
 async fn agent_commands(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/commands", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1188,9 +1502,10 @@ async fn agent_commands(
 async fn agent_models(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/models", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1208,9 +1523,10 @@ async fn agent_switch_model(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     model: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/model", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1231,9 +1547,10 @@ async fn agent_switch_ken_model(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     model: Option<String>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/ken/model", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1241,7 +1558,9 @@ async fn agent_switch_ken_model(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: rewrite a draft prompt into a tighter, terminology-correct version
@@ -1251,9 +1570,10 @@ async fn agent_enhance_prompt(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     text: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/enhance", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1261,7 +1581,9 @@ async fn agent_enhance_prompt(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>().await.map_err(|e| e.to_string())
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Proxy: cycle the reasoning/thinking level to the next supported value.
@@ -1270,9 +1592,10 @@ async fn agent_enhance_prompt(
 async fn agent_cycle_thinking(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/thinking", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1289,9 +1612,10 @@ async fn agent_cycle_thinking(
 async fn agent_settings(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/settings", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1309,9 +1633,10 @@ async fn agent_save_settings(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     projects_root: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/settings", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -1644,7 +1969,9 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
 
     let mut entries: Vec<WorkspaceEntry> = Vec::new();
     for label in &labels {
-        let Some(inst) = map.get(label) else { continue };
+        let Some(inst) = map.get(label).and_then(|panes| panes.get(PRIMARY_PANE_ID)) else {
+            continue;
+        };
         let cwd = inst.cwd.as_deref();
         if !keep_for_snapshot(cwd, &default) {
             continue;
@@ -1681,7 +2008,8 @@ fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str) {
         let state: State<Windows> = app.state();
         let map = state.map.lock().unwrap();
         map.get(label)
-            .and_then(|i| i.cwd.as_ref())
+            .and_then(|panes| panes.get(PRIMARY_PANE_ID))
+            .and_then(|pane| pane.cwd.as_ref())
             .map(|c| c.to_string_lossy().to_string())
     };
     let Some(cwd) = cwd else { return };
@@ -1813,7 +2141,8 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "xiaomi",
         label: "Xiaomi (MiMo)",
-        description: "MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 · Token Plan or API Credits",
+        description:
+            "MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 · Token Plan or API Credits",
         methods: &["apikey"],
         api_key_label: Some("Xiaomi MiMo"),
         api_key_base_url: Some("https://token-plan-sgp.xiaomimimo.com/v1"),
@@ -2110,9 +2439,10 @@ fn current_unix_millis() -> i64 {
 async fn agent_telegram_get(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/telegram", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2132,9 +2462,10 @@ async fn agent_telegram_save(
     client: State<'_, reqwest::Client>,
     bot_token: String,
     user_id: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/telegram", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2162,9 +2493,10 @@ async fn agent_telegram_save(
 async fn agent_serve_status(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .get(format!("{}/serve", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2181,9 +2513,10 @@ async fn agent_serve_status(
 async fn agent_serve_start(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/serve/start", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2210,9 +2543,10 @@ async fn agent_serve_start(
 async fn agent_serve_stop(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/serve/stop", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2231,9 +2565,10 @@ async fn agent_mcp_list(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     cwd: Option<String>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let mut req = client
         .get(format!("{}/mcp", sidecar_base(port)))
         .header("x-gg-session", &gg_sid);
@@ -2257,9 +2592,10 @@ async fn agent_mcp_add(
     line: String,
     scope: String,
     cwd: Option<String>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/mcp/add", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2291,9 +2627,10 @@ async fn agent_mcp_remove(
     name: String,
     scope: String,
     cwd: Option<String>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/mcp/remove", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2318,9 +2655,10 @@ async fn agent_mcp_login(
     name: String,
     scope: String,
     cwd: Option<String>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/mcp/login", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2350,9 +2688,10 @@ async fn agent_create_project(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     name: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let res = client
         .post(format!("{}/create-project", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
@@ -2383,8 +2722,12 @@ async fn agent_create_project(
 async fn agent_projects(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let sidecar_projects = match (port_for(&webview), session_for(&webview)) {
+    let sidecar_projects = match (
+        port_for(&webview),
+        pane_session_for(&webview, pane_id.as_deref()),
+    ) {
         (Some(port), Some(gg_sid)) => match client
             .get(format!("{}/projects", sidecar_base(port)))
             .header("x-gg-session", &gg_sid)
@@ -2411,9 +2754,10 @@ async fn agent_sessions(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     cwd: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let encoded = urlencoding(&cwd);
     let res = client
         .get(format!("{}/sessions?cwd={}", sidecar_base(port), encoded))
@@ -2433,9 +2777,10 @@ async fn agent_files(
     webview: WebviewWindow,
     client: State<'_, reqwest::Client>,
     query: String,
+    pane_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
-    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let gg_sid = pane_session_for(&webview, pane_id.as_deref()).ok_or("session not ready")?;
     let encoded = urlencoding(&query);
     let res = client
         .get(format!("{}/files?q={}", sidecar_base(port), encoded))
@@ -2605,7 +2950,15 @@ fn local_patched_update_command() -> Command {
     #[cfg(target_os = "windows")]
     {
         let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "pnpm", "--filter", "gg-app", "update:local-fixes", "--", "--check"]);
+        cmd.args([
+            "/C",
+            "pnpm",
+            "--filter",
+            "gg-app",
+            "update:local-fixes",
+            "--",
+            "--check",
+        ]);
         cmd
     }
     #[cfg(not(target_os = "windows"))]
@@ -2944,25 +3297,28 @@ async fn arrange_all(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Re-point THIS window's agent at a chosen project: dispose its current daemon
-/// session and create a fresh one at `cwd`, optionally resuming the session file
-/// `session_path`. No process is killed — only one session in the shared daemon
-/// is swapped. The webview re-runs its ready flow against the new session.
+/// Re-point one pane's agent at a chosen project. Omitted pane identity means
+/// primary, preserving the existing project-picker lifecycle seam.
 #[tauri::command]
 fn select_project(
     webview: WebviewWindow,
     app: tauri::AppHandle,
     cwd: String,
     session_path: Option<String>,
+    pane_id: Option<String>,
 ) -> Result<(), String> {
+    let pane_id = pane_id_or_primary(pane_id.as_deref())?.to_string();
     let label = webview.label().to_string();
-    // Take the old session id (and clear it) so the old SSE bridge retires.
     let old_id = {
         let windows: State<Windows> = app.state();
         let mut map = windows.map.lock().unwrap();
-        map.get_mut(&label).and_then(|w| w.session_id.take())
+        if pane_id != PRIMARY_PANE_ID && resolve_owned_pane(&map, &label, &pane_id).is_none() {
+            return Err(format!("pane '{pane_id}' does not exist"));
+        }
+        dispose_pane_target(&mut map, &label, &pane_id, true)
+            .ok()
+            .and_then(|pane| pane.session_id)
     };
-    // Dispose the old session on the daemon (best-effort, off-thread).
     if let Some(id) = old_id {
         if let Some(port) = port_for(&webview) {
             let app2 = app.clone();
@@ -2971,12 +3327,67 @@ fn select_project(
             });
         }
     }
-    // Create the new session for this window (records cwd/session_path, awaits
-    // the daemon, starts the bridge, emits sidecar-ready).
-    start_window_session(app.clone(), label, PathBuf::from(cwd), session_path);
-    // The map now reflects this window's new project/session; persist the
-    // workspace so a restart reopens it here.
-    snapshot_workspace(&app);
+    start_pane_session(
+        app.clone(),
+        label,
+        pane_id.clone(),
+        PathBuf::from(cwd),
+        session_path,
+    );
+    if pane_id == PRIMARY_PANE_ID {
+        snapshot_workspace(&app);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn agent_pane_create(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    pane_id: String,
+    cwd: String,
+    session_path: Option<String>,
+) -> Result<(), String> {
+    validate_pane_id(&pane_id)?;
+    let label = webview.label().to_string();
+    let generation = {
+        let windows: State<Windows> = app.state();
+        let mut map = windows.map.lock().unwrap();
+        create_pane_target(
+            &mut map,
+            &label,
+            &pane_id,
+            PathBuf::from(&cwd),
+            session_path.clone(),
+        )?
+    };
+    launch_pane_session(
+        app,
+        label,
+        pane_id,
+        PathBuf::from(cwd),
+        session_path,
+        generation,
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn agent_pane_dispose(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    pane_id: String,
+) -> Result<(), String> {
+    let pane = {
+        let windows: State<Windows> = app.state();
+        let mut map = windows.map.lock().unwrap();
+        dispose_pane_target(&mut map, webview.label(), &pane_id, false)?
+    };
+    if let (Some(port), Some(id)) = (port_for(&webview), pane.session_id) {
+        tauri::async_runtime::spawn(async move {
+            daemon_delete_session(&app, port, &id).await;
+        });
+    }
     Ok(())
 }
 
@@ -3246,11 +3657,33 @@ fn drain_sse_frames(buf: &mut Vec<u8>) -> Vec<String> {
     frames
 }
 
+/// Pure trusted event envelope. Sidecar-provided identity is overwritten; only
+/// the bridge's registry-bound pane/session tuple may identify an event.
+fn event_envelope(
+    mut value: serde_json::Value,
+    pane_id: &str,
+    session_id: &str,
+) -> Option<serde_json::Value> {
+    let object = value.as_object_mut()?;
+    object.insert("paneId".into(), serde_json::Value::String(pane_id.into()));
+    object.insert(
+        "sessionId".into(),
+        serde_json::Value::String(session_id.into()),
+    );
+    Some(value)
+}
+
 /// Connect to a window's sidecar SSE stream and re-emit each frame ONLY to that
 /// window (`emit_to` the window label) as `agent-event`, so windows never see
 /// each other's agent activity. Rust has no mixed-content restriction, so the
 /// webview never touches plain HTTP directly. Reconnects on stream end.
-fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16, session_id: String) {
+fn start_event_bridge(
+    app: tauri::AppHandle,
+    label: String,
+    pane_id: String,
+    port: u16,
+    session_id: String,
+) {
     // Reuse the app's shared HTTP client (cheap Arc clone) so the SSE connect
     // shares the connection pool with the proxy commands.
     let client = app.state::<reqwest::Client>().inner().clone();
@@ -3263,13 +3696,17 @@ fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16, session_i
             {
                 let state: State<Windows> = app.state();
                 let map = state.map.lock().unwrap();
-                if map.get(&label).and_then(|w| w.session_id.clone()) != Some(session_id.clone()) {
+                if !pane_bridge_is_active(&map, &label, &pane_id, &session_id) {
                     log::debug!("event bridge for {label} session {session_id} retired");
                     return;
                 }
             }
             // The daemon adds this response to the target session's SSE clients.
-            let url = format!("{}/events?session={}", sidecar_base(port), urlencoding(&session_id));
+            let url = format!(
+                "{}/events?session={}",
+                sidecar_base(port),
+                urlencoding(&session_id)
+            );
             match client.get(&url).send().await {
                 Ok(res) => {
                     let mut stream = res.bytes_stream();
@@ -3285,11 +3722,28 @@ fn start_event_bridge(app: tauri::AppHandle, label: String, port: u16, session_i
                                     if let Ok(value) =
                                         serde_json::from_str::<serde_json::Value>(payload)
                                     {
-                                        let _ = app.emit_to(
-                                            EventTarget::webview_window(label.clone()),
-                                            "agent-event",
-                                            value,
-                                        );
+                                        let active = {
+                                            let state: State<Windows> = app.state();
+                                            let map = state.map.lock().unwrap();
+                                            pane_bridge_is_active(
+                                                &map,
+                                                &label,
+                                                &pane_id,
+                                                &session_id,
+                                            )
+                                        };
+                                        if !active {
+                                            return;
+                                        }
+                                        if let Some(value) =
+                                            event_envelope(value, &pane_id, &session_id)
+                                        {
+                                            let _ = app.emit_to(
+                                                EventTarget::webview_window(label.clone()),
+                                                "agent-event",
+                                                value,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -3496,7 +3950,24 @@ fn pick_cwd(
 /// The daemon is a process-group leader (Unix), so `terminate_child` reaps its
 /// entire descendant tree (every session's MCP stdio children + LSP servers) in
 /// one group-kill — no orphans on quit.
+fn set_daemon_startup_error(app: &tauri::AppHandle, message: String) {
+    *app.state::<Daemon>().startup_error.lock().unwrap() = Some(message.clone());
+    for label in app.webview_windows().keys() {
+        let _ = app.emit_to(
+            EventTarget::webview_window(label.clone()),
+            "sidecar-error",
+            message.clone(),
+        );
+    }
+}
+
+fn clear_daemon_startup_error(app: &tauri::AppHandle) {
+    *app.state::<Daemon>().startup_error.lock().unwrap() = None;
+}
+
 fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
+    // A retry starts a fresh readiness attempt; any new failure is recorded below.
+    clear_daemon_startup_error(&app);
     let script = resolve_sidecar(&app);
     let node = resolve_node(&app);
     log::info!("spawning daemon: {} {}", node.display(), script.display());
@@ -3521,15 +3992,9 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             c
         }
         Err(e) => {
-            log::error!("failed to spawn daemon: {e}");
-            // Surface to every open window so they don't hang on waitForReady.
-            for label in app.webview_windows().keys() {
-                let _ = app.emit_to(
-                    EventTarget::webview_window(label.clone()),
-                    "sidecar-error",
-                    format!("failed to spawn daemon: {e}"),
-                );
-            }
+            let message = format!("failed to spawn daemon: {e}");
+            log::error!("{message}");
+            set_daemon_startup_error(&app, message);
             return;
         }
     };
@@ -3543,6 +4008,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                     if let Ok(port) = rest.trim().parse::<u16>() {
                         log::info!("daemon listening on port {port}");
                         *app2.state::<Daemon>().port.lock().unwrap() = Some(port);
+                        clear_daemon_startup_error(&app2);
                         // On a respawn the windows already exist with (now
                         // stale) sessions — re-create them all. On the initial
                         // spawn `restore_or_default_windows` drives creation.
@@ -3558,7 +4024,9 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                 }
             }
             // stdout closed → the daemon process exited. If the app isn't
-            // quitting, this is a crash: respawn + rehydrate every window.
+            // quitting, this is a crash: invalidate every daemon-owned runtime
+            // identity before respawning so readiness and event bridges cannot
+            // observe a stale session on the fresh daemon port.
             let exiting = app2.state::<AppExiting>().0.load(Ordering::SeqCst);
             if !exiting {
                 log::warn!("daemon exited unexpectedly — respawning");
@@ -3566,6 +4034,12 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                     let daemon: State<Daemon> = app2.state();
                     *daemon.port.lock().unwrap() = None;
                 }
+                let cleared = {
+                    let windows: State<Windows> = app2.state();
+                    let mut map = windows.map.lock().unwrap();
+                    clear_runtime_session_ids(&mut map)
+                };
+                log::debug!("cleared {cleared} stale pane session id(s)");
                 spawn_daemon(app2.clone(), true);
             }
         });
@@ -3578,13 +4052,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             for line in reader.lines().map_while(Result::ok) {
                 log::error!("[daemon:stderr] {line}");
                 if line.starts_with("GG_APP_FATAL") {
-                    for label in app3.webview_windows().keys() {
-                        let _ = app3.emit_to(
-                            EventTarget::webview_window(label.clone()),
-                            "sidecar-error",
-                            line.clone(),
-                        );
-                    }
+                    set_daemon_startup_error(&app3, line.clone());
                 }
             }
         });
@@ -3595,13 +4063,13 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
 }
 
 /// POST /session to the daemon for `cwd` (+ optional resume `session_path`);
-/// returns the new session id, or `None` on failure.
+/// returns the new session id or actionable backend/transport failure text.
 async fn daemon_create_session(
     app: &tauri::AppHandle,
     port: u16,
     cwd: &Path,
     session_path: Option<&str>,
-) -> Option<String> {
+) -> Result<String, String> {
     let client = app.state::<reqwest::Client>().inner().clone();
     let body = serde_json::json!({
         "cwd": cwd.to_string_lossy(),
@@ -3612,97 +4080,175 @@ async fn daemon_create_session(
         .json(&body)
         .send()
         .await
-        .ok()?;
-    let value = res.json::<serde_json::Value>().await.ok()?;
+        .map_err(|e| format!("failed to contact agent daemon: {e}"))?;
+    let status = res.status();
+    let text = res
+        .text()
+        .await
+        .map_err(|e| format!("failed to read agent daemon response: {e}"))?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        if status.is_success() {
+            format!("agent daemon returned an invalid response: {e}")
+        } else if text.trim().is_empty() {
+            format!("agent daemon rejected session creation ({status})")
+        } else {
+            format!(
+                "agent daemon rejected session creation ({status}): {}",
+                text.trim()
+            )
+        }
+    })?;
+    if !status.is_success() {
+        let detail = value
+            .get("error")
+            .or_else(|| value.get("message"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| text.trim());
+        return Err(if detail.is_empty() {
+            format!("agent daemon rejected session creation ({status})")
+        } else {
+            format!("agent daemon rejected session creation ({status}): {detail}")
+        });
+    }
     value
         .get("sessionId")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "agent daemon response did not include a session id".to_string())
 }
 
 /// DELETE /session/:id on the daemon (best-effort, fire-and-forget).
 async fn daemon_delete_session(app: &tauri::AppHandle, port: u16, id: &str) {
     let client = app.state::<reqwest::Client>().inner().clone();
     let _ = client
-        .delete(format!("{}/session/{}", sidecar_base(port), urlencoding(id)))
+        .delete(format!(
+            "{}/session/{}",
+            sidecar_base(port),
+            urlencoding(id)
+        ))
         .send()
         .await;
 }
 
-/// Create (or re-point) one window's session: record `{cwd, session_path}`,
-/// await the daemon, `POST /session`, store the returned id, start the SSE
-/// bridge, and emit `sidecar-ready`. Fire-and-forget (spawns its own task) so
-/// callers in sync contexts (setup/restore) don't block. Replaces the old
-/// per-window `spawn_sidecar` (now one shared daemon).
+fn start_pane_session(
+    app: tauri::AppHandle,
+    label: String,
+    pane_id: String,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) {
+    let generation = {
+        let windows: State<Windows> = app.state();
+        let mut map = windows.map.lock().unwrap();
+        record_pane_target(
+            &mut map,
+            &label,
+            &pane_id,
+            cwd.clone(),
+            session_path.clone(),
+        )
+    };
+    launch_pane_session(app, label, pane_id, cwd, session_path, generation);
+}
+
+fn emit_pane_start_error(app: &tauri::AppHandle, label: &str, pane_id: &str, message: &str) {
+    // Session creation is pane-scoped. Only daemon-global failures use
+    // `sidecar-error`, otherwise a primary failure could reject a sibling pane.
+    let _ = app.emit_to(
+        EventTarget::webview_window(label.to_string()),
+        "agent-pane-error",
+        serde_json::json!({ "paneId": pane_id, "message": message }),
+    );
+}
+
+fn launch_pane_session(
+    app: tauri::AppHandle,
+    label: String,
+    pane_id: String,
+    cwd: PathBuf,
+    session_path: Option<String>,
+    generation: u64,
+) {
+    tauri::async_runtime::spawn(async move {
+        let Some(port) = await_daemon_port(&app).await else {
+            let message = "daemon did not start in time".to_string();
+            log::error!("{message}; session for {label}/{pane_id} not created");
+            let recorded = {
+                let windows: State<Windows> = app.state();
+                let mut map = windows.map.lock().unwrap();
+                record_pane_startup_error(&mut map, &label, &pane_id, generation, message.clone())
+            };
+            if recorded {
+                emit_pane_start_error(&app, &label, &pane_id, &message);
+            }
+            return;
+        };
+        match daemon_create_session(&app, port, &cwd, session_path.as_deref()).await {
+            Ok(id) => {
+                let bound = {
+                    let windows: State<Windows> = app.state();
+                    let mut map = windows.map.lock().unwrap();
+                    bind_pane_session(&mut map, &label, &pane_id, generation, id.clone())
+                };
+                if !bound {
+                    daemon_delete_session(&app, port, &id).await;
+                    return;
+                }
+                start_event_bridge(app.clone(), label.clone(), pane_id.clone(), port, id);
+                let _ = app.emit_to(
+                    EventTarget::webview_window(label.clone()),
+                    "agent-pane-ready",
+                    serde_json::json!({ "paneId": pane_id, "port": port }),
+                );
+                if pane_id == PRIMARY_PANE_ID {
+                    let _ = app.emit_to(
+                        EventTarget::webview_window(label.clone()),
+                        "sidecar-ready",
+                        port,
+                    );
+                }
+            }
+            Err(message) => {
+                log::error!("daemon POST /session failed for {label}/{pane_id}: {message}");
+                let recorded = {
+                    let windows: State<Windows> = app.state();
+                    let mut map = windows.map.lock().unwrap();
+                    record_pane_startup_error(
+                        &mut map,
+                        &label,
+                        &pane_id,
+                        generation,
+                        message.clone(),
+                    )
+                };
+                if recorded {
+                    emit_pane_start_error(&app, &label, &pane_id, &message);
+                }
+            }
+        }
+    });
+}
+
 fn start_window_session(
     app: tauri::AppHandle,
     label: String,
     cwd: PathBuf,
     session_path: Option<String>,
 ) {
-    // Record the target up front so snapshot/restore + crash-respawn can see it
-    // even before the daemon answers.
-    {
-        let windows: State<Windows> = app.state();
-        let mut map = windows.map.lock().unwrap();
-        let entry = map.entry(label.clone()).or_default();
-        entry.cwd = Some(cwd.clone());
-        entry.session_path = session_path.clone();
-        entry.session_id = None;
-    }
-    tauri::async_runtime::spawn(async move {
-        let Some(port) = await_daemon_port(&app).await else {
-            log::error!("daemon never came up; session for {label} not created");
-            let _ = app.emit_to(
-                EventTarget::webview_window(label.clone()),
-                "sidecar-error",
-                "daemon did not start in time",
-            );
-            return;
-        };
-        match daemon_create_session(&app, port, &cwd, session_path.as_deref()).await {
-            Some(id) => {
-                {
-                    let windows: State<Windows> = app.state();
-                    let mut map = windows.map.lock().unwrap();
-                    let entry = map.entry(label.clone()).or_default();
-                    entry.session_id = Some(id.clone());
-                    entry.cwd = Some(cwd.clone());
-                    entry.session_path = session_path.clone();
-                }
-                start_event_bridge(app.clone(), label.clone(), port, id);
-                let _ = app.emit_to(
-                    EventTarget::webview_window(label.clone()),
-                    "sidecar-ready",
-                    port,
-                );
-            }
-            None => {
-                log::error!("daemon POST /session failed for {label}");
-                let _ = app.emit_to(
-                    EventTarget::webview_window(label.clone()),
-                    "sidecar-error",
-                    "failed to create agent session",
-                );
-            }
-        }
-    });
+    start_pane_session(app, label, PRIMARY_PANE_ID.to_string(), cwd, session_path);
 }
 
-/// After a daemon respawn, re-create a session for every live window from its
-/// stored `{cwd, session_path}` so each webview re-hydrates (history survives
-/// via the JSONL session files). Skips windows with no recorded project (still
-/// on the picker).
+/// After daemon respawn, re-create every recorded pane target.
 fn recreate_all_window_sessions(app: tauri::AppHandle) {
-    let targets: Vec<(String, PathBuf, Option<String>)> = {
+    let targets = {
         let windows: State<Windows> = app.state();
         let map = windows.map.lock().unwrap();
-        map.iter()
-            .filter_map(|(label, w)| w.cwd.clone().map(|c| (label.clone(), c, w.session_path.clone())))
-            .collect()
+        enumerate_pane_targets(&map)
     };
-    for (label, cwd, session_path) in targets {
-        start_window_session(app.clone(), label, cwd, session_path);
+    for (label, pane_id, cwd, session_path) in targets {
+        start_pane_session(app.clone(), label, pane_id, cwd, session_path);
     }
 }
 
@@ -3797,6 +4343,9 @@ pub fn run() {
         .manage(reqwest::Client::new())
         .invoke_handler(tauri::generate_handler![
             sidecar_port,
+            agent_pane_status,
+            agent_pane_create,
+            agent_pane_dispose,
             dropped_path_info,
             permissions_status,
             open_permissions_settings,
@@ -3895,13 +4444,16 @@ pub fn run() {
                 // other projects keep running. The daemon process itself is
                 // never killed here (that happens only on app exit).
                 let state: State<Windows> = window.state();
-                let session_id = state.map.lock().unwrap().remove(window.label()).and_then(|w| w.session_id);
-                if let Some(id) = session_id {
-                    if let Some(port) = *app.state::<Daemon>().port.lock().unwrap() {
-                        let app2 = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            daemon_delete_session(&app2, port, &id).await;
-                        });
+                let pane_sessions =
+                    take_window_panes(&mut state.map.lock().unwrap(), window.label());
+                if let Some(port) = *app.state::<Daemon>().port.lock().unwrap() {
+                    for pane in pane_sessions {
+                        if let Some(id) = pane.session_id {
+                            let app2 = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                daemon_delete_session(&app2, port, &id).await;
+                            });
+                        }
                     }
                 }
                 // Update peers: the closed window is gone from the reading order.
@@ -3977,11 +4529,17 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
     let Some(port) = *app.state::<Daemon>().port.lock().unwrap() else {
         return;
     };
-    let targets: Vec<(String, String)> = {
+    let targets: Vec<(String, String, String)> = {
         let state: State<Windows> = app.state();
         let map = state.map.lock().unwrap();
         map.iter()
-            .filter_map(|(label, w)| w.session_id.clone().map(|id| (label.clone(), id)))
+            .flat_map(|(label, panes)| {
+                panes.iter().filter_map(move |(pane_id, pane)| {
+                    pane.session_id
+                        .clone()
+                        .map(|id| (label.clone(), pane_id.clone(), id))
+                })
+            })
             .collect()
     };
     if targets.is_empty() {
@@ -3991,10 +4549,10 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
     // The exit callback runs on the main event-loop thread (outside the async
     // runtime), so block_on is safe here. Each request is time-boxed so a hung
     // session can't stall quit.
-    let results: Vec<(String, Option<String>, Option<PathBuf>)> =
+    let results: Vec<(String, String, String, Option<String>, Option<PathBuf>)> =
         tauri::async_runtime::block_on(async {
             let mut out = Vec::with_capacity(targets.len());
-            for (label, sid) in targets {
+            for (label, pane_id, sid) in targets {
                 let url = format!("{}/state", sidecar_base(port));
                 let req = client
                     .get(&url)
@@ -4018,14 +4576,20 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                     .map(PathBuf::from);
-                out.push((label, session_path, cwd));
+                out.push((label, pane_id, sid, session_path, cwd));
             }
             out
         });
     let state: State<Windows> = app.state();
     let mut map = state.map.lock().unwrap();
-    for (label, session_path, cwd) in results {
-        if let Some(inst) = map.get_mut(&label) {
+    for (label, pane_id, session_id, session_path, cwd) in results {
+        if !pane_bridge_is_active(&map, &label, &pane_id, &session_id) {
+            continue;
+        }
+        if let Some(inst) = map
+            .get_mut(&label)
+            .and_then(|panes| panes.get_mut(&pane_id))
+        {
             if session_path.is_some() {
                 inst.session_path = session_path;
             }
@@ -4039,6 +4603,88 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pane(session_id: &str, cwd: &str) -> PaneSession {
+        PaneSession {
+            session_id: Some(session_id.into()),
+            cwd: Some(PathBuf::from(cwd)),
+            session_path: None,
+            generation: 1,
+            startup_error: None,
+        }
+    }
+
+    #[test]
+    fn event_envelope_overwrites_untrusted_identity() {
+        let value = event_envelope(
+            serde_json::json!({ "type": "text", "paneId": "evil", "sessionId": "fake" }),
+            "right",
+            "trusted-session",
+        )
+        .unwrap();
+        assert_eq!(value["type"], "text");
+        assert_eq!(value["paneId"], "right");
+        assert_eq!(value["sessionId"], "trusted-session");
+    }
+
+    #[test]
+    fn pane_routes_are_owner_scoped_and_default_to_primary() {
+        let mut registry = PaneRegistry::new();
+        registry
+            .entry("window-a".into())
+            .or_default()
+            .insert(PRIMARY_PANE_ID.into(), pane("a-primary", "/a/primary"));
+        registry
+            .get_mut("window-a")
+            .unwrap()
+            .insert("right".into(), pane("a-right", "/a/right"));
+        registry
+            .entry("window-b".into())
+            .or_default()
+            .insert("right".into(), pane("b-right", "/b/right"));
+
+        let primary = pane_id_or_primary(None).unwrap();
+        assert_eq!(
+            resolve_owned_pane(&registry, "window-a", primary)
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("a-primary")
+        );
+        assert_eq!(
+            resolve_owned_pane(&registry, "window-a", "right")
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("a-right")
+        );
+        assert_eq!(
+            resolve_owned_pane(&registry, "window-b", "right")
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("b-right")
+        );
+        assert!(resolve_owned_pane(&registry, "window-b", PRIMARY_PANE_ID).is_none());
+    }
+
+    #[test]
+    fn stale_pane_session_tuple_is_rejected() {
+        let mut registry = PaneRegistry::new();
+        registry
+            .entry("window-a".into())
+            .or_default()
+            .insert("right".into(), pane("current", "/a/right"));
+        assert!(pane_bridge_is_active(
+            &registry, "window-a", "right", "current"
+        ));
+        assert!(!pane_bridge_is_active(
+            &registry, "window-a", "right", "stale"
+        ));
+        assert!(!pane_bridge_is_active(
+            &registry, "window-b", "right", "current"
+        ));
+    }
 
     #[test]
     fn keep_for_snapshot_excludes_picker_windows() {
@@ -4543,7 +5189,10 @@ mod tests {
         // → excluded.
         let snap = vec![proc(800, 1, "node vite")];
         let ks = orphan_killset(&snap, 100, &ledger(&[500]));
-        assert!(ks.is_empty(), "non-matching process must not be killed: {ks:?}");
+        assert!(
+            ks.is_empty(),
+            "non-matching process must not be killed: {ks:?}"
+        );
     }
 
     #[test]
@@ -4790,75 +5439,525 @@ mod tests {
         assert!(tile_rects(0, 0, 0, 1920, 1080).is_empty());
     }
 
-    // ── Window↔session map (daemon model) ──────────────────────────────────
-    // The `Windows` map replaces the old per-window `Sidecars` registry. These
-    // lock in the three mutations the lifecycle relies on: a window gets a
-    // session id once the daemon answers, `select_project` re-points it to a
-    // fresh session (old id taken so its SSE bridge retires), and a window
-    // close removes its entry entirely (peers untouched).
+    // ── Pane registry ownership + lifecycle ─────────────────────────────────
+    // Pure tests lock in nested ownership and generalized pane lifecycle rules.
 
     #[test]
-    fn window_session_records_project_before_daemon_answers() {
-        // start_window_session records cwd/session_path up front, session_id None
-        // until POST /session returns — so snapshot/restore can see the target.
-        let mut map: HashMap<String, WindowSession> = HashMap::new();
-        map.insert(
-            "main".into(),
-            WindowSession {
-                session_id: None,
-                cwd: Some(PathBuf::from("/p/a")),
-                session_path: Some("/s/a.jsonl".into()),
-            },
+    fn pane_registry_scopes_identical_pane_ids_by_owner() {
+        let mut registry = PaneRegistry::new();
+        let main_generation = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            Some("/s/a.jsonl".into()),
         );
-        let w = map.get("main").unwrap();
-        assert!(w.session_id.is_none());
-        assert_eq!(w.cwd.as_deref(), Some(Path::new("/p/a")));
-        assert_eq!(w.session_path.as_deref(), Some("/s/a.jsonl"));
+        let peer_generation = record_pane_target(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/b"),
+            None,
+        );
+
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            main_generation,
+            "id-1".into(),
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            peer_generation,
+            "id-2".into(),
+        ));
+
+        let main = resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID).unwrap();
+        let peer = resolve_owned_pane(&registry, "project-1", PRIMARY_PANE_ID).unwrap();
+        assert_eq!(main.session_id.as_deref(), Some("id-1"));
+        assert_eq!(main.cwd.as_deref(), Some(Path::new("/p/a")));
+        assert_eq!(main.session_path.as_deref(), Some("/s/a.jsonl"));
+        assert_eq!(peer.session_id.as_deref(), Some("id-2"));
+        assert!(resolve_owned_pane(&registry, "missing", PRIMARY_PANE_ID).is_none());
     }
 
     #[test]
-    fn select_project_repoints_to_a_fresh_session() {
-        // Mirrors select_project: take the old id (retires its bridge), then the
-        // new session id + cwd land on the SAME window entry.
-        let mut map: HashMap<String, WindowSession> = HashMap::new();
-        map.insert(
-            "main".into(),
-            WindowSession {
-                session_id: Some("old-id".into()),
-                cwd: Some(PathBuf::from("/p/a")),
-                session_path: None,
-            },
+    fn replacing_pane_target_rejects_stale_session_binding() {
+        let mut registry = PaneRegistry::new();
+        let old_generation = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            None,
         );
-        // select_project takes the old id so the old SSE bridge retires.
-        let old = map.get_mut("main").and_then(|w| w.session_id.take());
-        assert_eq!(old.as_deref(), Some("old-id"));
-        assert!(map.get("main").unwrap().session_id.is_none());
-        // start_window_session then records the new project + session id.
-        let entry = map.get_mut("main").unwrap();
-        entry.cwd = Some(PathBuf::from("/p/b"));
-        entry.session_id = Some("new-id".into());
-        let w = map.get("main").unwrap();
-        assert_eq!(w.session_id.as_deref(), Some("new-id"));
-        assert_eq!(w.cwd.as_deref(), Some(Path::new("/p/b")));
+        let new_generation = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/b"),
+            None,
+        );
+
+        assert!(new_generation > old_generation);
+        assert!(!bind_pane_session(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            old_generation,
+            "stale-id".into(),
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            new_generation,
+            "current-id".into(),
+        ));
+        assert!(!bind_pane_session(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            new_generation,
+            "duplicate-id".into(),
+        ));
+
+        let pane = resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID).unwrap();
+        assert_eq!(pane.cwd.as_deref(), Some(Path::new("/p/b")));
+        assert_eq!(pane.session_id.as_deref(), Some("current-id"));
+        assert!(pane_bridge_is_active(
+            &registry,
+            "main",
+            PRIMARY_PANE_ID,
+            "current-id",
+        ));
+        assert!(!pane_bridge_is_active(
+            &registry,
+            "main",
+            PRIMARY_PANE_ID,
+            "stale-id",
+        ));
     }
 
     #[test]
-    fn closing_one_window_leaves_peers_intact() {
-        // Destroyed removes only the closed window's entry; other windows keep
-        // their sessions (the shared daemon process is never touched here).
-        let mut map: HashMap<String, WindowSession> = HashMap::new();
-        map.insert(
-            "main".into(),
-            WindowSession { session_id: Some("id-1".into()), cwd: Some(PathBuf::from("/p/a")), session_path: None },
+    fn taking_a_pane_prunes_only_its_empty_owner() {
+        let mut registry = PaneRegistry::new();
+        let primary_generation = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            None,
         );
-        map.insert(
-            "project-1".into(),
-            WindowSession { session_id: Some("id-2".into()), cwd: Some(PathBuf::from("/p/b")), session_path: None },
+        record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/p/b"),
+            None,
         );
-        let removed = map.remove("main").and_then(|w| w.session_id);
-        assert_eq!(removed.as_deref(), Some("id-1"));
-        assert!(map.get("main").is_none());
-        // Peer survives with its own session.
-        assert_eq!(map.get("project-1").unwrap().session_id.as_deref(), Some("id-2"));
+        record_pane_target(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/c"),
+            None,
+        );
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            primary_generation,
+            "id-1".into(),
+        ));
+
+        let removed = take_pane_session(&mut registry, "main", PRIMARY_PANE_ID).unwrap();
+        assert_eq!(removed.session_id.as_deref(), Some("id-1"));
+        assert!(resolve_owned_pane(&registry, "main", "secondary").is_some());
+        assert!(resolve_owned_pane(&registry, "project-1", PRIMARY_PANE_ID).is_some());
+
+        assert!(take_pane_session(&mut registry, "main", "secondary").is_some());
+        assert!(!registry.contains_key("main"));
+        assert!(registry.contains_key("project-1"));
+    }
+
+    #[test]
+    fn taking_window_panes_drains_that_owner_and_preserves_peers() {
+        let mut registry = PaneRegistry::new();
+        record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            None,
+        );
+        record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/p/b"),
+            None,
+        );
+        record_pane_target(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/c"),
+            None,
+        );
+
+        let removed = take_window_panes(&mut registry, "main");
+        assert_eq!(removed.len(), 2);
+        assert!(!registry.contains_key("main"));
+        assert!(registry.contains_key("project-1"));
+        assert!(take_window_panes(&mut registry, "missing").is_empty());
+    }
+
+    #[test]
+    fn respawn_enumeration_preserves_every_pane_target() {
+        let mut registry = PaneRegistry::new();
+        record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            Some("/s/a.jsonl".into()),
+        );
+        record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/p/b"),
+            Some("/s/b.jsonl".into()),
+        );
+        record_pane_target(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/c"),
+            None,
+        );
+
+        let mut targets = enumerate_pane_targets(&registry);
+        targets.sort();
+        assert_eq!(
+            targets,
+            vec![
+                (
+                    "main".into(),
+                    PRIMARY_PANE_ID.into(),
+                    PathBuf::from("/p/a"),
+                    Some("/s/a.jsonl".into()),
+                ),
+                (
+                    "main".into(),
+                    "secondary".into(),
+                    PathBuf::from("/p/b"),
+                    Some("/s/b.jsonl".into()),
+                ),
+                (
+                    "project-1".into(),
+                    PRIMARY_PANE_ID.into(),
+                    PathBuf::from("/p/c"),
+                    None,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn daemon_crash_clears_all_runtime_ids_and_preserves_every_target() {
+        let mut registry = PaneRegistry::new();
+        let primary_generation = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            Some("/s/a.jsonl".into()),
+        );
+        let side_generation = record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/p/b"),
+            Some("/s/b.jsonl".into()),
+        );
+        let peer_generation = record_pane_target(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/c"),
+            None,
+        );
+        for (label, pane_id, generation, session_id) in [
+            ("main", PRIMARY_PANE_ID, primary_generation, "old-primary"),
+            ("main", "secondary", side_generation, "old-secondary"),
+            ("project-1", PRIMARY_PANE_ID, peer_generation, "old-peer"),
+        ] {
+            assert!(bind_pane_session(
+                &mut registry,
+                label,
+                pane_id,
+                generation,
+                session_id.into(),
+            ));
+            assert!(pane_bridge_is_active(&registry, label, pane_id, session_id));
+        }
+        let mut targets_before = enumerate_pane_targets(&registry);
+        targets_before.sort();
+
+        assert_eq!(clear_runtime_session_ids(&mut registry), 3);
+
+        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.get("main").unwrap().len(), 2);
+        assert!(resolve_owned_pane(&registry, "main", "secondary").is_some());
+        for (label, pane_id, generation, old_session_id) in [
+            ("main", PRIMARY_PANE_ID, primary_generation, "old-primary"),
+            ("main", "secondary", side_generation, "old-secondary"),
+            ("project-1", PRIMARY_PANE_ID, peer_generation, "old-peer"),
+        ] {
+            let pane = resolve_owned_pane(&registry, label, pane_id).unwrap();
+            assert_eq!(pane.generation, generation);
+            assert!(pane.session_id.is_none());
+            assert!(!pane_bridge_is_active(
+                &registry,
+                label,
+                pane_id,
+                old_session_id,
+            ));
+        }
+        let mut targets_after = enumerate_pane_targets(&registry);
+        targets_after.sort();
+        assert_eq!(targets_after, targets_before);
+    }
+
+    #[test]
+    fn primary_default_and_pane_id_validation_preserve_legacy_identity() {
+        assert_eq!(pane_id_or_primary(None).unwrap(), PRIMARY_PANE_ID);
+        assert_eq!(pane_id_or_primary(Some("pane_2")).unwrap(), "pane_2");
+        assert!(pane_id_or_primary(Some("")).is_err());
+        assert!(pane_id_or_primary(Some("bad pane")).is_err());
+        assert!(pane_id_or_primary(Some(&"x".repeat(MAX_PANE_ID_LEN + 1))).is_err());
+    }
+
+    #[test]
+    fn pane_create_rejects_duplicates_and_dispose_protects_primary() {
+        let mut registry = PaneRegistry::new();
+        assert!(create_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/p/b"),
+            None,
+        )
+        .is_ok());
+        assert!(create_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/p/c"),
+            None,
+        )
+        .is_err());
+        assert!(create_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            None,
+        )
+        .is_ok());
+        assert!(dispose_pane_target(&mut registry, "main", PRIMARY_PANE_ID, false).is_err());
+        assert!(dispose_pane_target(&mut registry, "main", "secondary", false).is_ok());
+        assert!(resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID).is_some());
+    }
+
+    #[test]
+    fn exact_tuple_bridge_identity_distinguishes_panes() {
+        let mut registry = PaneRegistry::new();
+        let a = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            None,
+        );
+        let b = record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/p/b"),
+            None,
+        );
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            a,
+            "same-looking-id-a".into(),
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "secondary",
+            b,
+            "same-looking-id-b".into(),
+        ));
+        assert!(pane_bridge_is_active(
+            &registry,
+            "main",
+            "secondary",
+            "same-looking-id-b",
+        ));
+        assert!(!pane_bridge_is_active(
+            &registry,
+            "main",
+            PRIMARY_PANE_ID,
+            "same-looking-id-b",
+        ));
+    }
+
+    #[test]
+    fn pane_status_is_ownership_checked() {
+        let mut registry = PaneRegistry::new();
+        record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            None,
+        );
+        assert!(pane_startup_status(&registry, "peer", PRIMARY_PANE_ID, None).is_err());
+        assert_eq!(
+            pane_startup_status(&registry, "main", PRIMARY_PANE_ID, None).unwrap(),
+            PaneStartupStatus {
+                ready: false,
+                error: None
+            }
+        );
+    }
+
+    #[test]
+    fn recorded_pane_error_is_generation_and_pane_isolated() {
+        let mut registry = PaneRegistry::new();
+        let stale = record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/old"),
+            None,
+        );
+        let current = record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/new"),
+            None,
+        );
+        record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/primary"),
+            None,
+        );
+        assert!(!record_pane_startup_error(
+            &mut registry,
+            "main",
+            "secondary",
+            stale,
+            "stale".into()
+        ));
+        assert!(record_pane_startup_error(
+            &mut registry,
+            "main",
+            "secondary",
+            current,
+            "current failure".into()
+        ));
+        assert_eq!(
+            pane_startup_status(&registry, "main", "secondary", None)
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("current failure")
+        );
+        assert_eq!(
+            pane_startup_status(&registry, "main", PRIMARY_PANE_ID, None)
+                .unwrap()
+                .error,
+            None
+        );
+        let retry = record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/new"),
+            None,
+        );
+        assert!(retry > current);
+        assert_eq!(
+            pane_startup_status(&registry, "main", "secondary", None)
+                .unwrap()
+                .error,
+            None
+        );
+    }
+
+    #[test]
+    fn daemon_global_failure_applies_to_every_owned_pane() {
+        let mut registry = PaneRegistry::new();
+        record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            None,
+        );
+        let status =
+            pane_startup_status(&registry, "main", PRIMARY_PANE_ID, Some("daemon failed")).unwrap();
+        assert_eq!(
+            status,
+            PaneStartupStatus {
+                ready: false,
+                error: Some("daemon failed".into())
+            }
+        );
+    }
+
+    #[test]
+    fn successful_session_binding_reports_readiness_and_clears_error() {
+        let mut registry = PaneRegistry::new();
+        let generation = record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/a"),
+            None,
+        );
+        assert!(record_pane_startup_error(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            generation,
+            "temporary".into()
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            generation,
+            "session-1".into()
+        ));
+        assert_eq!(
+            pane_startup_status(&registry, "main", PRIMARY_PANE_ID, None).unwrap(),
+            PaneStartupStatus {
+                ready: true,
+                error: None
+            }
+        );
     }
 }

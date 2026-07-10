@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { theme } from "./theme";
 import {
-  waitForReady,
+  waitForPaneReady,
   getState,
   sendPrompt,
   sendKenPrompt,
@@ -44,6 +44,7 @@ import {
   type Attachment,
   type PromptSegment,
 } from "./agent";
+import { PRIMARY_PANE_ID } from "./pane-routing";
 import { ActivityBar } from "./ActivityBar";
 import { KenActivityBar } from "./KenActivityBar";
 import { AutopilotReviewBar } from "./AutopilotReviewBar";
@@ -961,7 +962,7 @@ function App(): React.ReactElement {
     setHydrated(false);
     setStatus("connecting to agent\u2026");
     try {
-      await waitForReady();
+      await waitForPaneReady(PRIMARY_PANE_ID);
       readyRef.current = true;
       const st = await getState().catch(() => null);
       if (st) {
@@ -1105,7 +1106,7 @@ function App(): React.ReactElement {
   }, []);
 
   useEffect(() => {
-    const unsub = subscribe(handleEvent);
+    const unsub = subscribe(PRIMARY_PANE_ID, handleEvent);
     return () => unsub();
   }, [handleEvent]);
 

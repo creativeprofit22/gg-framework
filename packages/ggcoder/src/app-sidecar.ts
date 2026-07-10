@@ -111,6 +111,7 @@ import { awardPrompt, awardCommits } from "./core/progress/engine.js";
 import { detectNewCommits, repoKey } from "./core/progress/git-xp.js";
 import { rebuildFromSessions } from "./core/progress/rebuild.js";
 import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
+import { AppSidecarSessionRouter, sessionEventSseData } from "./app-sidecar-session-router.js";
 
 const ALL_PROVIDERS: Provider[] = [
   "anthropic",
@@ -786,7 +787,7 @@ async function main(): Promise<void> {
   // the daemon hands back from POST /session. The Rust shell routes each proxy
   // request to its window's session via the `x-gg-session` header (and the
   // `?session=` query for the SSE /events stream).
-  const sessions = new Map<string, SessionContext>();
+  const sessions = new AppSidecarSessionRouter<SessionContext>();
 
   // XP/rank progress — loaded once per daemon; awards fan out to every window.
   // Each frame is tagged `origin: true` only for the session that earned the
@@ -871,18 +872,6 @@ async function main(): Promise<void> {
     }
   }
 
-  /** Resolve the target session id: the `x-gg-session` header, else a
-   *  `?session=` query param (used by the SSE /events connection). */
-  function sessionIdFromReq(req: http.IncomingMessage, url: string): string | null {
-    const header = req.headers["x-gg-session"];
-    if (typeof header === "string" && header.length > 0) return header;
-    try {
-      return new URL(url, `http://${host}`).searchParams.get("session");
-    } catch {
-      return null;
-    }
-  }
-
   const server = http.createServer((req, res) => {
     const url = req.url ?? "/";
     const method = req.method ?? "GET";
@@ -920,7 +909,7 @@ async function main(): Promise<void> {
             { auth, paths, progress },
             { id, cwd: sessionCwd, sessionPath },
           );
-          sessions.set(id, ctx);
+          sessions.add(id, ctx);
           log("INFO", "app-sidecar", "session created", { id, cwd: sessionCwd });
           daemonJson(res, 200, { sessionId: id });
         } catch (err) {
@@ -935,9 +924,8 @@ async function main(): Promise<void> {
     // Dispose a session: DELETE /session/:id.
     if (method === "DELETE" && url.startsWith("/session/")) {
       const id = decodeURIComponent(url.slice("/session/".length));
-      const ctx = sessions.get(id);
+      const ctx = sessions.take(id);
       if (ctx) {
-        sessions.delete(id);
         void ctx.dispose().catch(() => {});
         log("INFO", "app-sidecar", "session disposed", { id });
       }
@@ -973,8 +961,7 @@ async function main(): Promise<void> {
     }
 
     // ── Per-session delegation ───────────────────────────────────────────
-    const id = sessionIdFromReq(req, url);
-    const ctx = id ? sessions.get(id) : undefined;
+    const ctx = sessions.resolveRequest(req, url, host);
     if (!ctx) {
       daemonJson(res, 404, { error: "unknown session" });
       return;
@@ -992,7 +979,7 @@ async function main(): Promise<void> {
     // Radio playback is app-wide (one stream across all windows), so it stops
     // at the daemon level, not per session.
     stopRadio();
-    await Promise.all([...sessions.values()].map((c) => c.dispose().catch(() => {})));
+    await sessions.disposeAll();
     server.close();
     process.exit(0);
   };
@@ -1236,7 +1223,7 @@ async function createSession(
   let clientSeq = 0;
 
   function broadcast(type: string, data: unknown): void {
-    const frame = `data: ${JSON.stringify({ type, data })}\n\n`;
+    const frame = sessionEventSseData(opts.id, type, data);
     for (const c of clients) c.res.write(frame);
   }
 
@@ -2161,19 +2148,16 @@ async function createSession(
       clients.add(client);
       const st = session.getState();
       res.write(
-        `data: ${JSON.stringify({
-          type: "ready",
-          data: {
-            ...st,
-            running,
-            thinkingLevel: session.getThinkingLevel() ?? null,
-            supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
-            supportsVideo: getModel(st.model)?.supportsVideo ?? false,
-            autopilot,
-            ...kenStatePayload(),
-            ...footerExtras(),
-          },
-        })}\n\n`,
+        sessionEventSseData(opts.id, "ready", {
+          ...st,
+          running,
+          thinkingLevel: session.getThinkingLevel() ?? null,
+          supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
+          supportsVideo: getModel(st.model)?.supportsVideo ?? false,
+          autopilot,
+          ...kenStatePayload(),
+          ...footerExtras(),
+        }),
       );
       const keepAlive = setInterval(() => res.write(`: ping\n\n`), 15000);
       req.on("close", () => {

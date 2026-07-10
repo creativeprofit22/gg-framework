@@ -19,6 +19,7 @@ import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
 import { formatBuildIdentity } from "./build-info";
+import { toast } from "./toast";
 
 interface Props {
   /** Called after the agent has been re-pointed at `cwd` (+ optional session). */
@@ -106,8 +107,13 @@ export function ProjectPicker({
           if (match) openProject(match);
         }
       })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setLoading(false);
+        toast(
+          `Agent failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
       });
     return () => {
       cancelled = true;

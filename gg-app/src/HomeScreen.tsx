@@ -65,7 +65,12 @@ export function HomeScreen({ onProjects, onLogin }: Props): React.ReactElement {
     void waitForReady()
       .then(() => getProgress())
       .then(setProgress)
-      .catch(() => {});
+      .catch((error: unknown) => {
+        toast(
+          `Agent failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      });
   }, []);
 
   async function refresh(): Promise<void> {

@@ -6,12 +6,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
+import { PRIMARY_PANE_ID, createPaneEventFanout } from "./pane-routing";
 
 // Per-window event bus. The Rust side emits agent traffic with `emit_to` the
 // specific window label, so each window must listen on ITS OWN webview target —
 // a global `listen` (target "Any") would never receive window-scoped events.
 // This is what keeps multiple project windows fully isolated.
 const appWindow = getCurrentWebviewWindow();
+
+/** Invoke a session-backed Rust command for one pane. */
+export function invokeForPane<T>(
+  command: string,
+  args: Record<string, unknown> = {},
+  paneId: string = PRIMARY_PANE_ID,
+): Promise<T> {
+  return invoke<T>(command, { ...args, paneId });
+}
 
 /** This webview's window label (`main` for the first window, `project-N` for
  *  windows opened via the Windows button). */
@@ -28,6 +38,8 @@ export function setWindowTitle(title: string): void {
 export interface SidecarEvent {
   type: string;
   data: unknown;
+  paneId?: string;
+  sessionId?: string;
 }
 
 export interface LocalPatchedUpdateEvent {
@@ -108,7 +120,7 @@ export interface ProjectTask {
 /** List this project's tasks (pending / in-progress / done). */
 export async function listTasks(): Promise<ProjectTask[]> {
   try {
-    const res = await invoke<{ tasks: ProjectTask[] }>("agent_tasks");
+    const res = await invokeForPane<{ tasks: ProjectTask[] }>("agent_tasks", {});
     return res.tasks ?? [];
   } catch (e) {
     await logError(`agent_tasks failed: ${String(e)}`);
@@ -118,18 +130,18 @@ export async function listTasks(): Promise<ProjectTask[]> {
 
 /** Run a single task end-to-end in its own fresh session. */
 export async function runTask(id: string): Promise<void> {
-  await invoke("agent_run_tasks", { id, all: false });
+  await invokeForPane("agent_run_tasks", { id, all: false });
 }
 
 /** Run every pending task sequentially (a fresh session each), in order. */
 export async function runAllTasks(): Promise<void> {
-  await invoke("agent_run_tasks", { id: null, all: true });
+  await invokeForPane("agent_run_tasks", { id: null, all: true });
 }
 
 /** Delete a task by id. Returns the remaining tasks. */
 export async function deleteTask(id: string): Promise<ProjectTask[]> {
   try {
-    const res = await invoke<{ tasks: ProjectTask[] }>("agent_delete_task", { id });
+    const res = await invokeForPane<{ tasks: ProjectTask[] }>("agent_delete_task", { id });
     return res.tasks ?? [];
   } catch (e) {
     await logError(`agent_delete_task failed: ${String(e)}`);
@@ -186,7 +198,7 @@ export interface SwitchKenModelResult {
 }
 
 export async function getState(): Promise<AgentState> {
-  return invoke<AgentState>("agent_state");
+  return invokeForPane<AgentState>("agent_state", {});
 }
 
 // ── Progress (Ranks) ─────────────────────────────────────────────────────
@@ -288,7 +300,7 @@ export interface EnhanceResult {
  */
 export async function enhancePrompt(text: string): Promise<EnhanceResult> {
   await waitForReady();
-  return invoke<EnhanceResult>("agent_enhance_prompt", { text });
+  return invokeForPane<EnhanceResult>("agent_enhance_prompt", { text });
 }
 
 export async function openProjectPath(path: string): Promise<void> {
@@ -299,7 +311,7 @@ export async function openProjectPath(path: string): Promise<void> {
     // Keep the original string if the model emitted a malformed `%` escape.
   }
   try {
-    await invoke("open_project_path", { path: decoded });
+    await invokeForPane("open_project_path", { path: decoded });
   } catch (e) {
     await logError(`open_project_path failed: ${String(e)}`);
   }
@@ -368,7 +380,7 @@ export async function sendPrompt(
     `prompt: ${text.slice(0, 80)}${attachments.length ? ` (+${attachments.length} att)` : ""}`,
   );
   try {
-    await invoke("agent_prompt", { text, attachments, meta: meta ?? null });
+    await invokeForPane("agent_prompt", { text, attachments, meta: meta ?? null });
   } catch (e) {
     await logError(`agent_prompt failed: ${String(e)}`);
     throw e;
@@ -377,7 +389,7 @@ export async function sendPrompt(
 
 export async function cancel(): Promise<void> {
   try {
-    await invoke("agent_cancel");
+    await invokeForPane("agent_cancel", {});
   } catch (e) {
     await logError(`agent_cancel failed: ${String(e)}`);
   }
@@ -420,7 +432,7 @@ export async function sendKenPrompt(text: string): Promise<void> {
   await logInfo(`ken prompt: ${text.slice(0, 80)}`);
   try {
     await waitForReady();
-    await invoke("agent_ken_prompt", { text });
+    await invokeForPane("agent_ken_prompt", { text });
   } catch (e) {
     await logError(`agent_ken_prompt failed: ${String(e)}`);
     throw e;
@@ -431,7 +443,7 @@ export async function sendKenPrompt(text: string): Promise<void> {
 export async function cancelKen(): Promise<void> {
   try {
     await waitForReady();
-    await invoke("agent_ken_cancel");
+    await invokeForPane("agent_ken_cancel", {});
   } catch (e) {
     await logError(`agent_ken_cancel failed: ${String(e)}`);
   }
@@ -442,7 +454,7 @@ export async function cancelKen(): Promise<void> {
 export async function setAutopilot(enabled: boolean): Promise<boolean> {
   try {
     await waitForReady();
-    const res = await invoke<{ autopilot?: boolean }>("agent_autopilot_set", { enabled });
+    const res = await invokeForPane<{ autopilot?: boolean }>("agent_autopilot_set", { enabled });
     return res.autopilot ?? enabled;
   } catch (e) {
     await logError(`agent_autopilot_set failed: ${String(e)}`);
@@ -458,7 +470,7 @@ export async function setAutopilot(enabled: boolean): Promise<boolean> {
  */
 export async function acceptPlan(planPath: string | null): Promise<void> {
   try {
-    await invoke("agent_accept_plan", { planPath });
+    await invokeForPane("agent_accept_plan", { planPath });
   } catch (e) {
     await logError(`agent_accept_plan failed: ${String(e)}`);
   }
@@ -523,7 +535,7 @@ export interface HistoryEntry {
 /** Fetch the resumed session's prior messages so the transcript can hydrate. */
 export async function listHistory(): Promise<HistoryEntry[]> {
   try {
-    const res = await invoke<{ history: HistoryEntry[] }>("agent_history");
+    const res = await invokeForPane<{ history: HistoryEntry[] }>("agent_history", {});
     return res.history ?? [];
   } catch (e) {
     await logError(`agent_history failed: ${String(e)}`);
@@ -596,13 +608,13 @@ export async function authApiKey(provider: string, key: string, variant?: string
  */
 export async function authOAuthStart(provider: string): Promise<void> {
   await waitForReady();
-  await invoke("agent_auth_oauth_start", { provider });
+  await invokeForPane("agent_auth_oauth_start", { provider });
 }
 
 /** Submit a pasted OAuth code to an in-flight login. Sidecar-proxied like start. */
 export async function authOAuthCode(code: string): Promise<void> {
   await waitForReady();
-  await invoke("agent_auth_oauth_code", { code });
+  await invokeForPane("agent_auth_oauth_code", { code });
 }
 
 /**
@@ -617,7 +629,7 @@ export async function authLogout(provider: string): Promise<void> {
 /** Start a fresh session (clears history) for this window's current project. */
 export async function newSession(): Promise<void> {
   try {
-    await invoke("agent_new_session");
+    await invokeForPane("agent_new_session", {});
   } catch (e) {
     await logError(`agent_new_session failed: ${String(e)}`);
     throw e;
@@ -641,7 +653,7 @@ export interface RadioState {
 /** Read this window's radio state (available stations + what's playing). */
 export async function getRadioState(): Promise<RadioState> {
   try {
-    const res = await invoke<RadioState>("agent_radio_state");
+    const res = await invokeForPane<RadioState>("agent_radio_state", {});
     return { stations: res.stations ?? [], current: res.current ?? null };
   } catch (e) {
     await logError(`agent_radio_state failed: ${String(e)}`);
@@ -655,14 +667,14 @@ export async function getRadioState(): Promise<RadioState> {
  * a user-facing message when no player is installed.
  */
 export async function setRadio(station: string): Promise<string | null> {
-  const res = await invoke<{ current: string | null }>("agent_radio_set", { station });
+  const res = await invokeForPane<{ current: string | null }>("agent_radio_set", { station });
   return res.current ?? null;
 }
 
 /** Stop a background task by id. Returns the sidecar's status message, if any. */
 export async function killTask(id: string): Promise<string | null> {
   try {
-    const res = await invoke<{ message?: string }>("agent_kill_task", { id });
+    const res = await invokeForPane<{ message?: string }>("agent_kill_task", { id });
     return res.message ?? null;
   } catch (e) {
     await logError(`agent_kill_task failed: ${String(e)}`);
@@ -673,7 +685,7 @@ export async function killTask(id: string): Promise<string | null> {
 /** Cycle the reasoning/thinking level to the next supported value (or off). */
 export async function cycleThinking(): Promise<ThinkingState | null> {
   try {
-    return await invoke<ThinkingState>("agent_cycle_thinking");
+    return await invokeForPane<ThinkingState>("agent_cycle_thinking", {});
   } catch (e) {
     await logError(`agent_cycle_thinking failed: ${String(e)}`);
     return null;
@@ -683,7 +695,7 @@ export async function cycleThinking(): Promise<ThinkingState | null> {
 /** List slash commands the agent can run, grouped by terminal-style source. */
 export async function listCommands(): Promise<SlashCommand[]> {
   try {
-    const res = await invoke<{ commands: SlashCommand[] }>("agent_commands");
+    const res = await invokeForPane<{ commands: SlashCommand[] }>("agent_commands", {});
     return res.commands ?? [];
   } catch (e) {
     await logError(`agent_commands failed: ${String(e)}`);
@@ -694,7 +706,7 @@ export async function listCommands(): Promise<SlashCommand[]> {
 /** List models available to the logged-in providers. */
 export async function listModels(): Promise<ModelOption[]> {
   try {
-    const res = await invoke<{ models: ModelOption[] }>("agent_models");
+    const res = await invokeForPane<{ models: ModelOption[] }>("agent_models", {});
     return res.models ?? [];
   } catch (e) {
     await logError(`agent_models failed: ${String(e)}`);
@@ -705,7 +717,7 @@ export async function listModels(): Promise<ModelOption[]> {
 /** Switch the active model by id. Returns the new provider/model + thinking state. */
 export async function switchModel(model: string): Promise<SwitchModelResult | null> {
   try {
-    return await invoke<SwitchModelResult>("agent_switch_model", { model });
+    return await invokeForPane<SwitchModelResult>("agent_switch_model", { model });
   } catch (e) {
     await logError(`agent_switch_model failed: ${String(e)}`);
     return null;
@@ -716,7 +728,7 @@ export async function switchModel(model: string): Promise<SwitchModelResult | nu
  *  he follows GG Coder's model again. Returns his effective model. */
 export async function switchKenModel(model: string | null): Promise<SwitchKenModelResult | null> {
   try {
-    return await invoke<SwitchKenModelResult>("agent_switch_ken_model", { model });
+    return await invokeForPane<SwitchKenModelResult>("agent_switch_ken_model", { model });
   } catch (e) {
     await logError(`agent_switch_ken_model failed: ${String(e)}`);
     return null;
@@ -804,7 +816,7 @@ export async function createProject(name: string): Promise<string> {
 /** Discover known projects (ggcoder + Claude Code + Codex), most recent first. */
 export async function listProjects(): Promise<DiscoveredProject[]> {
   try {
-    const res = await invoke<{ projects: DiscoveredProject[] }>("agent_projects");
+    const res = await invokeForPane<{ projects: DiscoveredProject[] }>("agent_projects", {});
     return res.projects ?? [];
   } catch (e) {
     await logError(`agent_projects failed: ${String(e)}`);
@@ -827,7 +839,7 @@ export interface FileHit {
  */
 export async function searchFiles(query: string): Promise<FileHit[]> {
   try {
-    const res = await invoke<{ files: FileHit[] }>("agent_files", { query });
+    const res = await invokeForPane<{ files: FileHit[] }>("agent_files", { query });
     return res.files ?? [];
   } catch (e) {
     await logError(`agent_files failed: ${String(e)}`);
@@ -838,7 +850,7 @@ export async function searchFiles(query: string): Promise<FileHit[]> {
 /** List the latest sessions for a project cwd (newest first, with previews). */
 export async function listSessions(cwd: string): Promise<RecentSession[]> {
   try {
-    const res = await invoke<{ sessions: RecentSession[] }>("agent_sessions", { cwd });
+    const res = await invokeForPane<{ sessions: RecentSession[] }>("agent_sessions", { cwd });
     return res.sessions ?? [];
   } catch (e) {
     await logError(`agent_sessions failed: ${String(e)}`);
@@ -851,7 +863,7 @@ export async function listSessions(cwd: string): Promise<RecentSession[]> {
  * optionally resuming `sessionPath`. The caller re-runs the ready flow after.
  */
 export async function selectProject(cwd: string, sessionPath?: string): Promise<void> {
-  await invoke("select_project", { cwd, sessionPath: sessionPath ?? null });
+  await invokeForPane("select_project", { cwd, sessionPath: sessionPath ?? null });
 }
 
 /** The project/session a window was restored to on app boot (workspace restore). */
@@ -996,7 +1008,7 @@ export interface TelegramStatus {
 /** Read the saved Telegram config status (masked). */
 export async function getTelegramStatus(): Promise<TelegramStatus> {
   try {
-    return await invoke<TelegramStatus>("agent_telegram_get");
+    return await invokeForPane<TelegramStatus>("agent_telegram_get", {});
   } catch (e) {
     await logError(`agent_telegram_get failed: ${String(e)}`);
     return { configured: false };
@@ -1010,7 +1022,7 @@ export async function getTelegramStatus(): Promise<TelegramStatus> {
  */
 export async function saveTelegramConfig(botToken: string, userId: string): Promise<void> {
   await waitForReady();
-  await invoke("agent_telegram_save", { botToken, userId });
+  await invokeForPane("agent_telegram_save", { botToken, userId });
 }
 
 export interface ServeStatus {
@@ -1021,7 +1033,7 @@ export interface ServeStatus {
 /** Read whether the Telegram serve loop is running + whether it's configured. */
 export async function getServeStatus(): Promise<ServeStatus> {
   try {
-    return await invoke<ServeStatus>("agent_serve_status");
+    return await invokeForPane<ServeStatus>("agent_serve_status", {});
   } catch (e) {
     await logError(`agent_serve_status failed: ${String(e)}`);
     return { running: false, configured: false };
@@ -1031,13 +1043,13 @@ export async function getServeStatus(): Promise<ServeStatus> {
 /** Start the Telegram serve loop. Throws with a user-facing message on failure. */
 export async function startServe(): Promise<void> {
   await waitForReady();
-  await invoke("agent_serve_start");
+  await invokeForPane("agent_serve_start", {});
 }
 
 /** Stop the Telegram serve loop. */
 export async function stopServe(): Promise<void> {
   await waitForReady();
-  await invoke("agent_serve_stop");
+  await invokeForPane("agent_serve_stop", {});
 }
 
 // ── MCP server management (mirrors `ggcoder mcp`) ────────────
@@ -1075,7 +1087,7 @@ export interface AddMcpResult {
 export async function listMcpServers(cwd?: string): Promise<McpServerRow[]> {
   try {
     await waitForReady();
-    const res = await invoke<{ servers: McpServerRow[] }>("agent_mcp_list", {
+    const res = await invokeForPane<{ servers: McpServerRow[] }>("agent_mcp_list", {
       cwd: cwd ?? null,
     });
     return res.servers ?? [];
@@ -1094,7 +1106,7 @@ export async function addMcpServer(
   cwd?: string,
 ): Promise<AddMcpResult> {
   await waitForReady();
-  return invoke<AddMcpResult>("agent_mcp_add", { line, scope, cwd: cwd ?? null });
+  return invokeForPane<AddMcpResult>("agent_mcp_add", { line, scope, cwd: cwd ?? null });
 }
 
 /** Begin an interactive OAuth login for a remote (HTTP) MCP server. Returns
@@ -1107,7 +1119,7 @@ export async function loginMcpServer(
   cwd?: string,
 ): Promise<void> {
   await waitForReady();
-  await invoke("agent_mcp_login", { name, scope, cwd: cwd ?? null });
+  await invokeForPane("agent_mcp_login", { name, scope, cwd: cwd ?? null });
 }
 
 /** Remove an MCP server by name. `cwd` is required for project scope. Returns
@@ -1119,7 +1131,7 @@ export async function removeMcpServer(
 ): Promise<{ removed: boolean }> {
   try {
     await waitForReady();
-    return await invoke<{ removed: boolean }>("agent_mcp_remove", {
+    return await invokeForPane<{ removed: boolean }>("agent_mcp_remove", {
       name,
       scope,
       cwd: cwd ?? null,
@@ -1130,64 +1142,132 @@ export async function removeMcpServer(
   }
 }
 
-// Single Tauri listener for the whole app, fanned out to local subscribers.
-// Registering the OS-level listener once at module scope (not per React mount)
-// eliminates the StrictMode/HMR double-mount race where two async `listen()`
-// calls leave two live listeners updating two independent state trees.
-const localSubscribers = new Set<(e: SidecarEvent) => void>();
+// Single Tauri listener for the whole app, fanned out by pane/session.
+const paneFanout = createPaneEventFanout<SidecarEvent>();
 let tauriListenerStarted = false;
 
 function ensureTauriListener(): void {
   if (tauriListenerStarted) return;
   tauriListenerStarted = true;
-  void appWindow.listen<SidecarEvent>("agent-event", (e) => {
-    for (const fn of localSubscribers) fn(e.payload);
-  });
+  void appWindow.listen<SidecarEvent>("agent-event", (e) => paneFanout.dispatch(e.payload));
 }
 
-/**
- * Subscribe to forwarded agent events. Synchronous add/remove against the local
- * fan-out — no async cleanup window, so exactly one render tree sees events.
- */
-export function subscribe(onEvent: (e: SidecarEvent) => void): () => void {
+export function subscribe(listener: (e: SidecarEvent) => void): () => void;
+export function subscribe(
+  paneId: string,
+  listener: (e: SidecarEvent) => void,
+  activeSessionId?: string,
+): () => void;
+export function subscribe(
+  paneIdOrListener: string | ((e: SidecarEvent) => void),
+  listener?: (e: SidecarEvent) => void,
+  activeSessionId?: string,
+): () => void {
   ensureTauriListener();
-  localSubscribers.add(onEvent);
-  return () => localSubscribers.delete(onEvent);
+  return typeof paneIdOrListener === "function"
+    ? paneFanout.subscribe(PRIMARY_PANE_ID, paneIdOrListener)
+    : paneFanout.subscribe(paneIdOrListener, listener!, activeSessionId);
 }
 
-/** Wait until the sidecar reports a port (proves the agent is up). */
-export async function waitForReady(): Promise<void> {
-  const immediate = await invoke<number | null>("sidecar_port").catch(() => null);
-  if (typeof immediate === "number") return;
+export interface AgentPaneStatus {
+  ready: boolean;
+  error: string | null;
+}
+
+function startupErrorMessage(payload: unknown): string {
+  if (typeof payload === "string") return payload;
+  if (
+    typeof payload === "object" &&
+    payload !== null &&
+    "message" in payload &&
+    typeof payload.message === "string"
+  ) {
+    return payload.message;
+  }
+  return "agent daemon failed to start";
+}
+
+export function getPaneStatus(paneId: string): Promise<AgentPaneStatus> {
+  return invokeForPane<AgentPaneStatus>("agent_pane_status", {}, paneId);
+}
+
+/** Wait until one pane's agent session is ready. Listeners are installed before
+ * the first status read, while persistent Rust status closes every event race. */
+export async function waitForPaneReady(paneId: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    let unlisten: (() => void) | undefined;
-    const timeout = setTimeout(() => {
-      if (!settled) {
-        clearInterval(poll);
-        unlisten?.();
-        reject(new Error("sidecar did not start in time"));
-      }
-    }, 30000);
+    let poll: ReturnType<typeof setInterval> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const unlisteners: Array<() => void> = [];
+
+    const cleanup = (): void => {
+      if (poll !== undefined) clearInterval(poll);
+      if (timeout !== undefined) clearTimeout(timeout);
+      for (const unlisten of unlisteners) unlisten();
+    };
     const finish = (): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
-      clearInterval(poll);
-      unlisten?.();
+      cleanup();
       resolve();
     };
-    appWindow
-      .listen<number>("sidecar-ready", finish)
-      .then((u) => {
-        if (settled) u();
-        else unlisten = u;
+    const fail = (message: string): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(message));
+    };
+    const checkStatus = async (): Promise<void> => {
+      try {
+        const status = await getPaneStatus(paneId);
+        if (status.error) fail(status.error);
+        else if (status.ready) finish();
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    void Promise.all([
+      appWindow.listen<{ paneId: string }>("agent-pane-ready", (event) => {
+        if (event.payload.paneId === paneId) finish();
+      }),
+      appWindow.listen<{ paneId: string; message: string }>("agent-pane-error", (event) => {
+        if (event.payload.paneId === paneId) fail(event.payload.message);
+      }),
+      appWindow.listen<unknown>("sidecar-error", (event) => {
+        fail(startupErrorMessage(event.payload));
+      }),
+    ])
+      .then((registered) => {
+        if (settled) {
+          for (const unlisten of registered) unlisten();
+          return;
+        }
+        unlisteners.push(...registered);
+        timeout = setTimeout(() => {
+          fail(`pane ${paneId} did not start in time`);
+        }, 30000);
+        poll = setInterval(() => void checkStatus(), 500);
+        void checkStatus();
       })
-      .catch(() => {});
-    const poll = setInterval(() => {
-      void invoke<number | null>("sidecar_port").then((p) => {
-        if (typeof p === "number") finish();
+      .catch((error: unknown) => {
+        fail(error instanceof Error ? error.message : String(error));
       });
-    }, 500);
   });
+}
+
+export function waitForReady(): Promise<void> {
+  return waitForPaneReady(PRIMARY_PANE_ID);
+}
+
+export function createPaneSession(
+  paneId: string,
+  cwd: string,
+  sessionPath?: string,
+): Promise<void> {
+  return invoke("agent_pane_create", { paneId, cwd, sessionPath: sessionPath ?? null });
+}
+
+export function disposePaneSession(paneId: string): Promise<void> {
+  return invoke("agent_pane_dispose", { paneId });
 }

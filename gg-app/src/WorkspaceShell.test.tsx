@@ -46,6 +46,7 @@ vi.mock("./ProjectNotes", () => ({
   ),
 }));
 vi.mock("./Confetti", () => ({ Confetti: () => null }));
+vi.mock("./Toaster", () => ({ Toaster: () => null }));
 
 function FakePane({
   paneId,

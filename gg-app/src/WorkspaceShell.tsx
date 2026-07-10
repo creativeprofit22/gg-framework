@@ -23,6 +23,7 @@ import { ScorecardModal } from "./ScorecardModal";
 import { playSound } from "./sounds";
 import { theme } from "./theme";
 import { toast } from "./toast";
+import { Toaster } from "./Toaster";
 import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
 
@@ -215,6 +216,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   return (
     <div className="workspace-shell" style={{ background: theme.background }}>
       {confettiNonce && <Confetti key={confettiNonce} />}
+      <Toaster />
       <div className="workspace-toolbar" data-tauri-drag-region>
         <RankBadge snapshot={progress} onClick={() => setShowScorecard(true)} />
         <ProjectNotes cwd={focusedSnapshot?.cwd ?? null} />

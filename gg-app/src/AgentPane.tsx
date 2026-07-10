@@ -51,7 +51,6 @@ import { ProjectPicker } from "./ProjectPicker";
 import { BackButton } from "./BackButton";
 import { AutopilotToggle } from "./AutopilotToggle";
 import { HomeScreen } from "./HomeScreen";
-import { Toaster } from "./Toaster";
 import { TitleUsageMeter } from "./TitleUsageMeter";
 import { LoginScreen } from "./LoginScreen";
 import { Markdown, PromptSendProvider } from "./Markdown";
@@ -1607,13 +1606,13 @@ export function AgentPane({
             discoverProjects={primaryCatalogClient.listProjects}
             discoverSessions={primaryCatalogClient.listSessions}
             bindProject={bindPickerProject}
+            showWindowControls={kind === "primary"}
             // Every window can return to the home screen (it shows global
             // settings/auth, nothing window-specific) — secondary windows just
             // default to opening on the picker.
             onClose={() => setEntryView("home")}
           />
         )}
-        <Toaster />
       </div>
     );
   }
@@ -1631,6 +1630,7 @@ export function AgentPane({
           discoverProjects={primaryCatalogClient.listProjects}
           discoverSessions={primaryCatalogClient.listSessions}
           bindProject={bindPickerProject}
+          showWindowControls={kind === "primary"}
           onChosen={() => {
             setShowPicker(false);
             onProjectChosen();

@@ -7,8 +7,6 @@ import {
   listSessions,
   selectProject,
   getSettings,
-  focusWindowByOffset,
-  arrangeAllWindows,
   type DiscoveredProject,
   type RecentSession,
 } from "./agent";
@@ -30,6 +28,7 @@ export interface ProjectPickerProps {
   discoverProjects?: () => Promise<DiscoveredProject[]>;
   discoverSessions?: (cwd: string) => Promise<RecentSession[]>;
   bindProject?: (cwd: string, sessionPath?: string) => Promise<void>;
+  showWindowControls?: boolean;
 }
 
 /**
@@ -46,6 +45,7 @@ export function ProjectPicker({
   discoverProjects = listProjects,
   discoverSessions = listSessions,
   bindProject = selectProject,
+  showWindowControls = true,
 }: ProjectPickerProps): React.ReactElement {
   const [projects, setProjects] = useState<DiscoveredProject[]>([]);
   const [loading, setLoading] = useState(true);
@@ -63,24 +63,6 @@ export function ProjectPicker({
   const filteredProjects = q
     ? projects.filter((p) => p.name.toLowerCase().includes(q) || p.path.toLowerCase().includes(q))
     : projects;
-
-  // Multi-window shortcuts work from the picker too, so you can cycle/arrange
-  // before choosing a project.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      const meta = e.metaKey || e.ctrlKey;
-      if (!meta) return;
-      if (e.code === "Backquote" && !e.altKey) {
-        e.preventDefault();
-        void focusWindowByOffset(e.shiftKey ? -1 : 1);
-      } else if (e.shiftKey && (e.key === "a" || e.key === "A") && !e.altKey) {
-        e.preventDefault();
-        void arrangeAllWindows();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -228,8 +210,12 @@ export function ProjectPicker({
               </button>
             </>
           )}
-          <RadioButton />
-          <WindowLayoutButton />
+          {showWindowControls && (
+            <>
+              <RadioButton />
+              <WindowLayoutButton />
+            </>
+          )}
         </span>
       </div>
 

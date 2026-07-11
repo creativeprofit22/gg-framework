@@ -169,6 +169,83 @@ describe("TerminalPane", () => {
     expect(mocks.terminal.write).not.toHaveBeenCalled();
   });
 
+  it("keeps an exit received before ready terminal and reports stopped once", async () => {
+    let resolveReady!: (value: TerminalInfo) => void;
+    const ready = new Promise<TerminalInfo>((resolve) => {
+      resolveReady = resolve;
+    });
+    const onRunningChange = vi.fn();
+    mocks.createTerminal.mockImplementation((_paneId, _cols, _rows, onEvent) => {
+      mocks.event = onEvent;
+      return makeClient(ready);
+    });
+
+    render(
+      <TerminalPane paneId="primary" onRequestClose={vi.fn()} onRunningChange={onRunningChange} />,
+    );
+    act(() => {
+      mocks.event?.({
+        type: "exit",
+        paneId: "primary",
+        terminalId: "terminal-1",
+        exitCode: 0,
+      });
+    });
+    expect(await screen.findByText("Exited (0)")).toBeTruthy();
+
+    resolveReady(info);
+    await act(async () => ready);
+    expect(screen.queryByText("Running")).toBeNull();
+    expect(onRunningChange).toHaveBeenCalledTimes(1);
+    expect(onRunningChange).toHaveBeenCalledWith(false);
+  });
+
+  it("keeps an error received before ready terminal and reports stopped once", async () => {
+    let resolveReady!: (value: TerminalInfo) => void;
+    const ready = new Promise<TerminalInfo>((resolve) => {
+      resolveReady = resolve;
+    });
+    const onRunningChange = vi.fn();
+    mocks.createTerminal.mockImplementation((_paneId, _cols, _rows, onEvent) => {
+      mocks.event = onEvent;
+      return makeClient(ready);
+    });
+
+    render(
+      <TerminalPane paneId="primary" onRequestClose={vi.fn()} onRunningChange={onRunningChange} />,
+    );
+    act(() => {
+      mocks.event?.({
+        type: "error",
+        paneId: "primary",
+        terminalId: "terminal-1",
+        message: "shell failed immediately",
+      });
+    });
+    expect((await screen.findByRole("alert")).textContent).toContain("shell failed immediately");
+
+    resolveReady(info);
+    await act(async () => ready);
+    expect(screen.queryByText("Running")).toBeNull();
+    expect(onRunningChange).toHaveBeenCalledTimes(1);
+    expect(onRunningChange).toHaveBeenCalledWith(false);
+  });
+
+  it("reports stopped when the initial fitted dimensions are invalid", () => {
+    mocks.terminal.cols = 1;
+    const onRunningChange = vi.fn();
+
+    render(
+      <TerminalPane paneId="primary" onRequestClose={vi.fn()} onRunningChange={onRunningChange} />,
+    );
+
+    expect(screen.getByRole("alert").textContent).toContain("too small");
+    expect(screen.queryByText("Running")).toBeNull();
+    expect(mocks.createTerminal).not.toHaveBeenCalled();
+    expect(onRunningChange).toHaveBeenCalledTimes(1);
+    expect(onRunningChange).toHaveBeenCalledWith(false);
+  });
+
   it("renders natural exit and requests an unguarded close", async () => {
     const requestClose = vi.fn();
     render(<TerminalPane paneId="primary" onRequestClose={requestClose} />);

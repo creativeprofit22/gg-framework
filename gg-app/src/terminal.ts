@@ -2,6 +2,8 @@ import type { IDisposable, Terminal } from "@xterm/xterm";
 import type { TerminalClient } from "./agent";
 
 export const TERMINAL_WRITE_HIGH_WATER_BYTES = 4 * 1024 * 1024;
+/** Must match Rust's authoritative decoded `MAX_INPUT_BYTES` request limit. */
+export const TERMINAL_INPUT_MAX_CALL_BYTES = 64 * 1024;
 export const TERMINAL_MIN_COLS = 2;
 export const TERMINAL_MAX_COLS = 500;
 export const TERMINAL_MIN_ROWS = 1;
@@ -97,6 +99,7 @@ export interface TerminalAdapterOptions {
 export class TerminalAdapter {
   private readonly disposables: IDisposable[] = [];
   private readonly writes: TerminalWriteQueue;
+  private inputQueue = Promise.resolve();
   private resizeTimer: ReturnType<typeof setTimeout> | undefined;
   private requestedSize: { cols: number; rows: number } | undefined;
   private sentSize: { cols: number; rows: number } | undefined;
@@ -166,9 +169,16 @@ export class TerminalAdapter {
 
   private sendInput(bytes: Uint8Array): void {
     if (this.disposed) return;
-    void this.client.input(bytes).catch((error: unknown) => {
-      this.options.onError(errorMessage(error));
-    });
+    for (let offset = 0; offset < bytes.byteLength; offset += TERMINAL_INPUT_MAX_CALL_BYTES) {
+      const chunk = bytes.slice(offset, offset + TERMINAL_INPUT_MAX_CALL_BYTES);
+      this.inputQueue = this.inputQueue
+        .then(() => {
+          if (!this.disposed) return this.client.input(chunk);
+        })
+        .catch((error: unknown) => {
+          if (!this.disposed) this.options.onError(errorMessage(error));
+        });
+    }
   }
 }
 

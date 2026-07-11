@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TerminalClient } from "./agent";
-import { TerminalAdapter, TerminalWriteQueue, validTerminalSize } from "./terminal";
+import {
+  TERMINAL_INPUT_MAX_CALL_BYTES,
+  TerminalAdapter,
+  TerminalWriteQueue,
+  validTerminalSize,
+} from "./terminal";
 
 function client(): TerminalClient {
   return {
@@ -76,11 +81,87 @@ describe("terminal byte transport", () => {
 
     xterm.emitData("é");
     xterm.emitBinary(String.fromCharCode(0, 0xff, 0x1b));
-    await Promise.resolve();
 
     const input = terminalClient.input as ReturnType<typeof vi.fn>;
+    await vi.waitFor(() => expect(input).toHaveBeenCalledTimes(2));
     expect(input.mock.calls[0][0]).toEqual(new TextEncoder().encode("é"));
     expect(input.mock.calls[1][0]).toEqual(new Uint8Array([0, 0xff, 0x1b]));
+    adapter.dispose();
+  });
+
+  it("chunks a large text paste and preserves ordering with a following keystroke", async () => {
+    const xterm = xtermMock();
+    const terminalClient = client();
+    const sent: Uint8Array[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstPending = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(terminalClient.input)
+      .mockImplementationOnce(async (data) => {
+        sent.push(data);
+        await firstPending;
+      })
+      .mockImplementation(async (data) => {
+        sent.push(data);
+      });
+    const adapter = new TerminalAdapter(xterm.terminal, terminalClient, {
+      onError: vi.fn(),
+      onOverflow: vi.fn(),
+    });
+    const paste = "🙂".repeat(TERMINAL_INPUT_MAX_CALL_BYTES / 2 + 17);
+    const expected = new TextEncoder().encode(`${paste}x`);
+
+    xterm.emitData(paste);
+    xterm.emitData("x");
+    await vi.waitFor(() => expect(terminalClient.input).toHaveBeenCalledTimes(1));
+    releaseFirst?.();
+    await vi.waitFor(() => expect(terminalClient.input).toHaveBeenCalledTimes(4));
+
+    expect(sent.every((chunk) => chunk.byteLength <= TERMINAL_INPUT_MAX_CALL_BYTES)).toBe(true);
+    expect(new Uint8Array(sent.flatMap((chunk) => [...chunk]))).toEqual(expected);
+    adapter.dispose();
+  });
+
+  it("chunks and exactly reassembles large binary input", async () => {
+    const xterm = xtermMock();
+    const terminalClient = client();
+    const adapter = new TerminalAdapter(xterm.terminal, terminalClient, {
+      onError: vi.fn(),
+      onOverflow: vi.fn(),
+    });
+    const source = Uint8Array.from(
+      { length: TERMINAL_INPUT_MAX_CALL_BYTES + 29 },
+      (_, index) => index % 256,
+    );
+    xterm.emitBinary(Array.from(source, (byte) => String.fromCharCode(byte)).join(""));
+
+    await vi.waitFor(() => expect(terminalClient.input).toHaveBeenCalledTimes(2));
+    const calls = vi.mocked(terminalClient.input).mock.calls.map(([chunk]) => chunk);
+    expect(calls.every((chunk) => chunk.byteLength <= TERMINAL_INPUT_MAX_CALL_BYTES)).toBe(true);
+    expect(new Uint8Array(calls.flatMap((chunk) => [...chunk]))).toEqual(source);
+    adapter.dispose();
+  });
+
+  it("reports an input rejection and keeps the queue usable", async () => {
+    const xterm = xtermMock();
+    const terminalClient = client();
+    vi.mocked(terminalClient.input)
+      .mockRejectedValueOnce(new Error("transport failed"))
+      .mockResolvedValue();
+    const onError = vi.fn();
+    const adapter = new TerminalAdapter(xterm.terminal, terminalClient, {
+      onError,
+      onOverflow: vi.fn(),
+    });
+
+    xterm.emitData("a");
+    xterm.emitData("b");
+
+    await vi.waitFor(() => expect(terminalClient.input).toHaveBeenCalledTimes(2));
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith("transport failed");
+    expect(vi.mocked(terminalClient.input).mock.calls.map(([bytes]) => bytes[0])).toEqual([97, 98]);
     adapter.dispose();
   });
 });

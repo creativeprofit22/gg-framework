@@ -328,6 +328,53 @@ describe("WorkspaceShell terminal dock", () => {
     expect(paneMounts).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    { label: "changes project", cwd: "/work/replacement", projectBound: true },
+    { label: "becomes unbound", cwd: null, projectBound: false },
+  ])("closes its owner-pinned terminal when the pane $label", async ({ cwd, projectBound }) => {
+    const paneMounts = vi.fn();
+    function ControllablePane(props: AgentPaneProps): React.ReactElement {
+      useEffect(() => paneMounts(props.paneId), [props.paneId]);
+      return (
+        <>
+          <FakePane {...props} />
+          {props.kind === "primary" && (
+            <button
+              onClick={() =>
+                props.onSnapshot({
+                  paneId: props.paneId,
+                  cwd,
+                  sessionPath: null,
+                  sessionTitle: null,
+                  projectBound,
+                  restoreChecked: true,
+                  activeWork: false,
+                })
+              }
+            >
+              Change primary project
+            </button>
+          )}
+        </>
+      );
+    }
+
+    render(<WorkspaceShell renderPane={(props) => <ControllablePane {...props} />} />);
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(open);
+    expect(screen.getByTestId("terminal-primary")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Change primary project" }));
+    await waitFor(() => expect(screen.queryByTestId("terminal-primary")).toBeNull());
+    expect(terminalMock.unmounts).toHaveBeenCalledTimes(1);
+    expect(terminalMock.unmounts).toHaveBeenCalledWith("primary");
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+    expect(screen.queryByTestId("terminal-secondary")).toBeNull();
+    expect(paneMounts).toHaveBeenCalledTimes(2);
+  });
+
   it("confirms a running close and never restores a terminal from layout storage", async () => {
     localStorage.setItem(
       "gg-workspace-layout:main",

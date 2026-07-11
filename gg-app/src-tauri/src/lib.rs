@@ -80,11 +80,11 @@ impl std::ops::DerefMut for PaneRegistry {
 
 /// Per-window pane registry, keyed first by owner window label, then pane ID.
 #[derive(Default)]
-struct Windows {
+pub(crate) struct Windows {
     map: Mutex<PaneRegistry>,
 }
 
-fn validate_pane_id(pane_id: &str) -> Result<(), String> {
+pub(crate) fn validate_pane_id(pane_id: &str) -> Result<(), String> {
     if pane_id.is_empty() || pane_id.len() > MAX_PANE_ID_LEN {
         return Err("pane id must contain 1-64 characters".into());
     }
@@ -111,7 +111,11 @@ fn resolve_owned_pane<'a>(
     registry.get(owner_label)?.get(pane_id)
 }
 
-fn owned_pane_cwd(windows: &Windows, owner_label: &str, pane_id: &str) -> Result<PathBuf, String> {
+pub(crate) fn owned_pane_cwd(
+    windows: &Windows,
+    owner_label: &str,
+    pane_id: &str,
+) -> Result<PathBuf, String> {
     let registry = windows
         .map
         .lock()

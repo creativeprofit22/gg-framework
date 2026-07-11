@@ -26,7 +26,20 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
     if (!host) return;
 
     let disposed = false;
+    let lifecycle: TerminalStatus = "starting";
+    let lastReportedRunning: boolean | undefined;
     let terminalId: string | undefined;
+    const reportRunning = (running: boolean): void => {
+      if (lastReportedRunning === running) return;
+      lastReportedRunning = running;
+      onRunningChange?.(running);
+    };
+    const finishLifecycle = (nextStatus: "exited" | "error"): boolean => {
+      if (lifecycle === "exited" || lifecycle === "error") return false;
+      lifecycle = nextStatus;
+      reportRunning(false);
+      return true;
+    };
     const terminal = new Terminal({
       cursorBlink: true,
       convertEol: false,
@@ -49,6 +62,7 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
     const initialCols = terminal.cols;
     const initialRows = terminal.rows;
     if (!validTerminalSize(initialCols, initialRows)) {
+      finishLifecycle("error");
       setStatus("error");
       setError("Terminal area is too small to start.");
       terminal.dispose();
@@ -78,37 +92,35 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
       }
       if (event.paneId !== paneId || (terminalId && event.terminalId !== terminalId)) return;
       if (event.type === "exit") {
+        if (!finishLifecycle("exited")) return;
         finishAfterOutput(() => {
           setExitCode(event.exitCode);
           setStatus("exited");
-          onRunningChange?.(false);
         });
       } else {
+        if (!finishLifecycle("error")) return;
         finishAfterOutput(() => {
           setError(event.message);
           setStatus("error");
-          onRunningChange?.(false);
         });
       }
     });
 
     adapter = new TerminalAdapter(terminal, client, {
       onError(message) {
-        if (disposed) return;
+        if (disposed || !finishLifecycle("error")) return;
         transportStopped = true;
         adapter?.dispose();
         setError(message);
         setStatus("error");
-        onRunningChange?.(false);
         void client.close().catch(() => {});
       },
       onOverflow() {
-        if (disposed) return;
+        if (disposed || !finishLifecycle("error")) return;
         transportStopped = true;
         adapter?.dispose();
         setError("Terminal output exceeded the 4 MiB render queue. The terminal was closed.");
         setStatus("error");
-        onRunningChange?.(false);
         void client.close().catch(() => {});
       },
     });
@@ -120,17 +132,17 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
         terminalId = created.terminalId;
         if (disposed) return;
         setInfo(created);
-        if (!transportStopped) {
+        if (lifecycle === "starting" && !transportStopped) {
+          lifecycle = "running";
           setStatus("running");
-          onRunningChange?.(true);
+          reportRunning(true);
           terminal.focus();
         }
       })
       .catch((cause: unknown) => {
-        if (disposed) return;
+        if (disposed || !finishLifecycle("error")) return;
         setError(cause instanceof Error ? cause.message : String(cause));
         setStatus("error");
-        onRunningChange?.(false);
       });
 
     const fitAndResize = () => {
@@ -151,7 +163,7 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
       adapter?.dispose();
       fitAddon.dispose();
       terminal.dispose();
-      onRunningChange?.(false);
+      reportRunning(false);
       void client.close().catch(() => {});
     };
   }, [onRunningChange, paneId]);

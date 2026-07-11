@@ -34,7 +34,7 @@ describe("workspace layout storage", () => {
 
     expect(result.status).toBe("migrated");
     expect(result.layout).toEqual({
-      version: 3,
+      version: 4,
       splitRatio: 90,
       secondaryOpen: true,
       focusedPaneId: "primary",
@@ -42,6 +42,7 @@ describe("workspace layout storage", () => {
         primary: target("/project/a"),
         secondary: target("/project/b", "/sessions/b.jsonl"),
       },
+      terminal: { open: false, ownerPaneId: null },
     });
   });
 
@@ -115,7 +116,7 @@ describe("workspace layout storage", () => {
     expect(result).toEqual({
       status: "migrated",
       layout: {
-        version: 3,
+        version: 4,
         splitRatio: 63,
         secondaryOpen: false,
         focusedPaneId: "primary",
@@ -123,11 +124,22 @@ describe("workspace layout storage", () => {
           primary: target("/project/a", "/sessions/a.jsonl"),
           secondary: target("/project/b", "/sessions/b.jsonl"),
         },
+        terminal: { open: false, ownerPaneId: null },
       },
     });
   });
 
-  it("restores valid secondary focus from v3", () => {
+  it("migrates v3 with a closed terminal", () => {
+    const record = { ...layout(), version: 3 };
+    delete (record as Partial<WorkspaceLayout>).terminal;
+
+    expect(parseWorkspaceLayout(JSON.stringify(record))).toEqual({
+      status: "migrated",
+      layout: layout(),
+    });
+  });
+
+  it("restores valid secondary focus from v4", () => {
     const parsed = parseWorkspaceLayout(JSON.stringify(layout({ focusedPaneId: "secondary" })));
 
     expect(parsed.status).toBe("valid");
@@ -139,7 +151,7 @@ describe("workspace layout storage", () => {
     ["non-string", 42],
     ["unknown", "tertiary"],
   ])(
-    "normalizes %s v3 focus to primary without rejecting pane targets",
+    "normalizes %s v4 focus to primary without rejecting pane targets",
     (_label, focusedPaneId) => {
       const record: Record<string, unknown> = { ...layout(), focusedPaneId };
       if (focusedPaneId === undefined) delete record.focusedPaneId;
@@ -166,6 +178,65 @@ describe("workspace layout storage", () => {
     expect(parsed.status).toBe("valid");
     expect(parsed.layout.focusedPaneId).toBe("primary");
     expect(parsed.layout.panes.secondary).toEqual(target("/b"));
+  });
+
+  it.each([
+    [true, "primary"],
+    [true, "secondary"],
+    [false, null],
+  ] as const)("accepts strict v4 terminal state %s/%s", (terminalOpen, terminalOwnerPaneId) => {
+    const parsed = parseWorkspaceLayout(
+      JSON.stringify(
+        layout({ terminal: { open: terminalOpen, ownerPaneId: terminalOwnerPaneId } }),
+      ),
+    );
+    expect(parsed.status).toBe("valid");
+    expect(parsed.layout.terminal).toEqual({
+      open: terminalOpen,
+      ownerPaneId: terminalOwnerPaneId,
+    });
+  });
+
+  it.each([
+    ["missing terminal", undefined],
+    ["null terminal", null],
+    ["non-object terminal", "closed"],
+    ["missing open", { ownerPaneId: null }],
+    ["missing owner", { open: false }],
+    ["open without owner", { open: true, ownerPaneId: null }],
+    ["closed with owner", { open: false, ownerPaneId: "primary" }],
+    ["non-boolean open", { open: "yes", ownerPaneId: "primary" }],
+    ["unknown owner", { open: true, ownerPaneId: "tertiary" }],
+  ])("rejects malformed v4 terminal: %s", (_label, terminal) => {
+    const record: Record<string, unknown> = { ...layout(), terminal };
+    if (terminal === undefined) delete record.terminal;
+
+    expect(parseWorkspaceLayout(JSON.stringify(record)).status).toBe("corrupt");
+  });
+
+  it("rejects extra nested terminal keys", () => {
+    expect(
+      parseWorkspaceLayout(
+        JSON.stringify({
+          ...layout(),
+          terminal: { open: false, ownerPaneId: null, runtime: true },
+        }),
+      ).status,
+    ).toBe("corrupt");
+  });
+
+  it("normalizes an open secondary terminal closed when the secondary pane is closed", () => {
+    const parsed = parseWorkspaceLayout(
+      JSON.stringify(
+        layout({
+          secondaryOpen: false,
+          terminal: { open: true, ownerPaneId: "secondary" },
+        }),
+      ),
+    );
+
+    expect(parsed.status).toBe("valid");
+    expect(parsed.layout.terminal).toEqual({ open: false, ownerPaneId: null });
   });
 
   it("round-trips whether the secondary pane is closed", () => {
@@ -209,6 +280,23 @@ describe("workspace layout storage", () => {
     expect(loaded.rejectedRaw).toBe(raw);
     expect(preserveRejectedWorkspaceLayout(storage, "main", loaded.rejectedRaw!)).toBe(true);
     expect(values.get(rejectedWorkspaceLayoutKey("main"))).toBe(raw);
+  });
+
+  it("serializes only allow-listed v4 fields and normalizes terminal ownership", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+    const dirty = {
+      ...layout(),
+      extra: "drop",
+      terminal: { open: false, ownerPaneId: "secondary", runtime: "drop" },
+    } as WorkspaceLayout;
+    (dirty.panes.primary as object as Record<string, unknown>).extra = "drop";
+
+    expect(saveWorkspaceLayout(storage, "main", dirty)).toBe(true);
+    expect(JSON.parse(values.get(workspaceLayoutKey("main"))!)).toEqual(layout());
   });
 
   it("round-trips one native window under its own key", () => {

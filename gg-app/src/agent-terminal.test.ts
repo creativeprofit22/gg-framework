@@ -78,6 +78,20 @@ describe("terminal IPC", () => {
       rows: 24,
       onEvent: mocks.channel,
     });
+    const createArgs = mocks.invoke.mock.calls.find(
+      ([command]) => command === "terminal_create",
+    )?.[1];
+    expect(Object.keys(createArgs as object)).toEqual(["paneId", "cols", "rows", "onEvent"]);
+    expect(createArgs).not.toHaveProperty("cwd");
+    expect(createArgs).not.toHaveProperty("command");
+    expect(createArgs).not.toHaveProperty("history");
+    expect(createArgs).not.toHaveProperty("output");
+    expect(createArgs).not.toHaveProperty("terminalId");
+    expect(mocks.invoke).not.toHaveBeenCalledWith(
+      "terminal_input",
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it("sends input bytes raw with owner identifiers in headers", async () => {

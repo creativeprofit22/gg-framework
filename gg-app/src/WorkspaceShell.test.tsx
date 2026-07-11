@@ -377,33 +377,136 @@ describe("WorkspaceShell terminal dock", () => {
     expect(paneMounts).toHaveBeenCalledTimes(2);
   });
 
-  it("confirms a running close and never restores a terminal from layout storage", async () => {
+  it("waits for the validated exact saved owner snapshot, starts once, and persists close", async () => {
     localStorage.setItem(
       "gg-workspace-layout:main",
       JSON.stringify({
-        version: 3,
+        version: 4,
+        splitRatio: 50,
+        secondaryOpen: true,
+        focusedPaneId: "secondary",
+        panes: {
+          primary: { cwd: "/saved/primary", sessionPath: null },
+          secondary: { cwd: "/saved/owner", sessionPath: "/sessions/owner.jsonl" },
+        },
+        terminal: { open: true, ownerPaneId: "secondary" },
+      }),
+    );
+    let emitOwnerSnapshot: (() => void) | undefined;
+    const agentMounts = vi.fn();
+    function DelayedOwnerPane({ kind, onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
+      useEffect(() => agentMounts(paneId), [paneId]);
+      useEffect(() => {
+        const snapshot = (cwd: string, sessionPath: string | null) =>
+          onSnapshot({
+            paneId,
+            cwd,
+            sessionPath,
+            sessionTitle: paneId,
+            projectBound: true,
+            restoreChecked: true,
+            activeWork: false,
+          });
+        if (kind === "primary") snapshot("/saved/primary", null);
+        else emitOwnerSnapshot = () => snapshot("/saved/owner", "/sessions/owner.jsonl");
+      }, [kind, onSnapshot, paneId]);
+      return <div data-testid={`delayed-${paneId}`} />;
+    }
+
+    render(<WorkspaceShell renderPane={(props) => <DelayedOwnerPane {...props} />} />);
+    await screen.findByTestId("delayed-secondary");
+    expect(bridge.validateWorkspaceTarget).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("terminal-secondary")).toBeNull();
+    emitOwnerSnapshot?.();
+    expect(await screen.findByTestId("terminal-secondary")).toBeTruthy();
+    expect(terminalMock.mounts).toHaveBeenCalledTimes(1);
+    expect(terminalMock.mounts).toHaveBeenCalledWith("secondary");
+    expect(agentMounts).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close Terminal" }));
+    await waitFor(() => expect(screen.queryByTestId("terminal-secondary")).toBeNull());
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
+      expect(saved.terminal).toEqual({ open: false, ownerPaneId: null });
+    });
+  });
+
+  it("opens a fresh terminal when the saved agent session is missing", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 4,
+        splitRatio: 50,
+        secondaryOpen: false,
+        focusedPaneId: "primary",
+        panes: {
+          primary: { cwd: "/saved/a", sessionPath: "/sessions/gone.jsonl" },
+          secondary: null,
+        },
+        terminal: { open: true, ownerPaneId: "primary" },
+      }),
+    );
+    bridge.validateWorkspaceTarget.mockResolvedValueOnce({
+      projectExists: true,
+      sessionExists: false,
+    });
+    function FreshPane({ onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
+      useEffect(() => {
+        onSnapshot({
+          paneId,
+          cwd: "/saved/a",
+          sessionPath: null,
+          sessionTitle: null,
+          projectBound: true,
+          restoreChecked: true,
+          activeWork: false,
+        });
+      }, [onSnapshot, paneId]);
+      return <div data-testid="fresh-pane" />;
+    }
+    render(<WorkspaceShell renderPane={(props) => <FreshPane {...props} />} />);
+    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
+    expect(toastMock).not.toHaveBeenCalled();
+  });
+
+  it("uses only the required deduped warning when the saved terminal project is unavailable", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 4,
         splitRatio: 50,
         secondaryOpen: true,
         focusedPaneId: "primary",
-        panes: { primary: { cwd: "/saved/a", sessionPath: null }, secondary: null },
+        panes: { primary: { cwd: "/missing", sessionPath: null }, secondary: null },
+        terminal: { open: true, ownerPaneId: "primary" },
       }),
     );
-    render(<WorkspaceShell renderPane={renderPane} />);
-    expect(screen.queryByTestId("terminal-primary")).toBeNull();
-    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
-    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
-    fireEvent.click(open);
-    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
-    expect(
-      screen.getByText(
-        "A shell is still running. Closing the terminal will stop it and its child processes.",
+    bridge.validateWorkspaceTarget.mockResolvedValueOnce({
+      projectExists: false,
+      sessionExists: false,
+    });
+    const view = render(<WorkspaceShell renderPane={renderPane} />);
+    const primary = await screen.findByTestId("pane-primary");
+    expect(primary.dataset.initialMode).toBe("picker");
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        "Saved terminal project was unavailable. The terminal stayed closed.",
+        "warning",
+        4000,
+        false,
       ),
-    ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.getByTestId("terminal-primary")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
-    fireEvent.click(screen.getByRole("button", { name: "Close Terminal" }));
-    await waitFor(() => expect(screen.queryByTestId("terminal-primary")).toBeNull());
+    );
+    expect(toastMock).toHaveBeenCalledTimes(1);
+    expect(toastMock).not.toHaveBeenCalledWith(
+      "Some saved workspace panes were unavailable. A safe layout was restored.",
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(screen.queryByTestId("terminal-primary")).toBeNull();
+    view.rerender(<WorkspaceShell renderPane={renderPane} />);
+    expect(toastMock).toHaveBeenCalledTimes(1);
   });
 
   it("isolates terminal shortcuts while reserving pane and window navigation", async () => {
@@ -472,7 +575,7 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
       expect(saved).toMatchObject({
-        version: 3,
+        version: 4,
         secondaryOpen: false,
         focusedPaneId: "primary",
       });

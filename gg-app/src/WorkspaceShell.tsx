@@ -46,6 +46,8 @@ const KEYBOARD_RESIZE_STEP_PX = 24;
 const MALFORMED_LAYOUT_WARNING = "Saved workspace layout was invalid. A safe layout was restored.";
 const STALE_TARGET_WARNING =
   "Some saved workspace panes were unavailable. A safe layout was restored.";
+const MISSING_TERMINAL_OWNER_WARNING =
+  "Saved terminal project was unavailable. The terminal stayed closed.";
 
 interface TerminalDock {
   ownerPaneId: WorkspacePaneId;
@@ -106,6 +108,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const [windowFocused, setWindowFocused] = useState(true);
   const [snapshots, setSnapshots] = useState<Record<string, PaneSnapshot>>({});
   const [terminalDock, setTerminalDock] = useState<TerminalDock | null>(null);
+  const [terminalIntent, setTerminalIntent] = useState<WorkspaceLayout["terminal"]>(
+    loadedLayout.layout.terminal,
+  );
+  const [terminalReady, setTerminalReady] = useState(!layoutManaged);
+  const terminalRestoreStartedRef = useRef(false);
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [confirmTerminalClose, setConfirmTerminalClose] = useState(false);
   const inputActionsRef = useRef(new Map<string, PaneInputActions>());
@@ -167,6 +174,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     setConfirmTerminalClose(false);
     setTerminalRunning(false);
     setTerminalDock(null);
+    setTerminalIntent({ open: false, ownerPaneId: null });
+    setRejectedLayoutChanged(true);
   }, []);
 
   const requestTerminalClose = useCallback(
@@ -179,16 +188,68 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
 
   const openTerminal = useCallback((): void => {
     const snapshot = snapshots[focusedPaneId];
-    if (!snapshot?.projectBound || !snapshot.cwd || terminalDock) return;
+    if (!snapshot?.restoreChecked || !snapshot.projectBound || !snapshot.cwd || terminalDock)
+      return;
     setTerminalRunning(true);
+    setTerminalIntent({ open: true, ownerPaneId: focusedPaneId });
     setTerminalDock({ ownerPaneId: focusedPaneId, cwd: snapshot.cwd });
+    setRejectedLayoutChanged(true);
   }, [focusedPaneId, snapshots, terminalDock]);
 
   useEffect(() => {
     if (!terminalDock) return;
     const owner = snapshots[terminalDock.ownerPaneId];
-    if (!owner?.projectBound || owner.cwd !== terminalDock.cwd) closeTerminal();
-  }, [closeTerminal, snapshots, terminalDock]);
+    if (
+      !owner?.restoreChecked ||
+      !owner.projectBound ||
+      !owner.cwd ||
+      owner.cwd !== terminalDock.cwd ||
+      paneTargets[terminalDock.ownerPaneId]?.cwd !== terminalDock.cwd
+    ) {
+      closeTerminal();
+    }
+  }, [closeTerminal, paneTargets, snapshots, terminalDock]);
+
+  useEffect(() => {
+    if (
+      !layoutReady ||
+      !terminalReady ||
+      terminalDock ||
+      !terminalIntent.open ||
+      terminalRestoreStartedRef.current
+    )
+      return;
+    const ownerPaneId = terminalIntent.ownerPaneId;
+    if (!ownerPaneId || (ownerPaneId === SECONDARY_PANE_ID && !secondaryOpen)) return;
+    const target = paneTargets[ownerPaneId];
+    const savedTarget = loadedLayout.layout.panes[ownerPaneId];
+    const owner = snapshots[ownerPaneId];
+    if (!owner?.restoreChecked) return;
+    if (
+      !target ||
+      !savedTarget ||
+      !owner.projectBound ||
+      owner.cwd !== target.cwd ||
+      owner.sessionPath !== target.sessionPath ||
+      target.cwd !== savedTarget.cwd
+    ) {
+      setTerminalIntent({ open: false, ownerPaneId: null });
+      setRejectedLayoutChanged(true);
+      return;
+    }
+    terminalRestoreStartedRef.current = true;
+    setTerminalRunning(true);
+    setTerminalDock({ ownerPaneId, cwd: target.cwd });
+  }, [
+    layoutReady,
+    loadedLayout.layout.panes,
+    paneTargets,
+    secondaryOpen,
+    snapshots,
+    terminalDock,
+    terminalIntent,
+    terminalReady,
+  ]);
 
   useEffect(() => {
     if (loadedLayout.status !== "corrupt" || loadedLayout.rejectedRaw === undefined) return;
@@ -204,8 +265,25 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     )
       .then((resolved) => {
         if (cancelled) return;
+        const terminalOwner = resolved.terminal.open ? resolved.terminal.ownerPaneId : null;
+        const terminalOwnerMissing = Boolean(terminalOwner && !resolved.panes[terminalOwner]);
         setPaneTargets(resolved.panes);
-        if (JSON.stringify(resolved.panes) !== JSON.stringify(loadedLayout.layout.panes)) {
+        setTerminalIntent(
+          terminalOwnerMissing ? { open: false, ownerPaneId: null } : resolved.terminal,
+        );
+        if (terminalOwnerMissing) {
+          warnRecovery(
+            `missing-terminal-owner:${terminalOwner}:${JSON.stringify(loadedLayout.layout.panes[terminalOwner!])}`,
+            MISSING_TERMINAL_OWNER_WARNING,
+          );
+        }
+        const staleNonTerminalTarget = PANE_IDS.some(
+          (paneId) =>
+            paneId !== terminalOwner &&
+            JSON.stringify(resolved.panes[paneId]) !==
+              JSON.stringify(loadedLayout.layout.panes[paneId]),
+        );
+        if (staleNonTerminalTarget) {
           warnRecovery(
             `stale:${JSON.stringify(loadedLayout.layout.panes)}:${JSON.stringify(resolved.panes)}`,
             STALE_TARGET_WARNING,
@@ -214,14 +292,17 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         setPrimaryPaneRatio(resolved.splitRatio);
         setSecondaryOpen(resolved.secondaryOpen);
         focusPane(resolved.focusedPaneId);
+        setTerminalReady(true);
         setLayoutReady(true);
       })
       .catch(() => {
         if (cancelled) return;
         setPaneTargets(loadedLayout.layout.panes);
+        setTerminalIntent({ open: false, ownerPaneId: null });
         setPrimaryPaneRatio(loadedLayout.layout.splitRatio);
         setSecondaryOpen(loadedLayout.layout.secondaryOpen);
         focusPane(loadedLayout.layout.focusedPaneId);
+        setTerminalReady(true);
         setLayoutReady(true);
       });
     return () => {
@@ -239,6 +320,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       secondaryOpen,
       focusedPaneId,
       panes: paneTargets,
+      terminal: terminalIntent,
     });
   }, [
     focusedPaneId,
@@ -249,6 +331,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     rejectedLayoutChanged,
     secondaryOpen,
     snapshots,
+    terminalIntent,
+    terminalReady,
   ]);
 
   useEffect(() => {
@@ -463,6 +547,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       setConfirmTerminalClose(false);
       setTerminalRunning(false);
       setTerminalDock(null);
+      setTerminalIntent({ open: false, ownerPaneId: null });
     }
     setRejectedLayoutChanged(true);
     setSecondaryOpen(false);
@@ -500,7 +585,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
 
   const focusedSnapshot = snapshots[focusedPaneId];
   const canOpenTerminal =
-    !terminalDock && Boolean(focusedSnapshot?.projectBound && focusedSnapshot.cwd);
+    !terminalDock &&
+    Boolean(focusedSnapshot?.restoreChecked && focusedSnapshot.projectBound && focusedSnapshot.cwd);
   const visiblePaneRatio = clampRatio(primaryPaneRatio, workspaceWidth);
   return (
     <div className="workspace-shell" style={{ background: theme.background }}>
@@ -573,13 +659,19 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
                     }}
                   />
                 )}
-                {terminalDock?.ownerPaneId === paneId && (
-                  <TerminalPane
-                    paneId={paneId}
-                    onRequestClose={requestTerminalClose}
-                    onRunningChange={setTerminalRunning}
-                  />
-                )}
+                {terminalReady &&
+                  terminalDock?.ownerPaneId === paneId &&
+                  snapshots[paneId]?.restoreChecked &&
+                  snapshots[paneId]?.projectBound &&
+                  snapshots[paneId]?.cwd === terminalDock.cwd &&
+                  paneTargets[paneId]?.cwd === terminalDock.cwd && (
+                    <TerminalPane
+                      key={`${paneId}:${terminalDock.cwd}`}
+                      paneId={paneId}
+                      onRequestClose={requestTerminalClose}
+                      onRunningChange={setTerminalRunning}
+                    />
+                  )}
               </div>
               {paneId === SECONDARY_PANE_ID && (
                 <button

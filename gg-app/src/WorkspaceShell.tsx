@@ -742,7 +742,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
               focused: layout.focusedPaneId === paneId,
               windowFocused,
               initialTarget:
-                layoutManaged || paneId.startsWith("pane-") ? layout.panes[paneId] : undefined,
+                layoutManaged ||
+                paneId.startsWith("pane-") ||
+                (paneId !== PRIMARY_PANE_ID && layout.panes[paneId] !== null)
+                  ? layout.panes[paneId]
+                  : undefined,
               onFocus: focusPane,
               onSnapshot: updateSnapshot,
               onUserTargetChange: markLayoutChanged,

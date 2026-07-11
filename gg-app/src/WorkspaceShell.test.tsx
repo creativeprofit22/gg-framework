@@ -330,6 +330,19 @@ describe("WorkspaceShell recursive rendering", () => {
     },
   );
 
+  it("preserves a newly bound legacy auxiliary target when splitting that pane", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const secondary = await screen.findByTestId("pane-secondary");
+    fireEvent.pointerDown(secondary);
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pane-secondary").dataset.initialMode).toBe("managed");
+      expect(screen.getByTestId("pane-secondary").dataset.initialCwd).toBe("/work/secondary");
+    });
+    expect(screen.getByTestId("pane-pane-1").dataset.initialMode).toBe("picker");
+  });
+
   it("supports dynamic nested leaves instead of discarding them", async () => {
     localStorage.setItem(
       "gg-workspace-layout-recursive:main",

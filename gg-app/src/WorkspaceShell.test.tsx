@@ -907,6 +907,65 @@ describe("WorkspaceShell layout recovery", () => {
     });
   });
 
+  it("preserves malformed legacy bytes only in the legacy diagnostic", async () => {
+    const legacyRaw = " \nlegacy-invalid-é\\u0000\t";
+    const recursiveDiagnostic = "existing-recursive-diagnostic";
+    localStorage.setItem("gg-workspace-layout:main", legacyRaw);
+    localStorage.setItem("gg-workspace-layout-rejected:main", "existing-legacy-diagnostic");
+    localStorage.setItem("gg-workspace-layout-recursive-rejected:main", recursiveDiagnostic);
+
+    render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
+    await screen.findByTestId("restore-pane-primary");
+
+    await waitFor(() =>
+      expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(legacyRaw),
+    );
+    expect(localStorage.getItem("gg-workspace-layout-recursive-rejected:main")).toBe(
+      recursiveDiagnostic,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).version).toBe(
+        6,
+      ),
+    );
+    expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(legacyRaw);
+    expect(localStorage.getItem("gg-workspace-layout-recursive-rejected:main")).toBe(
+      recursiveDiagnostic,
+    );
+  });
+
+  it("preserves malformed recursive bytes only in the recursive diagnostic", async () => {
+    const recursiveRaw = ' \n{"version":99,"future":"é\\u0000"}\t';
+    const legacyDiagnostic = "existing-legacy-diagnostic";
+    localStorage.setItem("gg-workspace-layout-recursive:main", recursiveRaw);
+    localStorage.setItem("gg-workspace-layout-rejected:main", legacyDiagnostic);
+    localStorage.setItem(
+      "gg-workspace-layout-recursive-rejected:main",
+      "existing-recursive-diagnostic",
+    );
+
+    render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
+    await screen.findByTestId("restore-pane-primary");
+
+    await waitFor(() =>
+      expect(localStorage.getItem("gg-workspace-layout-recursive-rejected:main")).toBe(
+        recursiveRaw,
+      ),
+    );
+    expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(legacyDiagnostic);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).version).toBe(
+        6,
+      ),
+    );
+    expect(localStorage.getItem("gg-workspace-layout-recursive-rejected:main")).toBe(recursiveRaw);
+    expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(legacyDiagnostic);
+  });
+
   it("keeps the rollback write barrier until user layout interaction", async () => {
     const raw = '{"version":99,"future":true}';
     localStorage.setItem("gg-workspace-layout:main", raw);
@@ -932,7 +991,7 @@ describe("WorkspaceShell layout recovery", () => {
     expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(raw);
   });
 
-  it("recovers from a layout storage load failure and warns once across rerenders", async () => {
+  it("recovers from a recursive layout storage load failure and warns once across rerenders", async () => {
     const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("storage blocked");
     });
@@ -942,7 +1001,7 @@ describe("WorkspaceShell layout recovery", () => {
     expect((await screen.findByTestId("restore-pane-primary")).dataset.source).toBe("native");
     expect(screen.getByTestId("restore-pane-secondary").dataset.source).toBe("picker");
     expect(bridge.validateWorkspaceTarget).not.toHaveBeenCalled();
-    expect(getItem).toHaveBeenCalledWith("gg-workspace-layout:main");
+    expect(getItem.mock.calls).toEqual([["gg-workspace-layout-recursive:main"]]);
     await waitFor(() =>
       expect(toastMock).toHaveBeenCalledWith(
         "Saved workspace layout could not be loaded. A safe layout was restored.",
@@ -957,6 +1016,20 @@ describe("WorkspaceShell layout recovery", () => {
 
     expect(screen.getByTestId("restore-pane-primary").dataset.source).toBe("native");
     expect(toastMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the legacy layout only when the recursive layout is absent", async () => {
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockReturnValue(null);
+
+    render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
+
+    expect((await screen.findByTestId("restore-pane-primary")).dataset.source).toBe("native");
+    expect(screen.getByTestId("restore-pane-secondary").dataset.source).toBe("picker");
+    expect(getItem.mock.calls).toEqual([
+      ["gg-workspace-layout-recursive:main"],
+      ["gg-workspace-layout:main"],
+    ]);
+    expect(toastMock).not.toHaveBeenCalled();
   });
 
   it("restores the saved ratio and both pane targets before mounting panes", async () => {

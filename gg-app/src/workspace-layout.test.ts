@@ -3,464 +3,343 @@ import {
   defaultWorkspaceLayout,
   loadWorkspaceLayout,
   parseWorkspaceLayout,
-  preserveRejectedWorkspaceLayout,
-  rejectedWorkspaceLayoutKey,
+  preserveRejectedRecursiveWorkspaceLayout,
+  recursiveWorkspaceLayoutKey,
+  rejectedRecursiveWorkspaceLayoutKey,
   resolveWorkspaceLayoutTargets,
   saveWorkspaceLayout,
   workspaceLayoutKey,
+  workspaceLayoutLeafIds,
   type WorkspaceLayout,
+  type WorkspaceLayoutNode,
 } from "./workspace-layout";
 
 const target = (cwd: string, sessionPath: string | null = null) => ({ cwd, sessionPath });
-const FORBIDDEN_TERMINAL_KEYS = [
-  "pid",
-  "terminalId",
-  "command",
-  "args",
-  "env",
-  "scrollback",
-  "history",
-  "input",
-  "output",
-  "exitCode",
-  "process",
-  "shell",
-] as const;
-
-function layout(overrides: Partial<WorkspaceLayout> = {}): WorkspaceLayout {
+const leaf = (paneId: string): WorkspaceLayoutNode => ({ type: "leaf", paneId });
+const split = (
+  first: WorkspaceLayoutNode,
+  second: WorkspaceLayoutNode,
+  direction: "horizontal" | "vertical" = "horizontal",
+  ratio = 50,
+): WorkspaceLayoutNode => ({ type: "split", direction, ratio, first, second });
+const store = () => {
+  const values = new Map<string, string>();
   return {
-    ...defaultWorkspaceLayout(),
-    panes: { primary: target("/project/a", "/sessions/a.jsonl"), secondary: null },
-    ...overrides,
+    values,
+    storage: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+      },
+    },
   };
-}
+};
+const canonical = (overrides: Partial<WorkspaceLayout> = {}): WorkspaceLayout => ({
+  ...defaultWorkspaceLayout(),
+  panes: { primary: target("/a"), secondary: target("/b") },
+  ...overrides,
+});
 
-describe("workspace layout storage", () => {
-  it("migrates the focused v0 shape and clamps its split ratio", () => {
-    const result = parseWorkspaceLayout(
-      JSON.stringify({
-        version: 0,
-        ratio: 150,
-        primary: { cwd: "/project/a" },
-        secondary: { cwd: "/project/b", sessionPath: "/sessions/b.jsonl" },
-      }),
+describe("recursive workspace layout", () => {
+  it("uses a v6 two-pane default compatible with WorkspaceShell", () => {
+    const value = defaultWorkspaceLayout();
+    expect(value.version).toBe(6);
+    expect(value.splitRatio).toBe(50);
+    expect(value.secondaryOpen).toBe(true);
+    expect(workspaceLayoutLeafIds(value.root)).toEqual(["primary", "secondary"]);
+  });
+
+  it("round-trips nested horizontal and vertical trees with stable IDs", () => {
+    const root = split(
+      leaf("alpha"),
+      split(leaf("beta"), leaf("gamma"), "vertical", 72),
+      "horizontal",
+      33,
     );
-
-    expect(result.status).toBe("migrated");
-    expect(result.layout).toEqual({
-      version: 5,
-      splitRatio: 90,
-      secondaryOpen: true,
-      focusedPaneId: "primary",
-      panes: {
-        primary: target("/project/a"),
-        secondary: target("/project/b", "/sessions/b.jsonl"),
-      },
-      terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
+    const raw = JSON.stringify({
+      version: 6,
+      root,
+      focusedPaneId: "gamma",
+      panes: { alpha: target("/a"), beta: null, gamma: target("/c") },
+      terminal: { open: true, ownerPaneId: "gamma", dockHeightPx: 400 },
+      extra: true,
     });
+    const parsed = parseWorkspaceLayout(raw);
+    expect(parsed.status).toBe("valid");
+    expect(parsed.layout.root).toEqual(root);
+    expect(parsed.layout.focusedPaneId).toBe("gamma");
+    expect(parsed.layout.terminal.open).toBe(true);
   });
 
-  it("normalizes missing session paths for both legacy pane targets", () => {
-    const result = parseWorkspaceLayout(
-      JSON.stringify({
-        version: 0,
-        primary: { cwd: "/project/a" },
-        secondary: { cwd: "/project/b" },
-      }),
-    );
-
-    expect(result.status).toBe("migrated");
-    expect(result.layout.panes).toEqual({
-      primary: target("/project/a"),
-      secondary: target("/project/b"),
-    });
-  });
-
-  it.each(["primary", "secondary"] as const)(
-    "rejects an invalid legacy session path type in the %s pane",
-    (paneId) => {
-      expect(
-        parseWorkspaceLayout(
-          JSON.stringify({ version: 0, [paneId]: { cwd: "/project/a", sessionPath: 42 } }),
-        ).status,
-      ).toBe("corrupt");
-    },
-  );
-
-  it.each([
-    "not-json",
-    "null",
-    JSON.stringify({ version: 99 }),
-    JSON.stringify({ version: 1, splitRatio: 50, panes: { primary: { cwd: "" } } }),
-  ])("falls back for corrupt or unsupported data: %s", (raw) => {
-    expect(parseWorkspaceLayout(raw)).toEqual({
-      layout: defaultWorkspaceLayout(),
-      status: "corrupt",
-    });
-  });
-
-  it("migrates v1 records with damaged ratios without losing pane selections", () => {
-    const result = parseWorkspaceLayout(
-      JSON.stringify({
-        version: 1,
-        splitRatio: -20,
-        panes: { primary: target("/project/a"), secondary: target("/project/b") },
-      }),
-    );
-
-    expect(result.status).toBe("migrated");
-    expect(result.layout.splitRatio).toBe(10);
-    expect(result.layout.focusedPaneId).toBe("primary");
-    expect(result.layout.panes.secondary?.cwd).toBe("/project/b");
-  });
-
-  it("migrates v2 records with primary focus while preserving pane state", () => {
-    const result = parseWorkspaceLayout(
-      JSON.stringify({
-        version: 2,
-        splitRatio: 63,
-        secondaryOpen: false,
-        panes: {
-          primary: target("/project/a", "/sessions/a.jsonl"),
-          secondary: target("/project/b", "/sessions/b.jsonl"),
-        },
-      }),
-    );
-
-    expect(result).toEqual({
-      status: "migrated",
-      layout: {
-        version: 5,
-        splitRatio: 63,
-        secondaryOpen: false,
-        focusedPaneId: "primary",
-        panes: {
-          primary: target("/project/a", "/sessions/a.jsonl"),
-          secondary: target("/project/b", "/sessions/b.jsonl"),
-        },
-        terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
-      },
-    });
-  });
-
-  it("migrates v3 with a closed terminal", () => {
-    const record = { ...layout(), version: 3 };
-    delete (record as Partial<WorkspaceLayout>).terminal;
-
-    expect(parseWorkspaceLayout(JSON.stringify(record))).toEqual({
-      status: "migrated",
-      layout: layout(),
-    });
-  });
-
-  it("migrates v4 terminal state with the default dock height", () => {
-    const record: Record<string, unknown> = { ...layout(), version: 4 };
-    record.terminal = { open: true, ownerPaneId: "primary" };
-
+  it("clamps every ratio and deterministically recovers stale focus", () => {
+    const record = {
+      version: 6,
+      root: split(leaf("a"), split(leaf("b"), leaf("c"), "vertical", -5), "horizontal", 999),
+      focusedPaneId: "gone",
+      panes: { a: null, b: null, c: null },
+      terminal: { open: false, ownerPaneId: null, dockHeightPx: 80 },
+    };
     const parsed = parseWorkspaceLayout(JSON.stringify(record));
-
-    expect(parsed.status).toBe("migrated");
-    expect(parsed.layout.terminal).toEqual({
-      open: true,
-      ownerPaneId: "primary",
-      dockHeightPx: 260,
-    });
-  });
-
-  it("restores valid secondary focus from v5", () => {
-    const parsed = parseWorkspaceLayout(JSON.stringify(layout({ focusedPaneId: "secondary" })));
-
-    expect(parsed.status).toBe("valid");
-    expect(parsed.layout.focusedPaneId).toBe("secondary");
-  });
-
-  it.each([
-    ["absent", undefined],
-    ["non-string", 42],
-    ["unknown", "tertiary"],
-  ])(
-    "normalizes %s v4 focus to primary without rejecting pane targets",
-    (_label, focusedPaneId) => {
-      const record: Record<string, unknown> = { ...layout(), focusedPaneId };
-      if (focusedPaneId === undefined) delete record.focusedPaneId;
-
-      const parsed = parseWorkspaceLayout(JSON.stringify(record));
-
-      expect(parsed.status).toBe("valid");
-      expect(parsed.layout.focusedPaneId).toBe("primary");
-      expect(parsed.layout.panes.primary).toEqual(target("/project/a", "/sessions/a.jsonl"));
-    },
-  );
-
-  it("normalizes secondary focus to primary when the secondary pane is closed", () => {
-    const parsed = parseWorkspaceLayout(
-      JSON.stringify(
-        layout({
-          secondaryOpen: false,
-          focusedPaneId: "secondary",
-          panes: { primary: target("/a"), secondary: target("/b") },
-        }),
-      ),
+    expect(parsed.layout.root).toEqual(
+      split(leaf("a"), split(leaf("b"), leaf("c"), "vertical", 10), "horizontal", 90),
     );
-
-    expect(parsed.status).toBe("valid");
-    expect(parsed.layout.focusedPaneId).toBe("primary");
-    expect(parsed.layout.panes.secondary).toEqual(target("/b"));
+    expect(parsed.layout.focusedPaneId).toBe("a");
+    expect(parsed.layout.terminal.dockHeightPx).toBe(140);
   });
 
   it.each([
-    [true, "primary"],
-    [true, "secondary"],
-    [false, null],
-  ] as const)("accepts strict v4 terminal state %s/%s", (terminalOpen, terminalOwnerPaneId) => {
-    const parsed = parseWorkspaceLayout(
-      JSON.stringify(
-        layout({
-          terminal: { open: terminalOpen, ownerPaneId: terminalOwnerPaneId, dockHeightPx: 260 },
-        }),
-      ),
-    );
-    expect(parsed.status).toBe("valid");
-    expect(parsed.layout.terminal).toEqual({
-      open: terminalOpen,
-      ownerPaneId: terminalOwnerPaneId,
-      dockHeightPx: 260,
-    });
-  });
-
-  it.each([
-    ["missing terminal", undefined],
-    ["null terminal", null],
-    ["non-object terminal", "closed"],
-    ["missing open", { ownerPaneId: null }],
-    ["missing owner", { open: false }],
-    ["open without owner", { open: true, ownerPaneId: null }],
-    ["closed with owner", { open: false, ownerPaneId: "primary" }],
-    ["non-boolean open", { open: "yes", ownerPaneId: "primary" }],
-    ["unknown owner", { open: true, ownerPaneId: "tertiary" }],
-  ])("rejects malformed v4 terminal: %s", (_label, terminal) => {
-    const record: Record<string, unknown> = { ...layout(), terminal };
-    if (terminal === undefined) delete record.terminal;
-
-    expect(parseWorkspaceLayout(JSON.stringify(record)).status).toBe("corrupt");
-  });
-
-  it("rejects extra nested terminal keys", () => {
+    [
+      "bad direction",
+      split(leaf("a"), leaf("b"), "horizontal") as unknown as Record<string, unknown>,
+      (node: Record<string, unknown>) => {
+        node.direction = "diagonal";
+      },
+    ],
+    ["duplicate leaf", split(leaf("a"), leaf("a")) as unknown as Record<string, unknown>, () => {}],
+    [
+      "malformed child",
+      split(leaf("a"), leaf("b")) as unknown as Record<string, unknown>,
+      (node: Record<string, unknown>) => {
+        node.second = null;
+      },
+    ],
+  ])("rejects %s", (_name, root, mutate) => {
+    mutate(root);
     expect(
       parseWorkspaceLayout(
         JSON.stringify({
-          ...layout(),
-          terminal: { open: false, ownerPaneId: null, runtime: true },
+          version: 6,
+          root,
+          focusedPaneId: "a",
+          panes: { a: null, b: null },
+          terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
         }),
       ).status,
     ).toBe("corrupt");
   });
 
-  it("normalizes an open secondary terminal closed when the secondary pane is closed", () => {
-    const parsed = parseWorkspaceLayout(
-      JSON.stringify(
-        layout({
-          secondaryOpen: false,
-          terminal: { open: true, ownerPaneId: "secondary", dockHeightPx: 260 },
+  it("rejects missing descriptors, descriptor overflow, leaf overflow, and depth overflow", () => {
+    const terminal = { open: false, ownerPaneId: null, dockHeightPx: 260 };
+    expect(
+      parseWorkspaceLayout(
+        JSON.stringify({ version: 6, root: leaf("a"), focusedPaneId: "a", panes: {}, terminal }),
+      ).status,
+    ).toBe("corrupt");
+    expect(
+      parseWorkspaceLayout(
+        JSON.stringify({
+          version: 6,
+          root: leaf("a"),
+          focusedPaneId: "a",
+          panes: { a: null, b: null, c: null, d: null, e: null },
+          terminal,
         }),
-      ),
-    );
-
-    expect(parsed.status).toBe("valid");
-    expect(parsed.layout.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 260 });
+      ).status,
+    ).toBe("corrupt");
+    const five = split(split(leaf("a"), leaf("b")), split(leaf("c"), split(leaf("d"), leaf("e"))));
+    expect(
+      parseWorkspaceLayout(
+        JSON.stringify({
+          version: 6,
+          root: five,
+          focusedPaneId: "a",
+          panes: { a: null, b: null, c: null, d: null, e: null },
+          terminal,
+        }),
+      ).status,
+    ).toBe("corrupt");
+    const deep = split(leaf("a"), split(leaf("b"), split(leaf("c"), split(leaf("d"), leaf("e")))));
+    expect(
+      parseWorkspaceLayout(
+        JSON.stringify({
+          version: 6,
+          root: deep,
+          focusedPaneId: "a",
+          panes: { a: null, b: null, c: null, d: null, e: null },
+          terminal,
+        }),
+      ).status,
+    ).toBe("corrupt");
   });
 
-  it.each([
-    [80, 140],
-    [260, 260],
-    [9_000, 2_000],
-  ])("recovers v5 terminal dock height %s to %s", (dockHeightPx, expected) => {
+  it("closes stale or targetless terminal owners and rejects terminal runtime fields", () => {
+    const base = { version: 6, root: leaf("a"), focusedPaneId: "a", panes: { a: null } };
     const parsed = parseWorkspaceLayout(
-      JSON.stringify(layout({ terminal: { open: false, ownerPaneId: null, dockHeightPx } })),
+      JSON.stringify({ ...base, terminal: { open: true, ownerPaneId: "a", dockHeightPx: 300 } }),
     );
-
-    expect(parsed.status).toBe("valid");
-    expect("dockHeightPx" in parsed.layout.terminal && parsed.layout.terminal.dockHeightPx).toBe(
-      expected,
-    );
-  });
-
-  it("reports recovery when clamping non-finite dock heights", async () => {
-    const { clampStoredTerminalDockHeightPx } = await import("./workspace-layout");
-    expect(clampStoredTerminalDockHeightPx(Number.POSITIVE_INFINITY)).toEqual({
-      value: 260,
-      recovered: true,
-    });
-  });
-
-  it.each([undefined, null, "260"])("rejects strict v5 dock height %s", (dockHeightPx) => {
-    const record = layout() as unknown as Record<string, unknown>;
-    record.terminal = { open: false, ownerPaneId: null, dockHeightPx };
-    expect(parseWorkspaceLayout(JSON.stringify(record)).status).toBe("corrupt");
-  });
-
-  it("preserves normalized dock height while terminal is closed", () => {
-    const parsed = parseWorkspaceLayout(
-      JSON.stringify(layout({ terminal: { open: false, ownerPaneId: null, dockHeightPx: 420 } })),
-    );
-    expect(parsed.layout.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 420 });
-  });
-
-  it("round-trips whether the secondary pane is closed", () => {
-    const closed = layout({
-      secondaryOpen: false,
-      focusedPaneId: "primary",
-      panes: { primary: target("/a"), secondary: null },
-    });
-    const parsed = parseWorkspaceLayout(JSON.stringify(closed));
-
-    expect(parsed.status).toBe("valid");
-    expect(parsed.layout.secondaryOpen).toBe(false);
-    expect(parsed.layout.focusedPaneId).toBe("primary");
-    expect(parsed.layout.panes.secondary).toBeNull();
-  });
-
-  it("distinguishes unavailable storage from malformed layout bytes without throwing", () => {
-    const unavailable = {
-      getItem: vi.fn(() => {
-        throw new Error("blocked");
-      }),
-      setItem: vi.fn(() => {
-        throw new Error("quota");
-      }),
-    };
-
-    expect(loadWorkspaceLayout(unavailable, "main")).toEqual({
-      layout: defaultWorkspaceLayout(),
-      status: "load-error",
-    });
-    expect(saveWorkspaceLayout(unavailable, "main", layout())).toBe(false);
-  });
-
-  it("preserves future-version rejected bytes exactly under a diagnostic key", () => {
-    const values = new Map<string, string>();
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-    };
-    const raw = ' \n{\r\n  "version": 99, "future": "é\\u0000"\r\n}\t';
-    values.set(workspaceLayoutKey("main"), raw);
-
-    const loaded = loadWorkspaceLayout(storage, "main");
-    expect(loaded.rejectedRaw).toBe(raw);
-    expect(preserveRejectedWorkspaceLayout(storage, "main", loaded.rejectedRaw!)).toBe(true);
-    expect(values.get(rejectedWorkspaceLayoutKey("main"))).toBe(raw);
-  });
-
-  it("rejects every forbidden runtime/process key inside terminal state", () => {
-    for (const key of FORBIDDEN_TERMINAL_KEYS) {
-      const record = layout() as unknown as Record<string, unknown>;
-      record.terminal = {
-        open: false,
-        ownerPaneId: null,
-        dockHeightPx: 260,
-        [key]: `forbidden-${key}`,
-      };
-      expect(parseWorkspaceLayout(JSON.stringify(record)).status, key).toBe("corrupt");
-    }
-  });
-
-  it("serializes only allow-listed v5 fields and emits no forbidden runtime/process keys", () => {
-    const values = new Map<string, string>();
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-    };
-    const dirty = {
-      ...layout(),
-      extra: "drop",
-      terminal: { open: false, ownerPaneId: "secondary", dockHeightPx: 260 },
-    } as WorkspaceLayout;
-    Object.assign(
-      dirty.terminal,
-      Object.fromEntries(FORBIDDEN_TERMINAL_KEYS.map((key) => [key, `forbidden-${key}`])),
-    );
-    (dirty.panes.primary as object as Record<string, unknown>).extra = "drop";
-
-    expect(saveWorkspaceLayout(storage, "main", dirty)).toBe(true);
-    const serialized = JSON.parse(values.get(workspaceLayoutKey("main"))!) as Record<
-      string,
-      Record<string, unknown>
-    >;
-    expect(serialized).toEqual(layout());
-    for (const key of FORBIDDEN_TERMINAL_KEYS) {
-      expect(Object.prototype.hasOwnProperty.call(serialized.terminal, key), key).toBe(false);
-    }
-  });
-
-  it("round-trips one native window under its own key", () => {
-    const values = new Map<string, string>();
-    const storage = {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-    };
-    const saved = layout({ splitRatio: 63 });
-
-    expect(saveWorkspaceLayout(storage, "project-2", saved)).toBe(true);
-    expect(values.has(workspaceLayoutKey("project-2"))).toBe(true);
-    expect(loadWorkspaceLayout(storage, "project-2")).toEqual({ layout: saved, status: "valid" });
+    expect(parsed.layout.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 300 });
+    expect(
+      parseWorkspaceLayout(
+        JSON.stringify({
+          ...base,
+          terminal: { open: false, ownerPaneId: null, dockHeightPx: 300, pid: 1 },
+        }),
+      ).status,
+    ).toBe("corrupt");
   });
 });
 
-describe("workspace layout restore", () => {
-  it("restores both existing project/session targets", async () => {
-    const saved = layout({
-      panes: {
-        primary: target("/project/a", "/sessions/a.jsonl"),
-        secondary: target("/project/b", "/sessions/b.jsonl"),
+describe("migration and storage", () => {
+  it("migrates v0-v5 while retaining pane targets and closed secondary descriptors", () => {
+    const fixedPanes = { primary: target("/a"), secondary: target("/b", "/s") };
+    const migratedRecords = [
+      { version: 1, splitRatio: 55, panes: fixedPanes },
+      { version: 2, splitRatio: 55, secondaryOpen: true, panes: fixedPanes },
+      {
+        version: 3,
+        splitRatio: 55,
+        secondaryOpen: true,
+        focusedPaneId: "secondary",
+        panes: fixedPanes,
       },
-    });
-    const validate = vi.fn().mockResolvedValue({ projectExists: true, sessionExists: true });
-
-    await expect(resolveWorkspaceLayoutTargets(saved, validate)).resolves.toEqual(saved);
-    expect(validate).toHaveBeenCalledTimes(2);
-  });
-
-  it("drops a missing project and starts cleanly when only its session is missing", async () => {
-    const saved = layout({
-      panes: {
-        primary: target("/missing", "/sessions/missing.jsonl"),
-        secondary: target("/project/b", "/sessions/gone.jsonl"),
+      {
+        version: 4,
+        splitRatio: 55,
+        secondaryOpen: true,
+        focusedPaneId: "secondary",
+        panes: fixedPanes,
+        terminal: { open: true, ownerPaneId: "secondary" },
       },
-    });
+    ];
+    for (const record of migratedRecords) {
+      const migrated = parseWorkspaceLayout(JSON.stringify(record));
+      expect(migrated.status, `v${record.version}`).toBe("migrated");
+      expect(migrated.layout.panes, `v${record.version}`).toEqual(fixedPanes);
+    }
 
-    const restored = await resolveWorkspaceLayoutTargets(saved, async ({ cwd }) => ({
-      projectExists: cwd !== "/missing",
-      sessionExists: false,
-    }));
+    const v0 = parseWorkspaceLayout(
+      JSON.stringify({
+        version: 0,
+        ratio: 95,
+        primary: { cwd: "/a" },
+        secondary: { cwd: "/b", sessionPath: "/s" },
+      }),
+    );
+    expect(v0.status).toBe("migrated");
+    expect(v0.layout.splitRatio).toBe(90);
+    expect(v0.layout.panes.secondary).toEqual(target("/b", "/s"));
+    const v5 = parseWorkspaceLayout(
+      JSON.stringify({
+        version: 5,
+        splitRatio: 63,
+        secondaryOpen: false,
+        focusedPaneId: "secondary",
+        panes: { primary: target("/a"), secondary: target("/b") },
+        terminal: { open: true, ownerPaneId: "secondary", dockHeightPx: 420 },
+      }),
+    );
+    expect(v5.layout.root).toEqual(leaf("primary"));
+    expect(v5.layout.panes.secondary).toEqual(target("/b"));
+    expect(v5.layout.focusedPaneId).toBe("primary");
+    expect(v5.layout.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 420 });
 
-    expect(restored.panes.primary).toBeNull();
-    expect(restored.panes.secondary).toEqual(target("/project/b"));
+    const damagedHeight = parseWorkspaceLayout(
+      JSON.stringify({
+        version: 5,
+        splitRatio: 50,
+        secondaryOpen: false,
+        focusedPaneId: "primary",
+        panes: { primary: target("/a"), secondary: null },
+        terminal: { open: true, ownerPaneId: "primary", dockHeightPx: 50 },
+      }),
+    );
+    expect(damagedHeight.terminalDockHeightRecovery).toEqual({ rejected: 50, resolved: 140 });
   });
 
-  it("contains validator failures to the affected pane", async () => {
-    const saved = layout({
-      panes: { primary: target("/project/a"), secondary: target("/project/b") },
-    });
-
-    const restored = await resolveWorkspaceLayoutTargets(saved, async ({ cwd }) => {
-      if (cwd === "/project/a") throw new Error("native validation failed");
-      return { projectExists: true, sessionExists: true };
-    });
-
-    expect(restored.panes.primary).toBeNull();
-    expect(restored.panes.secondary).toEqual(target("/project/b"));
+  it("loads recursive first and never replaces malformed recursive bytes from v5", () => {
+    const { values, storage } = store();
+    values.set(workspaceLayoutKey("main"), JSON.stringify({ version: 0 }));
+    const raw = " future recursive bytes ";
+    values.set(recursiveWorkspaceLayoutKey("main"), raw);
+    const loaded = loadWorkspaceLayout(storage, "main");
+    expect(loaded.status).toBe("corrupt");
+    expect(loaded.rejectedRaw).toBe(raw);
+    expect(loaded.rejectedSource).toBe("recursive");
+    expect(values.get(rejectedRecursiveWorkspaceLayoutKey("main"))).toBe(raw);
   });
 
-  it("defensively falls back to primary focus for a closed secondary during resolution", async () => {
-    const saved = layout({
-      secondaryOpen: false,
+  it("preserves recursive rejected bytes exactly", () => {
+    const { values, storage } = store();
+    const raw = ' \n{"version":99,"x":"é\\u0000"}\t';
+    expect(preserveRejectedRecursiveWorkspaceLayout(storage, "main", raw)).toBe(true);
+    expect(values.get(rejectedRecursiveWorkspaceLayoutKey("main"))).toBe(raw);
+  });
+
+  it("accepts the fixed WorkspaceShell save shape and dual-writes allow-listed v6/v5", () => {
+    const { values, storage } = store();
+    const fixed = {
+      version: 5,
+      splitRatio: 64,
+      secondaryOpen: true,
       focusedPaneId: "secondary",
-      panes: { primary: target("/project/a"), secondary: null },
+      panes: { primary: target("/a"), secondary: target("/b") },
+      terminal: { open: true, ownerPaneId: "secondary", dockHeightPx: 350 },
+    };
+    expect(saveWorkspaceLayout(storage, "main", fixed)).toBe(true);
+    expect(JSON.parse(values.get(recursiveWorkspaceLayoutKey("main"))!).version).toBe(6);
+    expect(JSON.parse(values.get(workspaceLayoutKey("main"))!)).toEqual(fixed);
+  });
+
+  it("does not overwrite the last v5 snapshot for a nested layout", () => {
+    const { values, storage } = store();
+    values.set(workspaceLayoutKey("main"), "last-safe-v5");
+    const nested = canonical({
+      root: split(leaf("primary"), split(leaf("secondary"), leaf("third"), "vertical")),
+      panes: { primary: target("/a"), secondary: target("/b"), third: target("/c") },
     });
+    expect(saveWorkspaceLayout(storage, "main", nested)).toBe(true);
+    expect(values.get(workspaceLayoutKey("main"))).toBe("last-safe-v5");
+    expect(values.has(recursiveWorkspaceLayoutKey("main"))).toBe(true);
+  });
 
-    const restored = await resolveWorkspaceLayoutTargets(saved, vi.fn());
+  it("returns false when either required fixed-layout write fails", () => {
+    const storage = {
+      getItem: () => null,
+      setItem: vi.fn((key: string) => {
+        if (key.startsWith("gg-workspace-layout:")) throw new Error("quota");
+      }),
+    };
+    expect(saveWorkspaceLayout(storage, "main", canonical())).toBe(false);
 
-    expect(restored.focusedPaneId).toBe("primary");
+    const recursiveFailure = {
+      getItem: () => null,
+      setItem: vi.fn((key: string) => {
+        if (key.startsWith("gg-workspace-layout-recursive:")) throw new Error("blocked");
+      }),
+    };
+    expect(saveWorkspaceLayout(recursiveFailure, "main", canonical())).toBe(false);
+  });
+
+  it("returns false instead of throwing for unserializable save input", () => {
+    const { storage } = store();
+    const value = canonical();
+    (value.root as unknown as { cycle: unknown }).cycle = value.root;
+    expect(saveWorkspaceLayout(storage, "main", value)).toBe(false);
+  });
+});
+
+describe("target resolution", () => {
+  it("validates every descriptor independently and preserves root IDs", async () => {
+    const root = split(leaf("a"), leaf("b"), "vertical", 40);
+    const value = canonical({
+      root,
+      focusedPaneId: "b",
+      panes: {
+        a: target("/missing", "/s"),
+        b: target("/b", "/missing-session"),
+        dormant: target("/throws"),
+      },
+      terminal: { open: true, ownerPaneId: "a", dockHeightPx: 300 },
+    });
+    const validate = vi.fn(async ({ cwd }: { cwd: string }) => {
+      if (cwd === "/throws") throw new Error("failed");
+      return { projectExists: cwd !== "/missing", sessionExists: false };
+    });
+    const resolved = await resolveWorkspaceLayoutTargets(value, validate);
+    expect(resolved.root).toEqual(root);
+    expect(resolved.panes).toEqual({ a: null, b: target("/b"), dormant: null });
+    expect(resolved.focusedPaneId).toBe("b");
+    expect(resolved.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 300 });
+    expect(validate).toHaveBeenCalledTimes(3);
   });
 });

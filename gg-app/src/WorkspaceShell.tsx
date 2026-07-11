@@ -32,6 +32,7 @@ import { useProgress } from "./useProgress";
 import {
   clampStoredTerminalDockHeightPx,
   loadWorkspaceLayout,
+  preserveRejectedRecursiveWorkspaceLayout,
   preserveRejectedWorkspaceLayout,
   WORKSPACE_LAYOUT_VERSION,
   resolveWorkspaceLayoutTargets,
@@ -281,8 +282,17 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       warnRecovery("load-error", LAYOUT_LOAD_ERROR_WARNING);
       return;
     }
-    if (loadedLayout.status !== "corrupt" || loadedLayout.rejectedRaw === undefined) return;
-    preserveRejectedWorkspaceLayout(localStorage, windowLabel, loadedLayout.rejectedRaw);
+    if (
+      loadedLayout.status !== "corrupt" ||
+      loadedLayout.rejectedRaw === undefined ||
+      loadedLayout.rejectedSource === undefined
+    )
+      return;
+    const preserveRejected =
+      loadedLayout.rejectedSource === "recursive"
+        ? preserveRejectedRecursiveWorkspaceLayout
+        : preserveRejectedWorkspaceLayout;
+    preserveRejected(localStorage, windowLabel, loadedLayout.rejectedRaw);
     warnRecovery(`malformed:${loadedLayout.rejectedRaw}`, MALFORMED_LAYOUT_WARNING);
   }, [loadedLayout, warnRecovery]);
 
@@ -303,23 +313,25 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     )
       .then((resolved) => {
         if (cancelled) return;
-        const terminalOwner = resolved.terminal.open ? resolved.terminal.ownerPaneId : null;
-        const terminalOwnerMissing = Boolean(terminalOwner && !resolved.panes[terminalOwner]);
-        setPaneTargets(resolved.panes);
-        setTerminalIntent(
-          terminalOwnerMissing
-            ? { ...resolved.terminal, open: false, ownerPaneId: null }
-            : resolved.terminal,
+        const savedTerminalOwner = loadedLayout.layout.terminal.open
+          ? loadedLayout.layout.terminal.ownerPaneId
+          : null;
+        const terminalOwnerMissing = Boolean(
+          savedTerminalOwner && !resolved.panes[savedTerminalOwner],
         );
+        setPaneTargets(resolved.panes);
+        setTerminalIntent(resolved.terminal);
         if (terminalOwnerMissing) {
           warnRecovery(
-            `missing-terminal-owner:${terminalOwner}:${JSON.stringify(loadedLayout.layout.panes[terminalOwner!])}`,
+            `missing-terminal-owner:${savedTerminalOwner}:${JSON.stringify(
+              loadedLayout.layout.panes[savedTerminalOwner!],
+            )}`,
             MISSING_TERMINAL_OWNER_WARNING,
           );
         }
         const staleNonTerminalTarget = PANE_IDS.some(
           (paneId) =>
-            paneId !== terminalOwner &&
+            paneId !== savedTerminalOwner &&
             JSON.stringify(resolved.panes[paneId]) !==
               JSON.stringify(loadedLayout.layout.panes[paneId]),
         );

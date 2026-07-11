@@ -89,6 +89,13 @@ jobs:
           pnpm --filter @kenkaiiii/gg-core build
           pnpm --filter @kenkaiiii/ggcoder build
 
+      - name: Verify gg-app
+        run: |
+          pnpm --filter gg-app check
+          pnpm --filter gg-app lint
+          pnpm --filter gg-app format:check
+          pnpm --filter gg-app test
+
       - name: Stage node runtime + bundle sidecar
         run: |
           pnpm --filter gg-app stage:node

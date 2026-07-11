@@ -1,13 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  allocateWorkspacePaneId,
   defaultWorkspaceLayout,
+  isValidWorkspacePaneId,
   loadWorkspaceLayout,
   parseWorkspaceLayout,
   preserveRejectedRecursiveWorkspaceLayout,
   recursiveWorkspaceLayoutKey,
   rejectedRecursiveWorkspaceLayoutKey,
+  removeWorkspacePane,
   resolveWorkspaceLayoutTargets,
   saveWorkspaceLayout,
+  splitWorkspacePane,
+  updateWorkspaceSplitRatio,
   workspaceLayoutKey,
   workspaceLayoutLeafIds,
   type WorkspaceLayout,
@@ -49,56 +54,111 @@ describe("recursive workspace layout", () => {
     expect(workspaceLayoutLeafIds(value.root)).toEqual(["primary", "secondary"]);
   });
 
-  it("round-trips nested horizontal and vertical trees with stable IDs", () => {
+  it("round-trips nested primary, secondary, and generated panes with stable IDs", () => {
     const root = split(
-      leaf("alpha"),
-      split(leaf("beta"), leaf("gamma"), "vertical", 72),
+      leaf("primary"),
+      split(leaf("secondary"), leaf("pane-3"), "vertical", 72),
       "horizontal",
       33,
     );
     const raw = JSON.stringify({
       version: 6,
       root,
-      focusedPaneId: "gamma",
-      panes: { alpha: target("/a"), beta: null, gamma: target("/c") },
-      terminal: { open: true, ownerPaneId: "gamma", dockHeightPx: 400 },
+      focusedPaneId: "pane-3",
+      panes: { primary: target("/a"), secondary: null, "pane-3": target("/c") },
+      terminal: { open: true, ownerPaneId: "pane-3", dockHeightPx: 400 },
       extra: true,
     });
     const parsed = parseWorkspaceLayout(raw);
     expect(parsed.status).toBe("valid");
     expect(parsed.layout.root).toEqual(root);
-    expect(parsed.layout.focusedPaneId).toBe("gamma");
+    expect(parsed.layout.focusedPaneId).toBe("pane-3");
     expect(parsed.layout.terminal.open).toBe(true);
+  });
+
+  it.each(["pane 3", "pane.3", "päne-3", "x".repeat(65)])(
+    "rejects Rust-invalid leaf pane ID %j",
+    (paneId) => {
+      expect(isValidWorkspacePaneId(paneId)).toBe(false);
+      expect(
+        parseWorkspaceLayout(
+          JSON.stringify({
+            version: 6,
+            root: split(leaf("primary"), leaf(paneId)),
+            focusedPaneId: "primary",
+            panes: { primary: null, [paneId]: null },
+            terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
+          }),
+        ).status,
+      ).toBe("corrupt");
+    },
+  );
+
+  it.each(["extra pane", "extra!", "额外", "x".repeat(65)])(
+    "rejects Rust-invalid extra descriptor key %j",
+    (paneId) => {
+      expect(
+        parseWorkspaceLayout(
+          JSON.stringify({
+            version: 6,
+            root: leaf("primary"),
+            focusedPaneId: "primary",
+            panes: { primary: null, [paneId]: null },
+            terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
+          }),
+        ).status,
+      ).toBe("corrupt");
+    },
+  );
+
+  it("accepts native-compatible pane IDs through the 64-byte ASCII boundary", () => {
+    expect(isValidWorkspacePaneId("primary")).toBe(true);
+    expect(isValidWorkspacePaneId("pane-3_A")).toBe(true);
+    expect(isValidWorkspacePaneId("x".repeat(64))).toBe(true);
   });
 
   it("clamps every ratio and deterministically recovers stale focus", () => {
     const record = {
       version: 6,
-      root: split(leaf("a"), split(leaf("b"), leaf("c"), "vertical", -5), "horizontal", 999),
+      root: split(
+        leaf("primary"),
+        split(leaf("secondary"), leaf("pane-3"), "vertical", -5),
+        "horizontal",
+        999,
+      ),
       focusedPaneId: "gone",
-      panes: { a: null, b: null, c: null },
+      panes: { primary: null, secondary: null, "pane-3": null },
       terminal: { open: false, ownerPaneId: null, dockHeightPx: 80 },
     };
     const parsed = parseWorkspaceLayout(JSON.stringify(record));
     expect(parsed.layout.root).toEqual(
-      split(leaf("a"), split(leaf("b"), leaf("c"), "vertical", 10), "horizontal", 90),
+      split(
+        leaf("primary"),
+        split(leaf("secondary"), leaf("pane-3"), "vertical", 10),
+        "horizontal",
+        90,
+      ),
     );
-    expect(parsed.layout.focusedPaneId).toBe("a");
+    expect(parsed.layout.focusedPaneId).toBe("primary");
     expect(parsed.layout.terminal.dockHeightPx).toBe(140);
   });
 
   it.each([
     [
       "bad direction",
-      split(leaf("a"), leaf("b"), "horizontal") as unknown as Record<string, unknown>,
+      split(leaf("primary"), leaf("secondary"), "horizontal") as unknown as Record<string, unknown>,
       (node: Record<string, unknown>) => {
         node.direction = "diagonal";
       },
     ],
-    ["duplicate leaf", split(leaf("a"), leaf("a")) as unknown as Record<string, unknown>, () => {}],
+    [
+      "duplicate leaf",
+      split(leaf("primary"), leaf("primary")) as unknown as Record<string, unknown>,
+      () => {},
+    ],
     [
       "malformed child",
-      split(leaf("a"), leaf("b")) as unknown as Record<string, unknown>,
+      split(leaf("primary"), leaf("secondary")) as unknown as Record<string, unknown>,
       (node: Record<string, unknown>) => {
         node.second = null;
       },
@@ -110,8 +170,8 @@ describe("recursive workspace layout", () => {
         JSON.stringify({
           version: 6,
           root,
-          focusedPaneId: "a",
-          panes: { a: null, b: null },
+          focusedPaneId: "primary",
+          panes: { primary: null, secondary: null },
           terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
         }),
       ).status,
@@ -122,50 +182,85 @@ describe("recursive workspace layout", () => {
     const terminal = { open: false, ownerPaneId: null, dockHeightPx: 260 };
     expect(
       parseWorkspaceLayout(
-        JSON.stringify({ version: 6, root: leaf("a"), focusedPaneId: "a", panes: {}, terminal }),
+        JSON.stringify({
+          version: 6,
+          root: leaf("primary"),
+          focusedPaneId: "primary",
+          panes: {},
+          terminal,
+        }),
       ).status,
     ).toBe("corrupt");
     expect(
       parseWorkspaceLayout(
         JSON.stringify({
           version: 6,
-          root: leaf("a"),
-          focusedPaneId: "a",
-          panes: { a: null, b: null, c: null, d: null, e: null },
+          root: leaf("primary"),
+          focusedPaneId: "primary",
+          panes: { primary: null, a: null, b: null, c: null, d: null },
           terminal,
         }),
       ).status,
     ).toBe("corrupt");
-    const five = split(split(leaf("a"), leaf("b")), split(leaf("c"), split(leaf("d"), leaf("e"))));
+    const five = split(
+      split(leaf("primary"), leaf("a")),
+      split(leaf("b"), split(leaf("c"), leaf("d"))),
+    );
     expect(
       parseWorkspaceLayout(
         JSON.stringify({
           version: 6,
           root: five,
-          focusedPaneId: "a",
-          panes: { a: null, b: null, c: null, d: null, e: null },
+          focusedPaneId: "primary",
+          panes: { primary: null, a: null, b: null, c: null, d: null },
           terminal,
         }),
       ).status,
     ).toBe("corrupt");
-    const deep = split(leaf("a"), split(leaf("b"), split(leaf("c"), split(leaf("d"), leaf("e")))));
+    const deep = split(
+      leaf("primary"),
+      split(leaf("a"), split(leaf("b"), split(leaf("c"), leaf("d")))),
+    );
     expect(
       parseWorkspaceLayout(
         JSON.stringify({
           version: 6,
           root: deep,
-          focusedPaneId: "a",
-          panes: { a: null, b: null, c: null, d: null, e: null },
+          focusedPaneId: "primary",
+          panes: { primary: null, a: null, b: null, c: null, d: null },
           terminal,
         }),
       ).status,
     ).toBe("corrupt");
   });
 
+  it("rejects a four-leaf tree without the canonical primary pane", () => {
+    const root = split(split(leaf("a"), leaf("b")), split(leaf("c"), leaf("d")));
+    expect(
+      parseWorkspaceLayout(
+        JSON.stringify({
+          version: 6,
+          root,
+          focusedPaneId: "a",
+          panes: { a: null, b: null, c: null, d: null },
+          terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
+        }),
+      ).status,
+    ).toBe("corrupt");
+  });
+
   it("closes stale or targetless terminal owners and rejects terminal runtime fields", () => {
-    const base = { version: 6, root: leaf("a"), focusedPaneId: "a", panes: { a: null } };
+    const base = {
+      version: 6,
+      root: leaf("primary"),
+      focusedPaneId: "primary",
+      panes: { primary: null },
+    };
     const parsed = parseWorkspaceLayout(
-      JSON.stringify({ ...base, terminal: { open: true, ownerPaneId: "a", dockHeightPx: 300 } }),
+      JSON.stringify({
+        ...base,
+        terminal: { open: true, ownerPaneId: "primary", dockHeightPx: 300 },
+      }),
     );
     expect(parsed.layout.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 300 });
     expect(
@@ -176,6 +271,57 @@ describe("recursive workspace layout", () => {
         }),
       ).status,
     ).toBe("corrupt");
+  });
+});
+
+describe("pure workspace layout operations", () => {
+  it("allocates deterministic IDs, splits leaves, and enforces the four-leaf cap", () => {
+    const base = canonical({ panes: { primary: null, secondary: null, "pane-3": target("/old") } });
+    expect(allocateWorkspacePaneId(base)).toBe("pane-4");
+    const three = splitWorkspacePane(base, "secondary", "vertical");
+    expect(workspaceLayoutLeafIds(three.root)).toEqual(["primary", "secondary", "pane-4"]);
+    expect(three.focusedPaneId).toBe("pane-4");
+    expect(three.panes["pane-4"]).toBeNull();
+    const four = splitWorkspacePane(three, "pane-4", "horizontal");
+    expect(workspaceLayoutLeafIds(four.root)).toHaveLength(4);
+    expect(allocateWorkspacePaneId(four)).toBeNull();
+    expect(splitWorkspacePane(four, "primary", "vertical")).toBe(four);
+  });
+
+  it("updates the split at a stable path without touching other ratios", () => {
+    const value = canonical({
+      root: split(
+        leaf("primary"),
+        split(leaf("secondary"), leaf("third"), "vertical", 70),
+        "horizontal",
+        30,
+      ),
+      panes: { primary: null, secondary: null, third: null },
+    });
+    const updated = updateWorkspaceSplitRatio(value, ["second"], 95);
+    expect(updated.root).toEqual(
+      split(
+        leaf("primary"),
+        split(leaf("secondary"), leaf("third"), "vertical", 90),
+        "horizontal",
+        30,
+      ),
+    );
+    expect(updateWorkspaceSplitRatio(value, ["first"], 40)).toBe(value);
+  });
+
+  it("removes and collapses with a deterministic adjacent focus survivor", () => {
+    const value = canonical({
+      root: split(split(leaf("a"), leaf("b"), "vertical"), split(leaf("c"), leaf("d"), "vertical")),
+      focusedPaneId: "c",
+      panes: { a: null, b: null, c: null, d: null },
+      terminal: { open: true, ownerPaneId: "c", dockHeightPx: 300 },
+    });
+    const removed = removeWorkspacePane(value, "c");
+    expect(removed.root).toEqual(split(split(leaf("a"), leaf("b"), "vertical"), leaf("d")));
+    expect(removed.focusedPaneId).toBe("d");
+    expect(removed.panes).not.toHaveProperty("c");
+    expect(removed.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 300 });
   });
 });
 
@@ -290,6 +436,20 @@ describe("migration and storage", () => {
     expect(saveWorkspaceLayout(storage, "main", nested)).toBe(true);
     expect(values.get(workspaceLayoutKey("main"))).toBe("last-safe-v5");
     expect(values.has(recursiveWorkspaceLayoutKey("main"))).toBe(true);
+  });
+
+  it("projects a one-primary v6 layout to v5 with secondary:null", () => {
+    const { values, storage } = store();
+    const one = canonical({
+      root: leaf("primary"),
+      focusedPaneId: "primary",
+      panes: { primary: target("/a") },
+      secondaryOpen: false,
+    });
+    expect(saveWorkspaceLayout(storage, "main", one)).toBe(true);
+    const rollback = JSON.parse(values.get(workspaceLayoutKey("main"))!);
+    expect(rollback.secondaryOpen).toBe(false);
+    expect(rollback.panes).toEqual({ primary: target("/a"), secondary: null });
   });
 
   it("returns false when either required fixed-layout write fails", () => {

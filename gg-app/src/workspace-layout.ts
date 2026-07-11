@@ -1,3 +1,5 @@
+import { PRIMARY_PANE_ID } from "./pane-routing";
+
 export const WORKSPACE_LAYOUT_VERSION = 6;
 export const DEFAULT_SPLIT_RATIO = 50;
 export const MIN_SPLIT_RATIO = 10;
@@ -7,6 +9,7 @@ export const MIN_TERMINAL_DOCK_HEIGHT_PX = 140;
 export const MAX_TERMINAL_DOCK_HEIGHT_PX = 2_000;
 export const MAX_WORKSPACE_PANES = 4;
 export const MAX_WORKSPACE_LAYOUT_DEPTH = 4;
+const MAX_WORKSPACE_PANE_ID_BYTES = 64;
 
 export type WorkspacePaneId = string;
 export type SplitDirection = "horizontal" | "vertical";
@@ -84,6 +87,15 @@ interface FixedLayout {
   terminalDockHeightRecovery?: { rejected: unknown; resolved: number };
 }
 
+export function isValidWorkspacePaneId(value: unknown): value is WorkspacePaneId {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= MAX_WORKSPACE_PANE_ID_BYTES &&
+    /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
 export function workspaceLayoutKey(windowLabel: string): string {
   return `gg-workspace-layout:${windowLabel}`;
 }
@@ -120,6 +132,120 @@ export function workspaceLayoutLeafIds(root: WorkspaceLayoutNode): WorkspacePane
   return root.type === "leaf"
     ? [root.paneId]
     : [...workspaceLayoutLeafIds(root.first), ...workspaceLayoutLeafIds(root.second)];
+}
+
+export type WorkspaceLayoutPath = readonly ("first" | "second")[];
+
+/** Allocates one greater than the highest generated pane ordinal retained by this layout. */
+export function allocateWorkspacePaneId(layout: WorkspaceLayout): WorkspacePaneId | null {
+  if (workspaceLayoutLeafIds(layout.root).length >= MAX_WORKSPACE_PANES) return null;
+  let highestOrdinal = 0;
+  for (const paneId of [...workspaceLayoutLeafIds(layout.root), ...Object.keys(layout.panes)]) {
+    const match = /^pane-(\d+)$/.exec(paneId);
+    if (match) highestOrdinal = Math.max(highestOrdinal, Number(match[1]));
+  }
+  return `pane-${highestOrdinal + 1}`;
+}
+
+function updateNodeAtPath(
+  node: WorkspaceLayoutNode,
+  path: WorkspaceLayoutPath,
+  update: (node: WorkspaceLayoutNode) => WorkspaceLayoutNode | null,
+  depth = 0,
+): WorkspaceLayoutNode | null {
+  if (depth === path.length) return update(node);
+  if (node.type !== "split") return null;
+  const side = path[depth];
+  const child = updateNodeAtPath(node[side], path, update, depth + 1);
+  return child ? { ...node, [side]: child } : null;
+}
+
+/** Splits a visible leaf, preserving the existing leaf as the first child. */
+export function splitWorkspacePane(
+  layout: WorkspaceLayout,
+  paneId: WorkspacePaneId,
+  direction: SplitDirection,
+): WorkspaceLayout {
+  const newPaneId = allocateWorkspacePaneId(layout);
+  if (!newPaneId) return layout;
+  let changed = false;
+  const splitLeaf = (node: WorkspaceLayoutNode): WorkspaceLayoutNode => {
+    if (node.type === "leaf") {
+      if (node.paneId !== paneId) return node;
+      changed = true;
+      return {
+        type: "split",
+        direction,
+        ratio: DEFAULT_SPLIT_RATIO,
+        first: node,
+        second: { type: "leaf", paneId: newPaneId },
+      };
+    }
+    return { ...node, first: splitLeaf(node.first), second: splitLeaf(node.second) };
+  };
+  const root = splitLeaf(layout.root);
+  return changed
+    ? normalizeLayout({
+        ...layout,
+        root,
+        focusedPaneId: newPaneId,
+        panes: { ...layout.panes, [newPaneId]: null },
+      })
+    : layout;
+}
+
+/** Updates only the split at the supplied stable tree path. */
+export function updateWorkspaceSplitRatio(
+  layout: WorkspaceLayout,
+  path: WorkspaceLayoutPath,
+  ratio: number,
+): WorkspaceLayout {
+  let changed = false;
+  const root = updateNodeAtPath(layout.root, path, (node) => {
+    if (node.type !== "split") return node;
+    changed = true;
+    return { ...node, ratio: clampStoredSplitRatio(ratio) };
+  });
+  return changed && root ? normalizeLayout({ ...layout, root }) : layout;
+}
+
+/** Removes a leaf and collapses its parent; focus moves to the nearest sibling leaf. */
+export function removeWorkspacePane(
+  layout: WorkspaceLayout,
+  paneId: WorkspacePaneId,
+): WorkspaceLayout {
+  if (workspaceLayoutLeafIds(layout.root).length === 1) return layout;
+  let removed = false;
+  let survivor: WorkspacePaneId | null = null;
+  const remove = (node: WorkspaceLayoutNode): WorkspaceLayoutNode | null => {
+    if (node.type === "leaf") {
+      if (node.paneId !== paneId) return node;
+      removed = true;
+      return null;
+    }
+    const first = remove(node.first);
+    if (!first) {
+      survivor = workspaceLayoutLeafIds(node.second)[0];
+      return node.second;
+    }
+    const second = remove(node.second);
+    if (!second) {
+      const firstLeafIds = workspaceLayoutLeafIds(node.first);
+      survivor = firstLeafIds[firstLeafIds.length - 1];
+      return node.first;
+    }
+    return { ...node, first, second };
+  };
+  const root = remove(layout.root);
+  if (!removed || !root) return layout;
+  const panes = { ...layout.panes };
+  delete panes[paneId];
+  return normalizeLayout({
+    ...layout,
+    root,
+    focusedPaneId: layout.focusedPaneId === paneId ? survivor! : layout.focusedPaneId,
+    panes,
+  });
 }
 
 function compatibility(root: WorkspaceLayoutNode): { splitRatio: number; secondaryOpen: boolean } {
@@ -179,8 +305,7 @@ function parseNode(value: unknown, depth: number, ids: Set<string>): WorkspaceLa
     return null;
   const record = value as Record<string, unknown>;
   if (record.type === "leaf") {
-    if (typeof record.paneId !== "string" || !record.paneId.trim() || ids.has(record.paneId))
-      return null;
+    if (!isValidWorkspacePaneId(record.paneId) || ids.has(record.paneId)) return null;
     ids.add(record.paneId);
     if (ids.size > MAX_WORKSPACE_PANES) return null;
     return { type: "leaf", paneId: record.paneId };
@@ -323,12 +448,18 @@ function parseFixed(record: Record<string, unknown>): FixedLayout | null {
 function parseV6(record: Record<string, unknown>): WorkspaceLayoutLoadResult | null {
   const ids = new Set<string>();
   const root = parseNode(record.root, 1, ids);
-  if (!root || typeof record.panes !== "object" || record.panes === null) return null;
+  if (
+    !root ||
+    !ids.has(PRIMARY_PANE_ID) ||
+    typeof record.panes !== "object" ||
+    record.panes === null
+  )
+    return null;
   const rawPanes = record.panes as Record<string, unknown>;
   const keys = Object.keys(rawPanes);
   if (
     keys.length > MAX_WORKSPACE_PANES ||
-    keys.some((key) => !key.trim()) ||
+    keys.some((key) => !isValidWorkspacePaneId(key)) ||
     [...ids].some((id) => !(id in rawPanes))
   )
     return null;
@@ -490,7 +621,7 @@ function rollbackProjection(layout: WorkspaceLayout): Record<string, unknown> | 
       layout.root.first.paneId === "primary" &&
       layout.root.second.type === "leaf" &&
       layout.root.second.paneId === "secondary");
-  if (!fixed || !("primary" in layout.panes) || !("secondary" in layout.panes)) return null;
+  if (!fixed || !("primary" in layout.panes)) return null;
   const owner =
     layout.terminal.open &&
     (layout.terminal.ownerPaneId === "primary" || layout.terminal.ownerPaneId === "secondary")
@@ -502,7 +633,7 @@ function rollbackProjection(layout: WorkspaceLayout): Record<string, unknown> | 
     secondaryOpen: layout.secondaryOpen,
     focusedPaneId:
       layout.focusedPaneId === "secondary" && layout.secondaryOpen ? "secondary" : "primary",
-    panes: { primary: layout.panes.primary, secondary: layout.panes.secondary },
+    panes: { primary: layout.panes.primary, secondary: layout.panes.secondary ?? null },
     terminal: {
       open: owner !== null,
       ownerPaneId: owner,

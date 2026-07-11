@@ -20,6 +20,8 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 
+mod terminal;
+
 /// The single shared Node daemon process. Every window's `AgentSession` lives
 /// inside this one process as an in-process object, addressed by a session id
 /// (see `Windows`). Replaces the old one-sidecar-process-per-window model: one
@@ -107,6 +109,16 @@ fn resolve_owned_pane<'a>(
     pane_id: &str,
 ) -> Option<&'a PaneSession> {
     registry.get(owner_label)?.get(pane_id)
+}
+
+fn owned_pane_cwd(windows: &Windows, owner_label: &str, pane_id: &str) -> Result<PathBuf, String> {
+    let registry = windows
+        .map
+        .lock()
+        .map_err(|_| "pane registry lock poisoned")?;
+    resolve_owned_pane(&registry, owner_label, pane_id)
+        .and_then(|pane| pane.cwd.clone())
+        .ok_or_else(|| "terminal pane is not ready or belongs to another window".into())
 }
 
 fn record_pane_target(
@@ -3398,6 +3410,11 @@ fn agent_pane_dispose(
         let mut map = windows.map.lock().unwrap();
         dispose_pane_target(&mut map, webview.label(), &pane_id, false)?
     };
+    terminal::close_for_pane(
+        &app.state::<terminal::TerminalRegistry>(),
+        webview.label(),
+        &pane_id,
+    );
     if let (Some(port), Some(id)) = (port_for(&webview), pane.session_id) {
         tauri::async_runtime::spawn(async move {
             daemon_delete_session(&app, port, &id).await;
@@ -4350,6 +4367,7 @@ pub fn run() {
         )
         .manage(Daemon::default())
         .manage(Windows::default())
+        .manage(terminal::TerminalRegistry::default())
         .manage(RestoreTargets::default())
         .manage(AppExiting::default())
         .manage(FocusedWindow::default())
@@ -4360,6 +4378,10 @@ pub fn run() {
             sidecar_port,
             agent_pane_status,
             workspace_target_status,
+            terminal::terminal_create,
+            terminal::terminal_input,
+            terminal::terminal_resize,
+            terminal::terminal_close,
             agent_pane_create,
             agent_pane_dispose,
             dropped_path_info,
@@ -4456,6 +4478,10 @@ pub fn run() {
                 if !exiting {
                     remove_window_from_workspace(app, window.label());
                 }
+                terminal::close_for_window(
+                    &app.state::<terminal::TerminalRegistry>(),
+                    window.label(),
+                );
                 // Dispose only THIS window's session in the shared daemon so
                 // other projects keep running. The daemon process itself is
                 // never killed here (that happens only on app exit).
@@ -4526,6 +4552,7 @@ pub fn run() {
                 app.state::<AppExiting>().0.store(true, Ordering::SeqCst);
                 refresh_live_sessions(app);
                 snapshot_workspace(app);
+                terminal::close_all(&app.state::<terminal::TerminalRegistry>());
                 // Terminate the daemon's process group once — reaps every
                 // session's MCP/LSP children in one shot (no orphans).
                 let child = app.state::<Daemon>().child.lock().unwrap().take();

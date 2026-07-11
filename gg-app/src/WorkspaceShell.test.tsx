@@ -8,6 +8,10 @@ import type * as WorkspaceLayout from "./workspace-layout";
 import { WorkspaceShell } from "./WorkspaceShell";
 
 const workspaceLayoutMock = vi.hoisted(() => ({ rejectResolution: false }));
+const terminalMock = vi.hoisted(() => ({
+  mounts: vi.fn(),
+  unmounts: vi.fn(),
+}));
 
 const bridge = vi.hoisted(() => ({
   arrangeAllWindows: vi.fn(() => Promise.resolve()),
@@ -67,6 +71,35 @@ vi.mock("./ProjectNotes", () => ({
 }));
 vi.mock("./Confetti", () => ({ Confetti: () => null }));
 vi.mock("./Toaster", () => ({ Toaster: () => null }));
+vi.mock("./TerminalPane", async () => {
+  const { useEffect } = await import("react");
+  return {
+    TerminalPane: ({
+      paneId,
+      onRequestClose,
+      onRunningChange,
+    }: {
+      paneId: string;
+      onRequestClose(running: boolean): void;
+      onRunningChange?(running: boolean): void;
+    }) => {
+      useEffect(() => {
+        terminalMock.mounts(paneId);
+        onRunningChange?.(true);
+        return () => {
+          terminalMock.unmounts(paneId);
+          onRunningChange?.(false);
+        };
+      }, [onRunningChange, paneId]);
+      return (
+        <div className="terminal-pane" data-testid={`terminal-${paneId}`}>
+          <input aria-label={`${paneId} terminal input`} />
+          <button onClick={() => onRequestClose(true)}>Mock terminal close</button>
+        </div>
+      );
+    },
+  };
+});
 
 function FakePane({
   paneId,
@@ -270,6 +303,93 @@ describe("WorkspaceShell pane routing", () => {
     expect(bridge.focusWindowByOffset).toHaveBeenNthCalledWith(2, -1);
     expect(bridge.focusWindowByOffset).toHaveBeenCalledTimes(2);
     expect(bridge.arrangeAllWindows).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("WorkspaceShell terminal dock", () => {
+  it("opens in the focused pane, pins its owner, and does not remount agent panes", async () => {
+    const paneMounts = vi.fn();
+    function CountingPane(props: AgentPaneProps): React.ReactElement {
+      useEffect(() => paneMounts(props.paneId), [props.paneId]);
+      return <FakePane {...props} />;
+    }
+    render(<WorkspaceShell renderPane={(props) => <CountingPane {...props} />} />);
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+    fireEvent.click(open);
+    expect(screen.getByTestId("terminal-secondary")).toBeTruthy();
+    expect(open.hasAttribute("disabled")).toBe(true);
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "primary input" }));
+    expect(screen.getByTestId("terminal-secondary")).toBeTruthy();
+    expect(screen.queryByTestId("terminal-primary")).toBeNull();
+    expect(paneMounts).toHaveBeenCalledTimes(2);
+  });
+
+  it("confirms a running close and never restores a terminal from layout storage", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 3,
+        splitRatio: 50,
+        secondaryOpen: true,
+        focusedPaneId: "primary",
+        panes: { primary: { cwd: "/saved/a", sessionPath: null }, secondary: null },
+      }),
+    );
+    render(<WorkspaceShell renderPane={renderPane} />);
+    expect(screen.queryByTestId("terminal-primary")).toBeNull();
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(open);
+    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
+    expect(
+      screen.getByText(
+        "A shell is still running. Closing the terminal will stop it and its child processes.",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByTestId("terminal-primary")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close Terminal" }));
+    await waitFor(() => expect(screen.queryByTestId("terminal-primary")).toBeNull());
+  });
+
+  it("isolates terminal shortcuts while reserving pane and window navigation", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(open);
+    const input = screen.getByRole("textbox", { name: "primary terminal input" });
+
+    fireEvent.keyDown(input, { key: "n", ctrlKey: true });
+    fireEvent.keyDown(input, { key: "a", ctrlKey: true, shiftKey: true });
+    expect(bridge.newWindow).not.toHaveBeenCalled();
+    expect(bridge.arrangeAllWindows).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "2", ctrlKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "secondary input" }));
+    fireEvent.keyDown(input, { key: "`", code: "Backquote", ctrlKey: true });
+    expect(bridge.focusWindowByOffset).toHaveBeenCalledWith(1);
+  });
+
+  it("treats a secondary terminal as active when closing its pane", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(open);
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+    expect(
+      screen.getByText(
+        "Work is active in the secondary pane. Closing it will stop that session. Close anyway?",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
+    await waitFor(() => expect(screen.queryByTestId("terminal-secondary")).toBeNull());
+    expect(screen.queryByTestId("pane-secondary")).toBeNull();
   });
 });
 

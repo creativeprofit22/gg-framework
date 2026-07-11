@@ -3,7 +3,7 @@
 // sidecar's plain-HTTP endpoints directly (mixed-content). Rust proxies for us:
 //   - invoke("agent_state" | "agent_prompt" | "agent_cancel")
 //   - listen("agent-event")  ← forwarded SSE frames
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { PRIMARY_PANE_ID, createPaneEventFanout } from "./pane-routing";
@@ -29,6 +29,90 @@ export const windowLabel = appWindow.label;
 
 /** True for secondary windows opened via the Windows button (not the main one). */
 export const isSecondaryWindow = appWindow.label !== "main";
+
+export interface TerminalInfo {
+  terminalId: string;
+  paneId: string;
+  cwd: string;
+  shell: string;
+  cols: number;
+  rows: number;
+}
+
+export type TerminalEvent =
+  | ArrayBuffer
+  | { type: "exit"; terminalId: string; paneId: string; exitCode: number | null }
+  | { type: "error"; terminalId: string; paneId: string; message: string };
+
+export interface TerminalClient {
+  readonly ready: Promise<TerminalInfo>;
+  input(data: Uint8Array): Promise<void>;
+  resize(cols: number, rows: number): Promise<void>;
+  close(): Promise<void>;
+}
+
+export function terminalInput(paneId: string, terminalId: string, data: Uint8Array): Promise<void> {
+  return invoke("terminal_input", data, {
+    headers: {
+      "Tauri-Terminal-Pane-Id": paneId,
+      "Tauri-Terminal-Id": terminalId,
+    },
+  });
+}
+
+export function terminalResize(
+  paneId: string,
+  terminalId: string,
+  cols: number,
+  rows: number,
+): Promise<void> {
+  return invoke("terminal_resize", { paneId, terminalId, cols, rows });
+}
+
+export function terminalClose(paneId: string, terminalId: string): Promise<void> {
+  return invoke("terminal_close", { paneId, terminalId });
+}
+
+/**
+ * Starts one PTY and keeps close authoritative even when React unmounts while
+ * Rust is still spawning it.
+ */
+export function createTerminal(
+  paneId: string,
+  cols: number,
+  rows: number,
+  onEvent: (event: TerminalEvent) => void,
+): TerminalClient {
+  const channel = new Channel<TerminalEvent>();
+  channel.onmessage = onEvent;
+  let closeRequested = false;
+  let closePromise: Promise<void> | undefined;
+  const ready = invoke<TerminalInfo>("terminal_create", {
+    paneId,
+    cols,
+    rows,
+    onEvent: channel,
+  });
+
+  const close = (): Promise<void> => {
+    closeRequested = true;
+    closePromise ??= ready.then((info) => terminalClose(info.paneId, info.terminalId));
+    return closePromise;
+  };
+
+  return {
+    ready,
+    async input(data) {
+      const info = await ready;
+      if (!closeRequested) await terminalInput(info.paneId, info.terminalId, data);
+    },
+    async resize(nextCols, nextRows) {
+      const info = await ready;
+      if (!closeRequested) await terminalResize(info.paneId, info.terminalId, nextCols, nextRows);
+    },
+    close,
+  };
+}
 
 /** Set the native (macOS overlay) window title bar text for THIS window. */
 export function setWindowTitle(title: string): void {

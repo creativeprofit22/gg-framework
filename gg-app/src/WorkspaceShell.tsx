@@ -26,6 +26,7 @@ import { playSound } from "./sounds";
 import { theme } from "./theme";
 import { toast } from "./toast";
 import { Toaster } from "./Toaster";
+import { TerminalPane } from "./TerminalPane";
 import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
 import {
@@ -42,6 +43,11 @@ const PANE_IDS = [PRIMARY_PANE_ID, SECONDARY_PANE_ID] as const;
 const DIVIDER_WIDTH_PX = 9;
 const MIN_PANE_WIDTH_PX = 280;
 const KEYBOARD_RESIZE_STEP_PX = 24;
+
+interface TerminalDock {
+  ownerPaneId: WorkspacePaneId;
+  cwd: string;
+}
 
 function ratioBounds(containerWidth: number): { min: number; max: number } {
   const availableWidth = Math.max(0, containerWidth - DIVIDER_WIDTH_PX);
@@ -96,6 +102,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const focusedPaneIdRef = useRef(focusedPaneId);
   const [windowFocused, setWindowFocused] = useState(true);
   const [snapshots, setSnapshots] = useState<Record<string, PaneSnapshot>>({});
+  const [terminalDock, setTerminalDock] = useState<TerminalDock | null>(null);
+  const [terminalRunning, setTerminalRunning] = useState(false);
+  const [confirmTerminalClose, setConfirmTerminalClose] = useState(false);
   const inputActionsRef = useRef(new Map<string, PaneInputActions>());
   const [windowIndex, setWindowIndex] = useState<number | null>(null);
   const [windowTotal, setWindowTotal] = useState(1);
@@ -144,6 +153,33 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     if (actions) inputActionsRef.current.set(paneId, actions);
     else inputActionsRef.current.delete(paneId);
   }, []);
+
+  const closeTerminal = useCallback((): void => {
+    setConfirmTerminalClose(false);
+    setTerminalRunning(false);
+    setTerminalDock(null);
+  }, []);
+
+  const requestTerminalClose = useCallback(
+    (running: boolean): void => {
+      if (running) setConfirmTerminalClose(true);
+      else closeTerminal();
+    },
+    [closeTerminal],
+  );
+
+  const openTerminal = useCallback((): void => {
+    const snapshot = snapshots[focusedPaneId];
+    if (!snapshot?.projectBound || !snapshot.cwd || terminalDock) return;
+    setTerminalRunning(true);
+    setTerminalDock({ ownerPaneId: focusedPaneId, cwd: snapshot.cwd });
+  }, [focusedPaneId, snapshots, terminalDock]);
+
+  useEffect(() => {
+    if (!terminalDock) return;
+    const owner = snapshots[terminalDock.ownerPaneId];
+    if (!owner?.projectBound || owner.cwd !== terminalDock.cwd) closeTerminal();
+  }, [closeTerminal, snapshots, terminalDock]);
 
   useEffect(() => {
     if (loadedLayout.status === "corrupt" && loadedLayout.rejectedRaw !== undefined) {
@@ -212,6 +248,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     const onKey = (event: KeyboardEvent): void => {
       const meta = event.metaKey || event.ctrlKey;
       if (!meta || event.altKey) return;
+      const inTerminal =
+        event.target instanceof Element && event.target.closest(".terminal-pane") !== null;
+      const reservedTerminalChord =
+        (!event.shiftKey && (event.key === "1" || event.key === "2")) || event.code === "Backquote";
+      if (inTerminal && !reservedTerminalChord) return;
       if (!event.shiftKey && event.key === "1") {
         event.preventDefault();
         focusPane(PRIMARY_PANE_ID);
@@ -403,6 +444,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const closeSecondary = useCallback((): void => {
     stopPointerResizeRef.current();
     setConfirmSecondaryClose(false);
+    if (terminalDock?.ownerPaneId === SECONDARY_PANE_ID) {
+      setConfirmTerminalClose(false);
+      setTerminalRunning(false);
+      setTerminalDock(null);
+    }
     setRejectedLayoutChanged(true);
     setSecondaryOpen(false);
     setPaneTargets((previous) => ({ ...previous, secondary: null }));
@@ -412,15 +458,16 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     });
     focusPane(PRIMARY_PANE_ID);
     requestAnimationFrame(() => inputActionsRef.current.get(PRIMARY_PANE_ID)?.focus());
-  }, [focusPane]);
+  }, [focusPane, terminalDock]);
 
   const requestSecondaryClose = useCallback((): void => {
-    if (snapshots[SECONDARY_PANE_ID]?.activeWork) {
+    const ownsRunningTerminal = terminalRunning && terminalDock?.ownerPaneId === SECONDARY_PANE_ID;
+    if (snapshots[SECONDARY_PANE_ID]?.activeWork || ownsRunningTerminal) {
       setConfirmSecondaryClose(true);
       return;
     }
     closeSecondary();
-  }, [closeSecondary, snapshots]);
+  }, [closeSecondary, snapshots, terminalDock, terminalRunning]);
 
   const reopenSecondary = useCallback((): void => {
     setRejectedLayoutChanged(true);
@@ -437,6 +484,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   }, [focusPane]);
 
   const focusedSnapshot = snapshots[focusedPaneId];
+  const canOpenTerminal =
+    !terminalDock && Boolean(focusedSnapshot?.projectBound && focusedSnapshot.cwd);
   const visiblePaneRatio = clampRatio(primaryPaneRatio, workspaceWidth);
   return (
     <div className="workspace-shell" style={{ background: theme.background }}>
@@ -445,6 +494,16 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       <div className="workspace-toolbar" data-tauri-drag-region>
         <RankBadge snapshot={progress} onClick={() => setShowScorecard(true)} />
         <ProjectNotes cwd={focusedSnapshot?.cwd ?? null} />
+        <button
+          type="button"
+          className="workspace-terminal-open"
+          disabled={!canOpenTerminal}
+          aria-label="Open terminal in focused pane"
+          title="Runs your default shell with your user permissions"
+          onClick={openTerminal}
+        >
+          Terminal
+        </button>
         {!secondaryOpen && (
           <button
             className="workspace-secondary-open"
@@ -482,22 +541,31 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
               onPointerDownCapture={() => focusPane(paneId)}
               onFocusCapture={() => focusPane(paneId)}
             >
-              {layoutReady && (
-                <PaneContent
-                  renderPane={renderPane}
-                  paneProps={{
-                    paneId,
-                    kind: index === 0 ? "primary" : "secondary",
-                    focused: focusedPaneId === paneId,
-                    windowFocused,
-                    initialTarget: layoutManaged ? paneTargets[paneId] : undefined,
-                    onFocus: focusPane,
-                    onSnapshot: updateSnapshot,
-                    onUserTargetChange: markLayoutChanged,
-                    registerInput,
-                  }}
-                />
-              )}
+              <div className="workspace-pane-body">
+                {layoutReady && (
+                  <PaneContent
+                    renderPane={renderPane}
+                    paneProps={{
+                      paneId,
+                      kind: index === 0 ? "primary" : "secondary",
+                      focused: focusedPaneId === paneId,
+                      windowFocused,
+                      initialTarget: layoutManaged ? paneTargets[paneId] : undefined,
+                      onFocus: focusPane,
+                      onSnapshot: updateSnapshot,
+                      onUserTargetChange: markLayoutChanged,
+                      registerInput,
+                    }}
+                  />
+                )}
+                {terminalDock?.ownerPaneId === paneId && (
+                  <TerminalPane
+                    paneId={paneId}
+                    onRequestClose={requestTerminalClose}
+                    onRunningChange={setTerminalRunning}
+                  />
+                )}
+              </div>
               {paneId === SECONDARY_PANE_ID && (
                 <button
                   className="workspace-secondary-close"
@@ -566,6 +634,15 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
             )}
           </span>
         </div>
+      )}
+      {confirmTerminalClose && (
+        <ConfirmModal
+          title="Close Terminal"
+          message="A shell is still running. Closing the terminal will stop it and its child processes."
+          confirmLabel="Close Terminal"
+          onConfirm={closeTerminal}
+          onClose={() => setConfirmTerminalClose(false)}
+        />
       )}
       {confirmSecondaryClose && (
         <ConfirmModal

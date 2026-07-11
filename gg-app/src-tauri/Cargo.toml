@@ -29,6 +29,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 futures-util = "0.3"
 tokio = { version = "1", features = ["time"] }
 base64 = "0.22"
+portable-pty = "0.9.0"
+
+[dev-dependencies]
+anyhow = "1"
 
 # Updater + process (relaunch) are desktop-only — the updater plugin doesn't
 # build for mobile targets.
@@ -38,4 +42,12 @@ tauri-plugin-process = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 

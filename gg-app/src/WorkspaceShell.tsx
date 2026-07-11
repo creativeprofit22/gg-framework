@@ -5,6 +5,7 @@ import {
   focusWindowByOffset,
   newWindow,
   onWindowOrder,
+  openPaneInNewWindow,
   setWindowTitle,
   validateWorkspaceTarget,
   windowLabel,
@@ -166,6 +167,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const [windowTotal, setWindowTotal] = useState(1);
   const [showScorecard, setShowScorecard] = useState(false);
   const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
+  const [openingPaneId, setOpeningPaneId] = useState<WorkspacePaneId | null>(null);
+  const openingPaneIdRef = useRef<WorkspacePaneId | null>(null);
   const loadedDockHeight = clampStoredTerminalDockHeightPx(
     loadedLayout.layout.terminal.dockHeightPx,
   );
@@ -716,6 +719,25 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     [markLayoutChanged],
   );
 
+  const openPaneWindow = useCallback(async (paneId: WorkspacePaneId): Promise<void> => {
+    if (openingPaneIdRef.current !== null) return;
+    openingPaneIdRef.current = paneId;
+    setOpeningPaneId(paneId);
+    try {
+      await openPaneInNewWindow(paneId);
+    } catch (error) {
+      toast(
+        `Couldn't open pane in a new window: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    } finally {
+      if (openingPaneIdRef.current === paneId) {
+        openingPaneIdRef.current = null;
+        setOpeningPaneId(null);
+      }
+    }
+  }, []);
+
   const focusedSnapshot = snapshots[layout.focusedPaneId];
   const canOpenTerminal =
     !terminalDock &&
@@ -775,7 +797,15 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       </div>
       {layout.focusedPaneId === paneId && (
         <PaneSplitActions
+          canOpenInNewWindow={Boolean(
+            snapshots[paneId]?.restoreChecked &&
+            snapshots[paneId]?.projectBound &&
+            snapshots[paneId]?.cwd,
+          )}
           canSplit={canSplit}
+          openingInNewWindow={openingPaneId === paneId}
+          openInNewWindowPending={openingPaneId !== null}
+          onOpenInNewWindow={() => void openPaneWindow(paneId)}
           onSplitRight={() => splitFocusedPane("horizontal")}
           onSplitDown={() => splitFocusedPane("vertical")}
         />

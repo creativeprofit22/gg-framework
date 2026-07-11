@@ -990,6 +990,16 @@ export async function setupWindows(count: number): Promise<void> {
   }
 }
 
+/** Copy one pane's current project/session into a new native window. */
+export async function openPaneInNewWindow(paneId: string): Promise<void> {
+  try {
+    await invoke("open_pane_in_new_window", { paneId });
+  } catch (e) {
+    await logError(`open_pane_in_new_window failed: ${String(e)}`);
+    throw e;
+  }
+}
+
 /** Open the dedicated, screen-centered "What's new" window (or refocus it if it's
  *  already open). Only the main window calls this, exactly once per update — see
  *  WhatsNewTrigger. */

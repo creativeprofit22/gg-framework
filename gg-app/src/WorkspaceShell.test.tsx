@@ -21,6 +21,7 @@ const bridge = vi.hoisted(() => ({
   arrangeAllWindows: vi.fn(() => Promise.resolve()),
   focusWindowByOffset: vi.fn(() => Promise.resolve()),
   newWindow: vi.fn(() => Promise.resolve()),
+  openPaneInNewWindow: vi.fn(() => Promise.resolve()),
   onWindowOrder: vi.fn(() => Promise.resolve(() => undefined)),
   setWindowTitle: vi.fn(),
   validateWorkspaceTarget: vi.fn(() =>
@@ -52,6 +53,7 @@ vi.mock("./agent", () => ({
   arrangeAllWindows: bridge.arrangeAllWindows,
   focusWindowByOffset: bridge.focusWindowByOffset,
   newWindow: bridge.newWindow,
+  openPaneInNewWindow: bridge.openPaneInNewWindow,
   onWindowOrder: bridge.onWindowOrder,
   setWindowTitle: bridge.setWindowTitle,
   validateWorkspaceTarget: bridge.validateWorkspaceTarget,
@@ -264,6 +266,7 @@ function setWorkspaceWidth(container: HTMLElement, width: number): void {
 beforeEach(() => {
   vi.stubGlobal("CSS", { escape: (value: string) => value });
   vi.clearAllMocks();
+  bridge.openPaneInNewWindow.mockResolvedValue(undefined);
   terminalMock.heights = [];
   terminalMock.onHeightChange = undefined;
   terminalMock.onStartupFailure = undefined;
@@ -467,6 +470,69 @@ describe("WorkspaceShell pane routing", () => {
     expect(document.activeElement).toBe(secondary);
   });
 
+  it("opens the exact focused primary or auxiliary pane without changing its source", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const primary = screen.getByTestId("pane-primary");
+    const secondary = screen.getByTestId("pane-secondary");
+
+    const primaryAction = await screen.findByRole("button", { name: "Open in new window" });
+    await waitFor(() => expect(primaryAction.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(primaryAction);
+    await waitFor(() => expect(bridge.openPaneInNewWindow).toHaveBeenCalledWith("primary"));
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+    const secondaryAction = screen.getByRole("button", { name: "Open in new window" });
+    await waitFor(() => expect(secondaryAction.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(secondaryAction);
+    await waitFor(() => expect(bridge.openPaneInNewWindow).toHaveBeenNthCalledWith(2, "secondary"));
+
+    expect(screen.getByTestId("pane-primary")).toBe(primary);
+    expect(screen.getByTestId("pane-secondary")).toBe(secondary);
+    expect(secondary.dataset.focused).toBe("true");
+    expect(secondary.dataset.initialCwd).toBe("");
+    expect(screen.queryByTestId("terminal-secondary")).toBeNull();
+  });
+
+  it("disables the action until a pane has a restored project target", async () => {
+    render(<WorkspaceShell renderPane={(props) => <PickerAwarePane {...props} />} />);
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    await screen.findByTestId("pane-pane-1");
+
+    expect(
+      screen.getByRole("button", { name: "Open in new window" }).hasAttribute("disabled"),
+    ).toBe(true);
+    expect(bridge.openPaneInNewWindow).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates pending clicks and restores the action after one native rejection", async () => {
+    let rejectOpen: ((error: Error) => void) | undefined;
+    bridge.openPaneInNewWindow.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectOpen = reject;
+        }),
+    );
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const source = screen.getByTestId("pane-primary");
+    const action = screen.getByRole("button", { name: "Open in new window" });
+    await waitFor(() => expect(action.hasAttribute("disabled")).toBe(false));
+
+    fireEvent.click(action);
+    fireEvent.click(action);
+    expect(bridge.openPaneInNewWindow).toHaveBeenCalledTimes(1);
+    expect(action.hasAttribute("disabled")).toBe(true);
+    await act(async () => rejectOpen?.(new Error("native build failed")));
+
+    await waitFor(() => expect(action.hasAttribute("disabled")).toBe(false));
+    expect(toastMock).toHaveBeenCalledTimes(1);
+    expect(toastMock).toHaveBeenCalledWith(
+      "Couldn't open pane in a new window: native build failed",
+      "error",
+    );
+    expect(screen.getByTestId("pane-primary")).toBe(source);
+    expect(source.dataset.focused).toBe("true");
+  });
+
   it("calls each native shortcut bridge exactly once", () => {
     render(<WorkspaceShell renderPane={renderPane} />);
 
@@ -476,6 +542,7 @@ describe("WorkspaceShell pane routing", () => {
     fireEvent.keyDown(window, { key: "a", metaKey: true, shiftKey: true });
 
     expect(bridge.newWindow).toHaveBeenCalledTimes(1);
+    expect(bridge.openPaneInNewWindow).not.toHaveBeenCalled();
     expect(bridge.focusWindowByOffset).toHaveBeenNthCalledWith(1, 1);
     expect(bridge.focusWindowByOffset).toHaveBeenNthCalledWith(2, -1);
     expect(bridge.focusWindowByOffset).toHaveBeenCalledTimes(2);

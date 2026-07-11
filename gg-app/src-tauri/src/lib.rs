@@ -2000,16 +2000,27 @@ fn filter_restorable<F: Fn(&str) -> bool>(
 /// Walk every live window + its `Windows` session entry and write a fresh
 /// snapshot. Picker-only windows (still at the default boot cwd) are excluded.
 /// Geometry is captured from each window's current outer position + inner size.
-fn snapshot_workspace(app: &tauri::AppHandle) {
+fn live_snapshot_labels<'a>(
+    live_labels: impl IntoIterator<Item = &'a String>,
+    excluded_label: Option<&str>,
+) -> Vec<String> {
+    let mut labels: Vec<String> = live_labels
+        .into_iter()
+        .filter(|label| excluded_label != Some(label.as_str()))
+        .cloned()
+        .collect();
+    labels.sort_by_key(|label| label_rank(label));
+    labels
+}
+
+fn snapshot_workspace_excluding(app: &tauri::AppHandle, excluded_label: Option<&str>) {
     let default = default_cwd();
     let windows = app.webview_windows();
+    // Only native windows are eligible. Registry-only labels are startup
+    // reservations and must never become persisted phantom windows.
+    let labels = live_snapshot_labels(windows.keys(), excluded_label);
     let state: State<Windows> = app.state();
     let map = state.map.lock().unwrap();
-
-    // Deterministic order: main first, then project-N ascending, so the first
-    // restored window reclaims the `main` label.
-    let mut labels: Vec<String> = windows.keys().cloned().collect();
-    labels.sort_by_key(|a| label_rank(a));
 
     let mut entries: Vec<WorkspaceEntry> = Vec::new();
     for label in &labels {
@@ -2045,25 +2056,8 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
     write_workspace(&Workspace { windows: entries });
 }
 
-/// Remove one window's entry from the snapshot (deliberate user close). Keyed by
-/// the window's recorded cwd, since the snapshot has no labels.
-fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str) {
-    let cwd = {
-        let state: State<Windows> = app.state();
-        let map = state.map.lock().unwrap();
-        map.get(label)
-            .and_then(|panes| panes.get(PRIMARY_PANE_ID))
-            .and_then(|pane| pane.cwd.as_ref())
-            .map(|c| c.to_string_lossy().to_string())
-    };
-    let Some(cwd) = cwd else { return };
-    let mut ws = read_workspace();
-    // Remove a SINGLE matching entry (not retain-by-cwd): two windows can have
-    // the same project open, and closing one must not prune the other's restore.
-    if let Some(idx) = ws.windows.iter().position(|w| w.cwd == cwd) {
-        ws.windows.remove(idx);
-        write_workspace(&ws);
-    }
+fn snapshot_workspace(app: &tauri::AppHandle) {
+    snapshot_workspace_excluding(app, None);
 }
 
 /// Consume-once: hand the calling window its restore target (cwd + session) so
@@ -3233,6 +3227,242 @@ async fn new_window(app: tauri::AppHandle) -> Result<(), String> {
     let label = next_window_label(&app);
     let win = build_app_window(&app, &label)?;
     start_window_session(app.clone(), label, default_cwd(), None);
+    let _ = win.set_focus();
+    broadcast_window_order(&app);
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PaneCopyTarget {
+    cwd: PathBuf,
+    session_path: Option<String>,
+    session_id: String,
+}
+
+fn resolve_pane_copy_target(
+    registry: &PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+) -> Result<PaneCopyTarget, String> {
+    validate_pane_id(pane_id)?;
+    let pane = resolve_owned_pane(registry, owner_label, pane_id)
+        .ok_or_else(|| format!("pane '{pane_id}' does not exist in this window"))?;
+    Ok(PaneCopyTarget {
+        cwd: pane
+            .cwd
+            .clone()
+            .ok_or_else(|| format!("pane '{pane_id}' has no project"))?,
+        session_path: pane.session_path.clone(),
+        session_id: pane
+            .session_id
+            .clone()
+            .ok_or_else(|| format!("pane '{pane_id}' is not ready"))?,
+    })
+}
+
+fn validate_pane_copy_target(target: &PaneCopyTarget) -> Result<(), String> {
+    if !target.cwd.is_dir() {
+        return Err(format!(
+            "project folder no longer exists: {}",
+            target.cwd.display()
+        ));
+    }
+    if let Some(path) = target.session_path.as_deref() {
+        if !Path::new(path).is_file() {
+            return Err(format!("session file no longer exists: {path}"));
+        }
+    }
+    Ok(())
+}
+
+fn merge_live_pane_copy_target(
+    durable: PaneCopyTarget,
+    live_state: Option<&serde_json::Value>,
+) -> PaneCopyTarget {
+    let Some(state) = live_state else {
+        return durable;
+    };
+    let cwd = state
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| durable.cwd.clone());
+    // A successful live response is authoritative: a missing sessionPath means
+    // the pane is currently a fresh session, not the stale durable session.
+    let session_path = state
+        .get("sessionPath")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+    PaneCopyTarget {
+        cwd,
+        session_path,
+        session_id: durable.session_id,
+    }
+}
+
+async fn live_pane_copy_target(
+    app: &tauri::AppHandle,
+    port: u16,
+    durable: PaneCopyTarget,
+) -> PaneCopyTarget {
+    let client = app.state::<reqwest::Client>().inner().clone();
+    let state = async {
+        client
+            .get(format!("{}/state", sidecar_base(port)))
+            .header("x-gg-session", &durable.session_id)
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+    }
+    .await;
+    merge_live_pane_copy_target(durable, state.as_ref())
+}
+
+fn next_project_window_label(
+    registry: &PaneRegistry,
+    mut native_window_exists: impl FnMut(&str) -> bool,
+) -> String {
+    let mut ordinal = 1;
+    loop {
+        let candidate = format!("project-{ordinal}");
+        if !native_window_exists(&candidate) && !registry.contains_key(&candidate) {
+            return candidate;
+        }
+        ordinal += 1;
+    }
+}
+
+fn rollback_open_pane_state(
+    registry: &mut PaneRegistry,
+    restore_targets: &mut HashMap<String, RestoreEntry>,
+    label: &str,
+) -> Vec<PaneSession> {
+    restore_targets.remove(label);
+    take_window_panes(registry, label)
+}
+
+async fn rollback_open_pane_window(app: &tauri::AppHandle, label: &str) {
+    let panes = {
+        let windows: State<Windows> = app.state();
+        let restore_targets: State<RestoreTargets> = app.state();
+        let mut registry = windows.map.lock().unwrap();
+        let mut targets = restore_targets.map.lock().unwrap();
+        rollback_open_pane_state(&mut registry, &mut targets, label)
+    };
+    let port = { *app.state::<Daemon>().port.lock().unwrap() };
+    if let Some(port) = port {
+        for pane in panes {
+            if let Some(session_id) = pane.session_id {
+                daemon_delete_session(app, port, &session_id).await;
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn open_pane_in_new_window(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    pane_id: String,
+) -> Result<(), String> {
+    let durable = {
+        let windows: State<Windows> = app.state();
+        let registry = windows.map.lock().unwrap();
+        resolve_pane_copy_target(&registry, webview.label(), &pane_id)?
+    };
+    let port = port_for(&webview).ok_or_else(|| format!("pane '{pane_id}' is not ready"))?;
+    let target = live_pane_copy_target(&app, port, durable).await;
+    validate_pane_copy_target(&target)?;
+
+    // Reserve the owner label and pane target under one registry lock. The native
+    // window does not exist until startup succeeds, so looking only at live
+    // webviews would let simultaneous copy commands choose the same label.
+    let (label, generation) = {
+        let windows: State<Windows> = app.state();
+        let mut registry = windows.map.lock().unwrap();
+        let label = next_project_window_label(&registry, |candidate| {
+            app.get_webview_window(candidate).is_some()
+        });
+        let generation = create_pane_target(
+            &mut registry,
+            &label,
+            PRIMARY_PANE_ID,
+            target.cwd.clone(),
+            target.session_path.clone(),
+        )?;
+        (label, generation)
+    };
+    launch_pane_session(
+        app.clone(),
+        label.clone(),
+        PRIMARY_PANE_ID.to_string(),
+        target.cwd.clone(),
+        target.session_path.clone(),
+        generation,
+    );
+    let mut startup_error = None;
+    for _ in 0..600 {
+        let status = {
+            let windows: State<Windows> = app.state();
+            let registry = windows.map.lock().unwrap();
+            let daemon_error = app.state::<Daemon>().startup_error.lock().unwrap().clone();
+            pane_startup_status(&registry, &label, PRIMARY_PANE_ID, daemon_error.as_deref())
+        };
+        let status = match status {
+            Ok(status) => status,
+            Err(error) => {
+                rollback_open_pane_window(&app, &label).await;
+                return Err(error);
+            }
+        };
+        if status.ready {
+            break;
+        }
+        if status.error.is_some() {
+            startup_error = status.error;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    if let Some(error) = startup_error {
+        rollback_open_pane_window(&app, &label).await;
+        return Err(error);
+    }
+    let ready = {
+        let windows: State<Windows> = app.state();
+        let registry = windows.map.lock().unwrap();
+        pane_startup_status(&registry, &label, PRIMARY_PANE_ID, None)
+            .map(|status| status.ready)
+            .unwrap_or(false)
+    };
+    if !ready {
+        rollback_open_pane_window(&app, &label).await;
+        return Err("new window session did not start in time".into());
+    }
+
+    app.state::<RestoreTargets>().map.lock().unwrap().insert(
+        label.clone(),
+        RestoreEntry {
+            cwd: target.cwd.to_string_lossy().to_string(),
+            session_path: target.session_path,
+        },
+    );
+    let win = match build_app_window(&app, &label) {
+        Ok(window) => window,
+        Err(error) => {
+            rollback_open_pane_window(&app, &label).await;
+            return Err(error);
+        }
+    };
+    snapshot_workspace(&app);
     let _ = win.set_focus();
     broadcast_window_order(&app);
     Ok(())
@@ -4448,6 +4678,7 @@ pub fn run() {
             agent_commands,
             setup_windows,
             new_window,
+            open_pane_in_new_window,
             open_whatsnew_window,
             select_project,
             agent_projects,
@@ -4501,13 +4732,6 @@ pub fn run() {
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::Destroyed => {
                 let app = window.app_handle();
-                // A deliberate close (app NOT quitting) drops this window from the
-                // workspace so it doesn't reopen next launch. During quit the
-                // AppExiting flag is set, so the snapshot is preserved intact.
-                let exiting = app.state::<AppExiting>().0.load(Ordering::SeqCst);
-                if !exiting {
-                    remove_window_from_workspace(app, window.label());
-                }
                 terminal::close_for_window(
                     &app.state::<terminal::TerminalRegistry>(),
                     window.label(),
@@ -4518,6 +4742,12 @@ pub fn run() {
                 let state: State<Windows> = window.state();
                 let pane_sessions =
                     take_window_panes(&mut state.map.lock().unwrap(), window.label());
+                // A deliberate close rewrites persistence from surviving labels,
+                // so duplicate cwd/session targets remain independent.
+                let exiting = app.state::<AppExiting>().0.load(Ordering::SeqCst);
+                if !exiting {
+                    snapshot_workspace_excluding(app, Some(window.label()));
+                }
                 if let Some(port) = *app.state::<Daemon>().port.lock().unwrap() {
                     for pane in pane_sessions {
                         if let Some(id) = pane.session_id {
@@ -4817,6 +5047,37 @@ mod tests {
         assert_eq!(ws, back);
         // The second entry omits optional fields entirely (skip_serializing_if).
         assert!(!json.contains("\"sessionPath\":null"));
+    }
+
+    #[test]
+    fn snapshot_labels_exclude_registry_only_reservations_and_the_destroyed_window() {
+        let live_labels = vec!["project-2".to_string(), "main".to_string()];
+
+        assert_eq!(
+            live_snapshot_labels(live_labels.iter(), Some("main")),
+            vec!["project-2"]
+        );
+        assert!(!live_snapshot_labels(live_labels.iter(), None)
+            .iter()
+            .any(|label| label == "project-1"));
+    }
+
+    #[test]
+    fn duplicate_workspace_targets_roundtrip_independently() {
+        let duplicate = WorkspaceEntry {
+            cwd: "/p/shared".into(),
+            session_path: Some("/s/shared.jsonl".into()),
+            ..Default::default()
+        };
+        let workspace = Workspace {
+            windows: vec![duplicate.clone(), duplicate],
+        };
+
+        let json = serde_json::to_string(&workspace).unwrap();
+        let restored: Workspace = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.windows.len(), 2);
+        assert_eq!(restored.windows[0], restored.windows[1]);
     }
 
     #[test]
@@ -5739,6 +6000,197 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn pane_copy_live_state_clears_stale_session_and_timeout_keeps_durable_target() {
+        let durable = PaneCopyTarget {
+            cwd: PathBuf::from("/p/durable"),
+            session_path: Some("/s/stale.jsonl".into()),
+            session_id: "source-runtime".into(),
+        };
+
+        let live = merge_live_pane_copy_target(
+            durable.clone(),
+            Some(&serde_json::json!({ "cwd": "/p/live" })),
+        );
+        assert_eq!(live.cwd, PathBuf::from("/p/live"));
+        assert_eq!(live.session_path, None);
+
+        let timed_out = merge_live_pane_copy_target(durable.clone(), None);
+        assert_eq!(timed_out, durable);
+    }
+
+    #[test]
+    fn concurrent_pane_copy_reservations_choose_distinct_native_window_labels() {
+        let mut registry = PaneRegistry::new();
+        let first = next_project_window_label(&registry, |label| label == "project-2");
+        assert_eq!(first, "project-1");
+        record_pane_target(
+            &mut registry,
+            &first,
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/shared"),
+            None,
+        );
+
+        let second = next_project_window_label(&registry, |label| label == "project-2");
+        assert_eq!(second, "project-3");
+    }
+
+    #[test]
+    fn pane_copy_resolution_is_owner_scoped_and_copy_identity_is_distinct() {
+        let mut registry = PaneRegistry::new();
+        let source_generation = record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/p/shared"),
+            Some("/s/shared.jsonl".into()),
+        );
+        let peer_generation = record_pane_target(
+            &mut registry,
+            "peer",
+            "secondary",
+            PathBuf::from("/p/peer"),
+            None,
+        );
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "secondary",
+            source_generation,
+            "source-runtime".into(),
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "peer",
+            "secondary",
+            peer_generation,
+            "peer-runtime".into(),
+        ));
+
+        let source = resolve_pane_copy_target(&registry, "main", "secondary").unwrap();
+        assert_eq!(source.cwd, PathBuf::from("/p/shared"));
+        assert_eq!(source.session_id, "source-runtime");
+        assert!(resolve_pane_copy_target(&registry, "missing", "secondary").is_err());
+
+        let destination_generation = create_pane_target(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            source.cwd.clone(),
+            source.session_path.clone(),
+        )
+        .unwrap();
+        assert!(bind_pane_session(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            destination_generation,
+            "destination-runtime".into(),
+        ));
+
+        let source_after = resolve_owned_pane(&registry, "main", "secondary").unwrap();
+        let destination = resolve_owned_pane(&registry, "project-1", PRIMARY_PANE_ID).unwrap();
+        assert_eq!(source_after.cwd, destination.cwd);
+        assert_eq!(source_after.session_path, destination.session_path);
+        assert_ne!(source_after.session_id, destination.session_id);
+    }
+
+    #[test]
+    fn pane_copy_rollback_removes_only_destination_registry_and_restore_state() {
+        let mut registry = PaneRegistry::new();
+        let source_generation = record_pane_target(
+            &mut registry,
+            "main",
+            "secondary",
+            PathBuf::from("/p/shared"),
+            Some("/s/shared.jsonl".into()),
+        );
+        let destination_generation = record_pane_target(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/p/shared"),
+            Some("/s/shared.jsonl".into()),
+        );
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "secondary",
+            source_generation,
+            "source-runtime".into(),
+        ));
+        assert!(bind_pane_session(
+            &mut registry,
+            "project-1",
+            PRIMARY_PANE_ID,
+            destination_generation,
+            "destination-runtime".into(),
+        ));
+        let mut restore_targets = HashMap::from([
+            (
+                "main".into(),
+                RestoreEntry {
+                    cwd: "/p/source".into(),
+                    session_path: None,
+                },
+            ),
+            (
+                "project-1".into(),
+                RestoreEntry {
+                    cwd: "/p/shared".into(),
+                    session_path: Some("/s/shared.jsonl".into()),
+                },
+            ),
+        ]);
+
+        let removed = rollback_open_pane_state(&mut registry, &mut restore_targets, "project-1");
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(
+            removed[0].session_id.as_deref(),
+            Some("destination-runtime")
+        );
+        assert!(resolve_owned_pane(&registry, "project-1", PRIMARY_PANE_ID).is_none());
+        assert!(resolve_owned_pane(&registry, "main", "secondary").is_some());
+        assert!(!restore_targets.contains_key("project-1"));
+        assert!(restore_targets.contains_key("main"));
+    }
+
+    #[test]
+    fn duplicate_close_and_respawn_enumeration_preserve_the_surviving_owner() {
+        let mut registry = PaneRegistry::new();
+        for (label, runtime) in [("main", "source-runtime"), ("project-1", "copy-runtime")] {
+            let generation = record_pane_target(
+                &mut registry,
+                label,
+                PRIMARY_PANE_ID,
+                PathBuf::from("/p/shared"),
+                Some("/s/shared.jsonl".into()),
+            );
+            assert!(bind_pane_session(
+                &mut registry,
+                label,
+                PRIMARY_PANE_ID,
+                generation,
+                runtime.into(),
+            ));
+        }
+
+        let targets = enumerate_pane_targets(&registry);
+        assert_eq!(targets.len(), 2);
+        assert!(targets.iter().all(|(_, _, cwd, session)| {
+            cwd == Path::new("/p/shared") && session.as_deref() == Some("/s/shared.jsonl")
+        }));
+
+        let removed = take_window_panes(&mut registry, "project-1");
+        assert_eq!(removed.len(), 1);
+        let surviving = enumerate_pane_targets(&registry);
+        assert_eq!(surviving.len(), 1);
+        assert_eq!(surviving[0].0, "main");
+        assert_eq!(surviving[0].2, PathBuf::from("/p/shared"));
     }
 
     #[test]

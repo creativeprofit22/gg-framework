@@ -603,6 +603,10 @@ body {
   opacity: 0.55;
 }
 
+.pane-split-action[aria-busy="true"] {
+  cursor: progress;
+}
+
 .workspace-divider {
   position: relative;
   z-index: 2;

@@ -577,8 +577,10 @@ describe("WorkspaceShell terminal dock", () => {
     expect(screen.queryByTestId("terminal-secondary")).toBeNull();
     emitOwnerSnapshot?.();
     expect(await screen.findByTestId("terminal-secondary")).toBeTruthy();
-    expect(terminalMock.mounts).toHaveBeenCalledTimes(1);
-    expect(terminalMock.mounts).toHaveBeenCalledWith("secondary");
+    await waitFor(() => {
+      expect(terminalMock.mounts).toHaveBeenCalledTimes(1);
+      expect(terminalMock.mounts).toHaveBeenCalledWith("secondary");
+    });
     expect(agentMounts).toHaveBeenCalledTimes(2);
 
     fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));

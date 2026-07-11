@@ -409,15 +409,19 @@ Ship the actual single-window workspace:
 
 Use app-owned resizable wrappers so a dependency can be upgraded/replaced without leaking its API throughout GG App.
 
-### Status (through `c2adb9f`)
+### Status (through `05481ff`)
 
 - [x] Fixed primary/secondary two-column workspace with independent project/session selection and pane-scoped controls (`29eed34`, `b94e420`).
 - [x] Click/focus and Ctrl/Cmd+1/2 routing target one pane; the native title and Notes follow the focused pane (`29eed34`, `c2adb9f`).
-- [x] Pointer and keyboard resizing use an accessible divider, enforce minimum widths, and preserve mounted pane/session state (`b36ec25`).
-- [x] Versioned fixed-layout restoration validates records, clamps ratios, restores both pane targets, handles missing projects, preserves rejected corrupt data, and persists the split ratio (`c9d86c1`, `84599e0`).
-- [x] The secondary pane closes idle, confirms active work, disposes only its session, restores primary focus, reopens to the picker, survives repeated cycles, and persists one-pane mode across restart (`6a59a0c`).
-- [x] Persist and restore the focused pane ID across reload/restart, normalizing stale or malformed focus to primary (`c2adb9f`).
-- [ ] Replace the fixed two-column model with recursive horizontal/vertical `SplitNode | LeafNode` splitting, normalization, and a conservative pane cap.
+- [x] Pointer and keyboard resizing use accessible recursive dividers, enforce minimum sizes, and preserve mounted pane/session state (`b36ec25`, `e7a29b1`).
+- [x] Versioned v6 `SplitNode | LeafNode` layouts recursively render nested horizontal/vertical splits and preserve stable arbitrary pane IDs and independent ratios (`e7a29b1`).
+- [x] **Split Right** and **Split Down** split the focused leaf into one new, focused, null-target auxiliary pane without remounting unrelated panes (`e7a29b1`).
+- [x] Generated and restored arbitrary pane IDs route focus, close controls, snapshots, keyboard shortcuts, and pane-scoped agent clients without fixed primary/secondary assumptions (`e7a29b1`).
+- [x] The model, parser, rapid mutation path, and disabled split controls enforce the four-pane cap (`e7a29b1`).
+- [x] Auxiliary create/rebind/dispose uses native generations, ignores stale snapshots/results, disposes late creates exactly once, and serializes disposal before failed operations settle (`e7a29b1`, `4cde985`).
+- [x] Splitting a newly bound legacy auxiliary preserves its current project/session target while the new leaf starts at the picker (`4befda5`).
+- [x] Recursive persistence restores nested trees, independent ratios, targets, focus, Notes routing, and terminal metadata (`e7a29b1`, `34a698d`).
+- [x] `WorkspaceShell.test.tsx` is isolated from unused `AgentPane`/audio imports, and its picker-aware fake snapshots only its mount-time target, eliminating the synchronous snapshot loop; all 50 tests and six isolated startup samples pass (`05481ff`).
 - [ ] Move/open a pane in a native window without duplicate live ownership.
 - [ ] Surface a concise recoverable warning when a malformed/stale layout falls back.
 

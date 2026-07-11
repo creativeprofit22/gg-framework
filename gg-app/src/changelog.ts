@@ -27,6 +27,7 @@ export const CHANGELOG: ChangelogEntry[] = [
     items: [
       "Your Claude and Codex limits now live right in the title bar. I built a tiny glowing meter that shows how much of your current window is gone and how long until it resets, so you can keep shipping without surprises.",
       "Tap the meter and your weekly view slides in instantly. I made it follow the model you are using and disappear when it has nothing useful to say.",
+      "Terminal docks now reopen exactly where and how tall you left them, with a brand-new shell in the right project. Commands, history, output, and old processes never come back, so every restart stays clean and safe.",
     ],
   },
   {

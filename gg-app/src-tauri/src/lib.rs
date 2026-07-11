@@ -39,6 +39,7 @@ struct Daemon {
 
 const PRIMARY_PANE_ID: &str = "primary";
 const MAX_PANE_ID_LEN: usize = 64;
+const MAX_PANES_PER_WINDOW: usize = 4;
 
 /// One pane's session inside the shared daemon. Pane IDs are scoped by their
 /// owning native window; daemon session IDs remain opaque runtime identities.
@@ -158,8 +159,14 @@ fn create_pane_target(
     session_path: Option<String>,
 ) -> Result<u64, String> {
     validate_pane_id(pane_id)?;
-    if resolve_owned_pane(registry, owner_label, pane_id).is_some() {
+    let panes = registry.get(owner_label);
+    if panes.is_some_and(|panes| panes.contains_key(pane_id)) {
         return Err(format!("pane '{pane_id}' already exists"));
+    }
+    if panes.is_some_and(|panes| panes.len() >= MAX_PANES_PER_WINDOW) {
+        return Err(format!(
+            "window cannot contain more than {MAX_PANES_PER_WINDOW} panes"
+        ));
     }
     Ok(record_pane_target(
         registry,
@@ -175,10 +182,16 @@ fn dispose_pane_target(
     owner_label: &str,
     pane_id: &str,
     allow_primary: bool,
+    expected_generation: Option<u64>,
 ) -> Result<PaneSession, String> {
     validate_pane_id(pane_id)?;
     if pane_id == PRIMARY_PANE_ID && !allow_primary {
         return Err("primary pane cannot be disposed".into());
+    }
+    let pane = resolve_owned_pane(registry, owner_label, pane_id)
+        .ok_or_else(|| format!("pane '{pane_id}' does not exist"))?;
+    if expected_generation.is_some_and(|generation| pane.generation != generation) {
+        return Err(format!("pane '{pane_id}' generation is stale"));
     }
     take_pane_session(registry, owner_label, pane_id)
         .ok_or_else(|| format!("pane '{pane_id}' does not exist"))
@@ -3329,7 +3342,8 @@ async fn arrange_all(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Re-point one pane's agent at a chosen project. Omitted pane identity means
-/// primary, preserving the existing project-picker lifecycle seam.
+/// primary, preserving the existing project-picker lifecycle seam. Auxiliary
+/// replacements must identify the generation they intend to replace.
 #[tauri::command]
 fn select_project(
     webview: WebviewWindow,
@@ -3337,18 +3351,27 @@ fn select_project(
     cwd: String,
     session_path: Option<String>,
     pane_id: Option<String>,
-) -> Result<(), String> {
+    expected_generation: Option<u64>,
+) -> Result<u64, String> {
     let pane_id = pane_id_or_primary(pane_id.as_deref())?.to_string();
     let label = webview.label().to_string();
     let old_id = {
         let windows: State<Windows> = app.state();
         let mut map = windows.map.lock().unwrap();
-        if pane_id != PRIMARY_PANE_ID && resolve_owned_pane(&map, &label, &pane_id).is_none() {
-            return Err(format!("pane '{pane_id}' does not exist"));
-        }
-        dispose_pane_target(&mut map, &label, &pane_id, true)
-            .ok()
-            .and_then(|pane| pane.session_id)
+        let pane = if pane_id == PRIMARY_PANE_ID {
+            dispose_pane_target(&mut map, &label, &pane_id, true, None).ok()
+        } else {
+            let expected = expected_generation
+                .ok_or_else(|| format!("pane '{pane_id}' replacement requires its generation"))?;
+            Some(dispose_pane_target(
+                &mut map,
+                &label,
+                &pane_id,
+                true,
+                Some(expected),
+            )?)
+        };
+        pane.and_then(|pane| pane.session_id)
     };
     if let Some(id) = old_id {
         if let Some(port) = port_for(&webview) {
@@ -3358,7 +3381,7 @@ fn select_project(
             });
         }
     }
-    start_pane_session(
+    let generation = start_pane_session(
         app.clone(),
         label,
         pane_id.clone(),
@@ -3368,7 +3391,7 @@ fn select_project(
     if pane_id == PRIMARY_PANE_ID {
         snapshot_workspace(&app);
     }
-    Ok(())
+    Ok(generation)
 }
 
 #[tauri::command]
@@ -3378,7 +3401,7 @@ fn agent_pane_create(
     pane_id: String,
     cwd: String,
     session_path: Option<String>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     validate_pane_id(&pane_id)?;
     let label = webview.label().to_string();
     let generation = {
@@ -3400,7 +3423,7 @@ fn agent_pane_create(
         session_path,
         generation,
     );
-    Ok(())
+    Ok(generation)
 }
 
 #[tauri::command]
@@ -3408,11 +3431,12 @@ fn agent_pane_dispose(
     webview: WebviewWindow,
     app: tauri::AppHandle,
     pane_id: String,
+    generation: Option<u64>,
 ) -> Result<(), String> {
     let pane = {
         let windows: State<Windows> = app.state();
         let mut map = windows.map.lock().unwrap();
-        dispose_pane_target(&mut map, webview.label(), &pane_id, false)?
+        dispose_pane_target(&mut map, webview.label(), &pane_id, false, generation)?
     };
     terminal::close_for_pane(
         &app.state::<terminal::TerminalRegistry>(),
@@ -4174,7 +4198,7 @@ fn start_pane_session(
     pane_id: String,
     cwd: PathBuf,
     session_path: Option<String>,
-) {
+) -> u64 {
     let generation = {
         let windows: State<Windows> = app.state();
         let mut map = windows.map.lock().unwrap();
@@ -4187,6 +4211,7 @@ fn start_pane_session(
         )
     };
     launch_pane_session(app, label, pane_id, cwd, session_path, generation);
+    generation
 }
 
 fn emit_pane_start_error(app: &tauri::AppHandle, label: &str, pane_id: &str, message: &str) {
@@ -5792,24 +5817,113 @@ mod tests {
     }
 
     #[test]
-    fn pane_create_rejects_duplicates_and_dispose_protects_primary() {
+    fn pane_create_enforces_owner_scoped_limit_and_preserves_lifecycle() {
         let mut registry = PaneRegistry::new();
-        assert!(create_pane_target(
+        let first_generation = create_pane_target(
             &mut registry,
             "main",
-            "secondary",
-            PathBuf::from("/p/b"),
+            "first",
+            PathBuf::from("/p/first"),
             None,
         )
-        .is_ok());
+        .unwrap();
+        for pane_id in ["second", "third", "fourth"] {
+            assert!(create_pane_target(
+                &mut registry,
+                "main",
+                pane_id,
+                PathBuf::from(format!("/p/{pane_id}")),
+                None,
+            )
+            .is_ok());
+        }
+        assert_eq!(registry.get("main").unwrap().len(), MAX_PANES_PER_WINDOW);
+
+        let duplicate = create_pane_target(
+            &mut registry,
+            "main",
+            "first",
+            PathBuf::from("/p/duplicate"),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(duplicate, "pane 'first' already exists");
+
         assert!(create_pane_target(
             &mut registry,
             "main",
-            "secondary",
-            PathBuf::from("/p/c"),
+            "fifth",
+            PathBuf::from("/p/fifth"),
             None,
         )
         .is_err());
+        assert!(resolve_owned_pane(&registry, "main", "fifth").is_none());
+        assert_eq!(registry.get("main").unwrap().len(), MAX_PANES_PER_WINDOW);
+
+        assert!(create_pane_target(
+            &mut registry,
+            "peer",
+            "fifth",
+            PathBuf::from("/peer/fifth"),
+            None,
+        )
+        .is_ok());
+        assert_eq!(registry.get("peer").unwrap().len(), 1);
+
+        let disposed = dispose_pane_target(&mut registry, "main", "first", false, None).unwrap();
+        assert_eq!(disposed.generation, first_generation);
+        let recreated_generation = create_pane_target(
+            &mut registry,
+            "main",
+            "first",
+            PathBuf::from("/p/recreated"),
+            None,
+        )
+        .unwrap();
+        assert!(recreated_generation > first_generation);
+        assert_eq!(registry.get("main").unwrap().len(), MAX_PANES_PER_WINDOW);
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "first")
+                .unwrap()
+                .cwd
+                .as_deref(),
+            Some(Path::new("/p/recreated"))
+        );
+    }
+
+    #[test]
+    fn stale_dispose_generation_cannot_remove_a_recreated_pane() {
+        let mut registry = PaneRegistry::new();
+        let old_generation = create_pane_target(
+            &mut registry,
+            "main",
+            "pane-1",
+            PathBuf::from("/p/old"),
+            None,
+        )
+        .unwrap();
+        dispose_pane_target(&mut registry, "main", "pane-1", false, Some(old_generation)).unwrap();
+        let current_generation = create_pane_target(
+            &mut registry,
+            "main",
+            "pane-1",
+            PathBuf::from("/p/current"),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            dispose_pane_target(&mut registry, "main", "pane-1", false, Some(old_generation),)
+                .is_err()
+        );
+        let current = resolve_owned_pane(&registry, "main", "pane-1").unwrap();
+        assert_eq!(current.generation, current_generation);
+        assert_eq!(current.cwd.as_deref(), Some(Path::new("/p/current")));
+    }
+
+    #[test]
+    fn pane_dispose_protects_primary() {
+        let mut registry = PaneRegistry::new();
         assert!(create_pane_target(
             &mut registry,
             "main",
@@ -5818,8 +5932,7 @@ mod tests {
             None,
         )
         .is_ok());
-        assert!(dispose_pane_target(&mut registry, "main", PRIMARY_PANE_ID, false).is_err());
-        assert!(dispose_pane_target(&mut registry, "main", "secondary", false).is_ok());
+        assert!(dispose_pane_target(&mut registry, "main", PRIMARY_PANE_ID, false, None).is_err());
         assert!(resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID).is_some());
     }
 

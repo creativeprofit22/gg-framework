@@ -98,8 +98,8 @@ describe("agent pane client routing", () => {
     }
   });
 
-  it("routes the pane-bound API to its secondary pane", async () => {
-    const client = createPaneAgentClient("secondary");
+  it("routes the pane-bound API to an arbitrary auxiliary pane", async () => {
+    const client = createPaneAgentClient("pane-3");
 
     await client.getState();
     await client.sendPrompt("hello", [], { kenSent: true });
@@ -118,49 +118,53 @@ describe("agent pane client routing", () => {
     await client.runAllTasks();
     await client.deleteTask("task-2");
     await client.listProjects();
-    await client.listSessions("/secondary");
-    await client.selectProject("/secondary", "/session-2");
-    await client.openProjectPath("/secondary/a%20b.ts");
+    await client.listSessions("/auxiliary");
+    await client.selectProject("/auxiliary", "/session-2", 16);
+    await client.openProjectPath("/auxiliary/a%20b.ts");
 
-    expect(client.paneId).toBe("secondary");
-    expectPane("agent_state", "secondary");
-    expectPane("agent_prompt", "secondary", {
+    expect(client.paneId).toBe("pane-3");
+    expectPane("agent_state", "pane-3");
+    expectPane("agent_prompt", "pane-3", {
       text: "hello",
       attachments: [],
       meta: { kenSent: true },
     });
-    expectPane("agent_ken_prompt", "secondary", { text: "mentor" });
-    expectPane("agent_cancel", "secondary");
-    expectPane("agent_ken_cancel", "secondary");
-    expectPane("agent_new_session", "secondary");
-    expectPane("agent_history", "secondary");
-    expectPane("agent_models", "secondary");
-    expectPane("agent_switch_model", "secondary", { model: "model-b" });
-    expectPane("agent_switch_ken_model", "secondary", { model: "ken-model" });
-    expectPane("agent_commands", "secondary");
-    expectPane("agent_files", "secondary", { query: "pane" });
-    expectPane("agent_tasks", "secondary");
-    expectPane("agent_run_tasks", "secondary", { id: "task-1", all: false });
-    expectPane("agent_run_tasks", "secondary", { id: null, all: true });
-    expectPane("agent_delete_task", "secondary", { id: "task-2" });
-    expectPane("agent_projects", "secondary");
-    expectPane("agent_sessions", "secondary", { cwd: "/secondary" });
-    expectPane("select_project", "secondary", {
-      cwd: "/secondary",
+    expectPane("agent_ken_prompt", "pane-3", { text: "mentor" });
+    expectPane("agent_cancel", "pane-3");
+    expectPane("agent_ken_cancel", "pane-3");
+    expectPane("agent_new_session", "pane-3");
+    expectPane("agent_history", "pane-3");
+    expectPane("agent_models", "pane-3");
+    expectPane("agent_switch_model", "pane-3", { model: "model-b" });
+    expectPane("agent_switch_ken_model", "pane-3", { model: "ken-model" });
+    expectPane("agent_commands", "pane-3");
+    expectPane("agent_files", "pane-3", { query: "pane" });
+    expectPane("agent_tasks", "pane-3");
+    expectPane("agent_run_tasks", "pane-3", { id: "task-1", all: false });
+    expectPane("agent_run_tasks", "pane-3", { id: null, all: true });
+    expectPane("agent_delete_task", "pane-3", { id: "task-2" });
+    expectPane("agent_projects", "pane-3");
+    expectPane("agent_sessions", "pane-3", { cwd: "/auxiliary" });
+    expectPane("select_project", "pane-3", {
+      cwd: "/auxiliary",
       sessionPath: "/session-2",
+      expectedGeneration: 16,
     });
-    expectPane("open_project_path", "secondary", { path: "/secondary/a b.ts" });
+    expectPane("open_project_path", "pane-3", { path: "/auxiliary/a b.ts" });
   });
 
-  it("uses dedicated create and dispose commands", async () => {
-    await createPaneSession("secondary", "/project", "/session");
-    await disposePaneSession("secondary");
+  it("uses dedicated create and dispose commands for arbitrary pane IDs", async () => {
+    await createPaneSession("pane-3", "/project", "/session");
+    await disposePaneSession("pane-3", 17);
 
     expect(mocks.invoke).toHaveBeenCalledWith("agent_pane_create", {
-      paneId: "secondary",
+      paneId: "pane-3",
       cwd: "/project",
       sessionPath: "/session",
     });
-    expect(mocks.invoke).toHaveBeenCalledWith("agent_pane_dispose", { paneId: "secondary" });
+    expect(mocks.invoke).toHaveBeenCalledWith("agent_pane_dispose", {
+      paneId: "pane-3",
+      generation: 17,
+    });
   });
 });

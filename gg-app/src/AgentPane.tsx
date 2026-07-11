@@ -236,7 +236,7 @@ export interface PaneInputActions {
 
 export interface AgentPaneProps {
   paneId: string;
-  kind: "primary" | "secondary";
+  kind: "primary" | "auxiliary";
   focused: boolean;
   windowFocused: boolean;
   initialTarget?: WorkspacePaneTarget | null;
@@ -404,14 +404,14 @@ export function AgentPane({
   // render so a window reopened from the saved workspace (after a restart /
   // update) never flashes the picker before jumping into its restored project.
   const [restoreChecked, setRestoreChecked] = useState(
-    kind === "secondary" && initialTarget === undefined,
+    kind === "auxiliary" && initialTarget === undefined,
   );
   const primaryCatalogClient = useMemo(() => createPaneAgentClient(PRIMARY_PANE_ID), []);
   // Entry-screen routing while no project is open: the home landing, the
-  // project chooser, or the provider login hub. Secondary windows (opened via
-  // the Windows button) skip the home screen and land on "Choose a project".
+  // project chooser, or the provider login hub. Auxiliary panes skip the home
+  // screen and land on "Choose a project".
   const [entryView, setEntryView] = useState<"home" | "projects" | "login">(
-    kind === "secondary" || isSecondaryWindow ? "projects" : "home",
+    kind === "auxiliary" || isSecondaryWindow ? "projects" : "home",
   );
   // Re-open the project/session picker over an already-open project (to switch
   // sessions). Distinct from `needsProject` so cancelling returns to the
@@ -475,32 +475,64 @@ export function AgentPane({
   const [hydrated, setHydrated] = useState(false);
 
   const readyRef = useRef(false);
-  const secondaryCreatedRef = useRef(false);
+  const auxiliaryCreatedRef = useRef(false);
   const disposedRef = useRef(false);
-  const disposingSecondaryRef = useRef(false);
-  const secondaryCreateStartedRef = useRef(false);
-  const secondaryCreateGenerationRef = useRef(0);
+  const auxiliaryCreateGenerationRef = useRef(0);
+  const auxiliaryNativeGenerationRef = useRef<number | null>(null);
+  const disposedNativeGenerationsRef = useRef(new Set<number>());
   const hydrateGenerationRef = useRef(0);
-  const disposeSecondary = useCallback((): void => {
-    if (
-      kind !== "secondary" ||
-      (!secondaryCreatedRef.current && !secondaryCreateStartedRef.current) ||
-      disposingSecondaryRef.current
-    ) {
-      return;
-    }
-    disposingSecondaryRef.current = true;
-    void disposePaneSession(paneId).catch(() => {});
-  }, [kind, paneId]);
+  const disposeAuxiliary = useCallback(
+    (generation: number | null): void => {
+      if (kind !== "auxiliary" || generation === null) return;
+      if (disposedNativeGenerationsRef.current.has(generation)) return;
+      disposedNativeGenerationsRef.current.add(generation);
+      if (auxiliaryNativeGenerationRef.current === generation) {
+        auxiliaryNativeGenerationRef.current = null;
+        auxiliaryCreatedRef.current = false;
+      }
+      void disposePaneSession(paneId, generation).catch(() => {});
+    },
+    [kind, paneId],
+  );
+  const bindAuxiliaryProject = useCallback(
+    async (cwd: string, sessionPath?: string): Promise<void> => {
+      const operation = ++auxiliaryCreateGenerationRef.current;
+      let nativeGeneration: number | null = null;
+      try {
+        nativeGeneration = auxiliaryCreatedRef.current
+          ? await selectProject(cwd, sessionPath, auxiliaryNativeGenerationRef.current ?? undefined)
+          : await createPaneSession(paneId, cwd, sessionPath);
+        if (disposedRef.current || operation !== auxiliaryCreateGenerationRef.current) {
+          disposeAuxiliary(nativeGeneration);
+          throw new Error("Pane was closed or rebound while its session was being created");
+        }
+        auxiliaryNativeGenerationRef.current = nativeGeneration;
+        await agentClient.waitForReady();
+        if (disposedRef.current || operation !== auxiliaryCreateGenerationRef.current) {
+          disposeAuxiliary(nativeGeneration);
+          throw new Error("Pane was closed or rebound while its session was becoming ready");
+        }
+        auxiliaryCreatedRef.current = true;
+      } catch (error) {
+        disposeAuxiliary(nativeGeneration);
+        if (operation === auxiliaryCreateGenerationRef.current) {
+          auxiliaryCreatedRef.current = false;
+          auxiliaryNativeGenerationRef.current = null;
+        }
+        throw error;
+      }
+    },
+    [agentClient, disposeAuxiliary, paneId, selectProject],
+  );
 
   useEffect(() => {
     disposedRef.current = false;
     return () => {
       disposedRef.current = true;
-      secondaryCreateGenerationRef.current += 1;
-      disposeSecondary();
+      auxiliaryCreateGenerationRef.current += 1;
+      disposeAuxiliary(auxiliaryNativeGenerationRef.current);
     };
-  }, [disposeSecondary]);
+  }, [disposeAuxiliary]);
   // Mirror of `state` for use inside the memoized event handler (which doesn't
   // re-capture state). Lets turn_end pick the right context-token formula by
   // provider without re-subscribing the SSE listener on every state change.
@@ -922,10 +954,7 @@ export function AgentPane({
       if (kind === "primary") {
         await selectProject(initialTarget.cwd, initialTarget.sessionPath ?? undefined);
       } else {
-        secondaryCreateStartedRef.current = true;
-        await createPaneSession(paneId, initialTarget.cwd, initialTarget.sessionPath ?? undefined);
-        secondaryCreatedRef.current = true;
-        await agentClient.waitForReady();
+        await bindAuxiliaryProject(initialTarget.cwd, initialTarget.sessionPath ?? undefined);
       }
       if (!cancelled && !disposedRef.current) onProjectChosen();
     })()
@@ -945,8 +974,8 @@ export function AgentPane({
   }, []);
 
   useEffect(() => {
-    // Only the main window auto-connects to its default project. Secondary
-    // (project-*) windows show the picker first and connect on selection.
+    // Only the primary pane auto-connects to its default project. Auxiliary
+    // panes show the picker first and connect on selection.
     // hydrateNonce forces a re-run when re-selecting a session in an already-
     // connected window (needsProject stays false there).
     if (!needsProject) void hydrate();
@@ -1600,26 +1629,13 @@ export function AgentPane({
   // sessions from the reopened picker), which flipping the boolean alone won't.
   const bindPickerProject = useCallback(
     async (cwd: string, sessionPath?: string): Promise<void> => {
-      if (kind !== "secondary" || secondaryCreatedRef.current) {
-        await selectProject(cwd, sessionPath);
+      if (kind === "auxiliary") {
+        await bindAuxiliaryProject(cwd, sessionPath);
         return;
       }
-
-      const generation = ++secondaryCreateGenerationRef.current;
-      secondaryCreateStartedRef.current = true;
-      await createPaneSession(paneId, cwd, sessionPath);
-      secondaryCreatedRef.current = true;
-      if (disposedRef.current || generation !== secondaryCreateGenerationRef.current) {
-        disposeSecondary();
-        throw new Error("Pane was disposed while its session was being created");
-      }
-      await agentClient.waitForReady();
-      if (disposedRef.current || generation !== secondaryCreateGenerationRef.current) {
-        disposeSecondary();
-        throw new Error("Pane was disposed while its session was becoming ready");
-      }
+      await selectProject(cwd, sessionPath);
     },
-    [agentClient, disposeSecondary, kind, paneId, selectProject],
+    [bindAuxiliaryProject, kind, selectProject],
   );
 
   function onProjectChosen(): void {
@@ -1673,7 +1689,7 @@ export function AgentPane({
             bindProject={bindPickerProject}
             showWindowControls={kind === "primary"}
             // Every window can return to the home screen (it shows global
-            // settings/auth, nothing window-specific) — secondary windows just
+            // settings/auth, nothing window-specific) — auxiliary panes just
             // default to opening on the picker.
             onClose={() => setEntryView("home")}
           />
@@ -1705,7 +1721,7 @@ export function AgentPane({
             setShowPicker(false);
             // Back from the over-a-project picker returns to the home screen for
             // every window (the entry picker now offers a back-to-home button,
-            // so secondary windows are no longer stranded there).
+            // so auxiliary panes are no longer stranded there).
             setNeedsProject(true);
             setEntryView("home");
           }}

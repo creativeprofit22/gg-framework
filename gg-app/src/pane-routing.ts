@@ -1,5 +1,4 @@
 export const PRIMARY_PANE_ID = "primary";
-export const SECONDARY_PANE_ID = "secondary";
 
 export interface PaneTaggedEvent {
   paneId?: string;
@@ -9,8 +8,8 @@ export interface PaneTaggedEvent {
 export type PaneEventSubscriber<TEvent extends PaneTaggedEvent> = (event: TEvent) => void;
 
 /**
- * Match an event to one pane. Legacy untagged frames belong only to the primary
- * pane; a supplied active session token additionally rejects stale bridges.
+ * Match an event to one arbitrary pane ID. Legacy untagged frames belong only
+ * to the primary pane; a supplied active session token rejects stale bridges.
  */
 export function matchesPaneEvent(
   event: PaneTaggedEvent,

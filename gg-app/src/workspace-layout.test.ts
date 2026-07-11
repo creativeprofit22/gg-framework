@@ -282,6 +282,18 @@ describe("pure workspace layout operations", () => {
     expect(workspaceLayoutLeafIds(three.root)).toEqual(["primary", "secondary", "pane-4"]);
     expect(three.focusedPaneId).toBe("pane-4");
     expect(three.panes["pane-4"]).toBeNull();
+
+    const requested = splitWorkspacePane(three, "pane-4", "horizontal", "pane-9");
+    expect(workspaceLayoutLeafIds(requested.root)).toEqual([
+      "primary",
+      "secondary",
+      "pane-4",
+      "pane-9",
+    ]);
+    expect(requested.panes["pane-9"]).toBeNull();
+    expect(splitWorkspacePane(three, "pane-4", "horizontal", "secondary")).toBe(three);
+    expect(splitWorkspacePane(three, "pane-4", "horizontal", "bad pane")).toBe(three);
+
     const four = splitWorkspacePane(three, "pane-4", "horizontal");
     expect(workspaceLayoutLeafIds(four.root)).toHaveLength(4);
     expect(allocateWorkspacePaneId(four)).toBeNull();

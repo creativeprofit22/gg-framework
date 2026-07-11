@@ -165,9 +165,16 @@ export function splitWorkspacePane(
   layout: WorkspaceLayout,
   paneId: WorkspacePaneId,
   direction: SplitDirection,
+  requestedPaneId?: WorkspacePaneId,
 ): WorkspaceLayout {
-  const newPaneId = allocateWorkspacePaneId(layout);
-  if (!newPaneId) return layout;
+  const newPaneId = requestedPaneId ?? allocateWorkspacePaneId(layout);
+  if (
+    !newPaneId ||
+    !isValidWorkspacePaneId(newPaneId) ||
+    workspaceLayoutLeafIds(layout.root).length >= MAX_WORKSPACE_PANES ||
+    workspaceLayoutLeafIds(layout.root).includes(newPaneId)
+  )
+    return layout;
   let changed = false;
   const splitLeaf = (node: WorkspaceLayoutNode): WorkspaceLayoutNode => {
     if (node.type === "leaf") {

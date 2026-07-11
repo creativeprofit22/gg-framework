@@ -133,15 +133,15 @@ function FakePane({
     });
     onSnapshot({
       paneId,
-      cwd: `/work/${paneId}`,
-      sessionPath: `/sessions/${paneId}.jsonl`,
-      sessionTitle: paneId,
-      projectBound: true,
+      cwd: mountedTarget === null ? null : `/work/${paneId}`,
+      sessionPath: mountedTarget === null ? null : `/sessions/${paneId}.jsonl`,
+      sessionTitle: mountedTarget === null ? null : paneId,
+      projectBound: mountedTarget !== null,
       restoreChecked: true,
       activeWork: false,
     });
     return () => registerInput(paneId, null);
-  }, [onSnapshot, paneId, registerInput]);
+  }, [mountedTarget, onSnapshot, paneId, registerInput]);
 
   return (
     <div
@@ -162,6 +162,45 @@ function FakePane({
 }
 
 const renderPane = (props: AgentPaneProps): React.ReactNode => <FakePane {...props} />;
+
+function PickerAwarePane({
+  paneId,
+  kind,
+  focused,
+  initialTarget,
+  onSnapshot,
+  registerInput,
+}: AgentPaneProps): React.ReactElement {
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    registerInput(paneId, {
+      focus: () => inputRef.current?.focus(),
+      handleNativeDrop: () => undefined,
+    });
+    if (initialTarget !== null) {
+      onSnapshot({
+        paneId,
+        cwd: `/work/${paneId}`,
+        sessionPath: null,
+        sessionTitle: paneId,
+        projectBound: true,
+        restoreChecked: true,
+        activeWork: false,
+      });
+    }
+    return () => registerInput(paneId, null);
+  }, [initialTarget, onSnapshot, paneId, registerInput]);
+  return (
+    <div
+      data-testid={`pane-${paneId}`}
+      data-kind={kind}
+      data-focused={String(focused)}
+      data-initial-mode={initialTarget === null ? "picker" : "native"}
+    >
+      <input ref={inputRef} />
+    </div>
+  );
+}
 
 const nativePrimaryTarget = { cwd: "/native/project", sessionPath: "/native/session.jsonl" };
 
@@ -219,6 +258,7 @@ function setWorkspaceWidth(container: HTMLElement, width: number): void {
 }
 
 beforeEach(() => {
+  vi.stubGlobal("CSS", { escape: (value: string) => value });
   vi.clearAllMocks();
   terminalMock.heights = [];
   terminalMock.onHeightChange = undefined;
@@ -260,66 +300,37 @@ describe("WorkspaceShell recursive rendering", () => {
     );
   });
 
-  it("preserves a vertical v6 root through snapshots, focus, and terminal updates, then intentionally replaces it on close and reopen", async () => {
-    const storageKey = "gg-workspace-layout-recursive:main";
-    localStorage.setItem(
-      storageKey,
-      JSON.stringify({
-        version: 6,
-        root: {
-          type: "split",
-          direction: "vertical",
-          ratio: 35,
-          first: { type: "leaf", paneId: "primary" },
-          second: { type: "leaf", paneId: "secondary" },
-        },
-        focusedPaneId: "primary",
-        panes: { primary: null, secondary: null },
-        terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
-      }),
-    );
-    render(<WorkspaceShell renderPane={renderPane} />);
+  it.each([
+    ["right", "Split Right", "horizontal"],
+    ["down", "Split Down", "vertical"],
+  ])(
+    "split %s creates exactly one focused null-target auxiliary pane without remounting unrelated panes",
+    async (_label, action, direction) => {
+      const mounts = vi.fn();
+      function CountingPane(props: AgentPaneProps): React.ReactElement {
+        useEffect(() => mounts(props.paneId), [props.paneId]);
+        return <PickerAwarePane {...props} />;
+      }
+      render(<WorkspaceShell renderPane={(props) => <CountingPane {...props} />} />);
+      const primary = screen.getByTestId("pane-primary");
+      fireEvent.pointerDown(primary);
+      mounts.mockClear();
+      fireEvent.click(screen.getByRole("button", { name: action }));
+      const created = await screen.findByTestId("pane-pane-1");
+      expect(created.dataset.kind).toBe("auxiliary");
+      expect(created.dataset.focused).toBe("true");
+      expect(created.dataset.initialMode).toBe("picker");
+      expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(3);
+      expect(
+        document.querySelectorAll(`.workspace-split-${direction}`).length,
+      ).toBeGreaterThanOrEqual(1);
+      expect(mounts.mock.calls.filter(([paneId]) => paneId === "pane-1")).toHaveLength(1);
+      expect(mounts).not.toHaveBeenCalledWith("secondary");
+      expect(screen.getByTestId("pane-primary")).toBeTruthy();
+    },
+  );
 
-    await screen.findByTestId("pane-secondary");
-    await waitFor(() => {
-      const saved = JSON.parse(localStorage.getItem(storageKey)!);
-      expect(saved.root).toMatchObject({ direction: "vertical", ratio: 35 });
-      expect(saved.panes.primary.cwd).toBe("/work/primary");
-    });
-
-    fireEvent.pointerDown(screen.getByTestId("pane-secondary"));
-    fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
-    await screen.findByTestId("terminal-secondary");
-    act(() => terminalMock.onHeightChange?.(340));
-    await waitFor(() => {
-      const saved = JSON.parse(localStorage.getItem(storageKey)!);
-      expect(saved.root).toMatchObject({ direction: "vertical", ratio: 35 });
-      expect(saved.focusedPaneId).toBe("secondary");
-      expect(saved.terminal).toMatchObject({
-        open: true,
-        ownerPaneId: "secondary",
-        dockHeightPx: 340,
-      });
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
-    fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
-    await waitFor(() =>
-      expect(JSON.parse(localStorage.getItem(storageKey)!).root).toEqual({
-        type: "leaf",
-        paneId: "primary",
-      }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Open secondary pane" }));
-    await waitFor(() => {
-      expect(JSON.parse(localStorage.getItem(storageKey)!).root).toMatchObject({
-        direction: "horizontal",
-        ratio: 50,
-      });
-    });
-  });
-
-  it("falls back from a nested tree containing an unsupported leaf without mounting another agent", async () => {
+  it("supports dynamic nested leaves instead of discarding them", async () => {
     localStorage.setItem(
       "gg-workspace-layout-recursive:main",
       JSON.stringify({
@@ -338,27 +349,21 @@ describe("WorkspaceShell recursive rendering", () => {
           },
         },
         focusedPaneId: "tertiary",
-        panes: { primary: null, secondary: null, tertiary: null },
+        panes: {
+          primary: { cwd: "/work/primary", sessionPath: null },
+          secondary: { cwd: "/work/secondary", sessionPath: null },
+          tertiary: { cwd: "/work/tertiary", sessionPath: null },
+        },
         terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
       }),
     );
-    const mounted = vi.fn();
-
-    render(
-      <WorkspaceShell
-        renderPane={(props) => {
-          mounted(props.paneId);
-          return <FakePane {...props} />;
-        }}
-      />,
-    );
-
-    await screen.findByTestId("pane-secondary");
-    expect(screen.queryByTestId("pane-tertiary")).toBeNull();
-    expect(new Set(mounted.mock.calls.map(([paneId]) => paneId))).toEqual(
-      new Set(["primary", "secondary"]),
-    );
-    expect(document.querySelectorAll(".workspace-split")).toHaveLength(1);
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const tertiary = await screen.findByTestId("pane-tertiary");
+    expect(tertiary.dataset.kind).toBe("auxiliary");
+    expect(tertiary.dataset.focused).toBe("true");
+    expect(document.querySelectorAll(".workspace-split")).toHaveLength(2);
+    await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/tertiary"));
+    await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("tertiary"));
   });
 });
 
@@ -369,7 +374,7 @@ describe("WorkspaceShell pane routing", () => {
 
     expect(slots.map((slot) => slot.dataset.paneId)).toEqual(["primary", "secondary"]);
     expect(screen.getByTestId("pane-primary").dataset.kind).toBe("primary");
-    expect(screen.getByTestId("pane-secondary").dataset.kind).toBe("secondary");
+    expect(screen.getByTestId("pane-secondary").dataset.kind).toBe("auxiliary");
     expect(screen.getByTestId("pane-primary").dataset.focused).toBe("true");
     expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("false");
 
@@ -393,7 +398,7 @@ describe("WorkspaceShell pane routing", () => {
         },
       }),
     );
-    const mounts = { primary: vi.fn(), secondary: vi.fn() };
+    const mounts = { primary: vi.fn(), auxiliary: vi.fn() };
     function MountCountingPane(props: AgentPaneProps): React.ReactElement {
       useEffect(() => mounts[props.kind](), [props.kind]);
       return <FakePane {...props} />;
@@ -407,10 +412,10 @@ describe("WorkspaceShell pane routing", () => {
     await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/secondary"));
     await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("secondary"));
     expect(mounts.primary).toHaveBeenCalledTimes(1);
-    expect(mounts.secondary).toHaveBeenCalledTimes(1);
+    expect(mounts.auxiliary).toHaveBeenCalledTimes(1);
   });
 
-  it("moves one focus by pointer, focus, and Ctrl/Cmd+1/2 and gives Notes the focused cwd", async () => {
+  it("moves focus by pointer, focus, and Ctrl/Cmd+1-4 in visible pane order", async () => {
     render(<WorkspaceShell renderPane={renderPane} />);
     const primary = screen.getByRole("textbox", { name: "primary input" });
     const secondary = screen.getByRole("textbox", { name: "secondary input" });
@@ -423,7 +428,11 @@ describe("WorkspaceShell pane routing", () => {
     expect(screen.getByTestId("pane-primary").dataset.focused).toBe("true");
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
     expect(document.activeElement).toBe(secondary);
-    expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    const paneThree = screen.getByRole("textbox", { name: "pane-1 input" });
+    fireEvent.keyDown(window, { key: "3", ctrlKey: true });
+    expect(document.activeElement).toBe(paneThree);
+    expect(screen.getByTestId("pane-pane-1").dataset.focused).toBe("true");
     fireEvent.keyDown(window, { key: "1", metaKey: true });
     expect(document.activeElement).toBe(primary);
     expect(screen.getByTestId("pane-primary").dataset.focused).toBe("true");
@@ -782,7 +791,7 @@ describe("WorkspaceShell terminal dock", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
     expect(
       screen.getByText(
-        "Work is active in the secondary pane. Closing it will stop that session. Close anyway?",
+        "Work is active in this pane. Closing it will stop that session. Close anyway?",
       ),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
@@ -793,21 +802,22 @@ describe("WorkspaceShell terminal dock", () => {
 
 describe("WorkspaceShell secondary pane lifecycle", () => {
   it("disposes only secondary listeners/session state and restores primary focus", async () => {
-    const disposed = { primary: vi.fn(), secondary: vi.fn() };
+    const disposed = { primary: vi.fn(), auxiliary: vi.fn() };
     function DisposablePane(props: AgentPaneProps): React.ReactElement {
       useEffect(() => () => disposed[props.kind](), [props.kind]);
       return <FakePane {...props} />;
     }
 
     render(<WorkspaceShell renderPane={(props) => <DisposablePane {...props} />} />);
-    const primaryInput = screen.getByRole("textbox", { name: "primary input" });
     fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
 
-    await waitFor(() => expect(disposed.secondary).toHaveBeenCalledTimes(1));
-    expect(disposed.primary).not.toHaveBeenCalled();
-    await waitFor(() => expect(document.activeElement).toBe(primaryInput));
+    await waitFor(() => expect(disposed.auxiliary).toHaveBeenCalledTimes(1));
+    expect(disposed.primary).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("aria-label")).toBe("primary input"),
+    );
     expect(screen.queryByTestId("pane-secondary")).toBeNull();
     expect(document.querySelector(".workspace-grid")?.getAttribute("data-pane-count")).toBe("1");
   });
@@ -836,71 +846,112 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
     await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/primary"));
     await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("primary"));
 
-    fireEvent.click(screen.getByRole("button", { name: "Open secondary pane" }));
-    const secondary = await screen.findByTestId("pane-secondary");
-    expect(secondary.dataset.initialMode).toBe("picker");
-    expect(screen.getByRole("button", { name: "Close secondary pane" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    const created = await screen.findByTestId("pane-pane-1");
+    expect(created.dataset.kind).toBe("auxiliary");
+    expect(screen.getByRole("button", { name: "Close pane-1 pane" })).toBeTruthy();
   });
 
-  it("supports repeated close and reopen without duplicating secondary mounts", async () => {
-    const mounts = vi.fn();
+  it("closes an arbitrary picker pane immediately and disposes exactly its renderPane mount", async () => {
     const disposals = vi.fn();
-    function CountingPane(props: AgentPaneProps): React.ReactElement {
-      useEffect(() => {
-        if (props.kind === "secondary") mounts();
-        return () => {
-          if (props.kind === "secondary") disposals();
-        };
-      }, [props.kind]);
+    function DisposablePane(props: AgentPaneProps): React.ReactElement {
+      useEffect(() => () => disposals(props.paneId), [props.paneId]);
       return <FakePane {...props} />;
     }
+    render(<WorkspaceShell renderPane={(props) => <DisposablePane {...props} />} />);
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    await screen.findByTestId("pane-pane-1");
+    disposals.mockClear();
 
-    render(<WorkspaceShell renderPane={(props) => <CountingPane {...props} />} />);
-    expect(mounts).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
 
-    for (let cycle = 1; cycle <= 2; cycle += 1) {
-      fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
-      await waitFor(() => expect(disposals).toHaveBeenCalledTimes(cycle));
-      fireEvent.click(screen.getByRole("button", { name: "Open secondary pane" }));
-      await screen.findByTestId("pane-secondary");
-      expect(mounts).toHaveBeenCalledTimes(cycle + 1);
-      expect(screen.getAllByTestId("pane-secondary")).toHaveLength(1);
-    }
+    await waitFor(() => expect(screen.queryByTestId("pane-pane-1")).toBeNull());
+    expect(disposals.mock.calls.filter(([paneId]) => paneId === "pane-1")).toHaveLength(1);
+    expect(disposals).not.toHaveBeenCalledWith("secondary");
+    expect(screen.getByTestId("pane-primary")).toBeTruthy();
+    expect(screen.getByTestId("pane-secondary")).toBeTruthy();
   });
 
-  it("requires confirmation before closing active work and keeps both panes on cancel", async () => {
-    function ActivePane({ kind, onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
+  it("does not resurrect or reuse a pane ID after rapid split-close and a late snapshot", async () => {
+    let emitLateSnapshot: (() => void) | undefined;
+    function LatePane({ onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
       useEffect(() => {
-        onSnapshot({
-          paneId,
-          cwd: `/work/${paneId}`,
-          sessionPath: `/sessions/${paneId}.jsonl`,
-          sessionTitle: paneId,
-          projectBound: true,
-          restoreChecked: true,
-          activeWork: kind === "secondary",
-        });
-      }, [kind, onSnapshot, paneId]);
-      return <div data-testid={`active-${paneId}`} />;
+        const emit = () =>
+          onSnapshot({
+            paneId,
+            cwd: `/work/${paneId}`,
+            sessionPath: null,
+            sessionTitle: paneId,
+            projectBound: true,
+            restoreChecked: true,
+            activeWork: false,
+          });
+        emit();
+        if (paneId === "pane-1") emitLateSnapshot = emit;
+      }, [onSnapshot, paneId]);
+      return <div data-testid={`late-${paneId}`} />;
     }
 
-    render(<WorkspaceShell renderPane={(props) => <ActivePane {...props} />} />);
-    await screen.findByTestId("active-secondary");
-    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+    render(<WorkspaceShell renderPane={(props) => <LatePane {...props} />} />);
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    await screen.findByTestId("late-pane-1");
+    fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
+    await waitFor(() => expect(screen.queryByTestId("late-pane-1")).toBeNull());
 
-    expect(
-      screen.getByText(
-        "Work is active in the secondary pane. Closing it will stop that session. Close anyway?",
-      ),
-    ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.getByTestId("active-secondary")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
-    fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
-    await waitFor(() => expect(screen.queryByTestId("active-secondary")).toBeNull());
-    expect(screen.getByTestId("active-primary")).toBeTruthy();
+    act(() => emitLateSnapshot?.());
+    fireEvent.click(screen.getByRole("button", { name: "Split Down" }));
+    expect(await screen.findByTestId("late-pane-2")).toBeTruthy();
+    expect(screen.queryByTestId("late-pane-1")).toBeNull();
+    await waitFor(() => {
+      const saved = JSON.parse(
+        localStorage.getItem("gg-workspace-layout-recursive:main") ?? "null",
+      );
+      expect(saved.panes["pane-1"]).toBeUndefined();
+      expect(saved.panes["pane-2"]).toBeTruthy();
+    });
   });
+
+  it.each(["bound", "active"])(
+    "requires confirmation before closing an arbitrary %s pane and keeps it on cancel",
+    async (condition) => {
+      function ConfirmPane({ onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
+        useEffect(() => {
+          onSnapshot({
+            paneId,
+            cwd: `/work/${paneId}`,
+            sessionPath: `/sessions/${paneId}.jsonl`,
+            sessionTitle: paneId,
+            projectBound: true,
+            restoreChecked: true,
+            activeWork: condition === "active" && paneId === "pane-1",
+          });
+        }, [onSnapshot, paneId]);
+        return <div data-testid={`active-${paneId}`} />;
+      }
+
+      render(<WorkspaceShell renderPane={(props) => <ConfirmPane {...props} />} />);
+      fireEvent.click(screen.getByRole("button", { name: "Split Down" }));
+      await screen.findByTestId("active-pane-1");
+      if (condition === "bound") {
+        fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
+        await screen.findByTestId("terminal-pane-1");
+      }
+      fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
+
+      expect(
+        screen.getByText(
+          "Work is active in this pane. Closing it will stop that session. Close anyway?",
+        ),
+      ).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.getByTestId("active-pane-1")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
+      fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
+      await waitFor(() => expect(screen.queryByTestId("active-pane-1")).toBeNull());
+      expect(screen.getByTestId("active-primary")).toBeTruthy();
+    },
+  );
 });
 
 describe("WorkspaceShell layout recovery", () => {
@@ -1177,12 +1228,14 @@ describe("WorkspaceShell layout recovery", () => {
 
     render(<WorkspaceShell renderPane={renderPane} />);
 
-    const divider = await screen.findByRole("separator", { name: "Resize workspace panes" });
+    const divider = await screen.findByRole("separator", {
+      name: "Resize horizontal workspace panes",
+    });
     await waitFor(() =>
       expect(screen.getByTestId("pane-primary").dataset.initialCwd).toBe("/saved/a"),
     );
     expect(screen.getByTestId("pane-secondary").dataset.initialSession).toBe("/sessions/b.jsonl");
-    expect(divider.getAttribute("aria-valuenow")).toBe("50");
+    expect(divider.getAttribute("aria-valuenow")).toBe("64");
     expect(divider.parentElement?.getAttribute("data-split-ratio")).toBe("64");
     expect(bridge.validateWorkspaceTarget).toHaveBeenCalledTimes(2);
   });
@@ -1212,10 +1265,96 @@ describe("WorkspaceShell layout recovery", () => {
 });
 
 describe("WorkspaceShell pane resizing", () => {
+  it("resizes recursive horizontal and vertical splits independently and restores both ratios", async () => {
+    const storageKey = "gg-workspace-layout-recursive:main";
+    const first = render(<WorkspaceShell renderPane={renderPane} />);
+    fireEvent.pointerDown(screen.getByTestId("pane-primary"));
+    fireEvent.click(screen.getByRole("button", { name: "Split Down" }));
+    await screen.findByTestId("pane-pane-1");
+
+    const horizontal = screen.getByRole("separator", { name: "Resize horizontal workspace panes" });
+    const vertical = screen.getByRole("separator", { name: "Resize vertical workspace panes" });
+    vi.spyOn(horizontal.parentElement!, "getBoundingClientRect").mockReturnValue({
+      width: 1009,
+      height: 700,
+      top: 0,
+      right: 1009,
+      bottom: 700,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(vertical.parentElement!, "getBoundingClientRect").mockReturnValue({
+      width: 500,
+      height: 709,
+      top: 0,
+      right: 500,
+      bottom: 709,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    fireEvent.keyDown(horizontal, { key: "ArrowRight", shiftKey: true });
+    fireEvent.keyDown(vertical, { key: "ArrowDown", shiftKey: true });
+    await waitFor(() => {
+      const root = JSON.parse(localStorage.getItem(storageKey)!).root;
+      expect(root.ratio).toBeCloseTo(59.6, 1);
+      expect(root.first.ratio).toBe(60);
+    });
+    first.unmount();
+
+    render(<WorkspaceShell renderPane={renderPane} />);
+    expect(
+      (await screen.findByRole("separator", { name: "Resize horizontal workspace panes" }))
+        .parentElement?.dataset.splitRatio,
+    ).toBe("59.6");
+    expect(
+      screen.getByRole("separator", { name: "Resize vertical workspace panes" }).parentElement
+        ?.dataset.splitRatio,
+    ).toBe("60");
+  });
+
+  it("caps rapid split mutations at four leaves", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    }
+
+    await waitFor(() => expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(4));
+    expect(screen.queryByTestId("pane-pane-3")).toBeNull();
+  });
+
+  it("disables both split actions at the four-leaf cap", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    await screen.findByTestId("pane-pane-1");
+    fireEvent.click(screen.getByRole("button", { name: "Split Down" }));
+    await screen.findByTestId("pane-pane-2");
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Split Right" }).disabled).toBe(
+      true,
+    );
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Split Down" }).disabled).toBe(
+      true,
+    );
+    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(4);
+  });
   it("applies pointer drag deltas relative to the available pane width", () => {
     const { container } = render(<WorkspaceShell renderPane={renderPane} />);
     setWorkspaceWidth(container, 1009);
-    const divider = screen.getByRole("separator", { name: "Resize workspace panes" });
+    const divider = screen.getByRole("separator", { name: "Resize horizontal workspace panes" });
+    vi.spyOn(divider.parentElement!, "getBoundingClientRect").mockReturnValue({
+      width: 1009,
+      height: 700,
+      top: 0,
+      right: 1009,
+      bottom: 700,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
 
     fireEvent.pointerDown(divider, { button: 0, clientX: 500, pointerId: 7 });
     fireEvent.pointerMove(window, { clientX: 600, pointerId: 7 });
@@ -1227,7 +1366,18 @@ describe("WorkspaceShell pane resizing", () => {
   it("clamps pointer resizing to a 280px minimum for each pane", () => {
     const { container } = render(<WorkspaceShell renderPane={renderPane} />);
     setWorkspaceWidth(container, 1009);
-    const divider = screen.getByRole("separator", { name: "Resize workspace panes" });
+    const divider = screen.getByRole("separator", { name: "Resize horizontal workspace panes" });
+    vi.spyOn(divider.parentElement!, "getBoundingClientRect").mockReturnValue({
+      width: 1009,
+      height: 700,
+      top: 0,
+      right: 1009,
+      bottom: 700,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
 
     fireEvent.pointerDown(divider, { button: 0, clientX: 500, pointerId: 8 });
     fireEvent.pointerMove(window, { clientX: -5_000, pointerId: 8 });
@@ -1240,7 +1390,18 @@ describe("WorkspaceShell pane resizing", () => {
   it("supports arrow, accelerated arrow, Home, and End keyboard controls", () => {
     const { container } = render(<WorkspaceShell renderPane={renderPane} />);
     setWorkspaceWidth(container, 1009);
-    const divider = screen.getByRole("separator", { name: "Resize workspace panes" });
+    const divider = screen.getByRole("separator", { name: "Resize horizontal workspace panes" });
+    vi.spyOn(divider.parentElement!, "getBoundingClientRect").mockReturnValue({
+      width: 1009,
+      height: 700,
+      top: 0,
+      right: 1009,
+      bottom: 700,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
 
     fireEvent.keyDown(divider, { key: "ArrowRight" });
     expect(divider.getAttribute("aria-valuenow")).toBe("52");
@@ -1257,7 +1418,18 @@ describe("WorkspaceShell pane resizing", () => {
     const removeListener = vi.spyOn(window, "removeEventListener");
     const { container, unmount } = render(<WorkspaceShell renderPane={renderPane} />);
     setWorkspaceWidth(container, 1009);
-    const divider = screen.getByRole("separator", { name: "Resize workspace panes" });
+    const divider = screen.getByRole("separator", { name: "Resize horizontal workspace panes" });
+    vi.spyOn(divider.parentElement!, "getBoundingClientRect").mockReturnValue({
+      width: 1009,
+      height: 700,
+      top: 0,
+      right: 1009,
+      bottom: 700,
+      left: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
     addListener.mockClear();
     removeListener.mockClear();
 

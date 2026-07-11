@@ -1365,17 +1365,17 @@ export function createPaneSession(
   paneId: string,
   cwd: string,
   sessionPath?: string,
-): Promise<void> {
-  return invoke("agent_pane_create", { paneId, cwd, sessionPath: sessionPath ?? null });
+): Promise<number> {
+  return invoke<number>("agent_pane_create", { paneId, cwd, sessionPath: sessionPath ?? null });
 }
 
-export function disposePaneSession(paneId: string): Promise<void> {
-  return invoke("agent_pane_dispose", { paneId });
+export function disposePaneSession(paneId: string, generation?: number): Promise<void> {
+  return invoke("agent_pane_dispose", { paneId, generation: generation ?? null });
 }
 
 /** Pane-bound session API used by AgentPane. Every sidecar-backed call carries
- * the explicit pane ID, preventing secondary panes from falling through to the
- * primary compatibility wrappers. */
+ * the exact arbitrary pane ID, preventing auxiliary panes from falling through
+ * to the primary compatibility wrappers. */
 export interface PaneAgentClient {
   readonly paneId: string;
   subscribe(listener: (event: SidecarEvent) => void, activeSessionId?: string): () => void;
@@ -1403,7 +1403,7 @@ export interface PaneAgentClient {
   deleteTask(id: string): Promise<ProjectTask[]>;
   listProjects(): Promise<DiscoveredProject[]>;
   listSessions(cwd: string): Promise<RecentSession[]>;
-  selectProject(cwd: string, sessionPath?: string): Promise<void>;
+  selectProject(cwd: string, sessionPath?: string, expectedGeneration?: number): Promise<number>;
   openProjectPath(path: string): Promise<void>;
 }
 
@@ -1512,8 +1512,12 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     deleteTask: (id) => arrayResult<ProjectTask>("agent_delete_task", "tasks", { id }),
     listProjects: () => arrayResult<DiscoveredProject>("agent_projects", "projects"),
     listSessions: (cwd) => arrayResult<RecentSession>("agent_sessions", "sessions", { cwd }),
-    selectProject: (cwd, sessionPath) =>
-      call("select_project", { cwd, sessionPath: sessionPath ?? null }),
+    selectProject: (cwd, sessionPath, expectedGeneration) =>
+      call("select_project", {
+        cwd,
+        sessionPath: sessionPath ?? null,
+        expectedGeneration: expectedGeneration ?? null,
+      }),
     async openProjectPath(path) {
       let decoded = path;
       try {

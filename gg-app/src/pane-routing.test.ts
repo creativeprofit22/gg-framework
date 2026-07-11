@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   PRIMARY_PANE_ID,
-  SECONDARY_PANE_ID,
   createPaneEventFanout,
   matchesPaneEvent,
   type PaneTaggedEvent,
@@ -25,10 +24,10 @@ describe("pane event routing", () => {
     expect(matchesPaneEvent(event("pane-b", "b"), PRIMARY_PANE_ID)).toBe(false);
   });
 
-  it("routes the fixed secondary pane only to its exact ID", () => {
-    expect(SECONDARY_PANE_ID).toBe("secondary");
-    expect(matchesPaneEvent(event(SECONDARY_PANE_ID, "b"), SECONDARY_PANE_ID)).toBe(true);
-    expect(matchesPaneEvent(event(PRIMARY_PANE_ID, "a"), SECONDARY_PANE_ID)).toBe(false);
+  it("routes arbitrary auxiliary panes only to their exact IDs", () => {
+    expect(matchesPaneEvent(event("pane-2", "b"), "pane-2")).toBe(true);
+    expect(matchesPaneEvent(event("pane-3", "c"), "pane-2")).toBe(false);
+    expect(matchesPaneEvent(event(PRIMARY_PANE_ID, "a"), "pane-3")).toBe(false);
   });
 
   it("accepts an untagged legacy event only for primary", () => {
@@ -36,36 +35,40 @@ describe("pane event routing", () => {
     expect(matchesPaneEvent(event(undefined, "legacy"), "pane-b")).toBe(false);
   });
 
-  it("preserves independent order for interleaved pane events", () => {
+  it("preserves isolation and order for interleaved arbitrary pane events", () => {
     const fanout = createPaneEventFanout<TestEvent>();
     const primary: string[] = [];
-    const paneB: string[] = [];
+    const pane2: string[] = [];
+    const pane3: string[] = [];
     fanout.subscribe(PRIMARY_PANE_ID, (value) => primary.push(value.data));
-    fanout.subscribe(SECONDARY_PANE_ID, (value) => paneB.push(value.data));
+    fanout.subscribe("pane-2", (value) => pane2.push(value.data));
+    fanout.subscribe("pane-3", (value) => pane3.push(value.data));
 
     fanout.dispatch(event(PRIMARY_PANE_ID, "a1"));
-    fanout.dispatch(event(SECONDARY_PANE_ID, "b1"));
+    fanout.dispatch(event("pane-3", "c1"));
+    fanout.dispatch(event("pane-2", "b1"));
+    fanout.dispatch(event("pane-3", "c2"));
     fanout.dispatch(event(PRIMARY_PANE_ID, "a2"));
-    fanout.dispatch(event(SECONDARY_PANE_ID, "b2"));
 
     expect(primary).toEqual(["a1", "a2"]);
-    expect(paneB).toEqual(["b1", "b2"]);
+    expect(pane2).toEqual(["b1"]);
+    expect(pane3).toEqual(["c1", "c2"]);
   });
 
   it("rejects stale tagged events while retaining primary legacy compatibility", () => {
     const fanout = createPaneEventFanout<TestEvent>();
     const paneBListener = vi.fn();
     const primaryListener = vi.fn();
-    fanout.subscribe(SECONDARY_PANE_ID, paneBListener, "session-new");
+    fanout.subscribe("pane-3", paneBListener, "session-new");
     fanout.subscribe(PRIMARY_PANE_ID, primaryListener, "primary-session");
 
-    fanout.dispatch(event(SECONDARY_PANE_ID, "stale", "session-old"));
-    fanout.dispatch(event(SECONDARY_PANE_ID, "missing-session"));
-    fanout.dispatch(event(SECONDARY_PANE_ID, "current", "session-new"));
+    fanout.dispatch(event("pane-3", "stale", "session-old"));
+    fanout.dispatch(event("pane-3", "missing-session"));
+    fanout.dispatch(event("pane-3", "current", "session-new"));
     fanout.dispatch(event(undefined, "legacy"));
 
     expect(paneBListener).toHaveBeenCalledTimes(1);
-    expect(paneBListener).toHaveBeenCalledWith(event(SECONDARY_PANE_ID, "current", "session-new"));
+    expect(paneBListener).toHaveBeenCalledWith(event("pane-3", "current", "session-new"));
     expect(primaryListener).toHaveBeenCalledWith(event(undefined, "legacy"));
   });
 });

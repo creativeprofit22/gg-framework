@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   arrangeAllWindows,
@@ -18,7 +18,8 @@ import {
 import { Confetti } from "./Confetti";
 import { ConfirmModal } from "./ConfirmModal";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
-import { PRIMARY_PANE_ID, SECONDARY_PANE_ID } from "./pane-routing";
+import { PRIMARY_PANE_ID } from "./pane-routing";
+import { PaneSplitActions } from "./PaneSplitActions";
 import { ProjectNotes } from "./ProjectNotes";
 import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
@@ -32,19 +33,27 @@ import { useProgress } from "./useProgress";
 import {
   clampStoredTerminalDockHeightPx,
   loadWorkspaceLayout,
+  MAX_SPLIT_RATIO,
+  MAX_WORKSPACE_PANES,
+  MIN_SPLIT_RATIO,
   preserveRejectedRecursiveWorkspaceLayout,
   preserveRejectedWorkspaceLayout,
-  WORKSPACE_LAYOUT_VERSION,
+  removeWorkspacePane,
   resolveWorkspaceLayoutTargets,
   saveWorkspaceLayout,
+  splitWorkspacePane,
+  updateWorkspaceSplitRatio,
+  workspaceLayoutLeafIds,
+  WORKSPACE_LAYOUT_VERSION,
+  type SplitDirection,
   type WorkspaceLayout,
   type WorkspaceLayoutNode,
+  type WorkspaceLayoutPath,
   type WorkspacePaneId,
 } from "./workspace-layout";
 
-const PANE_IDS = [PRIMARY_PANE_ID, SECONDARY_PANE_ID] as const;
 const DIVIDER_WIDTH_PX = 9;
-const MIN_PANE_WIDTH_PX = 280;
+const MIN_PANE_SIZE_PX = 280;
 const KEYBOARD_RESIZE_STEP_PX = 24;
 const MIN_DOCK_HEIGHT_PX = 140;
 const MAX_DOCK_HEIGHT_PX = 2_000;
@@ -64,16 +73,16 @@ interface TerminalDock {
   cwd: string;
 }
 
-function ratioBounds(containerWidth: number): { min: number; max: number } {
-  const availableWidth = Math.max(0, containerWidth - DIVIDER_WIDTH_PX);
-  if (availableWidth === 0) return { min: 50, max: 50 };
-  const effectiveMinimum = Math.min(MIN_PANE_WIDTH_PX, availableWidth / 2);
-  const min = (effectiveMinimum / availableWidth) * 100;
+function ratioBounds(containerSize: number): { min: number; max: number } {
+  const available = Math.max(0, containerSize - DIVIDER_WIDTH_PX);
+  if (available === 0) return { min: 50, max: 50 };
+  const effectiveMinimum = Math.min(MIN_PANE_SIZE_PX, available / 2);
+  const min = (effectiveMinimum / available) * 100;
   return { min, max: 100 - min };
 }
 
-function clampRatio(ratio: number, containerWidth: number): number {
-  const { min, max } = ratioBounds(containerWidth);
+function clampRatio(ratio: number, containerSize: number): number {
+  const { min, max } = ratioBounds(containerSize);
   return Math.min(max, Math.max(min, ratio));
 }
 
@@ -81,6 +90,16 @@ function clampDockHeight(height: number, availableHeight: number): number {
   if (availableHeight <= 0) return height;
   const maximum = Math.min(MAX_DOCK_HEIGHT_PX, availableHeight * MAX_DOCK_HEIGHT_RATIO);
   return Math.max(0, Math.min(height, maximum));
+}
+
+function canRestorePaneInput(): boolean {
+  const active = document.activeElement;
+  if (document.querySelector(".modal-backdrop") || window.getSelection()?.toString()) return false;
+  if (active && active !== document.body && active.tagName === "BUTTON") return false;
+  return !(
+    active instanceof HTMLElement &&
+    (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)
+  );
 }
 
 export interface WorkspaceShellProps {
@@ -99,144 +118,84 @@ function PaneContent({
 
 interface WorkspaceSplitProps {
   node: Extract<WorkspaceLayoutNode, { type: "split" }>;
-  renderNode: (node: WorkspaceLayoutNode) => React.ReactNode;
-  divider?: React.ReactNode;
-  ratio?: number;
-  collapsedSecond?: boolean;
-  enforcePaneMinimum?: boolean;
+  renderNode: (node: WorkspaceLayoutNode, path: WorkspaceLayoutPath) => React.ReactNode;
+  path: WorkspaceLayoutPath;
+  divider: React.ReactNode;
 }
 
-function WorkspaceSplit({
-  node,
-  renderNode,
-  divider,
-  ratio = node.ratio,
-  collapsedSecond = false,
-  enforcePaneMinimum = false,
-}: WorkspaceSplitProps) {
+function WorkspaceSplit({ node, renderNode, path, divider }: WorkspaceSplitProps) {
   const horizontal = node.direction === "horizontal";
   return (
     <div
       className={`workspace-split workspace-split-${node.direction}`}
       data-direction={node.direction}
-      data-split-ratio={ratio}
+      data-split-ratio={node.ratio}
       style={
-        collapsedSecond
-          ? { gridTemplateColumns: "minmax(0, 1fr)" }
-          : horizontal
-            ? {
-                gridTemplateColumns: enforcePaneMinimum
-                  ? `minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${ratio}fr) ${DIVIDER_WIDTH_PX}px minmax(min(${MIN_PANE_WIDTH_PX}px, calc((100% - ${DIVIDER_WIDTH_PX}px) / 2)), ${100 - ratio}fr)`
-                  : `${ratio}fr ${DIVIDER_WIDTH_PX}px ${100 - ratio}fr`,
-              }
-            : { gridTemplateRows: `${ratio}fr ${DIVIDER_WIDTH_PX}px ${100 - ratio}fr` }
+        horizontal
+          ? {
+              gridTemplateColumns: `${node.ratio}fr ${DIVIDER_WIDTH_PX}px ${100 - node.ratio}fr`,
+            }
+          : { gridTemplateRows: `${node.ratio}fr ${DIVIDER_WIDTH_PX}px ${100 - node.ratio}fr` }
       }
     >
-      {renderNode(node.first)}
-      {!collapsedSecond &&
-        (divider ?? (
-          <div
-            className={`workspace-divider workspace-divider-${node.direction}`}
-            aria-orientation={horizontal ? "vertical" : "horizontal"}
-            role="separator"
-          >
-            <span className="workspace-divider-line" />
-          </div>
-        ))}
-      {!collapsedSecond && renderNode(node.second)}
+      {renderNode(node.first, [...path, "first"])}
+      {divider}
+      {renderNode(node.second, [...path, "second"])}
     </div>
-  );
-}
-
-function isRenderableShellTree(root: WorkspaceLayoutNode, secondaryOpen: boolean): boolean {
-  const ids: string[] = [];
-  const visit = (node: WorkspaceLayoutNode): boolean => {
-    if (node.type === "leaf") {
-      ids.push(node.paneId);
-      return node.paneId === PRIMARY_PANE_ID || node.paneId === SECONDARY_PANE_ID;
-    }
-    return visit(node.first) && visit(node.second);
-  };
-  if (!visit(root) || new Set(ids).size !== ids.length) return false;
-  return secondaryOpen
-    ? ids.length === 2 && ids.includes(PRIMARY_PANE_ID) && ids.includes(SECONDARY_PANE_ID)
-    : (ids.length === 1 && ids[0] === PRIMARY_PANE_ID) ||
-        (ids.length === 2 && ids[0] === PRIMARY_PANE_ID && ids[1] === SECONDARY_PANE_ID);
-}
-
-function fixedShellTree(secondaryOpen: boolean, ratio: number): WorkspaceLayoutNode {
-  return secondaryOpen
-    ? {
-        type: "split",
-        direction: "horizontal",
-        ratio,
-        first: { type: "leaf", paneId: PRIMARY_PANE_ID },
-        second: { type: "leaf", paneId: SECONDARY_PANE_ID },
-      }
-    : { type: "leaf", paneId: PRIMARY_PANE_ID };
-}
-
-function canRestorePaneInput(): boolean {
-  const active = document.activeElement;
-  if (document.querySelector(".modal-backdrop") || window.getSelection()?.toString()) return false;
-  if (active && active !== document.body && active.tagName === "BUTTON") return false;
-  return !(
-    active instanceof HTMLElement &&
-    (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)
   );
 }
 
 export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.ReactElement {
   const [loadedLayout] = useState(() => loadWorkspaceLayout(localStorage, windowLabel));
   const layoutManaged = loadedLayout.status === "valid" || loadedLayout.status === "migrated";
-  const [paneTargets, setPaneTargets] = useState<WorkspaceLayout["panes"]>(
-    loadedLayout.layout.panes,
-  );
+  const [layout, setLayout] = useState<WorkspaceLayout>(loadedLayout.layout);
   const [layoutReady, setLayoutReady] = useState(!layoutManaged);
   const [rejectedLayoutChanged, setRejectedLayoutChanged] = useState(false);
-  const [focusedPaneId, setFocusedPaneId] = useState<WorkspacePaneId>(
-    loadedLayout.layout.focusedPaneId,
-  );
-  const [secondaryOpen, setSecondaryOpen] = useState(loadedLayout.layout.secondaryOpen);
-  const [confirmSecondaryClose, setConfirmSecondaryClose] = useState(false);
-  const focusedPaneIdRef = useRef(focusedPaneId);
+  const focusedPaneIdRef = useRef(layout.focusedPaneId);
+  const activePaneIdsRef = useRef(new Set(workspaceLayoutLeafIds(layout.root)));
   const [windowFocused, setWindowFocused] = useState(true);
   const [snapshots, setSnapshots] = useState<Record<string, PaneSnapshot>>({});
   const [terminalDock, setTerminalDock] = useState<TerminalDock | null>(null);
-  const [terminalIntent, setTerminalIntent] = useState<WorkspaceLayout["terminal"]>(
-    loadedLayout.layout.terminal,
-  );
   const [terminalReady, setTerminalReady] = useState(!layoutManaged);
   const terminalRestoreStartedRef = useRef(false);
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [confirmTerminalClose, setConfirmTerminalClose] = useState(false);
+  const [confirmPaneCloseId, setConfirmPaneCloseId] = useState<WorkspacePaneId | null>(null);
   const inputActionsRef = useRef(new Map<string, PaneInputActions>());
   const [windowIndex, setWindowIndex] = useState<number | null>(null);
   const [windowTotal, setWindowTotal] = useState(1);
   const [showScorecard, setShowScorecard] = useState(false);
   const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
-  const [primaryPaneRatio, setPrimaryPaneRatio] = useState(loadedLayout.layout.splitRatio);
-  const [renderRoot, setRenderRoot] = useState(loadedLayout.layout.root);
-  const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const loadedDockHeight = clampStoredTerminalDockHeightPx(
-    "dockHeightPx" in loadedLayout.layout.terminal
-      ? loadedLayout.layout.terminal.dockHeightPx
-      : undefined,
+    loadedLayout.layout.terminal.dockHeightPx,
   );
   const [dockHeight, setDockHeight] = useState(loadedDockHeight.value);
   const [workspaceHeight, setWorkspaceHeight] = useState(0);
   const workspaceGridRef = useRef<HTMLDivElement>(null);
-  const stopPointerResizeRef = useRef<() => void>(() => undefined);
+  const resizeCleanupRef = useRef(new Map<string, () => void>());
+  const nextGeneratedPaneOrdinalRef = useRef(
+    Math.max(
+      0,
+      ...Object.keys(loadedLayout.layout.panes).map((paneId) => {
+        const match = /^pane-(\d+)$/.exec(paneId);
+        return match ? Number(match[1]) : 0;
+      }),
+    ),
+  );
   const warnedRecoveryEventsRef = useRef(new Set<string>());
   const appUpdate = useAppUpdate();
   const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress();
-  const focusPane = useCallback((paneId: string): void => {
-    const resolvedPaneId: WorkspacePaneId =
-      paneId === SECONDARY_PANE_ID ? SECONDARY_PANE_ID : PRIMARY_PANE_ID;
-    focusedPaneIdRef.current = resolvedPaneId;
-    setFocusedPaneId(resolvedPaneId);
-  }, []);
+  const leafIds = useMemo(() => workspaceLayoutLeafIds(layout.root), [layout.root]);
+
   const markLayoutChanged = useCallback((): void => setRejectedLayoutChanged(true), []);
+  const focusPane = useCallback((paneId: string): void => {
+    focusedPaneIdRef.current = paneId;
+    setLayout((previous) =>
+      workspaceLayoutLeafIds(previous.root).includes(paneId)
+        ? { ...previous, focusedPaneId: paneId }
+        : previous,
+    );
+  }, []);
   const warnRecovery = useCallback((eventKey: string, message: string): void => {
     if (warnedRecoveryEventsRef.current.has(eventKey)) return;
     warnedRecoveryEventsRef.current.add(eventKey);
@@ -244,6 +203,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   }, []);
 
   const updateSnapshot = useCallback((snapshot: PaneSnapshot): void => {
+    if (!activePaneIdsRef.current.has(snapshot.paneId)) return;
     setSnapshots((previous) => {
       const current = previous[snapshot.paneId];
       if (
@@ -253,19 +213,22 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         current.projectBound === snapshot.projectBound &&
         current.restoreChecked === snapshot.restoreChecked &&
         current.activeWork === snapshot.activeWork
-      ) {
+      )
         return previous;
-      }
       return { ...previous, [snapshot.paneId]: snapshot };
     });
-    if (snapshot.projectBound && snapshot.cwd) {
-      setPaneTargets((previous) => ({
-        ...previous,
-        [snapshot.paneId]: { cwd: snapshot.cwd!, sessionPath: snapshot.sessionPath },
-      }));
-    } else if (snapshot.restoreChecked) {
-      setPaneTargets((previous) => ({ ...previous, [snapshot.paneId]: null }));
-    }
+    setLayout((previous) => ({
+      ...previous,
+      panes: {
+        ...previous.panes,
+        [snapshot.paneId]:
+          snapshot.projectBound && snapshot.cwd
+            ? { cwd: snapshot.cwd, sessionPath: snapshot.sessionPath }
+            : snapshot.restoreChecked
+              ? null
+              : previous.panes[snapshot.paneId],
+      },
+    }));
   }, []);
 
   const registerInput = useCallback((paneId: string, actions: PaneInputActions | null): void => {
@@ -277,9 +240,12 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     setConfirmTerminalClose(false);
     setTerminalRunning(false);
     setTerminalDock(null);
-    setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
-    setRejectedLayoutChanged(true);
-  }, []);
+    setLayout((previous) => ({
+      ...previous,
+      terminal: { ...previous.terminal, open: false, ownerPaneId: null },
+    }));
+    markLayoutChanged();
+  }, [markLayoutChanged]);
 
   const requestTerminalClose = useCallback(
     (running: boolean): void => {
@@ -290,18 +256,24 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   );
 
   const handleTerminalStartupFailure = useCallback((): void => {
-    setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
+    setLayout((previous) => ({
+      ...previous,
+      terminal: { ...previous.terminal, open: false, ownerPaneId: null },
+    }));
   }, []);
 
   const openTerminal = useCallback((): void => {
-    const snapshot = snapshots[focusedPaneId];
+    const snapshot = snapshots[layout.focusedPaneId];
     if (!snapshot?.restoreChecked || !snapshot.projectBound || !snapshot.cwd || terminalDock)
       return;
     setTerminalRunning(true);
-    setTerminalIntent((previous) => ({ ...previous, open: true, ownerPaneId: focusedPaneId }));
-    setTerminalDock({ ownerPaneId: focusedPaneId, cwd: snapshot.cwd });
-    setRejectedLayoutChanged(true);
-  }, [focusedPaneId, snapshots, terminalDock]);
+    setLayout((previous) => ({
+      ...previous,
+      terminal: { ...previous.terminal, open: true, ownerPaneId: previous.focusedPaneId },
+    }));
+    setTerminalDock({ ownerPaneId: layout.focusedPaneId, cwd: snapshot.cwd });
+    markLayoutChanged();
+  }, [layout.focusedPaneId, markLayoutChanged, snapshots, terminalDock]);
 
   useEffect(() => {
     if (!terminalDock) return;
@@ -311,24 +283,24 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       !owner.projectBound ||
       !owner.cwd ||
       owner.cwd !== terminalDock.cwd ||
-      paneTargets[terminalDock.ownerPaneId]?.cwd !== terminalDock.cwd
-    ) {
+      layout.panes[terminalDock.ownerPaneId]?.cwd !== terminalDock.cwd ||
+      !leafIds.includes(terminalDock.ownerPaneId)
+    )
       closeTerminal();
-    }
-  }, [closeTerminal, paneTargets, snapshots, terminalDock]);
+  }, [closeTerminal, layout.panes, leafIds, snapshots, terminalDock]);
 
   useEffect(() => {
     if (
       !layoutReady ||
       !terminalReady ||
       terminalDock ||
-      !terminalIntent.open ||
+      !layout.terminal.open ||
       terminalRestoreStartedRef.current
     )
       return;
-    const ownerPaneId = terminalIntent.ownerPaneId;
-    if (!ownerPaneId || (ownerPaneId === SECONDARY_PANE_ID && !secondaryOpen)) return;
-    const target = paneTargets[ownerPaneId];
+    const ownerPaneId = layout.terminal.ownerPaneId;
+    if (!ownerPaneId || !leafIds.includes(ownerPaneId)) return;
+    const target = layout.panes[ownerPaneId];
     const savedTarget = loadedLayout.layout.panes[ownerPaneId];
     const owner = snapshots[ownerPaneId];
     if (!owner?.restoreChecked) return;
@@ -340,21 +312,22 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       owner.sessionPath !== target.sessionPath ||
       target.cwd !== savedTarget.cwd
     ) {
-      setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
-      setRejectedLayoutChanged(true);
+      handleTerminalStartupFailure();
+      markLayoutChanged();
       return;
     }
     terminalRestoreStartedRef.current = true;
     setTerminalRunning(true);
     setTerminalDock({ ownerPaneId, cwd: target.cwd });
   }, [
+    handleTerminalStartupFailure,
+    layout,
     layoutReady,
+    leafIds,
     loadedLayout.layout.panes,
-    paneTargets,
-    secondaryOpen,
+    markLayoutChanged,
     snapshots,
     terminalDock,
-    terminalIntent,
     terminalReady,
   ]);
 
@@ -394,110 +367,91 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     )
       .then((resolved) => {
         if (cancelled) return;
-        const savedTerminalOwner = loadedLayout.layout.terminal.open
+        const owner = loadedLayout.layout.terminal.open
           ? loadedLayout.layout.terminal.ownerPaneId
           : null;
-        const terminalOwnerMissing = Boolean(
-          savedTerminalOwner && !resolved.panes[savedTerminalOwner],
-        );
-        setPaneTargets(resolved.panes);
-        setTerminalIntent(resolved.terminal);
-        if (terminalOwnerMissing) {
+        if (owner && !resolved.panes[owner]) {
           warnRecovery(
-            `missing-terminal-owner:${savedTerminalOwner}:${JSON.stringify(
-              loadedLayout.layout.panes[savedTerminalOwner!],
-            )}`,
+            `missing-terminal-owner:${owner}:${JSON.stringify(loadedLayout.layout.panes[owner])}`,
             MISSING_TERMINAL_OWNER_WARNING,
           );
         }
-        const staleNonTerminalTarget = PANE_IDS.some(
-          (paneId) =>
-            paneId !== savedTerminalOwner &&
-            JSON.stringify(resolved.panes[paneId]) !==
-              JSON.stringify(loadedLayout.layout.panes[paneId]),
-        );
-        if (staleNonTerminalTarget) {
+        if (
+          Object.keys(loadedLayout.layout.panes).some(
+            (paneId) =>
+              paneId !== owner &&
+              JSON.stringify(resolved.panes[paneId]) !==
+                JSON.stringify(loadedLayout.layout.panes[paneId]),
+          )
+        )
           warnRecovery(
             `stale:${JSON.stringify(loadedLayout.layout.panes)}:${JSON.stringify(resolved.panes)}`,
             STALE_TARGET_WARNING,
           );
-        }
-        setPrimaryPaneRatio(resolved.splitRatio);
-        setRenderRoot(resolved.root);
-        setSecondaryOpen(resolved.secondaryOpen);
-        focusPane(resolved.focusedPaneId);
+        activePaneIdsRef.current = new Set(workspaceLayoutLeafIds(resolved.root));
+        setLayout(resolved);
+        focusedPaneIdRef.current = resolved.focusedPaneId;
         setTerminalReady(true);
         setLayoutReady(true);
       })
       .catch(() => {
         if (cancelled) return;
-        setPaneTargets(loadedLayout.layout.panes);
-        setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
-        setPrimaryPaneRatio(loadedLayout.layout.splitRatio);
-        setRenderRoot(loadedLayout.layout.root);
-        setSecondaryOpen(loadedLayout.layout.secondaryOpen);
-        focusPane(loadedLayout.layout.focusedPaneId);
+        activePaneIdsRef.current = new Set(workspaceLayoutLeafIds(loadedLayout.layout.root));
+        setLayout({
+          ...loadedLayout.layout,
+          terminal: { ...loadedLayout.layout.terminal, open: false, ownerPaneId: null },
+        });
+        focusedPaneIdRef.current = loadedLayout.layout.focusedPaneId;
         setTerminalReady(true);
         setLayoutReady(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [focusPane, layoutManaged, loadedLayout, warnRecovery]);
+  }, [layoutManaged, loadedLayout, warnRecovery]);
 
   useEffect(() => {
-    if (!layoutReady || !snapshots[PRIMARY_PANE_ID]?.restoreChecked) return;
-    if (secondaryOpen && !snapshots[SECONDARY_PANE_ID]?.restoreChecked) return;
+    if (!layoutReady || !terminalReady) return;
+    if (leafIds.some((paneId) => !snapshots[paneId]?.restoreChecked)) return;
     if (loadedLayout.status === "corrupt" && !rejectedLayoutChanged) return;
     saveWorkspaceLayout(localStorage, windowLabel, {
+      ...layout,
       version: WORKSPACE_LAYOUT_VERSION,
-      root: secondaryOpen ? renderRoot : fixedShellTree(false, primaryPaneRatio),
-      splitRatio: primaryPaneRatio,
-      secondaryOpen,
-      focusedPaneId,
-      panes: paneTargets,
-      terminal: { ...terminalIntent, dockHeightPx: dockHeight },
+      terminal: { ...layout.terminal, dockHeightPx: dockHeight },
     });
   }, [
     dockHeight,
-    focusedPaneId,
+    layout,
     layoutReady,
+    leafIds,
     loadedLayout.status,
-    paneTargets,
-    primaryPaneRatio,
     rejectedLayoutChanged,
-    renderRoot,
-    secondaryOpen,
     snapshots,
-    terminalIntent,
     terminalReady,
   ]);
 
   useEffect(() => {
-    focusedPaneIdRef.current = focusedPaneId;
-    const focused = snapshots[focusedPaneId];
+    focusedPaneIdRef.current = layout.focusedPaneId;
+    const focused = snapshots[layout.focusedPaneId];
     setWindowTitle(
       focused?.projectBound && focused.sessionTitle ? focused.sessionTitle : PRODUCT_DISPLAY_NAME,
     );
-  }, [focusedPaneId, snapshots]);
+  }, [layout.focusedPaneId, snapshots]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       const meta = event.metaKey || event.ctrlKey;
       if (!meta || event.altKey) return;
+      const paneNumber = /^[1-4]$/.test(event.key) ? Number(event.key) : null;
       const inTerminal =
         event.target instanceof Element && event.target.closest(".terminal-pane") !== null;
-      const reservedTerminalChord =
-        (!event.shiftKey && (event.key === "1" || event.key === "2")) || event.code === "Backquote";
-      if (inTerminal && !reservedTerminalChord) return;
-      if (!event.shiftKey && event.key === "1") {
+      const reserved = (!event.shiftKey && paneNumber !== null) || event.code === "Backquote";
+      if (inTerminal && !reserved) return;
+      const paneId = paneNumber === null ? undefined : leafIds[paneNumber - 1];
+      if (!event.shiftKey && paneId) {
         event.preventDefault();
-        focusPane(PRIMARY_PANE_ID);
-        inputActionsRef.current.get(PRIMARY_PANE_ID)?.focus();
-      } else if (!event.shiftKey && event.key === "2" && secondaryOpen) {
-        event.preventDefault();
-        focusPane(SECONDARY_PANE_ID);
-        inputActionsRef.current.get(SECONDARY_PANE_ID)?.focus();
+        focusPane(paneId);
+        inputActionsRef.current.get(paneId)?.focus();
       } else if (!event.shiftKey && event.key.toLowerCase() === "n") {
         event.preventDefault();
         void newWindow();
@@ -511,7 +465,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [focusPane, secondaryOpen]);
+  }, [focusPane, leafIds]);
 
   useEffect(() => {
     const restoreFocusedInput = (): void => {
@@ -599,160 +553,179 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     return () => window.clearTimeout(timer);
   }, [levelUp, levelUpNonce, levelUpOrigin]);
 
-  useEffect(() => () => stopPointerResizeRef.current(), []);
+  useEffect(
+    () => () => {
+      for (const stop of resizeCleanupRef.current.values()) stop();
+      resizeCleanupRef.current.clear();
+    },
+    [],
+  );
 
   useLayoutEffect(() => {
     const measureWorkspace = (): void => {
-      const bounds = workspaceGridRef.current?.getBoundingClientRect();
-      setWorkspaceWidth(bounds?.width ?? 0);
-      setWorkspaceHeight(bounds?.height ?? 0);
+      setWorkspaceHeight(workspaceGridRef.current?.getBoundingClientRect().height ?? 0);
     };
     measureWorkspace();
     window.addEventListener("resize", measureWorkspace);
     return () => window.removeEventListener("resize", measureWorkspace);
   }, []);
 
+  const splitFocusedPane = useCallback(
+    (direction: SplitDirection): void => {
+      let newFocused: WorkspacePaneId | null = null;
+      const newPaneId = `pane-${++nextGeneratedPaneOrdinalRef.current}`;
+      setLayout((previous) => {
+        const next = splitWorkspacePane(previous, previous.focusedPaneId, direction, newPaneId);
+        if (next === previous) return previous;
+        newFocused = next.focusedPaneId;
+        focusedPaneIdRef.current = next.focusedPaneId;
+        activePaneIdsRef.current = new Set(workspaceLayoutLeafIds(next.root));
+        return next;
+      });
+      markLayoutChanged();
+      requestAnimationFrame(() => {
+        if (!newFocused) return;
+        document
+          .querySelector<HTMLElement>(
+            `#workspace-pane-${CSS.escape(newFocused)} button, #workspace-pane-${CSS.escape(newFocused)} input`,
+          )
+          ?.focus();
+      });
+    },
+    [markLayoutChanged],
+  );
+
+  const closePane = useCallback(
+    (paneId: WorkspacePaneId): void => {
+      if (paneId === PRIMARY_PANE_ID || !leafIds.includes(paneId)) return;
+      for (const stop of resizeCleanupRef.current.values()) stop();
+      setConfirmPaneCloseId(null);
+      if (terminalDock?.ownerPaneId === paneId) closeTerminal();
+      inputActionsRef.current.delete(paneId);
+      setSnapshots((previous) => {
+        const next = { ...previous };
+        delete next[paneId];
+        return next;
+      });
+      let nextFocus: WorkspacePaneId | null = null;
+      setLayout((previous) => {
+        const next = removeWorkspacePane(previous, paneId);
+        nextFocus = next.focusedPaneId;
+        focusedPaneIdRef.current = next.focusedPaneId;
+        activePaneIdsRef.current = new Set(workspaceLayoutLeafIds(next.root));
+        return next;
+      });
+      markLayoutChanged();
+      requestAnimationFrame(() => {
+        if (nextFocus) inputActionsRef.current.get(nextFocus)?.focus();
+      });
+    },
+    [closeTerminal, leafIds, markLayoutChanged, terminalDock],
+  );
+
+  const requestPaneClose = useCallback(
+    (paneId: WorkspacePaneId): void => {
+      const ownsRunningTerminal = terminalRunning && terminalDock?.ownerPaneId === paneId;
+      if (snapshots[paneId]?.activeWork || ownsRunningTerminal) setConfirmPaneCloseId(paneId);
+      else closePane(paneId);
+    },
+    [closePane, snapshots, terminalDock, terminalRunning],
+  );
+
   const resizeByKeyboard = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>): void => {
-      const containerWidth = workspaceGridRef.current?.getBoundingClientRect().width ?? 0;
-      setWorkspaceWidth(containerWidth);
-      const availableWidth = Math.max(0, containerWidth - DIVIDER_WIDTH_PX);
+    (
+      event: React.KeyboardEvent<HTMLDivElement>,
+      path: WorkspaceLayoutPath,
+      direction: SplitDirection,
+      ratio: number,
+    ): void => {
+      const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+      const size = direction === "horizontal" ? (bounds?.width ?? 0) : (bounds?.height ?? 0);
+      const available = Math.max(0, size - DIVIDER_WIDTH_PX);
       let nextRatio: number | null = null;
-
-      if (event.key === "Home") nextRatio = ratioBounds(containerWidth).min;
-      else if (event.key === "End") nextRatio = ratioBounds(containerWidth).max;
-      else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-        const direction = event.key === "ArrowLeft" ? -1 : 1;
-        const step = event.shiftKey ? KEYBOARD_RESIZE_STEP_PX * 4 : KEYBOARD_RESIZE_STEP_PX;
-        nextRatio =
-          primaryPaneRatio + direction * (availableWidth > 0 ? (step / availableWidth) * 100 : 0);
+      if (event.key === "Home") nextRatio = ratioBounds(size).min;
+      else if (event.key === "End") nextRatio = ratioBounds(size).max;
+      else {
+        const negative = direction === "horizontal" ? "ArrowLeft" : "ArrowUp";
+        const positive = direction === "horizontal" ? "ArrowRight" : "ArrowDown";
+        if (event.key === negative || event.key === positive) {
+          const sign = event.key === negative ? -1 : 1;
+          const step = event.shiftKey ? KEYBOARD_RESIZE_STEP_PX * 4 : KEYBOARD_RESIZE_STEP_PX;
+          nextRatio = ratio + sign * (available > 0 ? (step / available) * 100 : 0);
+        }
       }
-
       if (nextRatio === null) return;
       event.preventDefault();
-      setRejectedLayoutChanged(true);
-      const clampedRatio = clampRatio(nextRatio, containerWidth);
-      setPrimaryPaneRatio(clampedRatio);
-      setRenderRoot((previous) =>
-        previous.type === "split" ? { ...previous, ratio: clampedRatio } : previous,
+      markLayoutChanged();
+      setLayout((previous) =>
+        updateWorkspaceSplitRatio(previous, path, clampRatio(nextRatio!, size)),
       );
     },
-    [primaryPaneRatio],
+    [markLayoutChanged],
   );
 
   const startPointerResize = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>): void => {
+    (
+      event: React.PointerEvent<HTMLDivElement>,
+      path: WorkspaceLayoutPath,
+      direction: SplitDirection,
+      ratio: number,
+    ): void => {
       if (event.button !== 0) return;
       event.preventDefault();
       event.currentTarget.focus();
-      stopPointerResizeRef.current();
-
+      const key = path.join("/") || "root";
+      resizeCleanupRef.current.get(key)?.();
       const pointerId = event.pointerId;
-      const startX = event.clientX;
-      const startRatio = primaryPaneRatio;
-      const containerWidth = workspaceGridRef.current?.getBoundingClientRect().width ?? 0;
-      setWorkspaceWidth(containerWidth);
-      const availableWidth = Math.max(0, containerWidth - DIVIDER_WIDTH_PX);
+      const startPosition = direction === "horizontal" ? event.clientX : event.clientY;
+      const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+      const size = direction === "horizontal" ? (bounds?.width ?? 0) : (bounds?.height ?? 0);
+      const available = Math.max(0, size - DIVIDER_WIDTH_PX);
       const previousCursor = document.body.style.cursor;
       const previousUserSelect = document.body.style.userSelect;
-      document.body.style.cursor = "col-resize";
+      document.body.style.cursor = direction === "horizontal" ? "col-resize" : "row-resize";
       document.body.style.userSelect = "none";
-
       const stop = (): void => {
         window.removeEventListener("pointermove", onPointerMove);
         window.removeEventListener("pointerup", onPointerEnd);
         window.removeEventListener("pointercancel", onPointerEnd);
         document.body.style.cursor = previousCursor;
         document.body.style.userSelect = previousUserSelect;
-        stopPointerResizeRef.current = () => undefined;
+        resizeCleanupRef.current.delete(key);
       };
       const onPointerMove = (moveEvent: PointerEvent): void => {
-        if (moveEvent.pointerId !== pointerId || availableWidth === 0) return;
-        const deltaRatio = ((moveEvent.clientX - startX) / availableWidth) * 100;
-        setRejectedLayoutChanged(true);
-        const clampedRatio = clampRatio(startRatio + deltaRatio, containerWidth);
-        setPrimaryPaneRatio(clampedRatio);
-        setRenderRoot((previous) =>
-          previous.type === "split" ? { ...previous, ratio: clampedRatio } : previous,
+        if (moveEvent.pointerId !== pointerId || available === 0) return;
+        const current = direction === "horizontal" ? moveEvent.clientX : moveEvent.clientY;
+        markLayoutChanged();
+        setLayout((previous) =>
+          updateWorkspaceSplitRatio(
+            previous,
+            path,
+            clampRatio(ratio + ((current - startPosition) / available) * 100, size),
+          ),
         );
       };
       const onPointerEnd = (endEvent: PointerEvent): void => {
         if (endEvent.pointerId === pointerId) stop();
       };
-
-      stopPointerResizeRef.current = stop;
+      resizeCleanupRef.current.set(key, stop);
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerup", onPointerEnd);
       window.addEventListener("pointercancel", onPointerEnd);
     },
-    [primaryPaneRatio],
+    [markLayoutChanged],
   );
 
-  const closeSecondary = useCallback((): void => {
-    stopPointerResizeRef.current();
-    setConfirmSecondaryClose(false);
-    if (terminalDock?.ownerPaneId === SECONDARY_PANE_ID) {
-      setConfirmTerminalClose(false);
-      setTerminalRunning(false);
-      setTerminalDock(null);
-      setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
-    }
-    setRejectedLayoutChanged(true);
-    setSecondaryOpen(false);
-    setPaneTargets((previous) => ({ ...previous, secondary: null }));
-    setSnapshots((previous) => {
-      const { secondary: _secondary, ...remaining } = previous;
-      return remaining;
-    });
-    focusPane(PRIMARY_PANE_ID);
-    requestAnimationFrame(() => inputActionsRef.current.get(PRIMARY_PANE_ID)?.focus());
-  }, [focusPane, terminalDock]);
-
-  const requestSecondaryClose = useCallback((): void => {
-    const ownsRunningTerminal = terminalRunning && terminalDock?.ownerPaneId === SECONDARY_PANE_ID;
-    if (snapshots[SECONDARY_PANE_ID]?.activeWork || ownsRunningTerminal) {
-      setConfirmSecondaryClose(true);
-      return;
-    }
-    closeSecondary();
-  }, [closeSecondary, snapshots, terminalDock, terminalRunning]);
-
-  const reopenSecondary = useCallback((): void => {
-    setRejectedLayoutChanged(true);
-    setPaneTargets((previous) => ({ ...previous, secondary: null }));
-    setSecondaryOpen(true);
-    setRenderRoot(fixedShellTree(true, primaryPaneRatio));
-    focusPane(SECONDARY_PANE_ID);
-    requestAnimationFrame(() => {
-      document
-        .querySelector<HTMLElement>(
-          "#workspace-pane-secondary button, #workspace-pane-secondary input",
-        )
-        ?.focus();
-    });
-  }, [focusPane, primaryPaneRatio]);
-
-  const focusedSnapshot = snapshots[focusedPaneId];
+  const focusedSnapshot = snapshots[layout.focusedPaneId];
   const canOpenTerminal =
     !terminalDock &&
     Boolean(focusedSnapshot?.restoreChecked && focusedSnapshot.projectBound && focusedSnapshot.cwd);
-  const visiblePaneRatio = clampRatio(primaryPaneRatio, workspaceWidth);
   const visibleDockHeight = clampDockHeight(dockHeight, workspaceHeight);
-  const shellRoot = isRenderableShellTree(renderRoot, secondaryOpen)
-    ? renderRoot
-    : fixedShellTree(secondaryOpen, primaryPaneRatio);
-  const rootIsResizable =
-    shellRoot.type === "split" &&
-    shellRoot.direction === "horizontal" &&
-    shellRoot.first.type === "leaf" &&
-    shellRoot.first.paneId === PRIMARY_PANE_ID &&
-    shellRoot.second.type === "leaf" &&
-    shellRoot.second.paneId === SECONDARY_PANE_ID &&
-    secondaryOpen;
+  const canSplit = leafIds.length < MAX_WORKSPACE_PANES;
 
   const renderLeaf = (paneId: WorkspacePaneId): React.ReactElement => (
     <div
-      className="workspace-pane-slot"
+      className={`workspace-pane-slot${layout.focusedPaneId === paneId ? " pane-focused" : ""}`}
       data-pane-id={paneId}
       id={`workspace-pane-${paneId}`}
       key={paneId}
@@ -765,10 +738,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
             renderPane={renderPane}
             paneProps={{
               paneId,
-              kind: paneId === PRIMARY_PANE_ID ? "primary" : "secondary",
-              focused: focusedPaneId === paneId,
+              kind: paneId === PRIMARY_PANE_ID ? "primary" : "auxiliary",
+              focused: layout.focusedPaneId === paneId,
               windowFocused,
-              initialTarget: layoutManaged ? paneTargets[paneId] : undefined,
+              initialTarget:
+                layoutManaged || paneId.startsWith("pane-") ? layout.panes[paneId] : undefined,
               onFocus: focusPane,
               onSnapshot: updateSnapshot,
               onUserTargetChange: markLayoutChanged,
@@ -781,7 +755,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           snapshots[paneId]?.restoreChecked &&
           snapshots[paneId]?.projectBound &&
           snapshots[paneId]?.cwd === terminalDock.cwd &&
-          paneTargets[paneId]?.cwd === terminalDock.cwd && (
+          layout.panes[paneId]?.cwd === terminalDock.cwd && (
             <TerminalPane
               key={`${paneId}:${terminalDock.cwd}`}
               paneId={paneId}
@@ -795,49 +769,65 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
             />
           )}
       </div>
-      {paneId === SECONDARY_PANE_ID && (
+      {layout.focusedPaneId === paneId && (
+        <PaneSplitActions
+          canSplit={canSplit}
+          onSplitRight={() => splitFocusedPane("horizontal")}
+          onSplitDown={() => splitFocusedPane("vertical")}
+        />
+      )}
+      {paneId !== PRIMARY_PANE_ID && (
         <button
-          className="workspace-secondary-close"
-          aria-label="Close secondary pane"
-          title="Close secondary pane"
-          onClick={requestSecondaryClose}
+          className="workspace-pane-close"
+          aria-label={`Close ${paneId} pane`}
+          title={`Close ${paneId} pane`}
+          onClick={() => requestPaneClose(paneId)}
         >
           <span aria-hidden="true">×</span>
         </button>
       )}
     </div>
   );
-  const rootDivider = rootIsResizable ? (
-    <div
-      aria-controls="workspace-pane-primary workspace-pane-secondary"
-      aria-label="Resize workspace panes"
-      aria-orientation="vertical"
-      aria-valuemax={Math.round(ratioBounds(workspaceWidth).max)}
-      aria-valuemin={Math.round(ratioBounds(workspaceWidth).min)}
-      aria-valuenow={Math.round(visiblePaneRatio)}
-      className="workspace-divider workspace-divider-horizontal"
-      onKeyDown={resizeByKeyboard}
-      onPointerDown={startPointerResize}
-      role="separator"
-      tabIndex={0}
-    >
-      <span className="workspace-divider-line" />
-    </div>
-  ) : undefined;
-  const renderNode = (node: WorkspaceLayoutNode): React.ReactNode =>
-    node.type === "leaf" ? (
-      renderLeaf(node.paneId)
-    ) : (
+
+  const renderNode = (
+    node: WorkspaceLayoutNode,
+    path: WorkspaceLayoutPath = [],
+  ): React.ReactNode => {
+    if (node.type === "leaf") return renderLeaf(node.paneId);
+    const pathKey = path.join("/") || "root";
+    const firstIds = workspaceLayoutLeafIds(node.first);
+    const secondIds = workspaceLayoutLeafIds(node.second);
+    const visibleRatio = node.ratio;
+    const divider = (
+      <div
+        aria-controls={[...firstIds, ...secondIds]
+          .map((paneId) => `workspace-pane-${paneId}`)
+          .join(" ")}
+        aria-label={`Resize ${node.direction === "horizontal" ? "horizontal" : "vertical"} workspace panes`}
+        aria-orientation={node.direction === "horizontal" ? "vertical" : "horizontal"}
+        aria-valuemax={MAX_SPLIT_RATIO}
+        aria-valuemin={MIN_SPLIT_RATIO}
+        aria-valuenow={Math.round(visibleRatio)}
+        className={`workspace-divider workspace-divider-${node.direction}`}
+        onKeyDown={(event) => resizeByKeyboard(event, path, node.direction, node.ratio)}
+        onPointerDown={(event) => startPointerResize(event, path, node.direction, node.ratio)}
+        role="separator"
+        tabIndex={0}
+      >
+        <span className="workspace-divider-line" />
+      </div>
+    );
+    return (
       <WorkspaceSplit
-        key={`${node.direction}:${node.first.type === "leaf" ? node.first.paneId : "split"}:${node.second.type === "leaf" ? node.second.paneId : "split"}`}
+        key={pathKey}
         node={node}
+        path={path}
         renderNode={renderNode}
-        divider={node === shellRoot ? rootDivider : undefined}
-        ratio={node === shellRoot && rootIsResizable ? primaryPaneRatio : node.ratio}
-        collapsedSecond={node === shellRoot && !secondaryOpen}
-        enforcePaneMinimum={node === shellRoot && rootIsResizable}
+        divider={divider}
       />
     );
+  };
+
   return (
     <div className="workspace-shell" style={{ background: theme.background }}>
       {confettiNonce && <Confetti key={confettiNonce} />}
@@ -855,15 +845,6 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         >
           Terminal
         </button>
-        {!secondaryOpen && (
-          <button
-            className="workspace-secondary-open"
-            aria-controls="workspace-pane-secondary"
-            onClick={reopenSecondary}
-          >
-            Open secondary pane
-          </button>
-        )}
         {windowTotal > 1 && windowIndex !== null && (
           <span
             className="window-index"
@@ -873,11 +854,10 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       </div>
       <div
         className="workspace-grid"
-        data-split-ratio={primaryPaneRatio}
         ref={workspaceGridRef}
-        data-pane-count={secondaryOpen ? "2" : "1"}
+        data-pane-count={String(leafIds.length)}
       >
-        {renderNode(shellRoot)}
+        {renderNode(layout.root)}
       </div>
 
       {appUpdate.phase === "available" && (
@@ -921,13 +901,13 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           onClose={() => setConfirmTerminalClose(false)}
         />
       )}
-      {confirmSecondaryClose && (
+      {confirmPaneCloseId && (
         <ConfirmModal
-          title="Close Secondary Pane"
-          message="Work is active in the secondary pane. Closing it will stop that session. Close anyway?"
+          title="Close Pane"
+          message="Work is active in this pane. Closing it will stop that session. Close anyway?"
           confirmLabel="Close Pane"
-          onConfirm={closeSecondary}
-          onClose={() => setConfirmSecondaryClose(false)}
+          onConfirm={() => closePane(confirmPaneCloseId)}
+          onClose={() => setConfirmPaneCloseId(null)}
         />
       )}
       {showScorecard && progress && (

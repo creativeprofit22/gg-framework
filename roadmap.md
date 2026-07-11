@@ -529,6 +529,16 @@ Terminal architecture:
 - terminal descriptor persisted, but dead OS processes are recreated only through an explicit, safe restore policy
 - terminal panes use the same split tree, headers, focus model, resizing, move-to-window behavior, and persistence rules as agent panes
 
+First-slice status:
+
+- [x] Open one embedded terminal docked beneath the focused, project-bound agent pane with its inherited canonical cwd.
+- [x] Route create, input, resize, output, exit, and close through typed Tauri IPC backed by a Rust-owned native PTY.
+- [x] Chunk terminal input to the native 64 KiB request limit and preserve text/binary input order across asynchronous calls.
+- [x] Track rendered terminal dimensions and preserve ordered output through resize, natural exit, startup failure, and close lifecycle transitions.
+- [x] Close the owner-pinned terminal when its pane changes project, becomes unbound, closes, or its native window/app exits.
+- [x] On Windows, own the terminal process tree with a kill-on-close Job Object so descendant shells are cleaned up.
+- [ ] Automated native UI smoke remains unverified because the repo-local Tauri app opens a blank window; focused frontend, Rust PTY, lifecycle, and cleanup tests do not replace that smoke check.
+
 Polish scope:
 
 - workspace command palette/header actions

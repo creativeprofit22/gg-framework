@@ -891,6 +891,57 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
     expect(screen.getByTestId("pane-secondary")).toBeTruthy();
   });
 
+  it("closes generated pane-1 as the sole auxiliary and restores the collapsed primary workspace", async () => {
+    const disposals = vi.fn();
+    function DisposablePane(props: AgentPaneProps): React.ReactElement {
+      useEffect(() => () => disposals(props.paneId), [props.paneId]);
+      return <FakePane {...props} />;
+    }
+    const renderDisposablePane = (props: AgentPaneProps): React.ReactNode => (
+      <DisposablePane {...props} />
+    );
+    const first = render(<WorkspaceShell renderPane={renderDisposablePane} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+    await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
+    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    await screen.findByTestId("pane-pane-1");
+    disposals.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
+
+    await waitFor(() => expect(screen.queryByTestId("pane-pane-1")).toBeNull());
+    expect(disposals.mock.calls.filter(([paneId]) => paneId === "pane-1")).toHaveLength(1);
+    expect(screen.getByTestId("pane-primary").dataset.focused).toBe("true");
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("aria-label")).toBe("primary input"),
+    );
+    expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/primary");
+    expect(screen.getByTestId("terminal-primary")).toBeTruthy();
+    await waitFor(() => {
+      const saved = JSON.parse(
+        localStorage.getItem("gg-workspace-layout-recursive:main") ?? "null",
+      );
+      expect(saved.root).toEqual({ type: "leaf", paneId: "primary" });
+      expect(saved.focusedPaneId).toBe("primary");
+      expect(saved.panes["pane-1"]).toBeUndefined();
+      expect(saved.terminal).toEqual({ open: true, ownerPaneId: "primary", dockHeightPx: 260 });
+    });
+
+    first.unmount();
+    render(<WorkspaceShell renderPane={renderDisposablePane} />);
+
+    const restoredPrimary = await screen.findByTestId("pane-primary");
+    expect(restoredPrimary.dataset.focused).toBe("true");
+    expect(screen.queryByTestId("pane-pane-1")).toBeNull();
+    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(1);
+    await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/primary"));
+    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
+    expect(disposals.mock.calls.filter(([paneId]) => paneId === "pane-1")).toHaveLength(1);
+  });
+
   it("does not resurrect or reuse a pane ID after rapid split-close and a late snapshot", async () => {
     let emitLateSnapshot: (() => void) | undefined;
     function LatePane({ onSnapshot, paneId }: AgentPaneProps): React.ReactElement {

@@ -12,6 +12,8 @@ const toastMock = vi.hoisted(() => vi.fn(() => 1));
 const terminalMock = vi.hoisted(() => ({
   mounts: vi.fn(),
   unmounts: vi.fn(),
+  heights: [] as number[],
+  onHeightChange: undefined as ((height: number) => void) | undefined,
 }));
 
 const bridge = vi.hoisted(() => ({
@@ -78,13 +80,19 @@ vi.mock("./TerminalPane", async () => {
   return {
     TerminalPane: ({
       paneId,
+      height,
+      onHeightChange,
       onRequestClose,
       onRunningChange,
     }: {
       paneId: string;
+      height: number;
+      onHeightChange(height: number): void;
       onRequestClose(running: boolean): void;
       onRunningChange?(running: boolean): void;
     }) => {
+      terminalMock.heights.push(height);
+      terminalMock.onHeightChange = onHeightChange;
       useEffect(() => {
         terminalMock.mounts(paneId);
         onRunningChange?.(true);
@@ -186,15 +194,15 @@ const renderNativeRestorePane = (props: AgentPaneProps): React.ReactNode => (
   <NativeRestoreBoundaryPane {...props} />
 );
 
-function setWorkspaceWidth(container: HTMLElement, width: number): void {
+function setWorkspaceSize(container: HTMLElement, width: number, height = 700): void {
   const grid = container.querySelector<HTMLElement>(".workspace-grid");
   if (!grid) throw new Error("Workspace grid not found");
   vi.spyOn(grid, "getBoundingClientRect").mockReturnValue({
     width,
-    height: 700,
+    height,
     top: 0,
     right: width,
-    bottom: 700,
+    bottom: height,
     left: 0,
     x: 0,
     y: 0,
@@ -202,8 +210,14 @@ function setWorkspaceWidth(container: HTMLElement, width: number): void {
   });
 }
 
+function setWorkspaceWidth(container: HTMLElement, width: number): void {
+  setWorkspaceSize(container, width);
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  terminalMock.heights = [];
+  terminalMock.onHeightChange = undefined;
   workspaceLayoutMock.rejectResolution = false;
   localStorage.clear();
 });
@@ -428,8 +442,78 @@ describe("WorkspaceShell terminal dock", () => {
     await waitFor(() => expect(screen.queryByTestId("terminal-secondary")).toBeNull());
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
-      expect(saved.terminal).toEqual({ open: false, ownerPaneId: null });
+      expect(saved.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 260 });
     });
+  });
+
+  it("clamps, saves, and restores terminal dock height across restart", async () => {
+    const first = render(<WorkspaceShell renderPane={renderPane} />);
+    setWorkspaceSize(first.container, 1_000, 1_000);
+    fireEvent(window, new Event("resize"));
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(open);
+    expect(terminalMock.heights[terminalMock.heights.length - 1]).toBe(260);
+
+    terminalMock.onHeightChange?.(480);
+    await waitFor(() => expect(terminalMock.heights[terminalMock.heights.length - 1]).toBe(480));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
+      expect(saved.terminal.dockHeightPx).toBe(480);
+    });
+
+    first.unmount();
+    terminalMock.heights = [];
+
+    const restarted = render(<WorkspaceShell renderPane={renderPane} />);
+    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
+    expect(terminalMock.heights[terminalMock.heights.length - 1]).toBe(480);
+
+    setWorkspaceSize(restarted.container, 1_000, 1_000);
+    fireEvent(window, new Event("resize"));
+    terminalMock.onHeightChange?.(50);
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
+      expect(saved.terminal.dockHeightPx).toBe(140);
+    });
+    expect(terminalMock.heights[terminalMock.heights.length - 1]).toBe(140);
+    expect(toastMock).not.toHaveBeenCalledWith(
+      "Saved terminal size was unavailable. A safe size was restored.",
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("warns exactly once and restores a safe terminal height when the saved size is unavailable", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 5,
+        splitRatio: 50,
+        secondaryOpen: true,
+        focusedPaneId: "primary",
+        panes: {
+          primary: { cwd: "/work/primary", sessionPath: null },
+          secondary: { cwd: "/work/secondary", sessionPath: null },
+        },
+        terminal: { open: true, ownerPaneId: "primary", dockHeightPx: 50 },
+      }),
+    );
+
+    const view = render(<WorkspaceShell renderPane={renderPane} />);
+    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        "Saved terminal size was unavailable. A safe size was restored.",
+        "warning",
+        4000,
+        false,
+      ),
+    );
+    expect(toastMock).toHaveBeenCalledTimes(1);
+    view.rerender(<WorkspaceShell renderPane={renderPane} />);
+    expect(toastMock).toHaveBeenCalledTimes(1);
   });
 
   it("opens a fresh terminal when the saved agent session is missing", async () => {
@@ -575,7 +659,7 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
       expect(saved).toMatchObject({
-        version: 4,
+        version: 5,
         secondaryOpen: false,
         focusedPaneId: "primary",
       });
@@ -771,7 +855,7 @@ describe("WorkspaceShell layout recovery", () => {
   });
   it.each([
     ["malformed", "not-json"],
-    ["future", JSON.stringify({ version: 99, panes: {} })],
+    ["future", ' \n{\r\n  "version": 99, "future": "é\\u0000"\r\n}\t'],
   ])("recovers the native primary and secondary picker for %s layouts", async (_label, raw) => {
     localStorage.setItem("gg-workspace-layout:main", raw);
 
@@ -789,6 +873,31 @@ describe("WorkspaceShell layout recovery", () => {
       expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(raw);
       expect(localStorage.getItem("gg-workspace-layout:main")).toBe(raw);
     });
+  });
+
+  it("keeps the rollback write barrier until user layout interaction", async () => {
+    const raw = '{"version":99,"future":true}';
+    localStorage.setItem("gg-workspace-layout:main", raw);
+
+    render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
+    await screen.findByTestId("restore-pane-primary");
+    await waitFor(() =>
+      expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(raw),
+    );
+    expect(localStorage.getItem("gg-workspace-layout:main")).toBe(raw);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
+
+    await waitFor(() => {
+      const saved = localStorage.getItem("gg-workspace-layout:main");
+      expect(saved).not.toBe(raw);
+      expect(JSON.parse(saved!)).toMatchObject({
+        version: 5,
+        focusedPaneId: "primary",
+        terminal: { open: true, ownerPaneId: "primary" },
+      });
+    });
+    expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(raw);
   });
 
   it("recovers the native primary when reading layout storage fails", async () => {

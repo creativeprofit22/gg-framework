@@ -1,7 +1,10 @@
-export const WORKSPACE_LAYOUT_VERSION = 4;
+export const WORKSPACE_LAYOUT_VERSION = 5;
 export const DEFAULT_SPLIT_RATIO = 50;
 export const MIN_SPLIT_RATIO = 10;
 export const MAX_SPLIT_RATIO = 90;
+export const DEFAULT_TERMINAL_DOCK_HEIGHT_PX = 260;
+export const MIN_TERMINAL_DOCK_HEIGHT_PX = 140;
+export const MAX_TERMINAL_DOCK_HEIGHT_PX = 2_000;
 
 export type WorkspacePaneId = "primary" | "secondary";
 
@@ -10,13 +13,19 @@ export interface WorkspacePaneTarget {
   sessionPath: string | null;
 }
 
+export interface WorkspaceTerminalLayout {
+  open: boolean;
+  ownerPaneId: WorkspacePaneId | null;
+  dockHeightPx: number;
+}
+
 export interface WorkspaceLayout {
   version: typeof WORKSPACE_LAYOUT_VERSION;
   splitRatio: number;
   secondaryOpen: boolean;
   focusedPaneId: WorkspacePaneId;
   panes: Record<WorkspacePaneId, WorkspacePaneTarget | null>;
-  terminal: { open: boolean; ownerPaneId: WorkspacePaneId | null };
+  terminal: WorkspaceTerminalLayout;
 }
 
 export type WorkspaceLayoutLoadStatus = "missing" | "valid" | "migrated" | "corrupt";
@@ -25,6 +34,7 @@ export interface WorkspaceLayoutLoadResult {
   layout: WorkspaceLayout;
   status: WorkspaceLayoutLoadStatus;
   rejectedRaw?: string;
+  terminalDockHeightRecovery?: { rejected: unknown; resolved: number };
 }
 
 export interface WorkspaceTargetStatus {
@@ -61,13 +71,29 @@ export function defaultWorkspaceLayout(): WorkspaceLayout {
     secondaryOpen: true,
     focusedPaneId: "primary",
     panes: { primary: null, secondary: null },
-    terminal: { open: false, ownerPaneId: null },
+    terminal: { open: false, ownerPaneId: null, dockHeightPx: DEFAULT_TERMINAL_DOCK_HEIGHT_PX },
   };
 }
 
 export function clampStoredSplitRatio(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_SPLIT_RATIO;
   return Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, value));
+}
+
+export interface TerminalDockHeightClampResult {
+  value: number;
+  recovered: boolean;
+}
+
+export function clampStoredTerminalDockHeightPx(value: unknown): TerminalDockHeightClampResult {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return { value: DEFAULT_TERMINAL_DOCK_HEIGHT_PX, recovered: true };
+  }
+  const clamped = Math.min(
+    MAX_TERMINAL_DOCK_HEIGHT_PX,
+    Math.max(MIN_TERMINAL_DOCK_HEIGHT_PX, value),
+  );
+  return { value: clamped, recovered: clamped !== value };
 }
 
 function parseTarget(
@@ -110,11 +136,11 @@ function parseVersionThree(value: Record<string, unknown>): WorkspaceLayout | nu
     secondaryOpen: value.secondaryOpen,
     focusedPaneId: normalizeFocusedPaneId(value.focusedPaneId, value.secondaryOpen),
     panes: { primary, secondary },
-    terminal: { open: false, ownerPaneId: null },
+    terminal: { open: false, ownerPaneId: null, dockHeightPx: DEFAULT_TERMINAL_DOCK_HEIGHT_PX },
   };
 }
 
-function parseCurrent(value: Record<string, unknown>): WorkspaceLayout | null {
+function parseVersionFour(value: Record<string, unknown>): WorkspaceLayout | null {
   const layout = parseVersionThree(value);
   if (!layout || typeof value.terminal !== "object" || value.terminal === null) return null;
   const terminal = value.terminal as Record<string, unknown>;
@@ -126,7 +152,39 @@ function parseCurrent(value: Record<string, unknown>): WorkspaceLayout | null {
   }
   if (terminal.ownerPaneId !== "primary" && terminal.ownerPaneId !== "secondary") return null;
   if (terminal.ownerPaneId === "secondary" && !layout.secondaryOpen) return layout;
-  return { ...layout, terminal: { open: true, ownerPaneId: terminal.ownerPaneId } };
+  return {
+    ...layout,
+    terminal: {
+      open: true,
+      ownerPaneId: terminal.ownerPaneId,
+      dockHeightPx: DEFAULT_TERMINAL_DOCK_HEIGHT_PX,
+    },
+  };
+}
+
+function parseCurrent(value: Record<string, unknown>): WorkspaceLayout | null {
+  if (typeof value.terminal !== "object" || value.terminal === null) return null;
+  const terminal = value.terminal as Record<string, unknown>;
+  if (
+    Object.keys(terminal).some(
+      (key) => key !== "open" && key !== "ownerPaneId" && key !== "dockHeightPx",
+    )
+  )
+    return null;
+  if (typeof terminal.dockHeightPx !== "number") return null;
+  const legacyValue = {
+    ...value,
+    terminal: { open: terminal.open, ownerPaneId: terminal.ownerPaneId },
+  };
+  const layout = parseVersionFour(legacyValue);
+  if (!layout) return null;
+  return {
+    ...layout,
+    terminal: {
+      ...layout.terminal,
+      dockHeightPx: clampStoredTerminalDockHeightPx(terminal.dockHeightPx).value,
+    },
+  };
 }
 
 function migrateVersionTwo(value: Record<string, unknown>): WorkspaceLayout | null {
@@ -146,7 +204,7 @@ function migrateVersionOne(value: Record<string, unknown>): WorkspaceLayout | nu
     secondaryOpen: true,
     focusedPaneId: "primary",
     panes: { primary, secondary },
-    terminal: { open: false, ownerPaneId: null },
+    terminal: { open: false, ownerPaneId: null, dockHeightPx: DEFAULT_TERMINAL_DOCK_HEIGHT_PX },
   };
 }
 
@@ -160,7 +218,7 @@ function migrateLegacy(value: LegacyWorkspaceLayout): WorkspaceLayout | null {
     secondaryOpen: true,
     focusedPaneId: "primary",
     panes: { primary, secondary },
-    terminal: { open: false, ownerPaneId: null },
+    terminal: { open: false, ownerPaneId: null, dockHeightPx: DEFAULT_TERMINAL_DOCK_HEIGHT_PX },
   };
 }
 
@@ -178,8 +236,26 @@ export function parseWorkspaceLayout(raw: string): WorkspaceLayoutLoadResult {
   const record = value as Record<string, unknown>;
   if (record.version === WORKSPACE_LAYOUT_VERSION) {
     const layout = parseCurrent(record);
+    if (!layout) return { layout: defaultWorkspaceLayout(), status: "corrupt" };
+    const terminal = record.terminal as Record<string, unknown>;
+    const height = clampStoredTerminalDockHeightPx(terminal.dockHeightPx);
+    return {
+      layout,
+      status: "valid",
+      ...(height.recovered
+        ? {
+            terminalDockHeightRecovery: {
+              rejected: terminal.dockHeightPx,
+              resolved: height.value,
+            },
+          }
+        : {}),
+    };
+  }
+  if (record.version === 4) {
+    const layout = parseVersionFour(record);
     return layout
-      ? { layout, status: "valid" }
+      ? { layout, status: "migrated" }
       : { layout: defaultWorkspaceLayout(), status: "corrupt" };
   }
   if (record.version === 3) {
@@ -262,6 +338,9 @@ export function saveWorkspaceLayout(
         ownerPaneId: terminalOpen
           ? normalizeFocusedPaneId(layout.terminal.ownerPaneId, secondaryOpen)
           : null,
+        dockHeightPx: clampStoredTerminalDockHeightPx(
+          "dockHeightPx" in layout.terminal ? layout.terminal.dockHeightPx : undefined,
+        ).value,
       },
     };
     storage.setItem(workspaceLayoutKey(windowLabel), JSON.stringify(serializedLayout));

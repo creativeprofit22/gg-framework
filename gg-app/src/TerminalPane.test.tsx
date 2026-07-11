@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => {
     event: undefined as ((event: TerminalEvent) => void) | undefined,
     data: undefined as ((data: string) => void) | undefined,
     binary: undefined as ((data: string) => void) | undefined,
-    resizeObserver: undefined as (() => void) | undefined,
+    resizeObservers: [] as Array<{ callback: () => void; target?: Element }>,
     disconnect: vi.fn(),
   };
 });
@@ -71,6 +71,7 @@ function makeClient(ready: Promise<TerminalInfo> = Promise.resolve(info)): Termi
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.resizeObservers = [];
   mocks.terminal.cols = 80;
   mocks.terminal.rows = 24;
   mocks.terminal.onData.mockImplementation((handler: (data: string) => void) => {
@@ -91,10 +92,15 @@ beforeEach(() => {
   vi.stubGlobal(
     "ResizeObserver",
     class {
+      private observer: { callback: () => void; target?: Element };
+
       constructor(callback: () => void) {
-        mocks.resizeObserver = callback;
+        this.observer = { callback };
+        mocks.resizeObservers.push(this.observer);
       }
-      observe() {}
+      observe(target: Element) {
+        this.observer.target = target;
+      }
       disconnect() {
         mocks.disconnect();
       }
@@ -103,6 +109,40 @@ beforeEach(() => {
 });
 
 describe("TerminalPane", () => {
+  it("applies controlled height and reports user resizing without recreating xterm", () => {
+    const onHeightChange = vi.fn();
+    const view = render(
+      <TerminalPane
+        paneId="primary"
+        height={300}
+        onHeightChange={onHeightChange}
+        onRequestClose={vi.fn()}
+      />,
+    );
+    const pane = screen.getByRole("region", { name: "Terminal for primary" });
+    expect(pane.style.getPropertyValue("--terminal-dock-height")).toBe("300px");
+
+    let renderedHeight = 300;
+    vi.spyOn(pane, "getBoundingClientRect").mockImplementation(
+      () => ({ height: renderedHeight }) as DOMRect,
+    );
+    const paneObserver = mocks.resizeObservers.find(({ target }) => target === pane);
+    renderedHeight = 340;
+    act(() => paneObserver?.callback());
+    expect(onHeightChange).toHaveBeenCalledWith(340);
+
+    view.rerender(
+      <TerminalPane
+        paneId="primary"
+        height={340}
+        onHeightChange={onHeightChange}
+        onRequestClose={vi.fn()}
+      />,
+    );
+    expect(pane.style.getPropertyValue("--terminal-dock-height")).toBe("340px");
+    expect(mocks.createTerminal).toHaveBeenCalledOnce();
+  });
+
   it("fits before creating, then shows canonical metadata and focuses", async () => {
     render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
     expect(mocks.fitAddon.fit).toHaveBeenCalled();
@@ -135,7 +175,22 @@ describe("TerminalPane", () => {
     );
   });
 
-  it("fits and resizes the PTY when its container changes", async () => {
+  it("does not replay input or resize the PTY during mount", async () => {
+    const terminalClient = makeClient();
+    mocks.createTerminal.mockReturnValue(terminalClient);
+
+    render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
+    await screen.findByText("Running");
+
+    const hostObserver = mocks.resizeObservers.find(({ target }) =>
+      target?.classList.contains("terminal-pane-xterm"),
+    );
+    act(() => hostObserver?.callback());
+    expect(terminalClient.input).not.toHaveBeenCalled();
+    expect(terminalClient.resize).not.toHaveBeenCalled();
+  });
+
+  it("resizes only an existing PTY when its fitted dimensions change", async () => {
     vi.useFakeTimers();
     const terminalClient = makeClient();
     mocks.createTerminal.mockImplementation(
@@ -148,9 +203,16 @@ describe("TerminalPane", () => {
     await act(async () => Promise.resolve());
     mocks.terminal.cols = 100;
     mocks.terminal.rows = 30;
-    act(() => mocks.resizeObserver?.());
+    const hostObserver = mocks.resizeObservers.find(({ target }) =>
+      target?.classList.contains("terminal-pane-xterm"),
+    );
+    act(() => hostObserver?.callback());
     await act(async () => vi.advanceTimersByTimeAsync(40));
     expect(terminalClient.resize).toHaveBeenCalledWith(100, 30);
+    expect(terminalClient.resize).toHaveBeenCalledTimes(1);
+    act(() => hostObserver?.callback());
+    await act(async () => vi.advanceTimersByTimeAsync(40));
+    expect(terminalClient.resize).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
   });
 
@@ -341,7 +403,7 @@ describe("TerminalPane", () => {
     expect(terminalClient.close).toHaveBeenCalledOnce();
     resolve(info);
     await act(async () => pending);
-    expect(mocks.disconnect).toHaveBeenCalledOnce();
+    expect(mocks.disconnect).toHaveBeenCalledTimes(2);
     expect(mocks.terminal.dispose).toHaveBeenCalledOnce();
   });
 });

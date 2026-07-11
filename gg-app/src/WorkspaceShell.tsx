@@ -30,6 +30,7 @@ import { TerminalPane } from "./TerminalPane";
 import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
 import {
+  clampStoredTerminalDockHeightPx,
   loadWorkspaceLayout,
   preserveRejectedWorkspaceLayout,
   WORKSPACE_LAYOUT_VERSION,
@@ -43,11 +44,16 @@ const PANE_IDS = [PRIMARY_PANE_ID, SECONDARY_PANE_ID] as const;
 const DIVIDER_WIDTH_PX = 9;
 const MIN_PANE_WIDTH_PX = 280;
 const KEYBOARD_RESIZE_STEP_PX = 24;
+const MIN_DOCK_HEIGHT_PX = 140;
+const MAX_DOCK_HEIGHT_PX = 2_000;
+const MAX_DOCK_HEIGHT_RATIO = 0.6;
 const MALFORMED_LAYOUT_WARNING = "Saved workspace layout was invalid. A safe layout was restored.";
 const STALE_TARGET_WARNING =
   "Some saved workspace panes were unavailable. A safe layout was restored.";
 const MISSING_TERMINAL_OWNER_WARNING =
   "Saved terminal project was unavailable. The terminal stayed closed.";
+const INVALID_TERMINAL_SIZE_WARNING =
+  "Saved terminal size was unavailable. A safe size was restored.";
 
 interface TerminalDock {
   ownerPaneId: WorkspacePaneId;
@@ -65,6 +71,12 @@ function ratioBounds(containerWidth: number): { min: number; max: number } {
 function clampRatio(ratio: number, containerWidth: number): number {
   const { min, max } = ratioBounds(containerWidth);
   return Math.min(max, Math.max(min, ratio));
+}
+
+function clampDockHeight(height: number, availableHeight: number): number {
+  if (availableHeight <= 0) return height;
+  const maximum = Math.min(MAX_DOCK_HEIGHT_PX, availableHeight * MAX_DOCK_HEIGHT_RATIO);
+  return Math.max(0, Math.min(height, maximum));
 }
 
 export interface WorkspaceShellProps {
@@ -122,6 +134,13 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const [confettiNonce, setConfettiNonce] = useState<string | null>(null);
   const [primaryPaneRatio, setPrimaryPaneRatio] = useState(loadedLayout.layout.splitRatio);
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
+  const loadedDockHeight = clampStoredTerminalDockHeightPx(
+    "dockHeightPx" in loadedLayout.layout.terminal
+      ? loadedLayout.layout.terminal.dockHeightPx
+      : undefined,
+  );
+  const [dockHeight, setDockHeight] = useState(loadedDockHeight.value);
+  const [workspaceHeight, setWorkspaceHeight] = useState(0);
   const workspaceGridRef = useRef<HTMLDivElement>(null);
   const stopPointerResizeRef = useRef<() => void>(() => undefined);
   const warnedRecoveryEventsRef = useRef(new Set<string>());
@@ -174,7 +193,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     setConfirmTerminalClose(false);
     setTerminalRunning(false);
     setTerminalDock(null);
-    setTerminalIntent({ open: false, ownerPaneId: null });
+    setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
     setRejectedLayoutChanged(true);
   }, []);
 
@@ -191,7 +210,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     if (!snapshot?.restoreChecked || !snapshot.projectBound || !snapshot.cwd || terminalDock)
       return;
     setTerminalRunning(true);
-    setTerminalIntent({ open: true, ownerPaneId: focusedPaneId });
+    setTerminalIntent((previous) => ({ ...previous, open: true, ownerPaneId: focusedPaneId }));
     setTerminalDock({ ownerPaneId: focusedPaneId, cwd: snapshot.cwd });
     setRejectedLayoutChanged(true);
   }, [focusedPaneId, snapshots, terminalDock]);
@@ -233,7 +252,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       owner.sessionPath !== target.sessionPath ||
       target.cwd !== savedTarget.cwd
     ) {
-      setTerminalIntent({ open: false, ownerPaneId: null });
+      setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
       setRejectedLayoutChanged(true);
       return;
     }
@@ -258,6 +277,15 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   }, [loadedLayout, warnRecovery]);
 
   useEffect(() => {
+    const recovery = loadedLayout.terminalDockHeightRecovery;
+    if (!layoutManaged || !recovery) return;
+    warnRecovery(
+      `invalid-terminal-size:${String(recovery.rejected)}:${recovery.resolved}`,
+      INVALID_TERMINAL_SIZE_WARNING,
+    );
+  }, [layoutManaged, loadedLayout.terminalDockHeightRecovery, warnRecovery]);
+
+  useEffect(() => {
     if (!layoutManaged) return;
     let cancelled = false;
     void resolveWorkspaceLayoutTargets(loadedLayout.layout, (target) =>
@@ -269,7 +297,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         const terminalOwnerMissing = Boolean(terminalOwner && !resolved.panes[terminalOwner]);
         setPaneTargets(resolved.panes);
         setTerminalIntent(
-          terminalOwnerMissing ? { open: false, ownerPaneId: null } : resolved.terminal,
+          terminalOwnerMissing
+            ? { ...resolved.terminal, open: false, ownerPaneId: null }
+            : resolved.terminal,
         );
         if (terminalOwnerMissing) {
           warnRecovery(
@@ -298,7 +328,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       .catch(() => {
         if (cancelled) return;
         setPaneTargets(loadedLayout.layout.panes);
-        setTerminalIntent({ open: false, ownerPaneId: null });
+        setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
         setPrimaryPaneRatio(loadedLayout.layout.splitRatio);
         setSecondaryOpen(loadedLayout.layout.secondaryOpen);
         focusPane(loadedLayout.layout.focusedPaneId);
@@ -320,9 +350,10 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       secondaryOpen,
       focusedPaneId,
       panes: paneTargets,
-      terminal: terminalIntent,
+      terminal: { ...terminalIntent, dockHeightPx: dockHeight },
     });
   }, [
+    dockHeight,
     focusedPaneId,
     layoutReady,
     loadedLayout.status,
@@ -465,7 +496,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
 
   useLayoutEffect(() => {
     const measureWorkspace = (): void => {
-      setWorkspaceWidth(workspaceGridRef.current?.getBoundingClientRect().width ?? 0);
+      const bounds = workspaceGridRef.current?.getBoundingClientRect();
+      setWorkspaceWidth(bounds?.width ?? 0);
+      setWorkspaceHeight(bounds?.height ?? 0);
     };
     measureWorkspace();
     window.addEventListener("resize", measureWorkspace);
@@ -547,7 +580,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       setConfirmTerminalClose(false);
       setTerminalRunning(false);
       setTerminalDock(null);
-      setTerminalIntent({ open: false, ownerPaneId: null });
+      setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
     }
     setRejectedLayoutChanged(true);
     setSecondaryOpen(false);
@@ -588,6 +621,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     !terminalDock &&
     Boolean(focusedSnapshot?.restoreChecked && focusedSnapshot.projectBound && focusedSnapshot.cwd);
   const visiblePaneRatio = clampRatio(primaryPaneRatio, workspaceWidth);
+  const visibleDockHeight = clampDockHeight(dockHeight, workspaceHeight);
   return (
     <div className="workspace-shell" style={{ background: theme.background }}>
       {confettiNonce && <Confetti key={confettiNonce} />}
@@ -668,6 +702,12 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
                     <TerminalPane
                       key={`${paneId}:${terminalDock.cwd}`}
                       paneId={paneId}
+                      height={visibleDockHeight}
+                      onHeightChange={(height) =>
+                        setDockHeight(
+                          Math.min(MAX_DOCK_HEIGHT_PX, Math.max(MIN_DOCK_HEIGHT_PX, height)),
+                        )
+                      }
                       onRequestClose={requestTerminalClose}
                       onRunningChange={setTerminalRunning}
                     />

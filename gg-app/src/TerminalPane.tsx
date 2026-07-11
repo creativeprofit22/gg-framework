@@ -10,11 +10,22 @@ type TerminalStatus = "starting" | "running" | "exited" | "error";
 
 export interface TerminalPaneProps {
   paneId: string;
+  height?: number;
+  onHeightChange?(height: number): void;
   onRequestClose(running: boolean): void;
   onRunningChange?(running: boolean): void;
 }
 
-export function TerminalPane({ paneId, onRequestClose, onRunningChange }: TerminalPaneProps) {
+export function TerminalPane({
+  paneId,
+  height,
+  onHeightChange,
+  onRequestClose,
+  onRunningChange,
+}: TerminalPaneProps) {
+  const paneRef = useRef<HTMLElement>(null);
+  const heightChangeRef = useRef(onHeightChange);
+  const controlledHeightRef = useRef(height ?? 260);
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<TerminalStatus>("starting");
   const [info, setInfo] = useState<TerminalInfo | null>(null);
@@ -24,6 +35,27 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
   const [externalTerminalState, setExternalTerminalState] = useState<"idle" | "opening" | "opened">(
     "idle",
   );
+
+  useEffect(() => {
+    heightChangeRef.current = onHeightChange;
+    controlledHeightRef.current = height ?? 260;
+  }, [height, onHeightChange]);
+
+  useEffect(() => {
+    const pane = paneRef.current;
+    if (!pane) return;
+    let previousHeight = pane.getBoundingClientRect().height;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = pane.getBoundingClientRect().height;
+      if (Math.abs(nextHeight - previousHeight) < 1) return;
+      previousHeight = nextHeight;
+      if (Math.abs(nextHeight - controlledHeightRef.current) >= 1) {
+        heightChangeRef.current?.(nextHeight);
+      }
+    });
+    observer.observe(pane);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -76,6 +108,8 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
     }
 
     let adapter: TerminalAdapter | null = null;
+    let ptyReady = false;
+    let lastPtySize = { cols: initialCols, rows: initialRows };
     let transportStopped = false;
     let pendingFinish: (() => void) | null = null;
     const pendingOutput: Uint8Array[] = [];
@@ -142,6 +176,8 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
       .then((created) => {
         terminalId = created.terminalId;
         if (disposed) return;
+        ptyReady = true;
+        lastPtySize = { cols: created.cols, rows: created.rows };
         setInfo(created);
         if (lifecycle === "starting" && !transportStopped) {
           lifecycle = "running";
@@ -161,7 +197,14 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
       if (disposed) return;
       try {
         fitAddon.fit();
-        adapter?.resize(terminal.cols, terminal.rows);
+        if (
+          ptyReady &&
+          validTerminalSize(terminal.cols, terminal.rows) &&
+          (terminal.cols !== lastPtySize.cols || terminal.rows !== lastPtySize.rows)
+        ) {
+          lastPtySize = { cols: terminal.cols, rows: terminal.rows };
+          adapter?.resize(terminal.cols, terminal.rows);
+        }
       } catch {
         // A zero-sized host can occur briefly during a native window resize.
       }
@@ -202,7 +245,12 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
           : "Error";
 
   return (
-    <section className="terminal-pane" aria-label={`Terminal for ${paneId}`}>
+    <section
+      ref={paneRef}
+      className="terminal-pane"
+      aria-label={`Terminal for ${paneId}`}
+      style={{ "--terminal-dock-height": `${height ?? 260}px` } as React.CSSProperties}
+    >
       <header className="terminal-pane-header">
         <div className="terminal-pane-title">
           <strong>Terminal</strong>

@@ -12,6 +12,20 @@ import {
 } from "./workspace-layout";
 
 const target = (cwd: string, sessionPath: string | null = null) => ({ cwd, sessionPath });
+const FORBIDDEN_TERMINAL_KEYS = [
+  "pid",
+  "terminalId",
+  "command",
+  "args",
+  "env",
+  "scrollback",
+  "history",
+  "input",
+  "output",
+  "exitCode",
+  "process",
+  "shell",
+] as const;
 
 function layout(overrides: Partial<WorkspaceLayout> = {}): WorkspaceLayout {
   return {
@@ -34,7 +48,7 @@ describe("workspace layout storage", () => {
 
     expect(result.status).toBe("migrated");
     expect(result.layout).toEqual({
-      version: 4,
+      version: 5,
       splitRatio: 90,
       secondaryOpen: true,
       focusedPaneId: "primary",
@@ -42,7 +56,7 @@ describe("workspace layout storage", () => {
         primary: target("/project/a"),
         secondary: target("/project/b", "/sessions/b.jsonl"),
       },
-      terminal: { open: false, ownerPaneId: null },
+      terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
     });
   });
 
@@ -116,7 +130,7 @@ describe("workspace layout storage", () => {
     expect(result).toEqual({
       status: "migrated",
       layout: {
-        version: 4,
+        version: 5,
         splitRatio: 63,
         secondaryOpen: false,
         focusedPaneId: "primary",
@@ -124,7 +138,7 @@ describe("workspace layout storage", () => {
           primary: target("/project/a", "/sessions/a.jsonl"),
           secondary: target("/project/b", "/sessions/b.jsonl"),
         },
-        terminal: { open: false, ownerPaneId: null },
+        terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
       },
     });
   });
@@ -139,7 +153,21 @@ describe("workspace layout storage", () => {
     });
   });
 
-  it("restores valid secondary focus from v4", () => {
+  it("migrates v4 terminal state with the default dock height", () => {
+    const record: Record<string, unknown> = { ...layout(), version: 4 };
+    record.terminal = { open: true, ownerPaneId: "primary" };
+
+    const parsed = parseWorkspaceLayout(JSON.stringify(record));
+
+    expect(parsed.status).toBe("migrated");
+    expect(parsed.layout.terminal).toEqual({
+      open: true,
+      ownerPaneId: "primary",
+      dockHeightPx: 260,
+    });
+  });
+
+  it("restores valid secondary focus from v5", () => {
     const parsed = parseWorkspaceLayout(JSON.stringify(layout({ focusedPaneId: "secondary" })));
 
     expect(parsed.status).toBe("valid");
@@ -187,13 +215,16 @@ describe("workspace layout storage", () => {
   ] as const)("accepts strict v4 terminal state %s/%s", (terminalOpen, terminalOwnerPaneId) => {
     const parsed = parseWorkspaceLayout(
       JSON.stringify(
-        layout({ terminal: { open: terminalOpen, ownerPaneId: terminalOwnerPaneId } }),
+        layout({
+          terminal: { open: terminalOpen, ownerPaneId: terminalOwnerPaneId, dockHeightPx: 260 },
+        }),
       ),
     );
     expect(parsed.status).toBe("valid");
     expect(parsed.layout.terminal).toEqual({
       open: terminalOpen,
       ownerPaneId: terminalOwnerPaneId,
+      dockHeightPx: 260,
     });
   });
 
@@ -230,13 +261,49 @@ describe("workspace layout storage", () => {
       JSON.stringify(
         layout({
           secondaryOpen: false,
-          terminal: { open: true, ownerPaneId: "secondary" },
+          terminal: { open: true, ownerPaneId: "secondary", dockHeightPx: 260 },
         }),
       ),
     );
 
     expect(parsed.status).toBe("valid");
-    expect(parsed.layout.terminal).toEqual({ open: false, ownerPaneId: null });
+    expect(parsed.layout.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 260 });
+  });
+
+  it.each([
+    [80, 140],
+    [260, 260],
+    [9_000, 2_000],
+  ])("recovers v5 terminal dock height %s to %s", (dockHeightPx, expected) => {
+    const parsed = parseWorkspaceLayout(
+      JSON.stringify(layout({ terminal: { open: false, ownerPaneId: null, dockHeightPx } })),
+    );
+
+    expect(parsed.status).toBe("valid");
+    expect("dockHeightPx" in parsed.layout.terminal && parsed.layout.terminal.dockHeightPx).toBe(
+      expected,
+    );
+  });
+
+  it("reports recovery when clamping non-finite dock heights", async () => {
+    const { clampStoredTerminalDockHeightPx } = await import("./workspace-layout");
+    expect(clampStoredTerminalDockHeightPx(Number.POSITIVE_INFINITY)).toEqual({
+      value: 260,
+      recovered: true,
+    });
+  });
+
+  it.each([undefined, null, "260"])("rejects strict v5 dock height %s", (dockHeightPx) => {
+    const record = layout() as unknown as Record<string, unknown>;
+    record.terminal = { open: false, ownerPaneId: null, dockHeightPx };
+    expect(parseWorkspaceLayout(JSON.stringify(record)).status).toBe("corrupt");
+  });
+
+  it("preserves normalized dock height while terminal is closed", () => {
+    const parsed = parseWorkspaceLayout(
+      JSON.stringify(layout({ terminal: { open: false, ownerPaneId: null, dockHeightPx: 420 } })),
+    );
+    expect(parsed.layout.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 420 });
   });
 
   it("round-trips whether the secondary pane is closed", () => {
@@ -267,13 +334,13 @@ describe("workspace layout storage", () => {
     expect(saveWorkspaceLayout(unavailable, "main", layout())).toBe(false);
   });
 
-  it("preserves rejected bytes under a diagnostic key", () => {
+  it("preserves future-version rejected bytes exactly under a diagnostic key", () => {
     const values = new Map<string, string>();
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => values.set(key, value),
     };
-    const raw = '{"version":99,"future":true}';
+    const raw = ' \n{\r\n  "version": 99, "future": "é\\u0000"\r\n}\t';
     values.set(workspaceLayoutKey("main"), raw);
 
     const loaded = loadWorkspaceLayout(storage, "main");
@@ -282,7 +349,20 @@ describe("workspace layout storage", () => {
     expect(values.get(rejectedWorkspaceLayoutKey("main"))).toBe(raw);
   });
 
-  it("serializes only allow-listed v4 fields and normalizes terminal ownership", () => {
+  it("rejects every forbidden runtime/process key inside terminal state", () => {
+    for (const key of FORBIDDEN_TERMINAL_KEYS) {
+      const record = layout() as unknown as Record<string, unknown>;
+      record.terminal = {
+        open: false,
+        ownerPaneId: null,
+        dockHeightPx: 260,
+        [key]: `forbidden-${key}`,
+      };
+      expect(parseWorkspaceLayout(JSON.stringify(record)).status, key).toBe("corrupt");
+    }
+  });
+
+  it("serializes only allow-listed v5 fields and emits no forbidden runtime/process keys", () => {
     const values = new Map<string, string>();
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
@@ -291,12 +371,23 @@ describe("workspace layout storage", () => {
     const dirty = {
       ...layout(),
       extra: "drop",
-      terminal: { open: false, ownerPaneId: "secondary", runtime: "drop" },
+      terminal: { open: false, ownerPaneId: "secondary", dockHeightPx: 260 },
     } as WorkspaceLayout;
+    Object.assign(
+      dirty.terminal,
+      Object.fromEntries(FORBIDDEN_TERMINAL_KEYS.map((key) => [key, `forbidden-${key}`])),
+    );
     (dirty.panes.primary as object as Record<string, unknown>).extra = "drop";
 
     expect(saveWorkspaceLayout(storage, "main", dirty)).toBe(true);
-    expect(JSON.parse(values.get(workspaceLayoutKey("main"))!)).toEqual(layout());
+    const serialized = JSON.parse(values.get(workspaceLayoutKey("main"))!) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(serialized).toEqual(layout());
+    for (const key of FORBIDDEN_TERMINAL_KEYS) {
+      expect(Object.prototype.hasOwnProperty.call(serialized.terminal, key), key).toBe(false);
+    }
   });
 
   it("round-trips one native window under its own key", () => {

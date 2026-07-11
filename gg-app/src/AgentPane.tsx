@@ -479,18 +479,20 @@ export function AgentPane({
   const disposedRef = useRef(false);
   const auxiliaryCreateGenerationRef = useRef(0);
   const auxiliaryNativeGenerationRef = useRef<number | null>(null);
-  const disposedNativeGenerationsRef = useRef(new Set<number>());
+  const auxiliaryDisposalsRef = useRef(new Map<number, Promise<void>>());
   const hydrateGenerationRef = useRef(0);
   const disposeAuxiliary = useCallback(
-    (generation: number | null): void => {
-      if (kind !== "auxiliary" || generation === null) return;
-      if (disposedNativeGenerationsRef.current.has(generation)) return;
-      disposedNativeGenerationsRef.current.add(generation);
+    (generation: number | null): Promise<void> => {
+      if (kind !== "auxiliary" || generation === null) return Promise.resolve();
+      const pending = auxiliaryDisposalsRef.current.get(generation);
+      if (pending) return pending;
       if (auxiliaryNativeGenerationRef.current === generation) {
         auxiliaryNativeGenerationRef.current = null;
         auxiliaryCreatedRef.current = false;
       }
-      void disposePaneSession(paneId, generation).catch(() => {});
+      const disposal = disposePaneSession(paneId, generation).catch(() => {});
+      auxiliaryDisposalsRef.current.set(generation, disposal);
+      return disposal;
     },
     [kind, paneId],
   );
@@ -503,18 +505,18 @@ export function AgentPane({
           ? await selectProject(cwd, sessionPath, auxiliaryNativeGenerationRef.current ?? undefined)
           : await createPaneSession(paneId, cwd, sessionPath);
         if (disposedRef.current || operation !== auxiliaryCreateGenerationRef.current) {
-          disposeAuxiliary(nativeGeneration);
+          await disposeAuxiliary(nativeGeneration);
           throw new Error("Pane was closed or rebound while its session was being created");
         }
         auxiliaryNativeGenerationRef.current = nativeGeneration;
         await agentClient.waitForReady();
         if (disposedRef.current || operation !== auxiliaryCreateGenerationRef.current) {
-          disposeAuxiliary(nativeGeneration);
+          await disposeAuxiliary(nativeGeneration);
           throw new Error("Pane was closed or rebound while its session was becoming ready");
         }
         auxiliaryCreatedRef.current = true;
       } catch (error) {
-        disposeAuxiliary(nativeGeneration);
+        await disposeAuxiliary(nativeGeneration);
         if (operation === auxiliaryCreateGenerationRef.current) {
           auxiliaryCreatedRef.current = false;
           auxiliaryNativeGenerationRef.current = null;
@@ -530,7 +532,7 @@ export function AgentPane({
     return () => {
       disposedRef.current = true;
       auxiliaryCreateGenerationRef.current += 1;
-      disposeAuxiliary(auxiliaryNativeGenerationRef.current);
+      void disposeAuxiliary(auxiliaryNativeGenerationRef.current);
     };
   }, [disposeAuxiliary]);
   // Mirror of `state` for use inside the memoized event handler (which doesn't

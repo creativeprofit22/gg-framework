@@ -34,9 +34,16 @@ export function dismissToast(id: number): void {
   emit();
 }
 
-/** Raise a toast. Returns its id. De-dupes an identical message that's still up. */
-export function toast(message: string, tone: ToastTone = "info", duration = 4000): number {
-  const existing = toasts.find((t) => t.message === message && t.tone === tone);
+/** Raise a toast. Returns its id. De-dupes an identical message that's still up by default. */
+export function toast(
+  message: string,
+  tone: ToastTone = "info",
+  duration = 4000,
+  deduplicate = true,
+): number {
+  const existing = deduplicate
+    ? toasts.find((t) => t.message === message && t.tone === tone)
+    : undefined;
   if (existing) return existing.id;
   const id = ++seq;
   toasts = [...toasts, { id, message, tone, duration }];

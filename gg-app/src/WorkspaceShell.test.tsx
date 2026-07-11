@@ -8,6 +8,7 @@ import type * as WorkspaceLayout from "./workspace-layout";
 import { WorkspaceShell } from "./WorkspaceShell";
 
 const workspaceLayoutMock = vi.hoisted(() => ({ rejectResolution: false }));
+const toastMock = vi.hoisted(() => vi.fn(() => 1));
 const terminalMock = vi.hoisted(() => ({
   mounts: vi.fn(),
   unmounts: vi.fn(),
@@ -71,6 +72,7 @@ vi.mock("./ProjectNotes", () => ({
 }));
 vi.mock("./Confetti", () => ({ Confetti: () => null }));
 vi.mock("./Toaster", () => ({ Toaster: () => null }));
+vi.mock("./toast", () => ({ toast: toastMock }));
 vi.mock("./TerminalPane", async () => {
   const { useEffect } = await import("react");
   return {
@@ -553,6 +555,74 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
 });
 
 describe("WorkspaceShell layout recovery", () => {
+  it("warns once for a malformed layout across rerenders and keeps the pane usable", async () => {
+    localStorage.setItem("gg-workspace-layout:main", "not-json");
+
+    const view = render(<WorkspaceShell renderPane={renderPane} />);
+
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        "Saved workspace layout was invalid. A safe layout was restored.",
+        "warning",
+        4000,
+        false,
+      ),
+    );
+    const primaryInput = screen.getByRole("textbox", { name: "primary input" });
+    primaryInput.focus();
+    expect(document.activeElement).toBe(primaryInput);
+
+    view.rerender(<WorkspaceShell renderPane={renderPane} />);
+    expect(toastMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("warns once when a stale target falls back and keeps the recovered pane usable", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 3,
+        splitRatio: 50,
+        secondaryOpen: false,
+        focusedPaneId: "primary",
+        panes: { primary: { cwd: "/missing", sessionPath: null }, secondary: null },
+      }),
+    );
+    bridge.validateWorkspaceTarget.mockResolvedValueOnce({
+      projectExists: false,
+      sessionExists: false,
+    });
+
+    const view = render(<WorkspaceShell renderPane={renderPane} />);
+
+    const primary = await screen.findByTestId("pane-primary");
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        "Some saved workspace panes were unavailable. A safe layout was restored.",
+        "warning",
+        4000,
+        false,
+      ),
+    );
+    expect(primary.dataset.initialMode).toBe("picker");
+    fireEvent.pointerDown(primary);
+    expect(primary.dataset.focused).toBe("true");
+
+    view.rerender(<WorkspaceShell renderPane={renderPane} />);
+    expect(toastMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("warns again for a later distinct recovery event", async () => {
+    localStorage.setItem("gg-workspace-layout:main", "first-invalid-layout");
+    const first = render(<WorkspaceShell renderPane={renderPane} />);
+    await waitFor(() => expect(toastMock).toHaveBeenCalledTimes(1));
+    first.unmount();
+
+    localStorage.setItem("gg-workspace-layout:main", "second-invalid-layout");
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    await waitFor(() => expect(toastMock).toHaveBeenCalledTimes(2));
+  });
+
   it.each([
     ["absent", undefined],
     ["malformed", 42],

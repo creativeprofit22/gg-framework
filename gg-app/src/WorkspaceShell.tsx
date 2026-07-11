@@ -43,6 +43,9 @@ const PANE_IDS = [PRIMARY_PANE_ID, SECONDARY_PANE_ID] as const;
 const DIVIDER_WIDTH_PX = 9;
 const MIN_PANE_WIDTH_PX = 280;
 const KEYBOARD_RESIZE_STEP_PX = 24;
+const MALFORMED_LAYOUT_WARNING = "Saved workspace layout was invalid. A safe layout was restored.";
+const STALE_TARGET_WARNING =
+  "Some saved workspace panes were unavailable. A safe layout was restored.";
 
 interface TerminalDock {
   ownerPaneId: WorkspacePaneId;
@@ -114,6 +117,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const workspaceGridRef = useRef<HTMLDivElement>(null);
   const stopPointerResizeRef = useRef<() => void>(() => undefined);
+  const warnedRecoveryEventsRef = useRef(new Set<string>());
   const appUpdate = useAppUpdate();
   const { snapshot: progress, levelUp, levelUpNonce, levelUpOrigin } = useProgress();
   const focusPane = useCallback((paneId: string): void => {
@@ -123,6 +127,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     setFocusedPaneId(resolvedPaneId);
   }, []);
   const markLayoutChanged = useCallback((): void => setRejectedLayoutChanged(true), []);
+  const warnRecovery = useCallback((eventKey: string, message: string): void => {
+    if (warnedRecoveryEventsRef.current.has(eventKey)) return;
+    warnedRecoveryEventsRef.current.add(eventKey);
+    toast(message, "warning", 4000, false);
+  }, []);
 
   const updateSnapshot = useCallback((snapshot: PaneSnapshot): void => {
     setSnapshots((previous) => {
@@ -182,10 +191,10 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   }, [closeTerminal, snapshots, terminalDock]);
 
   useEffect(() => {
-    if (loadedLayout.status === "corrupt" && loadedLayout.rejectedRaw !== undefined) {
-      preserveRejectedWorkspaceLayout(localStorage, windowLabel, loadedLayout.rejectedRaw);
-    }
-  }, [loadedLayout]);
+    if (loadedLayout.status !== "corrupt" || loadedLayout.rejectedRaw === undefined) return;
+    preserveRejectedWorkspaceLayout(localStorage, windowLabel, loadedLayout.rejectedRaw);
+    warnRecovery(`malformed:${loadedLayout.rejectedRaw}`, MALFORMED_LAYOUT_WARNING);
+  }, [loadedLayout, warnRecovery]);
 
   useEffect(() => {
     if (!layoutManaged) return;
@@ -196,6 +205,12 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       .then((resolved) => {
         if (cancelled) return;
         setPaneTargets(resolved.panes);
+        if (JSON.stringify(resolved.panes) !== JSON.stringify(loadedLayout.layout.panes)) {
+          warnRecovery(
+            `stale:${JSON.stringify(loadedLayout.layout.panes)}:${JSON.stringify(resolved.panes)}`,
+            STALE_TARGET_WARNING,
+          );
+        }
         setPrimaryPaneRatio(resolved.splitRatio);
         setSecondaryOpen(resolved.secondaryOpen);
         focusPane(resolved.focusedPaneId);
@@ -212,7 +227,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     return () => {
       cancelled = true;
     };
-  }, [focusPane, layoutManaged, loadedLayout]);
+  }, [focusPane, layoutManaged, loadedLayout, warnRecovery]);
 
   useEffect(() => {
     if (!layoutReady || !snapshots[PRIMARY_PANE_ID]?.restoreChecked) return;

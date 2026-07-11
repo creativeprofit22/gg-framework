@@ -29,6 +29,9 @@ const bridge = vi.hoisted(() => ({
   onDragDropEvent: vi.fn(() => Promise.resolve(() => undefined)),
 }));
 
+vi.mock("./AgentPane", () => ({ AgentPane: () => null }));
+vi.mock("./sounds", () => ({ playSound: vi.fn() }));
+
 vi.mock("./workspace-layout", async () => {
   const actual = await vi.importActual<typeof WorkspaceLayout>("./workspace-layout");
   return {
@@ -172,12 +175,13 @@ function PickerAwarePane({
   registerInput,
 }: AgentPaneProps): React.ReactElement {
   const inputRef = useRef<HTMLInputElement>(null);
+  const [mountedTarget] = useState(initialTarget);
   useEffect(() => {
     registerInput(paneId, {
       focus: () => inputRef.current?.focus(),
       handleNativeDrop: () => undefined,
     });
-    if (initialTarget !== null) {
+    if (mountedTarget !== null) {
       onSnapshot({
         paneId,
         cwd: `/work/${paneId}`,
@@ -189,13 +193,13 @@ function PickerAwarePane({
       });
     }
     return () => registerInput(paneId, null);
-  }, [initialTarget, onSnapshot, paneId, registerInput]);
+  }, [mountedTarget, onSnapshot, paneId, registerInput]);
   return (
     <div
       data-testid={`pane-${paneId}`}
       data-kind={kind}
       data-focused={String(focused)}
-      data-initial-mode={initialTarget === null ? "picker" : "native"}
+      data-initial-mode={mountedTarget === null ? "picker" : "native"}
     >
       <input ref={inputRef} />
     </div>

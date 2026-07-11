@@ -273,13 +273,19 @@ describe("TerminalPane", () => {
       resolveReady = resolve;
     });
     const onRunningChange = vi.fn();
+    const onStartupFailure = vi.fn();
     mocks.createTerminal.mockImplementation((_paneId, _cols, _rows, onEvent) => {
       mocks.event = onEvent;
       return makeClient(ready);
     });
 
     render(
-      <TerminalPane paneId="primary" onRequestClose={vi.fn()} onRunningChange={onRunningChange} />,
+      <TerminalPane
+        paneId="primary"
+        onRequestClose={vi.fn()}
+        onRunningChange={onRunningChange}
+        onStartupFailure={onStartupFailure}
+      />,
     );
     act(() => {
       mocks.event?.({
@@ -287,6 +293,12 @@ describe("TerminalPane", () => {
         paneId: "primary",
         terminalId: "terminal-1",
         message: "shell failed immediately",
+      });
+      mocks.event?.({
+        type: "error",
+        paneId: "primary",
+        terminalId: "terminal-1",
+        message: "duplicate startup error",
       });
     });
     expect((await screen.findByRole("alert")).textContent).toContain("shell failed immediately");
@@ -296,14 +308,21 @@ describe("TerminalPane", () => {
     expect(screen.queryByText("Running")).toBeNull();
     expect(onRunningChange).toHaveBeenCalledTimes(1);
     expect(onRunningChange).toHaveBeenCalledWith(false);
+    expect(onStartupFailure).toHaveBeenCalledOnce();
   });
 
   it("reports stopped when the initial fitted dimensions are invalid", () => {
     mocks.terminal.cols = 1;
     const onRunningChange = vi.fn();
+    const onStartupFailure = vi.fn();
 
     render(
-      <TerminalPane paneId="primary" onRequestClose={vi.fn()} onRunningChange={onRunningChange} />,
+      <TerminalPane
+        paneId="primary"
+        onRequestClose={vi.fn()}
+        onRunningChange={onRunningChange}
+        onStartupFailure={onStartupFailure}
+      />,
     );
 
     expect(screen.getByRole("alert").textContent).toContain("too small");
@@ -311,6 +330,7 @@ describe("TerminalPane", () => {
     expect(mocks.createTerminal).not.toHaveBeenCalled();
     expect(onRunningChange).toHaveBeenCalledTimes(1);
     expect(onRunningChange).toHaveBeenCalledWith(false);
+    expect(onStartupFailure).toHaveBeenCalledOnce();
   });
 
   it("renders natural exit and requests an unguarded close", async () => {
@@ -332,12 +352,20 @@ describe("TerminalPane", () => {
 
   it("opens the failed pane cwd externally and reports success", async () => {
     const failed = Promise.reject(new Error("spawn failed"));
+    const onStartupFailure = vi.fn();
     mocks.createTerminal.mockReturnValue(makeClient(failed));
-    render(<TerminalPane paneId="secondary" onRequestClose={vi.fn()} />);
+    render(
+      <TerminalPane
+        paneId="secondary"
+        onRequestClose={vi.fn()}
+        onStartupFailure={onStartupFailure}
+      />,
+    );
 
     fireEvent.click(await screen.findByRole("button", { name: "Open in external terminal" }));
 
     await waitFor(() => expect(mocks.openExternalTerminal).toHaveBeenCalledWith("secondary"));
+    expect(onStartupFailure).toHaveBeenCalledOnce();
     expect(
       (screen.getByRole("button", { name: "Opened in external terminal" }) as HTMLButtonElement)
         .disabled,
@@ -360,8 +388,15 @@ describe("TerminalPane", () => {
     ).toBe(false);
   });
 
-  it("does not offer startup recovery after a running terminal later exits or errors", async () => {
-    const view = render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
+  it("does not report startup failure after a running terminal later exits or errors", async () => {
+    const onStartupFailure = vi.fn();
+    const view = render(
+      <TerminalPane
+        paneId="primary"
+        onRequestClose={vi.fn()}
+        onStartupFailure={onStartupFailure}
+      />,
+    );
     await screen.findByText("Running");
     act(() => {
       mocks.event?.({
@@ -372,9 +407,16 @@ describe("TerminalPane", () => {
       });
     });
     expect(screen.queryByRole("button", { name: "Open in external terminal" })).toBeNull();
+    expect(onStartupFailure).not.toHaveBeenCalled();
 
     view.unmount();
-    render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
+    render(
+      <TerminalPane
+        paneId="primary"
+        onRequestClose={vi.fn()}
+        onStartupFailure={onStartupFailure}
+      />,
+    );
     await screen.findByText("Running");
     act(() => {
       mocks.event?.({
@@ -386,6 +428,7 @@ describe("TerminalPane", () => {
     });
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Open in external terminal" })).toBeNull();
+    expect(onStartupFailure).not.toHaveBeenCalled();
   });
 
   it("requests confirmation while running and closes on unmount during create", async () => {

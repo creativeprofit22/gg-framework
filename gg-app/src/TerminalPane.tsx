@@ -14,6 +14,7 @@ export interface TerminalPaneProps {
   onHeightChange?(height: number): void;
   onRequestClose(running: boolean): void;
   onRunningChange?(running: boolean): void;
+  onStartupFailure?(): void;
 }
 
 export function TerminalPane({
@@ -22,6 +23,7 @@ export function TerminalPane({
   onHeightChange,
   onRequestClose,
   onRunningChange,
+  onStartupFailure,
 }: TerminalPaneProps) {
   const paneRef = useRef<HTMLElement>(null);
   const heightChangeRef = useRef(onHeightChange);
@@ -64,11 +66,17 @@ export function TerminalPane({
     let disposed = false;
     let lifecycle: TerminalStatus = "starting";
     let lastReportedRunning: boolean | undefined;
+    let startupFailureReported = false;
     let terminalId: string | undefined;
     const reportRunning = (running: boolean): void => {
       if (lastReportedRunning === running) return;
       lastReportedRunning = running;
       onRunningChange?.(running);
+    };
+    const reportStartupFailure = (): void => {
+      if (startupFailureReported) return;
+      startupFailureReported = true;
+      onStartupFailure?.();
     };
     const finishLifecycle = (nextStatus: "exited" | "error"): boolean => {
       if (lifecycle === "exited" || lifecycle === "error") return false;
@@ -99,6 +107,7 @@ export function TerminalPane({
     const initialRows = terminal.rows;
     if (!validTerminalSize(initialCols, initialRows)) {
       finishLifecycle("error");
+      reportStartupFailure();
       setStatus("error");
       setStartupFailed(true);
       setError("Terminal area is too small to start.");
@@ -139,6 +148,7 @@ export function TerminalPane({
       } else {
         const failedDuringStartup = lifecycle === "starting";
         if (!finishLifecycle("error")) return;
+        if (failedDuringStartup) reportStartupFailure();
         finishAfterOutput(() => {
           setStartupFailed(failedDuringStartup);
           setError(event.message);
@@ -151,6 +161,7 @@ export function TerminalPane({
       onError(message) {
         const failedDuringStartup = lifecycle === "starting";
         if (disposed || !finishLifecycle("error")) return;
+        if (failedDuringStartup) reportStartupFailure();
         transportStopped = true;
         adapter?.dispose();
         setStartupFailed(failedDuringStartup);
@@ -161,6 +172,7 @@ export function TerminalPane({
       onOverflow() {
         const failedDuringStartup = lifecycle === "starting";
         if (disposed || !finishLifecycle("error")) return;
+        if (failedDuringStartup) reportStartupFailure();
         transportStopped = true;
         adapter?.dispose();
         setStartupFailed(failedDuringStartup);
@@ -188,6 +200,7 @@ export function TerminalPane({
       })
       .catch((cause: unknown) => {
         if (disposed || !finishLifecycle("error")) return;
+        reportStartupFailure();
         setStartupFailed(true);
         setError(cause instanceof Error ? cause.message : String(cause));
         setStatus("error");
@@ -221,7 +234,7 @@ export function TerminalPane({
       reportRunning(false);
       void client.close().catch(() => {});
     };
-  }, [onRunningChange, paneId]);
+  }, [onRunningChange, onStartupFailure, paneId]);
 
   const openInExternalTerminal = async (): Promise<void> => {
     setExternalTerminalState("opening");

@@ -28,7 +28,7 @@ export interface WorkspaceLayout {
   terminal: WorkspaceTerminalLayout;
 }
 
-export type WorkspaceLayoutLoadStatus = "missing" | "valid" | "migrated" | "corrupt";
+export type WorkspaceLayoutLoadStatus = "missing" | "valid" | "migrated" | "corrupt" | "load-error";
 
 export interface WorkspaceLayoutLoadResult {
   layout: WorkspaceLayout;
@@ -295,7 +295,7 @@ export function loadWorkspaceLayout(
     const result = parseWorkspaceLayout(raw);
     return result.status === "corrupt" ? { ...result, rejectedRaw: raw } : result;
   } catch {
-    return { layout: defaultWorkspaceLayout(), status: "corrupt" };
+    return { layout: defaultWorkspaceLayout(), status: "load-error" };
   }
 }
 

@@ -538,6 +538,7 @@ First-slice status:
 - [x] Close the owner-pinned terminal when its pane changes project, becomes unbound, closes, or its native window/app exits.
 - [x] On Windows, own the terminal process tree with a kill-on-close Job Object so descendant shells are cleaned up.
 - [x] Recover from embedded-terminal startup failure with **Open in external terminal**; resolve the owner pane's cwd, canonicalize and require a directory, then launch the platform terminal without interpolating project-controlled text into a command line.
+- [x] Surface one concise, recoverable warning when malformed workspace data or unavailable saved pane targets fall back to a safe usable layout (`50a316c`).
 - [ ] Automated native UI smoke remains unverified because the repo-local Tauri app opens a blank window; focused frontend, Rust PTY, lifecycle, and cleanup tests do not replace that smoke check.
 
 Polish scope:

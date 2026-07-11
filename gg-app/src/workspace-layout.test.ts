@@ -320,7 +320,7 @@ describe("workspace layout storage", () => {
     expect(parsed.layout.panes.secondary).toBeNull();
   });
 
-  it("handles unavailable storage without throwing", () => {
+  it("distinguishes unavailable storage from malformed layout bytes without throwing", () => {
     const unavailable = {
       getItem: vi.fn(() => {
         throw new Error("blocked");
@@ -330,7 +330,10 @@ describe("workspace layout storage", () => {
       }),
     };
 
-    expect(loadWorkspaceLayout(unavailable, "main").status).toBe("corrupt");
+    expect(loadWorkspaceLayout(unavailable, "main")).toEqual({
+      layout: defaultWorkspaceLayout(),
+      status: "load-error",
+    });
     expect(saveWorkspaceLayout(unavailable, "main", layout())).toBe(false);
   });
 

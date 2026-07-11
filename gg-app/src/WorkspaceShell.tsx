@@ -48,6 +48,8 @@ const MIN_DOCK_HEIGHT_PX = 140;
 const MAX_DOCK_HEIGHT_PX = 2_000;
 const MAX_DOCK_HEIGHT_RATIO = 0.6;
 const MALFORMED_LAYOUT_WARNING = "Saved workspace layout was invalid. A safe layout was restored.";
+const LAYOUT_LOAD_ERROR_WARNING =
+  "Saved workspace layout could not be loaded. A safe layout was restored.";
 const STALE_TARGET_WARNING =
   "Some saved workspace panes were unavailable. A safe layout was restored.";
 const MISSING_TERMINAL_OWNER_WARNING =
@@ -205,6 +207,10 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     [closeTerminal],
   );
 
+  const handleTerminalStartupFailure = useCallback((): void => {
+    setTerminalIntent((previous) => ({ ...previous, open: false, ownerPaneId: null }));
+  }, []);
+
   const openTerminal = useCallback((): void => {
     const snapshot = snapshots[focusedPaneId];
     if (!snapshot?.restoreChecked || !snapshot.projectBound || !snapshot.cwd || terminalDock)
@@ -271,6 +277,10 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   ]);
 
   useEffect(() => {
+    if (loadedLayout.status === "load-error") {
+      warnRecovery("load-error", LAYOUT_LOAD_ERROR_WARNING);
+      return;
+    }
     if (loadedLayout.status !== "corrupt" || loadedLayout.rejectedRaw === undefined) return;
     preserveRejectedWorkspaceLayout(localStorage, windowLabel, loadedLayout.rejectedRaw);
     warnRecovery(`malformed:${loadedLayout.rejectedRaw}`, MALFORMED_LAYOUT_WARNING);
@@ -710,6 +720,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
                       }
                       onRequestClose={requestTerminalClose}
                       onRunningChange={setTerminalRunning}
+                      onStartupFailure={handleTerminalStartupFailure}
                     />
                   )}
               </div>

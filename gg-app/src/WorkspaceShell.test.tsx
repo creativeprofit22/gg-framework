@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, useRef, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentPaneProps } from "./AgentPane";
@@ -14,6 +14,7 @@ const terminalMock = vi.hoisted(() => ({
   unmounts: vi.fn(),
   heights: [] as number[],
   onHeightChange: undefined as ((height: number) => void) | undefined,
+  onStartupFailure: undefined as (() => void) | undefined,
 }));
 
 const bridge = vi.hoisted(() => ({
@@ -84,15 +85,18 @@ vi.mock("./TerminalPane", async () => {
       onHeightChange,
       onRequestClose,
       onRunningChange,
+      onStartupFailure,
     }: {
       paneId: string;
       height: number;
       onHeightChange(height: number): void;
       onRequestClose(running: boolean): void;
       onRunningChange?(running: boolean): void;
+      onStartupFailure?(): void;
     }) => {
       terminalMock.heights.push(height);
       terminalMock.onHeightChange = onHeightChange;
+      terminalMock.onStartupFailure = onStartupFailure;
       useEffect(() => {
         terminalMock.mounts(paneId);
         onRunningChange?.(true);
@@ -218,6 +222,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   terminalMock.heights = [];
   terminalMock.onHeightChange = undefined;
+  terminalMock.onStartupFailure = undefined;
   workspaceLayoutMock.rejectResolution = false;
   localStorage.clear();
 });
@@ -443,6 +448,33 @@ describe("WorkspaceShell terminal dock", () => {
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
       expect(saved.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 260 });
+    });
+  });
+
+  it("clears restored terminal intent after startup failure while keeping its error pane mounted", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 5,
+        splitRatio: 50,
+        secondaryOpen: true,
+        focusedPaneId: "primary",
+        panes: {
+          primary: { cwd: "/work/primary", sessionPath: null },
+          secondary: { cwd: "/work/secondary", sessionPath: null },
+        },
+        terminal: { open: true, ownerPaneId: "primary", dockHeightPx: 410 },
+      }),
+    );
+
+    render(<WorkspaceShell renderPane={renderPane} />);
+    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
+    act(() => terminalMock.onStartupFailure?.());
+
+    expect(screen.getByTestId("terminal-primary")).toBeTruthy();
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
+      expect(saved.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 410 });
     });
   });
 
@@ -900,17 +932,31 @@ describe("WorkspaceShell layout recovery", () => {
     expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(raw);
   });
 
-  it("recovers the native primary when reading layout storage fails", async () => {
+  it("recovers from a layout storage load failure and warns once across rerenders", async () => {
     const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("storage blocked");
     });
 
-    render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
+    const { rerender } = render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
 
     expect((await screen.findByTestId("restore-pane-primary")).dataset.source).toBe("native");
     expect(screen.getByTestId("restore-pane-secondary").dataset.source).toBe("picker");
     expect(bridge.validateWorkspaceTarget).not.toHaveBeenCalled();
     expect(getItem).toHaveBeenCalledWith("gg-workspace-layout:main");
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(
+        "Saved workspace layout could not be loaded. A safe layout was restored.",
+        "warning",
+        4000,
+        false,
+      ),
+    );
+    expect(toastMock).toHaveBeenCalledTimes(1);
+
+    rerender(<WorkspaceShell renderPane={renderNativeRestorePane} />);
+
+    expect(screen.getByTestId("restore-pane-primary").dataset.source).toBe("native");
+    expect(toastMock).toHaveBeenCalledTimes(1);
   });
 
   it("restores the saved ratio and both pane targets before mounting panes", async () => {

@@ -3,7 +3,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { X } from "lucide-react";
-import { createTerminal, type TerminalInfo } from "./agent";
+import { createTerminal, openExternalTerminal, type TerminalInfo } from "./agent";
 import { TerminalAdapter, validTerminalSize } from "./terminal";
 
 type TerminalStatus = "starting" | "running" | "exited" | "error";
@@ -20,6 +20,10 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
   const [info, setInfo] = useState<TerminalInfo | null>(null);
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [startupFailed, setStartupFailed] = useState(false);
+  const [externalTerminalState, setExternalTerminalState] = useState<"idle" | "opening" | "opened">(
+    "idle",
+  );
 
   useEffect(() => {
     const host = hostRef.current;
@@ -64,6 +68,7 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
     if (!validTerminalSize(initialCols, initialRows)) {
       finishLifecycle("error");
       setStatus("error");
+      setStartupFailed(true);
       setError("Terminal area is too small to start.");
       terminal.dispose();
       fitAddon.dispose();
@@ -98,8 +103,10 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
           setStatus("exited");
         });
       } else {
+        const failedDuringStartup = lifecycle === "starting";
         if (!finishLifecycle("error")) return;
         finishAfterOutput(() => {
+          setStartupFailed(failedDuringStartup);
           setError(event.message);
           setStatus("error");
         });
@@ -108,17 +115,21 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
 
     adapter = new TerminalAdapter(terminal, client, {
       onError(message) {
+        const failedDuringStartup = lifecycle === "starting";
         if (disposed || !finishLifecycle("error")) return;
         transportStopped = true;
         adapter?.dispose();
+        setStartupFailed(failedDuringStartup);
         setError(message);
         setStatus("error");
         void client.close().catch(() => {});
       },
       onOverflow() {
+        const failedDuringStartup = lifecycle === "starting";
         if (disposed || !finishLifecycle("error")) return;
         transportStopped = true;
         adapter?.dispose();
+        setStartupFailed(failedDuringStartup);
         setError("Terminal output exceeded the 4 MiB render queue. The terminal was closed.");
         setStatus("error");
         void client.close().catch(() => {});
@@ -141,6 +152,7 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
       })
       .catch((cause: unknown) => {
         if (disposed || !finishLifecycle("error")) return;
+        setStartupFailed(true);
         setError(cause instanceof Error ? cause.message : String(cause));
         setStatus("error");
       });
@@ -167,6 +179,17 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
       void client.close().catch(() => {});
     };
   }, [onRunningChange, paneId]);
+
+  const openInExternalTerminal = async (): Promise<void> => {
+    setExternalTerminalState("opening");
+    try {
+      await openExternalTerminal(paneId);
+      setExternalTerminalState("opened");
+    } catch (cause: unknown) {
+      setExternalTerminalState("idle");
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
 
   const running = status === "starting" || status === "running";
   const stateLabel =
@@ -203,7 +226,20 @@ export function TerminalPane({ paneId, onRequestClose, onRunningChange }: Termin
       </header>
       {error && (
         <div className="terminal-pane-message terminal-pane-error" role="alert">
-          {error}
+          <span>{error}</span>
+          {startupFailed && (
+            <button
+              type="button"
+              disabled={externalTerminalState !== "idle"}
+              onClick={() => void openInExternalTerminal()}
+            >
+              {externalTerminalState === "opened"
+                ? "Opened in external terminal"
+                : externalTerminalState === "opening"
+                  ? "Opening…"
+                  : "Open in external terminal"}
+            </button>
+          )}
         </div>
       )}
       <div ref={hostRef} className="terminal-pane-xterm" />

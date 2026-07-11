@@ -4386,6 +4386,7 @@ pub fn run() {
             terminal::terminal_input,
             terminal::terminal_resize,
             terminal::terminal_close,
+            terminal::terminal_open_external,
             agent_pane_create,
             agent_pane_dispose,
             dropped_path_info,

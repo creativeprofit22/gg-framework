@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
     terminal,
     fitAddon,
     createTerminal: vi.fn(),
+    openExternalTerminal: vi.fn(),
     event: undefined as ((event: TerminalEvent) => void) | undefined,
     data: undefined as ((data: string) => void) | undefined,
     binary: undefined as ((data: string) => void) | undefined,
@@ -43,7 +44,10 @@ vi.mock("@xterm/addon-fit", () => ({
     }
   },
 }));
-vi.mock("./agent", () => ({ createTerminal: mocks.createTerminal }));
+vi.mock("./agent", () => ({
+  createTerminal: mocks.createTerminal,
+  openExternalTerminal: mocks.openExternalTerminal,
+}));
 
 import { TerminalPane } from "./TerminalPane";
 
@@ -77,6 +81,7 @@ beforeEach(() => {
     mocks.binary = handler;
     return { dispose: vi.fn() };
   });
+  mocks.openExternalTerminal.mockResolvedValue(undefined);
   mocks.createTerminal.mockImplementation(
     (_paneId: string, _cols: number, _rows: number, onEvent: (event: TerminalEvent) => void) => {
       mocks.event = onEvent;
@@ -263,13 +268,62 @@ describe("TerminalPane", () => {
     expect(requestClose).toHaveBeenCalledWith(false);
   });
 
-  it("shows startup errors", async () => {
-    const failed = Promise.resolve().then(() => {
-      throw new Error("spawn failed");
-    });
+  it("opens the failed pane cwd externally and reports success", async () => {
+    const failed = Promise.reject(new Error("spawn failed"));
     mocks.createTerminal.mockReturnValue(makeClient(failed));
+    render(<TerminalPane paneId="secondary" onRequestClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open in external terminal" }));
+
+    await waitFor(() => expect(mocks.openExternalTerminal).toHaveBeenCalledWith("secondary"));
+    expect(
+      (screen.getByRole("button", { name: "Opened in external terminal" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("keeps startup recovery available and displays an external launch failure", async () => {
+    mocks.createTerminal.mockReturnValue(makeClient(Promise.reject(new Error("spawn failed"))));
+    mocks.openExternalTerminal.mockRejectedValueOnce(new Error("terminal app unavailable"));
     render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
-    expect((await screen.findByRole("alert")).textContent).toContain("spawn failed");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open in external terminal" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("terminal app unavailable"),
+    );
+    expect(
+      (screen.getByRole("button", { name: "Open in external terminal" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
+  });
+
+  it("does not offer startup recovery after a running terminal later exits or errors", async () => {
+    const view = render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
+    await screen.findByText("Running");
+    act(() => {
+      mocks.event?.({
+        type: "exit",
+        paneId: "primary",
+        terminalId: "terminal-1",
+        exitCode: 1,
+      });
+    });
+    expect(screen.queryByRole("button", { name: "Open in external terminal" })).toBeNull();
+
+    view.unmount();
+    render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
+    await screen.findByText("Running");
+    act(() => {
+      mocks.event?.({
+        type: "error",
+        paneId: "primary",
+        terminalId: "terminal-1",
+        message: "later transport failure",
+      });
+    });
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open in external terminal" })).toBeNull();
   });
 
   it("requests confirmation while running and closes on unmount during create", async () => {

@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -20,6 +22,132 @@ const MIN_COLS: u16 = 2;
 const MAX_COLS: u16 = 500;
 const MIN_ROWS: u16 = 1;
 const MAX_ROWS: u16 = 300;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ExternalTerminalLaunch {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+fn canonical_terminal_cwd(cwd: &Path) -> Result<PathBuf, String> {
+    let canonical = std::fs::canonicalize(cwd)
+        .map_err(|error| format!("failed to resolve terminal directory: {error}"))?;
+    if !canonical.is_dir() {
+        return Err("terminal project path is not a directory".into());
+    }
+    Ok(canonical)
+}
+
+#[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
+fn linux_terminal_launch(
+    cwd: &Path,
+    is_available: impl Fn(&str) -> bool,
+) -> Result<ExternalTerminalLaunch, String> {
+    let cwd = cwd.to_string_lossy().into_owned();
+    let candidates = [
+        ("xdg-terminal-exec", Vec::new()),
+        (
+            "x-terminal-emulator",
+            vec!["--working-directory".into(), cwd.clone()],
+        ),
+        (
+            "gnome-terminal",
+            vec!["--working-directory".into(), cwd.clone()],
+        ),
+        ("konsole", vec!["--workdir".into(), cwd.clone()]),
+        (
+            "xfce4-terminal",
+            vec!["--working-directory".into(), cwd.clone()],
+        ),
+        ("kitty", vec!["--directory".into(), cwd.clone()]),
+        ("alacritty", vec!["--working-directory".into(), cwd]),
+    ];
+    candidates
+        .into_iter()
+        .find(|(program, _)| is_available(program))
+        .map(|(program, args)| ExternalTerminalLaunch { program, args })
+        .ok_or_else(|| "no supported external terminal was found on PATH".into())
+}
+
+fn external_terminal_launch(
+    _cwd: &Path,
+    _is_available: impl Fn(&str) -> bool,
+) -> Result<ExternalTerminalLaunch, String> {
+    #[cfg(target_os = "windows")]
+    return Ok(ExternalTerminalLaunch {
+        // `start` delegates the new console to Windows' configured default terminal.
+        // The project path is inherited through current_dir, never parsed by cmd.exe.
+        program: "cmd.exe",
+        args: vec![
+            "/d".into(),
+            "/c".into(),
+            "start".into(),
+            "".into(),
+            "cmd.exe".into(),
+        ],
+    });
+    #[cfg(target_os = "macos")]
+    return Ok(ExternalTerminalLaunch {
+        program: "open",
+        args: vec![
+            "-a".into(),
+            "Terminal".into(),
+            _cwd.to_string_lossy().into_owned(),
+        ],
+    });
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return linux_terminal_launch(_cwd, _is_available);
+}
+
+fn external_terminal_cwd(
+    windows: &Windows,
+    owner_label: &str,
+    pane_id: &str,
+) -> Result<PathBuf, String> {
+    let cwd = owned_pane_cwd(windows, owner_label, pane_id)?;
+    canonical_terminal_cwd(&cwd)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn executable_on_path(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join(program))
+        .any(|candidate| {
+            candidate
+                .metadata()
+                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+}
+
+fn spawn_external_terminal(cwd: &Path) -> Result<(), String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let launch = external_terminal_launch(cwd, executable_on_path)?;
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let launch = external_terminal_launch(cwd, |_| true)?;
+    Command::new(launch.program)
+        .args(&launch.args)
+        .current_dir(cwd)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("failed to open external terminal: {error}"))
+}
+
+#[tauri::command]
+pub(crate) fn terminal_open_external(
+    webview: WebviewWindow,
+    windows: State<'_, Windows>,
+    pane_id: String,
+) -> Result<(), String> {
+    validate_pane_id(&pane_id)?;
+    let canonical_cwd = external_terminal_cwd(&windows, webview.label(), &pane_id)?;
+    spawn_external_terminal(&canonical_cwd)
+}
+
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
 const MAX_PENDING_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -819,6 +947,113 @@ impl Drop for WindowsJob {
 mod tests {
     use super::*;
     use std::sync::mpsc::TryRecvError;
+
+    fn test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "gg-app-external-terminal-{name}-{}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn external_terminal_cwd_accepts_directories_and_rejects_missing_or_files() {
+        let directory = test_path("valid");
+        let file = test_path("file");
+        let missing = test_path("missing");
+        let _ = std::fs::remove_dir_all(&directory);
+        let _ = std::fs::remove_file(&file);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&file, b"not a directory").unwrap();
+
+        assert_eq!(
+            canonical_terminal_cwd(&directory).unwrap(),
+            std::fs::canonicalize(&directory).unwrap()
+        );
+        assert!(canonical_terminal_cwd(&missing).is_err());
+        assert_eq!(
+            canonical_terminal_cwd(&file).unwrap_err(),
+            "terminal project path is not a directory"
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::remove_file(file).unwrap();
+    }
+
+    #[test]
+    fn external_terminal_launch_passes_project_text_as_one_argument() {
+        let hostile = Path::new(r#"C:\project & echo injected; $(touch nope)"#);
+        let launch = external_terminal_launch(hostile, |_| true).unwrap();
+        let hostile_text = hostile.to_string_lossy();
+        #[cfg(target_os = "windows")]
+        assert!(launch
+            .args
+            .iter()
+            .all(|argument| argument.as_str() != hostile_text));
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(launch.args.last().unwrap(), &hostile_text);
+            assert_eq!(
+                launch
+                    .args
+                    .iter()
+                    .filter(|argument| *argument == &hostile_text)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn linux_external_terminal_uses_the_first_available_fallback() {
+        let cwd = Path::new("/project");
+        let launch = linux_terminal_launch(cwd, |program| program == "konsole").unwrap();
+        assert_eq!(launch.program, "konsole");
+        assert_eq!(launch.args, ["--workdir", "/project"]);
+    }
+
+    #[test]
+    fn linux_external_terminal_reports_when_no_fallback_exists() {
+        assert_eq!(
+            linux_terminal_launch(Path::new("/project"), |_| false).unwrap_err(),
+            "no supported external terminal was found on PATH"
+        );
+    }
+
+    #[test]
+    fn external_terminal_uses_the_requested_owned_pane_cwd() {
+        let primary = test_path("primary");
+        let secondary = test_path("secondary");
+        let _ = std::fs::remove_dir_all(&primary);
+        let _ = std::fs::remove_dir_all(&secondary);
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&secondary).unwrap();
+        let windows = Windows::default();
+        {
+            let mut registry = windows.map.lock().unwrap();
+            registry.entry("main".into()).or_default().insert(
+                "primary".into(),
+                crate::PaneSession {
+                    cwd: Some(primary.clone()),
+                    ..Default::default()
+                },
+            );
+            registry.get_mut("main").unwrap().insert(
+                "secondary".into(),
+                crate::PaneSession {
+                    cwd: Some(secondary.clone()),
+                    ..Default::default()
+                },
+            );
+        }
+
+        assert_eq!(
+            external_terminal_cwd(&windows, "main", "secondary").unwrap(),
+            std::fs::canonicalize(&secondary).unwrap()
+        );
+
+        std::fs::remove_dir_all(primary).unwrap();
+        std::fs::remove_dir_all(secondary).unwrap();
+    }
 
     #[derive(Debug)]
     struct FakeChild;

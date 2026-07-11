@@ -232,6 +232,136 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("WorkspaceShell recursive rendering", () => {
+  it("renders a vertical v6 split with normalized row ratios and horizontal separator semantics", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout-recursive:main",
+      JSON.stringify({
+        version: 6,
+        root: {
+          type: "split",
+          direction: "vertical",
+          ratio: 35,
+          first: { type: "leaf", paneId: "primary" },
+          second: { type: "leaf", paneId: "secondary" },
+        },
+        focusedPaneId: "primary",
+        panes: { primary: null, secondary: null },
+        terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
+      }),
+    );
+
+    const { container } = render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+    const split = container.querySelector<HTMLElement>(".workspace-split-vertical");
+    expect(split?.style.gridTemplateRows).toBe("35fr 9px 65fr");
+    expect(split?.querySelector('[role="separator"]')?.getAttribute("aria-orientation")).toBe(
+      "horizontal",
+    );
+  });
+
+  it("preserves a vertical v6 root through snapshots, focus, and terminal updates, then intentionally replaces it on close and reopen", async () => {
+    const storageKey = "gg-workspace-layout-recursive:main";
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        version: 6,
+        root: {
+          type: "split",
+          direction: "vertical",
+          ratio: 35,
+          first: { type: "leaf", paneId: "primary" },
+          second: { type: "leaf", paneId: "secondary" },
+        },
+        focusedPaneId: "primary",
+        panes: { primary: null, secondary: null },
+        terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
+      }),
+    );
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    await screen.findByTestId("pane-secondary");
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem(storageKey)!);
+      expect(saved.root).toMatchObject({ direction: "vertical", ratio: 35 });
+      expect(saved.panes.primary.cwd).toBe("/work/primary");
+    });
+
+    fireEvent.pointerDown(screen.getByTestId("pane-secondary"));
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
+    await screen.findByTestId("terminal-secondary");
+    act(() => terminalMock.onHeightChange?.(340));
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem(storageKey)!);
+      expect(saved.root).toMatchObject({ direction: "vertical", ratio: 35 });
+      expect(saved.focusedPaneId).toBe("secondary");
+      expect(saved.terminal).toMatchObject({
+        open: true,
+        ownerPaneId: "secondary",
+        dockHeightPx: 340,
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(storageKey)!).root).toEqual({
+        type: "leaf",
+        paneId: "primary",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open secondary pane" }));
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem(storageKey)!).root).toMatchObject({
+        direction: "horizontal",
+        ratio: 50,
+      });
+    });
+  });
+
+  it("falls back from a nested tree containing an unsupported leaf without mounting another agent", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout-recursive:main",
+      JSON.stringify({
+        version: 6,
+        root: {
+          type: "split",
+          direction: "horizontal",
+          ratio: 40,
+          first: { type: "leaf", paneId: "primary" },
+          second: {
+            type: "split",
+            direction: "vertical",
+            ratio: 60,
+            first: { type: "leaf", paneId: "secondary" },
+            second: { type: "leaf", paneId: "tertiary" },
+          },
+        },
+        focusedPaneId: "tertiary",
+        panes: { primary: null, secondary: null, tertiary: null },
+        terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
+      }),
+    );
+    const mounted = vi.fn();
+
+    render(
+      <WorkspaceShell
+        renderPane={(props) => {
+          mounted(props.paneId);
+          return <FakePane {...props} />;
+        }}
+      />,
+    );
+
+    await screen.findByTestId("pane-secondary");
+    expect(screen.queryByTestId("pane-tertiary")).toBeNull();
+    expect(new Set(mounted.mock.calls.map(([paneId]) => paneId))).toEqual(
+      new Set(["primary", "secondary"]),
+    );
+    expect(document.querySelectorAll(".workspace-split")).toHaveLength(1);
+  });
+});
+
 describe("WorkspaceShell pane routing", () => {
   it("renders exactly two stable primary/secondary columns with primary initially focused", async () => {
     const { container, rerender } = render(<WorkspaceShell renderPane={renderPane} />);

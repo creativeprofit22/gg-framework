@@ -362,6 +362,23 @@ body {
   overflow: hidden;
 }
 
+.workspace-split {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-split-horizontal {
+  grid-auto-flow: column;
+}
+
+.workspace-split-vertical {
+  grid-auto-flow: row;
+}
+
 .workspace-pane-slot {
   position: relative;
   min-width: 0;
@@ -527,33 +544,60 @@ body {
 .workspace-divider {
   position: relative;
   z-index: 2;
-  min-width: 9px;
+  min-width: 0;
   min-height: 0;
   padding: 0;
   border: 0;
   outline: none;
   background: transparent;
-  cursor: col-resize;
   touch-action: none;
+}
+
+.workspace-divider-horizontal {
+  min-width: 9px;
+  cursor: col-resize;
+}
+
+.workspace-divider-vertical {
+  min-height: 9px;
+  cursor: row-resize;
 }
 
 .workspace-divider-line {
   position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 4px;
-  width: 1px;
   background: var(--border-strong);
   transition:
     width var(--t-fast),
+    height var(--t-fast),
     background-color var(--t-fast),
     box-shadow var(--t-fast);
 }
 
-.workspace-divider:hover .workspace-divider-line,
-.workspace-divider:focus-visible .workspace-divider-line {
+.workspace-divider-horizontal .workspace-divider-line {
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+}
+
+.workspace-divider-vertical .workspace-divider-line {
+  right: 0;
+  bottom: 4px;
+  left: 0;
+  height: 1px;
+}
+
+.workspace-divider-horizontal:hover .workspace-divider-line,
+.workspace-divider-horizontal:focus-visible .workspace-divider-line {
   left: 3px;
   width: 3px;
+  background: var(--primary);
+}
+
+.workspace-divider-vertical:hover .workspace-divider-line,
+.workspace-divider-vertical:focus-visible .workspace-divider-line {
+  bottom: 3px;
+  height: 3px;
   background: var(--primary);
 }
 

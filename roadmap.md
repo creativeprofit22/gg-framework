@@ -426,7 +426,7 @@ Use app-owned resizable wrappers so a dependency can be upgraded/replaced withou
 - [x] New-window startup atomically reserves its native label and target, falls back to the durable target after live-state timeout, and rolls back reserved registry, restore, and daemon state on failure (`8055bc8`).
 - [x] Native workspace snapshots exclude startup-only reservations and persist duplicate cwd/session windows independently, including close and restore/respawn paths (`8055bc8`).
 - **Deferred — true live-pane transfer:** copy semantics already cover the main workflow by opening the exact project/session target in an isolated native window while preserving the source pane and its active work; transferring one live runtime across webviews adds disproportionate event-routing, rollback, persistence, terminal, and resource-ownership risk.
-- [ ] **Future safer alternative — Open then close source:** only when the source pane is idle, open the isolated copy first, wait for destination readiness and persistence, then close the source through the existing confirmed disposal path.
+- [ ] **Optional/deferred — Open then close source:** only when the source pane is idle, open the isolated copy first, wait for destination readiness and persistence, then close the source through the existing confirmed disposal path. This is not required for the current copy-based native-window escape hatch.
 - [x] Surface a concise recoverable warning when a malformed/stale layout falls back (`50a316c`).
 
 ### Non-goals
@@ -527,15 +527,15 @@ Visual/manual:
 
 ### Goal
 
-Make terminal restore safe before later promoting terminals from the current single dock into independently persisted split-tree panes.
+Finish terminal and workspace polish on top of the implemented v7 recursive workspace through `f35b019`. Terminals are first-class independently persisted split-tree leaves with independent PTYs, multiple creation, focus/close behavior, stopped restore, explicit **Restart terminal**, and no legacy dock runtime; the remaining terminal UX is limited to the three items below.
 
 Terminal architecture:
 
 - frontend terminal emulator isolated behind `TerminalPane.tsx`
-- Rust-owned PTY/process lifecycle with explicit create/input/resize/close commands and pane ownership checks
+- Rust-owned independent PTY/process lifecycle with explicit create/input/resize/close commands and pane ownership checks
 - project cwd inherited when opened from an agent pane
-- terminal descriptor persisted, but dead OS processes are recreated only through an explicit, safe restore policy
-- terminal panes use the same split tree, headers, focus model, resizing, move-to-window behavior, and persistence rules as agent panes
+- terminal descriptors persist only safe metadata and always restore stopped until explicit user restart
+- terminal panes share the recursive split tree, focus model, resizing, close lifecycle, and persistence rules
 
 First-slice status:
 
@@ -550,20 +550,30 @@ First-slice status:
 - [x] Surface one concise, recoverable warning when malformed workspace data or unavailable saved pane targets fall back to a safe usable layout (`50a316c`).
 - [x] Windows native UI smoke builds the packaged debug Tauri app from `frontendDist`, requires exactly one eligible `Tauri Window`, verifies its HWND, PID, and normalized executable path belong to the spawned repo app, captures that HWND directly, confirms the installed app remains open alongside it, and visually verifies the resulting screenshot shows the **Supah Coder Local Fork** UI (`23899d0`).
 
-Remaining terminal work, in order:
+Completed terminal work:
 
-1. [ ] **Stopped-on-restore safety:** restore terminal placement as stopped and create no shell until the user selects **Restart terminal**.
-2. [ ] **Later — multi-terminal split-tree panes:** replace the single owner-pinned dock with independently persisted terminal panes after stopped restore is complete.
+1. [x] **First-class split-tree leaves:** v7 stores terminal panes as independently identified recursive leaves.
+2. [x] **Independent PTYs:** concurrent terminal leaves route lifecycle and output by logical pane ID without crossover.
+3. [x] **Stopped restore and explicit restart:** restored terminal leaves create no shell until **Restart terminal** is selected.
+4. [x] **Multiple terminal creation:** users can add multiple terminal leaves from project-bound agent panes.
+5. [x] **Focus, close, and persistence:** terminal leaves focus, run, confirm/close, clean up, and restore independently.
+6. [x] **Legacy dock removal:** the owner-pinned terminal dock runtime was removed (`f35b019`).
 
-Polish scope:
+Remaining Phase 5 terminal UX:
 
-- workspace command palette/header actions
-- one-time handoff notification behavior
-- persistent polite announcement region
-- clear active/running/error/unread indicators
-- session/resource cleanup
-- performance budgets and recovery UX
-- documentation of shortcuts and rollback/recovery
+- [ ] Split directly from a terminal leaf.
+- [ ] Copy a terminal leaf into a new native window.
+- [ ] Honor persisted fixed-pixel terminal sizing in the recursive renderer.
+
+Other partial/deferred Phase 5 work:
+
+- [ ] **Partial — packaged smoke:** complete terminal lifecycle/cleanup coverage on Windows and macOS; Windows packaged native-UI launch/identity/screenshot smoke is implemented.
+- [ ] **Partial — app-wide announcements:** add one persistent app-wide, deduplicated polite announcement region.
+- [ ] **Partial — docs:** add workspace command discovery, shortcuts, and rollback/recovery documentation.
+- [ ] **Partial — performance:** define concrete budgets and record the 30-minute mixed agent/terminal soak.
+- [x] **Dropped — Handoff pulse:** retain the static unread indicator without adding restored-state animation.
+
+Already implemented polish: clear terminal lifecycle indicators, terminal-focus shortcut suppression, scoped running-terminal confirmation, external-terminal recovery, pane/window/app resource cleanup, and recoverable malformed-layout fallback.
 
 ### Non-goals
 

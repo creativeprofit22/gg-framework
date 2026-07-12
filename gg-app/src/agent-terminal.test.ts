@@ -94,17 +94,109 @@ describe("terminal IPC", () => {
     );
   });
 
-  it("sends input bytes raw with owner identifiers in headers", async () => {
+  it("forwards the logical pane ID through input, resize, and close", async () => {
     const terminal = createTerminal("primary", 80, 24, vi.fn());
     const input = new Uint8Array([0, 0xff, 0x1b]);
 
     await terminal.input(input);
+    await terminal.resize(100, 30);
+    await terminal.close();
 
-    expect(mocks.invoke).toHaveBeenLastCalledWith("terminal_input", input, {
+    expect(mocks.invoke).toHaveBeenCalledWith("terminal_input", input, {
       headers: {
         "Tauri-Terminal-Pane-Id": "primary",
         "Tauri-Terminal-Id": "terminal-1",
       },
     });
+    expect(mocks.invoke).toHaveBeenCalledWith("terminal_resize", {
+      paneId: "primary",
+      terminalId: "terminal-1",
+      cols: 100,
+      rows: 30,
+    });
+    expect(mocks.invoke).toHaveBeenCalledWith("terminal_close", {
+      paneId: "primary",
+      terminalId: "terminal-1",
+    });
+  });
+
+  it("filters control events for another pane or terminal runtime", async () => {
+    const events: TerminalEvent[] = [];
+    const terminal = createTerminal("primary", 80, 24, (event) => events.push(event));
+    await terminal.ready;
+
+    mocks.channel?.onmessage({
+      type: "exit",
+      terminalId: "terminal-1",
+      paneId: "secondary",
+      exitCode: 0,
+    });
+    mocks.channel?.onmessage({
+      type: "exit",
+      terminalId: "stale-terminal",
+      paneId: "primary",
+      exitCode: 0,
+    });
+    mocks.channel?.onmessage({
+      type: "exit",
+      terminalId: "terminal-1",
+      paneId: "primary",
+      exitCode: 0,
+    });
+
+    expect(events).toEqual([
+      { type: "exit", terminalId: "terminal-1", paneId: "primary", exitCode: 0 },
+    ]);
+  });
+
+  it("keeps concurrent terminal event channels isolated", async () => {
+    mocks.invoke.mockImplementation(async (command: string, args?: { paneId?: string }) => {
+      if (command !== "terminal_create") return undefined;
+      const paneId = args?.paneId ?? "primary";
+      return { ...info, paneId, terminalId: `terminal-${paneId}` };
+    });
+    const primaryEvents: TerminalEvent[] = [];
+    const primary = createTerminal("primary", 80, 24, (event) => primaryEvents.push(event));
+    const primaryChannel = mocks.channel;
+    const secondaryEvents: TerminalEvent[] = [];
+    const secondary = createTerminal("secondary", 80, 24, (event) => secondaryEvents.push(event));
+    const secondaryChannel = mocks.channel;
+    await Promise.all([primary.ready, secondary.ready]);
+
+    primaryChannel?.onmessage({
+      type: "error",
+      terminalId: "terminal-primary",
+      paneId: "primary",
+      message: "primary only",
+    });
+    secondaryChannel?.onmessage({
+      type: "error",
+      terminalId: "terminal-secondary",
+      paneId: "secondary",
+      message: "secondary only",
+    });
+    primaryChannel?.onmessage({
+      type: "exit",
+      terminalId: "terminal-secondary",
+      paneId: "secondary",
+      exitCode: 0,
+    });
+
+    expect(primaryEvents).toEqual([
+      {
+        type: "error",
+        terminalId: "terminal-primary",
+        paneId: "primary",
+        message: "primary only",
+      },
+    ]);
+    expect(secondaryEvents).toEqual([
+      {
+        type: "error",
+        terminalId: "terminal-secondary",
+        paneId: "secondary",
+        message: "secondary only",
+      },
+    ]);
   });
 });

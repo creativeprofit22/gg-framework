@@ -1148,6 +1148,69 @@ mod tests {
     }
 
     #[test]
+    fn bridge_routes_controls_and_tagged_events_by_window_and_pane() {
+        let registry = TerminalRegistry::default();
+        assert!(registry
+            .insert("main", fake_session("primary", "terminal-primary"))
+            .is_ok());
+        assert!(registry
+            .insert("main", fake_session("secondary", "terminal-secondary"))
+            .is_ok());
+        assert!(registry
+            .insert("other", fake_session("primary", "terminal-other"))
+            .is_ok());
+
+        {
+            let state = registry.inner.lock().unwrap();
+            let primary = state
+                .sessions
+                .get(&("main".into(), "primary".into()))
+                .expect("input and resize resolve the primary terminal key");
+            assert_eq!(primary.terminal_id, "terminal-primary");
+            let secondary = state
+                .sessions
+                .get(&("main".into(), "secondary".into()))
+                .expect("input and resize resolve the secondary terminal key");
+            assert_eq!(secondary.terminal_id, "terminal-secondary");
+            let other = state
+                .sessions
+                .get(&("other".into(), "primary".into()))
+                .expect("the same pane ID remains isolated across windows");
+            assert_eq!(other.terminal_id, "terminal-other");
+            assert!(validate_owner(secondary, "secondary", "terminal-primary").is_err());
+        }
+
+        let event = TerminalEvent::Exit {
+            terminal_id: "terminal-secondary".into(),
+            pane_id: "secondary".into(),
+            exit_code: Some(0),
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "exit",
+                "terminalId": "terminal-secondary",
+                "paneId": "secondary",
+                "exitCode": 0
+            })
+        );
+
+        assert!(registry
+            .remove_matching("main", "primary", "terminal-secondary")
+            .is_none());
+        assert!(registry
+            .remove_matching("main", "secondary", "terminal-secondary")
+            .is_some());
+        let state = registry.inner.lock().unwrap();
+        assert!(state
+            .sessions
+            .contains_key(&("main".into(), "primary".into())));
+        assert!(state
+            .sessions
+            .contains_key(&("other".into(), "primary".into())));
+    }
+
+    #[test]
     fn registry_supports_concurrent_terminals_in_one_window() {
         let registry = TerminalRegistry::default();
         assert!(registry

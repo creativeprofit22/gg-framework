@@ -88,7 +88,20 @@ export function createTerminal(
   onEvent: (event: TerminalEvent) => void,
 ): TerminalClient {
   const channel = new Channel<TerminalEvent>();
-  channel.onmessage = onEvent;
+  const pendingEvents: TerminalEvent[] = [];
+  let terminalId: string | undefined;
+  const forwardEvent = (event: TerminalEvent): void => {
+    if (
+      event instanceof ArrayBuffer ||
+      (event.paneId === paneId && event.terminalId === terminalId)
+    ) {
+      onEvent(event);
+    }
+  };
+  channel.onmessage = (event) => {
+    if (terminalId === undefined) pendingEvents.push(event);
+    else forwardEvent(event);
+  };
   let closeRequested = false;
   let closePromise: Promise<void> | undefined;
   const ready = invoke<TerminalInfo>("terminal_create", {
@@ -96,11 +109,16 @@ export function createTerminal(
     cols,
     rows,
     onEvent: channel,
+  }).then((info) => {
+    if (info.paneId !== paneId) throw new Error("terminal pane ID mismatch");
+    terminalId = info.terminalId;
+    for (const event of pendingEvents.splice(0)) forwardEvent(event);
+    return info;
   });
 
   const close = (): Promise<void> => {
     closeRequested = true;
-    closePromise ??= ready.then((info) => terminalClose(info.paneId, info.terminalId));
+    closePromise ??= ready.then((info) => terminalClose(paneId, info.terminalId));
     return closePromise;
   };
 
@@ -108,11 +126,11 @@ export function createTerminal(
     ready,
     async input(data) {
       const info = await ready;
-      if (!closeRequested) await terminalInput(info.paneId, info.terminalId, data);
+      if (!closeRequested) await terminalInput(paneId, info.terminalId, data);
     },
     async resize(nextCols, nextRows) {
       const info = await ready;
-      if (!closeRequested) await terminalResize(info.paneId, info.terminalId, nextCols, nextRows);
+      if (!closeRequested) await terminalResize(paneId, info.terminalId, nextCols, nextRows);
     },
     close,
   };

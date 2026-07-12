@@ -10,17 +10,11 @@ import {
   validateWorkspaceTarget,
   windowLabel,
 } from "./agent";
-import {
-  AgentPane,
-  type AgentPaneProps,
-  type PaneInputActions,
-  type PaneSnapshot,
-} from "./AgentPane";
+import { type AgentPaneProps, type PaneInputActions, type PaneSnapshot } from "./AgentPane";
 import { Confetti } from "./Confetti";
 import { ConfirmModal } from "./ConfirmModal";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { PRIMARY_PANE_ID } from "./pane-routing";
-import { PaneSplitActions } from "./PaneSplitActions";
 import { ProjectNotes } from "./ProjectNotes";
 import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
@@ -28,15 +22,12 @@ import { playSound } from "./sounds";
 import { theme } from "./theme";
 import { toast } from "./toast";
 import { Toaster } from "./Toaster";
-import { TerminalPane } from "./TerminalPane";
 import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
 import {
   clampStoredTerminalDockHeightPx,
   loadWorkspaceLayout,
-  MAX_SPLIT_RATIO,
   MAX_WORKSPACE_PANES,
-  MIN_SPLIT_RATIO,
   preserveRejectedRecursiveWorkspaceLayout,
   preserveRejectedWorkspaceLayout,
   removeWorkspacePane,
@@ -48,10 +39,10 @@ import {
   WORKSPACE_LAYOUT_VERSION,
   type SplitDirection,
   type WorkspaceLayout,
-  type WorkspaceLayoutNode,
   type WorkspaceLayoutPath,
   type WorkspacePaneId,
 } from "./workspace-layout";
+import { WorkspaceNode } from "./WorkspaceNode";
 
 const DIVIDER_WIDTH_PX = 9;
 const MIN_PANE_SIZE_PX = 280;
@@ -106,45 +97,6 @@ function canRestorePaneInput(): boolean {
 
 export interface WorkspaceShellProps {
   renderPane?: (props: AgentPaneProps) => React.ReactNode;
-}
-
-function PaneContent({
-  renderPane,
-  paneProps,
-}: {
-  renderPane?: WorkspaceShellProps["renderPane"];
-  paneProps: AgentPaneProps;
-}): React.ReactElement {
-  return <>{renderPane ? renderPane(paneProps) : <AgentPane {...paneProps} />}</>;
-}
-
-interface WorkspaceSplitProps {
-  node: Extract<WorkspaceLayoutNode, { type: "split" }>;
-  renderNode: (node: WorkspaceLayoutNode, path: WorkspaceLayoutPath) => React.ReactNode;
-  path: WorkspaceLayoutPath;
-  divider: React.ReactNode;
-}
-
-function WorkspaceSplit({ node, renderNode, path, divider }: WorkspaceSplitProps) {
-  const horizontal = node.direction === "horizontal";
-  return (
-    <div
-      className={`workspace-split workspace-split-${node.direction}`}
-      data-direction={node.direction}
-      data-split-ratio={node.ratio}
-      style={
-        horizontal
-          ? {
-              gridTemplateColumns: `${node.ratio}fr ${DIVIDER_WIDTH_PX}px ${100 - node.ratio}fr`,
-            }
-          : { gridTemplateRows: `${node.ratio}fr ${DIVIDER_WIDTH_PX}px ${100 - node.ratio}fr` }
-      }
-    >
-      {renderNode(node.first, [...path, "first"])}
-      {divider}
-      {renderNode(node.second, [...path, "second"])}
-    </div>
-  );
 }
 
 export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.ReactElement {
@@ -746,124 +698,6 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const visibleDockHeight = clampDockHeight(dockHeight, workspaceHeight);
   const canSplit = leafIds.length < MAX_WORKSPACE_PANES;
 
-  const renderLeaf = (paneId: WorkspacePaneId): React.ReactElement => (
-    <div
-      className={`workspace-pane-slot${layout.focusedPaneId === paneId ? " pane-focused" : ""}`}
-      data-pane-id={paneId}
-      id={`workspace-pane-${paneId}`}
-      key={paneId}
-      onPointerDownCapture={() => focusPane(paneId)}
-      onFocusCapture={() => focusPane(paneId)}
-    >
-      <div className="workspace-pane-body">
-        {layoutReady && (
-          <PaneContent
-            renderPane={renderPane}
-            paneProps={{
-              paneId,
-              kind: paneId === PRIMARY_PANE_ID ? "primary" : "auxiliary",
-              focused: layout.focusedPaneId === paneId,
-              windowFocused,
-              initialTarget:
-                layoutManaged ||
-                paneId.startsWith("pane-") ||
-                (paneId !== PRIMARY_PANE_ID && layout.panes[paneId] !== null)
-                  ? layout.panes[paneId]
-                  : undefined,
-              onFocus: focusPane,
-              onSnapshot: updateSnapshot,
-              onUserTargetChange: markLayoutChanged,
-              registerInput,
-            }}
-          />
-        )}
-        {terminalReady &&
-          terminalDock?.ownerPaneId === paneId &&
-          snapshots[paneId]?.restoreChecked &&
-          snapshots[paneId]?.projectBound &&
-          snapshots[paneId]?.cwd === terminalDock.cwd &&
-          layout.panes[paneId]?.cwd === terminalDock.cwd && (
-            <TerminalPane
-              key={`${paneId}:${terminalDock.cwd}`}
-              paneId={paneId}
-              initiallyStopped={terminalDock.stopped}
-              height={visibleDockHeight}
-              onHeightChange={(height) =>
-                setDockHeight(Math.min(MAX_DOCK_HEIGHT_PX, Math.max(MIN_DOCK_HEIGHT_PX, height)))
-              }
-              onRequestClose={requestTerminalClose}
-              onRunningChange={setTerminalRunning}
-              onStartupFailure={handleTerminalStartupFailure}
-            />
-          )}
-      </div>
-      {layout.focusedPaneId === paneId && (
-        <PaneSplitActions
-          canOpenInNewWindow={Boolean(
-            snapshots[paneId]?.restoreChecked &&
-            snapshots[paneId]?.projectBound &&
-            snapshots[paneId]?.cwd,
-          )}
-          canSplit={canSplit}
-          openingInNewWindow={openingPaneId === paneId}
-          openInNewWindowPending={openingPaneId !== null}
-          onOpenInNewWindow={() => void openPaneWindow(paneId)}
-          onSplitRight={() => splitFocusedPane("horizontal")}
-          onSplitDown={() => splitFocusedPane("vertical")}
-        />
-      )}
-      {paneId !== PRIMARY_PANE_ID && (
-        <button
-          className="workspace-pane-close"
-          aria-label={`Close ${paneId} pane`}
-          title={`Close ${paneId} pane`}
-          onClick={() => requestPaneClose(paneId)}
-        >
-          <span aria-hidden="true">×</span>
-        </button>
-      )}
-    </div>
-  );
-
-  const renderNode = (
-    node: WorkspaceLayoutNode,
-    path: WorkspaceLayoutPath = [],
-  ): React.ReactNode => {
-    if (node.type === "leaf") return renderLeaf(node.paneId);
-    const pathKey = path.join("/") || "root";
-    const firstIds = workspaceLayoutLeafIds(node.first);
-    const secondIds = workspaceLayoutLeafIds(node.second);
-    const visibleRatio = node.ratio;
-    const divider = (
-      <div
-        aria-controls={[...firstIds, ...secondIds]
-          .map((paneId) => `workspace-pane-${paneId}`)
-          .join(" ")}
-        aria-label={`Resize ${node.direction === "horizontal" ? "horizontal" : "vertical"} workspace panes`}
-        aria-orientation={node.direction === "horizontal" ? "vertical" : "horizontal"}
-        aria-valuemax={MAX_SPLIT_RATIO}
-        aria-valuemin={MIN_SPLIT_RATIO}
-        aria-valuenow={Math.round(visibleRatio)}
-        className={`workspace-divider workspace-divider-${node.direction}`}
-        onKeyDown={(event) => resizeByKeyboard(event, path, node.direction, node.ratio)}
-        onPointerDown={(event) => startPointerResize(event, path, node.direction, node.ratio)}
-        role="separator"
-        tabIndex={0}
-      >
-        <span className="workspace-divider-line" />
-      </div>
-    );
-    return (
-      <WorkspaceSplit
-        key={pathKey}
-        node={node}
-        path={path}
-        renderNode={renderNode}
-        divider={divider}
-      />
-    );
-  };
-
   return (
     <div className="workspace-shell" style={{ background: theme.background }}>
       {confettiNonce && <Confetti key={confettiNonce} />}
@@ -893,7 +727,36 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         ref={workspaceGridRef}
         data-pane-count={String(leafIds.length)}
       >
-        {renderNode(layout.root)}
+        <WorkspaceNode
+          node={layout.root}
+          focusedPaneId={layout.focusedPaneId}
+          panes={layout.panes}
+          layoutReady={layoutReady}
+          layoutManaged={layoutManaged}
+          windowFocused={windowFocused}
+          snapshots={snapshots}
+          terminalReady={terminalReady}
+          terminalDock={terminalDock}
+          visibleDockHeight={visibleDockHeight}
+          canSplit={canSplit}
+          openingPaneId={openingPaneId}
+          renderPane={renderPane}
+          onFocusPane={focusPane}
+          onSnapshot={updateSnapshot}
+          onUserTargetChange={markLayoutChanged}
+          registerInput={registerInput}
+          onTerminalHeightChange={(height) =>
+            setDockHeight(Math.min(MAX_DOCK_HEIGHT_PX, Math.max(MIN_DOCK_HEIGHT_PX, height)))
+          }
+          onRequestTerminalClose={requestTerminalClose}
+          onTerminalRunningChange={setTerminalRunning}
+          onTerminalStartupFailure={handleTerminalStartupFailure}
+          onOpenPaneWindow={(paneId) => void openPaneWindow(paneId)}
+          onSplitFocusedPane={splitFocusedPane}
+          onRequestPaneClose={requestPaneClose}
+          onResizeByKeyboard={resizeByKeyboard}
+          onStartPointerResize={startPointerResize}
+        />
       </div>
 
       {appUpdate.phase === "available" && (

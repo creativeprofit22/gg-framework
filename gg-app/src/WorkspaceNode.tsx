@@ -10,6 +10,7 @@ import {
   type WorkspaceLayoutNode,
   type WorkspaceLayoutPath,
   type WorkspacePaneId,
+  type WorkspacePaneTarget,
   type WorkspacePaneValue,
 } from "./workspace-layout";
 
@@ -44,6 +45,7 @@ export interface WorkspaceNodeProps {
   onRequestTerminalClose: (running: boolean) => void;
   onTerminalRunningChange: (running: boolean) => void;
   onTerminalStartupFailure: () => void;
+  onRestartTerminalPane: (paneId: WorkspacePaneId, target: WorkspacePaneTarget) => void;
   onOpenPaneWindow: (paneId: WorkspacePaneId) => void;
   onSplitFocusedPane: (direction: SplitDirection) => void;
   onRequestPaneClose: (paneId: WorkspacePaneId) => void;
@@ -63,8 +65,33 @@ export interface WorkspaceNodeProps {
 
 export function WorkspaceNode({ path = [], ...props }: WorkspaceNodeProps): React.ReactElement {
   const { node } = props;
-  if (node.type === "leaf") return <WorkspaceAgentLeaf paneId={node.paneId} {...props} />;
-
+  if (node.type === "leaf") {
+    const descriptor = props.panes[node.paneId];
+    if (descriptor?.kind === "terminal") {
+      return (
+        <div
+          className={`workspace-pane-slot${props.focusedPaneId === node.paneId ? " pane-focused" : ""}`}
+          data-pane-id={node.paneId}
+          id={`workspace-pane-${node.paneId}`}
+          onPointerDownCapture={() => props.onFocusPane(node.paneId)}
+          onFocusCapture={() => props.onFocusPane(node.paneId)}
+        >
+          <div className="workspace-pane-body">
+            <TerminalPane
+              key={`${node.paneId}:${descriptor.cwd}:${descriptor.sessionPath ?? ""}`}
+              paneId={node.paneId}
+              initiallyStopped
+              onRestart={() => props.onRestartTerminalPane(node.paneId, descriptor)}
+              onRequestClose={() => props.onRequestPaneClose(node.paneId)}
+              onRunningChange={props.onTerminalRunningChange}
+              onStartupFailure={props.onTerminalStartupFailure}
+            />
+          </div>
+        </div>
+      );
+    }
+    return <WorkspaceAgentLeaf paneId={node.paneId} {...props} />;
+  }
   const horizontal = node.direction === "horizontal";
   const pathKey = path.join("/") || "root";
   const firstIds = workspaceLayoutLeafIds(node.first);

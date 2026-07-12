@@ -41,6 +41,7 @@ import {
   type WorkspaceLayout,
   type WorkspaceLayoutPath,
   type WorkspacePaneId,
+  type WorkspacePaneTarget,
 } from "./workspace-layout";
 import { WorkspaceNode } from "./WorkspaceNode";
 
@@ -588,6 +589,16 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     [closePane, snapshots, terminalDock, terminalRunning],
   );
 
+  const restartTerminalPane = useCallback(
+    (paneId: WorkspacePaneId, target: WorkspacePaneTarget): void => {
+      const descriptor = layout.panes[paneId];
+      if (descriptor?.kind !== "terminal") return;
+      if (descriptor.cwd !== target.cwd || descriptor.sessionPath !== target.sessionPath) return;
+      setTerminalRunning(true);
+    },
+    [layout.panes],
+  );
+
   const resizeByKeyboard = useCallback(
     (
       event: React.KeyboardEvent<HTMLDivElement>,
@@ -751,6 +762,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           onRequestTerminalClose={requestTerminalClose}
           onTerminalRunningChange={setTerminalRunning}
           onTerminalStartupFailure={handleTerminalStartupFailure}
+          onRestartTerminalPane={restartTerminalPane}
           onOpenPaneWindow={(paneId) => void openPaneWindow(paneId)}
           onSplitFocusedPane={splitFocusedPane}
           onRequestPaneClose={requestPaneClose}

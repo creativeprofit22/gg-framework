@@ -13,6 +13,7 @@ export interface TerminalPaneProps {
   initiallyStopped?: boolean;
   height?: number;
   onHeightChange?(height: number): void;
+  onRestart?(): void;
   onRequestClose(running: boolean): void;
   onRunningChange?(running: boolean): void;
   onStartupFailure?(): void;
@@ -23,6 +24,7 @@ export function TerminalPane({
   initiallyStopped = false,
   height,
   onHeightChange,
+  onRestart,
   onRequestClose,
   onRunningChange,
   onStartupFailure,
@@ -254,6 +256,7 @@ export function TerminalPane({
   const running = status === "starting" || status === "running";
   const restart = (): void => {
     if (status !== "stopped") return;
+    onRestart?.();
     setStatus("starting");
     setStartNonce(1);
   };

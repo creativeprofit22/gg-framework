@@ -89,6 +89,7 @@ vi.mock("./TerminalPane", async () => {
       initiallyStopped,
       height,
       onHeightChange,
+      onRestart,
       onRequestClose,
       onRunningChange,
       onStartupFailure,
@@ -97,6 +98,7 @@ vi.mock("./TerminalPane", async () => {
       initiallyStopped?: boolean;
       height: number;
       onHeightChange(height: number): void;
+      onRestart?(): void;
       onRequestClose(running: boolean): void;
       onRunningChange?(running: boolean): void;
       onStartupFailure?(): void;
@@ -117,7 +119,14 @@ vi.mock("./TerminalPane", async () => {
       return (
         <div className="terminal-pane" data-testid={`terminal-${paneId}`}>
           {stopped ? (
-            <button onClick={() => setStopped(false)}>Restart terminal</button>
+            <button
+              onClick={() => {
+                onRestart?.();
+                setStopped(false);
+              }}
+            >
+              Restart terminal
+            </button>
           ) : (
             <input aria-label={`${paneId} terminal input`} />
           )}
@@ -392,6 +401,60 @@ describe("WorkspaceShell recursive rendering", () => {
     expect(document.querySelectorAll(".workspace-split")).toHaveLength(2);
     await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/tertiary"));
     await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("tertiary"));
+  });
+});
+
+describe("WorkspaceShell v7 terminal rendering", () => {
+  function saveStoppedTerminalLayout(): void {
+    localStorage.setItem(
+      "gg-workspace-layout-recursive:main",
+      JSON.stringify({
+        version: 7,
+        root: {
+          type: "split",
+          direction: "vertical",
+          size: { type: "fixed-second", pixels: 260 },
+          first: { type: "leaf", paneId: "primary" },
+          second: { type: "leaf", paneId: "terminal-1" },
+        },
+        focusedPaneId: "primary",
+        panes: {
+          primary: { kind: "agent", cwd: "/work/primary", sessionPath: null },
+          "terminal-1": {
+            kind: "terminal",
+            stopped: true,
+            cwd: "/work/primary",
+            sessionPath: null,
+          },
+        },
+      }),
+    );
+  }
+
+  it("renders a persisted terminal leaf stopped and creates one PTY only after Restart", async () => {
+    saveStoppedTerminalLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Restart terminal" })).toBeTruthy();
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Restart terminal" }));
+
+    await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledOnce());
+    expect(terminalMock.mounts).toHaveBeenCalledWith("terminal-1");
+  });
+
+  it("dispatches close for the terminal leaf without starting a PTY", async () => {
+    saveStoppedTerminalLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
+
+    await waitFor(() => expect(screen.queryByTestId("terminal-terminal-1")).toBeNull());
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("pane-primary")).toBeTruthy();
   });
 });
 

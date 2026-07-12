@@ -25,6 +25,7 @@ import { Toaster } from "./Toaster";
 import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
 import {
+  addTerminalWorkspacePane,
   clampStoredTerminalDockHeightPx,
   loadWorkspaceLayout,
   MAX_WORKSPACE_PANES,
@@ -219,6 +220,40 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     }));
   }, []);
 
+  const addTerminalLeaf = useCallback((): void => {
+    const paneId = layout.focusedPaneId;
+    const snapshot = snapshots[paneId];
+    const descriptor = layout.panes[paneId];
+    if (
+      descriptor?.kind === "terminal" ||
+      !descriptor?.cwd ||
+      !snapshot?.restoreChecked ||
+      !snapshot.projectBound ||
+      snapshot.cwd !== descriptor.cwd ||
+      snapshot.sessionPath !== descriptor.sessionPath
+    )
+      return;
+    setLayout((previous) => {
+      const next = addTerminalWorkspacePane(
+        previous,
+        paneId,
+        clampDockHeight(dockHeight, workspaceHeight),
+      );
+      if (next === previous) return previous;
+      focusedPaneIdRef.current = next.focusedPaneId;
+      activePaneIdsRef.current = new Set(workspaceLayoutLeafIds(next.root));
+      return next;
+    });
+    markLayoutChanged();
+  }, [
+    dockHeight,
+    layout.focusedPaneId,
+    layout.panes,
+    markLayoutChanged,
+    snapshots,
+    workspaceHeight,
+  ]);
+
   const openTerminal = useCallback((): void => {
     const snapshot = snapshots[layout.focusedPaneId];
     if (!snapshot?.restoreChecked || !snapshot.projectBound || !snapshot.cwd || terminalDock)
@@ -369,7 +404,13 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
 
   useEffect(() => {
     if (!layoutReady || !terminalReady) return;
-    if (leafIds.some((paneId) => !snapshots[paneId]?.restoreChecked)) return;
+    if (
+      leafIds.some(
+        (paneId) =>
+          layout.panes[paneId]?.kind !== "terminal" && !snapshots[paneId]?.restoreChecked,
+      )
+    )
+      return;
     if (loadedLayout.status === "corrupt" && !rejectedLayoutChanged) return;
     saveWorkspaceLayout(localStorage, windowLabel, {
       ...layout,
@@ -703,9 +744,16 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   }, []);
 
   const focusedSnapshot = snapshots[layout.focusedPaneId];
+  const focusedDescriptor = layout.panes[layout.focusedPaneId];
   const canOpenTerminal =
-    !terminalDock &&
-    Boolean(focusedSnapshot?.restoreChecked && focusedSnapshot.projectBound && focusedSnapshot.cwd);
+    focusedDescriptor?.kind !== "terminal" &&
+    Boolean(
+      focusedDescriptor?.cwd &&
+      focusedSnapshot?.restoreChecked &&
+      focusedSnapshot.projectBound &&
+      focusedSnapshot.cwd === focusedDescriptor.cwd &&
+      focusedSnapshot.sessionPath === focusedDescriptor.sessionPath,
+    );
   const visibleDockHeight = clampDockHeight(dockHeight, workspaceHeight);
   const canSplit = leafIds.length < MAX_WORKSPACE_PANES;
 
@@ -722,7 +770,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           disabled={!canOpenTerminal}
           aria-label="Open terminal in focused pane"
           title="Runs your default shell with your user permissions"
-          onClick={openTerminal}
+          onClick={
+            layout.version === WORKSPACE_LAYOUT_VERSION ? addTerminalLeaf : openTerminal
+          }
         >
           Terminal
         </button>

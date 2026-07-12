@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  addTerminalWorkspacePane,
   defaultWorkspaceLayout,
   loadWorkspaceLayout,
   parseWorkspaceLayout,
@@ -290,6 +291,45 @@ describe("v6 single-dock migration", () => {
       expect(parsed.status, `v${record.version}`).toBe("migrated");
       expect(parsed.layout.version).toBe(7);
     }
+  });
+});
+
+describe("v7 terminal creation reducer", () => {
+  it("copies the agent target, focuses the stopped sibling, and allocates unique IDs", () => {
+    const layout = canonical({
+      panes: {
+        primary: agent("/project", "/sessions/primary.jsonl"),
+        secondary: agent("/other"),
+      },
+    });
+
+    const first = addTerminalWorkspacePane(layout, "primary");
+    expect(workspaceLayoutLeafIds(first.root)).toEqual(["primary", "terminal-1", "secondary"]);
+    expect(first.focusedPaneId).toBe("terminal-1");
+    expect(first.panes["terminal-1"]).toEqual(
+      terminal("/project", "/sessions/primary.jsonl"),
+    );
+
+    const second = addTerminalWorkspacePane(first, "primary");
+    expect(workspaceLayoutLeafIds(second.root)).toEqual([
+      "primary",
+      "terminal-2",
+      "terminal-1",
+      "secondary",
+    ]);
+    expect(second.focusedPaneId).toBe("terminal-2");
+    expect(second.panes["terminal-2"]).toEqual(
+      terminal("/project", "/sessions/primary.jsonl"),
+    );
+  });
+
+  it("fails closed for unbound, terminal, and missing leaves", () => {
+    const unbound = canonical({ panes: { primary: null, secondary: agent("/other") } });
+    expect(addTerminalWorkspacePane(unbound, "primary")).toBe(unbound);
+
+    const withTerminal = addTerminalWorkspacePane(canonical(), "primary");
+    expect(addTerminalWorkspacePane(withTerminal, "terminal-1")).toBe(withTerminal);
+    expect(addTerminalWorkspacePane(withTerminal, "missing-pane")).toBe(withTerminal);
   });
 });
 

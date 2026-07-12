@@ -445,6 +445,45 @@ describe("WorkspaceShell v7 terminal rendering", () => {
     expect(terminalMock.mounts).toHaveBeenCalledWith("terminal-1");
   });
 
+  it("creates, focuses, and persists two uniquely identified stopped terminal leaves", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+
+    fireEvent.click(open);
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(document.querySelector('[data-pane-id="terminal-1"]')?.classList).toContain(
+      "pane-focused",
+    );
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(screen.getByTestId("pane-primary"));
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(open);
+
+    expect(await screen.findByTestId("terminal-terminal-2")).toBeTruthy();
+    expect(document.querySelector('[data-pane-id="terminal-2"]')?.classList).toContain(
+      "pane-focused",
+    );
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
+    await waitFor(() => {
+      const saved = JSON.parse(
+        localStorage.getItem("gg-workspace-layout-recursive:main") ?? "null",
+      );
+      expect(saved.focusedPaneId).toBe("terminal-2");
+      expect(saved.panes["terminal-1"]).toMatchObject({
+        kind: "terminal",
+        stopped: true,
+        cwd: "/work/primary",
+      });
+      expect(saved.panes["terminal-2"]).toMatchObject({
+        kind: "terminal",
+        stopped: true,
+        cwd: "/work/primary",
+      });
+    });
+  });
+
   it("dispatches close for the terminal leaf without starting a PTY", async () => {
     saveStoppedTerminalLayout();
     render(<WorkspaceShell renderPane={renderPane} />);

@@ -287,6 +287,36 @@ function allocateTerminalId(
   while (used.has(`terminal-${ordinal}`)) ordinal += 1;
   return `terminal-${ordinal}`;
 }
+
+export function addTerminalWorkspacePane(
+  layout: WorkspaceLayout,
+  agentPaneId: WorkspacePaneId,
+  dockHeightPx = DEFAULT_TERMINAL_DOCK_HEIGHT_PX,
+): WorkspaceLayout {
+  const target = agentTarget(layout.panes[agentPaneId]);
+  if (!target || !workspaceLayoutLeafIds(layout.root).includes(agentPaneId)) return layout;
+  const terminalPaneId = allocateTerminalId(layout.root, layout.panes);
+  let changed = false;
+  const addSibling = (node: WorkspaceLayoutNode): WorkspaceLayoutNode => {
+    if (node.type === "leaf") {
+      if (node.paneId !== agentPaneId) return node;
+      changed = true;
+      return fixedNode(dockHeightPx, node, { type: "leaf", paneId: terminalPaneId });
+    }
+    return { ...node, first: addSibling(node.first), second: addSibling(node.second) };
+  };
+  const root = addSibling(layout.root);
+  return changed
+    ? normalizeLayout({
+        root,
+        focusedPaneId: terminalPaneId,
+        panes: {
+          ...layout.panes,
+          [terminalPaneId]: { kind: "terminal", stopped: true, ...target },
+        },
+      })
+    : layout;
+}
 function updateNodeAtPath(
   node: WorkspaceLayoutNode,
   path: WorkspaceLayoutPath,

@@ -3168,12 +3168,19 @@ fn apply_mac_overlay<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
 /// shows — the in-app `chat-head-title` is the ONLY title. Building via the
 /// builder (rather than the config + a runtime patch) is the only way to hide
 /// the native title, since there's no runtime `set_hidden_title` setter.
-fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
+fn build_app_window_with_script(
+    app: &tauri::AppHandle,
+    label: &str,
+    initialization_script: Option<&str>,
+) -> Result<WebviewWindow, String> {
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Supah Coder")
         .inner_size(1024.0, 720.0)
         .min_inner_size(480.0, 360.0)
         .background_color(APP_BG);
+    if let Some(script) = initialization_script {
+        builder = builder.initialization_script(script);
+    }
     // Windows needs HTML5 drop enabled for the existing browser attachment path.
     // macOS keeps Tauri's native handler so folder drops include absolute paths.
     #[cfg(target_os = "windows")]
@@ -3184,6 +3191,18 @@ fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow
         builder = apply_mac_overlay(builder);
     }
     builder.build().map_err(|e| e.to_string())
+}
+
+fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
+    build_app_window_with_script(app, label, None)
+}
+
+fn build_terminal_app_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    initialization_script: &str,
+) -> Result<WebviewWindow, String> {
+    build_app_window_with_script(app, label, Some(initialization_script))
 }
 
 /// Open enough new project windows to reach `count` total (each with its own
@@ -3463,6 +3482,113 @@ async fn open_pane_in_new_window(
         }
     };
     snapshot_workspace(&app);
+    let _ = win.set_focus();
+    broadcast_window_order(&app);
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalWindowTarget {
+    cwd: String,
+    session_path: Option<String>,
+}
+
+fn validate_terminal_window_target(
+    target: &TerminalWindowTarget,
+) -> Result<PaneCopyTarget, String> {
+    let copy_target = PaneCopyTarget {
+        cwd: PathBuf::from(&target.cwd),
+        session_path: target.session_path.clone(),
+        session_id: String::new(),
+    };
+    if target.cwd.trim().is_empty() {
+        return Err(format!(
+            "project folder no longer exists: {}",
+            copy_target.cwd.display()
+        ));
+    }
+    validate_pane_copy_target(&copy_target)?;
+    Ok(copy_target)
+}
+
+fn terminal_window_seed_script(
+    label: &str,
+    target: &TerminalWindowTarget,
+) -> Result<String, String> {
+    let storage_key = format!("gg-workspace-layout-recursive:{label}");
+    let marker_key = format!("gg-terminal-window-seeded:{label}");
+    let layout = serde_json::json!({
+        "version": 7,
+        "root": { "type": "leaf", "paneId": "terminal-1" },
+        "focusedPaneId": "terminal-1",
+        "panes": {
+            "terminal-1": {
+                "kind": "terminal",
+                "cwd": target.cwd,
+                "sessionPath": target.session_path,
+                "stopped": true
+            }
+        }
+    });
+    let key_json = serde_json::to_string(&storage_key).map_err(|error| error.to_string())?;
+    let marker_json = serde_json::to_string(&marker_key).map_err(|error| error.to_string())?;
+    let layout_json = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
+    let serialized_layout =
+        serde_json::to_string(&layout_json).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "(()=>{{const key={key_json};const marker={marker_json};if(sessionStorage.getItem(marker)!=='1'){{localStorage.setItem(key,{serialized_layout});sessionStorage.setItem(marker,'1');}}}})();"
+    ))
+}
+
+fn reserve_terminal_window_label(
+    registry: &mut PaneRegistry,
+    mut native_window_exists: impl FnMut(&str) -> bool,
+) -> String {
+    let label = next_project_window_label(registry, |candidate| native_window_exists(candidate));
+    registry.insert(label.clone(), HashMap::new());
+    label
+}
+
+fn rollback_terminal_window_reservation(registry: &mut PaneRegistry, label: &str) {
+    if registry.get(label).is_some_and(HashMap::is_empty) {
+        registry.remove(label);
+    }
+}
+
+#[tauri::command]
+async fn open_terminal_in_new_window(
+    app: tauri::AppHandle,
+    target: TerminalWindowTarget,
+) -> Result<(), String> {
+    validate_terminal_window_target(&target)?;
+    let label = {
+        let windows: State<Windows> = app.state();
+        let mut registry = windows.map.lock().unwrap();
+        reserve_terminal_window_label(&mut registry, |candidate| {
+            app.get_webview_window(candidate).is_some()
+        })
+    };
+    let script = match terminal_window_seed_script(&label, &target) {
+        Ok(script) => script,
+        Err(error) => {
+            let windows: State<Windows> = app.state();
+            rollback_terminal_window_reservation(&mut windows.map.lock().unwrap(), &label);
+            return Err(error);
+        }
+    };
+    let win = match build_terminal_app_window(&app, &label, &script) {
+        Ok(window) => window,
+        Err(error) => {
+            let windows: State<Windows> = app.state();
+            rollback_terminal_window_reservation(&mut windows.map.lock().unwrap(), &label);
+            return Err(error);
+        }
+    };
+    {
+        let windows: State<Windows> = app.state();
+        rollback_terminal_window_reservation(&mut windows.map.lock().unwrap(), &label);
+    }
     let _ = win.set_focus();
     broadcast_window_order(&app);
     Ok(())
@@ -4679,6 +4805,7 @@ pub fn run() {
             setup_windows,
             new_window,
             open_pane_in_new_window,
+            open_terminal_in_new_window,
             open_whatsnew_window,
             select_project,
             agent_projects,
@@ -6036,6 +6163,89 @@ mod tests {
 
         let second = next_project_window_label(&registry, |label| label == "project-2");
         assert_eq!(second, "project-3");
+    }
+
+    #[test]
+    fn terminal_native_window_build_failure_rolls_back_only_its_reserved_label() {
+        let mut registry = PaneRegistry::new();
+        record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            PathBuf::from("/existing"),
+            None,
+        );
+        let first = reserve_terminal_window_label(&mut registry, |_| false);
+        let second = reserve_terminal_window_label(&mut registry, |_| false);
+        assert_eq!(
+            (first.as_str(), second.as_str()),
+            ("project-1", "project-2")
+        );
+
+        rollback_terminal_window_reservation(&mut registry, &first);
+        assert!(!registry.contains_key(&first));
+        assert!(registry.contains_key(&second));
+        assert!(registry.contains_key("main"));
+        assert!(resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID).is_some());
+        assert_eq!(
+            reserve_terminal_window_label(&mut registry, |_| false),
+            "project-1"
+        );
+    }
+
+    #[test]
+    fn terminal_window_copy_first_navigation_seeds_once_and_reload_skips_duplicate() {
+        let target = TerminalWindowTarget {
+            cwd: r#"C:\Users\O'Reilly\"quoted""#.into(),
+            session_path: Some(r#"C:\sessions\"one".jsonl"#.into()),
+        };
+        let script = terminal_window_seed_script("project-7", &target).unwrap();
+        assert!(script.contains("gg-workspace-layout-recursive:project-7"));
+        assert!(script.contains("gg-terminal-window-seeded:project-7"));
+        let marker_check = script.find("sessionStorage.getItem(marker)!=='1'").unwrap();
+        let layout_write = script.find("localStorage.setItem").unwrap();
+        let marker_write = script.find("sessionStorage.setItem(marker,'1')").unwrap();
+        assert!(marker_check < layout_write && layout_write < marker_write);
+        assert_eq!(script.matches("localStorage.setItem").count(), 1);
+        assert_eq!(script.matches("sessionStorage.setItem").count(), 1);
+        let serialized_layout = script
+            .split_once("localStorage.setItem(key,")
+            .unwrap()
+            .1
+            .split_once(");sessionStorage.setItem")
+            .unwrap()
+            .0;
+        let layout_json: String = serde_json::from_str(serialized_layout).unwrap();
+        let layout: serde_json::Value = serde_json::from_str(&layout_json).unwrap();
+        assert_eq!(layout["panes"]["terminal-1"]["cwd"], target.cwd);
+        assert_eq!(
+            layout["panes"]["terminal-1"]["sessionPath"].as_str(),
+            target.session_path.as_deref()
+        );
+
+        let null_script = terminal_window_seed_script(
+            "project-8",
+            &TerminalWindowTarget {
+                cwd: "/tmp/project".into(),
+                session_path: None,
+            },
+        )
+        .unwrap();
+        assert!(null_script.contains(r#"\"sessionPath\":null"#));
+    }
+
+    #[test]
+    fn terminal_window_copy_validation_happens_before_reservation() {
+        let mut registry = PaneRegistry::new();
+        let target = TerminalWindowTarget {
+            cwd: " ".into(),
+            session_path: None,
+        };
+        assert!(validate_terminal_window_target(&target).is_err());
+        assert!(registry.is_empty());
+
+        let label = reserve_terminal_window_label(&mut registry, |_| false);
+        assert_eq!(label, "project-1");
     }
 
     #[test]

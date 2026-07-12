@@ -6,6 +6,7 @@ import {
   newWindow,
   onWindowOrder,
   openPaneInNewWindow,
+  openTerminalInNewWindow,
   setWindowTitle,
   validateWorkspaceTarget,
   windowLabel,
@@ -558,24 +559,41 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     [markLayoutChanged],
   );
 
-  const openPaneWindow = useCallback(async (paneId: WorkspacePaneId): Promise<void> => {
-    if (openingPaneIdRef.current !== null) return;
-    openingPaneIdRef.current = paneId;
-    setOpeningPaneId(paneId);
-    try {
-      await openPaneInNewWindow(paneId);
-    } catch (error) {
-      toast(
-        `Couldn't open pane in a new window: ${error instanceof Error ? error.message : String(error)}`,
-        "error",
-      );
-    } finally {
-      if (openingPaneIdRef.current === paneId) {
-        openingPaneIdRef.current = null;
-        setOpeningPaneId(null);
+  const openPaneWindow = useCallback(
+    async (paneId: WorkspacePaneId): Promise<void> => {
+      if (openingPaneIdRef.current !== null) return;
+      const descriptor = layout.panes[paneId];
+      if (!descriptor) return;
+      const validTarget =
+        typeof descriptor.cwd === "string" &&
+        Boolean(descriptor.cwd.trim()) &&
+        (descriptor.sessionPath === null || typeof descriptor.sessionPath === "string");
+      const terminalTarget =
+        descriptor.kind === "terminal" && descriptor.stopped === true && validTarget
+          ? { cwd: descriptor.cwd, sessionPath: descriptor.sessionPath }
+          : null;
+      const validAgent =
+        (descriptor.kind === undefined || descriptor.kind === "agent") && validTarget;
+      if (!terminalTarget && !validAgent) return;
+      openingPaneIdRef.current = paneId;
+      setOpeningPaneId(paneId);
+      try {
+        if (terminalTarget) await openTerminalInNewWindow(terminalTarget);
+        else await openPaneInNewWindow(paneId);
+      } catch (error) {
+        toast(
+          `Couldn't open pane in a new window: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      } finally {
+        if (openingPaneIdRef.current === paneId) {
+          openingPaneIdRef.current = null;
+          setOpeningPaneId(null);
+        }
       }
-    }
-  }, []);
+    },
+    [layout.panes],
+  );
 
   const focusedSnapshot = snapshots[layout.focusedPaneId];
   const focusedDescriptor = layout.panes[layout.focusedPaneId];

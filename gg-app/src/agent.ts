@@ -1018,6 +1018,21 @@ export async function openPaneInNewWindow(paneId: string): Promise<void> {
   }
 }
 
+export interface TerminalWindowTarget {
+  cwd: string;
+  sessionPath: string | null;
+}
+
+/** Copy one stopped terminal target into a new native window. */
+export async function openTerminalInNewWindow(target: TerminalWindowTarget): Promise<void> {
+  try {
+    await invoke("open_terminal_in_new_window", { target });
+  } catch (e) {
+    await logError(`open_terminal_in_new_window failed: ${String(e)}`);
+    throw e;
+  }
+}
+
 /** Open the dedicated, screen-centered "What's new" window (or refocus it if it's
  *  already open). Only the main window calls this, exactly once per update — see
  *  WhatsNewTrigger. */

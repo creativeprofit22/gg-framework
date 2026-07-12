@@ -19,6 +19,7 @@ const bridge = vi.hoisted(() => ({
   focusWindowByOffset: vi.fn(() => Promise.resolve()),
   newWindow: vi.fn(() => Promise.resolve()),
   openPaneInNewWindow: vi.fn(() => Promise.resolve()),
+  openTerminalInNewWindow: vi.fn(() => Promise.resolve()),
   onWindowOrder: vi.fn(() => Promise.resolve(() => undefined)),
   setWindowTitle: vi.fn(),
   validateWorkspaceTarget: vi.fn(() =>
@@ -51,6 +52,7 @@ vi.mock("./agent", () => ({
   focusWindowByOffset: bridge.focusWindowByOffset,
   newWindow: bridge.newWindow,
   openPaneInNewWindow: bridge.openPaneInNewWindow,
+  openTerminalInNewWindow: bridge.openTerminalInNewWindow,
   onWindowOrder: bridge.onWindowOrder,
   setWindowTitle: bridge.setWindowTitle,
   validateWorkspaceTarget: bridge.validateWorkspaceTarget,
@@ -272,6 +274,7 @@ beforeEach(() => {
   vi.stubGlobal("CSS", { escape: (value: string) => value });
   vi.clearAllMocks();
   bridge.openPaneInNewWindow.mockResolvedValue(undefined);
+  bridge.openTerminalInNewWindow.mockResolvedValue(undefined);
   workspaceLayoutMock.rejectResolution = false;
   localStorage.clear();
 });
@@ -432,6 +435,120 @@ describe("WorkspaceShell v7 terminal rendering", () => {
 
     await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledOnce());
     expect(terminalMock.mounts).toHaveBeenCalledWith("terminal-1");
+  });
+
+  it.each([null, "/sessions/source.jsonl"])(
+    "copies the focused stopped terminal target with session %s and keeps its source",
+    async (sessionPath) => {
+      saveStoppedTerminalLayout("terminal-1", sessionPath);
+      render(<WorkspaceShell renderPane={renderPane} />);
+      const source = await screen.findByTestId("terminal-terminal-1");
+      const action = screen.getByRole("button", { name: "Open in new window" });
+      expect(action.hasAttribute("disabled")).toBe(false);
+
+      fireEvent.click(action);
+
+      await waitFor(() =>
+        expect(bridge.openTerminalInNewWindow).toHaveBeenCalledWith({
+          cwd: "/work/primary",
+          sessionPath,
+        }),
+      );
+      expect(bridge.openPaneInNewWindow).not.toHaveBeenCalled();
+      expect(screen.getByTestId("terminal-terminal-1")).toBe(source);
+      expect(terminalMock.mounts).not.toHaveBeenCalled();
+    },
+  );
+
+  it("deduplicates terminal copy clicks and recovers from one native rejection", async () => {
+    let rejectOpen: ((error: Error) => void) | undefined;
+    bridge.openTerminalInNewWindow.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectOpen = reject;
+        }),
+    );
+    saveStoppedTerminalLayout("terminal-1");
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const source = await screen.findByTestId("terminal-terminal-1");
+    const action = screen.getByRole("button", { name: "Open in new window" });
+
+    fireEvent.click(action);
+    fireEvent.click(action);
+    expect(bridge.openTerminalInNewWindow).toHaveBeenCalledTimes(1);
+    expect(action.hasAttribute("disabled")).toBe(true);
+    await act(async () => rejectOpen?.(new Error("native build failed")));
+
+    await waitFor(() => expect(action.hasAttribute("disabled")).toBe(false));
+    expect(toastMock).toHaveBeenCalledOnce();
+    expect(screen.getByTestId("terminal-terminal-1")).toBe(source);
+  });
+
+  it.each([
+    ["an agent", "agent"],
+    ["a terminal", "terminal"],
+  ] as const)(
+    "disables agent and terminal native-window actions while %s copy is pending",
+    async (_description, pendingKind) => {
+      let resolveOpen: (() => void) | undefined;
+      const pending = new Promise<void>((resolve) => {
+        resolveOpen = resolve;
+      });
+      if (pendingKind === "agent") bridge.openPaneInNewWindow.mockReturnValue(pending);
+      else bridge.openTerminalInNewWindow.mockReturnValue(pending);
+      saveStoppedTerminalLayout(pendingKind === "terminal" ? "terminal-1" : "primary");
+      render(<WorkspaceShell renderPane={renderPane} />);
+
+      const pendingAction = await screen.findByRole("button", { name: "Open in new window" });
+      await waitFor(() => expect(pendingAction.hasAttribute("disabled")).toBe(false));
+      fireEvent.click(pendingAction);
+
+      const destination =
+        pendingKind === "agent"
+          ? await screen.findByTestId("terminal-terminal-1")
+          : await screen.findByTestId("pane-primary");
+      fireEvent.pointerDown(destination);
+      const otherAction = screen.getByRole("button", { name: "Open in new window" });
+      expect(otherAction.hasAttribute("disabled")).toBe(true);
+      fireEvent.click(otherAction);
+      expect(bridge.openPaneInNewWindow).toHaveBeenCalledTimes(pendingKind === "agent" ? 1 : 0);
+      expect(bridge.openTerminalInNewWindow).toHaveBeenCalledTimes(
+        pendingKind === "terminal" ? 1 : 0,
+      );
+
+      await act(async () => resolveOpen?.());
+      await waitFor(() => expect(otherAction.hasAttribute("disabled")).toBe(false));
+    },
+  );
+
+  it("renders a copied terminal destination stopped across reloads without creating a PTY", async () => {
+    saveStoppedTerminalLayout("terminal-1", "/sessions/copied.jsonl");
+    const firstNavigation = render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Restart terminal" })).toHaveLength(1);
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
+
+    firstNavigation.unmount();
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(screen.getAllByTestId("terminal-terminal-1")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Restart terminal" })).toHaveLength(1);
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for a malformed running terminal descriptor", async () => {
+    saveStoppedTerminalLayout("terminal-1");
+    const key = "gg-workspace-layout-recursive:main";
+    const malformed = JSON.parse(localStorage.getItem(key)!);
+    malformed.panes["terminal-1"].stopped = false;
+    localStorage.setItem(key, JSON.stringify(malformed));
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    await waitFor(() => expect(toastMock).toHaveBeenCalled());
+    expect(bridge.openTerminalInNewWindow).not.toHaveBeenCalled();
+    expect(bridge.openPaneInNewWindow).not.toHaveBeenCalled();
   });
 
   it.each([

@@ -10,6 +10,7 @@ import {
   removeWorkspacePane,
   saveWorkspaceLayout,
   splitWorkspacePane,
+  terminalOnlyWorkspaceLayout,
   updateWorkspaceSplitRatio,
   workspaceLayoutKey,
   workspaceLayoutLeafIds,
@@ -450,6 +451,44 @@ describe("v7 reducers", () => {
   it("never removes primary", () => {
     const layout = canonical();
     expect(removeWorkspacePane(layout, "primary")).toBe(layout);
+  });
+});
+
+describe("terminal-only native workspace", () => {
+  it.each([null, "/sessions/terminal.jsonl"])(
+    "constructs and round-trips one focused stopped terminal with session %s",
+    (sessionPath) => {
+      const layout = terminalOnlyWorkspaceLayout({ cwd: "C:\\project", sessionPath });
+      expect(layout).not.toBeNull();
+      expect(layout).toMatchObject({
+        root: leaf("terminal-1"),
+        focusedPaneId: "terminal-1",
+        panes: { "terminal-1": terminal("C:\\project", sessionPath) },
+        terminal: { open: false, ownerPaneId: null },
+      });
+      const { storage } = store();
+      expect(saveWorkspaceLayout(storage, "project-2", layout!)).toBe(true);
+      expect(loadWorkspaceLayout(storage, "project-2")).toMatchObject({
+        status: "valid",
+        layout: {
+          root: leaf("terminal-1"),
+          focusedPaneId: "terminal-1",
+          panes: { "terminal-1": terminal("C:\\project", sessionPath) },
+        },
+      });
+    },
+  );
+
+  it.each([
+    ["extra pane", v7(leaf("terminal-1"), { "terminal-1": terminal("/a"), extra: agent("/b") }, "terminal-1")],
+    ["split root", v7(split(leaf("terminal-1"), leaf("terminal-2")), { "terminal-1": terminal("/a"), "terminal-2": terminal("/a") }, "terminal-1")],
+    ["blank cwd", v7(leaf("terminal-1"), { "terminal-1": terminal("") }, "terminal-1")],
+    ["invalid session", v7(leaf("terminal-1"), { "terminal-1": { ...terminal("/a"), sessionPath: 1 } }, "terminal-1")],
+    ["agent descriptor", v7(leaf("terminal-1"), { "terminal-1": agent("/a") }, "terminal-1")],
+    ["wrong focus", v7(leaf("terminal-1"), { "terminal-1": terminal("/a") }, "primary")],
+    ["wrong leaf id", v7(leaf("terminal-2"), { "terminal-2": terminal("/a") }, "terminal-2")],
+  ])("rejects %s", (_name, raw) => {
+    expect(parseWorkspaceLayout(raw).status).toBe("corrupt");
   });
 });
 

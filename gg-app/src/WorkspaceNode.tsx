@@ -75,11 +75,16 @@ export function WorkspaceNode({ path = [], ...props }: WorkspaceNodeProps): Reac
           </div>
           {props.focusedPaneId === node.paneId && (
             <PaneSplitActions
-              canOpenInNewWindow={false}
+              canOpenInNewWindow={
+                descriptor.stopped === true &&
+                typeof descriptor.cwd === "string" &&
+                Boolean(descriptor.cwd.trim()) &&
+                (descriptor.sessionPath === null || typeof descriptor.sessionPath === "string")
+              }
               canSplit={props.canSplit}
-              openingInNewWindow={false}
-              openInNewWindowPending={false}
-              onOpenInNewWindow={() => undefined}
+              openingInNewWindow={props.openingPaneId === node.paneId}
+              openInNewWindowPending={props.openingPaneId !== null}
+              onOpenInNewWindow={() => props.onOpenPaneWindow(node.paneId)}
               onSplitRight={() => props.onSplitFocusedPane("horizontal")}
               onSplitDown={() => props.onSplitFocusedPane("vertical")}
             />

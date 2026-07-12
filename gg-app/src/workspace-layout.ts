@@ -264,6 +264,18 @@ export function defaultWorkspaceLayout(): WorkspaceLayout {
   });
 }
 
+export function terminalOnlyWorkspaceLayout(target: WorkspacePaneTarget): WorkspaceLayout | null {
+  const parsedTarget = parseTarget(target);
+  if (!parsedTarget) return null;
+  return normalizeLayout({
+    root: { type: "leaf", paneId: "terminal-1" },
+    focusedPaneId: "terminal-1",
+    panes: {
+      "terminal-1": { kind: "terminal", stopped: true, ...parsedTarget },
+    },
+  });
+}
+
 export function allocateWorkspacePaneId(layout: WorkspaceLayout): WorkspacePaneId | null {
   if (
     workspaceLayoutLeafIds(layout.root).filter(
@@ -712,13 +724,7 @@ function validFixedSplitTopology(
 function parseV7(record: Record<string, unknown>): WorkspaceLayoutLoadResult | null {
   const ids = new Set<string>();
   const root = parseNode(record.root, 1, ids, 7);
-  if (
-    !root ||
-    !ids.has(PRIMARY_PANE_ID) ||
-    typeof record.panes !== "object" ||
-    record.panes === null
-  )
-    return null;
+  if (!root || typeof record.panes !== "object" || record.panes === null) return null;
   const rawPanes = record.panes as Record<string, unknown>;
   const keys = Object.keys(rawPanes);
   if (keys.length !== ids.size || keys.some((key) => !ids.has(key))) return null;
@@ -728,13 +734,21 @@ function parseV7(record: Record<string, unknown>): WorkspaceLayoutLoadResult | n
     if (descriptor === undefined) return null;
     panes[key] = descriptor;
   }
-  if (descriptorKind(panes.primary) !== "agent" || !validFixedSplitTopology(root, panes))
+  const focusedPaneId = typeof record.focusedPaneId === "string" ? record.focusedPaneId : "";
+  const terminalOnly =
+    root.type === "leaf" &&
+    root.paneId === "terminal-1" &&
+    focusedPaneId === "terminal-1" &&
+    keys.length === 1 &&
+    descriptorKind(panes["terminal-1"]) === "terminal";
+  if (
+    !terminalOnly &&
+    (!ids.has(PRIMARY_PANE_ID) ||
+      descriptorKind(panes.primary) !== "agent" ||
+      !validFixedSplitTopology(root, panes))
+  )
     return null;
-  const layout = normalizeLayout({
-    root,
-    focusedPaneId: typeof record.focusedPaneId === "string" ? record.focusedPaneId : "",
-    panes,
-  });
+  const layout = normalizeLayout({ root, focusedPaneId, panes });
   return { layout, status: "valid" };
 }
 

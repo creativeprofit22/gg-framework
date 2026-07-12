@@ -330,7 +330,53 @@ describe("v7 terminal creation reducer", () => {
 });
 
 describe("v7 reducers", () => {
-  it("splits only agent leaves and creates an unbound agent slot", () => {
+  it.each([
+    ["right", "horizontal"],
+    ["down", "vertical"],
+  ] as const)(
+    "splits a focused terminal %s into a unique stopped sibling with its target",
+    (_label, direction) => {
+      const parsed = parseWorkspaceLayout(
+        v7(
+          dock(leaf("primary"), leaf("terminal-1")),
+          {
+            primary: agent("/a"),
+            "terminal-1": terminal("/project", "/sessions/source.jsonl"),
+          },
+          "terminal-1",
+        ),
+      ).layout;
+      const layout = {
+        ...parsed,
+        panes: { ...parsed.panes, "terminal-2": terminal("/stale") },
+      };
+
+      const next = splitWorkspacePane(layout, "terminal-1", direction, "pane-99");
+
+      expect(workspaceLayoutLeafIds(next.root)).toEqual(["primary", "terminal-1", "terminal-3"]);
+      expect(next.focusedPaneId).toBe("terminal-3");
+      expect(next.panes["terminal-3"]).toEqual(terminal("/project", "/sessions/source.jsonl"));
+      const terminalSplit = (next.root as Extract<WorkspaceLayoutNode, { type: "split" }>).second;
+      expect(terminalSplit).toMatchObject({ direction, size: { type: "ratio", value: 50 } });
+    },
+  );
+
+  it("fails closed when a terminal descriptor has an invalid target", () => {
+    const layout = parseWorkspaceLayout(
+      v7(dock(leaf("primary"), leaf("terminal-1")), {
+        primary: agent("/a"),
+        "terminal-1": terminal("/valid"),
+      }),
+    ).layout;
+    const malformed = {
+      ...layout,
+      panes: { ...layout.panes, "terminal-1": { kind: "terminal", stopped: true, cwd: "" } },
+    } as unknown as WorkspaceLayout;
+
+    expect(splitWorkspacePane(malformed, "terminal-1", "horizontal")).toBe(malformed);
+  });
+
+  it("splits an agent leaf and creates an unbound agent slot", () => {
     const layout = canonical();
     const next = splitWorkspacePane(layout, "primary", "vertical", "pane-3");
     expect(workspaceLayoutLeafIds(next.root)).toEqual(["primary", "pane-3", "secondary"]);
@@ -341,7 +387,7 @@ describe("v7 reducers", () => {
         "terminal-1": terminal("/a"),
       }),
     ).layout;
-    expect(splitWorkspacePane(withTerminal, "terminal-1", "horizontal")).toBe(withTerminal);
+    expect(splitWorkspacePane(withTerminal, "missing-terminal", "horizontal")).toBe(withTerminal);
   });
 
   it("updates ratio splits but not fixed terminal splits", () => {

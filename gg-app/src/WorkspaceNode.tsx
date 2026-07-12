@@ -73,6 +73,17 @@ export function WorkspaceNode({ path = [], ...props }: WorkspaceNodeProps): Reac
               onRequestClose={(running) => props.onRequestTerminalPaneClose(node.paneId, running)}
             />
           </div>
+          {props.focusedPaneId === node.paneId && (
+            <PaneSplitActions
+              canOpenInNewWindow={false}
+              canSplit={props.canSplit}
+              openingInNewWindow={false}
+              openInNewWindowPending={false}
+              onOpenInNewWindow={() => undefined}
+              onSplitRight={() => props.onSplitFocusedPane("horizontal")}
+              onSplitDown={() => props.onSplitFocusedPane("vertical")}
+            />
+          )}
         </div>
       );
     }

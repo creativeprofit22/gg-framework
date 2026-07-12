@@ -335,14 +335,30 @@ export function splitWorkspacePane(
   direction: SplitDirection,
   requestedPaneId?: WorkspacePaneId,
 ): WorkspaceLayout {
-  if (descriptorKind(layout.panes[paneId]) === "terminal") return layout;
-  const newPaneId = requestedPaneId ?? allocateWorkspacePaneId(layout);
+  const source = layout.panes[paneId];
+  if (!workspaceLayoutLeafIds(layout.root).includes(paneId)) return layout;
+  const sourceKind = descriptorKind(source) === "terminal" ? "terminal" : "agent";
+
+  const terminalTarget = sourceKind === "terminal" ? parseTarget(source) : null;
+  if (
+    sourceKind === "terminal" &&
+    (!terminalTarget || source?.kind !== "terminal" || source.stopped !== true)
+  )
+    return layout;
+
+  const newPaneId =
+    sourceKind === "terminal"
+      ? allocateTerminalId(layout.root, layout.panes)
+      : (requestedPaneId ?? allocateWorkspacePaneId(layout));
   if (
     !newPaneId ||
     !isValidWorkspacePaneId(newPaneId) ||
-    workspaceLayoutLeafIds(layout.root).filter(
-      (id) => descriptorKind(layout.panes[id]) !== "terminal",
-    ).length >= MAX_WORKSPACE_PANES ||
+    (sourceKind === "agent" &&
+      workspaceLayoutLeafIds(layout.root).filter(
+        (id) => descriptorKind(layout.panes[id]) !== "terminal",
+      ).length >= MAX_WORKSPACE_PANES) ||
+    (sourceKind === "terminal" &&
+      workspaceLayoutLeafIds(layout.root).length >= MAX_WORKSPACE_LEAVES) ||
     workspaceLayoutLeafIds(layout.root).includes(newPaneId)
   )
     return layout;
@@ -356,11 +372,14 @@ export function splitWorkspacePane(
     return { ...node, first: splitLeaf(node.first), second: splitLeaf(node.second) };
   };
   const root = splitLeaf(layout.root);
+  const newDescriptor: WorkspacePaneValue = terminalTarget
+    ? { kind: "terminal", stopped: true, ...terminalTarget }
+    : null;
   return changed
     ? normalizeLayout({
         root,
         focusedPaneId: newPaneId,
-        panes: { ...layout.panes, [newPaneId]: null },
+        panes: { ...layout.panes, [newPaneId]: newDescriptor },
       })
     : layout;
 }
@@ -668,6 +687,16 @@ function parseV6(record: Record<string, unknown>): WorkspaceLayoutLoadResult | n
     ...(parsedTerminal.recovery ? { terminalDockHeightRecovery: parsedTerminal.recovery } : {}),
   };
 }
+function containsOnlyTerminalLeaves(
+  node: WorkspaceLayoutNode,
+  panes: Record<string, WorkspacePaneValue>,
+): boolean {
+  return node.type === "leaf"
+    ? descriptorKind(panes[node.paneId]) === "terminal"
+    : containsOnlyTerminalLeaves(node.first, panes) &&
+        containsOnlyTerminalLeaves(node.second, panes);
+}
+
 function validFixedSplitTopology(
   node: WorkspaceLayoutNode,
   panes: Record<string, WorkspacePaneValue>,
@@ -675,9 +704,7 @@ function validFixedSplitTopology(
   if (node.type === "leaf") return true;
   if (
     node.size.type === "fixed-second" &&
-    (node.direction !== "vertical" ||
-      node.second.type !== "leaf" ||
-      descriptorKind(panes[node.second.paneId]) !== "terminal")
+    (node.direction !== "vertical" || !containsOnlyTerminalLeaves(node.second, panes))
   )
     return false;
   return validFixedSplitTopology(node.first, panes) && validFixedSplitTopology(node.second, panes);

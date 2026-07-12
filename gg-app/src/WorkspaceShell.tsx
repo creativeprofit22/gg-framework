@@ -27,6 +27,7 @@ import { useProgress } from "./useProgress";
 import {
   addTerminalWorkspacePane,
   loadWorkspaceLayout,
+  MAX_WORKSPACE_LEAVES,
   MAX_WORKSPACE_PANES,
   preserveRejectedRecursiveWorkspaceLayout,
   preserveRejectedWorkspaceLayout,
@@ -393,9 +394,14 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const splitFocusedPane = useCallback(
     (direction: SplitDirection): void => {
       let newFocused: WorkspacePaneId | null = null;
-      const newPaneId = `pane-${++nextGeneratedPaneOrdinalRef.current}`;
+      const requestedPaneId = `pane-${++nextGeneratedPaneOrdinalRef.current}`;
       setLayout((previous) => {
-        const next = splitWorkspacePane(previous, previous.focusedPaneId, direction, newPaneId);
+        const next = splitWorkspacePane(
+          previous,
+          previous.focusedPaneId,
+          direction,
+          requestedPaneId,
+        );
         if (next === previous) return previous;
         newFocused = next.focusedPaneId;
         focusedPaneIdRef.current = next.focusedPaneId;
@@ -582,7 +588,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       focusedSnapshot.cwd === focusedDescriptor.cwd &&
       focusedSnapshot.sessionPath === focusedDescriptor.sessionPath,
     );
-  const canSplit = leafIds.length < MAX_WORKSPACE_PANES;
+  const canSplit =
+    focusedDescriptor?.kind === "terminal"
+      ? leafIds.length < MAX_WORKSPACE_LEAVES
+      : leafIds.filter((paneId) => layout.panes[paneId]?.kind !== "terminal").length <
+        MAX_WORKSPACE_PANES;
 
   return (
     <div className="workspace-shell" style={{ background: theme.background }}>

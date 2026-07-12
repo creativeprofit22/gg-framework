@@ -390,7 +390,10 @@ describe("WorkspaceShell recursive rendering", () => {
 });
 
 describe("WorkspaceShell v7 terminal rendering", () => {
-  function saveStoppedTerminalLayout(): void {
+  function saveStoppedTerminalLayout(
+    focusedPaneId = "primary",
+    terminalSessionPath: string | null = null,
+  ): void {
     localStorage.setItem(
       "gg-workspace-layout-recursive:main",
       JSON.stringify({
@@ -402,14 +405,14 @@ describe("WorkspaceShell v7 terminal rendering", () => {
           first: { type: "leaf", paneId: "primary" },
           second: { type: "leaf", paneId: "terminal-1" },
         },
-        focusedPaneId: "primary",
+        focusedPaneId,
         panes: {
           primary: { kind: "agent", cwd: "/work/primary", sessionPath: null },
           "terminal-1": {
             kind: "terminal",
             stopped: true,
             cwd: "/work/primary",
-            sessionPath: null,
+            sessionPath: terminalSessionPath,
           },
         },
       }),
@@ -430,6 +433,40 @@ describe("WorkspaceShell v7 terminal rendering", () => {
     await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledOnce());
     expect(terminalMock.mounts).toHaveBeenCalledWith("terminal-1");
   });
+
+  it.each([
+    ["right", "Split Right", "horizontal"],
+    ["down", "Split Down", "vertical"],
+  ])(
+    "splits a focused terminal %s, copies its target, focuses and persists it without a PTY",
+    async (_label, action, direction) => {
+      saveStoppedTerminalLayout("terminal-1", "/sessions/source.jsonl");
+      render(<WorkspaceShell renderPane={renderPane} />);
+      await screen.findByTestId("terminal-terminal-1");
+      await screen.findByTestId("pane-primary");
+
+      fireEvent.click(screen.getByRole("button", { name: action }));
+
+      expect(await screen.findByTestId("terminal-terminal-2")).toBeTruthy();
+      expect(document.querySelector('[data-pane-id="terminal-2"]')?.classList).toContain(
+        "pane-focused",
+      );
+      expect(document.querySelectorAll(`.workspace-split-${direction}`).length).toBeGreaterThan(0);
+      expect(terminalMock.mounts).not.toHaveBeenCalled();
+      await waitFor(() => {
+        const saved = JSON.parse(
+          localStorage.getItem("gg-workspace-layout-recursive:main") ?? "null",
+        );
+        expect(saved.focusedPaneId).toBe("terminal-2");
+        expect(saved.panes["terminal-2"]).toEqual({
+          kind: "terminal",
+          stopped: true,
+          cwd: "/work/primary",
+          sessionPath: "/sessions/source.jsonl",
+        });
+      });
+    },
+  );
 
   it("creates, focuses, and persists two uniquely identified stopped terminal leaves", async () => {
     render(<WorkspaceShell renderPane={renderPane} />);

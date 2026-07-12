@@ -12,9 +12,6 @@ const toastMock = vi.hoisted(() => vi.fn(() => 1));
 const terminalMock = vi.hoisted(() => ({
   mounts: vi.fn(),
   unmounts: vi.fn(),
-  heights: [] as number[],
-  onHeightChange: undefined as ((height: number) => void) | undefined,
-  onStartupFailure: undefined as (() => void) | undefined,
 }));
 
 const bridge = vi.hoisted(() => ({
@@ -87,26 +84,17 @@ vi.mock("./TerminalPane", async () => {
     TerminalPane: ({
       paneId,
       initiallyStopped,
-      height,
-      onHeightChange,
       onRestart,
       onRequestClose,
       onRunningChange,
-      onStartupFailure,
     }: {
       paneId: string;
       initiallyStopped?: boolean;
-      height: number;
-      onHeightChange(height: number): void;
       onRestart?(): void;
       onRequestClose(running: boolean): void;
       onRunningChange?(running: boolean): void;
-      onStartupFailure?(): void;
     }) => {
       const [stopped, setStopped] = useState(Boolean(initiallyStopped));
-      terminalMock.heights.push(height);
-      terminalMock.onHeightChange = onHeightChange;
-      terminalMock.onStartupFailure = onStartupFailure;
       useEffect(() => {
         if (stopped) return;
         terminalMock.mounts(paneId);
@@ -284,9 +272,6 @@ beforeEach(() => {
   vi.stubGlobal("CSS", { escape: (value: string) => value });
   vi.clearAllMocks();
   bridge.openPaneInNewWindow.mockResolvedValue(undefined);
-  terminalMock.heights = [];
-  terminalMock.onHeightChange = undefined;
-  terminalMock.onStartupFailure = undefined;
   workspaceLayoutMock.rejectResolution = false;
   localStorage.clear();
 });
@@ -436,6 +421,7 @@ describe("WorkspaceShell v7 terminal rendering", () => {
     render(<WorkspaceShell renderPane={renderPane} />);
 
     expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(screen.getAllByTestId("terminal-terminal-1")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Restart terminal" })).toBeTruthy();
     expect(terminalMock.mounts).not.toHaveBeenCalled();
 
@@ -482,6 +468,80 @@ describe("WorkspaceShell v7 terminal rendering", () => {
         cwd: "/work/primary",
       });
     });
+  });
+
+  it("closes one running terminal without touching another", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(open);
+    await screen.findByTestId("terminal-terminal-1");
+    fireEvent.pointerDown(screen.getByTestId("pane-primary"));
+    fireEvent.click(open);
+    await screen.findByTestId("terminal-terminal-2");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Restart terminal" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Restart terminal" })[0]);
+    await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledTimes(2));
+    terminalMock.unmounts.mockClear();
+    const second = screen.getByTestId("terminal-terminal-2");
+    fireEvent.click(second.querySelector("button")!);
+    expect(
+      screen.getByText(
+        "A shell is still running. Closing the terminal will stop it and its child processes.",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close Terminal" }));
+
+    await waitFor(() => expect(screen.queryByTestId("terminal-terminal-2")).toBeNull());
+    expect(screen.getByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(terminalMock.unmounts).toHaveBeenCalledWith("terminal-2");
+    expect(terminalMock.unmounts).not.toHaveBeenCalledWith("terminal-1");
+  });
+
+  it("keeps terminal leaves when their former agent sibling closes", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    fireEvent.pointerDown(screen.getByTestId("pane-secondary"));
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(open);
+    await screen.findByTestId("terminal-terminal-1");
+    fireEvent.pointerDown(screen.getByTestId("pane-secondary"));
+    fireEvent.click(open);
+    await screen.findByTestId("terminal-terminal-2");
+
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+
+    await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
+    expect(screen.getByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(screen.getByTestId("terminal-terminal-2")).toBeTruthy();
+    expect(terminalMock.unmounts).not.toHaveBeenCalled();
+  });
+
+  it("restores every persisted terminal stopped after reload", async () => {
+    const view = render(<WorkspaceShell renderPane={renderPane} />);
+    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
+    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(open);
+    await screen.findByTestId("terminal-terminal-1");
+    fireEvent.pointerDown(screen.getByTestId("pane-primary"));
+    fireEvent.click(open);
+    await screen.findByTestId("terminal-terminal-2");
+    await waitFor(() => {
+      const saved = JSON.parse(
+        localStorage.getItem("gg-workspace-layout-recursive:main") ?? "null",
+      );
+      expect(saved.panes["terminal-2"]?.stopped).toBe(true);
+    });
+
+    view.unmount();
+    terminalMock.mounts.mockClear();
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(await screen.findByTestId("terminal-terminal-2")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Restart terminal" })).toHaveLength(2);
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
   });
 
   it("dispatches close for the terminal leaf without starting a PTY", async () => {
@@ -660,342 +720,6 @@ describe("WorkspaceShell pane routing", () => {
   });
 });
 
-describe("WorkspaceShell terminal dock", () => {
-  it("opens in the focused pane, pins its owner, and does not remount agent panes", async () => {
-    const paneMounts = vi.fn();
-    function CountingPane(props: AgentPaneProps): React.ReactElement {
-      useEffect(() => paneMounts(props.paneId), [props.paneId]);
-      return <FakePane {...props} />;
-    }
-    render(<WorkspaceShell renderPane={(props) => <CountingPane {...props} />} />);
-    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
-    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
-
-    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
-    fireEvent.click(open);
-    expect(screen.getByTestId("terminal-secondary")).toBeTruthy();
-    expect(open.hasAttribute("disabled")).toBe(true);
-
-    fireEvent.focus(screen.getByRole("textbox", { name: "primary input" }));
-    expect(screen.getByTestId("terminal-secondary")).toBeTruthy();
-    expect(screen.queryByTestId("terminal-primary")).toBeNull();
-    expect(paneMounts).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([
-    { label: "changes project", cwd: "/work/replacement", projectBound: true },
-    { label: "becomes unbound", cwd: null, projectBound: false },
-  ])("closes its owner-pinned terminal when the pane $label", async ({ cwd, projectBound }) => {
-    const paneMounts = vi.fn();
-    function ControllablePane(props: AgentPaneProps): React.ReactElement {
-      useEffect(() => paneMounts(props.paneId), [props.paneId]);
-      return (
-        <>
-          <FakePane {...props} />
-          {props.kind === "primary" && (
-            <button
-              onClick={() =>
-                props.onSnapshot({
-                  paneId: props.paneId,
-                  cwd,
-                  sessionPath: null,
-                  sessionTitle: null,
-                  projectBound,
-                  restoreChecked: true,
-                  activeWork: false,
-                })
-              }
-            >
-              Change primary project
-            </button>
-          )}
-        </>
-      );
-    }
-
-    render(<WorkspaceShell renderPane={(props) => <ControllablePane {...props} />} />);
-    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
-    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
-    fireEvent.click(open);
-    expect(screen.getByTestId("terminal-primary")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "Change primary project" }));
-    await waitFor(() => expect(screen.queryByTestId("terminal-primary")).toBeNull());
-    expect(terminalMock.unmounts).toHaveBeenCalledTimes(1);
-    expect(terminalMock.unmounts).toHaveBeenCalledWith("primary");
-
-    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
-    expect(screen.queryByTestId("terminal-secondary")).toBeNull();
-    expect(paneMounts).toHaveBeenCalledTimes(2);
-  });
-
-  it("restores the saved dock stopped and starts exactly one terminal for its owner pane", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
-      JSON.stringify({
-        version: 4,
-        splitRatio: 50,
-        secondaryOpen: true,
-        focusedPaneId: "primary",
-        panes: {
-          primary: { cwd: "/saved/primary", sessionPath: null },
-          secondary: { cwd: "/work/secondary", sessionPath: "/sessions/secondary.jsonl" },
-        },
-        terminal: { open: true, ownerPaneId: "secondary" },
-      }),
-    );
-
-    render(<WorkspaceShell renderPane={renderPane} />);
-    expect(await screen.findByTestId("terminal-secondary")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Restart terminal" })).toBeTruthy();
-    expect(terminalMock.mounts).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Restart terminal" }));
-    await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledOnce());
-    expect(terminalMock.mounts).toHaveBeenCalledWith("secondary");
-    expect(screen.getByTestId("pane-secondary").dataset.initialCwd).toBe("/work/secondary");
-  });
-
-  it("closes a stopped restored dock, clears persistence, and skips terminal cleanup", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
-      JSON.stringify({
-        version: 5,
-        splitRatio: 50,
-        secondaryOpen: true,
-        focusedPaneId: "primary",
-        panes: {
-          primary: { cwd: "/work/primary", sessionPath: null },
-          secondary: { cwd: "/work/secondary", sessionPath: null },
-        },
-        terminal: { open: true, ownerPaneId: "primary", dockHeightPx: 260 },
-      }),
-    );
-
-    render(<WorkspaceShell renderPane={renderPane} />);
-    expect(await screen.findByRole("button", { name: "Restart terminal" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
-
-    await waitFor(() => expect(screen.queryByTestId("terminal-primary")).toBeNull());
-    expect(terminalMock.mounts).not.toHaveBeenCalled();
-    expect(terminalMock.unmounts).not.toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "Close Terminal" })).toBeNull();
-    await waitFor(() => {
-      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
-      expect(saved.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 260 });
-    });
-  });
-
-  it("clears restored terminal intent after startup failure while keeping its error pane mounted", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
-      JSON.stringify({
-        version: 5,
-        splitRatio: 50,
-        secondaryOpen: true,
-        focusedPaneId: "primary",
-        panes: {
-          primary: { cwd: "/work/primary", sessionPath: null },
-          secondary: { cwd: "/work/secondary", sessionPath: null },
-        },
-        terminal: { open: true, ownerPaneId: "primary", dockHeightPx: 410 },
-      }),
-    );
-
-    render(<WorkspaceShell renderPane={renderPane} />);
-    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
-    act(() => terminalMock.onStartupFailure?.());
-
-    expect(screen.getByTestId("terminal-primary")).toBeTruthy();
-    await waitFor(() => {
-      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
-      expect(saved.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 410 });
-    });
-  });
-
-  it("clamps, saves, and restores terminal dock height across restart", async () => {
-    const first = render(<WorkspaceShell renderPane={renderPane} />);
-    setWorkspaceSize(first.container, 1_000, 1_000);
-    fireEvent(window, new Event("resize"));
-    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
-    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
-    fireEvent.click(open);
-    expect(terminalMock.heights[terminalMock.heights.length - 1]).toBe(260);
-
-    terminalMock.onHeightChange?.(480);
-    await waitFor(() => expect(terminalMock.heights[terminalMock.heights.length - 1]).toBe(480));
-    await waitFor(() => {
-      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
-      expect(saved.terminal.dockHeightPx).toBe(480);
-    });
-
-    first.unmount();
-    terminalMock.heights = [];
-
-    const restarted = render(<WorkspaceShell renderPane={renderPane} />);
-    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
-    expect(terminalMock.heights[terminalMock.heights.length - 1]).toBe(480);
-
-    setWorkspaceSize(restarted.container, 1_000, 1_000);
-    fireEvent(window, new Event("resize"));
-    terminalMock.onHeightChange?.(50);
-    await waitFor(() => {
-      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
-      expect(saved.terminal.dockHeightPx).toBe(140);
-    });
-    expect(terminalMock.heights[terminalMock.heights.length - 1]).toBe(140);
-    expect(toastMock).not.toHaveBeenCalledWith(
-      "Saved terminal size was unavailable. A safe size was restored.",
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-    );
-  });
-
-  it("warns exactly once and restores a safe terminal height when the saved size is unavailable", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
-      JSON.stringify({
-        version: 5,
-        splitRatio: 50,
-        secondaryOpen: true,
-        focusedPaneId: "primary",
-        panes: {
-          primary: { cwd: "/work/primary", sessionPath: null },
-          secondary: { cwd: "/work/secondary", sessionPath: null },
-        },
-        terminal: { open: true, ownerPaneId: "primary", dockHeightPx: 50 },
-      }),
-    );
-
-    const view = render(<WorkspaceShell renderPane={renderPane} />);
-    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
-    await waitFor(() =>
-      expect(toastMock).toHaveBeenCalledWith(
-        "Saved terminal size was unavailable. A safe size was restored.",
-        "warning",
-        4000,
-        false,
-      ),
-    );
-    expect(toastMock).toHaveBeenCalledTimes(1);
-    view.rerender(<WorkspaceShell renderPane={renderPane} />);
-    expect(toastMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("opens a fresh terminal when the saved agent session is missing", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
-      JSON.stringify({
-        version: 4,
-        splitRatio: 50,
-        secondaryOpen: false,
-        focusedPaneId: "primary",
-        panes: {
-          primary: { cwd: "/saved/a", sessionPath: "/sessions/gone.jsonl" },
-          secondary: null,
-        },
-        terminal: { open: true, ownerPaneId: "primary" },
-      }),
-    );
-    bridge.validateWorkspaceTarget.mockResolvedValueOnce({
-      projectExists: true,
-      sessionExists: false,
-    });
-    function FreshPane({ onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
-      useEffect(() => {
-        onSnapshot({
-          paneId,
-          cwd: "/saved/a",
-          sessionPath: null,
-          sessionTitle: null,
-          projectBound: true,
-          restoreChecked: true,
-          activeWork: false,
-        });
-      }, [onSnapshot, paneId]);
-      return <div data-testid="fresh-pane" />;
-    }
-    render(<WorkspaceShell renderPane={(props) => <FreshPane {...props} />} />);
-    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
-    expect(toastMock).not.toHaveBeenCalled();
-  });
-
-  it("uses only the required deduped warning when the saved terminal project is unavailable", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
-      JSON.stringify({
-        version: 4,
-        splitRatio: 50,
-        secondaryOpen: true,
-        focusedPaneId: "primary",
-        panes: { primary: { cwd: "/missing", sessionPath: null }, secondary: null },
-        terminal: { open: true, ownerPaneId: "primary" },
-      }),
-    );
-    bridge.validateWorkspaceTarget.mockResolvedValueOnce({
-      projectExists: false,
-      sessionExists: false,
-    });
-    const view = render(<WorkspaceShell renderPane={renderPane} />);
-    const primary = await screen.findByTestId("pane-primary");
-    expect(primary.dataset.initialMode).toBe("picker");
-    await waitFor(() =>
-      expect(toastMock).toHaveBeenCalledWith(
-        "Saved terminal project was unavailable. The terminal stayed closed.",
-        "warning",
-        4000,
-        false,
-      ),
-    );
-    expect(toastMock).toHaveBeenCalledTimes(1);
-    expect(toastMock).not.toHaveBeenCalledWith(
-      "Some saved workspace panes were unavailable. A safe layout was restored.",
-      expect.anything(),
-      expect.anything(),
-      expect.anything(),
-    );
-    expect(screen.queryByTestId("terminal-primary")).toBeNull();
-    view.rerender(<WorkspaceShell renderPane={renderPane} />);
-    expect(toastMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("isolates terminal shortcuts while reserving pane and window navigation", async () => {
-    render(<WorkspaceShell renderPane={renderPane} />);
-    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
-    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
-    fireEvent.click(open);
-    const input = screen.getByRole("textbox", { name: "primary terminal input" });
-
-    fireEvent.keyDown(input, { key: "n", ctrlKey: true });
-    fireEvent.keyDown(input, { key: "a", ctrlKey: true, shiftKey: true });
-    expect(bridge.newWindow).not.toHaveBeenCalled();
-    expect(bridge.arrangeAllWindows).not.toHaveBeenCalled();
-
-    fireEvent.keyDown(input, { key: "2", ctrlKey: true });
-    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "secondary input" }));
-    fireEvent.keyDown(input, { key: "`", code: "Backquote", ctrlKey: true });
-    expect(bridge.focusWindowByOffset).toHaveBeenCalledWith(1);
-  });
-
-  it("treats a secondary terminal as active when closing its pane", async () => {
-    render(<WorkspaceShell renderPane={renderPane} />);
-    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
-    const open = screen.getByRole("button", { name: "Open terminal in focused pane" });
-    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
-    fireEvent.click(open);
-    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
-    expect(
-      screen.getByText(
-        "Work is active in this pane. Closing it will stop that session. Close anyway?",
-      ),
-    ).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
-    await waitFor(() => expect(screen.queryByTestId("terminal-secondary")).toBeNull());
-    expect(screen.queryByTestId("pane-secondary")).toBeNull();
-  });
-});
-
 describe("WorkspaceShell secondary pane lifecycle", () => {
   it("disposes only secondary listeners/session state and restores primary focus", async () => {
     const disposed = { primary: vi.fn(), auxiliary: vi.fn() };
@@ -1081,8 +805,6 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
     await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
-    fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
-    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
     await screen.findByTestId("pane-pane-1");
@@ -1096,7 +818,6 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
       expect(document.activeElement?.getAttribute("aria-label")).toBe("primary input"),
     );
     expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/primary");
-    expect(screen.getByTestId("terminal-primary")).toBeTruthy();
     await waitFor(() => {
       const saved = JSON.parse(
         localStorage.getItem("gg-workspace-layout-recursive:main") ?? "null",
@@ -1104,7 +825,6 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
       expect(saved.root).toEqual({ type: "leaf", paneId: "primary" });
       expect(saved.focusedPaneId).toBe("primary");
       expect(saved.panes["pane-1"]).toBeUndefined();
-      expect(saved.terminal).toEqual({ open: true, ownerPaneId: "primary", dockHeightPx: 260 });
     });
 
     first.unmount();
@@ -1115,7 +835,6 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
     expect(screen.queryByTestId("pane-pane-1")).toBeNull();
     expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(1);
     await waitFor(() => expect(screen.getByTestId("notes").dataset.cwd).toBe("/work/primary"));
-    expect(await screen.findByTestId("terminal-primary")).toBeTruthy();
     expect(disposals.mock.calls.filter(([paneId]) => paneId === "pane-1")).toHaveLength(1);
   });
 
@@ -1158,47 +877,40 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
     });
   });
 
-  it.each(["bound", "active"])(
-    "requires confirmation before closing an arbitrary %s pane and keeps it on cancel",
-    async (condition) => {
-      function ConfirmPane({ onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
-        useEffect(() => {
-          onSnapshot({
-            paneId,
-            cwd: `/work/${paneId}`,
-            sessionPath: `/sessions/${paneId}.jsonl`,
-            sessionTitle: paneId,
-            projectBound: true,
-            restoreChecked: true,
-            activeWork: condition === "active" && paneId === "pane-1",
-          });
-        }, [onSnapshot, paneId]);
-        return <div data-testid={`active-${paneId}`} />;
-      }
+  it("requires confirmation before closing an active pane and keeps it on cancel", async () => {
+    function ConfirmPane({ onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
+      useEffect(() => {
+        onSnapshot({
+          paneId,
+          cwd: `/work/${paneId}`,
+          sessionPath: `/sessions/${paneId}.jsonl`,
+          sessionTitle: paneId,
+          projectBound: true,
+          restoreChecked: true,
+          activeWork: paneId === "pane-1",
+        });
+      }, [onSnapshot, paneId]);
+      return <div data-testid={`active-${paneId}`} />;
+    }
 
-      render(<WorkspaceShell renderPane={(props) => <ConfirmPane {...props} />} />);
-      fireEvent.click(screen.getByRole("button", { name: "Split Down" }));
-      await screen.findByTestId("active-pane-1");
-      if (condition === "bound") {
-        fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
-        await screen.findByTestId("terminal-pane-1");
-      }
-      fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
+    render(<WorkspaceShell renderPane={(props) => <ConfirmPane {...props} />} />);
+    fireEvent.click(screen.getByRole("button", { name: "Split Down" }));
+    await screen.findByTestId("active-pane-1");
+    fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
 
-      expect(
-        screen.getByText(
-          "Work is active in this pane. Closing it will stop that session. Close anyway?",
-        ),
-      ).toBeTruthy();
-      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-      expect(screen.getByTestId("active-pane-1")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Work is active in this pane. Closing it will stop that session. Close anyway?",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByTestId("active-pane-1")).toBeTruthy();
 
-      fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
-      fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
-      await waitFor(() => expect(screen.queryByTestId("active-pane-1")).toBeNull());
-      expect(screen.getByTestId("active-primary")).toBeTruthy();
-    },
-  );
+    fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
+    await waitFor(() => expect(screen.queryByTestId("active-pane-1")).toBeNull());
+    expect(screen.getByTestId("active-primary")).toBeTruthy();
+  });
 });
 
 describe("WorkspaceShell layout recovery", () => {
@@ -1355,7 +1067,7 @@ describe("WorkspaceShell layout recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
     await waitFor(() =>
       expect(JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).version).toBe(
-        6,
+        7,
       ),
     );
     expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(legacyRaw);
@@ -1387,7 +1099,7 @@ describe("WorkspaceShell layout recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
     await waitFor(() =>
       expect(JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).version).toBe(
-        6,
+        7,
       ),
     );
     expect(localStorage.getItem("gg-workspace-layout-recursive-rejected:main")).toBe(recursiveRaw);
@@ -1547,8 +1259,8 @@ describe("WorkspaceShell pane resizing", () => {
     fireEvent.keyDown(vertical, { key: "ArrowDown", shiftKey: true });
     await waitFor(() => {
       const root = JSON.parse(localStorage.getItem(storageKey)!).root;
-      expect(root.ratio).toBeCloseTo(59.6, 1);
-      expect(root.first.ratio).toBe(60);
+      expect(root.size.value).toBeCloseTo(59.6, 1);
+      expect(root.first.size.value).toBe(60);
     });
     first.unmount();
 

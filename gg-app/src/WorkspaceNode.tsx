@@ -16,12 +16,6 @@ import {
 
 const DIVIDER_WIDTH_PX = 9;
 
-export interface WorkspaceNodeTerminalDock {
-  ownerPaneId: WorkspacePaneId;
-  cwd: string;
-  stopped: boolean;
-}
-
 export interface WorkspaceNodeProps {
   node: WorkspaceLayoutNode;
   path?: WorkspaceLayoutPath;
@@ -31,9 +25,6 @@ export interface WorkspaceNodeProps {
   layoutManaged: boolean;
   windowFocused: boolean;
   snapshots: Record<string, PaneSnapshot>;
-  terminalReady: boolean;
-  terminalDock: WorkspaceNodeTerminalDock | null;
-  visibleDockHeight: number;
   canSplit: boolean;
   openingPaneId: WorkspacePaneId | null;
   renderPane?: (props: AgentPaneProps) => React.ReactNode;
@@ -41,10 +32,7 @@ export interface WorkspaceNodeProps {
   onSnapshot: (snapshot: PaneSnapshot) => void;
   onUserTargetChange: () => void;
   registerInput: AgentPaneProps["registerInput"];
-  onTerminalHeightChange: (height: number) => void;
-  onRequestTerminalClose: (running: boolean) => void;
-  onTerminalRunningChange: (running: boolean) => void;
-  onTerminalStartupFailure: () => void;
+  onRequestTerminalPaneClose: (paneId: WorkspacePaneId, running: boolean) => void;
   onRestartTerminalPane: (paneId: WorkspacePaneId, target: WorkspacePaneTarget) => void;
   onOpenPaneWindow: (paneId: WorkspacePaneId) => void;
   onSplitFocusedPane: (direction: SplitDirection) => void;
@@ -82,9 +70,7 @@ export function WorkspaceNode({ path = [], ...props }: WorkspaceNodeProps): Reac
               paneId={node.paneId}
               initiallyStopped
               onRestart={() => props.onRestartTerminalPane(node.paneId, descriptor)}
-              onRequestClose={() => props.onRequestPaneClose(node.paneId)}
-              onRunningChange={props.onTerminalRunningChange}
-              onStartupFailure={props.onTerminalStartupFailure}
+              onRequestClose={(running) => props.onRequestTerminalPaneClose(node.paneId, running)}
             />
           </div>
         </div>
@@ -141,9 +127,6 @@ function WorkspaceAgentLeaf({
   layoutManaged,
   windowFocused,
   snapshots,
-  terminalReady,
-  terminalDock,
-  visibleDockHeight,
   canSplit,
   openingPaneId,
   renderPane,
@@ -151,10 +134,6 @@ function WorkspaceAgentLeaf({
   onSnapshot,
   onUserTargetChange,
   registerInput,
-  onTerminalHeightChange,
-  onRequestTerminalClose,
-  onTerminalRunningChange,
-  onTerminalStartupFailure,
   onOpenPaneWindow,
   onSplitFocusedPane,
   onRequestPaneClose,
@@ -190,23 +169,6 @@ function WorkspaceAgentLeaf({
     >
       <div className="workspace-pane-body">
         {layoutReady && <>{renderPane ? renderPane(paneProps) : <AgentPane {...paneProps} />}</>}
-        {terminalReady &&
-          terminalDock?.ownerPaneId === paneId &&
-          snapshots[paneId]?.restoreChecked &&
-          snapshots[paneId]?.projectBound &&
-          snapshots[paneId]?.cwd === terminalDock.cwd &&
-          panes[paneId]?.cwd === terminalDock.cwd && (
-            <TerminalPane
-              key={`${paneId}:${terminalDock.cwd}`}
-              paneId={paneId}
-              initiallyStopped={terminalDock.stopped}
-              height={visibleDockHeight}
-              onHeightChange={onTerminalHeightChange}
-              onRequestClose={onRequestTerminalClose}
-              onRunningChange={onTerminalRunningChange}
-              onStartupFailure={onTerminalStartupFailure}
-            />
-          )}
       </div>
       {focused && (
         <PaneSplitActions

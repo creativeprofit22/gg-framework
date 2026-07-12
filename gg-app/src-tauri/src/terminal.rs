@@ -189,13 +189,12 @@ pub(crate) enum TerminalEvent {
 
 #[derive(Default)]
 struct RegistryState {
-    sessions: HashMap<String, TerminalSession>,
-    closed: HashMap<String, ClosedTerminal>,
+    sessions: HashMap<(String, String), TerminalSession>,
+    closed: HashMap<(String, String), ClosedTerminal>,
 }
 
 #[derive(Clone)]
 struct ClosedTerminal {
-    pane_id: String,
     terminal_id: String,
 }
 
@@ -223,11 +222,12 @@ impl TerminalRegistry {
         let Ok(mut state) = self.inner.lock() else {
             return Err(session);
         };
-        if state.sessions.contains_key(owner) {
+        let key = (owner.to_string(), session.pane_id.clone());
+        if state.sessions.contains_key(&key) {
             return Err(session);
         }
-        state.closed.remove(owner);
-        state.sessions.insert(owner.to_string(), session);
+        state.closed.remove(&key);
+        state.sessions.insert(key, session);
         Ok(())
     }
 
@@ -238,50 +238,55 @@ impl TerminalRegistry {
         terminal_id: &str,
     ) -> Option<TerminalSession> {
         let mut state = self.inner.lock().ok()?;
-        let matches = state.sessions.get(owner).is_some_and(|session| {
-            session.pane_id == pane_id && session.terminal_id == terminal_id
-        });
+        let key = (owner.to_string(), pane_id.to_string());
+        let matches = state
+            .sessions
+            .get(&key)
+            .is_some_and(|session| session.terminal_id == terminal_id);
         if !matches {
             return None;
         }
-        let session = state.sessions.remove(owner)?;
+        let session = state.sessions.remove(&key)?;
         state.closed.insert(
-            owner.to_string(),
+            key,
             ClosedTerminal {
-                pane_id: pane_id.to_string(),
                 terminal_id: terminal_id.to_string(),
             },
         );
         Some(session)
     }
 
-    fn take_for_window(&self, owner: &str) -> Option<TerminalSession> {
-        let mut state = self.inner.lock().ok()?;
-        let session = state.sessions.remove(owner)?;
-        state.closed.insert(
-            owner.to_string(),
-            ClosedTerminal {
-                pane_id: session.pane_id.clone(),
-                terminal_id: session.terminal_id.clone(),
-            },
-        );
-        Some(session)
+    fn take_for_window(&self, owner: &str) -> Vec<TerminalSession> {
+        let Ok(mut state) = self.inner.lock() else {
+            return Vec::new();
+        };
+        let keys = state
+            .sessions
+            .keys()
+            .filter(|(session_owner, _)| session_owner == owner)
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| {
+                let session = state.sessions.remove(&key)?;
+                state.closed.insert(
+                    key,
+                    ClosedTerminal {
+                        terminal_id: session.terminal_id.clone(),
+                    },
+                );
+                Some(session)
+            })
+            .collect()
     }
 
     fn take_for_pane(&self, owner: &str, pane_id: &str) -> Option<TerminalSession> {
         let mut state = self.inner.lock().ok()?;
-        if state
-            .sessions
-            .get(owner)
-            .is_none_or(|session| session.pane_id != pane_id)
-        {
-            return None;
-        }
-        let session = state.sessions.remove(owner)?;
+        let key = (owner.to_string(), pane_id.to_string());
+        let session = state.sessions.remove(&key)?;
         state.closed.insert(
-            owner.to_string(),
+            key,
             ClosedTerminal {
-                pane_id: session.pane_id.clone(),
                 terminal_id: session.terminal_id.clone(),
             },
         );
@@ -340,8 +345,11 @@ pub(crate) fn terminal_create(
             .inner
             .lock()
             .map_err(|_| "terminal registry lock poisoned")?;
-        if state.sessions.contains_key(&owner) {
-            return Err("a terminal is already open in this window".into());
+        if state
+            .sessions
+            .contains_key(&(owner.clone(), pane_id.clone()))
+        {
+            return Err("a terminal is already open in this pane".into());
         }
     }
 
@@ -412,7 +420,7 @@ pub(crate) fn terminal_create(
     };
     if let Err(session) = terminals.insert(&owner, session) {
         teardown_session(session);
-        return Err("a terminal is already open in this window".into());
+        return Err("a terminal is already open in this pane".into());
     }
 
     spawn_output_pump(
@@ -662,7 +670,7 @@ pub(crate) fn terminal_input(
             .map_err(|_| "terminal registry lock poisoned")?;
         let session = state
             .sessions
-            .get(webview.label())
+            .get(&(webview.label().to_string(), pane_id.clone()))
             .ok_or("terminal is not running")?;
         validate_owner(session, &pane_id, &terminal_id)?;
         session.writer.clone()
@@ -693,7 +701,7 @@ pub(crate) fn terminal_resize(
             .map_err(|_| "terminal registry lock poisoned")?;
         let session = state
             .sessions
-            .get(webview.label())
+            .get(&(webview.label().to_string(), pane_id.clone()))
             .ok_or("terminal is not running")?;
         validate_owner(session, &pane_id, &terminal_id)?;
         (session.master.clone(), session.dimensions.clone())
@@ -724,34 +732,35 @@ pub(crate) fn terminal_close(
 ) -> Result<(), String> {
     validate_pane_id(&pane_id)?;
     let owner = webview.label();
-    let session =
+    let session = {
+        let mut state = terminals
+            .inner
+            .lock()
+            .map_err(|_| "terminal registry lock poisoned")?;
+        let key = (owner.to_string(), pane_id.clone());
+        if let Some(session) = state.sessions.get(&key) {
+            validate_owner(session, &pane_id, &terminal_id)?;
+            let session = state
+                .sessions
+                .remove(&key)
+                .expect("terminal existence checked");
+            state.closed.insert(
+                key,
+                ClosedTerminal {
+                    terminal_id: terminal_id.clone(),
+                },
+            );
+            Some(session)
+        } else if state
+            .closed
+            .get(&key)
+            .is_some_and(|closed| closed.terminal_id == terminal_id)
         {
-            let mut state = terminals
-                .inner
-                .lock()
-                .map_err(|_| "terminal registry lock poisoned")?;
-            if let Some(session) = state.sessions.get(owner) {
-                validate_owner(session, &pane_id, &terminal_id)?;
-                let session = state
-                    .sessions
-                    .remove(owner)
-                    .expect("terminal existence checked");
-                state.closed.insert(
-                    owner.to_string(),
-                    ClosedTerminal {
-                        pane_id: pane_id.clone(),
-                        terminal_id: terminal_id.clone(),
-                    },
-                );
-                Some(session)
-            } else if state.closed.get(owner).is_some_and(|closed| {
-                closed.pane_id == pane_id && closed.terminal_id == terminal_id
-            }) {
-                None
-            } else {
-                return Err("terminal is not running or belongs to another pane".into());
-            }
-        };
+            None
+        } else {
+            return Err("terminal is not running or belongs to another pane".into());
+        }
+    };
     if let Some(session) = session {
         teardown_session(session);
     }
@@ -770,7 +779,7 @@ fn validate_owner(
 }
 
 pub(crate) fn close_for_window(terminals: &TerminalRegistry, owner: &str) {
-    if let Some(session) = terminals.take_for_window(owner) {
+    for session in terminals.take_for_window(owner) {
         teardown_session(session);
     }
 }
@@ -1139,40 +1148,89 @@ mod tests {
     }
 
     #[test]
-    fn registry_rejects_duplicates_and_cross_owner_controls() {
+    fn registry_supports_concurrent_terminals_in_one_window() {
         let registry = TerminalRegistry::default();
         assert!(registry
             .insert("main", fake_session("primary", "terminal-1"))
             .is_ok());
         assert!(registry
             .insert("main", fake_session("secondary", "terminal-2"))
-            .is_err());
-        assert!(registry
-            .remove_matching("other-window", "primary", "terminal-1")
-            .is_none());
-        assert!(registry
-            .remove_matching("main", "secondary", "terminal-1")
-            .is_none());
-        assert!(registry
-            .remove_matching("main", "primary", "stale-terminal")
-            .is_none());
-        assert!(registry
-            .remove_matching("main", "primary", "terminal-1")
-            .is_some());
+            .is_ok());
+        assert_eq!(registry.inner.lock().unwrap().sessions.len(), 2);
     }
 
     #[test]
-    fn window_and_app_drains_are_idempotent() {
+    fn registry_rejects_duplicate_window_and_pane_key() {
         let registry = TerminalRegistry::default();
         assert!(registry
             .insert("main", fake_session("primary", "terminal-1"))
             .is_ok());
-        close_for_pane(&registry, "main", "other-pane");
-        assert_eq!(registry.inner.lock().unwrap().sessions.len(), 1);
+        assert!(registry
+            .insert("main", fake_session("primary", "terminal-2"))
+            .is_err());
+        assert!(registry
+            .insert("other-window", fake_session("primary", "terminal-3"))
+            .is_ok());
+    }
+
+    #[test]
+    fn registry_keeps_cross_pane_controls_isolated() {
+        let registry = TerminalRegistry::default();
+        assert!(registry
+            .insert("main", fake_session("primary", "terminal-1"))
+            .is_ok());
+        assert!(registry
+            .insert("main", fake_session("secondary", "terminal-2"))
+            .is_ok());
+        assert!(registry
+            .remove_matching("main", "secondary", "terminal-1")
+            .is_none());
+        assert_eq!(registry.inner.lock().unwrap().sessions.len(), 2);
+        assert!(registry
+            .remove_matching("main", "primary", "terminal-1")
+            .is_some());
+        assert!(registry
+            .remove_matching("main", "secondary", "terminal-2")
+            .is_some());
+    }
+
+    #[test]
+    fn pane_close_removes_only_the_scoped_terminal() {
+        let registry = TerminalRegistry::default();
+        assert!(registry
+            .insert("main", fake_session("primary", "terminal-1"))
+            .is_ok());
+        assert!(registry
+            .insert("main", fake_session("secondary", "terminal-2"))
+            .is_ok());
         close_for_pane(&registry, "main", "primary");
+        let state = registry.inner.lock().unwrap();
+        assert!(!state
+            .sessions
+            .contains_key(&("main".into(), "primary".into())));
+        assert!(state
+            .sessions
+            .contains_key(&("main".into(), "secondary".into())));
+    }
+
+    #[test]
+    fn window_cleanup_removes_all_owned_terminals_only() {
+        let registry = TerminalRegistry::default();
+        assert!(registry
+            .insert("main", fake_session("primary", "terminal-1"))
+            .is_ok());
+        assert!(registry
+            .insert("main", fake_session("secondary", "terminal-2"))
+            .is_ok());
+        assert!(registry
+            .insert("other", fake_session("primary", "terminal-3"))
+            .is_ok());
         close_for_window(&registry, "main");
-        close_all(&registry);
-        assert!(registry.inner.lock().unwrap().sessions.is_empty());
+        let state = registry.inner.lock().unwrap();
+        assert_eq!(state.sessions.len(), 1);
+        assert!(state
+            .sessions
+            .contains_key(&("other".into(), "primary".into())));
     }
 
     #[test]

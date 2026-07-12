@@ -306,9 +306,7 @@ describe("v7 terminal creation reducer", () => {
     const first = addTerminalWorkspacePane(layout, "primary");
     expect(workspaceLayoutLeafIds(first.root)).toEqual(["primary", "terminal-1", "secondary"]);
     expect(first.focusedPaneId).toBe("terminal-1");
-    expect(first.panes["terminal-1"]).toEqual(
-      terminal("/project", "/sessions/primary.jsonl"),
-    );
+    expect(first.panes["terminal-1"]).toEqual(terminal("/project", "/sessions/primary.jsonl"));
 
     const second = addTerminalWorkspacePane(first, "primary");
     expect(workspaceLayoutLeafIds(second.root)).toEqual([
@@ -318,9 +316,7 @@ describe("v7 terminal creation reducer", () => {
       "secondary",
     ]);
     expect(second.focusedPaneId).toBe("terminal-2");
-    expect(second.panes["terminal-2"]).toEqual(
-      terminal("/project", "/sessions/primary.jsonl"),
-    );
+    expect(second.panes["terminal-2"]).toEqual(terminal("/project", "/sessions/primary.jsonl"));
   });
 
   it("fails closed for unbound, terminal, and missing leaves", () => {

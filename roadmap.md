@@ -409,7 +409,7 @@ Ship the actual single-window workspace:
 
 Use app-owned resizable wrappers so a dependency can be upgraded/replaced without leaking its API throughout GG App.
 
-### Status (through `05481ff`)
+### Status (through `50a316c`)
 
 - [x] Fixed primary/secondary two-column workspace with independent project/session selection and pane-scoped controls (`29eed34`, `b94e420`).
 - [x] Click/focus and Ctrl/Cmd+1/2 routing target one pane; the native title and Notes follow the focused pane (`29eed34`, `c2adb9f`).
@@ -422,8 +422,12 @@ Use app-owned resizable wrappers so a dependency can be upgraded/replaced withou
 - [x] Splitting a newly bound legacy auxiliary preserves its current project/session target while the new leaf starts at the picker (`4befda5`).
 - [x] Recursive persistence restores nested trees, independent ratios, targets, focus, Notes routing, and terminal metadata (`e7a29b1`, `34a698d`).
 - [x] `WorkspaceShell.test.tsx` is isolated from unused `AgentPane`/audio imports, and its picker-aware fake snapshots only its mount-time target, eliminating the synchronous snapshot loop; all 50 tests and six isolated startup samples pass (`05481ff`).
-- [ ] Move/open a pane in a native window without duplicate live ownership.
-- [ ] Surface a concise recoverable warning when a malformed/stale layout falls back.
+- [x] **Open Pane/Project in New Native Window** copies the exact focused project/session target into a distinct daemon runtime, keeps the source pane mounted, gates unbound/pending actions, and deduplicates busy clicks (`8055bc8`).
+- [x] New-window startup atomically reserves its native label and target, falls back to the durable target after live-state timeout, and rolls back reserved registry, restore, and daemon state on failure (`8055bc8`).
+- [x] Native workspace snapshots exclude startup-only reservations and persist duplicate cwd/session windows independently, including close and restore/respawn paths (`8055bc8`).
+- **Deferred — true live-pane transfer:** copy semantics already cover the main workflow by opening the exact project/session target in an isolated native window while preserving the source pane and its active work; transferring one live runtime across webviews adds disproportionate event-routing, rollback, persistence, terminal, and resource-ownership risk.
+- [ ] **Future safer alternative — Open then close source:** only when the source pane is idle, open the isolated copy first, wait for destination readiness and persistence, then close the source through the existing confirmed disposal path.
+- [x] Surface a concise recoverable warning when a malformed/stale layout falls back (`50a316c`).
 
 ### Non-goals
 
@@ -543,7 +547,7 @@ First-slice status:
 - [x] On Windows, own the terminal process tree with a kill-on-close Job Object so descendant shells are cleaned up.
 - [x] Recover from embedded-terminal startup failure with **Open in external terminal**; resolve the owner pane's cwd, canonicalize and require a directory, then launch the platform terminal without interpolating project-controlled text into a command line.
 - [x] Surface one concise, recoverable warning when malformed workspace data or unavailable saved pane targets fall back to a safe usable layout (`50a316c`).
-- [ ] Automated native UI smoke remains unverified because the repo-local Tauri app opens a blank window; focused frontend, Rust PTY, lifecycle, and cleanup tests do not replace that smoke check.
+- [x] Windows native UI smoke builds the packaged debug Tauri app from `frontendDist`, requires exactly one eligible `Tauri Window`, verifies its HWND, PID, and normalized executable path belong to the spawned repo app, captures that HWND directly, confirms the installed app remains open alongside it, and visually verifies the resulting screenshot shows the **Supah Coder Local Fork** UI.
 
 Polish scope:
 

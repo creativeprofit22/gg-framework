@@ -527,7 +527,7 @@ Visual/manual:
 
 ### Goal
 
-Add user-controlled terminal panes as another `PaneDescriptor` type, then polish the workspace into a dependable daily driver.
+Make terminal restore safe before later promoting terminals from the current single dock into independently persisted split-tree panes.
 
 Terminal architecture:
 
@@ -539,15 +539,21 @@ Terminal architecture:
 
 First-slice status:
 
-- [x] Open one embedded terminal docked beneath the focused, project-bound agent pane with its inherited canonical cwd.
-- [x] Route create, input, resize, output, exit, and close through typed Tauri IPC backed by a Rust-owned native PTY.
-- [x] Chunk terminal input to the native 64 KiB request limit and preserve text/binary input order across asynchronous calls.
-- [x] Track rendered terminal dimensions and preserve ordered output through resize, natural exit, startup failure, and close lifecycle transitions.
-- [x] Close the owner-pinned terminal when its pane changes project, becomes unbound, closes, or its native window/app exits.
-- [x] On Windows, own the terminal process tree with a kill-on-close Job Object so descendant shells are cleaned up.
-- [x] Recover from embedded-terminal startup failure with **Open in external terminal**; resolve the owner pane's cwd, canonicalize and require a directory, then launch the platform terminal without interpolating project-controlled text into a command line.
+- [x] Open one embedded terminal docked beneath the focused, project-bound agent pane with its inherited canonical cwd (`798b558`).
+- [x] Route create, input, resize, output, exit, and close through typed Tauri IPC backed by a Rust-owned native PTY (`798b558`).
+- [x] Chunk terminal input to the native 64 KiB request limit and preserve text/binary input order across asynchronous calls (`b5d25f5`).
+- [x] Track rendered terminal dimensions and preserve ordered output through resize, natural exit, startup failure, and close lifecycle transitions (`798b558`, `b5d25f5`).
+- [x] Close the owner-pinned terminal when its pane changes project, becomes unbound, closes, or its native window/app exits (`798b558`).
+- [x] On Windows, own the terminal process tree with a kill-on-close Job Object so descendant shells are cleaned up (`798b558`).
+- [x] Recover from embedded-terminal startup failure with **Open in external terminal**; resolve the owner pane's cwd, canonicalize and require a directory, then launch the platform terminal without interpolating project-controlled text into a command line (`8ffd851`).
+- [x] Persist, clamp, restore, and resize the single terminal dock (`45cbb3a`, `81e8260`).
 - [x] Surface one concise, recoverable warning when malformed workspace data or unavailable saved pane targets fall back to a safe usable layout (`50a316c`).
-- [x] Windows native UI smoke builds the packaged debug Tauri app from `frontendDist`, requires exactly one eligible `Tauri Window`, verifies its HWND, PID, and normalized executable path belong to the spawned repo app, captures that HWND directly, confirms the installed app remains open alongside it, and visually verifies the resulting screenshot shows the **Supah Coder Local Fork** UI.
+- [x] Windows native UI smoke builds the packaged debug Tauri app from `frontendDist`, requires exactly one eligible `Tauri Window`, verifies its HWND, PID, and normalized executable path belong to the spawned repo app, captures that HWND directly, confirms the installed app remains open alongside it, and visually verifies the resulting screenshot shows the **Supah Coder Local Fork** UI (`23899d0`).
+
+Remaining terminal work, in order:
+
+1. [ ] **Stopped-on-restore safety:** restore terminal placement as stopped and create no shell until the user selects **Restart terminal**.
+2. [ ] **Later — multi-terminal split-tree panes:** replace the single owner-pinned dock with independently persisted terminal panes after stopped restore is complete.
 
 Polish scope:
 

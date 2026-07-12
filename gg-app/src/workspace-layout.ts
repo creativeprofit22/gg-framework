@@ -1,6 +1,6 @@
 import { PRIMARY_PANE_ID } from "./pane-routing";
 
-export const WORKSPACE_LAYOUT_VERSION = 6;
+export const WORKSPACE_LAYOUT_VERSION = 7;
 export const DEFAULT_SPLIT_RATIO = 50;
 export const MIN_SPLIT_RATIO = 10;
 export const MAX_SPLIT_RATIO = 90;
@@ -8,7 +8,10 @@ export const DEFAULT_TERMINAL_DOCK_HEIGHT_PX = 260;
 export const MIN_TERMINAL_DOCK_HEIGHT_PX = 140;
 export const MAX_TERMINAL_DOCK_HEIGHT_PX = 2_000;
 export const MAX_WORKSPACE_PANES = 4;
-export const MAX_WORKSPACE_LAYOUT_DEPTH = 4;
+/** Four agent panes plus one terminal leaf for each agent remain migration-safe. */
+export const MAX_WORKSPACE_LEAVES = MAX_WORKSPACE_PANES * 2;
+export const MAX_WORKSPACE_LAYOUT_DEPTH = 5;
+const MAX_V6_WORKSPACE_LAYOUT_DEPTH = 4;
 const MAX_WORKSPACE_PANE_ID_BYTES = 64;
 
 export type WorkspacePaneId = string;
@@ -17,10 +20,21 @@ export interface LeafNode {
   type: "leaf";
   paneId: WorkspacePaneId;
 }
+export interface RatioSplitSize {
+  type: "ratio";
+  value: number;
+}
+export interface FixedSecondSplitSize {
+  type: "fixed-second";
+  pixels: number;
+}
+export type WorkspaceSplitSize = RatioSplitSize | FixedSecondSplitSize;
 export interface SplitNode {
   type: "split";
   direction: SplitDirection;
+  /** Compatibility projection used by the current renderer until it consumes `size`. */
   ratio: number;
+  size: WorkspaceSplitSize;
   first: WorkspaceLayoutNode;
   second: WorkspaceLayoutNode;
 }
@@ -30,18 +44,32 @@ export interface WorkspacePaneTarget {
   cwd: string;
   sessionPath: string | null;
 }
+/**
+ * `kind` is optional in memory so the existing UI can keep supplying its v6 target shape during
+ * the schema-only migration. Canonical v7 storage always writes and requires it.
+ */
+export interface AgentPaneDescriptor extends WorkspacePaneTarget {
+  kind?: "agent";
+}
+export interface TerminalPaneDescriptor extends WorkspacePaneTarget {
+  kind: "terminal";
+  stopped: true;
+}
+export type WorkspacePaneDescriptor = AgentPaneDescriptor | TerminalPaneDescriptor;
+export type WorkspacePaneValue = WorkspacePaneDescriptor | null;
+
+/** Legacy single-dock projection retained until the renderer moves to typed terminal leaves. */
 export interface WorkspaceTerminalLayout {
   open: boolean;
   ownerPaneId: WorkspacePaneId | null;
   dockHeightPx: number;
 }
 
-/** Canonical v6 layout plus the fixed projection consumed by WorkspaceShell. */
 export interface WorkspaceLayout {
   version: typeof WORKSPACE_LAYOUT_VERSION;
   root: WorkspaceLayoutNode;
   focusedPaneId: WorkspacePaneId;
-  panes: Record<WorkspacePaneId, WorkspacePaneTarget | null>;
+  panes: Record<WorkspacePaneId, WorkspacePaneValue>;
   terminal: WorkspaceTerminalLayout;
   splitRatio: number;
   secondaryOpen: boolean;
@@ -52,7 +80,7 @@ export interface FixedWorkspaceLayoutInput {
   splitRatio: number;
   secondaryOpen: boolean;
   focusedPaneId: WorkspacePaneId;
-  panes: Record<WorkspacePaneId, WorkspacePaneTarget | null>;
+  panes: Record<WorkspacePaneId, WorkspacePaneValue>;
   terminal: WorkspaceTerminalLayout;
 }
 export type WorkspaceLayoutSaveInput = WorkspaceLayout | FixedWorkspaceLayoutInput;
@@ -63,6 +91,7 @@ export interface WorkspaceLayoutLoadResult {
   rejectedRaw?: string;
   rejectedSource?: "legacy" | "recursive";
   terminalDockHeightRecovery?: { rejected: unknown; resolved: number };
+  terminalRecovery?: { ownerPaneId: unknown; reason: "missing" | "unbound" };
 }
 export interface WorkspaceTargetStatus {
   projectExists: boolean;
@@ -71,12 +100,6 @@ export interface WorkspaceTargetStatus {
 interface LayoutStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
-}
-interface LegacyWorkspaceLayout {
-  version: 0;
-  ratio?: unknown;
-  primary?: unknown;
-  secondary?: unknown;
 }
 interface FixedLayout {
   splitRatio: number;
@@ -95,7 +118,6 @@ export function isValidWorkspacePaneId(value: unknown): value is WorkspacePaneId
     /^[A-Za-z0-9_-]+$/.test(value)
   );
 }
-
 export function workspaceLayoutKey(windowLabel: string): string {
   return `gg-workspace-layout:${windowLabel}`;
 }
@@ -108,7 +130,6 @@ export function rejectedWorkspaceLayoutKey(windowLabel: string): string {
 export function rejectedRecursiveWorkspaceLayoutKey(windowLabel: string): string {
   return `gg-workspace-layout-recursive-rejected:${windowLabel}`;
 }
-
 export function clampStoredSplitRatio(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.min(MAX_SPLIT_RATIO, Math.max(MIN_SPLIT_RATIO, value))
@@ -133,12 +154,123 @@ export function workspaceLayoutLeafIds(root: WorkspaceLayoutNode): WorkspacePane
     ? [root.paneId]
     : [...workspaceLayoutLeafIds(root.first), ...workspaceLayoutLeafIds(root.second)];
 }
-
 export type WorkspaceLayoutPath = readonly ("first" | "second")[];
 
-/** Allocates one greater than the highest generated pane ordinal retained by this layout. */
+function descriptorKind(value: WorkspacePaneValue | undefined): "agent" | "terminal" | null {
+  if (!value) return null;
+  return value.kind === "terminal" ? "terminal" : "agent";
+}
+function agentTarget(value: WorkspacePaneValue | undefined): WorkspacePaneTarget | null {
+  return value && descriptorKind(value) === "agent"
+    ? { cwd: value.cwd, sessionPath: value.sessionPath }
+    : null;
+}
+function compatibility(root: WorkspaceLayoutNode): { splitRatio: number; secondaryOpen: boolean } {
+  const secondaryOpen = workspaceLayoutLeafIds(root).includes("secondary");
+  const ratio = root.type === "split" && root.size.type === "ratio" ? root.size.value : null;
+  const fixed =
+    ratio !== null &&
+    root.type === "split" &&
+    root.direction === "horizontal" &&
+    root.first.type === "leaf" &&
+    root.first.paneId === "primary" &&
+    root.second.type === "leaf" &&
+    root.second.paneId === "secondary";
+  return { splitRatio: fixed ? ratio : DEFAULT_SPLIT_RATIO, secondaryOpen };
+}
+function ratioNode(
+  direction: SplitDirection,
+  ratio: number,
+  first: WorkspaceLayoutNode,
+  second: WorkspaceLayoutNode,
+): SplitNode {
+  const value = clampStoredSplitRatio(ratio);
+  return { type: "split", direction, ratio: value, size: { type: "ratio", value }, first, second };
+}
+function fixedNode(
+  pixels: number,
+  first: WorkspaceLayoutNode,
+  second: WorkspaceLayoutNode,
+): SplitNode {
+  return {
+    type: "split",
+    direction: "vertical",
+    ratio: DEFAULT_SPLIT_RATIO,
+    size: { type: "fixed-second", pixels },
+    first,
+    second,
+  };
+}
+function legacyTerminalProjection(
+  root: WorkspaceLayoutNode,
+  panes: Record<string, WorkspacePaneValue>,
+): WorkspaceTerminalLayout {
+  let projection: WorkspaceTerminalLayout = {
+    open: false,
+    ownerPaneId: null,
+    dockHeightPx: DEFAULT_TERMINAL_DOCK_HEIGHT_PX,
+  };
+  const visit = (node: WorkspaceLayoutNode): void => {
+    if (node.type === "leaf") return;
+    if (
+      node.direction === "vertical" &&
+      node.size.type === "fixed-second" &&
+      node.second.type === "leaf" &&
+      descriptorKind(panes[node.second.paneId]) === "terminal" &&
+      node.first.type === "leaf" &&
+      descriptorKind(panes[node.first.paneId]) === "agent"
+    ) {
+      projection = {
+        open: true,
+        ownerPaneId: node.first.paneId,
+        dockHeightPx: node.size.pixels,
+      };
+    }
+    visit(node.first);
+    visit(node.second);
+  };
+  visit(root);
+  return projection;
+}
+function normalizeLayout(layout: {
+  root: WorkspaceLayoutNode;
+  focusedPaneId: WorkspacePaneId;
+  panes: Record<WorkspacePaneId, WorkspacePaneValue>;
+}): WorkspaceLayout {
+  const visible = workspaceLayoutLeafIds(layout.root);
+  const firstAgent =
+    visible.find((id) => descriptorKind(layout.panes[id]) === "agent") ?? visible[0];
+  const focusedPaneId = visible.includes(layout.focusedPaneId) ? layout.focusedPaneId : firstAgent;
+  return {
+    version: 7,
+    root: layout.root,
+    focusedPaneId,
+    panes: layout.panes,
+    terminal: legacyTerminalProjection(layout.root, layout.panes),
+    ...compatibility(layout.root),
+  };
+}
+
+export function defaultWorkspaceLayout(): WorkspaceLayout {
+  return normalizeLayout({
+    root: ratioNode(
+      "horizontal",
+      50,
+      { type: "leaf", paneId: "primary" },
+      { type: "leaf", paneId: "secondary" },
+    ),
+    focusedPaneId: "primary",
+    panes: { primary: null, secondary: null },
+  });
+}
+
 export function allocateWorkspacePaneId(layout: WorkspaceLayout): WorkspacePaneId | null {
-  if (workspaceLayoutLeafIds(layout.root).length >= MAX_WORKSPACE_PANES) return null;
+  if (
+    workspaceLayoutLeafIds(layout.root).filter(
+      (paneId) => descriptorKind(layout.panes[paneId]) !== "terminal",
+    ).length >= MAX_WORKSPACE_PANES
+  )
+    return null;
   let highestOrdinal = 0;
   for (const paneId of [...workspaceLayoutLeafIds(layout.root), ...Object.keys(layout.panes)]) {
     const match = /^pane-(\d+)$/.exec(paneId);
@@ -146,7 +278,15 @@ export function allocateWorkspacePaneId(layout: WorkspaceLayout): WorkspacePaneI
   }
   return `pane-${highestOrdinal + 1}`;
 }
-
+function allocateTerminalId(
+  root: WorkspaceLayoutNode,
+  panes: Record<string, WorkspacePaneValue>,
+): string {
+  const used = new Set([...workspaceLayoutLeafIds(root), ...Object.keys(panes)]);
+  let ordinal = 1;
+  while (used.has(`terminal-${ordinal}`)) ordinal += 1;
+  return `terminal-${ordinal}`;
+}
 function updateNodeAtPath(
   node: WorkspaceLayoutNode,
   path: WorkspaceLayoutPath,
@@ -159,19 +299,20 @@ function updateNodeAtPath(
   const child = updateNodeAtPath(node[side], path, update, depth + 1);
   return child ? { ...node, [side]: child } : null;
 }
-
-/** Splits a visible leaf, preserving the existing leaf as the first child. */
 export function splitWorkspacePane(
   layout: WorkspaceLayout,
   paneId: WorkspacePaneId,
   direction: SplitDirection,
   requestedPaneId?: WorkspacePaneId,
 ): WorkspaceLayout {
+  if (descriptorKind(layout.panes[paneId]) === "terminal") return layout;
   const newPaneId = requestedPaneId ?? allocateWorkspacePaneId(layout);
   if (
     !newPaneId ||
     !isValidWorkspacePaneId(newPaneId) ||
-    workspaceLayoutLeafIds(layout.root).length >= MAX_WORKSPACE_PANES ||
+    workspaceLayoutLeafIds(layout.root).filter(
+      (id) => descriptorKind(layout.panes[id]) !== "terminal",
+    ).length >= MAX_WORKSPACE_PANES ||
     workspaceLayoutLeafIds(layout.root).includes(newPaneId)
   )
     return layout;
@@ -180,28 +321,19 @@ export function splitWorkspacePane(
     if (node.type === "leaf") {
       if (node.paneId !== paneId) return node;
       changed = true;
-      return {
-        type: "split",
-        direction,
-        ratio: DEFAULT_SPLIT_RATIO,
-        first: node,
-        second: { type: "leaf", paneId: newPaneId },
-      };
+      return ratioNode(direction, DEFAULT_SPLIT_RATIO, node, { type: "leaf", paneId: newPaneId });
     }
     return { ...node, first: splitLeaf(node.first), second: splitLeaf(node.second) };
   };
   const root = splitLeaf(layout.root);
   return changed
     ? normalizeLayout({
-        ...layout,
         root,
         focusedPaneId: newPaneId,
         panes: { ...layout.panes, [newPaneId]: null },
       })
     : layout;
 }
-
-/** Updates only the split at the supplied stable tree path. */
 export function updateWorkspaceSplitRatio(
   layout: WorkspaceLayout,
   path: WorkspaceLayoutPath,
@@ -209,79 +341,53 @@ export function updateWorkspaceSplitRatio(
 ): WorkspaceLayout {
   let changed = false;
   const root = updateNodeAtPath(layout.root, path, (node) => {
-    if (node.type !== "split") return node;
+    if (node.type !== "split" || node.size.type !== "ratio") return node;
     changed = true;
-    return { ...node, ratio: clampStoredSplitRatio(ratio) };
+    const value = clampStoredSplitRatio(ratio);
+    return { ...node, ratio: value, size: { type: "ratio", value } };
   });
-  return changed && root ? normalizeLayout({ ...layout, root }) : layout;
+  return changed && root
+    ? normalizeLayout({ root, focusedPaneId: layout.focusedPaneId, panes: layout.panes })
+    : layout;
 }
-
-/** Removes a leaf and collapses its parent; focus moves to the nearest sibling leaf. */
 export function removeWorkspacePane(
   layout: WorkspaceLayout,
   paneId: WorkspacePaneId,
 ): WorkspaceLayout {
-  if (workspaceLayoutLeafIds(layout.root).length === 1) return layout;
-  let removed = false;
-  let survivor: WorkspacePaneId | null = null;
+  if (paneId === PRIMARY_PANE_ID || !workspaceLayoutLeafIds(layout.root).includes(paneId))
+    return layout;
+  const removeIds = new Set([paneId]);
   const remove = (node: WorkspaceLayoutNode): WorkspaceLayoutNode | null => {
-    if (node.type === "leaf") {
-      if (node.paneId !== paneId) return node;
-      removed = true;
-      return null;
-    }
+    if (node.type === "leaf") return removeIds.has(node.paneId) ? null : node;
     const first = remove(node.first);
-    if (!first) {
-      survivor = workspaceLayoutLeafIds(node.second)[0];
-      return node.second;
-    }
     const second = remove(node.second);
-    if (!second) {
-      const firstLeafIds = workspaceLayoutLeafIds(node.first);
-      survivor = firstLeafIds[firstLeafIds.length - 1];
-      return node.first;
-    }
+    if (!first) return second;
+    if (!second) return first;
     return { ...node, first, second };
   };
   const root = remove(layout.root);
-  if (!removed || !root) return layout;
+  if (!root) return layout;
   const panes = { ...layout.panes };
-  delete panes[paneId];
+  for (const id of removeIds) delete panes[id];
+  const visible = workspaceLayoutLeafIds(root);
+  const ownerFallback =
+    descriptorKind(layout.panes[paneId]) === "terminal"
+      ? visible.find(
+          (id) =>
+            descriptorKind(panes[id]) === "agent" &&
+            panes[id]?.cwd === layout.panes[paneId]?.cwd &&
+            panes[id]?.sessionPath === layout.panes[paneId]?.sessionPath,
+        )
+      : undefined;
   return normalizeLayout({
-    ...layout,
     root,
-    focusedPaneId: layout.focusedPaneId === paneId ? survivor! : layout.focusedPaneId,
+    focusedPaneId:
+      layout.focusedPaneId === paneId || removeIds.has(layout.focusedPaneId)
+        ? (ownerFallback ??
+          visible.find((id) => descriptorKind(panes[id]) === "agent") ??
+          visible[0])
+        : layout.focusedPaneId,
     panes,
-  });
-}
-
-function compatibility(root: WorkspaceLayoutNode): { splitRatio: number; secondaryOpen: boolean } {
-  const secondaryOpen = workspaceLayoutLeafIds(root).includes("secondary");
-  const fixed =
-    root.type === "split" &&
-    root.direction === "horizontal" &&
-    root.first.type === "leaf" &&
-    root.first.paneId === "primary" &&
-    root.second.type === "leaf" &&
-    root.second.paneId === "secondary";
-  return { splitRatio: fixed ? root.ratio : DEFAULT_SPLIT_RATIO, secondaryOpen };
-}
-
-export function defaultWorkspaceLayout(): WorkspaceLayout {
-  return normalizeLayout({
-    version: 6,
-    root: {
-      type: "split",
-      direction: "horizontal",
-      ratio: 50,
-      first: { type: "leaf", paneId: "primary" },
-      second: { type: "leaf", paneId: "secondary" },
-    },
-    focusedPaneId: "primary",
-    panes: { primary: null, secondary: null },
-    terminal: { open: false, ownerPaneId: null, dockHeightPx: DEFAULT_TERMINAL_DOCK_HEIGHT_PX },
-    splitRatio: 50,
-    secondaryOpen: true,
   });
 }
 
@@ -306,37 +412,67 @@ function parseTarget(
       typeof record.sessionPath === "string" && record.sessionPath ? record.sessionPath : null,
   };
 }
-
-function parseNode(value: unknown, depth: number, ids: Set<string>): WorkspaceLayoutNode | null {
-  if (depth > MAX_WORKSPACE_LAYOUT_DEPTH || typeof value !== "object" || value === null)
-    return null;
+function parseV7Descriptor(value: unknown): WorkspacePaneValue | undefined {
+  if (value === null) return null;
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (record.kind === "agent") {
+    if (Object.keys(record).some((key) => !["kind", "cwd", "sessionPath"].includes(key)))
+      return undefined;
+    const target = parseTarget(record);
+    return target ? { kind: "agent", ...target } : undefined;
+  }
+  if (record.kind === "terminal") {
+    if (Object.keys(record).some((key) => !["kind", "cwd", "sessionPath", "stopped"].includes(key)))
+      return undefined;
+    if (record.stopped !== true) return undefined;
+    const target = parseTarget(record);
+    return target ? { kind: "terminal", stopped: true, ...target } : undefined;
+  }
+  return undefined;
+}
+function parseNode(
+  value: unknown,
+  depth: number,
+  ids: Set<string>,
+  version: 6 | 7,
+): WorkspaceLayoutNode | null {
+  const maximumDepth = version === 6 ? MAX_V6_WORKSPACE_LAYOUT_DEPTH : MAX_WORKSPACE_LAYOUT_DEPTH;
+  if (depth > maximumDepth || typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
   if (record.type === "leaf") {
     if (!isValidWorkspacePaneId(record.paneId) || ids.has(record.paneId)) return null;
     ids.add(record.paneId);
-    if (ids.size > MAX_WORKSPACE_PANES) return null;
+    if (ids.size > MAX_WORKSPACE_LEAVES) return null;
     return { type: "leaf", paneId: record.paneId };
   }
   if (
     record.type !== "split" ||
-    (record.direction !== "horizontal" && record.direction !== "vertical") ||
-    typeof record.ratio !== "number" ||
-    !Number.isFinite(record.ratio)
+    (record.direction !== "horizontal" && record.direction !== "vertical")
   )
     return null;
-  const first = parseNode(record.first, depth + 1, ids);
-  const second = parseNode(record.second, depth + 1, ids);
-  return first && second
-    ? {
-        type: "split",
-        direction: record.direction,
-        ratio: clampStoredSplitRatio(record.ratio),
-        first,
-        second,
-      }
-    : null;
+  let node: SplitNode;
+  if (version === 6) {
+    if (typeof record.ratio !== "number" || !Number.isFinite(record.ratio)) return null;
+    node = ratioNode(record.direction, record.ratio, null!, null!);
+  } else {
+    if (typeof record.size !== "object" || record.size === null) return null;
+    const size = record.size as Record<string, unknown>;
+    if (size.type === "ratio" && typeof size.value === "number" && Number.isFinite(size.value)) {
+      node = ratioNode(record.direction, size.value, null!, null!);
+    } else if (
+      size.type === "fixed-second" &&
+      record.direction === "vertical" &&
+      typeof size.pixels === "number" &&
+      Number.isFinite(size.pixels)
+    ) {
+      node = fixedNode(clampStoredTerminalDockHeightPx(size.pixels).value, null!, null!);
+    } else return null;
+  }
+  const first = parseNode(record.first, depth + 1, ids, version);
+  const second = parseNode(record.second, depth + 1, ids, version);
+  return first && second ? { ...node, first, second } : null;
 }
-
 function parseTerminal(value: unknown): {
   terminal: WorkspaceTerminalLayout;
   recovery?: { rejected: unknown; resolved: number };
@@ -363,52 +499,6 @@ function parseTerminal(value: unknown): {
       : {}),
   };
 }
-
-function normalizeLayout(
-  layout: Omit<WorkspaceLayout, "splitRatio" | "secondaryOpen"> &
-    Partial<Pick<WorkspaceLayout, "splitRatio" | "secondaryOpen">>,
-): WorkspaceLayout {
-  const visible = workspaceLayoutLeafIds(layout.root);
-  const focusedPaneId = visible.includes(layout.focusedPaneId) ? layout.focusedPaneId : visible[0];
-  const ownerValid =
-    layout.terminal.open &&
-    layout.terminal.ownerPaneId !== null &&
-    visible.includes(layout.terminal.ownerPaneId) &&
-    layout.panes[layout.terminal.ownerPaneId] !== null;
-  const terminal = {
-    open: ownerValid,
-    ownerPaneId: ownerValid ? layout.terminal.ownerPaneId : null,
-    dockHeightPx: clampStoredTerminalDockHeightPx(layout.terminal.dockHeightPx).value,
-  };
-  return {
-    version: 6,
-    root: layout.root,
-    focusedPaneId,
-    panes: layout.panes,
-    terminal,
-    ...compatibility(layout.root),
-  };
-}
-
-function fixedToRecursive(fixed: FixedLayout): WorkspaceLayout {
-  const root: WorkspaceLayoutNode = fixed.secondaryOpen
-    ? {
-        type: "split",
-        direction: "horizontal",
-        ratio: clampStoredSplitRatio(fixed.splitRatio),
-        first: { type: "leaf", paneId: "primary" },
-        second: { type: "leaf", paneId: "secondary" },
-      }
-    : { type: "leaf", paneId: "primary" };
-  return normalizeLayout({
-    version: 6,
-    root,
-    focusedPaneId: fixed.focusedPaneId,
-    panes: { primary: fixed.panes.primary, secondary: fixed.panes.secondary },
-    terminal: fixed.terminal,
-  });
-}
-
 function parseFixed(record: Record<string, unknown>): FixedLayout | null {
   if (typeof record.panes !== "object" || record.panes === null) return null;
   const panes = record.panes as Record<string, unknown>;
@@ -417,25 +507,29 @@ function parseFixed(record: Record<string, unknown>): FixedLayout | null {
   if (primary === undefined || secondary === undefined) return null;
   const secondaryOpen = record.version === 0 || record.version === 1 ? true : record.secondaryOpen;
   if (typeof secondaryOpen !== "boolean") return null;
-  let terminal: WorkspaceTerminalLayout = { open: false, ownerPaneId: null, dockHeightPx: 260 };
+  let terminal: WorkspaceTerminalLayout = {
+    open: false,
+    ownerPaneId: null,
+    dockHeightPx: DEFAULT_TERMINAL_DOCK_HEIGHT_PX,
+  };
   let terminalDockHeightRecovery: FixedLayout["terminalDockHeightRecovery"];
   if (record.version === 4) {
-    if (typeof record.terminal !== "object" || record.terminal === null) return null;
-    const t = record.terminal as Record<string, unknown>;
+    const raw = record.terminal as Record<string, unknown> | null;
     if (
-      Object.keys(t).some((key) => !["open", "ownerPaneId"].includes(key)) ||
-      typeof t.open !== "boolean" ||
-      (t.open
-        ? t.ownerPaneId !== "primary" && t.ownerPaneId !== "secondary"
-        : t.ownerPaneId !== null)
+      !raw ||
+      Object.keys(raw).some((key) => !["open", "ownerPaneId"].includes(key)) ||
+      typeof raw.open !== "boolean" ||
+      (raw.open
+        ? raw.ownerPaneId !== "primary" && raw.ownerPaneId !== "secondary"
+        : raw.ownerPaneId !== null)
     )
       return null;
-    terminal = { open: t.open, ownerPaneId: t.ownerPaneId as string | null, dockHeightPx: 260 };
+    terminal = { open: raw.open, ownerPaneId: raw.ownerPaneId as string | null, dockHeightPx: 260 };
   } else if (record.version === 5) {
     const parsed = parseTerminal(record.terminal);
     if (!parsed) return null;
     terminal = parsed.terminal;
-    if (parsed.recovery) terminalDockHeightRecovery = parsed.recovery;
+    terminalDockHeightRecovery = parsed.recovery;
   }
   return {
     splitRatio: clampStoredSplitRatio(record.splitRatio),
@@ -451,10 +545,64 @@ function parseFixed(record: Record<string, unknown>): FixedLayout | null {
     ...(terminalDockHeightRecovery ? { terminalDockHeightRecovery } : {}),
   };
 }
-
+function fixedToV6(fixed: FixedLayout): {
+  root: WorkspaceLayoutNode;
+  focusedPaneId: string;
+  panes: Record<string, WorkspacePaneTarget | null>;
+  terminal: WorkspaceTerminalLayout;
+} {
+  return {
+    root: fixed.secondaryOpen
+      ? ratioNode(
+          "horizontal",
+          fixed.splitRatio,
+          { type: "leaf", paneId: "primary" },
+          { type: "leaf", paneId: "secondary" },
+        )
+      : { type: "leaf", paneId: "primary" },
+    focusedPaneId: fixed.focusedPaneId,
+    panes: { primary: fixed.panes.primary, secondary: fixed.panes.secondary },
+    terminal: fixed.terminal,
+  };
+}
+function migrateV6(
+  root: WorkspaceLayoutNode,
+  focusedPaneId: string,
+  targets: Record<string, WorkspacePaneTarget | null>,
+  terminal: WorkspaceTerminalLayout,
+): Pick<WorkspaceLayoutLoadResult, "layout" | "terminalRecovery"> {
+  const visible = workspaceLayoutLeafIds(root);
+  const panes: Record<string, WorkspacePaneValue> = {};
+  for (const id of visible) {
+    const target = targets[id] ?? null;
+    panes[id] = target ? { kind: "agent", ...target } : null;
+  }
+  if (!terminal.open) return { layout: normalizeLayout({ root, focusedPaneId, panes }) };
+  const owner = terminal.ownerPaneId;
+  const target = owner ? agentTarget(panes[owner]) : null;
+  if (!owner || !visible.includes(owner) || !target) {
+    return {
+      layout: normalizeLayout({ root, focusedPaneId, panes }),
+      terminalRecovery: {
+        ownerPaneId: owner,
+        reason: owner && visible.includes(owner) ? "unbound" : "missing",
+      },
+    };
+  }
+  const terminalId = allocateTerminalId(root, panes);
+  const replace = (node: WorkspaceLayoutNode): WorkspaceLayoutNode => {
+    if (node.type === "leaf")
+      return node.paneId === owner
+        ? fixedNode(terminal.dockHeightPx, node, { type: "leaf", paneId: terminalId })
+        : node;
+    return { ...node, first: replace(node.first), second: replace(node.second) };
+  };
+  panes[terminalId] = { kind: "terminal", stopped: true, ...target };
+  return { layout: normalizeLayout({ root: replace(root), focusedPaneId, panes }) };
+}
 function parseV6(record: Record<string, unknown>): WorkspaceLayoutLoadResult | null {
   const ids = new Set<string>();
-  const root = parseNode(record.root, 1, ids);
+  const root = parseNode(record.root, 1, ids, 6);
   if (
     !root ||
     !ids.has(PRIMARY_PANE_ID) ||
@@ -470,26 +618,67 @@ function parseV6(record: Record<string, unknown>): WorkspaceLayoutLoadResult | n
     [...ids].some((id) => !(id in rawPanes))
   )
     return null;
-  const panes: Record<string, WorkspacePaneTarget | null> = {};
-  for (const key of keys) {
-    const target = parseTarget(rawPanes[key]);
+  const targets: Record<string, WorkspacePaneTarget | null> = {};
+  for (const id of ids) {
+    const target = parseTarget(rawPanes[id]);
     if (target === undefined) return null;
-    panes[key] = target;
+    targets[id] = target;
   }
-  const terminal = parseTerminal(record.terminal);
-  if (!terminal) return null;
+  const parsedTerminal = parseTerminal(record.terminal);
+  if (!parsedTerminal) return null;
+  const migrated = migrateV6(
+    root,
+    typeof record.focusedPaneId === "string" ? record.focusedPaneId : "",
+    targets,
+    parsedTerminal.terminal,
+  );
+  return {
+    ...migrated,
+    status: "migrated",
+    ...(parsedTerminal.recovery ? { terminalDockHeightRecovery: parsedTerminal.recovery } : {}),
+  };
+}
+function validFixedSplitTopology(
+  node: WorkspaceLayoutNode,
+  panes: Record<string, WorkspacePaneValue>,
+): boolean {
+  if (node.type === "leaf") return true;
+  if (
+    node.size.type === "fixed-second" &&
+    (node.direction !== "vertical" ||
+      node.second.type !== "leaf" ||
+      descriptorKind(panes[node.second.paneId]) !== "terminal")
+  )
+    return false;
+  return validFixedSplitTopology(node.first, panes) && validFixedSplitTopology(node.second, panes);
+}
+function parseV7(record: Record<string, unknown>): WorkspaceLayoutLoadResult | null {
+  const ids = new Set<string>();
+  const root = parseNode(record.root, 1, ids, 7);
+  if (
+    !root ||
+    !ids.has(PRIMARY_PANE_ID) ||
+    typeof record.panes !== "object" ||
+    record.panes === null
+  )
+    return null;
+  const rawPanes = record.panes as Record<string, unknown>;
+  const keys = Object.keys(rawPanes);
+  if (keys.length !== ids.size || keys.some((key) => !ids.has(key))) return null;
+  const panes: Record<string, WorkspacePaneValue> = {};
+  for (const key of keys) {
+    const descriptor = parseV7Descriptor(rawPanes[key]);
+    if (descriptor === undefined) return null;
+    panes[key] = descriptor;
+  }
+  if (descriptorKind(panes.primary) !== "agent" || !validFixedSplitTopology(root, panes))
+    return null;
   const layout = normalizeLayout({
-    version: 6,
     root,
     focusedPaneId: typeof record.focusedPaneId === "string" ? record.focusedPaneId : "",
     panes,
-    terminal: terminal.terminal,
   });
-  return {
-    layout,
-    status: "valid",
-    ...(terminal.recovery ? { terminalDockHeightRecovery: terminal.recovery } : {}),
-  };
+  return { layout, status: "valid" };
 }
 
 export function parseWorkspaceLayout(raw: string): WorkspaceLayoutLoadResult {
@@ -502,35 +691,37 @@ export function parseWorkspaceLayout(raw: string): WorkspaceLayoutLoadResult {
   if (typeof value !== "object" || value === null)
     return { layout: defaultWorkspaceLayout(), status: "corrupt" };
   const record = value as Record<string, unknown>;
+  if (record.version === 7)
+    return parseV7(record) ?? { layout: defaultWorkspaceLayout(), status: "corrupt" };
   if (record.version === 6)
     return parseV6(record) ?? { layout: defaultWorkspaceLayout(), status: "corrupt" };
   if (![0, 1, 2, 3, 4, 5].includes(record.version as number))
     return { layout: defaultWorkspaceLayout(), status: "corrupt" };
   let fixed: FixedLayout | null;
   if (record.version === 0) {
-    const legacy = record as unknown as LegacyWorkspaceLayout;
-    const primary = parseTarget(legacy.primary ?? null, true),
-      secondary = parseTarget(legacy.secondary ?? null, true);
+    const primary = parseTarget(record.primary ?? null, true);
+    const secondary = parseTarget(record.secondary ?? null, true);
     fixed =
       primary === undefined || secondary === undefined
         ? null
         : {
-            splitRatio: clampStoredSplitRatio(legacy.ratio),
+            splitRatio: clampStoredSplitRatio(record.ratio),
             secondaryOpen: true,
             focusedPaneId: "primary",
             panes: { primary, secondary },
             terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
           };
   } else fixed = parseFixed(record);
-  return fixed
-    ? {
-        layout: fixedToRecursive(fixed),
-        status: "migrated",
-        ...(fixed.terminalDockHeightRecovery
-          ? { terminalDockHeightRecovery: fixed.terminalDockHeightRecovery }
-          : {}),
-      }
-    : { layout: defaultWorkspaceLayout(), status: "corrupt" };
+  if (!fixed) return { layout: defaultWorkspaceLayout(), status: "corrupt" };
+  const v6 = fixedToV6(fixed);
+  const migrated = migrateV6(v6.root, v6.focusedPaneId, v6.panes, v6.terminal);
+  return {
+    ...migrated,
+    status: "migrated",
+    ...(fixed.terminalDockHeightRecovery
+      ? { terminalDockHeightRecovery: fixed.terminalDockHeightRecovery }
+      : {}),
+  };
 }
 
 export function loadWorkspaceLayout(
@@ -545,7 +736,7 @@ export function loadWorkspaceLayout(
       try {
         storage.setItem(rejectedRecursiveWorkspaceLayoutKey(windowLabel), recursiveRaw);
       } catch {
-        // Diagnostic preservation is best-effort; the safe corrupt fallback still applies.
+        // Rejected-byte preservation is best-effort; the safe fallback still applies.
       }
       return { ...result, rejectedRaw: recursiveRaw, rejectedSource: "recursive" };
     }
@@ -559,7 +750,6 @@ export function loadWorkspaceLayout(
     return { layout: defaultWorkspaceLayout(), status: "load-error" };
   }
 }
-
 export function preserveRejectedWorkspaceLayout(
   storage: LayoutStorage,
   windowLabel: string,
@@ -584,71 +774,115 @@ export function preserveRejectedRecursiveWorkspaceLayout(
     return false;
   }
 }
-
+function canonicalRecord(layout: WorkspaceLayout): Record<string, unknown> {
+  const panes = Object.fromEntries(
+    Object.entries(layout.panes).map(([id, descriptor]) => [
+      id,
+      descriptor
+        ? descriptorKind(descriptor) === "terminal"
+          ? {
+              kind: "terminal",
+              cwd: descriptor.cwd,
+              sessionPath: descriptor.sessionPath,
+              stopped: true,
+            }
+          : { kind: "agent", cwd: descriptor.cwd, sessionPath: descriptor.sessionPath }
+        : null,
+    ]),
+  );
+  const stripNode = (node: WorkspaceLayoutNode): Record<string, unknown> =>
+    node.type === "leaf"
+      ? { type: "leaf", paneId: node.paneId }
+      : {
+          type: "split",
+          direction: node.direction,
+          size: node.size,
+          first: stripNode(node.first),
+          second: stripNode(node.second),
+        };
+  return { version: 7, root: stripNode(layout.root), focusedPaneId: layout.focusedPaneId, panes };
+}
 function canonicalizeInput(input: WorkspaceLayoutSaveInput): WorkspaceLayout | null {
-  if ("root" in input && input.version === 6) {
-    const parsed = parseWorkspaceLayout(
-      JSON.stringify({
-        version: 6,
-        root: input.root,
-        focusedPaneId: input.focusedPaneId,
-        panes: input.panes,
-        terminal: input.terminal,
-      }),
-    );
+  if (input.version === 7) {
+    const parsed = parseWorkspaceLayout(JSON.stringify(canonicalRecord(input as WorkspaceLayout)));
     return parsed.status === "valid" ? parsed.layout : null;
   }
-  const primary = parseTarget(input.panes.primary),
-    secondary = parseTarget(input.panes.secondary);
+  const fixed = input as FixedWorkspaceLayoutInput;
+  const primary = parseTarget(fixed.panes.primary),
+    secondary = parseTarget(fixed.panes.secondary);
   if (primary === undefined || secondary === undefined) return null;
-  return fixedToRecursive({
-    splitRatio: input.splitRatio,
-    secondaryOpen: input.secondaryOpen === true,
-    focusedPaneId: input.focusedPaneId,
+  const v6 = fixedToV6({
+    splitRatio: fixed.splitRatio,
+    secondaryOpen: fixed.secondaryOpen === true,
+    focusedPaneId: fixed.focusedPaneId,
     panes: { primary, secondary },
-    terminal: input.terminal,
+    terminal: fixed.terminal,
   });
-}
-
-function canonicalBytes(layout: WorkspaceLayout): string {
-  return JSON.stringify({
-    version: 6,
-    root: layout.root,
-    focusedPaneId: layout.focusedPaneId,
-    panes: layout.panes,
-    terminal: layout.terminal,
-  });
+  return migrateV6(v6.root, v6.focusedPaneId, v6.panes, v6.terminal).layout;
 }
 function rollbackProjection(layout: WorkspaceLayout): Record<string, unknown> | null {
+  let terminal: WorkspaceTerminalLayout = {
+    open: false,
+    ownerPaneId: null,
+    dockHeightPx: DEFAULT_TERMINAL_DOCK_HEIGHT_PX,
+  };
+  let terminalCount = 0;
+  const removeTerminal = (node: WorkspaceLayoutNode): WorkspaceLayoutNode | null => {
+    if (node.type === "leaf") {
+      if (descriptorKind(layout.panes[node.paneId]) === "terminal") {
+        terminalCount += 1;
+        return null;
+      }
+      return node;
+    }
+    if (
+      node.direction === "vertical" &&
+      node.size.type === "fixed-second" &&
+      node.first.type === "leaf" &&
+      node.second.type === "leaf" &&
+      descriptorKind(layout.panes[node.first.paneId]) === "agent" &&
+      descriptorKind(layout.panes[node.second.paneId]) === "terminal"
+    ) {
+      terminalCount += 1;
+      terminal = {
+        open: true,
+        ownerPaneId: node.first.paneId,
+        dockHeightPx: node.size.pixels,
+      };
+      return node.first;
+    }
+    if (node.size.type !== "ratio") return null;
+    const first = removeTerminal(node.first);
+    const second = removeTerminal(node.second);
+    return first && second ? { ...node, first, second } : null;
+  };
+  const root = removeTerminal(layout.root);
+  if (!root || terminalCount > 1) return null;
   const fixed =
-    (layout.root.type === "leaf" && layout.root.paneId === "primary") ||
-    (layout.root.type === "split" &&
-      layout.root.direction === "horizontal" &&
-      layout.root.first.type === "leaf" &&
-      layout.root.first.paneId === "primary" &&
-      layout.root.second.type === "leaf" &&
-      layout.root.second.paneId === "secondary");
-  if (!fixed || !("primary" in layout.panes)) return null;
-  const owner =
-    layout.terminal.open &&
-    (layout.terminal.ownerPaneId === "primary" || layout.terminal.ownerPaneId === "secondary")
-      ? layout.terminal.ownerPaneId
-      : null;
+    (root.type === "leaf" && root.paneId === "primary") ||
+    (root.type === "split" &&
+      root.direction === "horizontal" &&
+      root.size.type === "ratio" &&
+      root.first.type === "leaf" &&
+      root.first.paneId === "primary" &&
+      root.second.type === "leaf" &&
+      root.second.paneId === "secondary");
+  if (!fixed) return null;
+  const splitRatio =
+    root.type === "split" && root.size.type === "ratio" ? root.size.value : DEFAULT_SPLIT_RATIO;
   return {
     version: 5,
-    splitRatio: layout.splitRatio,
-    secondaryOpen: layout.secondaryOpen,
+    splitRatio,
+    secondaryOpen: root.type === "split",
     focusedPaneId:
-      layout.focusedPaneId === "secondary" && layout.secondaryOpen ? "secondary" : "primary",
-    panes: { primary: layout.panes.primary, secondary: layout.panes.secondary ?? null },
-    terminal: {
-      open: owner !== null,
-      ownerPaneId: owner,
-      dockHeightPx: layout.terminal.dockHeightPx,
+      layout.focusedPaneId === "secondary" && root.type === "split" ? "secondary" : "primary",
+    panes: {
+      primary: agentTarget(layout.panes.primary),
+      secondary: root.type === "split" ? agentTarget(layout.panes.secondary) : null,
     },
+    terminal,
   };
 }
-
 export function saveWorkspaceLayout(
   storage: LayoutStorage,
   windowLabel: string,
@@ -657,7 +891,10 @@ export function saveWorkspaceLayout(
   try {
     const layout = canonicalizeInput(input);
     if (!layout) return false;
-    storage.setItem(recursiveWorkspaceLayoutKey(windowLabel), canonicalBytes(layout));
+    storage.setItem(
+      recursiveWorkspaceLayoutKey(windowLabel),
+      JSON.stringify(canonicalRecord(layout)),
+    );
     const rollback = rollbackProjection(layout);
     if (rollback) storage.setItem(workspaceLayoutKey(windowLabel), JSON.stringify(rollback));
     return true;
@@ -665,29 +902,39 @@ export function saveWorkspaceLayout(
     return false;
   }
 }
-
 export async function resolveWorkspaceLayoutTargets(
   layout: WorkspaceLayout,
   validate: (target: WorkspacePaneTarget) => Promise<WorkspaceTargetStatus>,
 ): Promise<WorkspaceLayout> {
-  const entries = await Promise.all(
-    Object.entries(layout.panes).map(
-      async ([paneId, target]): Promise<[string, WorkspacePaneTarget | null]> => {
-        if (!target) return [paneId, null];
-        try {
-          const status = await validate(target);
-          if (!status.projectExists) return [paneId, null];
-          return [
-            paneId,
-            target.sessionPath && !status.sessionExists
-              ? { cwd: target.cwd, sessionPath: null }
-              : target,
-          ];
-        } catch {
-          return [paneId, null];
-        }
-      },
-    ),
-  );
-  return normalizeLayout({ ...layout, panes: Object.fromEntries(entries) });
+  const panes = { ...layout.panes };
+  const invalidTerminals = new Set<string>();
+  for (const [id, descriptor] of Object.entries(layout.panes)) {
+    if (!descriptor) continue;
+    try {
+      const status = await validate({ cwd: descriptor.cwd, sessionPath: descriptor.sessionPath });
+      if (!status.projectExists) {
+        if (descriptorKind(descriptor) === "terminal") invalidTerminals.add(id);
+        else panes[id] = null;
+      } else if (descriptor.sessionPath && !status.sessionExists) {
+        panes[id] = { ...descriptor, sessionPath: null };
+      }
+    } catch {
+      if (descriptorKind(descriptor) === "terminal") invalidTerminals.add(id);
+      else panes[id] = null;
+    }
+  }
+  if (invalidTerminals.size === 0)
+    return normalizeLayout({ root: layout.root, focusedPaneId: layout.focusedPaneId, panes });
+  const prune = (node: WorkspaceLayoutNode): WorkspaceLayoutNode | null => {
+    if (node.type === "leaf") return invalidTerminals.has(node.paneId) ? null : node;
+    const first = prune(node.first);
+    const second = prune(node.second);
+    if (!first) return second;
+    if (!second) return first;
+    return { ...node, first, second };
+  };
+  const root = prune(layout.root);
+  if (!root) return defaultWorkspaceLayout();
+  for (const id of invalidTerminals) delete panes[id];
+  return normalizeLayout({ root, focusedPaneId: layout.focusedPaneId, panes });
 }

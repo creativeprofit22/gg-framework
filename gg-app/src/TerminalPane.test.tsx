@@ -109,6 +109,20 @@ beforeEach(() => {
 });
 
 describe("TerminalPane", () => {
+  it("creates no PTY while restored stopped and creates exactly one for the owner on restart", async () => {
+    const onRequestClose = vi.fn();
+    render(<TerminalPane paneId="secondary" initiallyStopped onRequestClose={onRequestClose} />);
+
+    expect(screen.getByText("Stopped")).toBeTruthy();
+    expect(mocks.createTerminal).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Restart terminal" }));
+
+    await screen.findByText("Running");
+    expect(mocks.createTerminal).toHaveBeenCalledOnce();
+    expect(mocks.createTerminal).toHaveBeenCalledWith("secondary", 80, 24, expect.any(Function));
+    expect(screen.getByText("C:\\project · cmd.exe")).toBeTruthy();
+  });
+
   it("applies controlled height and reports user resizing without recreating xterm", () => {
     const onHeightChange = vi.fn();
     const view = render(

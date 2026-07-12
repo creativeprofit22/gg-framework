@@ -477,21 +477,29 @@ body {
   white-space: nowrap;
 }
 
+.terminal-pane-restart,
 .terminal-pane-close {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 24px;
   height: 24px;
-  padding: 0;
+  padding: 0 8px;
   border: 1px solid transparent;
   border-radius: var(--radius-button);
   color: var(--text-muted);
   background: transparent;
+  font: inherit;
   cursor: pointer;
 }
 
+.terminal-pane-close {
+  width: 24px;
+  padding: 0;
+}
+
+.terminal-pane-restart:hover,
+.terminal-pane-restart:focus-visible,
 .terminal-pane-close:hover,
 .terminal-pane-close:focus-visible {
   color: var(--text);

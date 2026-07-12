@@ -86,6 +86,7 @@ vi.mock("./TerminalPane", async () => {
   return {
     TerminalPane: ({
       paneId,
+      initiallyStopped,
       height,
       onHeightChange,
       onRequestClose,
@@ -93,27 +94,34 @@ vi.mock("./TerminalPane", async () => {
       onStartupFailure,
     }: {
       paneId: string;
+      initiallyStopped?: boolean;
       height: number;
       onHeightChange(height: number): void;
       onRequestClose(running: boolean): void;
       onRunningChange?(running: boolean): void;
       onStartupFailure?(): void;
     }) => {
+      const [stopped, setStopped] = useState(Boolean(initiallyStopped));
       terminalMock.heights.push(height);
       terminalMock.onHeightChange = onHeightChange;
       terminalMock.onStartupFailure = onStartupFailure;
       useEffect(() => {
+        if (stopped) return;
         terminalMock.mounts(paneId);
         onRunningChange?.(true);
         return () => {
           terminalMock.unmounts(paneId);
           onRunningChange?.(false);
         };
-      }, [onRunningChange, paneId]);
+      }, [onRunningChange, paneId, stopped]);
       return (
         <div className="terminal-pane" data-testid={`terminal-${paneId}`}>
-          <input aria-label={`${paneId} terminal input`} />
-          <button onClick={() => onRequestClose(true)}>Mock terminal close</button>
+          {stopped ? (
+            <button onClick={() => setStopped(false)}>Restart terminal</button>
+          ) : (
+            <input aria-label={`${paneId} terminal input`} />
+          )}
+          <button onClick={() => onRequestClose(!stopped)}>Mock terminal close</button>
         </div>
       );
     },
@@ -619,57 +627,57 @@ describe("WorkspaceShell terminal dock", () => {
     expect(paneMounts).toHaveBeenCalledTimes(2);
   });
 
-  it("waits for the validated exact saved owner snapshot, starts once, and persists close", async () => {
+  it("restores the saved dock stopped and starts exactly one terminal for its owner pane", async () => {
     localStorage.setItem(
       "gg-workspace-layout:main",
       JSON.stringify({
         version: 4,
         splitRatio: 50,
         secondaryOpen: true,
-        focusedPaneId: "secondary",
+        focusedPaneId: "primary",
         panes: {
           primary: { cwd: "/saved/primary", sessionPath: null },
-          secondary: { cwd: "/saved/owner", sessionPath: "/sessions/owner.jsonl" },
+          secondary: { cwd: "/work/secondary", sessionPath: "/sessions/secondary.jsonl" },
         },
         terminal: { open: true, ownerPaneId: "secondary" },
       }),
     );
-    let emitOwnerSnapshot: (() => void) | undefined;
-    const agentMounts = vi.fn();
-    function DelayedOwnerPane({ kind, onSnapshot, paneId }: AgentPaneProps): React.ReactElement {
-      useEffect(() => agentMounts(paneId), [paneId]);
-      useEffect(() => {
-        const snapshot = (cwd: string, sessionPath: string | null) =>
-          onSnapshot({
-            paneId,
-            cwd,
-            sessionPath,
-            sessionTitle: paneId,
-            projectBound: true,
-            restoreChecked: true,
-            activeWork: false,
-          });
-        if (kind === "primary") snapshot("/saved/primary", null);
-        else emitOwnerSnapshot = () => snapshot("/saved/owner", "/sessions/owner.jsonl");
-      }, [kind, onSnapshot, paneId]);
-      return <div data-testid={`delayed-${paneId}`} />;
-    }
 
-    render(<WorkspaceShell renderPane={(props) => <DelayedOwnerPane {...props} />} />);
-    await screen.findByTestId("delayed-secondary");
-    expect(bridge.validateWorkspaceTarget).toHaveBeenCalledTimes(2);
-    expect(screen.queryByTestId("terminal-secondary")).toBeNull();
-    emitOwnerSnapshot?.();
+    render(<WorkspaceShell renderPane={renderPane} />);
     expect(await screen.findByTestId("terminal-secondary")).toBeTruthy();
-    await waitFor(() => {
-      expect(terminalMock.mounts).toHaveBeenCalledTimes(1);
-      expect(terminalMock.mounts).toHaveBeenCalledWith("secondary");
-    });
-    expect(agentMounts).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("button", { name: "Restart terminal" })).toBeTruthy();
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
 
+    fireEvent.click(screen.getByRole("button", { name: "Restart terminal" }));
+    await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledOnce());
+    expect(terminalMock.mounts).toHaveBeenCalledWith("secondary");
+    expect(screen.getByTestId("pane-secondary").dataset.initialCwd).toBe("/work/secondary");
+  });
+
+  it("closes a stopped restored dock, clears persistence, and skips terminal cleanup", async () => {
+    localStorage.setItem(
+      "gg-workspace-layout:main",
+      JSON.stringify({
+        version: 5,
+        splitRatio: 50,
+        secondaryOpen: true,
+        focusedPaneId: "primary",
+        panes: {
+          primary: { cwd: "/work/primary", sessionPath: null },
+          secondary: { cwd: "/work/secondary", sessionPath: null },
+        },
+        terminal: { open: true, ownerPaneId: "primary", dockHeightPx: 260 },
+      }),
+    );
+
+    render(<WorkspaceShell renderPane={renderPane} />);
+    expect(await screen.findByRole("button", { name: "Restart terminal" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
-    fireEvent.click(screen.getByRole("button", { name: "Close Terminal" }));
-    await waitFor(() => expect(screen.queryByTestId("terminal-secondary")).toBeNull());
+
+    await waitFor(() => expect(screen.queryByTestId("terminal-primary")).toBeNull());
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
+    expect(terminalMock.unmounts).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Close Terminal" })).toBeNull();
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout:main") ?? "null");
       expect(saved.terminal).toEqual({ open: false, ownerPaneId: null, dockHeightPx: 260 });

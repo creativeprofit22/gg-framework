@@ -72,6 +72,7 @@ const INVALID_TERMINAL_SIZE_WARNING =
 interface TerminalDock {
   ownerPaneId: WorkspacePaneId;
   cwd: string;
+  stopped: boolean;
 }
 
 function ratioBounds(containerSize: number): { min: number; max: number } {
@@ -274,7 +275,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       ...previous,
       terminal: { ...previous.terminal, open: true, ownerPaneId: previous.focusedPaneId },
     }));
-    setTerminalDock({ ownerPaneId: layout.focusedPaneId, cwd: snapshot.cwd });
+    setTerminalDock({ ownerPaneId: layout.focusedPaneId, cwd: snapshot.cwd, stopped: false });
     markLayoutChanged();
   }, [layout.focusedPaneId, markLayoutChanged, snapshots, terminalDock]);
 
@@ -320,8 +321,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       return;
     }
     terminalRestoreStartedRef.current = true;
-    setTerminalRunning(true);
-    setTerminalDock({ ownerPaneId, cwd: target.cwd });
+    setTerminalRunning(false);
+    setTerminalDock({ ownerPaneId, cwd: target.cwd, stopped: true });
   }, [
     handleTerminalStartupFailure,
     layout,
@@ -785,6 +786,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
             <TerminalPane
               key={`${paneId}:${terminalDock.cwd}`}
               paneId={paneId}
+              initiallyStopped={terminalDock.stopped}
               height={visibleDockHeight}
               onHeightChange={(height) =>
                 setDockHeight(Math.min(MAX_DOCK_HEIGHT_PX, Math.max(MIN_DOCK_HEIGHT_PX, height)))

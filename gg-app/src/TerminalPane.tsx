@@ -6,10 +6,11 @@ import { X } from "lucide-react";
 import { createTerminal, openExternalTerminal, type TerminalInfo } from "./agent";
 import { TerminalAdapter, validTerminalSize } from "./terminal";
 
-type TerminalStatus = "starting" | "running" | "exited" | "error";
+type TerminalStatus = "stopped" | "starting" | "running" | "exited" | "error";
 
 export interface TerminalPaneProps {
   paneId: string;
+  initiallyStopped?: boolean;
   height?: number;
   onHeightChange?(height: number): void;
   onRequestClose(running: boolean): void;
@@ -19,6 +20,7 @@ export interface TerminalPaneProps {
 
 export function TerminalPane({
   paneId,
+  initiallyStopped = false,
   height,
   onHeightChange,
   onRequestClose,
@@ -29,7 +31,8 @@ export function TerminalPane({
   const heightChangeRef = useRef(onHeightChange);
   const controlledHeightRef = useRef(height ?? 260);
   const hostRef = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<TerminalStatus>("starting");
+  const [status, setStatus] = useState<TerminalStatus>(initiallyStopped ? "stopped" : "starting");
+  const [startNonce, setStartNonce] = useState(initiallyStopped ? 0 : 1);
   const [info, setInfo] = useState<TerminalInfo | null>(null);
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -60,6 +63,7 @@ export function TerminalPane({
   }, []);
 
   useEffect(() => {
+    if (startNonce === 0) return;
     const host = hostRef.current;
     if (!host) return;
 
@@ -234,7 +238,7 @@ export function TerminalPane({
       reportRunning(false);
       void client.close().catch(() => {});
     };
-  }, [onRunningChange, onStartupFailure, paneId]);
+  }, [onRunningChange, onStartupFailure, paneId, startNonce]);
 
   const openInExternalTerminal = async (): Promise<void> => {
     setExternalTerminalState("opening");
@@ -248,14 +252,21 @@ export function TerminalPane({
   };
 
   const running = status === "starting" || status === "running";
+  const restart = (): void => {
+    if (status !== "stopped") return;
+    setStatus("starting");
+    setStartNonce(1);
+  };
   const stateLabel =
-    status === "starting"
-      ? "Starting…"
-      : status === "running"
-        ? "Running"
-        : status === "exited"
-          ? `Exited${exitCode === null ? "" : ` (${exitCode})`}`
-          : "Error";
+    status === "stopped"
+      ? "Stopped"
+      : status === "starting"
+        ? "Starting…"
+        : status === "running"
+          ? "Running"
+          : status === "exited"
+            ? `Exited${exitCode === null ? "" : ` (${exitCode})`}`
+            : "Error";
 
   return (
     <section
@@ -276,6 +287,11 @@ export function TerminalPane({
             </span>
           )}
         </div>
+        {status === "stopped" && (
+          <button type="button" className="terminal-pane-restart" onClick={restart}>
+            Restart terminal
+          </button>
+        )}
         <button
           type="button"
           className="terminal-pane-close"
@@ -302,6 +318,9 @@ export function TerminalPane({
             </button>
           )}
         </div>
+      )}
+      {status === "stopped" && (
+        <div className="terminal-pane-message">Restored terminal sessions stay stopped.</div>
       )}
       <div ref={hostRef} className="terminal-pane-xterm" />
     </section>

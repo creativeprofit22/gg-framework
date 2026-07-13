@@ -138,6 +138,9 @@ jobs:
             gg-app/src-tauri/binaries \
             gg-app/src-tauri/sidecar
 
+      - name: Test gg-app Rust backend
+        run: cargo test --manifest-path gg-app/src-tauri/Cargo.toml --locked
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

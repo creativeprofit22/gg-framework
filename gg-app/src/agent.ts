@@ -77,6 +77,14 @@ export function openExternalTerminal(paneId: string): Promise<void> {
   return invoke("terminal_open_external", { paneId });
 }
 
+export function registerStoppedTerminalTarget(
+  paneId: string,
+  cwd: string,
+  sessionPath: string | null,
+): Promise<void> {
+  return invoke("register_stopped_terminal_target", { paneId, cwd, sessionPath });
+}
+
 /**
  * Starts one PTY and keeps close authoritative even when React unmounts while
  * Rust is still spawning it.

@@ -20,6 +20,7 @@ const bridge = vi.hoisted(() => ({
   newWindow: vi.fn(() => Promise.resolve()),
   openPaneInNewWindow: vi.fn(() => Promise.resolve()),
   openTerminalInNewWindow: vi.fn(() => Promise.resolve()),
+  registerStoppedTerminalTarget: vi.fn(() => Promise.resolve()),
   onWindowOrder: vi.fn(() => Promise.resolve(() => undefined)),
   setWindowTitle: vi.fn(),
   validateWorkspaceTarget: vi.fn(() =>
@@ -53,6 +54,7 @@ vi.mock("./agent", () => ({
   newWindow: bridge.newWindow,
   openPaneInNewWindow: bridge.openPaneInNewWindow,
   openTerminalInNewWindow: bridge.openTerminalInNewWindow,
+  registerStoppedTerminalTarget: bridge.registerStoppedTerminalTarget,
   onWindowOrder: bridge.onWindowOrder,
   setWindowTitle: bridge.setWindowTitle,
   validateWorkspaceTarget: bridge.validateWorkspaceTarget,
@@ -92,11 +94,12 @@ vi.mock("./TerminalPane", async () => {
     }: {
       paneId: string;
       initiallyStopped?: boolean;
-      onRestart?(): void;
+      onRestart?(): Promise<void>;
       onRequestClose(running: boolean): void;
       onRunningChange?(running: boolean): void;
     }) => {
       const [stopped, setStopped] = useState(Boolean(initiallyStopped));
+      const [error, setError] = useState<string | null>(null);
       useEffect(() => {
         if (stopped) return;
         terminalMock.mounts(paneId);
@@ -111,8 +114,11 @@ vi.mock("./TerminalPane", async () => {
           {stopped ? (
             <button
               onClick={() => {
-                onRestart?.();
-                setStopped(false);
+                void onRestart?.().then(
+                  () => setStopped(false),
+                  (cause: unknown) =>
+                    setError(cause instanceof Error ? cause.message : String(cause)),
+                );
               }}
             >
               Restart terminal
@@ -120,6 +126,7 @@ vi.mock("./TerminalPane", async () => {
           ) : (
             <input aria-label={`${paneId} terminal input`} />
           )}
+          {error && <div role="alert">{error}</div>}
           <button onClick={() => onRequestClose(!stopped)}>Mock terminal close</button>
         </div>
       );
@@ -275,6 +282,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   bridge.openPaneInNewWindow.mockResolvedValue(undefined);
   bridge.openTerminalInNewWindow.mockResolvedValue(undefined);
+  bridge.registerStoppedTerminalTarget.mockResolvedValue(undefined);
   workspaceLayoutMock.rejectResolution = false;
   localStorage.clear();
 });
@@ -431,10 +439,35 @@ describe("WorkspaceShell v7 terminal rendering", () => {
     expect(screen.getByRole("button", { name: "Restart terminal" })).toBeTruthy();
     expect(terminalMock.mounts).not.toHaveBeenCalled();
 
+    let resolveRegistration!: () => void;
+    bridge.registerStoppedTerminalTarget.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveRegistration = resolve;
+      }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Restart terminal" }));
 
+    expect(bridge.registerStoppedTerminalTarget).toHaveBeenCalledWith(
+      "terminal-1",
+      "/work/primary",
+      null,
+    );
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
+    await act(async () => resolveRegistration());
     await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledOnce());
     expect(terminalMock.mounts).toHaveBeenCalledWith("terminal-1");
+  });
+
+  it("keeps a copied terminal stopped and shows registration rejection", async () => {
+    saveStoppedTerminalLayout();
+    bridge.registerStoppedTerminalTarget.mockRejectedValueOnce(new Error("target rejected"));
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Restart terminal" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("target rejected");
+    expect(screen.getByRole("button", { name: "Restart terminal" })).toBeTruthy();
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
   });
 
   it.each([null, "/sessions/source.jsonl"])(
@@ -634,8 +667,9 @@ describe("WorkspaceShell v7 terminal rendering", () => {
     fireEvent.click(open);
     await screen.findByTestId("terminal-terminal-2");
 
-    fireEvent.click(screen.getAllByRole("button", { name: "Restart terminal" })[0]);
-    fireEvent.click(screen.getAllByRole("button", { name: "Restart terminal" })[0]);
+    const restartButtons = screen.getAllByRole("button", { name: "Restart terminal" });
+    fireEvent.click(restartButtons[0]);
+    fireEvent.click(restartButtons[1]);
     await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledTimes(2));
     terminalMock.unmounts.mockClear();
     const second = screen.getByTestId("terminal-terminal-2");

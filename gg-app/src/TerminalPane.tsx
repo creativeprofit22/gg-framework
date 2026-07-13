@@ -13,7 +13,7 @@ export interface TerminalPaneProps {
   initiallyStopped?: boolean;
   height?: number;
   onHeightChange?(height: number): void;
-  onRestart?(): void;
+  onRestart?(): Promise<void>;
   onRequestClose(running: boolean): void;
   onRunningChange?(running: boolean): void;
   onStartupFailure?(): void;
@@ -39,6 +39,7 @@ export function TerminalPane({
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [startupFailed, setStartupFailed] = useState(false);
+  const [restartPending, setRestartPending] = useState(false);
   const [externalTerminalState, setExternalTerminalState] = useState<"idle" | "opening" | "opened">(
     "idle",
   );
@@ -254,11 +255,19 @@ export function TerminalPane({
   };
 
   const running = status === "starting" || status === "running";
-  const restart = (): void => {
-    if (status !== "stopped") return;
-    onRestart?.();
-    setStatus("starting");
-    setStartNonce(1);
+  const restart = async (): Promise<void> => {
+    if (status !== "stopped" || restartPending) return;
+    setRestartPending(true);
+    setError(null);
+    try {
+      await onRestart?.();
+      setStatus("starting");
+      setStartNonce(1);
+    } catch (cause: unknown) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRestartPending(false);
+    }
   };
   const stateLabel =
     status === "stopped"
@@ -291,7 +300,12 @@ export function TerminalPane({
           )}
         </div>
         {status === "stopped" && (
-          <button type="button" className="terminal-pane-restart" onClick={restart}>
+          <button
+            type="button"
+            className="terminal-pane-restart"
+            disabled={restartPending}
+            onClick={() => void restart()}
+          >
             Restart terminal
           </button>
         )}

@@ -50,6 +50,7 @@ struct PaneSession {
     session_path: Option<String>,
     generation: u64,
     startup_error: Option<String>,
+    terminal_only: bool,
 }
 
 #[derive(Default)]
@@ -112,6 +113,14 @@ fn resolve_owned_pane<'a>(
     registry.get(owner_label)?.get(pane_id)
 }
 
+fn resolve_owned_pane_mut<'a>(
+    registry: &'a mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+) -> Option<&'a mut PaneSession> {
+    registry.get_mut(owner_label)?.get_mut(pane_id)
+}
+
 pub(crate) fn owned_pane_cwd(
     windows: &Windows,
     owner_label: &str,
@@ -146,6 +155,7 @@ fn record_pane_target(
             session_path,
             generation,
             startup_error: None,
+            terminal_only: false,
         },
     );
     generation
@@ -303,6 +313,9 @@ fn enumerate_pane_targets(
         .iter()
         .flat_map(|(label, panes)| {
             panes.iter().filter_map(move |(pane_id, pane)| {
+                if pane.terminal_only {
+                    return None;
+                }
                 pane.cwd.clone().map(|cwd| {
                     (
                         label.clone(),
@@ -3512,6 +3525,42 @@ fn validate_terminal_window_target(
     Ok(copy_target)
 }
 
+fn register_terminal_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    target: &TerminalWindowTarget,
+) -> Result<(), String> {
+    let target = validate_terminal_window_target(target)?;
+    create_pane_target(
+        registry,
+        owner_label,
+        pane_id,
+        target.cwd,
+        target.session_path,
+    )?;
+    resolve_owned_pane_mut(registry, owner_label, pane_id)
+        .ok_or_else(|| format!("pane '{pane_id}' does not exist"))?
+        .terminal_only = true;
+    Ok(())
+}
+
+#[tauri::command]
+fn register_stopped_terminal_target(
+    webview: WebviewWindow,
+    windows: State<'_, Windows>,
+    pane_id: String,
+    cwd: String,
+    session_path: Option<String>,
+) -> Result<(), String> {
+    let target = TerminalWindowTarget { cwd, session_path };
+    let mut registry = windows
+        .map
+        .lock()
+        .map_err(|_| "pane registry lock poisoned")?;
+    register_terminal_target(&mut registry, webview.label(), &pane_id, &target)
+}
+
 fn terminal_window_seed_script(
     label: &str,
     target: &TerminalWindowTarget,
@@ -4806,6 +4855,7 @@ pub fn run() {
             new_window,
             open_pane_in_new_window,
             open_terminal_in_new_window,
+            register_stopped_terminal_target,
             open_whatsnew_window,
             select_project,
             agent_projects,
@@ -5041,6 +5091,7 @@ mod tests {
             session_path: None,
             generation: 1,
             startup_error: None,
+            terminal_only: false,
         }
     }
 
@@ -6191,6 +6242,75 @@ mod tests {
             reserve_terminal_window_label(&mut registry, |_| false),
             "project-1"
         );
+    }
+
+    #[test]
+    fn stopped_terminal_registration_is_owner_scoped_and_preserves_target() {
+        let mut registry = PaneRegistry::new();
+        let cwd = std::env::current_dir().unwrap();
+        let target = TerminalWindowTarget {
+            cwd: cwd.to_string_lossy().into_owned(),
+            session_path: None,
+        };
+
+        register_terminal_target(&mut registry, "project-1", "terminal-1", &target).unwrap();
+
+        let registered = resolve_owned_pane(&registry, "project-1", "terminal-1").unwrap();
+        assert_eq!(registered.cwd.as_ref(), Some(&cwd));
+        assert_eq!(registered.session_path, None);
+        assert!(registered.terminal_only);
+        assert!(resolve_owned_pane(&registry, "project-2", "terminal-1").is_none());
+        assert!(enumerate_pane_targets(&registry).is_empty());
+    }
+
+    #[test]
+    fn stopped_terminal_registration_rejects_invalid_paths_duplicates_and_cross_window_lookup() {
+        let mut registry = PaneRegistry::new();
+        let cwd = std::env::current_dir().unwrap();
+        let target = TerminalWindowTarget {
+            cwd: cwd.to_string_lossy().into_owned(),
+            session_path: None,
+        };
+        let missing_cwd = TerminalWindowTarget {
+            cwd: cwd
+                .join("missing-terminal-cwd")
+                .to_string_lossy()
+                .into_owned(),
+            session_path: None,
+        };
+        let missing_session = TerminalWindowTarget {
+            cwd: target.cwd.clone(),
+            session_path: Some(
+                cwd.join("missing-terminal-session.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        };
+
+        assert!(register_terminal_target(&mut registry, "project-1", "bad pane", &target).is_err());
+        assert!(
+            register_terminal_target(&mut registry, "project-1", "terminal-1", &missing_cwd)
+                .unwrap_err()
+                .contains("project folder no longer exists")
+        );
+        assert!(register_terminal_target(
+            &mut registry,
+            "project-1",
+            "terminal-1",
+            &missing_session
+        )
+        .unwrap_err()
+        .contains("session file no longer exists"));
+        register_terminal_target(&mut registry, "project-1", "terminal-1", &target).unwrap();
+        assert_eq!(
+            register_terminal_target(&mut registry, "project-1", "terminal-1", &target)
+                .unwrap_err(),
+            "pane 'terminal-1' already exists"
+        );
+        let windows = Windows {
+            map: Mutex::new(registry),
+        };
+        assert!(owned_pane_cwd(&windows, "project-2", "terminal-1").is_err());
     }
 
     #[test]

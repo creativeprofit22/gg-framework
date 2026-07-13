@@ -33,7 +33,7 @@ export interface WorkspaceNodeProps {
   onUserTargetChange: () => void;
   registerInput: AgentPaneProps["registerInput"];
   onRequestTerminalPaneClose: (paneId: WorkspacePaneId, running: boolean) => void;
-  onRestartTerminalPane: (paneId: WorkspacePaneId, target: WorkspacePaneTarget) => void;
+  onRestartTerminalPane: (paneId: WorkspacePaneId, target: WorkspacePaneTarget) => Promise<void>;
   onOpenPaneWindow: (paneId: WorkspacePaneId) => void;
   onSplitFocusedPane: (direction: SplitDirection) => void;
   onRequestPaneClose: (paneId: WorkspacePaneId) => void;

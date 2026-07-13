@@ -7,6 +7,7 @@ import {
   onWindowOrder,
   openPaneInNewWindow,
   openTerminalInNewWindow,
+  registerStoppedTerminalTarget,
   setWindowTitle,
   validateWorkspaceTarget,
   windowLabel,
@@ -467,10 +468,13 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   );
 
   const restartTerminalPane = useCallback(
-    (paneId: WorkspacePaneId, target: WorkspacePaneTarget): void => {
+    async (paneId: WorkspacePaneId, target: WorkspacePaneTarget): Promise<void> => {
       const descriptor = layout.panes[paneId];
-      if (descriptor?.kind !== "terminal") return;
-      if (descriptor.cwd !== target.cwd || descriptor.sessionPath !== target.sessionPath) return;
+      if (descriptor?.kind !== "terminal") throw new Error("terminal pane target is unavailable");
+      if (descriptor.cwd !== target.cwd || descriptor.sessionPath !== target.sessionPath) {
+        throw new Error("terminal pane target changed before restart");
+      }
+      await registerStoppedTerminalTarget(paneId, descriptor.cwd, descriptor.sessionPath);
     },
     [layout.panes],
   );

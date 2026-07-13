@@ -110,7 +110,7 @@ beforeEach(() => {
 
 describe("TerminalPane", () => {
   it("creates no PTY while restored stopped and creates exactly one for the owner on restart", async () => {
-    const onRestart = vi.fn();
+    const onRestart = vi.fn(() => Promise.resolve());
     const onRequestClose = vi.fn();
     render(
       <TerminalPane
@@ -130,6 +130,35 @@ describe("TerminalPane", () => {
     expect(mocks.createTerminal).toHaveBeenCalledOnce();
     expect(mocks.createTerminal).toHaveBeenCalledWith("secondary", 80, 24, expect.any(Function));
     expect(screen.getByText("C:\\project · cmd.exe")).toBeTruthy();
+  });
+
+  it("waits for restart registration and stays stopped when registration fails", async () => {
+    let rejectRegistration!: (cause: Error) => void;
+    const onRestart = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectRegistration = reject;
+        }),
+    );
+    render(
+      <TerminalPane
+        paneId="secondary"
+        initiallyStopped
+        onRestart={onRestart}
+        onRequestClose={vi.fn()}
+      />,
+    );
+
+    const restart = screen.getByRole("button", { name: "Restart terminal" });
+    fireEvent.click(restart);
+    fireEvent.click(restart);
+    expect(onRestart).toHaveBeenCalledOnce();
+    expect(mocks.createTerminal).not.toHaveBeenCalled();
+
+    await act(async () => rejectRegistration(new Error("target registration rejected")));
+    expect(screen.getByText("Stopped")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("target registration rejected");
+    expect(mocks.createTerminal).not.toHaveBeenCalled();
   });
 
   it("applies controlled height and reports user resizing without recreating xterm", () => {

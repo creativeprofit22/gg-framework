@@ -480,10 +480,23 @@ describe("terminal-only native workspace", () => {
   );
 
   it.each([
-    ["extra pane", v7(leaf("terminal-1"), { "terminal-1": terminal("/a"), extra: agent("/b") }, "terminal-1")],
-    ["split root", v7(split(leaf("terminal-1"), leaf("terminal-2")), { "terminal-1": terminal("/a"), "terminal-2": terminal("/a") }, "terminal-1")],
+    [
+      "extra pane",
+      v7(leaf("terminal-1"), { "terminal-1": terminal("/a"), extra: agent("/b") }, "terminal-1"),
+    ],
+    [
+      "split root",
+      v7(
+        split(leaf("terminal-1"), leaf("terminal-2")),
+        { "terminal-1": terminal("/a"), "terminal-2": terminal("/a") },
+        "terminal-1",
+      ),
+    ],
     ["blank cwd", v7(leaf("terminal-1"), { "terminal-1": terminal("") }, "terminal-1")],
-    ["invalid session", v7(leaf("terminal-1"), { "terminal-1": { ...terminal("/a"), sessionPath: 1 } }, "terminal-1")],
+    [
+      "invalid session",
+      v7(leaf("terminal-1"), { "terminal-1": { ...terminal("/a"), sessionPath: 1 } }, "terminal-1"),
+    ],
     ["agent descriptor", v7(leaf("terminal-1"), { "terminal-1": agent("/a") }, "terminal-1")],
     ["wrong focus", v7(leaf("terminal-1"), { "terminal-1": terminal("/a") }, "primary")],
     ["wrong leaf id", v7(leaf("terminal-2"), { "terminal-2": terminal("/a") }, "terminal-2")],

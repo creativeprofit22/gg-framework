@@ -242,6 +242,124 @@ describe("TerminalPane", () => {
     expect(terminalClient.resize).not.toHaveBeenCalled();
   });
 
+  it("sends one catch-up resize before buffered input when size changes during create", async () => {
+    let resolveReady!: (value: TerminalInfo) => void;
+    const ready = new Promise<TerminalInfo>((resolve) => {
+      resolveReady = resolve;
+    });
+    const calls: string[] = [];
+    const terminalClient = makeClient(ready);
+    vi.mocked(terminalClient.resize).mockImplementation(async () => {
+      calls.push("resize");
+    });
+    vi.mocked(terminalClient.input).mockImplementation(async () => {
+      calls.push("input");
+    });
+    mocks.createTerminal.mockReturnValue(terminalClient);
+    render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
+
+    mocks.terminal.cols = 100;
+    mocks.terminal.rows = 30;
+    const hostObserver = mocks.resizeObservers.find(({ target }) =>
+      target?.classList.contains("terminal-pane-xterm"),
+    );
+    act(() => {
+      hostObserver?.callback();
+      mocks.data?.("buffered");
+    });
+    await act(async () => Promise.resolve());
+    expect(terminalClient.resize).not.toHaveBeenCalled();
+    expect(terminalClient.input).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveReady(info);
+      await ready;
+    });
+    await screen.findByText("Running");
+    await waitFor(() => expect(terminalClient.input).toHaveBeenCalledOnce());
+    expect(terminalClient.resize).toHaveBeenCalledOnce();
+    expect(terminalClient.resize).toHaveBeenCalledWith(100, 30);
+    expect(calls).toEqual(["resize", "input"]);
+  });
+
+  it("sends no catch-up resize when pending fitted dimensions are unchanged", async () => {
+    let resolveReady!: (value: TerminalInfo) => void;
+    const ready = new Promise<TerminalInfo>((resolve) => {
+      resolveReady = resolve;
+    });
+    const terminalClient = makeClient(ready);
+    mocks.createTerminal.mockReturnValue(terminalClient);
+    render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
+
+    const hostObserver = mocks.resizeObservers.find(({ target }) =>
+      target?.classList.contains("terminal-pane-xterm"),
+    );
+    act(() => hostObserver?.callback());
+    await act(async () => {
+      resolveReady(info);
+      await ready;
+    });
+
+    await screen.findByText("Running");
+    expect(terminalClient.resize).not.toHaveBeenCalled();
+  });
+
+  it("uses only the latest dimensions after multiple pending size changes", async () => {
+    let resolveReady!: (value: TerminalInfo) => void;
+    const ready = new Promise<TerminalInfo>((resolve) => {
+      resolveReady = resolve;
+    });
+    const terminalClient = makeClient(ready);
+    mocks.createTerminal.mockReturnValue(terminalClient);
+    render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
+
+    const hostObserver = mocks.resizeObservers.find(({ target }) =>
+      target?.classList.contains("terminal-pane-xterm"),
+    );
+    act(() => {
+      mocks.terminal.cols = 90;
+      mocks.terminal.rows = 25;
+      hostObserver?.callback();
+      mocks.terminal.cols = 120;
+      mocks.terminal.rows = 40;
+      hostObserver?.callback();
+    });
+    await act(async () => {
+      resolveReady(info);
+      await ready;
+    });
+
+    await screen.findByText("Running");
+    expect(terminalClient.resize).toHaveBeenCalledOnce();
+    expect(terminalClient.resize).toHaveBeenCalledWith(120, 40);
+  });
+
+  it("sends no resize or buffered input when create fails", async () => {
+    let rejectReady!: (cause: Error) => void;
+    const ready = new Promise<TerminalInfo>((_resolve, reject) => {
+      rejectReady = reject;
+    });
+    const terminalClient = makeClient(ready);
+    mocks.createTerminal.mockReturnValue(terminalClient);
+    render(<TerminalPane paneId="primary" onRequestClose={vi.fn()} />);
+
+    mocks.terminal.cols = 100;
+    mocks.terminal.rows = 30;
+    const hostObserver = mocks.resizeObservers.find(({ target }) =>
+      target?.classList.contains("terminal-pane-xterm"),
+    );
+    act(() => {
+      hostObserver?.callback();
+      mocks.data?.("buffered");
+    });
+    await act(async () => Promise.resolve());
+    await act(async () => rejectReady(new Error("spawn failed")));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("spawn failed");
+    expect(terminalClient.resize).not.toHaveBeenCalled();
+    expect(terminalClient.input).not.toHaveBeenCalled();
+  });
+
   it("resizes only an existing PTY when its fitted dimensions change", async () => {
     vi.useFakeTimers();
     const terminalClient = makeClient();

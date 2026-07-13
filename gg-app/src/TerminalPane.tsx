@@ -3,7 +3,12 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { X } from "lucide-react";
-import { createTerminal, openExternalTerminal, type TerminalInfo } from "./agent";
+import {
+  createTerminal,
+  openExternalTerminal,
+  type TerminalClient,
+  type TerminalInfo,
+} from "./agent";
 import { TerminalAdapter, validTerminalSize } from "./terminal";
 
 type TerminalStatus = "stopped" | "starting" | "running" | "exited" | "error";
@@ -125,7 +130,8 @@ export function TerminalPane({
 
     let adapter: TerminalAdapter | null = null;
     let ptyReady = false;
-    let lastPtySize = { cols: initialCols, rows: initialRows };
+    let latestFittedSize = { cols: initialCols, rows: initialRows };
+    let lastPtySize = latestFittedSize;
     let transportStopped = false;
     let pendingFinish: (() => void) | null = null;
     const pendingOutput: Uint8Array[] = [];
@@ -163,8 +169,32 @@ export function TerminalPane({
         });
       }
     });
+    const readyAfterCatchUp = client.ready.then(async (created) => {
+      terminalId = created.terminalId;
+      if (disposed) return created;
 
-    adapter = new TerminalAdapter(terminal, client, {
+      ptyReady = true;
+      const catchUpSize = latestFittedSize;
+      lastPtySize = catchUpSize;
+      if (catchUpSize.cols !== initialCols || catchUpSize.rows !== initialRows) {
+        await client.resize(catchUpSize.cols, catchUpSize.rows);
+      }
+      return created;
+    });
+    const orderedClient: TerminalClient = {
+      ready: readyAfterCatchUp,
+      async input(data) {
+        await readyAfterCatchUp;
+        await client.input(data);
+      },
+      async resize(cols, rows) {
+        await readyAfterCatchUp;
+        await client.resize(cols, rows);
+      },
+      close: () => client.close(),
+    };
+
+    adapter = new TerminalAdapter(terminal, orderedClient, {
       onError(message) {
         const failedDuringStartup = lifecycle === "starting";
         if (disposed || !finishLifecycle("error")) return;
@@ -191,12 +221,9 @@ export function TerminalPane({
     for (const data of pendingOutput.splice(0)) adapter.write(data);
     (pendingFinish as (() => void) | null)?.();
 
-    void client.ready
+    void readyAfterCatchUp
       .then((created) => {
-        terminalId = created.terminalId;
         if (disposed) return;
-        ptyReady = true;
-        lastPtySize = { cols: created.cols, rows: created.rows };
         setInfo(created);
         if (lifecycle === "starting" && !transportStopped) {
           lifecycle = "running";
@@ -217,12 +244,14 @@ export function TerminalPane({
       if (disposed) return;
       try {
         fitAddon.fit();
+        if (!validTerminalSize(terminal.cols, terminal.rows)) return;
+
+        latestFittedSize = { cols: terminal.cols, rows: terminal.rows };
         if (
           ptyReady &&
-          validTerminalSize(terminal.cols, terminal.rows) &&
           (terminal.cols !== lastPtySize.cols || terminal.rows !== lastPtySize.rows)
         ) {
-          lastPtySize = { cols: terminal.cols, rows: terminal.rows };
+          lastPtySize = latestFittedSize;
           adapter?.resize(terminal.cols, terminal.rows);
         }
       } catch {

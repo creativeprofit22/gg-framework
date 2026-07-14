@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   arrangeAllWindows,
+  disposePaneSession,
   focusWindowByOffset,
   newWindow,
   onWindowOrder,
@@ -28,6 +29,7 @@ import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
 import {
   addTerminalWorkspacePane,
+  bootstrapDefaultTerminalWorkspacePane,
   loadWorkspaceLayout,
   MAX_WORKSPACE_LEAVES,
   MAX_WORKSPACE_PANES,
@@ -135,34 +137,52 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     toast(message, "warning", 4000, false);
   }, []);
 
-  const updateSnapshot = useCallback((snapshot: PaneSnapshot): void => {
-    if (!activePaneIdsRef.current.has(snapshot.paneId)) return;
-    setSnapshots((previous) => {
-      const current = previous[snapshot.paneId];
-      if (
-        current?.cwd === snapshot.cwd &&
-        current.sessionPath === snapshot.sessionPath &&
-        current.sessionTitle === snapshot.sessionTitle &&
-        current.projectBound === snapshot.projectBound &&
-        current.restoreChecked === snapshot.restoreChecked &&
-        current.activeWork === snapshot.activeWork
-      )
-        return previous;
-      return { ...previous, [snapshot.paneId]: snapshot };
-    });
-    setLayout((previous) => ({
-      ...previous,
-      panes: {
-        ...previous.panes,
-        [snapshot.paneId]:
-          snapshot.projectBound && snapshot.cwd
-            ? { cwd: snapshot.cwd, sessionPath: snapshot.sessionPath }
-            : snapshot.restoreChecked
-              ? null
-              : previous.panes[snapshot.paneId],
-      },
-    }));
-  }, []);
+  const updateSnapshot = useCallback(
+    (snapshot: PaneSnapshot): void => {
+      if (!activePaneIdsRef.current.has(snapshot.paneId)) return;
+      setSnapshots((previous) => {
+        const current = previous[snapshot.paneId];
+        if (
+          current?.cwd === snapshot.cwd &&
+          current.sessionPath === snapshot.sessionPath &&
+          current.sessionTitle === snapshot.sessionTitle &&
+          current.projectBound === snapshot.projectBound &&
+          current.restoreChecked === snapshot.restoreChecked &&
+          current.activeWork === snapshot.activeWork
+        )
+          return previous;
+        return { ...previous, [snapshot.paneId]: snapshot };
+      });
+      setLayout((previous) => {
+        const hydrated = {
+          ...previous,
+          panes: {
+            ...previous.panes,
+            [snapshot.paneId]:
+              snapshot.projectBound && snapshot.cwd
+                ? { cwd: snapshot.cwd, sessionPath: snapshot.sessionPath }
+                : snapshot.restoreChecked
+                  ? null
+                  : previous.panes[snapshot.paneId],
+          },
+        };
+        const bootstrapped =
+          snapshot.paneId === PRIMARY_PANE_ID &&
+          snapshot.restoreChecked &&
+          snapshot.projectBound &&
+          Boolean(snapshot.cwd?.trim())
+            ? bootstrapDefaultTerminalWorkspacePane(hydrated)
+            : hydrated;
+        if (bootstrapped !== hydrated) {
+          focusedPaneIdRef.current = bootstrapped.focusedPaneId;
+          activePaneIdsRef.current = new Set(workspaceLayoutLeafIds(bootstrapped.root));
+          markLayoutChanged();
+        }
+        return bootstrapped;
+      });
+    },
+    [markLayoutChanged],
+  );
 
   const registerInput = useCallback((paneId: string, actions: PaneInputActions | null): void => {
     if (actions) inputActionsRef.current.set(paneId, actions);
@@ -426,6 +446,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const closePane = useCallback(
     (paneId: WorkspacePaneId): void => {
       if (paneId === PRIMARY_PANE_ID || !leafIds.includes(paneId)) return;
+      if (layout.panes[paneId]?.kind === "terminal") {
+        void disposePaneSession(paneId).catch(() => {});
+      }
       for (const stop of resizeCleanupRef.current.values()) stop();
       setConfirmPaneCloseId(null);
       setConfirmTerminalCloseId(null);
@@ -448,7 +471,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         if (nextFocus) inputActionsRef.current.get(nextFocus)?.focus();
       });
     },
-    [leafIds, markLayoutChanged],
+    [layout.panes, leafIds, markLayoutChanged],
   );
 
   const requestPaneClose = useCallback(

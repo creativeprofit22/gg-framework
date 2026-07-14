@@ -4,6 +4,7 @@ import {
   MAX_WORKSPACE_LAYOUT_LEAVES,
   MAX_WORKSPACE_LEAVES,
   addTerminalWorkspacePane,
+  bootstrapDefaultTerminalWorkspacePane,
   defaultWorkspaceLayout,
   isTerminalPaneMoveRequest,
   isTerminalPanePlacement,
@@ -559,6 +560,90 @@ describe("v8 reducers", () => {
       focusedPaneId: "primary",
       defaultTerminalBootstrap: "pending",
     });
+  });
+  it("bootstraps a fresh bound primary exactly once", () => {
+    const { storage } = store();
+    const fresh = loadWorkspaceLayout(storage, "main").layout;
+    const hydrated = {
+      ...fresh,
+      panes: { primary: agent("/project", "/session") },
+    };
+
+    const bootstrapped = bootstrapDefaultTerminalWorkspacePane(hydrated);
+
+    expect(workspaceLayoutLeafIds(bootstrapped.root)).toEqual(["primary", "terminal-1"]);
+    expect(bootstrapped.root).toEqual(dock(leaf("primary"), leaf("terminal-1")));
+    expect(bootstrapped.panes["terminal-1"]).toEqual(terminal("/project", "/session"));
+    expect(bootstrapped.defaultTerminalBootstrap).toBe("complete");
+    expect(bootstrapDefaultTerminalWorkspacePane(bootstrapped)).toBe(bootstrapped);
+  });
+
+  it("leaves pending when insertion is unsafe", () => {
+    const { storage } = store();
+    const pending = loadWorkspaceLayout(storage, "main").layout;
+    expect(bootstrapDefaultTerminalWorkspacePane(pending)).toBe(pending);
+    expect(pending.defaultTerminalBootstrap).toBe("pending");
+
+    const extraVisible = {
+      ...pending,
+      root: split(leaf("primary"), leaf("pane-1")),
+      panes: { primary: agent("/project"), "pane-1": agent("/other") },
+    };
+    expect(bootstrapDefaultTerminalWorkspacePane(extraVisible)).toBe(extraVisible);
+    expect(extraVisible.defaultTerminalBootstrap).toBe("pending");
+
+    const existingTerminal = {
+      ...pending,
+      root: dock(leaf("primary"), leaf("terminal-1")),
+      panes: { primary: agent("/project"), "terminal-1": terminal("/project") },
+    };
+    expect(bootstrapDefaultTerminalWorkspacePane(existingTerminal)).toBe(existingTerminal);
+    expect(existingTerminal.defaultTerminalBootstrap).toBe("pending");
+  });
+
+  it("does not change complete, migrated, or terminal-only layouts", () => {
+    const complete = defaultWorkspaceLayout();
+    expect(bootstrapDefaultTerminalWorkspacePane(complete)).toBe(complete);
+
+    const migratedV6 = parseWorkspaceLayout(v6()).layout;
+    expect(bootstrapDefaultTerminalWorkspacePane(migratedV6)).toBe(migratedV6);
+
+    const migratedV7 = parseWorkspaceLayout(
+      v7(split(leaf("primary"), leaf("secondary")), {
+        primary: agent("/a"),
+        secondary: agent("/b"),
+      }),
+    ).layout;
+    expect(bootstrapDefaultTerminalWorkspacePane(migratedV7)).toBe(migratedV7);
+
+    const terminalOnly = terminalOnlyWorkspaceLayout(target("/project"))!;
+    expect(bootstrapDefaultTerminalWorkspacePane(terminalOnly)).toBe(terminalOnly);
+  });
+
+  it("persists completion with terminal insertion in one canonical record", () => {
+    const { values, storage } = store();
+    const fresh = loadWorkspaceLayout(storage, "main").layout;
+    const bootstrapped = bootstrapDefaultTerminalWorkspacePane({
+      ...fresh,
+      panes: { primary: agent("/project", "/session") },
+    });
+
+    expect(saveWorkspaceLayout(storage, "main", bootstrapped)).toBe(true);
+    const saved = JSON.parse(values.get(recursiveWorkspaceLayoutKey("main"))!);
+    expect(saved.defaultTerminalBootstrap).toBe("complete");
+    expect(
+      Object.values(saved.panes).filter(
+        (descriptor) =>
+          typeof descriptor === "object" &&
+          descriptor !== null &&
+          (descriptor as { kind?: string }).kind === "terminal",
+      ),
+    ).toEqual([terminal("/project", "/session")]);
+
+    const loaded = loadWorkspaceLayout(storage, "main");
+    expect(loaded.status).toBe("valid");
+    expect(workspaceLayoutLeafIds(loaded.layout.root)).toEqual(["primary", "terminal-1"]);
+    expect(loaded.layout.defaultTerminalBootstrap).toBe("complete");
   });
 });
 

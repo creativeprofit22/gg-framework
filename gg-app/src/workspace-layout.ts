@@ -373,6 +373,32 @@ export function addTerminalWorkspacePane(
       })
     : layout;
 }
+export function bootstrapDefaultTerminalWorkspacePane(layout: WorkspaceLayout): WorkspaceLayout {
+  const visible = workspaceLayoutLeafIds(layout.root);
+  const paneKeys = Object.keys(layout.panes);
+  const primaryTarget = agentTarget(layout.panes[PRIMARY_PANE_ID]);
+  if (
+    layout.defaultTerminalBootstrap !== "pending" ||
+    layout.root.type !== "leaf" ||
+    layout.root.paneId !== PRIMARY_PANE_ID ||
+    visible.length !== 1 ||
+    paneKeys.length !== 1 ||
+    paneKeys[0] !== PRIMARY_PANE_ID ||
+    !primaryTarget ||
+    !primaryTarget.cwd.trim()
+  )
+    return layout;
+
+  const inserted = addTerminalWorkspacePane(layout, PRIMARY_PANE_ID);
+  return inserted === layout
+    ? layout
+    : normalizeLayout({
+        root: inserted.root,
+        focusedPaneId: inserted.focusedPaneId,
+        panes: inserted.panes,
+        defaultTerminalBootstrap: "complete",
+      });
+}
 function updateNodeAtPath(
   node: WorkspaceLayoutNode,
   path: WorkspaceLayoutPath,

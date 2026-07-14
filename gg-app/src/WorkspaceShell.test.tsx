@@ -16,6 +16,7 @@ const terminalMock = vi.hoisted(() => ({
 
 const bridge = vi.hoisted(() => ({
   arrangeAllWindows: vi.fn(() => Promise.resolve()),
+  disposePaneSession: vi.fn(() => Promise.resolve()),
   focusWindowByOffset: vi.fn(() => Promise.resolve()),
   newWindow: vi.fn(() => Promise.resolve()),
   openPaneInNewWindow: vi.fn(() => Promise.resolve()),
@@ -50,6 +51,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 }));
 vi.mock("./agent", () => ({
   arrangeAllWindows: bridge.arrangeAllWindows,
+  disposePaneSession: bridge.disposePaneSession,
   focusWindowByOffset: bridge.focusWindowByOffset,
   newWindow: bridge.newWindow,
   openPaneInNewWindow: bridge.openPaneInNewWindow,
@@ -281,6 +283,54 @@ function setLegacyWorkspaceLayout(raw: string): void {
   localStorage.removeItem("gg-workspace-layout-recursive:main");
   localStorage.setItem("gg-workspace-layout:main", raw);
 }
+type RecursiveTestNode = {
+  type: "leaf" | "split";
+  paneId?: string;
+  first?: unknown;
+  second?: unknown;
+};
+
+type SavedRecursiveLayout = {
+  root: RecursiveTestNode;
+  panes: Record<string, unknown>;
+  defaultTerminalBootstrap?: unknown;
+};
+
+function recursiveLeafIds(node: RecursiveTestNode): string[] {
+  if (node.type === "leaf") return [node.paneId ?? ""];
+  return [
+    ...recursiveLeafIds(node.first as RecursiveTestNode),
+    ...recursiveLeafIds(node.second as RecursiveTestNode),
+  ];
+}
+
+function savedRecursiveLayout(): SavedRecursiveLayout {
+  return JSON.parse(
+    localStorage.getItem("gg-workspace-layout-recursive:main") ?? "null",
+  ) as SavedRecursiveLayout;
+}
+
+function saveCompletePrimarySecondaryLayout(): void {
+  localStorage.setItem(
+    "gg-workspace-layout-recursive:main",
+    JSON.stringify({
+      version: 8,
+      root: {
+        type: "split",
+        direction: "horizontal",
+        size: { type: "ratio", value: 50 },
+        first: { type: "leaf", paneId: "primary" },
+        second: { type: "leaf", paneId: "secondary" },
+      },
+      focusedPaneId: "primary",
+      defaultTerminalBootstrap: "complete",
+      panes: {
+        primary: { kind: "agent", cwd: "/valid/primary", sessionPath: null },
+        secondary: { kind: "agent", cwd: "/valid/secondary", sessionPath: null },
+      },
+    }),
+  );
+}
 
 function savePhase0LeafCapLayout(leafCount: 7 | 8): void {
   const ids = [
@@ -324,6 +374,7 @@ function savePhase0LeafCapLayout(leafCount: 7 | 8): void {
 beforeEach(() => {
   vi.stubGlobal("CSS", { escape: (value: string) => value });
   vi.clearAllMocks();
+  bridge.disposePaneSession.mockResolvedValue(undefined);
   bridge.openPaneInNewWindow.mockResolvedValue(undefined);
   bridge.openTerminalInNewWindow.mockResolvedValue(undefined);
   bridge.registerStoppedTerminalTarget.mockResolvedValue(undefined);
@@ -445,6 +496,143 @@ describe("WorkspaceShell recursive rendering", () => {
   });
 });
 
+describe("WorkspaceShell default terminal bootstrap", () => {
+  it("missing layout binds primary then auto-creates one stopped terminal and saves complete", async () => {
+    localStorage.clear();
+
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(screen.getAllByTestId("terminal-terminal-1")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Restart terminal" })).toHaveLength(1);
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
+    expect(bridge.registerStoppedTerminalTarget).not.toHaveBeenCalled();
+    await waitFor(() => {
+      const saved = savedRecursiveLayout();
+      expect(saved.defaultTerminalBootstrap).toBe("complete");
+      expect(recursiveLeafIds(saved.root)).toEqual(["primary", "terminal-1"]);
+      expect(saved.panes["terminal-1"]).toEqual({
+        kind: "terminal",
+        stopped: true,
+        cwd: "/work/primary",
+        sessionPath: "/sessions/primary.jsonl",
+      });
+    });
+  });
+
+  it("repeated renders and saved complete state do not add another terminal", async () => {
+    localStorage.clear();
+    const first = render(<WorkspaceShell renderPane={renderPane} />);
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    await waitFor(() => expect(savedRecursiveLayout().defaultTerminalBootstrap).toBe("complete"));
+
+    first.unmount();
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+    expect(screen.getAllByTestId("terminal-terminal-1")).toHaveLength(1);
+    await waitFor(() => {
+      const saved = savedRecursiveLayout();
+      expect(saved.panes["terminal-1"]).toBeTruthy();
+      expect(saved.panes["terminal-2"]).toBeUndefined();
+      expect(recursiveLeafIds(saved.root)).toEqual(["primary", "terminal-1"]);
+    });
+  });
+
+  it("closing the default terminal prevents resurrection after reload and rebind", async () => {
+    localStorage.clear();
+    const first = render(<WorkspaceShell renderPane={renderPane} />);
+    expect(await screen.findByTestId("terminal-terminal-1")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
+
+    await waitFor(() => expect(bridge.disposePaneSession).toHaveBeenCalledWith("terminal-1"));
+    await waitFor(() => {
+      const saved = savedRecursiveLayout();
+      expect(saved.defaultTerminalBootstrap).toBe("complete");
+      expect(saved.panes["terminal-1"]).toBeUndefined();
+      expect(recursiveLeafIds(saved.root)).toEqual(["primary"]);
+    });
+
+    first.unmount();
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByTestId("pane-primary")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("terminal-terminal-1")).toBeNull());
+    await waitFor(() => {
+      const saved = savedRecursiveLayout();
+      expect(saved.panes["terminal-1"]).toBeUndefined();
+      expect(saved.panes["terminal-2"]).toBeUndefined();
+    });
+  });
+
+  it("existing valid and migrated layouts bind without auto-insertion", async () => {
+    saveCompletePrimarySecondaryLayout();
+    const valid = render(<WorkspaceShell renderPane={renderPane} />);
+    expect(await screen.findByTestId("pane-secondary")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("terminal-terminal-1")).toBeNull());
+    expect(recursiveLeafIds(savedRecursiveLayout().root)).toEqual(["primary", "secondary"]);
+
+    valid.unmount();
+    setLegacyWorkspaceLayout(
+      JSON.stringify({
+        version: 6,
+        root: {
+          type: "split",
+          direction: "horizontal",
+          ratio: 50,
+          first: { type: "leaf", paneId: "primary" },
+          second: { type: "leaf", paneId: "secondary" },
+        },
+        focusedPaneId: "primary",
+        panes: {
+          primary: { cwd: "/legacy/primary", sessionPath: null },
+          secondary: { cwd: "/legacy/secondary", sessionPath: null },
+        },
+        terminal: { open: false, ownerPaneId: null, dockHeightPx: 260 },
+      }),
+    );
+    render(<WorkspaceShell renderPane={renderPane} />);
+    expect(await screen.findByTestId("pane-secondary")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("terminal-terminal-1")).toBeNull());
+    await waitFor(() => {
+      expect(recursiveLeafIds(savedRecursiveLayout().root)).toEqual(["primary", "secondary"]);
+    });
+  });
+
+  it("stale primary and non-primary bindings do not bootstrap", async () => {
+    function SelectivePane({ paneId, onSnapshot }: AgentPaneProps): React.ReactElement {
+      useEffect(() => {
+        onSnapshot({
+          paneId,
+          cwd: paneId === "primary" ? null : `/work/${paneId}`,
+          sessionPath: paneId === "primary" ? null : `/sessions/${paneId}.jsonl`,
+          sessionTitle: null,
+          projectBound: paneId !== "primary",
+          restoreChecked: true,
+          activeWork: false,
+        });
+      }, [onSnapshot, paneId]);
+      return <div data-testid={`pane-${paneId}`} />;
+    }
+
+    localStorage.clear();
+    const stalePrimary = render(
+      <WorkspaceShell renderPane={(props) => <SelectivePane {...props} />} />,
+    );
+    expect(await screen.findByTestId("pane-primary")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("terminal-terminal-1")).toBeNull());
+    expect(localStorage.getItem("gg-workspace-layout-recursive:main")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    expect(await screen.findByTestId("pane-pane-1")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("terminal-terminal-1")).toBeNull());
+    expect(localStorage.getItem("gg-workspace-layout-recursive:main")).toBeNull();
+
+    stalePrimary.unmount();
+  });
+});
+
 describe("WorkspaceShell v7 terminal rendering", () => {
   function saveStoppedTerminalLayout(
     focusedPaneId = "primary",
@@ -501,6 +689,43 @@ describe("WorkspaceShell v7 terminal rendering", () => {
     await act(async () => resolveRegistration());
     await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledOnce());
     expect(terminalMock.mounts).toHaveBeenCalledWith("terminal-1");
+  });
+
+  it("disposes a restarted running terminal target so terminal-1 can be reused", async () => {
+    const registeredTargets = new Set<string>();
+    bridge.registerStoppedTerminalTarget.mockImplementation(async (...args: unknown[]) => {
+      const [paneId] = args as [string];
+      if (registeredTargets.has(paneId)) throw new Error(`pane '${paneId}' already exists`);
+      registeredTargets.add(paneId);
+    });
+    bridge.disposePaneSession.mockImplementation(async (...args: unknown[]) => {
+      const [paneId] = args as [string];
+      registeredTargets.delete(paneId);
+    });
+    saveStoppedTerminalLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Restart terminal" }));
+    await waitFor(() => expect(terminalMock.mounts).toHaveBeenCalledWith("terminal-1"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close Terminal" }));
+
+    await waitFor(() => expect(bridge.disposePaneSession).toHaveBeenCalledWith("terminal-1"));
+    await waitFor(() => expect(screen.queryByTestId("terminal-terminal-1")).toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Restart terminal" }));
+
+    await waitFor(() => expect(bridge.registerStoppedTerminalTarget).toHaveBeenCalledTimes(2));
+    expect(bridge.registerStoppedTerminalTarget).toHaveBeenLastCalledWith(
+      "terminal-1",
+      "/work/primary",
+      "/sessions/primary.jsonl",
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("keeps a copied terminal stopped and shows registration rejection", async () => {

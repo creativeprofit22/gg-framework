@@ -182,63 +182,115 @@ Enter plan mode and obtain approval before implementation; after focused checks 
 
 ## Phase 1 — Default terminal bootstrap and practical-unlimited creation
 
-### Goal
+### Phase 1A — Default terminal bootstrap
 
-Give each genuinely new project-bound workspace one stopped terminal exactly once and remove the normal visible terminal-count ceiling.
+#### Goal
 
-### Exact scope
+Give each genuinely new project-bound workspace one stopped terminal exactly once.
+
+#### Exact scope
 
 - Create fresh missing-layout workspaces with one primary agent leaf and bootstrap-pending metadata.
 - After the primary pane reports a successful, stable project binding, atomically add one stopped terminal sibling and mark bootstrap complete.
 - Persist bootstrap completion in the same saved layout update as terminal insertion.
 - Keep bootstrap pending if insertion cannot safely complete; retry only on a later valid binding, never after completion.
 - Keep completion persisted when the default terminal is closed.
-- Remove terminal creation checks based on the old small leaf limit; retain the 64-total-leaf guard.
-- Keep agent-pane limits unchanged unless separately approved.
 - Keep all restored and bootstrapped terminals stopped and require explicit restart.
 
-### Invariants
+#### Invariants
 
 - No terminal is created before project binding is validated.
 - A fresh workspace receives at most one automatic terminal.
 - Existing, migrated, recovered, and terminal-only layouts receive no automatic terminal.
 - Closing the automatic terminal never causes resurrection after reload, rebind, or app restart.
-- Manual creation preserves project/session target identity and never starts a PTY automatically.
-- Terminal creation cannot produce a 65th total leaf.
 - Failed bootstrap does not persist a false `complete` state.
 
-### Files expected to change
+#### Files expected to change
 
 - `gg-app/src/workspace-layout.ts`
 - `gg-app/src/workspace-layout.test.ts`
 - `gg-app/src/WorkspaceShell.tsx`
 - `gg-app/src/WorkspaceShell.test.tsx`
-- `roadmap.md` only to record phase completion evidence after implementation
+- `roadmap.md` only to record Phase 1A evidence after implementation
 
-### Focused tests
+#### Focused tests
 
 - Missing layout → project binding → one stopped terminal plus bootstrap-complete in one resulting state.
 - Repeated snapshots, rerenders, and binding events do not add another terminal.
 - Close default terminal → save/reload/rebind → terminal remains closed.
 - Existing valid and migrated layouts bind without terminal insertion.
 - Binding mismatch, stale target, rejected layout, and failed insertion leave safe state.
-- Manual terminal creation succeeds beyond four terminals and stops at the 64th total leaf.
 - No terminal registration/start call occurs during bootstrap or restore.
 
-### Visual/manual proof
+#### Visual/manual proof
 
 - Create a new workspace, bind a project, and show one agent pane plus one stopped terminal with a visible restart action.
 - Close that terminal, restart the dev app, and show that it stays closed.
-- Open at least six terminals and show no four-terminal cap or cap messaging.
 - Reopen an existing saved multi-pane workspace and show no automatic terminal was added.
 
-### Stop condition
+#### Stop condition
 
-Stop when bootstrap-once persistence, no-resurrection behavior, compatibility, stopped lifecycle, and creation beyond four terminals are proven; do not implement movement or relocate controls yet.
+Stop when bootstrap-once persistence, no-resurrection behavior, compatibility, and stopped lifecycle are proven; do not remove the old small terminal-count ceiling, implement movement, or relocate controls yet.
 
-### Phase gate
+#### Phase gate
 
-Enter plan mode and obtain approval before implementation; after focused checks and real-app bootstrap proof pass, commit Phase 1 and do not start Phase 2 before that commit exists.
+Enter plan mode and obtain approval before implementation; after focused checks and real-app bootstrap proof pass, commit Phase 1A and do not start Phase 1B before that commit exists.
+
+#### Phase 1A completion evidence
+
+- **Reducer bootstrap suite:** `pnpm --filter gg-app exec vitest run src/workspace-layout.test.ts` — 55/55 passed.
+- **Shell bootstrap suite:** `pnpm --filter gg-app exec vitest run src/WorkspaceShell.test.tsx` — 65/65 passed; assertions cover auto-insertion, idempotence, close/no-resurrection, existing/migrated no-insertion, stale/non-primary no-insertion, and no PTY registration/start during bootstrap.
+- **GG App gates:** `pnpm --filter gg-app check`, `pnpm --filter gg-app lint`, and `pnpm --filter gg-app format:check` passed.
+- **Broader regression suite:** `pnpm --filter gg-app test` passed 322/322 tests across 28 files.
+- **Implementation outcome:** fresh missing-layout primary binding now atomically creates exactly one stopped `terminal-1` descriptor and persists `defaultTerminalBootstrap: "complete"`; complete, migrated, terminal-only, unsafe pending, and closed-default-terminal layouts remain structurally unchanged.
+- **Phase 1A commit:** this commit; resolve its immutable hash with `git rev-parse HEAD` after checkout.
+
+### Phase 1B — Practical-unlimited terminal creation
+
+#### Goal
+
+Remove the normal visible terminal-count ceiling while preserving the 64-total-leaf corruption/resource guard.
+
+#### Exact scope
+
+- Remove terminal creation checks based on the old small leaf limit; retain the 64-total-leaf guard.
+- Keep agent-pane limits unchanged unless separately approved.
+- Manual creation preserves project/session target identity and never starts a PTY automatically.
+- Terminal creation cannot produce a 65th total leaf.
+
+#### Files expected to change
+
+- `gg-app/src/workspace-layout.ts`
+- `gg-app/src/workspace-layout.test.ts`
+- `gg-app/src/WorkspaceShell.tsx`
+- `gg-app/src/WorkspaceShell.test.tsx`
+- `roadmap.md` only to record Phase 1B evidence after implementation
+
+#### Focused tests
+
+- Manual terminal creation succeeds beyond four terminals and stops at the 64th total leaf.
+- Manual terminal creation preserves project/session target identity and never starts a PTY automatically.
+- Existing bootstrap tests from Phase 1A still pass unchanged.
+
+#### Visual/manual proof
+
+- Open at least six terminals and show no four-terminal cap or cap messaging.
+- Confirm the 64-total-leaf guard remains the only terminal creation ceiling.
+
+#### Stop condition
+
+Stop when creation beyond four terminals is proven, the 64-total-leaf guard still rejects a 65th leaf, and bootstrap behavior remains unchanged; do not implement movement or relocate controls yet.
+
+#### Phase gate
+
+Enter plan mode and obtain approval before implementation; after focused checks and real-app creation proof pass, commit Phase 1B and do not start Phase 2 before that commit exists.
+
+### Phase 1C — Completion evidence
+
+Record Phase 1A and Phase 1B evidence here only after each subphase is implemented, verified, and committed. Do not mark Phase 1 complete until both subphases have committed evidence.
+
+- **Phase 1A evidence:** complete; see the Phase 1A completion evidence above.
+- **Phase 1B evidence:** pending.
 
 ---
 

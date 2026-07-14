@@ -1964,22 +1964,59 @@ struct Workspace {
     windows: Vec<WorkspaceEntry>,
 }
 
-/// Absolute path to ~/.gg/gg-app-workspace.json.
-fn app_workspace_path() -> PathBuf {
-    home_dir().join(".gg").join("gg-app-workspace.json")
+const GG_APP_WORKSPACE_PATH: &str = "GG_APP_WORKSPACE_PATH";
+
+/// Resolves the test-only workspace snapshot override, rejecting unusable paths.
+fn workspace_path_from_override(
+    override_path: Option<PathBuf>,
+    default_path: PathBuf,
+) -> Result<PathBuf, String> {
+    let Some(path) = override_path else {
+        return Ok(default_path);
+    };
+
+    if !path.is_absolute() {
+        return Err(format!(
+            "{GG_APP_WORKSPACE_PATH} must be an absolute path: {}",
+            path.display()
+        ));
+    }
+
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(path),
+        Ok(_) => Err(format!(
+            "{GG_APP_WORKSPACE_PATH} must reference a regular file: {}",
+            path.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
+        Err(error) => Err(format!(
+            "{GG_APP_WORKSPACE_PATH} cannot be used: {} ({error})",
+            path.display()
+        )),
+    }
+}
+
+/// Absolute path to ~/.gg/gg-app-workspace.json, or the test-only absolute override.
+fn app_workspace_path() -> Result<PathBuf, String> {
+    workspace_path_from_override(
+        std::env::var_os(GG_APP_WORKSPACE_PATH).map(PathBuf::from),
+        home_dir().join(".gg").join("gg-app-workspace.json"),
+    )
 }
 
 /// Read the workspace snapshot; missing/invalid file → an empty workspace.
-fn read_workspace() -> Workspace {
-    std::fs::read_to_string(app_workspace_path())
+fn read_workspace() -> Result<Workspace, String> {
+    Ok(std::fs::read_to_string(app_workspace_path()?)
         .ok()
         .and_then(|s| serde_json::from_str::<Workspace>(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 /// Write the workspace snapshot (creating ~/.gg if needed). Best-effort.
 fn write_workspace(ws: &Workspace) {
-    let path = app_workspace_path();
+    let Ok(path) = app_workspace_path() else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -4724,7 +4761,7 @@ fn recreate_all_window_sessions(app: tauri::AppHandle) {
 /// restore target so the webview skips the picker. Otherwise fall back to the
 /// single default `main` window at the boot cwd (the picker then shows).
 fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
-    let ws = read_workspace();
+    let ws = read_workspace()?;
     let entries = filter_restorable(ws.windows, |c| Path::new(c).exists());
     if entries.is_empty() {
         // Fresh boot / nothing to restore: the usual single main window.
@@ -4886,6 +4923,9 @@ pub fn run() {
             window_restore_target
         ])
         .setup(|app| {
+            // Fail startup before creating app resources when an explicit workspace
+            // override cannot safely replace the default snapshot.
+            app_workspace_path()?;
             // Windows-only: track per-window minimized state so restoring one
             // window can restore its siblings (macOS does this natively).
             #[cfg(target_os = "windows")]
@@ -5200,6 +5240,47 @@ mod tests {
         let kept = filter_restorable(windows, |c| c == "/exists/a");
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].cwd, "/exists/a");
+    }
+
+    #[test]
+    fn workspace_path_defaults_to_home_snapshot() {
+        let default_path = std::env::temp_dir()
+            .join("gg-app-workspace-path-default")
+            .join(".gg")
+            .join("gg-app-workspace.json");
+        assert_eq!(
+            workspace_path_from_override(None, default_path.clone()),
+            Ok(default_path)
+        );
+    }
+
+    #[test]
+    fn workspace_path_uses_absolute_override() {
+        let default_path = std::env::temp_dir().join("gg-app-workspace-path-default.json");
+        let override_path = std::env::temp_dir().join("gg-app-workspace-path-override.json");
+        assert_eq!(
+            workspace_path_from_override(Some(override_path.clone()), default_path),
+            Ok(override_path)
+        );
+    }
+
+    #[test]
+    fn workspace_path_rejects_relative_override() {
+        let default_path = std::env::temp_dir().join("gg-app-workspace-path-default.json");
+        let error =
+            workspace_path_from_override(Some(PathBuf::from("workspace.json")), default_path)
+                .unwrap_err();
+        assert!(error.contains(GG_APP_WORKSPACE_PATH));
+        assert!(error.contains("absolute path"));
+    }
+
+    #[test]
+    fn workspace_path_rejects_unusable_override() {
+        let default_path = std::env::temp_dir().join("gg-app-workspace-path-default.json");
+        let error =
+            workspace_path_from_override(Some(std::env::temp_dir()), default_path).unwrap_err();
+        assert!(error.contains(GG_APP_WORKSPACE_PATH));
+        assert!(error.contains("regular file"));
     }
 
     #[test]

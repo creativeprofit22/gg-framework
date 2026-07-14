@@ -417,16 +417,17 @@ Enter plan mode and obtain approval before implementation; after reducer checks 
 
 ### Phase 2C — Completion evidence
 
-Record Phase 2A and Phase 2B evidence here only after each subphase is implemented, verified, and committed. Do not mark Phase 2 complete until both subphases have committed evidence.
+Record Phase 2A and Phase 2B evidence here only after each subphase is implemented, verified, and committed. Phase 3 and all future phases remain pending until a separate approved implementation plan exists.
 
 - **Phase 2A evidence:** complete; commit `dd334ee2` (`Add terminal move layout helper foundations`) implemented the pure helper foundation for terminal movement without exposing the public reducer or UI wiring.
   - `pnpm --filter gg-app exec vitest run src/workspace-layout.test.ts` — 73/73 passed.
-- **Phase 2B evidence:** complete; exported `moveTerminalWorkspacePane` as the public pure reducer wrapping the Phase 2A candidate helper, with exact original-layout identity rollback for invalid/no-op requests and terminal focus on successful moves.
+- **Phase 2B evidence:** complete; commit `43da5efd` exported `moveTerminalWorkspacePane` as the public pure reducer wrapping the Phase 2A candidate helper, with exact original-layout identity rollback for invalid/no-op requests and terminal focus on successful moves.
   - `pnpm --filter gg-app exec vitest run src/workspace-layout.test.ts` — 101/101 passed.
+  - Reducer tests cover four-way movement around agent and terminal targets, source-parent collapse variants, invalid rollback identity, corrupt/over-depth/over-64 rollback, save/parse round-trips, leaf multiset equality, descriptor equality, unchanged leaf count, and unchanged bootstrap state.
+- **Phase 2B commit gates:** passed before the Phase 2B commit.
   - `pnpm --filter gg-app check` — passed.
   - `pnpm --filter gg-app lint` — passed.
   - `pnpm --filter gg-app format:check` — passed.
-  - Reducer tests cover four-way movement around agent and terminal targets, source-parent collapse variants, invalid rollback identity, corrupt/over-depth/over-64 rollback, save/parse round-trips, leaf multiset equality, descriptor equality, unchanged leaf count, and unchanged bootstrap state.
 
 ### Phase gate
 

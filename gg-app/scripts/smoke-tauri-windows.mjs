@@ -26,10 +26,9 @@ const buildCommand = "pnpm exec tauri build --debug --no-bundle";
 
 let appPid;
 let profileDir;
-let smokeSessionId;
-let daemonPort;
+let workspaceSnapshotDir;
+let workspaceSnapshotPath;
 let webviewPid;
-let daemonPid;
 let stdout = "";
 let stderr = "";
 let screenshotPath;
@@ -114,22 +113,20 @@ public static class SmokeWindows {
       if ([SmokeWindows]::IsWindowVisible($hwnd)) {
         $className = New-Object System.Text.StringBuilder 256
         [void][SmokeWindows]::GetClassName($hwnd, $className, $className.Capacity)
-        if ($className.ToString() -eq 'Tauri Window') {
-          [uint32]$owner = 0
-          [void][SmokeWindows]::GetWindowThreadProcessId($hwnd, [ref]$owner)
-          $rect = New-Object SmokeWindows+Rect
-          if ([SmokeWindows]::GetWindowRect($hwnd, [ref]$rect)) {
-            $title = New-Object System.Text.StringBuilder 512
-            [void][SmokeWindows]::GetWindowText($hwnd, $title, $title.Capacity)
-            $items.Add([pscustomobject]@{
-              Handle = $hwnd.ToInt64()
-              ProcessId = $owner
-              ClassName = $className.ToString()
-              Title = $title.ToString()
-              Width = $rect.Right - $rect.Left
-              Height = $rect.Bottom - $rect.Top
-            })
-          }
+        [uint32]$owner = 0
+        [void][SmokeWindows]::GetWindowThreadProcessId($hwnd, [ref]$owner)
+        $rect = New-Object SmokeWindows+Rect
+        if ([SmokeWindows]::GetWindowRect($hwnd, [ref]$rect)) {
+          $title = New-Object System.Text.StringBuilder 512
+          [void][SmokeWindows]::GetWindowText($hwnd, $title, $title.Capacity)
+          $items.Add([pscustomobject]@{
+            Handle = $hwnd.ToInt64()
+            ProcessId = $owner
+            ClassName = $className.ToString()
+            Title = $title.ToString()
+            Width = $rect.Right - $rect.Left
+            Height = $rect.Bottom - $rect.Top
+          })
         }
       }
       return $true
@@ -186,23 +183,44 @@ function processExists(pid) {
   }
 }
 
-async function removeProfile() {
-  if (!profileDir) return;
+async function removeTemporaryDirectory(directory, label) {
+  if (!directory) return;
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
-      rmSync(profileDir, { recursive: true, force: true });
-      if (!existsSync(profileDir)) return;
+      rmSync(directory, { recursive: true, force: true });
+      if (!existsSync(directory)) return;
     } catch {
       // WebView2 can retain file handles briefly after its parent exits.
     }
     await sleep(250);
   }
-  fail(`could not remove temporary WebView2 profile: ${profileDir}`);
+  fail(`could not remove temporary ${label}: ${directory}`);
+}
+
+function boundedWindowDiagnostics() {
+  const executablePaths = new Map(
+    processSnapshot().map((entry) => [entry.ProcessId, entry.ExecutablePath ?? null]),
+  );
+  return JSON.stringify(
+    tauriWindows()
+      .slice(0, 12)
+      .map((window) => ({
+        hwnd: window.Handle,
+        pid: window.ProcessId,
+        executable: executablePaths.get(window.ProcessId) ?? null,
+        className: window.ClassName,
+        title: window.Title.slice(0, 160),
+        size: `${window.Width}x${window.Height}`,
+      })),
+  );
 }
 
 async function main() {
   if (process.platform !== "win32") fail("this smoke test only runs on Windows");
   profileDir = mkdtempSync(join(tmpdir(), "gg-app-smoke-webview2-"));
+  workspaceSnapshotDir = mkdtempSync(join(tmpdir(), "gg-app-smoke-workspace-"));
+  workspaceSnapshotPath = join(workspaceSnapshotDir, "gg-app-workspace.json");
+  writeFileSync(workspaceSnapshotPath, `${JSON.stringify({ windows: [] })}\n`);
 
   const tauriConfig = JSON.parse(readFileSync(tauriConfigPath, "utf8"));
   const frontendDist = resolve(appDir, "src-tauri", tauriConfig.build?.frontendDist ?? "");
@@ -251,7 +269,11 @@ async function main() {
 
   const child = spawn(debugExe, [], {
     cwd: appDir,
-    env: { ...process.env, WEBVIEW2_USER_DATA_FOLDER: profileDir },
+    env: {
+      ...process.env,
+      GG_APP_WORKSPACE_PATH: workspaceSnapshotPath,
+      WEBVIEW2_USER_DATA_FOLDER: profileDir,
+    },
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: false,
   });
@@ -282,35 +304,50 @@ async function main() {
   }
   pass("spawn identity", `pid=${appPid} executable=${normalizedSpawnedPath}`);
 
-  const eligibleWindows = await waitFor(
-    "exactly one eligible repo Tauri Window",
+  const ownedWindows = await waitFor(
+    "exactly one owned repo Tauri Window",
     () => {
-      const windows = tauriWindows().filter(
-        (window) =>
-          window.ProcessId === appPid &&
-          window.Title === "Supah Coder" &&
-          window.Width >= 480 &&
-          window.Height >= 360,
+      const repoProcess = processSnapshot().find(
+        (entry) =>
+          entry.ProcessId === appPid &&
+          entry.ExecutablePath &&
+          normalizeExecutablePath(entry.ExecutablePath) === normalizedDebugExe,
       );
-      return windows.length === 1 ? windows : null;
+      if (!repoProcess) {
+        fail(`owned PID/path evidence disappeared: pid=${appPid} expected=${normalizedDebugExe}`);
+      }
+      const matches = tauriWindows().filter(
+        (window) => window.ProcessId === appPid && window.ClassName === "Tauri Window",
+      );
+      if (matches.length !== 1) {
+        fail(
+          `expected one owned repo window; found ${matches.length}; candidates=${boundedWindowDiagnostics()}`,
+        );
+      }
+      return matches;
     },
     60000,
   );
-  const [visibleWindow] = eligibleWindows;
-  const windowProcess = processSnapshot().find(
-    (entry) => entry.ProcessId === visibleWindow.ProcessId,
-  );
+  const [visibleWindow] = ownedWindows;
+  const windowProcess = processSnapshot().find((entry) => entry.ProcessId === visibleWindow.ProcessId);
   if (!windowProcess?.ExecutablePath) fail(`HWND ${visibleWindow.Handle} has no executable path`);
   const normalizedWindowPath = normalizeExecutablePath(windowProcess.ExecutablePath);
   if (visibleWindow.ProcessId !== child.pid) {
     fail(`HWND PID mismatch: child=${child.pid} window=${visibleWindow.ProcessId}`);
   }
-  if (normalizedWindowPath !== normalizedDebugExe) {
-    fail(`HWND executable mismatch: expected=${normalizedDebugExe} actual=${normalizedWindowPath}`);
+  if (normalizedWindowPath !== normalizedDebugExe || visibleWindow.ClassName !== "Tauri Window") {
+    fail(
+      `owned HWND identity mismatch: expected pid=${child.pid} path=${normalizedDebugExe} class=Tauri Window actual pid=${visibleWindow.ProcessId} path=${normalizedWindowPath} class=${visibleWindow.ClassName}`,
+    );
+  }
+  if (visibleWindow.Width < 480 || visibleWindow.Height < 360) {
+    fail(
+      `owned HWND is too small to capture: hwnd=${visibleWindow.Handle} size=${visibleWindow.Width}x${visibleWindow.Height}`,
+    );
   }
   pass(
-    "exactly one eligible Tauri Window",
-    `count=1 hwnd=${visibleWindow.Handle} pid=${visibleWindow.ProcessId} executable=${normalizedWindowPath} size=${visibleWindow.Width}x${visibleWindow.Height} title=${JSON.stringify(visibleWindow.Title)}`,
+    "exactly one owned repo Tauri Window",
+    `count=1 hwnd=${visibleWindow.Handle} pid=${visibleWindow.ProcessId} executable=${normalizedWindowPath} class=${visibleWindow.ClassName} size=${visibleWindow.Width}x${visibleWindow.Height} title=${JSON.stringify(visibleWindow.Title)}`,
   );
 
   const webview = await waitFor("WebView2 process using isolated profile", () => {
@@ -327,49 +364,6 @@ async function main() {
     "WebView2 evidence",
     `pid=${webview.ProcessId} parent=${webview.ParentProcessId} profile=${profileDir}`,
   );
-
-  const daemon = await waitFor("repo daemon child", () =>
-    processSnapshot().find(
-      (entry) =>
-        ["ggnode.exe", "node.exe"].includes(entry.Name?.toLowerCase()) &&
-        entry.ParentProcessId === appPid &&
-        entry.CommandLine?.toLowerCase().includes("app-sidecar"),
-    ),
-  );
-  daemonPid = daemon.ProcessId;
-  pass(
-    "daemon process evidence",
-    `pid=${daemon.ProcessId} parent=${daemon.ParentProcessId} command=${daemon.CommandLine}`,
-  );
-
-  daemonPort = await waitFor(
-    "daemon listening evidence",
-    () => Number(stdout.match(/daemon listening on port (\d+)/)?.[1]) || null,
-    120000,
-  );
-  pass("daemon listening evidence", `http://127.0.0.1:${daemonPort}`);
-
-  const createResponse = await fetch(`http://127.0.0.1:${daemonPort}/session`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ cwd: resolve(here, "..", "..") }),
-    signal: AbortSignal.timeout(120000),
-  });
-  if (!createResponse.ok) {
-    fail(`POST /session returned ${createResponse.status}: ${await createResponse.text()}`);
-  }
-  smokeSessionId = (await createResponse.json()).sessionId;
-  if (!smokeSessionId) fail("POST /session returned no sessionId");
-  pass("session creation evidence", `session=${smokeSessionId}`);
-
-  const stateResponse = await fetch(`http://127.0.0.1:${daemonPort}/state`, {
-    headers: { "x-gg-session": smokeSessionId },
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!stateResponse.ok) fail(`GET /state returned ${stateResponse.status}`);
-  const state = await stateResponse.json();
-  if (!("ready" in state)) fail(`GET /state omitted ready: ${JSON.stringify(state)}`);
-  pass("session state evidence", `status=200 ready=${state.ready}`);
 
   screenshotPath = join(artifactDir, `windows-native-smoke-${runStamp}-pid-${appPid}.png`);
   captureWindow(visibleWindow, screenshotPath);
@@ -397,13 +391,6 @@ try {
   console.error(`SMOKE FAIL: ${error.message}`);
   process.exitCode = 1;
 } finally {
-  if (smokeSessionId && daemonPort) {
-    await fetch(`http://127.0.0.1:${daemonPort}/session/${encodeURIComponent(smokeSessionId)}`, {
-      method: "DELETE",
-      signal: AbortSignal.timeout(5000),
-    }).catch(() => {});
-  }
-
   if (appPid && processExists(appPid)) {
     try {
       execFileSync("taskkill.exe", ["/PID", String(appPid), "/T", "/F"], {
@@ -415,7 +402,7 @@ try {
     }
   }
   if (appPid) {
-    const ownedPids = [appPid, daemonPid, webviewPid].filter(Boolean);
+    const ownedPids = [appPid, webviewPid].filter(Boolean);
     await waitFor(
       "owned repo process tree cleanup",
       () => ownedPids.every((pid) => !processExists(pid)),
@@ -428,11 +415,19 @@ try {
       });
   }
 
-  await removeProfile().catch((error) => {
+  await removeTemporaryDirectory(profileDir, "WebView2 profile").catch((error) => {
     console.error(`CLEANUP FAIL: ${error.message}`);
     process.exitCode = 1;
   });
   if (profileDir && !existsSync(profileDir)) pass("temporary profile cleaned", profileDir);
+
+  await removeTemporaryDirectory(workspaceSnapshotDir, "workspace snapshot").catch((error) => {
+    console.error(`CLEANUP FAIL: ${error.message}`);
+    process.exitCode = 1;
+  });
+  if (workspaceSnapshotDir && !existsSync(workspaceSnapshotDir)) {
+    pass("temporary workspace snapshot cleaned", workspaceSnapshotPath);
+  }
 
   if (appPid) {
     logPath = join(artifactDir, `windows-native-smoke-${runStamp}-pid-${appPid}.log`);

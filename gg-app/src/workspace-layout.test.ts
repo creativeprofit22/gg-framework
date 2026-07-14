@@ -5,13 +5,19 @@ import {
   addTerminalWorkspacePane,
   bootstrapDefaultTerminalWorkspacePane,
   defaultWorkspaceLayout,
+  findWorkspaceLayoutLeaf,
+  insertWorkspaceLayoutLeafNearTarget,
   isTerminalPaneMoveRequest,
   isTerminalPanePlacement,
+  isVisibleTerminalLeaf,
+  isVisibleWorkspaceLeaf,
   loadWorkspaceLayout,
   parseWorkspaceLayout,
+  prepareTerminalMoveWorkspaceLayoutCandidate,
   preserveRejectedRecursiveWorkspaceLayout,
   recursiveWorkspaceLayoutKey,
   rejectedRecursiveWorkspaceLayoutKey,
+  removeWorkspaceLayoutLeafAndCollapse,
   removeWorkspacePane,
   resolveWorkspaceLayoutTargets,
   saveWorkspaceLayout,
@@ -21,6 +27,7 @@ import {
   validateWorkspaceLayoutCandidate,
   workspaceLayoutKey,
   workspaceLayoutLeafIds,
+  type LeafNode,
   type WorkspaceLayout,
   type WorkspaceLayoutNode,
 } from "./workspace-layout";
@@ -487,6 +494,268 @@ describe("movement guards", () => {
     expect(
       isTerminalPaneMoveRequest({ ...valid, kind: "agent", cwd: "/a", sessionPath: null }),
     ).toBe(false);
+  });
+});
+
+describe("terminal move helper foundations", () => {
+  const moveLayout = (): WorkspaceLayout =>
+    canonical({
+      root: split(dock(leaf("primary"), leaf("terminal-1"), 320), leaf("secondary")),
+      focusedPaneId: "primary",
+      panes: {
+        primary: agent("/a"),
+        "terminal-1": terminal("/a"),
+        secondary: agent("/b"),
+      },
+    });
+
+  const expectOk = <T>(result: { ok: true; value: T } | { ok: false; reason: string }): T => {
+    expect(result).toMatchObject({ ok: true });
+    return (result as { ok: true; value: T }).value;
+  };
+
+  it("finds visible agent and terminal leaves in shallow and nested trees", () => {
+    const shallow = canonical({
+      root: split(leaf("primary"), leaf("terminal-1")),
+      panes: { primary: agent("/a"), "terminal-1": terminal("/a"), stale: terminal("/x") },
+    });
+    expect(findWorkspaceLayoutLeaf(shallow.root, "primary", shallow.panes)).toMatchObject({
+      paneId: "primary",
+      path: ["first"],
+      descriptorKind: "agent",
+    });
+    expect(findWorkspaceLayoutLeaf(shallow.root, "terminal-1", shallow.panes)).toMatchObject({
+      paneId: "terminal-1",
+      path: ["second"],
+      descriptorKind: "terminal",
+    });
+    expect(findWorkspaceLayoutLeaf(shallow.root, "stale", shallow.panes)).toBeNull();
+    expect(findWorkspaceLayoutLeaf(shallow.root, "missing", shallow.panes)).toBeNull();
+
+    const nested = moveLayout();
+    expect(findWorkspaceLayoutLeaf(nested.root, "terminal-1", nested.panes)).toMatchObject({
+      path: ["first", "second"],
+      descriptorKind: "terminal",
+    });
+    expect(isVisibleTerminalLeaf(nested, "terminal-1")).toBe(true);
+    expect(isVisibleWorkspaceLeaf(nested, "secondary")).toBe(true);
+    expect(isVisibleWorkspaceLeaf(nested, "stale")).toBe(false);
+  });
+
+  it("removes terminal leaves from either side and collapses only the direct parent", () => {
+    const firstSurvivor = leaf("primary");
+    const firstTerminal = split(leaf("terminal-1"), firstSurvivor);
+    expect(expectOk(removeWorkspaceLayoutLeafAndCollapse(firstTerminal, "terminal-1")).root).toBe(
+      firstSurvivor,
+    );
+
+    const secondSurvivor = leaf("primary");
+    const secondTerminal = split(secondSurvivor, leaf("terminal-1"));
+    expect(expectOk(removeWorkspaceLayoutLeafAndCollapse(secondTerminal, "terminal-1")).root).toBe(
+      secondSurvivor,
+    );
+
+    const outerSibling = leaf("secondary");
+    const nested = split(dock(leaf("primary"), leaf("terminal-1"), 333), outerSibling);
+    const nestedRemoved = expectOk(removeWorkspaceLayoutLeafAndCollapse(nested, "terminal-1")).root;
+    expect(nestedRemoved).toEqual(split(leaf("primary"), leaf("secondary")));
+    expect(nestedRemoved.type === "split" && nestedRemoved.second).toBe(outerSibling);
+
+    const fixedBranch = dock(leaf("pane-1"), leaf("terminal-2"), 444);
+    const withFixedSibling = split(fixedBranch, dock(leaf("primary"), leaf("terminal-1")));
+    const fixedRemoved = expectOk(
+      removeWorkspaceLayoutLeafAndCollapse(withFixedSibling, "terminal-1"),
+    ).root;
+    expect(fixedRemoved.type === "split" && fixedRemoved.first).toBe(fixedBranch);
+    expect(fixedRemoved.type === "split" && fixedRemoved.first).toMatchObject({
+      size: { type: "fixed-second", pixels: 444 },
+    });
+  });
+
+  it("fails remove without mutating missing or root-only input", () => {
+    const rootOnly = leaf("terminal-1");
+    expect(removeWorkspaceLayoutLeafAndCollapse(rootOnly, "terminal-1")).toEqual({
+      ok: false,
+      reason: "cannot-remove-root-leaf",
+    });
+
+    const root = split(leaf("primary"), leaf("secondary"));
+    const snapshot = structuredClone(root);
+    const result = removeWorkspaceLayoutLeafAndCollapse(root, "terminal-1");
+    expect(result).toEqual({ ok: false, reason: "leaf-not-found" });
+    expect(root).toEqual(snapshot);
+  });
+
+  it.each([
+    ["left", "horizontal", true],
+    ["right", "horizontal", false],
+    ["up", "vertical", true],
+    ["down", "vertical", false],
+  ] as const)(
+    "inserts detached terminal %s of a target with a 50/50 ratio split",
+    (placement, direction, sourceFirst) => {
+      const sibling = leaf("secondary");
+      const root = split(leaf("primary"), sibling);
+      const inserted = expectOk(
+        insertWorkspaceLayoutLeafNearTarget(
+          root,
+          leaf("terminal-1") as LeafNode,
+          "primary",
+          placement,
+        ),
+      );
+
+      expect(inserted.type).toBe("split");
+      expect(inserted.type === "split" && inserted.second).toBe(sibling);
+      const replacement = inserted.type === "split" ? inserted.first : inserted;
+      expect(replacement).toMatchObject({
+        type: "split",
+        direction,
+        ratio: 50,
+        size: { type: "ratio", value: 50 },
+      });
+      expect(workspaceLayoutLeafIds(replacement)).toEqual(
+        sourceFirst ? ["terminal-1", "primary"] : ["primary", "terminal-1"],
+      );
+    },
+  );
+
+  it("inserts around terminal targets and rejects invalid placement or missing target", () => {
+    const root = split(leaf("primary"), leaf("terminal-2"));
+    const up = expectOk(
+      insertWorkspaceLayoutLeafNearTarget(root, leaf("terminal-1") as LeafNode, "terminal-2", "up"),
+    );
+    expect(workspaceLayoutLeafIds(up)).toEqual(["primary", "terminal-1", "terminal-2"]);
+    expect(
+      insertWorkspaceLayoutLeafNearTarget(
+        root,
+        leaf("terminal-1") as LeafNode,
+        "primary",
+        "center",
+      ),
+    ).toEqual({
+      ok: false,
+      reason: "invalid-placement",
+    });
+    expect(
+      insertWorkspaceLayoutLeafNearTarget(root, leaf("terminal-1") as LeafNode, "missing", "left"),
+    ).toEqual({
+      ok: false,
+      reason: "target-not-found",
+    });
+  });
+
+  it("prepares a valid terminal move candidate without changing descriptors", () => {
+    const layout = moveLayout();
+    const moved = expectOk(
+      prepareTerminalMoveWorkspaceLayoutCandidate(layout, {
+        terminalPaneId: "terminal-1",
+        targetPaneId: "secondary",
+        placement: "right",
+      }),
+    );
+
+    expect(workspaceLayoutLeafIds(moved.root)).toEqual(["primary", "secondary", "terminal-1"]);
+    expect(moved.focusedPaneId).toBe("terminal-1");
+    expect(moved.panes).toEqual(layout.panes);
+    expect(moved.panes).not.toBe(layout.panes);
+    expect(layout.root).toEqual(
+      split(dock(leaf("primary"), leaf("terminal-1"), 320), leaf("secondary")),
+    );
+  });
+
+  it.each([
+    ["agent source", { terminalPaneId: "primary", targetPaneId: "secondary", placement: "left" }],
+    [
+      "missing source",
+      { terminalPaneId: "terminal-9", targetPaneId: "secondary", placement: "left" },
+    ],
+    ["missing target", { terminalPaneId: "terminal-1", targetPaneId: "pane-9", placement: "left" }],
+    [
+      "same source target",
+      { terminalPaneId: "terminal-1", targetPaneId: "terminal-1", placement: "left" },
+    ],
+    [
+      "invalid placement",
+      { terminalPaneId: "terminal-1", targetPaneId: "secondary", placement: "center" },
+    ],
+  ])("rejects %s without mutating layout identity", (_name, request) => {
+    const layout = moveLayout();
+    const originalRoot = layout.root;
+    const originalPanes = layout.panes;
+    const snapshot = structuredClone(layout);
+
+    expect(prepareTerminalMoveWorkspaceLayoutCandidate(layout, request)).toMatchObject({
+      ok: false,
+    });
+    expect(layout).toEqual(snapshot);
+    expect(layout.root).toBe(originalRoot);
+    expect(layout.panes).toBe(originalPanes);
+  });
+
+  it("rejects malformed and running terminal descriptors", () => {
+    for (const descriptor of [
+      { kind: "terminal", cwd: "", sessionPath: null, stopped: true },
+      { kind: "terminal", cwd: "/a", sessionPath: null, stopped: false },
+    ]) {
+      const layout = moveLayout();
+      layout.panes = { ...layout.panes, "terminal-1": descriptor as never };
+      expect(
+        prepareTerminalMoveWorkspaceLayoutCandidate(layout, {
+          terminalPaneId: "terminal-1",
+          targetPaneId: "secondary",
+          placement: "left",
+        }),
+      ).toMatchObject({ ok: false });
+    }
+  });
+
+  it("rejects corrupt, over-depth, and over-64 candidates at the validation boundary", () => {
+    const corruptPrimary = canonical({
+      root: split(leaf("primary"), leaf("terminal-1")),
+      panes: { primary: terminal("/a"), "terminal-1": terminal("/a") },
+      focusedPaneId: "terminal-1",
+    });
+    expect(
+      prepareTerminalMoveWorkspaceLayoutCandidate(corruptPrimary, {
+        terminalPaneId: "terminal-1",
+        targetPaneId: "primary",
+        placement: "left",
+      }),
+    ).toEqual({ ok: false, reason: "invalid-candidate" });
+
+    const tooMany = leafGuardLayout(64);
+    const withExtraTerminal = {
+      ...tooMany,
+      root: split(tooMany.root, leaf("terminal-extra")),
+      panes: { ...tooMany.panes, "terminal-extra": terminal("/extra") },
+    };
+    expect(
+      prepareTerminalMoveWorkspaceLayoutCandidate(withExtraTerminal, {
+        terminalPaneId: "terminal-extra",
+        targetPaneId: "primary",
+        placement: "left",
+      }),
+    ).toEqual({ ok: false, reason: "invalid-candidate" });
+
+    let deepRoot: WorkspaceLayoutNode = split(leaf("primary"), leaf("terminal-1"));
+    const deepPanes: WorkspaceLayout["panes"] = {
+      primary: agent("/primary"),
+      "terminal-1": terminal("/t"),
+    };
+    for (let index = 0; index < MAX_WORKSPACE_LAYOUT_DEPTH; index += 1) {
+      const id = `deep-${index}`;
+      deepRoot = split(deepRoot, leaf(id));
+      deepPanes[id] = agent(`/${id}`);
+    }
+    const deepLayout = canonical({ root: deepRoot, panes: deepPanes });
+    expect(
+      prepareTerminalMoveWorkspaceLayoutCandidate(deepLayout, {
+        terminalPaneId: "terminal-1",
+        targetPaneId: "primary",
+        placement: "left",
+      }),
+    ).toEqual({ ok: false, reason: "invalid-candidate" });
   });
 });
 

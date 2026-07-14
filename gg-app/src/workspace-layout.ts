@@ -181,10 +181,155 @@ export function workspaceLayoutLeafIds(root: WorkspaceLayoutNode): WorkspacePane
     : [...workspaceLayoutLeafIds(root.first), ...workspaceLayoutLeafIds(root.second)];
 }
 export type WorkspaceLayoutPath = readonly ("first" | "second")[];
+export interface WorkspaceLayoutLeafInfo {
+  paneId: WorkspacePaneId;
+  node: LeafNode;
+  path: WorkspaceLayoutPath;
+  descriptorKind: "agent" | "terminal";
+}
+export type WorkspaceLayoutHelperResult<T> = { ok: true; value: T } | { ok: false; reason: string };
 
 function descriptorKind(value: WorkspacePaneValue | undefined): "agent" | "terminal" | null {
   if (!value) return null;
   return value.kind === "terminal" ? "terminal" : "agent";
+}
+
+function canonicalDescriptorKind(
+  value: WorkspacePaneValue | undefined,
+): "agent" | "terminal" | null {
+  const parsed = parseWorkspacePaneDescriptor(value);
+  return parsed ? descriptorKind(parsed) : null;
+}
+
+export function findWorkspaceLayoutLeaf(
+  root: WorkspaceLayoutNode,
+  paneId: WorkspacePaneId,
+  panes: Record<WorkspacePaneId, WorkspacePaneValue>,
+  path: WorkspaceLayoutPath = [],
+): WorkspaceLayoutLeafInfo | null {
+  if (root.type === "leaf") {
+    const kind = root.paneId === paneId ? canonicalDescriptorKind(panes[root.paneId]) : null;
+    return kind ? { paneId: root.paneId, node: root, path, descriptorKind: kind } : null;
+  }
+  return (
+    findWorkspaceLayoutLeaf(root.first, paneId, panes, [...path, "first"]) ??
+    findWorkspaceLayoutLeaf(root.second, paneId, panes, [...path, "second"])
+  );
+}
+
+export function isVisibleTerminalLeaf(layout: WorkspaceLayout, paneId: WorkspacePaneId): boolean {
+  return findWorkspaceLayoutLeaf(layout.root, paneId, layout.panes)?.descriptorKind === "terminal";
+}
+
+export function isVisibleWorkspaceLeaf(layout: WorkspaceLayout, paneId: WorkspacePaneId): boolean {
+  return findWorkspaceLayoutLeaf(layout.root, paneId, layout.panes) !== null;
+}
+
+export function removeWorkspaceLayoutLeafAndCollapse(
+  root: WorkspaceLayoutNode,
+  paneId: WorkspacePaneId,
+  isRoot = true,
+): WorkspaceLayoutHelperResult<{ root: WorkspaceLayoutNode; removed: LeafNode }> {
+  if (root.type === "leaf") {
+    return root.paneId === paneId && isRoot
+      ? { ok: false, reason: "cannot-remove-root-leaf" }
+      : { ok: false, reason: "leaf-not-found" };
+  }
+
+  if (root.first.type === "leaf" && root.first.paneId === paneId)
+    return { ok: true, value: { root: root.second, removed: root.first } };
+  if (root.second.type === "leaf" && root.second.paneId === paneId)
+    return { ok: true, value: { root: root.first, removed: root.second } };
+
+  const firstResult = removeWorkspaceLayoutLeafAndCollapse(root.first, paneId, false);
+  if (firstResult.ok)
+    return {
+      ok: true,
+      value: {
+        root: { ...root, first: firstResult.value.root },
+        removed: firstResult.value.removed,
+      },
+    };
+
+  const secondResult = removeWorkspaceLayoutLeafAndCollapse(root.second, paneId, false);
+  if (secondResult.ok)
+    return {
+      ok: true,
+      value: {
+        root: { ...root, second: secondResult.value.root },
+        removed: secondResult.value.removed,
+      },
+    };
+
+  return { ok: false, reason: "leaf-not-found" };
+}
+
+export function insertWorkspaceLayoutLeafNearTarget(
+  root: WorkspaceLayoutNode,
+  detachedLeaf: LeafNode,
+  targetPaneId: WorkspacePaneId,
+  placement: unknown,
+): WorkspaceLayoutHelperResult<WorkspaceLayoutNode> {
+  if (!isTerminalPanePlacement(placement)) return { ok: false, reason: "invalid-placement" };
+  const direction: SplitDirection =
+    placement === "left" || placement === "right" ? "horizontal" : "vertical";
+  const sourceFirst = placement === "left" || placement === "up";
+  let inserted = false;
+  const insert = (node: WorkspaceLayoutNode): WorkspaceLayoutNode => {
+    if (node.type === "leaf") {
+      if (node.paneId !== targetPaneId) return node;
+      inserted = true;
+      return sourceFirst
+        ? ratioNode(direction, DEFAULT_SPLIT_RATIO, detachedLeaf, node)
+        : ratioNode(direction, DEFAULT_SPLIT_RATIO, node, detachedLeaf);
+    }
+    const first = insert(node.first);
+    if (inserted) return first === node.first ? node : { ...node, first };
+    const second = insert(node.second);
+    return second === node.second ? node : { ...node, second };
+  };
+  const nextRoot = insert(root);
+  return inserted ? { ok: true, value: nextRoot } : { ok: false, reason: "target-not-found" };
+}
+
+/** Foundation-level terminal movement validator; public reducer rollback is added in Phase 2B. */
+export function prepareTerminalMoveWorkspaceLayoutCandidate(
+  layout: WorkspaceLayout,
+  request: unknown,
+): WorkspaceLayoutHelperResult<WorkspaceLayout> {
+  if (!isTerminalPaneMoveRequest(request)) return { ok: false, reason: "invalid-request" };
+  if (request.terminalPaneId === request.targetPaneId)
+    return { ok: false, reason: "same-source-target" };
+
+  const source = findWorkspaceLayoutLeaf(layout.root, request.terminalPaneId, layout.panes);
+  if (!source) return { ok: false, reason: "invalid-source" };
+  if (source.descriptorKind !== "terminal") return { ok: false, reason: "source-not-terminal" };
+  if (!isVisibleTerminalLeaf(layout, request.terminalPaneId))
+    return { ok: false, reason: "source-not-stopped-terminal" };
+  if (!isVisibleWorkspaceLeaf(layout, request.targetPaneId))
+    return { ok: false, reason: "invalid-target" };
+
+  const removed = removeWorkspaceLayoutLeafAndCollapse(layout.root, request.terminalPaneId);
+  if (!removed.ok) return removed;
+  if (!findWorkspaceLayoutLeaf(removed.value.root, request.targetPaneId, layout.panes))
+    return { ok: false, reason: "target-removed" };
+
+  const inserted = insertWorkspaceLayoutLeafNearTarget(
+    removed.value.root,
+    removed.value.removed,
+    request.targetPaneId,
+    request.placement,
+  );
+  if (!inserted.ok) return inserted;
+
+  const normalized = normalizeLayout({
+    root: inserted.value,
+    focusedPaneId: request.terminalPaneId,
+    panes: layout.panes,
+    defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
+  });
+  const valid = validateWorkspaceLayoutCandidate(normalized);
+  return valid ? { ok: true, value: valid } : { ok: false, reason: "invalid-candidate" };
 }
 function agentTarget(value: WorkspacePaneValue | undefined): WorkspacePaneTarget | null {
   return value && descriptorKind(value) === "agent"

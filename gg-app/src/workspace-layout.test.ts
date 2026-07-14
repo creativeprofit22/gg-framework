@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MAX_WORKSPACE_LAYOUT_DEPTH,
   MAX_WORKSPACE_LAYOUT_LEAVES,
+  MAX_WORKSPACE_LEAVES,
   addTerminalWorkspacePane,
   defaultWorkspaceLayout,
   isTerminalPaneMoveRequest,
@@ -483,6 +484,27 @@ describe("v8 reducers", () => {
     expect(addTerminalWorkspacePane(first, "terminal-1")).toBe(first);
   });
 
+  it("returns the original layout when terminal creation reaches the Phase 0 leaf cap", () => {
+    const cappedRoot = comb(MAX_WORKSPACE_LEAVES);
+    const capped = canonical({
+      root: cappedRoot,
+      focusedPaneId: "primary",
+      panes: {
+        primary: agent("/primary"),
+        "pane-1": agent("/pane-1"),
+        "pane-2": agent("/pane-2"),
+        "pane-3": agent("/pane-3"),
+        "pane-4": terminal("/pane-4"),
+        "pane-5": terminal("/pane-5"),
+        "pane-6": terminal("/pane-6"),
+        "pane-7": terminal("/pane-7"),
+      },
+    });
+
+    expect(workspaceLayoutLeafIds(capped.root)).toHaveLength(MAX_WORKSPACE_LEAVES);
+    expect(addTerminalWorkspacePane(capped, "primary")).toBe(capped);
+  });
+
   it("splits, resizes, and removes while preserving pending bootstrap", () => {
     const layout = canonical({ defaultTerminalBootstrap: "pending" });
     const splitLayout = splitWorkspacePane(layout, "primary", "vertical", "pane-3");
@@ -693,7 +715,7 @@ describe("v8 storage and rollback", () => {
   });
 
   it("returns false for invalid bootstrap, invalid descriptors, circular input, and failed saves", () => {
-    const { storage } = store();
+    const { values, storage } = store();
     expect(
       saveWorkspaceLayout(
         storage,
@@ -701,6 +723,7 @@ describe("v8 storage and rollback", () => {
         canonical({ defaultTerminalBootstrap: undefined as never }),
       ),
     ).toBe(false);
+    expect(values.has(recursiveWorkspaceLayoutKey("main"))).toBe(false);
     expect(
       saveWorkspaceLayout(
         storage,
@@ -708,12 +731,64 @@ describe("v8 storage and rollback", () => {
         canonical({ defaultTerminalBootstrap: "unknown" as never }),
       ),
     ).toBe(false);
+    expect(values.has(recursiveWorkspaceLayoutKey("main"))).toBe(false);
     expect(
       saveWorkspaceLayout(storage, "main", canonical({ panes: { primary: agent("/a") } })),
     ).toBe(false);
+    expect(values.has(recursiveWorkspaceLayoutKey("main"))).toBe(false);
+    const invalidDescriptors: Array<[string, WorkspaceLayout]> = [
+      [
+        "unknown kind",
+        canonical({
+          panes: { primary: { kind: "editor", ...target("/a") } as never, secondary: agent("/b") },
+        }),
+      ],
+      [
+        "running terminal",
+        canonical({
+          root: dock(leaf("primary"), leaf("terminal-1")),
+          panes: {
+            primary: agent("/a"),
+            "terminal-1": { ...terminal("/a"), stopped: false } as never,
+          },
+        }),
+      ],
+      [
+        "terminalId",
+        canonical({
+          root: dock(leaf("primary"), leaf("terminal-1")),
+          panes: {
+            primary: agent("/a"),
+            "terminal-1": { ...terminal("/a"), terminalId: "native-1" } as never,
+          },
+        }),
+      ],
+      [
+        "pid",
+        canonical({
+          root: dock(leaf("primary"), leaf("terminal-1")),
+          panes: { primary: agent("/a"), "terminal-1": { ...terminal("/a"), pid: 1 } as never },
+        }),
+      ],
+      [
+        "output",
+        canonical({
+          root: dock(leaf("primary"), leaf("terminal-1")),
+          panes: {
+            primary: agent("/a"),
+            "terminal-1": { ...terminal("/a"), output: "secret" } as never,
+          },
+        }),
+      ],
+    ];
+    for (const [name, layout] of invalidDescriptors) {
+      expect(saveWorkspaceLayout(storage, `invalid-${name}`, layout)).toBe(false);
+      expect(values.has(recursiveWorkspaceLayoutKey(`invalid-${name}`))).toBe(false);
+    }
     const circular = canonical();
     (circular.root as unknown as { first: unknown }).first = circular.root;
     expect(saveWorkspaceLayout(storage, "main", circular)).toBe(false);
+    expect(values.has(recursiveWorkspaceLayoutKey("main"))).toBe(false);
     expect(
       saveWorkspaceLayout(
         {

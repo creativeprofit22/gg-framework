@@ -1,6 +1,6 @@
 # gg-framework
 
-A pnpm monorepo for reusable LLM/agent libraries and products: the `ggcoder` coding-agent CLI, the GG Coder Tauri desktop app, multi-agent orchestration, voice, and video-editor integrations.
+A pnpm workspace for reusable LLM/agent libraries and products: the `ggcoder` coding-agent CLI, the React/Tauri GG App desktop product, multi-project orchestration, realtime voice, and video-editor integrations. CI uses Node 22, pnpm 10, and Rust stable.
 
 ## Stable structure
 
@@ -12,10 +12,10 @@ A pnpm monorepo for reusable LLM/agent libraries and products: the `ggcoder` cod
 - `packages/gg-voice`: realtime voice sessions and ggcoder/ggboss bridges.
 - `packages/gg-editor`: Resolve/Premiere editing-agent CLI; its build generates skills and copies Python helpers.
 - `packages/gg-editor-premiere-panel`: Premiere UXP/legacy CEP panel and installer CLI.
-- `packages/ggcoder-eyes`: project-local perception probes and observation journal.
+- `packages/ggcoder-eyes`: project-agnostic screenshot, runtime-log, API, and capture-sink probes.
 - `gg-app`: primary desktop product; React/Vite frontend in `src`, Tauri/Rust host in `src-tauri`.
 - `Matey`: separate Electron chat UI prototype.
-- `benchmarks`, `bench`, `experiments`: benchmark and experimental workspaces, not product runtime.
+- `benchmarks`, `bench`: repository-level benchmark/audit harnesses, not product runtime; `experiments/*` contains pnpm-managed experimental projects.
 
 Workspace dependency spine: `gg-ai` → `gg-agent`; `gg-core` also depends on `gg-ai`; applications consume these shared packages. Provider/model/auth behavior belongs in `gg-ai` or `gg-core`, not app-local copies.
 
@@ -51,6 +51,8 @@ pnpm --filter gg-app check
 pnpm --filter gg-app test
 pnpm --filter gg-app lint
 pnpm --filter gg-app format:check
+cargo test --manifest-path gg-app/src-tauri/Cargo.toml
+cargo fmt --manifest-path gg-app/src-tauri/Cargo.toml -- --check
 ```
 
 After changing `app-sidecar.ts` for local desktop development, rebuild `@kenkaiiii/ggcoder` and restart Tauri; Vite hot-reloads frontend-only changes. Distribution assembly additionally runs `pnpm --filter gg-app stage:node`, `bundle:sidecar`, then `node gg-app/scripts/smoke-sidecar.mjs`.

@@ -602,6 +602,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const focusedSnapshot = snapshots[layout.focusedPaneId];
   const focusedDescriptor = layout.panes[layout.focusedPaneId];
   const canOpenTerminal =
+    leafIds.length < MAX_WORKSPACE_LEAVES &&
     focusedDescriptor?.kind !== "terminal" &&
     Boolean(
       focusedDescriptor?.cwd &&

@@ -346,8 +346,10 @@ export function addTerminalWorkspacePane(
   agentPaneId: WorkspacePaneId,
   dockHeightPx = DEFAULT_TERMINAL_DOCK_HEIGHT_PX,
 ): WorkspaceLayout {
+  const leafIds = workspaceLayoutLeafIds(layout.root);
   const target = agentTarget(layout.panes[agentPaneId]);
-  if (!target || !workspaceLayoutLeafIds(layout.root).includes(agentPaneId)) return layout;
+  if (!target || !leafIds.includes(agentPaneId) || leafIds.length >= MAX_WORKSPACE_LEAVES)
+    return layout;
   const terminalPaneId = allocateTerminalId(layout.root, layout.panes);
   let changed = false;
   const addSibling = (node: WorkspaceLayoutNode): WorkspaceLayoutNode => {
@@ -998,8 +1000,7 @@ function canonicalRecord(layout: WorkspaceLayout): Record<string, unknown> {
   };
 }
 function canonicalizeInput(input: WorkspaceLayoutSaveInput): WorkspaceLayout | null {
-  if (input.version === WORKSPACE_LAYOUT_VERSION)
-    return validateWorkspaceLayoutCandidate(canonicalRecord(input as WorkspaceLayout));
+  if (input.version === WORKSPACE_LAYOUT_VERSION) return validateWorkspaceLayoutCandidate(input);
   const fixed = input as FixedWorkspaceLayoutInput;
   const primary = parseTarget(fixed.panes.primary),
     secondary = parseTarget(fixed.panes.secondary);

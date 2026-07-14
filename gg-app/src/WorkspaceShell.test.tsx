@@ -282,6 +282,45 @@ function setLegacyWorkspaceLayout(raw: string): void {
   localStorage.setItem("gg-workspace-layout:main", raw);
 }
 
+function savePhase0LeafCapLayout(leafCount: 7 | 8): void {
+  const ids = [
+    "primary",
+    "pane-1",
+    "pane-2",
+    "pane-3",
+    ...Array.from({ length: leafCount - 4 }, (_, index) => `terminal-${index + 1}`),
+  ];
+  const leaf = (paneId: string): WorkspaceLayout.WorkspaceLayoutNode => ({ type: "leaf", paneId });
+  const root = ids.slice(1).reduce<WorkspaceLayout.WorkspaceLayoutNode>(
+    (node, paneId) => ({
+      type: "split" as const,
+      direction: "horizontal" as const,
+      ratio: 50,
+      size: { type: "ratio" as const, value: 50 },
+      first: node,
+      second: leaf(paneId),
+    }),
+    leaf(ids[0]),
+  );
+  localStorage.setItem(
+    "gg-workspace-layout-recursive:main",
+    JSON.stringify({
+      version: 8,
+      root,
+      focusedPaneId: "primary",
+      defaultTerminalBootstrap: "complete",
+      panes: Object.fromEntries(
+        ids.map((id) => [
+          id,
+          id.startsWith("terminal-")
+            ? { kind: "terminal", stopped: true, cwd: "/work/primary", sessionPath: null }
+            : { kind: "agent", cwd: `/work/${id}`, sessionPath: `/sessions/${id}.jsonl` },
+        ]),
+      ),
+    }),
+  );
+}
+
 beforeEach(() => {
   vi.stubGlobal("CSS", { escape: (value: string) => value });
   vi.clearAllMocks();
@@ -661,6 +700,45 @@ describe("WorkspaceShell v7 terminal rendering", () => {
         cwd: "/work/primary",
       });
     });
+  });
+
+  it("disables toolbar terminal creation and terminal split controls at the eight-leaf Phase 0 cap", async () => {
+    savePhase0LeafCapLayout(8);
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    await screen.findByTestId("pane-primary");
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: "Open terminal in focused pane" })
+        .disabled,
+    ).toBe(true);
+
+    fireEvent.pointerDown(screen.getByTestId("terminal-terminal-1"));
+
+    expect(document.querySelector('[data-pane-id="terminal-1"]')?.classList).toContain(
+      "pane-focused",
+    );
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Split Right" }).disabled).toBe(
+      true,
+    );
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Split Down" }).disabled).toBe(
+      true,
+    );
+    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(8);
+  });
+
+  it("allows a seven-leaf bound agent to add one terminal", async () => {
+    savePhase0LeafCapLayout(7);
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const open = screen.getByRole<HTMLButtonElement>("button", {
+      name: "Open terminal in focused pane",
+    });
+    await waitFor(() => expect(open.disabled).toBe(false));
+
+    fireEvent.click(open);
+
+    expect(await screen.findByTestId("terminal-terminal-4")).toBeTruthy();
+    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(8);
+    await waitFor(() => expect(open.disabled).toBe(true));
   });
 
   it("closes one running terminal without touching another", async () => {

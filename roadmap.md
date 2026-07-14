@@ -300,21 +300,81 @@ Record Phase 1A and Phase 1B evidence here only after each subphase is implement
 
 ## Phase 2 — Pure terminal move reducer
 
-### Goal
+### Phase 2A — Tree helpers and movement validation
 
-Add a deterministic, fully tested recursive tree transformation for moving one terminal left, right, up, or down of another visible pane.
+#### Goal
 
-### Exact scope
+Add the typed pure helper foundation for terminal movement without exposing the final reducer or changing runtime UI behavior.
 
-- Implement pure lookup, remove-and-collapse, target replacement, normalization, and validation helpers in the layout module.
+#### Exact scope
+
+- Implement pure lookup helpers for visible leaf discovery and descriptor consistency checks in the layout module.
+- Implement pure remove-and-collapse helpers that remove one source leaf and collapse exactly one now-unary parent.
+- Implement pure target-replacement helpers that can insert a detached leaf left, right, up, or down of a visible target with a new 50/50 split.
+- Implement or extend normalization and candidate validation helpers used by move candidates.
+- Define and enforce runtime validation for terminal-only sources and the four legal placements.
+- Preserve all pane descriptors and every unaffected branch in helper outputs.
+- Do not export or wire the public `moveTerminalWorkspacePane` reducer in this subphase.
+- Do not add DOM drag handlers or visual overlays in this subphase.
+
+#### Invariants
+
+- The source validation accepts only a visible terminal leaf.
+- The target validation accepts a visible terminal or agent leaf but rejects the source itself.
+- Agent leaves can be targets but never sources.
+- Legal placements are exactly `left`, `right`, `up`, and `down`.
+- Left/right map to horizontal splits; up/down map to vertical splits.
+- Left/up place the source first; right/down place the source second.
+- Removing the source collapses exactly one now-unary parent and leaves unaffected branches untouched.
+- Leaf IDs remain unique, descriptors remain unchanged, focus remains visible, and total leaves remain constant for valid helper candidates.
+- Any helper validation failure returns an explicit failed result without partial mutation or persistence.
+
+#### Files expected to change
+
+- `gg-app/src/workspace-layout.ts`
+- `gg-app/src/workspace-layout.test.ts`
+- `roadmap.md` only to record Phase 2A evidence after implementation
+
+#### Focused tests
+
+- Lookup visible terminal and agent leaves in shallow and nested trees.
+- Remove terminals from shallow, nested, first-child, second-child, ratio, and fixed-second source parents.
+- Insert detached terminal leaves in each of the four directions around agent and terminal targets.
+- Verify unaffected subtree object structure, descriptors, ratios, and fixed sizes remain intact after helper operations.
+- Reject agent sources, missing IDs, self-targets, invalid placements, duplicate/corrupt candidates, over-depth candidates, and over-64 candidates at helper validation boundaries.
+- Assert helper failure paths do not mutate the original layout object.
+
+#### Visual/manual proof
+
+- Use a reducer-helper harness or test-rendered tree to print before/after structures for helper removal and insertion cases.
+- Confirm the renderer can display representative helper-produced nested trees without clipped or missing panes.
+- No interactive drag demonstration is required in this subphase.
+
+#### Stop condition
+
+Stop when helper tests prove lookup, remove-and-collapse, four-way insertion semantics, descriptor preservation, validation rejection, and no-mutation failure behavior; do not wire UI events or export the public move reducer yet.
+
+#### Phase gate
+
+Enter plan mode and obtain approval before implementation; after helper checks and structural rendering proof pass, commit Phase 2A and do not start Phase 2B before that commit exists.
+
+### Phase 2B — Public terminal move reducer
+
+#### Goal
+
+Export one deterministic, fully tested recursive tree transformation for moving one terminal left, right, up, or down of another visible pane.
+
+#### Exact scope
+
 - Export one `moveTerminalWorkspacePane` reducer accepting source terminal ID, target leaf ID, and four-way placement.
+- Compose the Phase 2A lookup, remove-and-collapse, target replacement, normalization, and validation helpers into one guarded reducer commit point.
 - Preserve all pane descriptors and every unaffected branch.
 - Use a new 50/50 ratio split at the insertion point; preserve ratios and fixed sizes outside the removed source parent and inserted target position.
 - Keep the moved terminal focused on success.
 - Return the exact original layout object for all invalid or no-op requests.
-- Do not add DOM drag handlers or visual overlays in this phase.
+- Do not add DOM drag handlers or visual overlays in this subphase.
 
-### Invariants
+#### Invariants
 
 - The source must be a visible terminal leaf.
 - The target may be a visible terminal or agent leaf but may not equal the source.
@@ -325,13 +385,13 @@ Add a deterministic, fully tested recursive tree transformation for moving one t
 - Leaf IDs remain unique, descriptors remain unchanged, focus remains visible, and total leaves remain constant.
 - Any validation failure returns the original object without partial mutation or persistence.
 
-### Files expected to change
+#### Files expected to change
 
 - `gg-app/src/workspace-layout.ts`
 - `gg-app/src/workspace-layout.test.ts`
-- `roadmap.md` only to record phase completion evidence after implementation
+- `roadmap.md` only to record Phase 2B evidence after implementation
 
-### Focused tests
+#### Focused tests
 
 - Move a terminal in each of the four directions around agent and terminal targets.
 - Move from shallow, nested, first-child, second-child, ratio, and fixed-second source parents.
@@ -341,19 +401,36 @@ Add a deterministic, fully tested recursive tree transformation for moving one t
 - Round-trip every successful candidate through save/load validation.
 - Property-style table tests assert leaf multiset and descriptor map equality before and after valid moves.
 
-### Visual/manual proof
+#### Visual/manual proof
 
 - Use a reducer harness or test-rendered tree to print before/after structures for all four directions.
 - Confirm the renderer can display each resulting nested tree without clipped or missing panes.
-- No interactive drag demonstration is required in this phase.
+- No interactive drag demonstration is required in this subphase.
 
-### Stop condition
+#### Stop condition
 
 Stop when the pure reducer proves four-way placement, terminal-only sources, descriptor preservation, focus preservation, round-trip persistence, and exact rollback semantics; do not wire UI events yet.
 
+#### Phase gate
+
+Enter plan mode and obtain approval before implementation; after reducer checks and structural rendering proof pass, commit Phase 2B and do not start Phase 2C before that commit exists.
+
+### Phase 2C — Completion evidence
+
+Record Phase 2A and Phase 2B evidence here only after each subphase is implemented, verified, and committed. Do not mark Phase 2 complete until both subphases have committed evidence.
+
+- **Phase 2A evidence:** complete; commit `dd334ee2` (`Add terminal move layout helper foundations`) implemented the pure helper foundation for terminal movement without exposing the public reducer or UI wiring.
+  - `pnpm --filter gg-app exec vitest run src/workspace-layout.test.ts` — 73/73 passed.
+- **Phase 2B evidence:** complete; exported `moveTerminalWorkspacePane` as the public pure reducer wrapping the Phase 2A candidate helper, with exact original-layout identity rollback for invalid/no-op requests and terminal focus on successful moves.
+  - `pnpm --filter gg-app exec vitest run src/workspace-layout.test.ts` — 101/101 passed.
+  - `pnpm --filter gg-app check` — passed.
+  - `pnpm --filter gg-app lint` — passed.
+  - `pnpm --filter gg-app format:check` — passed.
+  - Reducer tests cover four-way movement around agent and terminal targets, source-parent collapse variants, invalid rollback identity, corrupt/over-depth/over-64 rollback, save/parse round-trips, leaf multiset equality, descriptor equality, unchanged leaf count, and unchanged bootstrap state.
+
 ### Phase gate
 
-Enter plan mode and obtain approval before implementation; after reducer checks and structural rendering proof pass, commit Phase 2 and do not start Phase 3 before that commit exists.
+After Phase 2A and Phase 2B are both complete and committed, commit the Phase 2C evidence update and do not start Phase 3 before that commit exists.
 
 ---
 

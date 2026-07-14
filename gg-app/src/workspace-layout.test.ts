@@ -12,6 +12,7 @@ import {
   isVisibleTerminalLeaf,
   isVisibleWorkspaceLeaf,
   loadWorkspaceLayout,
+  moveTerminalWorkspacePane,
   parseWorkspaceLayout,
   prepareTerminalMoveWorkspaceLayoutCandidate,
   preserveRejectedRecursiveWorkspaceLayout,
@@ -757,6 +758,219 @@ describe("terminal move helper foundations", () => {
       }),
     ).toEqual({ ok: false, reason: "invalid-candidate" });
   });
+});
+
+describe("terminal move reducer", () => {
+  const reducerLayout = (): WorkspaceLayout =>
+    canonical({
+      root: split(dock(leaf("primary"), leaf("terminal-1"), 320), leaf("secondary")),
+      focusedPaneId: "primary",
+      panes: {
+        primary: agent("/a"),
+        "terminal-1": terminal("/a"),
+        secondary: agent("/b"),
+      },
+    });
+
+  const terminalTargetLayout = (): WorkspaceLayout =>
+    canonical({
+      root: split(
+        dock(leaf("primary"), leaf("terminal-1"), 320),
+        split(leaf("terminal-2"), leaf("secondary")),
+      ),
+      focusedPaneId: "primary",
+      panes: {
+        primary: agent("/a"),
+        "terminal-1": terminal("/a"),
+        "terminal-2": terminal("/b"),
+        secondary: agent("/b"),
+      },
+    });
+
+  const moveRequest = (targetPaneId: string, placement: "left" | "right" | "up" | "down") => ({
+    terminalPaneId: "terminal-1",
+    targetPaneId,
+    placement,
+  });
+
+  const sortedLeaves = (layout: WorkspaceLayout) =>
+    [...workspaceLayoutLeafIds(layout.root)].sort((left, right) => left.localeCompare(right));
+
+  it.each([
+    ["left", "horizontal", ["primary", "terminal-1", "secondary"]],
+    ["right", "horizontal", ["primary", "secondary", "terminal-1"]],
+    ["up", "vertical", ["primary", "terminal-1", "secondary"]],
+    ["down", "vertical", ["primary", "secondary", "terminal-1"]],
+  ] as const)("moves a terminal %s of an agent target", (placement, direction, expectedLeafIds) => {
+    const layout = reducerLayout();
+
+    const moved = moveTerminalWorkspacePane(layout, moveRequest("secondary", placement));
+
+    expect(moved).not.toBe(layout);
+    expect(workspaceLayoutLeafIds(moved.root)).toEqual(expectedLeafIds);
+    expect(moved.focusedPaneId).toBe("terminal-1");
+    const secondary = findWorkspaceLayoutLeaf(moved.root, "secondary", moved.panes);
+    expect(
+      secondary?.path
+        .slice(0, -1)
+        .reduce<WorkspaceLayoutNode>(
+          (node, step) => (node.type === "split" ? node[step] : node),
+          moved.root,
+        ),
+    ).toMatchObject({ type: "split", direction, ratio: 50, size: { type: "ratio", value: 50 } });
+  });
+
+  it.each([
+    ["left", ["primary", "terminal-1", "terminal-2", "secondary"]],
+    ["right", ["primary", "terminal-2", "terminal-1", "secondary"]],
+    ["up", ["primary", "terminal-1", "terminal-2", "secondary"]],
+    ["down", ["primary", "terminal-2", "terminal-1", "secondary"]],
+  ] as const)("moves a terminal %s of a terminal target", (placement, expectedLeafIds) => {
+    const layout = terminalTargetLayout();
+
+    const moved = moveTerminalWorkspacePane(layout, moveRequest("terminal-2", placement));
+
+    expect(workspaceLayoutLeafIds(moved.root)).toEqual(expectedLeafIds);
+    expect(moved.focusedPaneId).toBe("terminal-1");
+    expect(moved.panes).toEqual(layout.panes);
+  });
+
+  it.each([
+    ["shallow source parent", split(dock(leaf("primary"), leaf("terminal-1")), leaf("secondary"))],
+    [
+      "nested source parent",
+      split(split(dock(leaf("primary"), leaf("terminal-1")), leaf("pane-3")), leaf("secondary")),
+    ],
+    ["source as first child", split(split(leaf("terminal-1"), leaf("primary")), leaf("secondary"))],
+    [
+      "source as second child",
+      split(split(leaf("primary"), leaf("terminal-1")), leaf("secondary")),
+    ],
+    [
+      "ratio source parent",
+      split(split(leaf("primary"), leaf("terminal-1"), "horizontal", 70), leaf("secondary")),
+    ],
+    [
+      "fixed-second source parent",
+      split(dock(leaf("primary"), leaf("terminal-1"), 333), leaf("secondary")),
+    ],
+  ] as const)("collapses only the %s when moving through the reducer", (_name, root) => {
+    const hasPane3 = workspaceLayoutLeafIds(root).includes("pane-3");
+    const layout = canonical({
+      root,
+      panes: {
+        primary: agent("/a"),
+        "terminal-1": terminal("/a"),
+        secondary: agent("/b"),
+        ...(hasPane3 ? { "pane-3": agent("/c") } : {}),
+      },
+    });
+    const originalPanes = layout.panes;
+
+    const moved = moveTerminalWorkspacePane(layout, moveRequest("secondary", "left"));
+
+    expect(moved).not.toBe(layout);
+    expect(workspaceLayoutLeafIds(moved.root)).toEqual(
+      workspaceLayoutLeafIds(root).includes("pane-3")
+        ? ["primary", "pane-3", "terminal-1", "secondary"]
+        : ["primary", "terminal-1", "secondary"],
+    );
+    expect(moved.panes).toEqual(originalPanes);
+    expect(layout.root).toBe(root);
+  });
+
+  it.each([
+    ["agent source", { terminalPaneId: "primary", targetPaneId: "secondary", placement: "left" }],
+    [
+      "missing source",
+      { terminalPaneId: "terminal-9", targetPaneId: "secondary", placement: "left" },
+    ],
+    ["missing target", { terminalPaneId: "terminal-1", targetPaneId: "pane-9", placement: "left" }],
+    [
+      "self-target",
+      { terminalPaneId: "terminal-1", targetPaneId: "terminal-1", placement: "left" },
+    ],
+    [
+      "invalid placement",
+      { terminalPaneId: "terminal-1", targetPaneId: "secondary", placement: "center" },
+    ],
+  ])("returns the original layout by identity for %s", (_name, request) => {
+    const layout = reducerLayout();
+
+    expect(moveTerminalWorkspacePane(layout, request)).toBe(layout);
+  });
+
+  it("returns the original layout by identity for corrupt, over-depth, and over-64 candidates", () => {
+    const corruptPrimary = canonical({
+      root: split(leaf("primary"), leaf("terminal-1")),
+      panes: { primary: terminal("/a"), "terminal-1": terminal("/a") },
+      focusedPaneId: "terminal-1",
+    });
+    expect(moveTerminalWorkspacePane(corruptPrimary, moveRequest("primary", "left"))).toBe(
+      corruptPrimary,
+    );
+
+    const tooMany = leafGuardLayout(64);
+    const withExtraTerminal = {
+      ...tooMany,
+      root: split(tooMany.root, leaf("terminal-extra")),
+      panes: { ...tooMany.panes, "terminal-extra": terminal("/extra") },
+    };
+    expect(
+      moveTerminalWorkspacePane(withExtraTerminal, {
+        terminalPaneId: "terminal-extra",
+        targetPaneId: "primary",
+        placement: "left",
+      }),
+    ).toBe(withExtraTerminal);
+
+    let deepRoot: WorkspaceLayoutNode = split(leaf("primary"), leaf("terminal-1"));
+    const deepPanes: WorkspaceLayout["panes"] = {
+      primary: agent("/primary"),
+      "terminal-1": terminal("/t"),
+    };
+    for (let index = 0; index < MAX_WORKSPACE_LAYOUT_DEPTH; index += 1) {
+      const id = `deep-${index}`;
+      deepRoot = split(deepRoot, leaf(id));
+      deepPanes[id] = agent(`/${id}`);
+    }
+    const deepLayout = canonical({ root: deepRoot, panes: deepPanes });
+    expect(moveTerminalWorkspacePane(deepLayout, moveRequest("primary", "left"))).toBe(deepLayout);
+  });
+
+  it.each([
+    ["agent-left", reducerLayout(), moveRequest("secondary", "left")],
+    ["agent-right", reducerLayout(), moveRequest("secondary", "right")],
+    ["agent-up", reducerLayout(), moveRequest("secondary", "up")],
+    ["agent-down", reducerLayout(), moveRequest("secondary", "down")],
+    ["terminal-left", terminalTargetLayout(), moveRequest("terminal-2", "left")],
+    ["terminal-right", terminalTargetLayout(), moveRequest("terminal-2", "right")],
+    ["terminal-up", terminalTargetLayout(), moveRequest("terminal-2", "up")],
+    ["terminal-down", terminalTargetLayout(), moveRequest("terminal-2", "down")],
+  ] as const)(
+    "round-trips and preserves invariants for successful move %s",
+    (_name, layout, request) => {
+      const moved = moveTerminalWorkspacePane(layout, request);
+
+      expect(moved).not.toBe(layout);
+      expect(sortedLeaves(moved)).toEqual(sortedLeaves(layout));
+      expect(workspaceLayoutLeafIds(moved.root)).toHaveLength(
+        workspaceLayoutLeafIds(layout.root).length,
+      );
+      expect(moved.panes).toEqual(layout.panes);
+      expect(moved.defaultTerminalBootstrap).toBe(layout.defaultTerminalBootstrap);
+
+      const { values, storage } = store();
+      expect(saveWorkspaceLayout(storage, "terminal-move", moved)).toBe(true);
+      const parsed = parseWorkspaceLayout(
+        values.get(recursiveWorkspaceLayoutKey("terminal-move"))!,
+      );
+      expect(parsed.status).toBe("valid");
+      expect(parsed.layout.root).toEqual(moved.root);
+      expect(parsed.layout.focusedPaneId).toBe("terminal-1");
+      expect(parsed.layout.panes).toEqual(moved.panes);
+    },
+  );
 });
 
 describe("v8 reducers", () => {

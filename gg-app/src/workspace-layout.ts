@@ -292,7 +292,7 @@ export function insertWorkspaceLayoutLeafNearTarget(
   return inserted ? { ok: true, value: nextRoot } : { ok: false, reason: "target-not-found" };
 }
 
-/** Foundation-level terminal movement validator; public reducer rollback is added in Phase 2B. */
+/** Foundation-level terminal movement validator used by the public reducer rollback boundary. */
 export function prepareTerminalMoveWorkspaceLayoutCandidate(
   layout: WorkspaceLayout,
   request: unknown,
@@ -330,6 +330,14 @@ export function prepareTerminalMoveWorkspaceLayoutCandidate(
   });
   const valid = validateWorkspaceLayoutCandidate(normalized);
   return valid ? { ok: true, value: valid } : { ok: false, reason: "invalid-candidate" };
+}
+
+export function moveTerminalWorkspacePane(
+  layout: WorkspaceLayout,
+  request: unknown,
+): WorkspaceLayout {
+  const candidate = prepareTerminalMoveWorkspaceLayoutCandidate(layout, request);
+  return candidate.ok ? candidate.value : layout;
 }
 function agentTarget(value: WorkspacePaneValue | undefined): WorkspacePaneTarget | null {
   return value && descriptorKind(value) === "agent"

@@ -277,6 +277,11 @@ function setWorkspaceWidth(container: HTMLElement, width: number): void {
   setWorkspaceSize(container, width);
 }
 
+function setLegacyWorkspaceLayout(raw: string): void {
+  localStorage.removeItem("gg-workspace-layout-recursive:main");
+  localStorage.setItem("gg-workspace-layout:main", raw);
+}
+
 beforeEach(() => {
   vi.stubGlobal("CSS", { escape: (value: string) => value });
   vi.clearAllMocks();
@@ -285,6 +290,7 @@ beforeEach(() => {
   bridge.registerStoppedTerminalTarget.mockResolvedValue(undefined);
   workspaceLayoutMock.rejectResolution = false;
   localStorage.clear();
+  localStorage.setItem("gg-workspace-layout-recursive:main", "test-default-invalid-layout");
 });
 
 afterEach(() => {
@@ -763,8 +769,7 @@ describe("WorkspaceShell pane routing", () => {
   });
 
   it("restores secondary focus, title, and Notes after target hydration without remounting panes", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
+    setLegacyWorkspaceLayout(
       JSON.stringify({
         version: 3,
         splitRatio: 58,
@@ -874,6 +879,7 @@ describe("WorkspaceShell pane routing", () => {
     const source = screen.getByTestId("pane-primary");
     const action = screen.getByRole("button", { name: "Open in new window" });
     await waitFor(() => expect(action.hasAttribute("disabled")).toBe(false));
+    toastMock.mockClear();
 
     fireEvent.click(action);
     fireEvent.click(action);
@@ -1103,7 +1109,7 @@ describe("WorkspaceShell secondary pane lifecycle", () => {
 
 describe("WorkspaceShell layout recovery", () => {
   it("warns once for a malformed layout across rerenders and keeps the pane usable", async () => {
-    localStorage.setItem("gg-workspace-layout:main", "not-json");
+    setLegacyWorkspaceLayout("not-json");
 
     const view = render(<WorkspaceShell renderPane={renderPane} />);
 
@@ -1124,8 +1130,7 @@ describe("WorkspaceShell layout recovery", () => {
   });
 
   it("warns once when a stale target falls back and keeps the recovered pane usable", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
+    setLegacyWorkspaceLayout(
       JSON.stringify({
         version: 3,
         splitRatio: 50,
@@ -1159,12 +1164,12 @@ describe("WorkspaceShell layout recovery", () => {
   });
 
   it("warns again for a later distinct recovery event", async () => {
-    localStorage.setItem("gg-workspace-layout:main", "first-invalid-layout");
+    setLegacyWorkspaceLayout("first-invalid-layout");
     const first = render(<WorkspaceShell renderPane={renderPane} />);
     await waitFor(() => expect(toastMock).toHaveBeenCalledTimes(1));
     first.unmount();
 
-    localStorage.setItem("gg-workspace-layout:main", "second-invalid-layout");
+    setLegacyWorkspaceLayout("second-invalid-layout");
     render(<WorkspaceShell renderPane={renderPane} />);
 
     await waitFor(() => expect(toastMock).toHaveBeenCalledTimes(2));
@@ -1186,7 +1191,7 @@ describe("WorkspaceShell layout recovery", () => {
       },
     };
     if (focusedPaneId === undefined) delete record.focusedPaneId;
-    localStorage.setItem("gg-workspace-layout:main", JSON.stringify(record));
+    setLegacyWorkspaceLayout(JSON.stringify(record));
 
     render(<WorkspaceShell renderPane={renderPane} />);
 
@@ -1196,8 +1201,7 @@ describe("WorkspaceShell layout recovery", () => {
   });
 
   it("falls back to one focused primary pane for stale closed-secondary focus", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
+    setLegacyWorkspaceLayout(
       JSON.stringify({
         version: 3,
         splitRatio: 50,
@@ -1217,7 +1221,7 @@ describe("WorkspaceShell layout recovery", () => {
     ["malformed", "not-json"],
     ["future", ' \n{\r\n  "version": 99, "future": "é\\u0000"\r\n}\t'],
   ])("recovers the native primary and secondary picker for %s layouts", async (_label, raw) => {
-    localStorage.setItem("gg-workspace-layout:main", raw);
+    setLegacyWorkspaceLayout(raw);
 
     render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
 
@@ -1238,7 +1242,7 @@ describe("WorkspaceShell layout recovery", () => {
   it("preserves malformed legacy bytes only in the legacy diagnostic", async () => {
     const legacyRaw = " \nlegacy-invalid-é\\u0000\t";
     const recursiveDiagnostic = "existing-recursive-diagnostic";
-    localStorage.setItem("gg-workspace-layout:main", legacyRaw);
+    setLegacyWorkspaceLayout(legacyRaw);
     localStorage.setItem("gg-workspace-layout-rejected:main", "existing-legacy-diagnostic");
     localStorage.setItem("gg-workspace-layout-recursive-rejected:main", recursiveDiagnostic);
 
@@ -1255,7 +1259,7 @@ describe("WorkspaceShell layout recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
     await waitFor(() =>
       expect(JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).version).toBe(
-        7,
+        8,
       ),
     );
     expect(localStorage.getItem("gg-workspace-layout-rejected:main")).toBe(legacyRaw);
@@ -1287,7 +1291,7 @@ describe("WorkspaceShell layout recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open terminal in focused pane" }));
     await waitFor(() =>
       expect(JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!).version).toBe(
-        7,
+        8,
       ),
     );
     expect(localStorage.getItem("gg-workspace-layout-recursive-rejected:main")).toBe(recursiveRaw);
@@ -1296,7 +1300,7 @@ describe("WorkspaceShell layout recovery", () => {
 
   it("keeps the rollback write barrier until user layout interaction", async () => {
     const raw = '{"version":99,"future":true}';
-    localStorage.setItem("gg-workspace-layout:main", raw);
+    setLegacyWorkspaceLayout(raw);
 
     render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
     await screen.findByTestId("restore-pane-primary");
@@ -1352,7 +1356,7 @@ describe("WorkspaceShell layout recovery", () => {
     render(<WorkspaceShell renderPane={renderNativeRestorePane} />);
 
     expect((await screen.findByTestId("restore-pane-primary")).dataset.source).toBe("native");
-    expect(screen.getByTestId("restore-pane-secondary").dataset.source).toBe("picker");
+    expect(screen.queryByTestId("restore-pane-secondary")).toBeNull();
     expect(getItem.mock.calls).toEqual([
       ["gg-workspace-layout-recursive:main"],
       ["gg-workspace-layout:main"],
@@ -1361,8 +1365,7 @@ describe("WorkspaceShell layout recovery", () => {
   });
 
   it("restores the saved ratio and both pane targets before mounting panes", async () => {
-    localStorage.setItem(
-      "gg-workspace-layout:main",
+    setLegacyWorkspaceLayout(
       JSON.stringify({
         version: 1,
         splitRatio: 64,
@@ -1389,8 +1392,7 @@ describe("WorkspaceShell layout recovery", () => {
 
   it("mounts the saved targets when layout validation fails unexpectedly", async () => {
     workspaceLayoutMock.rejectResolution = true;
-    localStorage.setItem(
-      "gg-workspace-layout:main",
+    setLegacyWorkspaceLayout(
       JSON.stringify({
         version: 1,
         splitRatio: 64,

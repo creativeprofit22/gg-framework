@@ -1,6 +1,6 @@
 import { PRIMARY_PANE_ID } from "./pane-routing";
 
-export const WORKSPACE_LAYOUT_VERSION = 7;
+export const WORKSPACE_LAYOUT_VERSION = 8;
 export const DEFAULT_SPLIT_RATIO = 50;
 export const MIN_SPLIT_RATIO = 10;
 export const MAX_SPLIT_RATIO = 90;
@@ -8,14 +8,24 @@ export const DEFAULT_TERMINAL_DOCK_HEIGHT_PX = 260;
 export const MIN_TERMINAL_DOCK_HEIGHT_PX = 140;
 export const MAX_TERMINAL_DOCK_HEIGHT_PX = 2_000;
 export const MAX_WORKSPACE_PANES = 4;
-/** Four agent panes plus one terminal leaf for each agent remain migration-safe. */
+/** Temporary terminal-creation policy retained until Phase 1 removes the small product limit. */
 export const MAX_WORKSPACE_LEAVES = MAX_WORKSPACE_PANES * 2;
-export const MAX_WORKSPACE_LAYOUT_DEPTH = 5;
+/** Persisted-input and reducer-output corruption/resource guard, separate from creation policy. */
+export const MAX_WORKSPACE_LAYOUT_LEAVES = 64;
+/** A 64-leaf comb reaches depth 64 when the root is counted as depth 1. */
+export const MAX_WORKSPACE_LAYOUT_DEPTH = MAX_WORKSPACE_LAYOUT_LEAVES;
 const MAX_V6_WORKSPACE_LAYOUT_DEPTH = 4;
 const MAX_WORKSPACE_PANE_ID_BYTES = 64;
 
 export type WorkspacePaneId = string;
 export type SplitDirection = "horizontal" | "vertical";
+export type DefaultTerminalBootstrap = "pending" | "complete";
+export type TerminalPanePlacement = "left" | "right" | "up" | "down";
+export interface TerminalPaneMoveRequest {
+  terminalPaneId: WorkspacePaneId;
+  targetPaneId: WorkspacePaneId;
+  placement: TerminalPanePlacement;
+}
 export interface LeafNode {
   type: "leaf";
   paneId: WorkspacePaneId;
@@ -46,7 +56,7 @@ export interface WorkspacePaneTarget {
 }
 /**
  * `kind` is optional in memory so the existing UI can keep supplying its v6 target shape during
- * the schema-only migration. Canonical v7 storage always writes and requires it.
+ * the schema-only migration. Canonical v8 storage always writes and requires it.
  */
 export interface AgentPaneDescriptor extends WorkspacePaneTarget {
   kind?: "agent";
@@ -70,6 +80,7 @@ export interface WorkspaceLayout {
   root: WorkspaceLayoutNode;
   focusedPaneId: WorkspacePaneId;
   panes: Record<WorkspacePaneId, WorkspacePaneValue>;
+  defaultTerminalBootstrap: DefaultTerminalBootstrap;
   terminal: WorkspaceTerminalLayout;
   splitRatio: number;
   secondaryOpen: boolean;
@@ -116,6 +127,23 @@ export function isValidWorkspacePaneId(value: unknown): value is WorkspacePaneId
     value.length >= 1 &&
     value.length <= MAX_WORKSPACE_PANE_ID_BYTES &&
     /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+export function isTerminalPanePlacement(value: unknown): value is TerminalPanePlacement {
+  return value === "left" || value === "right" || value === "up" || value === "down";
+}
+
+export function isTerminalPaneMoveRequest(value: unknown): value is TerminalPaneMoveRequest {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return (
+    keys.length === 3 &&
+    keys.every((key) => ["terminalPaneId", "targetPaneId", "placement"].includes(key)) &&
+    isValidWorkspacePaneId(record.terminalPaneId) &&
+    isValidWorkspacePaneId(record.targetPaneId) &&
+    isTerminalPanePlacement(record.placement)
   );
 }
 export function workspaceLayoutKey(windowLabel: string): string {
@@ -236,19 +264,30 @@ function normalizeLayout(layout: {
   root: WorkspaceLayoutNode;
   focusedPaneId: WorkspacePaneId;
   panes: Record<WorkspacePaneId, WorkspacePaneValue>;
+  defaultTerminalBootstrap: DefaultTerminalBootstrap;
 }): WorkspaceLayout {
   const visible = workspaceLayoutLeafIds(layout.root);
   const firstAgent =
     visible.find((id) => descriptorKind(layout.panes[id]) === "agent") ?? visible[0];
   const focusedPaneId = visible.includes(layout.focusedPaneId) ? layout.focusedPaneId : firstAgent;
   return {
-    version: 7,
+    version: WORKSPACE_LAYOUT_VERSION,
     root: layout.root,
     focusedPaneId,
     panes: layout.panes,
+    defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
     terminal: legacyTerminalProjection(layout.root, layout.panes),
     ...compatibility(layout.root),
   };
+}
+
+function freshWorkspaceLayout(): WorkspaceLayout {
+  return normalizeLayout({
+    root: { type: "leaf", paneId: "primary" },
+    focusedPaneId: "primary",
+    panes: { primary: null },
+    defaultTerminalBootstrap: "pending",
+  });
 }
 
 export function defaultWorkspaceLayout(): WorkspaceLayout {
@@ -261,6 +300,7 @@ export function defaultWorkspaceLayout(): WorkspaceLayout {
     ),
     focusedPaneId: "primary",
     panes: { primary: null, secondary: null },
+    defaultTerminalBootstrap: "complete",
   });
 }
 
@@ -273,6 +313,7 @@ export function terminalOnlyWorkspaceLayout(target: WorkspacePaneTarget): Worksp
     panes: {
       "terminal-1": { kind: "terminal", stopped: true, ...parsedTarget },
     },
+    defaultTerminalBootstrap: "complete",
   });
 }
 
@@ -326,6 +367,7 @@ export function addTerminalWorkspacePane(
           ...layout.panes,
           [terminalPaneId]: { kind: "terminal", stopped: true, ...target },
         },
+        defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
       })
     : layout;
 }
@@ -392,6 +434,7 @@ export function splitWorkspacePane(
         root,
         focusedPaneId: newPaneId,
         panes: { ...layout.panes, [newPaneId]: newDescriptor },
+        defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
       })
     : layout;
 }
@@ -408,7 +451,12 @@ export function updateWorkspaceSplitRatio(
     return { ...node, ratio: value, size: { type: "ratio", value } };
   });
   return changed && root
-    ? normalizeLayout({ root, focusedPaneId: layout.focusedPaneId, panes: layout.panes })
+    ? normalizeLayout({
+        root,
+        focusedPaneId: layout.focusedPaneId,
+        panes: layout.panes,
+        defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
+      })
     : layout;
 }
 export function removeWorkspacePane(
@@ -449,6 +497,7 @@ export function removeWorkspacePane(
           visible[0])
         : layout.focusedPaneId,
     panes,
+    defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
   });
 }
 
@@ -473,13 +522,18 @@ function parseTarget(
       typeof record.sessionPath === "string" && record.sessionPath ? record.sessionPath : null,
   };
 }
-function parseV7Descriptor(value: unknown): WorkspacePaneValue | undefined {
+function isDefaultTerminalBootstrap(value: unknown): value is DefaultTerminalBootstrap {
+  return value === "pending" || value === "complete";
+}
+
+function parseWorkspacePaneDescriptor(value: unknown): WorkspacePaneValue | undefined {
   if (value === null) return null;
   if (typeof value !== "object" || value === null) return undefined;
   const record = value as Record<string, unknown>;
-  if (record.kind === "agent") {
-    if (Object.keys(record).some((key) => !["kind", "cwd", "sessionPath"].includes(key)))
-      return undefined;
+  if (record.kind === "agent" || record.kind === undefined) {
+    const allowedKeys =
+      record.kind === "agent" ? ["kind", "cwd", "sessionPath"] : ["cwd", "sessionPath"];
+    if (Object.keys(record).some((key) => !allowedKeys.includes(key))) return undefined;
     const target = parseTarget(record);
     return target ? { kind: "agent", ...target } : undefined;
   }
@@ -496,7 +550,7 @@ function parseNode(
   value: unknown,
   depth: number,
   ids: Set<string>,
-  version: 6 | 7,
+  version: 6 | 7 | typeof WORKSPACE_LAYOUT_VERSION,
 ): WorkspaceLayoutNode | null {
   const maximumDepth = version === 6 ? MAX_V6_WORKSPACE_LAYOUT_DEPTH : MAX_WORKSPACE_LAYOUT_DEPTH;
   if (depth > maximumDepth || typeof value !== "object" || value === null) return null;
@@ -504,7 +558,8 @@ function parseNode(
   if (record.type === "leaf") {
     if (!isValidWorkspacePaneId(record.paneId) || ids.has(record.paneId)) return null;
     ids.add(record.paneId);
-    if (ids.size > MAX_WORKSPACE_LEAVES) return null;
+    const maximumLeaves = version === 6 ? MAX_WORKSPACE_PANES : MAX_WORKSPACE_LAYOUT_LEAVES;
+    if (ids.size > maximumLeaves) return null;
     return { type: "leaf", paneId: record.paneId };
   }
   if (
@@ -638,12 +693,25 @@ function migrateV6(
     const target = targets[id] ?? null;
     panes[id] = target ? { kind: "agent", ...target } : null;
   }
-  if (!terminal.open) return { layout: normalizeLayout({ root, focusedPaneId, panes }) };
+  if (!terminal.open)
+    return {
+      layout: normalizeLayout({
+        root,
+        focusedPaneId,
+        panes,
+        defaultTerminalBootstrap: "complete",
+      }),
+    };
   const owner = terminal.ownerPaneId;
   const target = owner ? agentTarget(panes[owner]) : null;
   if (!owner || !visible.includes(owner) || !target) {
     return {
-      layout: normalizeLayout({ root, focusedPaneId, panes }),
+      layout: normalizeLayout({
+        root,
+        focusedPaneId,
+        panes,
+        defaultTerminalBootstrap: "complete",
+      }),
       terminalRecovery: {
         ownerPaneId: owner,
         reason: owner && visible.includes(owner) ? "unbound" : "missing",
@@ -659,7 +727,14 @@ function migrateV6(
     return { ...node, first: replace(node.first), second: replace(node.second) };
   };
   panes[terminalId] = { kind: "terminal", stopped: true, ...target };
-  return { layout: normalizeLayout({ root: replace(root), focusedPaneId, panes }) };
+  return {
+    layout: normalizeLayout({
+      root: replace(root),
+      focusedPaneId,
+      panes,
+      defaultTerminalBootstrap: "complete",
+    }),
+  };
 }
 function parseV6(record: Record<string, unknown>): WorkspaceLayoutLoadResult | null {
   const ids = new Set<string>();
@@ -674,9 +749,9 @@ function parseV6(record: Record<string, unknown>): WorkspaceLayoutLoadResult | n
   const rawPanes = record.panes as Record<string, unknown>;
   const keys = Object.keys(rawPanes);
   if (
+    keys.length !== ids.size ||
     keys.length > MAX_WORKSPACE_PANES ||
-    keys.some((key) => !isValidWorkspacePaneId(key)) ||
-    [...ids].some((id) => !(id in rawPanes))
+    keys.some((key) => !isValidWorkspacePaneId(key) || !ids.has(key))
   )
     return null;
   const targets: Record<string, WorkspacePaneTarget | null> = {};
@@ -721,16 +796,23 @@ function validFixedSplitTopology(
     return false;
   return validFixedSplitTopology(node.first, panes) && validFixedSplitTopology(node.second, panes);
 }
-function parseV7(record: Record<string, unknown>): WorkspaceLayoutLoadResult | null {
+export function validateWorkspaceLayoutCandidate(candidate: unknown): WorkspaceLayout | null {
+  if (typeof candidate !== "object" || candidate === null) return null;
+  const record = candidate as Record<string, unknown>;
+  if (
+    record.version !== WORKSPACE_LAYOUT_VERSION ||
+    !isDefaultTerminalBootstrap(record.defaultTerminalBootstrap)
+  )
+    return null;
   const ids = new Set<string>();
-  const root = parseNode(record.root, 1, ids, 7);
+  const root = parseNode(record.root, 1, ids, WORKSPACE_LAYOUT_VERSION);
   if (!root || typeof record.panes !== "object" || record.panes === null) return null;
   const rawPanes = record.panes as Record<string, unknown>;
   const keys = Object.keys(rawPanes);
   if (keys.length !== ids.size || keys.some((key) => !ids.has(key))) return null;
   const panes: Record<string, WorkspacePaneValue> = {};
   for (const key of keys) {
-    const descriptor = parseV7Descriptor(rawPanes[key]);
+    const descriptor = parseWorkspacePaneDescriptor(rawPanes[key]);
     if (descriptor === undefined) return null;
     panes[key] = descriptor;
   }
@@ -748,8 +830,36 @@ function parseV7(record: Record<string, unknown>): WorkspaceLayoutLoadResult | n
       !validFixedSplitTopology(root, panes))
   )
     return null;
-  const layout = normalizeLayout({ root, focusedPaneId, panes });
-  return { layout, status: "valid" };
+  return normalizeLayout({
+    root,
+    focusedPaneId,
+    panes,
+    defaultTerminalBootstrap: record.defaultTerminalBootstrap,
+  });
+}
+
+function hasCanonicalPaneDescriptorKinds(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Object.values(value).every(
+      (descriptor) =>
+        descriptor === null ||
+        (typeof descriptor === "object" &&
+          descriptor !== null &&
+          (descriptor as Record<string, unknown>).kind !== undefined),
+    )
+  );
+}
+
+function parseV7(record: Record<string, unknown>): WorkspaceLayoutLoadResult | null {
+  if (!hasCanonicalPaneDescriptorKinds(record.panes)) return null;
+  const layout = validateWorkspaceLayoutCandidate({
+    ...record,
+    version: WORKSPACE_LAYOUT_VERSION,
+    defaultTerminalBootstrap: "complete",
+  });
+  return layout ? { layout, status: "migrated" } : null;
 }
 
 export function parseWorkspaceLayout(raw: string): WorkspaceLayoutLoadResult {
@@ -762,6 +872,14 @@ export function parseWorkspaceLayout(raw: string): WorkspaceLayoutLoadResult {
   if (typeof value !== "object" || value === null)
     return { layout: defaultWorkspaceLayout(), status: "corrupt" };
   const record = value as Record<string, unknown>;
+  if (record.version === WORKSPACE_LAYOUT_VERSION) {
+    if (!hasCanonicalPaneDescriptorKinds(record.panes))
+      return { layout: defaultWorkspaceLayout(), status: "corrupt" };
+    const layout = validateWorkspaceLayoutCandidate(record);
+    return layout
+      ? { layout, status: "valid" }
+      : { layout: defaultWorkspaceLayout(), status: "corrupt" };
+  }
   if (record.version === 7)
     return parseV7(record) ?? { layout: defaultWorkspaceLayout(), status: "corrupt" };
   if (record.version === 6)
@@ -812,7 +930,7 @@ export function loadWorkspaceLayout(
       return { ...result, rejectedRaw: recursiveRaw, rejectedSource: "recursive" };
     }
     const raw = storage.getItem(workspaceLayoutKey(windowLabel));
-    if (raw === null) return { layout: defaultWorkspaceLayout(), status: "missing" };
+    if (raw === null) return { layout: freshWorkspaceLayout(), status: "missing" };
     const result = parseWorkspaceLayout(raw);
     return result.status === "corrupt"
       ? { ...result, rejectedRaw: raw, rejectedSource: "legacy" }
@@ -871,13 +989,17 @@ function canonicalRecord(layout: WorkspaceLayout): Record<string, unknown> {
           first: stripNode(node.first),
           second: stripNode(node.second),
         };
-  return { version: 7, root: stripNode(layout.root), focusedPaneId: layout.focusedPaneId, panes };
+  return {
+    version: WORKSPACE_LAYOUT_VERSION,
+    root: stripNode(layout.root),
+    focusedPaneId: layout.focusedPaneId,
+    panes,
+    defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
+  };
 }
 function canonicalizeInput(input: WorkspaceLayoutSaveInput): WorkspaceLayout | null {
-  if (input.version === 7) {
-    const parsed = parseWorkspaceLayout(JSON.stringify(canonicalRecord(input as WorkspaceLayout)));
-    return parsed.status === "valid" ? parsed.layout : null;
-  }
+  if (input.version === WORKSPACE_LAYOUT_VERSION)
+    return validateWorkspaceLayoutCandidate(canonicalRecord(input as WorkspaceLayout));
   const fixed = input as FixedWorkspaceLayoutInput;
   const primary = parseTarget(fixed.panes.primary),
     secondary = parseTarget(fixed.panes.secondary);
@@ -995,7 +1117,12 @@ export async function resolveWorkspaceLayoutTargets(
     }
   }
   if (invalidTerminals.size === 0)
-    return normalizeLayout({ root: layout.root, focusedPaneId: layout.focusedPaneId, panes });
+    return normalizeLayout({
+      root: layout.root,
+      focusedPaneId: layout.focusedPaneId,
+      panes,
+      defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
+    });
   const prune = (node: WorkspaceLayoutNode): WorkspaceLayoutNode | null => {
     if (node.type === "leaf") return invalidTerminals.has(node.paneId) ? null : node;
     const first = prune(node.first);
@@ -1007,5 +1134,10 @@ export async function resolveWorkspaceLayoutTargets(
   const root = prune(layout.root);
   if (!root) return defaultWorkspaceLayout();
   for (const id of invalidTerminals) delete panes[id];
-  return normalizeLayout({ root, focusedPaneId: layout.focusedPaneId, panes });
+  return normalizeLayout({
+    root,
+    focusedPaneId: layout.focusedPaneId,
+    panes,
+    defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
+  });
 }

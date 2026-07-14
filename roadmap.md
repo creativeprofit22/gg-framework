@@ -437,34 +437,36 @@ After Phase 2A and Phase 2B are both complete and committed, commit the Phase 2C
 
 ## Phase 3 — Toggleable terminal drag UI
 
-### Goal
+### Phase 3A — Rearrangement mode and pointer drag foundation
 
-Expose deliberate, previewable terminal rearrangement while making accidental dragging impossible outside rearrangement mode.
+#### Goal
 
-### Exact scope
+Expose deliberate, previewable pointer-based terminal rearrangement while making accidental dragging impossible outside rearrangement mode.
+
+#### Exact scope
 
 - Add workspace-scoped transient rearrangement state, defaulting to disabled on mount.
 - Render a drag handle only for terminal panes and make it draggable only while mode is enabled.
 - Render four explicit target zones over visible pane leaves: left, right, up, and down.
 - Use full half-pane previews where space permits and compact directional indicators in small panes.
 - Dispatch only one reducer request on drop; never mutate layout during hover.
-- Cancel active drag on Escape, pointer cancel, drag end without valid drop, outside drop, window blur, source disappearance, target disappearance, and mode disable.
+- Cancel active pointer drag on Escape, pointer cancel, drag end without valid drop, outside drop, window blur, source disappearance, target disappearance, and mode disable.
 - Keep file-drop/native-drop handling isolated from internal terminal movement through a dedicated drag MIME/type marker.
-- Add an accessible non-pointer “Move terminal” flow exposing the same target and direction choices.
-- Announce mode changes, valid moves, and cancellations through an app-appropriate polite live region.
+- Announce pointer mode changes, valid moves, and cancellations through an app-appropriate polite live region.
+- Do not add the accessible non-pointer “Move terminal” flow in this subphase.
 
-### Invariants
+#### Invariants
 
 - Disabled mode registers no valid internal drop targets and starts no terminal movement.
 - Only terminal handles initiate internal movement.
 - Hover state is transient and never reaches layout persistence.
 - No center/background/root drop exists.
 - Invalid drops leave layout object identity unchanged.
-- A successful drop focuses the moved terminal; cancellation restores the initiating handle's focus when it still exists.
+- A successful pointer drop focuses the moved terminal; cancellation restores the initiating handle's focus when it still exists.
 - Terminal input remains interactive, and terminal text selection does not start a drag.
 - Native file drops continue reaching the focused agent input without being mistaken for pane moves.
 
-### Files expected to change
+#### Files expected to change
 
 - `gg-app/src/WorkspaceShell.tsx`
 - `gg-app/src/WorkspaceNode.tsx`
@@ -473,34 +475,109 @@ Expose deliberate, previewable terminal rearrangement while making accidental dr
 - `gg-app/src/WorkspaceShell.test.tsx`
 - `gg-app/src/TerminalPane.test.tsx`
 - A focused new drag-overlay component/test file if separation is clearer than expanding `WorkspaceNode.tsx`
-- `roadmap.md` only to record phase completion evidence after implementation
+- `roadmap.md` only to record Phase 3A evidence after implementation
 
-### Focused tests
+#### Focused tests
 
 - Disabled mode blocks drag start and renders no active zones.
 - Enabled mode accepts only terminal drag payloads and four legal zones.
-- Hover previews do not call the reducer; valid drop calls it once.
+- Hover previews do not call the reducer; valid pointer drop calls it once.
 - Escape, blur, pointer cancel, outside drop, mode-off, invalid target, and source removal clear all transient state.
 - Agent panes cannot become drag sources.
-- Keyboard movement reaches every target/direction combination and restores focus correctly on cancel.
-- ARIA names, pressed state, instructions, live announcements, and focus order are stable.
-- File-drop tests remain green alongside internal drag tests.
+- ARIA names, pressed state, instructions, live announcements, and focus order for pointer rearrangement controls are stable.
+- File-drop tests remain green alongside internal pointer drag tests.
 
-### Visual/manual proof
+#### Visual/manual proof
 
 - Record enabled and disabled states, including the absence of drag affordances when disabled.
 - Drag one terminal left, right, up, and down around both agent and terminal targets.
 - Demonstrate compact indicators in a narrow/small pane.
-- Demonstrate Escape cancellation and keyboard-only movement with visible focus.
+- Demonstrate Escape cancellation with visible focus restoration.
 - Type and select text inside a terminal before and after rearrangement to prove interaction remains intact.
 
-### Stop condition
+#### Stop condition
+
+Stop when pointer movement uses the pure reducer, every pointer cancellation path is inert, disabled mode is genuinely non-draggable, focus/announcements are correct for pointer movement, and file drops remain isolated; do not add keyboard-only movement or relocate header controls yet.
+
+#### Phase gate
+
+Enter plan mode and obtain approval before implementation; after focused pointer interaction checks and recorded real-app pointer drag proof pass, commit Phase 3A and do not start Phase 3B before that commit exists.
+
+#### Phase 3A completion evidence
+
+- **Focused interaction suites:** `TerminalDropOverlay.test.tsx` passed 10/10, `TerminalPane.test.tsx` passed 22/22, `WorkspaceShell.test.tsx` passed 77/77, and `workspace-layout.test.ts` passed 101/101.
+- **GG App gates:** `pnpm --filter gg-app check`, `lint`, and `format:check` passed; `pnpm --filter gg-app test` passed 392/392 tests across 29 files; `pnpm --filter gg-app build` completed successfully.
+- **Pointer behavior proof:** shell tests exercise one-shot reducer commit/persistence/focus, Escape, pointer-cancel, drag-end, outside-drop, blur, mode-off, source/hovered-target removal, and browser/native file-drop isolation; overlay tests exercise all four directions plus self/file/arbitrary-payload rejection.
+- **Native launch proof:** `pnpm --filter gg-app tauri dev` built and launched `target/debug/gg-app.exe`; ignored native-window evidence is stored at `.gg/evidence/terminal-workspace-phase-3a/tauri-printwindow.png`. The unattended runner could capture the native window but could not synthesize trustworthy OS-level HTML drag gestures, so the four-way gesture matrix is proven by the focused DOM interaction suites rather than claimed as manual input.
+- **Known baseline warnings:** full tests retain existing React `act(...)` stderr warnings, and the production build retains the existing >500 kB chunk warning; all commands exited successfully.
+
+### Phase 3B — Keyboard-accessible movement and accessibility completion
+
+#### Goal
+
+Add the accessible non-pointer movement path and complete shared focus and announcement behavior for terminal rearrangement.
+
+#### Exact scope
+
+- Add an accessible non-pointer “Move terminal” flow exposing the same target and direction choices as pointer movement.
+- Reuse the same workspace-scoped transient rearrangement state and pure reducer commit path as pointer movement.
+- Cancel active keyboard movement on Escape, outside dismissal, window blur, source disappearance, target disappearance, and mode disable.
+- Announce keyboard mode changes, valid moves, and cancellations through the same app-appropriate polite live region.
+- Keep pointer drag behavior from Phase 3A unchanged.
+
+#### Invariants
+
+- Disabled mode starts no terminal movement by pointer or keyboard.
+- Only terminal panes expose keyboard movement as sources.
+- Keyboard hover/selection state is transient and never reaches layout persistence.
+- Keyboard choices expose no center/background/root drop.
+- Invalid keyboard moves leave layout object identity unchanged.
+- A successful keyboard move focuses the moved terminal; cancellation restores focus to the initiating control when it still exists.
+- Pointer and keyboard movement share the pure reducer and legal placement vocabulary.
+- Native file drops continue reaching the focused agent input without being mistaken for pane moves.
+
+#### Files expected to change
+
+- `gg-app/src/WorkspaceShell.tsx`
+- `gg-app/src/WorkspaceNode.tsx`
+- `gg-app/src/TerminalPane.tsx`
+- `gg-app/src/App.css`
+- `gg-app/src/WorkspaceShell.test.tsx`
+- `gg-app/src/TerminalPane.test.tsx`
+- A focused new keyboard-move component/test file if separation is clearer than expanding `WorkspaceNode.tsx`
+- `roadmap.md` only to record Phase 3B evidence after implementation
+
+#### Focused tests
+
+- Keyboard movement reaches every target/direction combination and restores focus correctly on cancel.
+- Keyboard valid move calls the reducer once and focuses the moved terminal.
+- Escape, blur, outside dismissal, mode-off, invalid target, and source removal clear all keyboard transient state.
+- Agent panes cannot become keyboard movement sources.
+- ARIA names, pressed state, instructions, live announcements, and focus order are stable across pointer and keyboard flows.
+- Existing pointer drag and file-drop tests from Phase 3A still pass unchanged.
+
+#### Visual/manual proof
+
+- Demonstrate keyboard-only movement with visible focus.
+- Demonstrate Escape cancellation from keyboard movement with focus restored.
+- Confirm pointer drag still moves one terminal left, right, up, and down around both agent and terminal targets.
+- Type and select text inside a terminal before and after keyboard rearrangement to prove interaction remains intact.
+
+#### Stop condition
 
 Stop when pointer and keyboard movement share the pure reducer, every cancellation path is inert, disabled mode is genuinely non-draggable, focus/announcements are correct, and file drops remain isolated; do not relocate header controls yet.
 
+#### Phase gate
+
+Enter plan mode and obtain approval before implementation; after focused keyboard/accessibility checks and recorded real-app keyboard movement proof pass, commit Phase 3B and do not start Phase 3C before that commit exists.
+
+### Phase 3C — Completion evidence
+
+Record Phase 3A and Phase 3B evidence here only after each subphase is implemented, verified, and committed. Phase 4 and all future phases remain pending until a separate approved implementation plan exists.
+
 ### Phase gate
 
-Enter plan mode and obtain approval before implementation; after focused interaction checks and recorded real-app drag proof pass, commit Phase 3 and do not start Phase 4 before that commit exists.
+After Phase 3A and Phase 3B are both complete and committed, and after focused interaction checks and recorded real-app drag proof pass, commit the Phase 3C evidence update and do not start Phase 4 before that commit exists.
 
 ---
 

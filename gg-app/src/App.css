@@ -330,7 +330,8 @@ body {
 }
 
 .workspace-secondary-open,
-.workspace-terminal-open {
+.workspace-terminal-open,
+.workspace-rearrangement-toggle {
   padding: 3px 9px;
   border: 1px solid var(--border-strong);
   border-radius: 5px;
@@ -344,15 +345,36 @@ body {
 .workspace-secondary-open:hover,
 .workspace-secondary-open:focus-visible,
 .workspace-terminal-open:hover:not(:disabled),
-.workspace-terminal-open:focus-visible:not(:disabled) {
+.workspace-terminal-open:focus-visible:not(:disabled),
+.workspace-rearrangement-toggle:hover:not(:disabled),
+.workspace-rearrangement-toggle:focus-visible:not(:disabled),
+.workspace-rearrangement-toggle[aria-pressed="true"] {
   color: var(--text);
   border-color: var(--primary);
 }
 
-.workspace-terminal-open:disabled {
+.workspace-terminal-open:disabled,
+.workspace-rearrangement-toggle:disabled {
   color: var(--text-dim);
   cursor: not-allowed;
   opacity: 0.65;
+}
+
+.workspace-rearrangement-toggle[aria-pressed="true"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--primary) 18%, var(--surface-2));
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
 }
 
 .workspace-grid {
@@ -393,6 +415,131 @@ body {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  container-type: inline-size;
+}
+
+.terminal-drag-active {
+  cursor: grabbing;
+}
+
+.terminal-drop-overlay {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  pointer-events: none;
+}
+
+.terminal-drop-overlay::after {
+  position: absolute;
+  z-index: 0;
+  border: 2px solid color-mix(in srgb, var(--primary) 82%, white);
+  background: color-mix(in srgb, var(--primary) 24%, transparent);
+  box-shadow: inset 0 0 24px color-mix(in srgb, var(--primary) 12%, transparent);
+  content: "";
+  pointer-events: none;
+  opacity: 0;
+}
+
+.terminal-drop-overlay[data-hovered-placement="left"]::after,
+.terminal-drop-overlay[data-hovered-placement="right"]::after {
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  opacity: 1;
+}
+
+.terminal-drop-overlay[data-hovered-placement="left"]::after {
+  left: 0;
+}
+
+.terminal-drop-overlay[data-hovered-placement="right"]::after {
+  right: 0;
+}
+
+.terminal-drop-overlay[data-hovered-placement="up"]::after,
+.terminal-drop-overlay[data-hovered-placement="down"]::after {
+  right: 0;
+  left: 0;
+  height: 50%;
+  opacity: 1;
+}
+
+.terminal-drop-overlay[data-hovered-placement="up"]::after {
+  top: 0;
+}
+
+.terminal-drop-overlay[data-hovered-placement="down"]::after {
+  bottom: 0;
+}
+
+.terminal-drop-zone {
+  position: absolute;
+  z-index: 1;
+  pointer-events: auto;
+}
+
+.terminal-drop-overlay-inert .terminal-drop-zone {
+  cursor: not-allowed;
+}
+
+.terminal-drop-zone-left,
+.terminal-drop-zone-right {
+  top: 0;
+  bottom: 0;
+  width: 25%;
+}
+
+.terminal-drop-zone-left {
+  left: 0;
+}
+
+.terminal-drop-zone-right {
+  right: 0;
+}
+
+.terminal-drop-zone-up,
+.terminal-drop-zone-down {
+  right: 25%;
+  left: 25%;
+  height: 25%;
+}
+
+.terminal-drop-zone-up {
+  top: 0;
+}
+
+.terminal-drop-zone-down {
+  bottom: 0;
+}
+
+@container (max-width: 420px) {
+  .terminal-drop-overlay::after {
+    width: 36px !important;
+    height: 36px !important;
+    border-radius: 6px;
+  }
+
+  .terminal-drop-overlay[data-hovered-placement="left"]::after {
+    top: calc(50% - 18px);
+    bottom: auto;
+  }
+
+  .terminal-drop-overlay[data-hovered-placement="right"]::after {
+    top: calc(50% - 18px);
+    bottom: auto;
+  }
+
+  .terminal-drop-overlay[data-hovered-placement="up"]::after {
+    right: auto;
+    bottom: auto;
+    left: calc(50% - 18px);
+  }
+
+  .terminal-drop-overlay[data-hovered-placement="down"]::after {
+    top: auto;
+    right: auto;
+    left: calc(50% - 18px);
+  }
 }
 
 .workspace-pane-body {
@@ -440,6 +587,33 @@ body {
   padding: 4px 8px 4px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-1);
+}
+
+.terminal-pane-drag-handle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-button);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: grab;
+}
+
+.terminal-pane-drag-handle:hover,
+.terminal-pane-drag-handle:focus-visible {
+  color: var(--text);
+  border-color: var(--primary);
+  background: var(--surface-2);
+  outline: none;
+}
+
+.terminal-pane-drag-handle:active {
+  cursor: grabbing;
 }
 
 .terminal-pane-title {

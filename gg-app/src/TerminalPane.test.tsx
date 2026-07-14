@@ -109,6 +109,64 @@ beforeEach(() => {
 });
 
 describe("TerminalPane", () => {
+  it("shows a labeled draggable handle only while rearrangement is enabled", () => {
+    const view = render(
+      <>
+        <p id="drag-help">Drag to a directional edge.</p>
+        <TerminalPane paneId="terminal-1" initiallyStopped onRequestClose={vi.fn()} />
+      </>,
+    );
+    expect(screen.queryByRole("button", { name: "Move terminal terminal-1" })).toBeNull();
+
+    view.rerender(
+      <>
+        <p id="drag-help">Drag to a directional edge.</p>
+        <TerminalPane
+          paneId="terminal-1"
+          initiallyStopped
+          rearrangementEnabled
+          dragInstructionsId="drag-help"
+          onRequestClose={vi.fn()}
+        />
+      </>,
+    );
+    const handle = screen.getByRole("button", { name: "Move terminal terminal-1" });
+    expect((handle as HTMLButtonElement).draggable).toBe(true);
+    expect(handle.getAttribute("aria-describedby")).toBe("drag-help");
+    expect(handle.getAttribute("data-terminal-drag-handle")).toBe("terminal-1");
+    expect(
+      view.container.querySelector(".terminal-pane-xterm")?.getAttribute("draggable"),
+    ).toBeNull();
+    expect(screen.getByText("Terminal").getAttribute("draggable")).toBeNull();
+  });
+
+  it("publishes only the internal terminal marker and reports drag start and end", () => {
+    const onTerminalDragStart = vi.fn();
+    const onTerminalDragEnd = vi.fn();
+    const setData = vi.fn();
+    const dataTransfer = { setData, effectAllowed: "none" } as unknown as DataTransfer;
+    render(
+      <TerminalPane
+        paneId="terminal-1"
+        initiallyStopped
+        rearrangementEnabled
+        onTerminalDragStart={onTerminalDragStart}
+        onTerminalDragEnd={onTerminalDragEnd}
+        onRequestClose={vi.fn()}
+      />,
+    );
+    const handle = screen.getByRole("button", { name: "Move terminal terminal-1" });
+
+    fireEvent.dragStart(handle, { dataTransfer });
+    expect(setData).toHaveBeenCalledOnce();
+    expect(setData).toHaveBeenCalledWith("application/x-gg-terminal-pane", "terminal-1");
+    expect(dataTransfer.effectAllowed).toBe("move");
+    expect(onTerminalDragStart).toHaveBeenCalledWith("terminal-1", handle);
+
+    fireEvent.dragEnd(handle, { dataTransfer });
+    expect(onTerminalDragEnd).toHaveBeenCalledOnce();
+    expect(onTerminalDragEnd).toHaveBeenCalledWith("terminal-1");
+  });
   it("creates no PTY while restored stopped and creates exactly one for the owner on restart", async () => {
     const onRestart = vi.fn(() => Promise.resolve());
     const onRequestClose = vi.fn();

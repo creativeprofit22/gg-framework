@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { X } from "lucide-react";
+import { GripVertical, X } from "lucide-react";
 import {
   createTerminal,
   openExternalTerminal,
@@ -10,6 +10,7 @@ import {
   type TerminalInfo,
 } from "./agent";
 import { TerminalAdapter, validTerminalSize } from "./terminal";
+import { TERMINAL_PANE_DRAG_MIME } from "./TerminalDropOverlay";
 
 type TerminalStatus = "stopped" | "starting" | "running" | "exited" | "error";
 
@@ -22,6 +23,10 @@ export interface TerminalPaneProps {
   onRequestClose(running: boolean): void;
   onRunningChange?(running: boolean): void;
   onStartupFailure?(): void;
+  rearrangementEnabled?: boolean;
+  dragInstructionsId?: string;
+  onTerminalDragStart?(paneId: string, handle: HTMLButtonElement): void;
+  onTerminalDragEnd?(paneId: string): void;
 }
 
 export function TerminalPane({
@@ -33,6 +38,10 @@ export function TerminalPane({
   onRequestClose,
   onRunningChange,
   onStartupFailure,
+  rearrangementEnabled = false,
+  dragInstructionsId,
+  onTerminalDragStart,
+  onTerminalDragEnd,
 }: TerminalPaneProps) {
   const paneRef = useRef<HTMLElement>(null);
   const heightChangeRef = useRef(onHeightChange);
@@ -317,6 +326,25 @@ export function TerminalPane({
       style={{ "--terminal-dock-height": `${height ?? 260}px` } as React.CSSProperties}
     >
       <header className="terminal-pane-header">
+        {rearrangementEnabled && (
+          <button
+            type="button"
+            className="terminal-pane-drag-handle"
+            draggable
+            data-terminal-drag-handle={paneId}
+            aria-label={`Move terminal ${paneId}`}
+            aria-describedby={dragInstructionsId}
+            title="Drag to move this terminal"
+            onDragStart={(event) => {
+              event.dataTransfer.setData(TERMINAL_PANE_DRAG_MIME, paneId);
+              event.dataTransfer.effectAllowed = "move";
+              onTerminalDragStart?.(paneId, event.currentTarget);
+            }}
+            onDragEnd={() => onTerminalDragEnd?.(paneId)}
+          >
+            <GripVertical size={15} aria-hidden="true" />
+          </button>
+        )}
         <div className="terminal-pane-title">
           <strong>Terminal</strong>
           <span className={`terminal-pane-status terminal-pane-status-${status}`}>

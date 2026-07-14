@@ -7,11 +7,15 @@ import type { AgentPaneProps } from "./AgentPane";
 import type * as WorkspaceLayout from "./workspace-layout";
 import { WorkspaceShell } from "./WorkspaceShell";
 
-const workspaceLayoutMock = vi.hoisted(() => ({ rejectResolution: false }));
+const workspaceLayoutMock = vi.hoisted(() => ({ rejectResolution: false, move: vi.fn() }));
 const toastMock = vi.hoisted(() => vi.fn(() => 1));
 const terminalMock = vi.hoisted(() => ({
   mounts: vi.fn(),
   unmounts: vi.fn(),
+  nativeDrops: vi.fn(),
+  nativeListener: undefined as
+    | ((event: { payload: { type: string; paths: string[] } }) => void)
+    | undefined,
 }));
 
 const bridge = vi.hoisted(() => ({
@@ -27,7 +31,12 @@ const bridge = vi.hoisted(() => ({
   validateWorkspaceTarget: vi.fn(() =>
     Promise.resolve({ projectExists: true, sessionExists: true }),
   ),
-  onDragDropEvent: vi.fn(() => Promise.resolve(() => undefined)),
+  onDragDropEvent: vi.fn(
+    (listener: (event: { payload: { type: string; paths: string[] } }) => void) => {
+      terminalMock.nativeListener = listener;
+      return Promise.resolve(() => undefined);
+    },
+  ),
 }));
 
 vi.mock("./AgentPane", () => ({ AgentPane: () => null }));
@@ -43,6 +52,10 @@ vi.mock("./workspace-layout", async () => {
       workspaceLayoutMock.rejectResolution
         ? Promise.reject(new Error("layout resolution failed"))
         : actual.resolveWorkspaceLayoutTargets(...args),
+    moveTerminalWorkspacePane: (...args: Parameters<typeof actual.moveTerminalWorkspacePane>) => {
+      workspaceLayoutMock.move(...args);
+      return actual.moveTerminalWorkspacePane(...args);
+    },
   };
 });
 
@@ -93,12 +106,20 @@ vi.mock("./TerminalPane", async () => {
       onRestart,
       onRequestClose,
       onRunningChange,
+      rearrangementEnabled,
+      dragInstructionsId,
+      onTerminalDragStart,
+      onTerminalDragEnd,
     }: {
       paneId: string;
       initiallyStopped?: boolean;
       onRestart?(): Promise<void>;
       onRequestClose(running: boolean): void;
       onRunningChange?(running: boolean): void;
+      rearrangementEnabled?: boolean;
+      dragInstructionsId?: string;
+      onTerminalDragStart?(paneId: string, handle: HTMLButtonElement): void;
+      onTerminalDragEnd?(paneId: string): void;
     }) => {
       const [stopped, setStopped] = useState(Boolean(initiallyStopped));
       const [error, setError] = useState<string | null>(null);
@@ -113,6 +134,22 @@ vi.mock("./TerminalPane", async () => {
       }, [onRunningChange, paneId, stopped]);
       return (
         <div className="terminal-pane" data-testid={`terminal-${paneId}`}>
+          {rearrangementEnabled && (
+            <button
+              draggable
+              data-terminal-drag-handle={paneId}
+              aria-label={`Move terminal ${paneId}`}
+              aria-describedby={dragInstructionsId}
+              onDragStart={(event) => {
+                event.dataTransfer.setData("application/x-gg-terminal-pane", paneId);
+                event.dataTransfer.effectAllowed = "move";
+                onTerminalDragStart?.(paneId, event.currentTarget);
+              }}
+              onDragEnd={() => onTerminalDragEnd?.(paneId)}
+            >
+              Move
+            </button>
+          )}
           {stopped ? (
             <button
               onClick={() => {
@@ -150,7 +187,7 @@ function FakePane({
   useEffect(() => {
     registerInput(paneId, {
       focus: () => inputRef.current?.focus(),
-      handleNativeDrop: () => undefined,
+      handleNativeDrop: (paths) => terminalMock.nativeDrops(paneId, paths),
     });
     onSnapshot({
       paneId,
@@ -332,6 +369,64 @@ function saveCompletePrimarySecondaryLayout(): void {
   );
 }
 
+function saveTerminalMoveLayout(): void {
+  localStorage.setItem(
+    "gg-workspace-layout-recursive:main",
+    JSON.stringify({
+      version: 8,
+      root: {
+        type: "split",
+        direction: "horizontal",
+        size: { type: "ratio", value: 50 },
+        first: { type: "leaf", paneId: "primary" },
+        second: {
+          type: "split",
+          direction: "vertical",
+          size: { type: "ratio", value: 50 },
+          first: { type: "leaf", paneId: "secondary" },
+          second: { type: "leaf", paneId: "terminal-1" },
+        },
+      },
+      focusedPaneId: "primary",
+      defaultTerminalBootstrap: "complete",
+      panes: {
+        primary: { kind: "agent", cwd: "/work/primary", sessionPath: null },
+        secondary: { kind: "agent", cwd: "/work/secondary", sessionPath: null },
+        "terminal-1": {
+          kind: "terminal",
+          stopped: true,
+          cwd: "/work/primary",
+          sessionPath: null,
+        },
+      },
+    }),
+  );
+}
+
+function terminalDragTransfer(extraTypes: string[] = []): DataTransfer {
+  const types = [...extraTypes];
+  const values = new Map<string, string>();
+  return {
+    types,
+    effectAllowed: "none",
+    dropEffect: "none",
+    setData(type: string, value: string) {
+      values.set(type, value);
+      if (!types.includes(type)) types.push(type);
+    },
+    getData(type: string) {
+      return values.get(type) ?? "";
+    },
+  } as unknown as DataTransfer;
+}
+
+function startTerminalDrag(): { handle: HTMLElement; dataTransfer: DataTransfer } {
+  const handle = screen.getByRole("button", { name: "Move terminal terminal-1" });
+  const dataTransfer = terminalDragTransfer();
+  fireEvent.dragStart(handle, { dataTransfer });
+  return { handle, dataTransfer };
+}
+
 function saveLeafGuardLayout(leafCount: 63 | 64): void {
   const ids = [
     "primary",
@@ -378,6 +473,7 @@ beforeEach(() => {
   bridge.openPaneInNewWindow.mockResolvedValue(undefined);
   bridge.openTerminalInNewWindow.mockResolvedValue(undefined);
   bridge.registerStoppedTerminalTarget.mockResolvedValue(undefined);
+  terminalMock.nativeListener = undefined;
   workspaceLayoutMock.rejectResolution = false;
   localStorage.clear();
   localStorage.setItem("gg-workspace-layout-recursive:main", "test-default-invalid-layout");
@@ -1918,5 +2014,131 @@ describe("WorkspaceShell pane resizing", () => {
     expect(removeListener).toHaveBeenCalledWith("pointercancel", expect.any(Function));
     expect(document.body.style.cursor).toBe("");
     expect(document.body.style.userSelect).toBe("");
+  });
+});
+
+describe("WorkspaceShell terminal rearrangement", () => {
+  it("defaults off, commits one reducer move, persists, announces, and restores moved focus", async () => {
+    saveTerminalMoveLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("terminal-terminal-1");
+    const toggle = screen.getByRole("button", { name: "Rearrange terminals" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByRole("button", { name: "Move terminal terminal-1" })).toBeNull();
+    expect(document.querySelector(".terminal-drop-overlay")).toBeNull();
+
+    fireEvent.click(toggle);
+    const { handle, dataTransfer } = startTerminalDrag();
+    const rightZone = document.querySelector('[data-pane-id="primary"] [data-placement="right"]')!;
+    fireEvent.dragOver(rightZone, { dataTransfer });
+    fireEvent.drop(rightZone, { dataTransfer });
+    fireEvent.dragEnd(handle, { dataTransfer });
+
+    expect(workspaceLayoutMock.move).toHaveBeenCalledOnce();
+    expect(workspaceLayoutMock.move.mock.calls[0]?.[1]).toEqual({
+      terminalPaneId: "terminal-1",
+      targetPaneId: "primary",
+      placement: "right",
+    });
+    await waitFor(() => {
+      const saved = savedRecursiveLayout();
+      expect(recursiveLeafIds(saved.root)).toEqual(["primary", "terminal-1", "secondary"]);
+      expect((saved as SavedRecursiveLayout & { focusedPaneId: string }).focusedPaneId).toBe(
+        "terminal-1",
+      );
+    });
+    expect(screen.getByText("Terminal terminal-1 moved right of primary.")).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Move terminal terminal-1" }),
+      ),
+    );
+  });
+
+  it.each(["escape", "pointercancel", "dragend", "outside-drop", "blur", "mode-off"] as const)(
+    "cancels through %s without calling the move reducer",
+    async (path) => {
+      saveTerminalMoveLayout();
+      render(<WorkspaceShell renderPane={renderPane} />);
+      await screen.findByTestId("terminal-terminal-1");
+      const toggle = screen.getByRole("button", { name: "Rearrange terminals" });
+      fireEvent.click(toggle);
+      const { handle, dataTransfer } = startTerminalDrag();
+
+      if (path === "escape") fireEvent.keyDown(window, { key: "Escape" });
+      else if (path === "pointercancel") fireEvent.pointerCancel(window);
+      else if (path === "dragend") fireEvent.dragEnd(handle, { dataTransfer });
+      else if (path === "outside-drop") fireEvent.drop(window, { dataTransfer });
+      else if (path === "blur") fireEvent.blur(window);
+      else fireEvent.click(toggle);
+
+      await waitFor(() => expect(document.querySelector(".terminal-drag-active")).toBeNull());
+      expect(workspaceLayoutMock.move).not.toHaveBeenCalled();
+      expect(recursiveLeafIds(savedRecursiveLayout().root)).toEqual([
+        "primary",
+        "secondary",
+        "terminal-1",
+      ]);
+      if (path !== "mode-off") {
+        expect(screen.getByText("Terminal move cancelled.")).toBeTruthy();
+        await waitFor(() => expect(document.activeElement).toBe(handle));
+      }
+    },
+  );
+
+  it("cancels when the source leaf disappears", async () => {
+    saveTerminalMoveLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("terminal-terminal-1");
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange terminals" }));
+    startTerminalDrag();
+    fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
+
+    await waitFor(() => expect(screen.queryByTestId("terminal-terminal-1")).toBeNull());
+    expect(workspaceLayoutMock.move).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Rearrange terminals" }).hasAttribute("disabled"),
+    ).toBe(true);
+  });
+
+  it("cancels and restores source focus when the hovered target disappears", async () => {
+    saveTerminalMoveLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("terminal-terminal-1");
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange terminals" }));
+    const { dataTransfer } = startTerminalDrag();
+    const secondaryLeft = document.querySelector(
+      '[data-pane-id="secondary"] [data-placement="left"]',
+    )!;
+    fireEvent.dragOver(secondaryLeft, { dataTransfer });
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+
+    await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
+    expect(workspaceLayoutMock.move).not.toHaveBeenCalled();
+    expect(screen.getByText("Terminal move cancelled.")).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Move terminal terminal-1" }),
+      ),
+    );
+  });
+
+  it("ignores browser files and native path drops during an internal drag", async () => {
+    saveTerminalMoveLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("terminal-terminal-1");
+    await waitFor(() => expect(terminalMock.nativeListener).toBeTypeOf("function"));
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange terminals" }));
+    startTerminalDrag();
+
+    fireEvent.drop(window, { dataTransfer: terminalDragTransfer(["Files"]) });
+    expect(document.querySelector(".terminal-drag-active")).toBeTruthy();
+    act(() =>
+      terminalMock.nativeListener?.({ payload: { type: "drop", paths: ["/tmp/example.txt"] } }),
+    );
+    expect(terminalMock.nativeDrops).toHaveBeenCalledWith("primary", ["/tmp/example.txt"]);
+    expect(document.querySelector(".terminal-drag-active")).toBeTruthy();
+    expect(workspaceLayoutMock.move).not.toHaveBeenCalled();
+    fireEvent.keyDown(window, { key: "Escape" });
   });
 });

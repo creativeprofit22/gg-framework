@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MAX_WORKSPACE_LAYOUT_DEPTH,
   MAX_WORKSPACE_LAYOUT_LEAVES,
-  MAX_WORKSPACE_LEAVES,
   addTerminalWorkspacePane,
   bootstrapDefaultTerminalWorkspacePane,
   defaultWorkspaceLayout,
@@ -137,6 +136,27 @@ const descriptors = (count: number) =>
     ),
   );
 
+const leafGuardLayout = (leafCount: 63 | 64, agentCount = 4): WorkspaceLayout => {
+  const agentIds = [
+    "primary",
+    ...Array.from({ length: agentCount - 1 }, (_, index) => `pane-${index + 1}`),
+  ];
+  const terminalIds = Array.from(
+    { length: leafCount - agentIds.length },
+    (_, index) => `terminal-${index + 1}`,
+  );
+  const ids = [...agentIds, ...terminalIds];
+  const root = ids
+    .slice(1)
+    .reduce<WorkspaceLayoutNode>((node, paneId) => split(node, leaf(paneId)), leaf(ids[0]));
+  return canonical({
+    root,
+    focusedPaneId: "primary",
+    panes: Object.fromEntries(
+      ids.map((id) => [id, id.startsWith("terminal-") ? terminal(`/${id}`) : agent(`/${id}`)]),
+    ),
+  });
+};
 describe("v8 typed workspace schema", () => {
   it("uses one v8 recursive tree and records completed bootstrap by default", () => {
     const layout = defaultWorkspaceLayout();
@@ -485,25 +505,14 @@ describe("v8 reducers", () => {
     expect(addTerminalWorkspacePane(first, "terminal-1")).toBe(first);
   });
 
-  it("returns the original layout when terminal creation reaches the Phase 0 leaf cap", () => {
-    const cappedRoot = comb(MAX_WORKSPACE_LEAVES);
-    const capped = canonical({
-      root: cappedRoot,
-      focusedPaneId: "primary",
-      panes: {
-        primary: agent("/primary"),
-        "pane-1": agent("/pane-1"),
-        "pane-2": agent("/pane-2"),
-        "pane-3": agent("/pane-3"),
-        "pane-4": terminal("/pane-4"),
-        "pane-5": terminal("/pane-5"),
-        "pane-6": terminal("/pane-6"),
-        "pane-7": terminal("/pane-7"),
-      },
-    });
+  it("allows terminal creation at 63 leaves and blocks the 65th total leaf", () => {
+    const layout = leafGuardLayout(63);
 
-    expect(workspaceLayoutLeafIds(capped.root)).toHaveLength(MAX_WORKSPACE_LEAVES);
-    expect(addTerminalWorkspacePane(capped, "primary")).toBe(capped);
+    const next = addTerminalWorkspacePane(layout, "primary");
+
+    expect(workspaceLayoutLeafIds(next.root)).toHaveLength(64);
+    expect(next.panes["terminal-60"]).toEqual(terminal("/primary"));
+    expect(addTerminalWorkspacePane(next, "primary")).toBe(next);
   });
 
   it("splits, resizes, and removes while preserving pending bootstrap", () => {
@@ -539,6 +548,22 @@ describe("v8 reducers", () => {
       panes: { ...parsed.panes, "terminal-1": { kind: "terminal", stopped: true, cwd: "" } },
     } as unknown as WorkspaceLayout;
     expect(splitWorkspacePane(malformed, "terminal-1", "horizontal")).toBe(malformed);
+  });
+
+  it("copies stopped terminal splits at 63 leaves and blocks the 65th total leaf", () => {
+    const layout = leafGuardLayout(63);
+    const next = splitWorkspacePane(layout, "terminal-1", "horizontal", "pane-99");
+
+    expect(workspaceLayoutLeafIds(next.root)).toHaveLength(64);
+    expect(next.panes["terminal-60"]).toEqual(terminal("/terminal-1"));
+    expect(next.panes).not.toHaveProperty("pane-99");
+    expect(splitWorkspacePane(next, "terminal-1", "horizontal")).toBe(next);
+  });
+
+  it("blocks agent splits at 64 total leaves even below the agent-pane cap", () => {
+    const capped = leafGuardLayout(64, 3);
+
+    expect(splitWorkspacePane(capped, "primary", "horizontal")).toBe(capped);
   });
 
   it("does not resize fixed terminal splits and focuses owner when terminal is removed", () => {

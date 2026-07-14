@@ -332,7 +332,7 @@ function saveCompletePrimarySecondaryLayout(): void {
   );
 }
 
-function savePhase0LeafCapLayout(leafCount: 7 | 8): void {
+function saveLeafGuardLayout(leafCount: 63 | 64): void {
   const ids = [
     "primary",
     "pane-1",
@@ -927,8 +927,8 @@ describe("WorkspaceShell v7 terminal rendering", () => {
     });
   });
 
-  it("disables toolbar terminal creation and terminal split controls at the eight-leaf Phase 0 cap", async () => {
-    savePhase0LeafCapLayout(8);
+  it("disables toolbar terminal creation and terminal split controls at the 64-leaf guard", async () => {
+    saveLeafGuardLayout(64);
     render(<WorkspaceShell renderPane={renderPane} />);
 
     await screen.findByTestId("pane-primary");
@@ -948,11 +948,11 @@ describe("WorkspaceShell v7 terminal rendering", () => {
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Split Down" }).disabled).toBe(
       true,
     );
-    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(8);
+    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(64);
   });
 
-  it("allows a seven-leaf bound agent to add one terminal", async () => {
-    savePhase0LeafCapLayout(7);
+  it("allows a 63-leaf bound agent to add one terminal", async () => {
+    saveLeafGuardLayout(63);
     render(<WorkspaceShell renderPane={renderPane} />);
     const open = screen.getByRole<HTMLButtonElement>("button", {
       name: "Open terminal in focused pane",
@@ -961,9 +961,24 @@ describe("WorkspaceShell v7 terminal rendering", () => {
 
     fireEvent.click(open);
 
-    expect(await screen.findByTestId("terminal-terminal-4")).toBeTruthy();
-    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(8);
+    expect(await screen.findByTestId("terminal-terminal-60")).toBeTruthy();
+    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(64);
     await waitFor(() => expect(open.disabled).toBe(true));
+  });
+
+  it("allows a 63-leaf stopped terminal to split once without starting a PTY", async () => {
+    saveLeafGuardLayout(63);
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-primary");
+    fireEvent.pointerDown(screen.getByTestId("terminal-terminal-1"));
+    const splitRight = screen.getByRole<HTMLButtonElement>("button", { name: "Split Right" });
+    await waitFor(() => expect(splitRight.disabled).toBe(false));
+
+    fireEvent.click(splitRight);
+
+    expect(await screen.findByTestId("terminal-terminal-60")).toBeTruthy();
+    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(64);
+    expect(terminalMock.mounts).not.toHaveBeenCalled();
   });
 
   it("closes one running terminal without touching another", async () => {

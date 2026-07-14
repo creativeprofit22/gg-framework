@@ -290,7 +290,11 @@ Enter plan mode and obtain approval before implementation; after focused checks 
 Record Phase 1A and Phase 1B evidence here only after each subphase is implemented, verified, and committed. Do not mark Phase 1 complete until both subphases have committed evidence.
 
 - **Phase 1A evidence:** complete; see the Phase 1A completion evidence above.
-- **Phase 1B evidence:** pending.
+- **Phase 1B evidence:** complete; implementation removed the old 8-leaf terminal creation/split ceiling while preserving the 64-total-leaf guard and the four-agent-pane cap.
+  - `pnpm --filter gg-app exec vitest run src/workspace-layout.test.ts` — 57/57 passed.
+  - `pnpm --filter gg-app exec vitest run src/WorkspaceShell.test.tsx` — 67/67 passed; existing React `act(...)` warnings were emitted by the pre-existing layout recovery test, but the suite passed.
+  - `pnpm --filter gg-app check`, `pnpm --filter gg-app lint`, and `pnpm --filter gg-app format:check` passed.
+  - Post-format focused reruns passed: `src/workspace-layout.test.ts` 57/57 and `src/WorkspaceShell.test.tsx` 67/67.
 
 ---
 

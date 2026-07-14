@@ -8,8 +8,6 @@ export const DEFAULT_TERMINAL_DOCK_HEIGHT_PX = 260;
 export const MIN_TERMINAL_DOCK_HEIGHT_PX = 140;
 export const MAX_TERMINAL_DOCK_HEIGHT_PX = 2_000;
 export const MAX_WORKSPACE_PANES = 4;
-/** Temporary terminal-creation policy retained until Phase 1 removes the small product limit. */
-export const MAX_WORKSPACE_LEAVES = MAX_WORKSPACE_PANES * 2;
 /** Persisted-input and reducer-output corruption/resource guard, separate from creation policy. */
 export const MAX_WORKSPACE_LAYOUT_LEAVES = 64;
 /** A 64-leaf comb reaches depth 64 when the root is counted as depth 1. */
@@ -348,7 +346,7 @@ export function addTerminalWorkspacePane(
 ): WorkspaceLayout {
   const leafIds = workspaceLayoutLeafIds(layout.root);
   const target = agentTarget(layout.panes[agentPaneId]);
-  if (!target || !leafIds.includes(agentPaneId) || leafIds.length >= MAX_WORKSPACE_LEAVES)
+  if (!target || !leafIds.includes(agentPaneId) || leafIds.length >= MAX_WORKSPACE_LAYOUT_LEAVES)
     return layout;
   const terminalPaneId = allocateTerminalId(layout.root, layout.panes);
   let changed = false;
@@ -418,7 +416,8 @@ export function splitWorkspacePane(
   requestedPaneId?: WorkspacePaneId,
 ): WorkspaceLayout {
   const source = layout.panes[paneId];
-  if (!workspaceLayoutLeafIds(layout.root).includes(paneId)) return layout;
+  const leafIds = workspaceLayoutLeafIds(layout.root);
+  if (!leafIds.includes(paneId)) return layout;
   const sourceKind = descriptorKind(source) === "terminal" ? "terminal" : "agent";
 
   const terminalTarget = sourceKind === "terminal" ? parseTarget(source) : null;
@@ -435,13 +434,11 @@ export function splitWorkspacePane(
   if (
     !newPaneId ||
     !isValidWorkspacePaneId(newPaneId) ||
+    leafIds.length >= MAX_WORKSPACE_LAYOUT_LEAVES ||
     (sourceKind === "agent" &&
-      workspaceLayoutLeafIds(layout.root).filter(
-        (id) => descriptorKind(layout.panes[id]) !== "terminal",
-      ).length >= MAX_WORKSPACE_PANES) ||
-    (sourceKind === "terminal" &&
-      workspaceLayoutLeafIds(layout.root).length >= MAX_WORKSPACE_LEAVES) ||
-    workspaceLayoutLeafIds(layout.root).includes(newPaneId)
+      leafIds.filter((id) => descriptorKind(layout.panes[id]) !== "terminal").length >=
+        MAX_WORKSPACE_PANES) ||
+    leafIds.includes(newPaneId)
   )
     return layout;
   let changed = false;

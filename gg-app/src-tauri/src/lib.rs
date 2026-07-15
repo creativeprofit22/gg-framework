@@ -20,8 +20,6 @@ use tauri::{
 };
 use tauri_plugin_opener::OpenerExt;
 
-mod terminal;
-
 /// The single shared Node daemon process. Every window's `AgentSession` lives
 /// inside this one process as an in-process object, addressed by a session id
 /// (see `Windows`). Replaces the old one-sidecar-process-per-window model: one
@@ -40,13 +38,6 @@ struct Daemon {
 const PRIMARY_PANE_ID: &str = "primary";
 const MAX_PANE_ID_LEN: usize = 64;
 const MAX_AGENT_PANES_PER_WINDOW: usize = 12;
-const MAX_PANE_TARGETS_PER_WINDOW: usize = 64;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PaneKind {
-    Agent,
-    Terminal,
-}
 
 /// One pane's session inside the shared daemon. Pane IDs are scoped by their
 /// owning native window; daemon session IDs remain opaque runtime identities.
@@ -57,7 +48,6 @@ struct PaneSession {
     session_path: Option<String>,
     generation: u64,
     startup_error: Option<String>,
-    terminal_only: bool,
 }
 
 #[derive(Default)]
@@ -120,27 +110,12 @@ fn resolve_owned_pane<'a>(
     registry.get(owner_label)?.get(pane_id)
 }
 
-pub(crate) fn owned_pane_cwd(
-    windows: &Windows,
-    owner_label: &str,
-    pane_id: &str,
-) -> Result<PathBuf, String> {
-    let registry = windows
-        .map
-        .lock()
-        .map_err(|_| "pane registry lock poisoned")?;
-    resolve_owned_pane(&registry, owner_label, pane_id)
-        .and_then(|pane| pane.cwd.clone())
-        .ok_or_else(|| "terminal pane is not ready or belongs to another window".into())
-}
-
-fn record_pane_target_with_kind(
+fn record_pane_target(
     registry: &mut PaneRegistry,
     owner_label: &str,
     pane_id: &str,
     cwd: PathBuf,
     session_path: Option<String>,
-    kind: PaneKind,
 ) -> u64 {
     // Keep generation history outside pane entries so disposal + recreation of
     // the same ID cannot let an old async POST /session bind to the new target.
@@ -155,64 +130,9 @@ fn record_pane_target_with_kind(
             session_path,
             generation,
             startup_error: None,
-            terminal_only: kind == PaneKind::Terminal,
         },
     );
     generation
-}
-
-fn record_pane_target(
-    registry: &mut PaneRegistry,
-    owner_label: &str,
-    pane_id: &str,
-    cwd: PathBuf,
-    session_path: Option<String>,
-) -> u64 {
-    record_pane_target_with_kind(
-        registry,
-        owner_label,
-        pane_id,
-        cwd,
-        session_path,
-        PaneKind::Agent,
-    )
-}
-
-fn create_pane_target_with_kind(
-    registry: &mut PaneRegistry,
-    owner_label: &str,
-    pane_id: &str,
-    cwd: PathBuf,
-    session_path: Option<String>,
-    kind: PaneKind,
-) -> Result<u64, String> {
-    validate_pane_id(pane_id)?;
-    let panes = registry.get(owner_label);
-    if panes.is_some_and(|panes| panes.contains_key(pane_id)) {
-        return Err(format!("pane '{pane_id}' already exists"));
-    }
-    if panes.is_some_and(|panes| panes.len() >= MAX_PANE_TARGETS_PER_WINDOW) {
-        return Err(format!(
-            "window cannot contain more than {MAX_PANE_TARGETS_PER_WINDOW} pane targets"
-        ));
-    }
-    if kind == PaneKind::Agent
-        && panes.is_some_and(|panes| {
-            panes.values().filter(|pane| !pane.terminal_only).count() >= MAX_AGENT_PANES_PER_WINDOW
-        })
-    {
-        return Err(format!(
-            "window cannot contain more than {MAX_AGENT_PANES_PER_WINDOW} agent panes"
-        ));
-    }
-    Ok(record_pane_target_with_kind(
-        registry,
-        owner_label,
-        pane_id,
-        cwd,
-        session_path,
-        kind,
-    ))
 }
 
 fn create_pane_target(
@@ -222,14 +142,23 @@ fn create_pane_target(
     cwd: PathBuf,
     session_path: Option<String>,
 ) -> Result<u64, String> {
-    create_pane_target_with_kind(
+    validate_pane_id(pane_id)?;
+    let panes = registry.get(owner_label);
+    if panes.is_some_and(|panes| panes.contains_key(pane_id)) {
+        return Err(format!("pane '{pane_id}' already exists"));
+    }
+    if panes.is_some_and(|panes| panes.len() >= MAX_AGENT_PANES_PER_WINDOW) {
+        return Err(format!(
+            "window cannot contain more than {MAX_AGENT_PANES_PER_WINDOW} agent panes"
+        ));
+    }
+    Ok(record_pane_target(
         registry,
         owner_label,
         pane_id,
         cwd,
         session_path,
-        PaneKind::Agent,
-    )
+    ))
 }
 
 /// Reclaim a matching agent target after a webview reload without launching a
@@ -247,9 +176,6 @@ fn restore_pane_target(
         .get_mut(owner_label)
         .and_then(|panes| panes.get_mut(pane_id))
     {
-        if existing.terminal_only {
-            return Err(format!("pane '{pane_id}' is a terminal target"));
-        }
         let generated_session_path = existing.session_id.is_some()
             && existing.session_path.is_none()
             && session_path.is_some();
@@ -399,9 +325,6 @@ fn enumerate_pane_targets(
         .iter()
         .flat_map(|(label, panes)| {
             panes.iter().filter_map(move |(pane_id, pane)| {
-                if pane.terminal_only {
-                    return None;
-                }
                 pane.cwd.clone().map(|cwd| {
                     (
                         label.clone(),
@@ -3304,19 +3227,12 @@ fn apply_mac_overlay<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
 /// shows — the in-app `chat-head-title` is the ONLY title. Building via the
 /// builder (rather than the config + a runtime patch) is the only way to hide
 /// the native title, since there's no runtime `set_hidden_title` setter.
-fn build_app_window_with_script(
-    app: &tauri::AppHandle,
-    label: &str,
-    initialization_script: Option<&str>,
-) -> Result<WebviewWindow, String> {
+fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Supah Coder")
         .inner_size(1024.0, 720.0)
         .min_inner_size(480.0, 360.0)
         .background_color(APP_BG);
-    if let Some(script) = initialization_script {
-        builder = builder.initialization_script(script);
-    }
     // Windows needs HTML5 drop enabled for the existing browser attachment path.
     // macOS keeps Tauri's native handler so folder drops include absolute paths.
     #[cfg(target_os = "windows")]
@@ -3327,18 +3243,6 @@ fn build_app_window_with_script(
         builder = apply_mac_overlay(builder);
     }
     builder.build().map_err(|e| e.to_string())
-}
-
-fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
-    build_app_window_with_script(app, label, None)
-}
-
-fn build_terminal_app_window(
-    app: &tauri::AppHandle,
-    label: &str,
-    initialization_script: &str,
-) -> Result<WebviewWindow, String> {
-    build_app_window_with_script(app, label, Some(initialization_script))
 }
 
 /// Open enough new project windows to reach `count` total (each with its own
@@ -3623,147 +3527,6 @@ async fn open_pane_in_new_window(
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalWindowTarget {
-    cwd: String,
-    session_path: Option<String>,
-}
-
-fn validate_terminal_window_target(
-    target: &TerminalWindowTarget,
-) -> Result<PaneCopyTarget, String> {
-    let copy_target = PaneCopyTarget {
-        cwd: PathBuf::from(&target.cwd),
-        session_path: target.session_path.clone(),
-        session_id: String::new(),
-    };
-    if target.cwd.trim().is_empty() {
-        return Err(format!(
-            "project folder no longer exists: {}",
-            copy_target.cwd.display()
-        ));
-    }
-    validate_pane_copy_target(&copy_target)?;
-    Ok(copy_target)
-}
-
-fn register_terminal_target(
-    registry: &mut PaneRegistry,
-    owner_label: &str,
-    pane_id: &str,
-    target: &TerminalWindowTarget,
-) -> Result<(), String> {
-    let target = validate_terminal_window_target(target)?;
-    create_pane_target_with_kind(
-        registry,
-        owner_label,
-        pane_id,
-        target.cwd,
-        target.session_path,
-        PaneKind::Terminal,
-    )?;
-    Ok(())
-}
-
-#[tauri::command]
-fn register_stopped_terminal_target(
-    webview: WebviewWindow,
-    windows: State<'_, Windows>,
-    pane_id: String,
-    cwd: String,
-    session_path: Option<String>,
-) -> Result<(), String> {
-    let target = TerminalWindowTarget { cwd, session_path };
-    let mut registry = windows
-        .map
-        .lock()
-        .map_err(|_| "pane registry lock poisoned")?;
-    register_terminal_target(&mut registry, webview.label(), &pane_id, &target)
-}
-
-fn terminal_window_seed_script(
-    label: &str,
-    target: &TerminalWindowTarget,
-) -> Result<String, String> {
-    let storage_key = format!("gg-workspace-layout-recursive:{label}");
-    let marker_key = format!("gg-terminal-window-seeded:{label}");
-    let layout = serde_json::json!({
-        "version": 7,
-        "root": { "type": "leaf", "paneId": "terminal-1" },
-        "focusedPaneId": "terminal-1",
-        "panes": {
-            "terminal-1": {
-                "kind": "terminal",
-                "cwd": target.cwd,
-                "sessionPath": target.session_path,
-                "stopped": true
-            }
-        }
-    });
-    let key_json = serde_json::to_string(&storage_key).map_err(|error| error.to_string())?;
-    let marker_json = serde_json::to_string(&marker_key).map_err(|error| error.to_string())?;
-    let layout_json = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
-    let serialized_layout =
-        serde_json::to_string(&layout_json).map_err(|error| error.to_string())?;
-    Ok(format!(
-        "(()=>{{const key={key_json};const marker={marker_json};if(sessionStorage.getItem(marker)!=='1'){{localStorage.setItem(key,{serialized_layout});sessionStorage.setItem(marker,'1');}}}})();"
-    ))
-}
-
-fn reserve_terminal_window_label(
-    registry: &mut PaneRegistry,
-    mut native_window_exists: impl FnMut(&str) -> bool,
-) -> String {
-    let label = next_project_window_label(registry, |candidate| native_window_exists(candidate));
-    registry.insert(label.clone(), HashMap::new());
-    label
-}
-
-fn rollback_terminal_window_reservation(registry: &mut PaneRegistry, label: &str) {
-    if registry.get(label).is_some_and(HashMap::is_empty) {
-        registry.remove(label);
-    }
-}
-
-#[tauri::command]
-async fn open_terminal_in_new_window(
-    app: tauri::AppHandle,
-    target: TerminalWindowTarget,
-) -> Result<(), String> {
-    validate_terminal_window_target(&target)?;
-    let label = {
-        let windows: State<Windows> = app.state();
-        let mut registry = windows.map.lock().unwrap();
-        reserve_terminal_window_label(&mut registry, |candidate| {
-            app.get_webview_window(candidate).is_some()
-        })
-    };
-    let script = match terminal_window_seed_script(&label, &target) {
-        Ok(script) => script,
-        Err(error) => {
-            let windows: State<Windows> = app.state();
-            rollback_terminal_window_reservation(&mut windows.map.lock().unwrap(), &label);
-            return Err(error);
-        }
-    };
-    let win = match build_terminal_app_window(&app, &label, &script) {
-        Ok(window) => window,
-        Err(error) => {
-            let windows: State<Windows> = app.state();
-            rollback_terminal_window_reservation(&mut windows.map.lock().unwrap(), &label);
-            return Err(error);
-        }
-    };
-    {
-        let windows: State<Windows> = app.state();
-        rollback_terminal_window_reservation(&mut windows.map.lock().unwrap(), &label);
-    }
-    let _ = win.set_focus();
-    broadcast_window_order(&app);
-    Ok(())
-}
-
 /// The "What's new" modal lives in its OWN dedicated window so it appears EXACTLY
 /// once (the main webview decides; see WhatsNewTrigger) and centers on the user's
 /// SCREEN rather than inside whichever tiled project window happens to be open.
@@ -3997,11 +3760,6 @@ fn agent_pane_dispose(
         let mut map = windows.map.lock().unwrap();
         dispose_pane_target(&mut map, webview.label(), &pane_id, false, generation)?
     };
-    terminal::close_for_pane(
-        &app.state::<terminal::TerminalRegistry>(),
-        webview.label(),
-        &pane_id,
-    );
     if let (Some(port), Some(id)) = (port_for(&webview), pane.session_id) {
         tauri::async_runtime::spawn(async move {
             daemon_delete_session(&app, port, &id).await;
@@ -4955,7 +4713,6 @@ pub fn run() {
         )
         .manage(Daemon::default())
         .manage(Windows::default())
-        .manage(terminal::TerminalRegistry::default())
         .manage(RestoreTargets::default())
         .manage(AppExiting::default())
         .manage(FocusedWindow::default())
@@ -4966,11 +4723,6 @@ pub fn run() {
             sidecar_port,
             agent_pane_status,
             workspace_target_status,
-            terminal::terminal_create,
-            terminal::terminal_input,
-            terminal::terminal_resize,
-            terminal::terminal_close,
-            terminal::terminal_open_external,
             agent_pane_create,
             agent_pane_restore,
             agent_pane_dispose,
@@ -5009,8 +4761,6 @@ pub fn run() {
             setup_windows,
             new_window,
             open_pane_in_new_window,
-            open_terminal_in_new_window,
-            register_stopped_terminal_target,
             open_whatsnew_window,
             select_project,
             agent_projects,
@@ -5067,10 +4817,6 @@ pub fn run() {
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::Destroyed => {
                 let app = window.app_handle();
-                terminal::close_for_window(
-                    &app.state::<terminal::TerminalRegistry>(),
-                    window.label(),
-                );
                 // Dispose only THIS window's session in the shared daemon so
                 // other projects keep running. The daemon process itself is
                 // never killed here (that happens only on app exit).
@@ -5147,7 +4893,6 @@ pub fn run() {
                 app.state::<AppExiting>().0.store(true, Ordering::SeqCst);
                 refresh_live_sessions(app);
                 snapshot_workspace(app);
-                terminal::close_all(&app.state::<terminal::TerminalRegistry>());
                 // Terminate the daemon's process group once — reaps every
                 // session's MCP/LSP children in one shot (no orphans).
                 let child = app.state::<Daemon>().child.lock().unwrap().take();
@@ -5249,7 +4994,6 @@ mod tests {
             session_path: None,
             generation: 1,
             startup_error: None,
-            terminal_only: false,
         }
     }
 
@@ -6416,158 +6160,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_native_window_build_failure_rolls_back_only_its_reserved_label() {
-        let mut registry = PaneRegistry::new();
-        record_pane_target(
-            &mut registry,
-            "main",
-            PRIMARY_PANE_ID,
-            PathBuf::from("/existing"),
-            None,
-        );
-        let first = reserve_terminal_window_label(&mut registry, |_| false);
-        let second = reserve_terminal_window_label(&mut registry, |_| false);
-        assert_eq!(
-            (first.as_str(), second.as_str()),
-            ("project-1", "project-2")
-        );
-
-        rollback_terminal_window_reservation(&mut registry, &first);
-        assert!(!registry.contains_key(&first));
-        assert!(registry.contains_key(&second));
-        assert!(registry.contains_key("main"));
-        assert!(resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID).is_some());
-        assert_eq!(
-            reserve_terminal_window_label(&mut registry, |_| false),
-            "project-1"
-        );
-    }
-
-    #[test]
-    fn stopped_terminal_registration_is_owner_scoped_and_preserves_target() {
-        let mut registry = PaneRegistry::new();
-        let cwd = std::env::current_dir().unwrap();
-        let target = TerminalWindowTarget {
-            cwd: cwd.to_string_lossy().into_owned(),
-            session_path: None,
-        };
-
-        register_terminal_target(&mut registry, "project-1", "terminal-1", &target).unwrap();
-
-        let registered = resolve_owned_pane(&registry, "project-1", "terminal-1").unwrap();
-        assert_eq!(registered.cwd.as_ref(), Some(&cwd));
-        assert_eq!(registered.session_path, None);
-        assert!(registered.terminal_only);
-        assert!(resolve_owned_pane(&registry, "project-2", "terminal-1").is_none());
-        assert!(enumerate_pane_targets(&registry).is_empty());
-    }
-
-    #[test]
-    fn stopped_terminal_registration_rejects_invalid_paths_duplicates_and_cross_window_lookup() {
-        let mut registry = PaneRegistry::new();
-        let cwd = std::env::current_dir().unwrap();
-        let target = TerminalWindowTarget {
-            cwd: cwd.to_string_lossy().into_owned(),
-            session_path: None,
-        };
-        let missing_cwd = TerminalWindowTarget {
-            cwd: cwd
-                .join("missing-terminal-cwd")
-                .to_string_lossy()
-                .into_owned(),
-            session_path: None,
-        };
-        let missing_session = TerminalWindowTarget {
-            cwd: target.cwd.clone(),
-            session_path: Some(
-                cwd.join("missing-terminal-session.jsonl")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-        };
-
-        assert!(register_terminal_target(&mut registry, "project-1", "bad pane", &target).is_err());
-        assert!(
-            register_terminal_target(&mut registry, "project-1", "terminal-1", &missing_cwd)
-                .unwrap_err()
-                .contains("project folder no longer exists")
-        );
-        assert!(register_terminal_target(
-            &mut registry,
-            "project-1",
-            "terminal-1",
-            &missing_session
-        )
-        .unwrap_err()
-        .contains("session file no longer exists"));
-        register_terminal_target(&mut registry, "project-1", "terminal-1", &target).unwrap();
-        assert_eq!(
-            register_terminal_target(&mut registry, "project-1", "terminal-1", &target)
-                .unwrap_err(),
-            "pane 'terminal-1' already exists"
-        );
-        let windows = Windows {
-            map: Mutex::new(registry),
-        };
-        assert!(owned_pane_cwd(&windows, "project-2", "terminal-1").is_err());
-    }
-
-    #[test]
-    fn terminal_window_copy_first_navigation_seeds_once_and_reload_skips_duplicate() {
-        let target = TerminalWindowTarget {
-            cwd: r#"C:\Users\O'Reilly\"quoted""#.into(),
-            session_path: Some(r#"C:\sessions\"one".jsonl"#.into()),
-        };
-        let script = terminal_window_seed_script("project-7", &target).unwrap();
-        assert!(script.contains("gg-workspace-layout-recursive:project-7"));
-        assert!(script.contains("gg-terminal-window-seeded:project-7"));
-        let marker_check = script.find("sessionStorage.getItem(marker)!=='1'").unwrap();
-        let layout_write = script.find("localStorage.setItem").unwrap();
-        let marker_write = script.find("sessionStorage.setItem(marker,'1')").unwrap();
-        assert!(marker_check < layout_write && layout_write < marker_write);
-        assert_eq!(script.matches("localStorage.setItem").count(), 1);
-        assert_eq!(script.matches("sessionStorage.setItem").count(), 1);
-        let serialized_layout = script
-            .split_once("localStorage.setItem(key,")
-            .unwrap()
-            .1
-            .split_once(");sessionStorage.setItem")
-            .unwrap()
-            .0;
-        let layout_json: String = serde_json::from_str(serialized_layout).unwrap();
-        let layout: serde_json::Value = serde_json::from_str(&layout_json).unwrap();
-        assert_eq!(layout["panes"]["terminal-1"]["cwd"], target.cwd);
-        assert_eq!(
-            layout["panes"]["terminal-1"]["sessionPath"].as_str(),
-            target.session_path.as_deref()
-        );
-
-        let null_script = terminal_window_seed_script(
-            "project-8",
-            &TerminalWindowTarget {
-                cwd: "/tmp/project".into(),
-                session_path: None,
-            },
-        )
-        .unwrap();
-        assert!(null_script.contains(r#"\"sessionPath\":null"#));
-    }
-
-    #[test]
-    fn terminal_window_copy_validation_happens_before_reservation() {
-        let mut registry = PaneRegistry::new();
-        let target = TerminalWindowTarget {
-            cwd: " ".into(),
-            session_path: None,
-        };
-        assert!(validate_terminal_window_target(&target).is_err());
-        assert!(registry.is_empty());
-
-        let label = reserve_terminal_window_label(&mut registry, |_| false);
-        assert_eq!(label, "project-1");
-    }
-
-    #[test]
     fn pane_copy_resolution_is_owner_scoped_and_copy_identity_is_distinct() {
         let mut registry = PaneRegistry::new();
         let source_generation = record_pane_target(
@@ -7001,118 +6593,6 @@ mod tests {
                 .as_deref(),
             Some(Path::new("/p/recreated"))
         );
-    }
-
-    #[test]
-    fn pane_capacity_counts_agents_and_terminals_independently() {
-        let cwd = std::env::current_dir().unwrap();
-        let terminal_target = TerminalWindowTarget {
-            cwd: cwd.to_string_lossy().into_owned(),
-            session_path: None,
-        };
-
-        let mut twelve_agents_then_terminal = PaneRegistry::new();
-        for pane_number in 1..=MAX_AGENT_PANES_PER_WINDOW {
-            create_pane_target(
-                &mut twelve_agents_then_terminal,
-                "main",
-                &format!("pane-{pane_number}"),
-                PathBuf::from(format!("/p/pane-{pane_number}")),
-                None,
-            )
-            .unwrap();
-        }
-        register_terminal_target(
-            &mut twelve_agents_then_terminal,
-            "main",
-            "terminal-1",
-            &terminal_target,
-        )
-        .unwrap();
-        assert_eq!(
-            twelve_agents_then_terminal.get("main").unwrap().len(),
-            MAX_AGENT_PANES_PER_WINDOW + 1
-        );
-        assert!(
-            resolve_owned_pane(&twelve_agents_then_terminal, "main", "terminal-1")
-                .unwrap()
-                .terminal_only
-        );
-
-        let mut eleven_agents_then_terminal = PaneRegistry::new();
-        for pane_number in 1..MAX_AGENT_PANES_PER_WINDOW {
-            create_pane_target(
-                &mut eleven_agents_then_terminal,
-                "main",
-                &format!("pane-{pane_number}"),
-                PathBuf::from(format!("/p/pane-{pane_number}")),
-                None,
-            )
-            .unwrap();
-        }
-        register_terminal_target(
-            &mut eleven_agents_then_terminal,
-            "main",
-            "terminal-1",
-            &terminal_target,
-        )
-        .unwrap();
-        create_pane_target(
-            &mut eleven_agents_then_terminal,
-            "main",
-            "pane-12",
-            PathBuf::from("/p/pane-12"),
-            None,
-        )
-        .unwrap();
-        assert_eq!(
-            eleven_agents_then_terminal
-                .get("main")
-                .unwrap()
-                .values()
-                .filter(|pane| !pane.terminal_only)
-                .count(),
-            MAX_AGENT_PANES_PER_WINDOW
-        );
-
-        let error = create_pane_target(
-            &mut eleven_agents_then_terminal,
-            "main",
-            "pane-13",
-            PathBuf::from("/p/pane-13"),
-            None,
-        )
-        .unwrap_err();
-        assert_eq!(error, "window cannot contain more than 12 agent panes");
-        assert!(resolve_owned_pane(&eleven_agents_then_terminal, "main", "pane-13").is_none());
-    }
-
-    #[test]
-    fn pane_capacity_preserves_sixty_four_target_resource_guard() {
-        let mut registry = PaneRegistry::new();
-        for terminal_number in 1..=MAX_PANE_TARGETS_PER_WINDOW {
-            create_pane_target_with_kind(
-                &mut registry,
-                "main",
-                &format!("terminal-{terminal_number}"),
-                PathBuf::from("/p/shared"),
-                None,
-                PaneKind::Terminal,
-            )
-            .unwrap();
-        }
-
-        let error = create_pane_target_with_kind(
-            &mut registry,
-            "main",
-            "terminal-65",
-            PathBuf::from("/p/shared"),
-            None,
-            PaneKind::Terminal,
-        )
-        .unwrap_err();
-        assert_eq!(error, "window cannot contain more than 64 pane targets");
-        assert!(resolve_owned_pane(&registry, "main", "terminal-65").is_none());
     }
 
     #[test]

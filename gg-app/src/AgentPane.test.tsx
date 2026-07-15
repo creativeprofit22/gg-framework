@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { useState } from "react";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as AgentModule from "./agent";
+
+HTMLElement.prototype.scrollTo = vi.fn();
 
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => vi.fn()) }),
@@ -36,12 +38,31 @@ vi.mock("./useAgentEvents", () => ({
   useAgentEvents: () => ({ handleEvent: vi.fn(), pushItem: vi.fn(), endStreamingText: vi.fn() }),
 }));
 vi.mock("./HomeScreen", () => ({
-  HomeScreen: (props: Record<string, unknown>) => (
-    <div data-testid="home-screen" data-has-client={String("client" in props)} />
+  HomeScreen: (props: { onProjects?: () => void }) => (
+    <div data-testid="home-screen" data-has-client={String("client" in props)}>
+      <button onClick={props.onProjects}>Open projects</button>
+    </div>
+  ),
+}));
+vi.mock("./ProjectPicker", () => ({
+  ProjectPicker: (props: {
+    bindProject: (cwd: string, sessionPath?: string) => Promise<unknown>;
+    onChosen: (cwd: string) => void;
+  }) => (
+    <button
+      onClick={() =>
+        void Promise.resolve(props.bindProject("/chosen", "/chosen.jsonl")).then(() =>
+          props.onChosen("/chosen"),
+        )
+      }
+    >
+      Bind project
+    </button>
   ),
 }));
 vi.mock("./update", () => ({ useAppUpdate: () => ({ phase: "idle", progressLines: [] }) }));
 vi.mock("./sounds", () => ({ playSound: vi.fn() }));
+vi.mock("./RadioButton", () => ({ RadioButton: () => null }));
 vi.mock("./agent", async (importOriginal) => {
   const actual = await importOriginal<typeof AgentModule>();
   return {
@@ -51,7 +72,7 @@ vi.mock("./agent", async (importOriginal) => {
     onWindowOrder: vi.fn(async () => vi.fn()),
     isSecondaryWindow: false,
     windowLabel: "main",
-    createPaneAgentClient: vi.fn(),
+    createPaneAgentClient: vi.fn((paneId: string) => client(paneId, 1)),
   };
 });
 
@@ -68,7 +89,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     dispose: vi.fn(async () => {}),
     subscribe: vi.fn(() => vi.fn()),
     waitForReady: vi.fn(async () => ({ ready: true, error: null, generation, sessionId: paneId })),
-    status: vi.fn(),
+    status: vi.fn(async () => ({ ready: true, error: null, generation, sessionId: paneId })),
     selectWorkspace: vi.fn(),
     getState: vi.fn(async () => ({ running: false })),
     listModels: empty,
@@ -131,6 +152,32 @@ describe("AgentPane lifecycle", () => {
       document.querySelector('[data-testid="home-screen"]')?.getAttribute("data-has-client"),
     ).toBe("false");
     expect(pane.create).not.toHaveBeenCalled();
+  });
+
+  it("binds an auxiliary picker through its pane-scoped client", async () => {
+    const pane = client("pane-1", 3);
+    const onUserTargetChange = vi.fn();
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-1"
+        kind="auxiliary"
+        initialTarget={null}
+        workspaceOwnsSessionLifecycle
+        onUserTargetChange={onUserTargetChange}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+
+    await waitFor(() =>
+      expect(pane.selectWorkspace).toHaveBeenCalledWith(
+        { mode: "code", cwd: "/chosen", sessionPath: "/chosen.jsonl" },
+        0,
+      ),
+    );
+    expect(onUserTargetChange).toHaveBeenCalledOnce();
   });
 
   it("separate pane clients create and subscribe independently", async () => {

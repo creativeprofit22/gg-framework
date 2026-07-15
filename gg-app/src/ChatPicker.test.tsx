@@ -105,6 +105,36 @@ describe("ChatPicker", () => {
     expect(screen.queryByRole("tab")).toBeNull();
   });
 
+  it("uses pane-scoped catalog and binding adapters without native window controls", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/workspaces", configured: true });
+    const waitForCatalogReady = vi.fn(async () => undefined);
+    const discoverSessions = vi.fn(async () => [session]);
+    const bindChat = vi.fn(async () => 4);
+    const onChosen = vi.fn();
+
+    render(
+      <ChatPicker
+        onChosen={onChosen}
+        waitForCatalogReady={waitForCatalogReady}
+        discoverSessions={discoverSessions}
+        bindChat={bindChat}
+        showWindowControls={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByText("Plan my week"));
+    await waitFor(() =>
+      expect(bindChat).toHaveBeenCalledWith("/workspaces", "/sessions/chat-1.jsonl", "therapist"),
+    );
+    expect(waitForCatalogReady).toHaveBeenCalledOnce();
+    expect(discoverSessions).toHaveBeenCalledWith("/workspaces", "all");
+    expect(onChosen).toHaveBeenCalledWith("/workspaces");
+    expect(waitForReadyMock).not.toHaveBeenCalled();
+    expect(selectWorkspaceMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Radio" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Windows" })).toBeNull();
+  });
+
   it("shows a clear prerequisite error when projectsRoot is unavailable", async () => {
     getSettingsMock.mockResolvedValue(null);
 

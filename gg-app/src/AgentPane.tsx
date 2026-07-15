@@ -28,6 +28,7 @@ import {
   type Attachment,
   type PromptSegment,
 } from "./agent";
+import { PRIMARY_PANE_ID } from "./pane-routing";
 import { ActivityBar } from "./ActivityBar";
 import { KenActivityBar } from "./KenActivityBar";
 import { AutopilotReviewBar } from "./AutopilotReviewBar";
@@ -267,12 +268,14 @@ export function AgentPane({
   onLifecycleError,
   onFocus,
   onSnapshot,
+  onUserTargetChange,
   workspaceOwnsSessionLifecycle = false,
   reclaimNativeSession = false,
   kind = isSecondaryWindow ? "auxiliary" : "primary",
   registerInput,
 }: AgentPaneProps): React.ReactElement {
   const generatedClient = useMemo(() => createPaneAgentClient(paneId), [paneId]);
+  const catalogClient = useMemo(() => createPaneAgentClient(PRIMARY_PANE_ID), []);
   const client = suppliedClient ?? generatedClient;
   const [items, setItems] = useState<Item[]>([]);
   const lifecycleEpochRef = useRef(0);
@@ -1141,6 +1144,27 @@ export function AgentPane({
     setHydrateNonce((n) => n + 1);
   }, [client]);
 
+  const bindPickerProject = useCallback(
+    (cwd: string, sessionPath?: string): Promise<number> =>
+      client.selectWorkspace(
+        { mode: "code", cwd, sessionPath: sessionPath ?? null },
+        generationRef.current ?? 0,
+      ),
+    [client],
+  );
+  const bindPickerChat = useCallback(
+    (cwd: string, sessionPath: string | undefined, chatAgent: ChatAgentId): Promise<number> =>
+      client.selectWorkspace(
+        { mode: "chat", cwd, sessionPath: sessionPath ?? null, chatAgent },
+        generationRef.current ?? 0,
+      ),
+    [client],
+  );
+  const handlePickerChosen = useCallback((): void => {
+    onUserTargetChange?.();
+    onProjectChosen();
+  }, [onProjectChosen, onUserTargetChange]);
+
   useEffect(() => {
     const unsub = client.subscribe(handleEvent);
     return () => unsub();
@@ -1874,11 +1898,22 @@ export function AgentPane({
         ) : entryView === "login" ? (
           <LoginScreen onClose={() => setEntryView("home")} />
         ) : entryView === "chats" ? (
-          <ChatPicker onChosen={onProjectChosen} onClose={() => setEntryView("home")} />
+          <ChatPicker
+            onChosen={handlePickerChosen}
+            onClose={() => setEntryView("home")}
+            waitForCatalogReady={catalogClient.waitForReady}
+            discoverSessions={catalogClient.listSessions}
+            bindChat={bindPickerChat}
+            showWindowControls={kind === "primary"}
+          />
         ) : (
           <ProjectPicker
-            onChosen={onProjectChosen}
-            // Every window can return to the mode-neutral home screen.
+            onChosen={handlePickerChosen}
+            waitForCatalogReady={catalogClient.waitForReady}
+            discoverProjects={catalogClient.listProjects}
+            discoverSessions={catalogClient.listSessions}
+            bindProject={bindPickerProject}
+            showWindowControls={kind === "primary"}
             onClose={() => setEntryView("home")}
           />
         )}
@@ -1893,20 +1928,32 @@ export function AgentPane({
     const pickerProps = {
       onChosen: () => {
         setShowPicker(false);
-        onProjectChosen();
+        handlePickerChosen();
       },
       onClose: () => {
         setShowPicker(false);
         setNeedsProject(true);
         setEntryView("home" as const);
       },
+      waitForCatalogReady: catalogClient.waitForReady,
+      discoverSessions: catalogClient.listSessions,
+      showWindowControls: kind === "primary",
     };
     return (
       <div className="app" style={{ background: theme.background }}>
         {workspaceMode === "chat" ? (
-          <ChatPicker initialAgent={state?.chatAgent ?? "general"} {...pickerProps} />
+          <ChatPicker
+            initialAgent={state?.chatAgent ?? "general"}
+            bindChat={bindPickerChat}
+            {...pickerProps}
+          />
         ) : (
-          <ProjectPicker initialProjectPath={state?.cwd ?? null} {...pickerProps} />
+          <ProjectPicker
+            initialProjectPath={state?.cwd ?? null}
+            discoverProjects={catalogClient.listProjects}
+            bindProject={bindPickerProject}
+            {...pickerProps}
+          />
         )}
       </div>
     );

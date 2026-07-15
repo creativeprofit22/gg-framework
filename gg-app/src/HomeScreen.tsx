@@ -8,6 +8,7 @@ import { MemeLayer } from "./MemeLayer";
 import { SettingsModal } from "./SettingsModal";
 import { TelegramSettingsModal } from "./TelegramSettingsModal";
 import { McpModal } from "./McpModal";
+import { ConfirmModal } from "./ConfirmModal";
 import {
   waitForReady,
   getSettings,
@@ -22,6 +23,13 @@ import {
 import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
 import { useAppUpdate } from "./update";
+import {
+  LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL,
+  LOCAL_UPDATE_CONFIRMATION_MESSAGE,
+  LOCAL_UPDATE_CONFIRMATION_TITLE,
+  shouldConfirmLocalUpdate,
+} from "./local-update-confirmation";
+import { formatVersionLabel } from "./build-info";
 import { toast } from "./toast";
 
 interface Props {
@@ -40,6 +48,7 @@ export function HomeScreen({ onProjects, onChat, onLogin }: Props): React.ReactE
   const [showSettings, setShowSettings] = useState(false);
   const [showTelegram, setShowTelegram] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
+  const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
   const [serving, setServing] = useState(false);
   const [telegramConfigured, setTelegramConfigured] = useState(false);
   const [serveBusy, setServeBusy] = useState(false);
@@ -133,24 +142,37 @@ export function HomeScreen({ onProjects, onChat, onLogin }: Props): React.ReactE
     }
   }
 
+  function handleUpdateClick(): void {
+    if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+      setShowLocalUpdateConfirm(true);
+      return;
+    }
+    void appUpdate.install();
+  }
+
+  function confirmLocalUpdate(): void {
+    setShowLocalUpdateConfirm(false);
+    void appUpdate.install();
+  }
+
   return (
     <div className="home" data-tauri-drag-region>
       <HomeBackdrop />
       <MemeLayer />
-      {appUpdate.phase === "available" || appUpdate.phase === "installing" ? (
+      {["available", "installing", "completed", "error"].includes(appUpdate.phase) ? (
         <button
           className="home-update"
-          disabled={appUpdate.phase === "installing"}
-          title={`Update to ${appUpdate.version} — installs and restarts the app`}
-          onClick={() => void appUpdate.install()}
+          disabled={appUpdate.phase === "installing" || appUpdate.phase === "completed"}
+          title={appUpdate.statusMessage ?? appUpdate.installTitle}
+          onClick={handleUpdateClick}
         >
           <Download size={14} strokeWidth={2.25} aria-hidden="true" />
-          {appUpdate.phase === "installing" ? "Installing\u2026" : `Update to ${appUpdate.version}`}
+          {appUpdate.installLabel}
         </button>
       ) : (
         version && (
           <div className="home-version-row">
-            <span className="home-version">{`v${version}`}</span>
+            <span className="home-version">{formatVersionLabel(version)}</span>
             <RankBadge
               snapshot={progress}
               onClick={() => setShowScorecard(true)}
@@ -266,6 +288,15 @@ export function HomeScreen({ onProjects, onChat, onLogin }: Props): React.ReactE
       {showMcp && <McpModal onClose={() => setShowMcp(false)} />}
       {showScorecard && progress && (
         <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
+      )}
+      {showLocalUpdateConfirm && (
+        <ConfirmModal
+          title={LOCAL_UPDATE_CONFIRMATION_TITLE}
+          message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
+          confirmLabel={LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL}
+          onConfirm={confirmLocalUpdate}
+          onClose={() => setShowLocalUpdateConfirm(false)}
+        />
       )}
     </div>
   );

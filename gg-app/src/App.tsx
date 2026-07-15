@@ -92,6 +92,12 @@ import { LoginScreen } from "./LoginScreen";
 import { Markdown, PromptSendProvider } from "./Markdown";
 import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
+import {
+  LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL,
+  LOCAL_UPDATE_CONFIRMATION_MESSAGE,
+  LOCAL_UPDATE_CONFIRMATION_TITLE,
+  shouldConfirmLocalUpdate,
+} from "./local-update-confirmation";
 import { recoverPromptLabel } from "./prompt-labels";
 import { playSound } from "./sounds";
 import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
@@ -524,6 +530,7 @@ function App(): React.ReactElement {
   const [newSessionBusy, setNewSessionBusy] = useState(false);
   // App self-update (GitHub releases). Drives the footer update banner.
   const appUpdate = useAppUpdate();
+  const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
   // Initialize-git modal (shown via the top-right button when not yet a repo).
   const [showInitGit, setShowInitGit] = useState(false);
   // True once the initial hydrate (state + models + commands + history) has
@@ -2422,17 +2429,25 @@ function App(): React.ReactElement {
       {appUpdate.phase === "available" && (
         <button
           className="update-banner"
-          title={`Update to ${appUpdate.version} — installs and restarts the app`}
-          onClick={() => void appUpdate.install()}
+          title={appUpdate.installTitle}
+          onClick={() => {
+            if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+              setShowLocalUpdateConfirm(true);
+            } else {
+              void appUpdate.install();
+            }
+          }}
         >
           <span className="update-banner-dot" />
-          {`Ken just pushed a new update (${appUpdate.version}) — click here to install`}
+          {appUpdate.localPatched
+            ? `${appUpdate.installLabel} — click to review the protected source update`
+            : `Ken just pushed a new update (${appUpdate.version}) — click here to install`}
         </button>
       )}
-      {appUpdate.phase === "installing" && (
-        <div className="update-banner update-banner-busy">
+      {["installing", "completed", "error"].includes(appUpdate.phase) && (
+        <div className="update-banner update-banner-busy" title={appUpdate.installTitle}>
           <span className="update-banner-dot" />
-          {"Installing update\u2026 the app will restart automatically."}
+          {appUpdate.statusMessage ?? appUpdate.installLabel}
         </div>
       )}
 
@@ -2444,6 +2459,19 @@ function App(): React.ReactElement {
             setShowInitGit(false);
             submitText(prompt, "Initializing Git\u2026");
           }}
+        />
+      )}
+
+      {showLocalUpdateConfirm && (
+        <ConfirmModal
+          title={LOCAL_UPDATE_CONFIRMATION_TITLE}
+          message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
+          confirmLabel={LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL}
+          onConfirm={() => {
+            setShowLocalUpdateConfirm(false);
+            void appUpdate.install();
+          }}
+          onClose={() => setShowLocalUpdateConfirm(false)}
         />
       )}
 

@@ -11,6 +11,8 @@
     "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}' && pnpm --filter gg-app format:check",
     "test": "pnpm -r test",
     "bench": "pnpm build && npx tsx benchmarks/run-comparison.ts",
+    "app:update:local-fixes": "pnpm --filter gg-app update:local-fixes",
+    "app:build:local-patched": "pnpm --filter gg-app build:local-patched",
     "prepare": "pnpm build"
   },
   "devDependencies": {

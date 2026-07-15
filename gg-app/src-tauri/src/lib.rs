@@ -1,12 +1,16 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
+use std::time::SystemTime;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt as WindowsCommandExt;
 
 use base64::Engine as _;
 use futures_util::StreamExt;
@@ -192,6 +196,12 @@ fn restore_sibling_windows(window: &tauri::Window) {
             let _ = win.unminimize();
         }
     }
+}
+
+/// App-wide guard: only one source rebase/build may run across all windows.
+#[derive(Default)]
+struct LocalPatchedUpdate {
+    running: Mutex<bool>,
 }
 
 fn sidecar_base(port: u16) -> String {
@@ -1010,7 +1020,6 @@ async fn agent_history(
 ) -> Result<serde_json::Value, String> {
     sidecar_get_json(&webview, &client, "/history").await
 }
-
 
 /// Proxy: start a fresh session (clears history) for this window's project.
 #[tauri::command]
@@ -2602,6 +2611,247 @@ fn urlencoding(s: &str) -> String {
     out
 }
 
+const LOCAL_PATCHED_UPDATE_EVENT: &str = "local-patched-update";
+
+#[tauri::command]
+fn app_local_patched_update_start(
+    app: tauri::AppHandle,
+    update_state: State<'_, LocalPatchedUpdate>,
+    repo_root: String,
+) -> Result<serde_json::Value, String> {
+    let repo = resolve_local_update_repo_root(repo_root)?;
+    {
+        let mut running = update_state.running.lock().unwrap();
+        if *running {
+            return Err("A local-patched update is already running.".into());
+        }
+        *running = true;
+    }
+    std::thread::spawn(move || run_local_patched_update(app, repo));
+    Ok(serde_json::json!({ "started": true }))
+}
+
+fn resolve_local_update_repo_root(repo_root: String) -> Result<PathBuf, String> {
+    let raw = if repo_root.trim().is_empty() {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    } else {
+        PathBuf::from(repo_root)
+    };
+    let repo = std::fs::canonicalize(&raw).map_err(|e| {
+        format!(
+            "Could not find the local source checkout at {}: {e}",
+            raw.display()
+        )
+    })?;
+    if !repo.join("package.json").is_file()
+        || !repo.join("gg-app/package.json").is_file()
+        || !repo
+            .join("gg-app/scripts/update-with-local-fixes.mjs")
+            .is_file()
+    {
+        return Err(format!(
+            "{} does not look like the local gg-framework checkout.",
+            repo.display()
+        ));
+    }
+    Ok(repo)
+}
+
+fn emit_local_patched_update(app: &tauri::AppHandle, payload: serde_json::Value) {
+    let _ = app.emit(LOCAL_PATCHED_UPDATE_EVENT, payload);
+}
+
+fn run_local_patched_update(app: tauri::AppHandle, repo: PathBuf) {
+    emit_local_patched_update(
+        &app,
+        serde_json::json!({
+            "type": "started",
+            "message": "Starting protected source update: backup, fetch, rebase, restore, check, and build.",
+        }),
+    );
+    let mut command = local_patched_update_command();
+    command
+        .current_dir(&repo)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(0x08000000);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            finish_local_patched_update(
+                &app,
+                serde_json::json!({
+                    "type": "error",
+                    "message": format!("Failed to start the local source updater: {error}"),
+                }),
+            );
+            return;
+        }
+    };
+    let mut readers: Vec<JoinHandle<()>> = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        readers.push(stream_local_update_output(app.clone(), "stdout", stdout));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        readers.push(stream_local_update_output(app.clone(), "stderr", stderr));
+    }
+    let status = child.wait();
+    for reader in readers {
+        let _ = reader.join();
+    }
+
+    match status {
+        Ok(status) if status.success() => {
+            let installer = newest_rebuilt_installer(&repo);
+            let opened = open_rebuilt_update_result(&app, installer.as_deref(), &repo);
+            emit_local_patched_update(
+                &app,
+                serde_json::json!({
+                    "type": "completed",
+                    "exitCode": status.code().unwrap_or(0),
+                    "installerPath": installer.map(|path| path.to_string_lossy().to_string()),
+                    "opened": opened,
+                    "message": completed_local_update_message(opened),
+                }),
+            );
+            clear_local_patched_update_running(&app);
+        }
+        Ok(status) => finish_local_patched_update(
+            &app,
+            serde_json::json!({
+                "type": "error",
+                "exitCode": status.code(),
+                "message": format!(
+                    "Local-patched update failed with exit code {}. Review the progress output for recovery instructions.",
+                    status.code().map_or_else(|| "unknown".into(), |code| code.to_string())
+                ),
+            }),
+        ),
+        Err(error) => finish_local_patched_update(
+            &app,
+            serde_json::json!({
+                "type": "error",
+                "message": format!("Local-patched update process failed: {error}"),
+            }),
+        ),
+    }
+}
+
+fn local_patched_update_command() -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("cmd");
+        command.args([
+            "/C",
+            "pnpm",
+            "--filter",
+            "gg-app",
+            "update:local-fixes",
+            "--",
+            "--check",
+        ]);
+        command
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut command = Command::new("pnpm");
+        command.args(["--filter", "gg-app", "update:local-fixes", "--", "--check"]);
+        command
+    }
+}
+
+fn stream_local_update_output<R: Read + Send + 'static>(
+    app: tauri::AppHandle,
+    stream: &'static str,
+    reader: R,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            emit_local_patched_update(
+                &app,
+                serde_json::json!({ "type": "line", "stream": stream, "line": line }),
+            );
+        }
+    })
+}
+
+fn newest_rebuilt_installer(repo: &Path) -> Option<PathBuf> {
+    let bundle = repo.join("gg-app/src-tauri/target/release/bundle");
+    let directories = ["nsis", "msi", "dmg", "appimage", "deb", "rpm"];
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for directory in directories.map(|name| bundle.join(name)) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let extension = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
+            if !["exe", "msi", "dmg", "AppImage", "deb", "rpm"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+            {
+                continue;
+            }
+            let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(time, _)| modified > *time) {
+                newest = Some((modified, path));
+            }
+        }
+    }
+    newest.map(|(_, path)| path)
+}
+
+fn open_rebuilt_update_result(
+    app: &tauri::AppHandle,
+    installer: Option<&Path>,
+    repo: &Path,
+) -> &'static str {
+    if let Some(installer) = installer {
+        if app
+            .opener()
+            .open_path(installer.to_string_lossy().to_string(), None::<String>)
+            .is_ok()
+        {
+            return "installer";
+        }
+    }
+    let bundle = repo.join("gg-app/src-tauri/target/release/bundle");
+    if app
+        .opener()
+        .open_path(bundle.to_string_lossy().to_string(), None::<String>)
+        .is_ok()
+    {
+        "folder"
+    } else {
+        "none"
+    }
+}
+
+fn completed_local_update_message(opened: &str) -> &'static str {
+    match opened {
+        "installer" => "Patched installer built and opened. Finish installation to update the app.",
+        "folder" => "Patched installer built. Opened its containing folder.",
+        _ => "Patched installer built under gg-app/src-tauri/target/release/bundle.",
+    }
+}
+
+fn finish_local_patched_update(app: &tauri::AppHandle, payload: serde_json::Value) {
+    emit_local_patched_update(app, payload);
+    clear_local_patched_update_running(app);
+}
+
+fn clear_local_patched_update_running(app: &tauri::AppHandle) {
+    let state: State<LocalPatchedUpdate> = app.state();
+    *state.running.lock().unwrap() = false;
+}
+
 /// App background (#111317) painted on the native window + webview BEFORE the
 /// first frame, so opening a new window never flashes white.
 const APP_BG: tauri::window::Color = tauri::window::Color(15, 17, 21, 255);
@@ -3801,6 +4051,7 @@ pub fn run() {
         .manage(AppExiting::default())
         .manage(FocusedWindow::default())
         .manage(MoveDebounce::default())
+        .manage(LocalPatchedUpdate::default())
         .manage(reqwest::Client::new())
         .invoke_handler(tauri::generate_handler![
             sidecar_port,
@@ -3854,6 +4105,7 @@ pub fn run() {
             app_settings_get,
             app_settings_save,
             app_create_project,
+            app_local_patched_update_start,
             app_auth_status,
             app_auth_apikey,
             app_auth_logout,

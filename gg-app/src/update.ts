@@ -1,66 +1,85 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
+import {
+  listenLocalPatchedUpdate,
+  startLocalPatchedUpdate,
+  type LocalPatchedUpdateEvent,
+} from "./agent";
+import { appBuildInfo } from "./build-info";
+import { installUpdateForBuild } from "./update-policy";
 
-/**
- * App self-update, driven by the Tauri updater plugin (GitHub releases of this
- * repo — see `plugins.updater` in tauri.conf.json). One shared hook powers both
- * the footer banner and the home-screen button: it polls for an update on mount
- * + hourly, and `install()` downloads → installs → relaunches the app.
- */
-
-export type UpdatePhase = "idle" | "checking" | "available" | "installing" | "error";
+export type UpdatePhase = "idle" | "checking" | "available" | "installing" | "completed" | "error";
 
 export interface UpdateInfo {
-  /** The pending update (null until one is detected). */
   update: Update | null;
-  /** Newer version string, e.g. "0.2.0" (null when up to date). */
   version: string | null;
   phase: UpdatePhase;
-  /** Kick off download → install → relaunch. No-op unless an update is pending. */
+  localPatched: boolean;
+  installLabel: string;
+  installTitle: string;
+  installCommand: string | null;
+  statusMessage: string | null;
+  progressLines: string[];
+  installerPath: string | null;
   install: () => Promise<void>;
 }
 
-const POLL_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
-
-/**
- * DEV ONLY — fake a pending update so the banner + home button + install flow
- * can be eyeballed before any real GitHub release exists. Flip to `false` (or
- * just ship a production build, where it's ignored) to disable. The simulated
- * install runs the phases without downloading or relaunching.
- */
+const POLL_INTERVAL_MS = 60 * 60 * 1000;
+const MAX_PROGRESS_LINES = 8;
 const DEV_FAKE_UPDATE = false;
 const devFakeEnabled = import.meta.env.DEV && DEV_FAKE_UPDATE;
+const LOCAL_UPDATE_COMMAND = "pnpm --filter gg-app update:local-fixes -- --check";
 const FAKE_VERSION = "9.9.9";
+
+function appendProgress(lines: string[], line: string): string[] {
+  const trimmed = line.trimEnd();
+  return trimmed ? [...lines, trimmed].slice(-MAX_PROGRESS_LINES) : lines;
+}
+
+function describeLocalProgress(line: string): string | null {
+  if (line.includes("git fetch")) return "Fetching upstream source…";
+  if (line.includes("git rebase")) return "Rebasing local customizations on upstream…";
+  if (line.includes("git stash pop")) return "Restoring your local work…";
+  if (line.includes(" gg-app check") || line.includes("@kenkaiiii/ggcoder check")) {
+    return "Checking the patched source…";
+  }
+  if (line.includes("build:local-patched") || line.includes("tauri build")) {
+    return "Building a new local-patched installer…";
+  }
+  if (/conflict|failed/i.test(line)) return line;
+  return null;
+}
 
 export function useAppUpdate(): UpdateInfo {
   const [update, setUpdate] = useState<Update | null>(null);
   const [phase, setPhase] = useState<UpdatePhase>("idle");
   const [fakeVersion, setFakeVersion] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [progressLines, setProgressLines] = useState<string[]>([]);
+  const [installerPath, setInstallerPath] = useState<string | null>(null);
 
   const runCheck = useCallback(async (): Promise<void> => {
     if (devFakeEnabled) {
       setFakeVersion(FAKE_VERSION);
-      setPhase((p) => (p === "installing" ? p : "available"));
+      setPhase((current) => (current === "installing" ? current : "available"));
       return;
     }
-    // Don't interrupt an in-flight install with a re-check.
-    setPhase((p) => (p === "installing" ? p : "checking"));
+    setPhase((current) => (current === "installing" ? current : "checking"));
     try {
       const found = await check();
       if (found?.available) {
         setUpdate(found);
-        setPhase((p) => (p === "installing" ? p : "available"));
+        setPhase((current) => (current === "installing" ? current : "available"));
         logInfo(`Update available: ${found.version}`);
       } else {
         setUpdate(null);
-        setPhase((p) => (p === "installing" ? p : "idle"));
+        setPhase((current) => (current === "installing" ? current : "idle"));
       }
-    } catch (e) {
-      // No endpoint / no release yet / offline — stay quiet, just no banner.
-      setPhase((p) => (p === "installing" ? p : "idle"));
-      logError(`Update check failed: ${String(e)}`);
+    } catch (error) {
+      setPhase((current) => (current === "installing" ? current : "idle"));
+      logError(`Update check failed: ${String(error)}`);
     }
   }, []);
 
@@ -70,30 +89,103 @@ export function useAppUpdate(): UpdateInfo {
     return () => clearInterval(id);
   }, [runCheck]);
 
+  useEffect(() => {
+    if (!appBuildInfo.localPatched) return undefined;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listenLocalPatchedUpdate((payload: LocalPatchedUpdateEvent) => {
+      if (cancelled) return;
+      if (payload.type === "started") {
+        setPhase("installing");
+        setInstallerPath(null);
+        setProgressLines([]);
+        setStatusMessage(payload.message ?? "Starting the protected source update…");
+      } else if (payload.type === "line" && payload.line) {
+        const prefix = payload.stream === "stderr" ? "! " : "";
+        setProgressLines((lines) => appendProgress(lines, `${prefix}${payload.line}`));
+        const progress = describeLocalProgress(payload.line);
+        if (progress) setStatusMessage(progress);
+      } else if (payload.type === "completed") {
+        setPhase("completed");
+        setInstallerPath(payload.installerPath ?? null);
+        setStatusMessage(payload.message ?? "Patched installer built.");
+      } else if (payload.type === "error") {
+        setPhase("error");
+        setStatusMessage(payload.message ?? "Local-patched update failed.");
+      }
+    })
+      .then((cleanup) => {
+        if (cancelled) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch((error) => {
+        setPhase("error");
+        setStatusMessage(`Could not listen for update progress: ${String(error)}`);
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   const install = useCallback(async (): Promise<void> => {
     if (devFakeEnabled) {
-      // Simulate download/install without touching disk or relaunching.
       setPhase("installing");
-      logInfo("[dev] Simulating update install\u2026");
-      await new Promise((r) => setTimeout(r, 2500));
-      logInfo("[dev] Fake install done (no relaunch in dev).");
+      await new Promise((resolve) => setTimeout(resolve, 2500));
       return;
     }
-    if (!update) return;
-    setPhase("installing");
+    if (appBuildInfo.localPatched) {
+      setPhase("installing");
+      setProgressLines([]);
+      setInstallerPath(null);
+      setStatusMessage("Starting local rebase — the official binary will not be installed.");
+    } else if (update) {
+      setPhase("installing");
+    }
     try {
-      await update.downloadAndInstall();
-      await relaunch();
-    } catch (e) {
+      await installUpdateForBuild({
+        localPatched: appBuildInfo.localPatched,
+        sourceRoot: appBuildInfo.sourceRoot,
+        update,
+        startLocalPatchedUpdate,
+        relaunch,
+      });
+    } catch (error) {
       setPhase("error");
-      logError(`Update install failed: ${String(e)}`);
+      const kind = appBuildInfo.localPatched ? "Local-patched update" : "Update install";
+      setStatusMessage(`${kind} failed: ${String(error)}`);
+      logError(`${kind} failed: ${String(error)}`);
     }
   }, [update]);
 
+  const version = update?.version ?? fakeVersion;
+  const installLabel = useMemo(() => {
+    if (appBuildInfo.localPatched && phase === "installing") return "Building patched installer…";
+    if (appBuildInfo.localPatched && phase === "completed") return "Patched installer built";
+    if (appBuildInfo.localPatched && phase === "error") return "Local update failed";
+    if (appBuildInfo.localPatched) {
+      return version ? `Update v${version} (local fixes)` : "Update (local fixes)";
+    }
+    if (phase === "installing") return "Installing…";
+    return version ? `Update to ${version}` : "Update";
+  }, [phase, version]);
+  const installTitle = appBuildInfo.localPatched
+    ? `Runs ${LOCAL_UPDATE_COMMAND} and builds a patched installer without installing the official binary.`
+    : version
+      ? `Update to ${version} — installs and restarts the app`
+      : "Install update and restart the app";
+
   return {
     update,
-    version: update?.version ?? fakeVersion,
+    version,
     phase,
+    localPatched: appBuildInfo.localPatched,
+    installLabel,
+    installTitle,
+    installCommand: appBuildInfo.localPatched ? LOCAL_UPDATE_COMMAND : null,
+    statusMessage,
+    progressLines,
+    installerPath,
     install,
   };
 }

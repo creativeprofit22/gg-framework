@@ -62,7 +62,7 @@ import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./
 import { ContextMeter } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { TasksModal } from "./TasksModal";
-import { NotesModal } from "./NotesModal";
+import { ProjectNotes } from "./ProjectNotes";
 import { MemoryModal } from "./MemoryModal";
 import { ShimmerText } from "./ShimmerText";
 import { WakeScreen } from "./WakeScreen";
@@ -455,10 +455,7 @@ function App(): React.ReactElement {
   // Updated live via the `tasks_list` SSE event while a run-all sweep advances.
   const [projectTasks, setProjectTasks] = useState<ProjectTask[]>([]);
   const [showTasks, setShowTasks] = useState(false);
-  // Free-form per-project notes, persisted to localStorage keyed by project cwd.
-  const [showNotes, setShowNotes] = useState(false);
   const [showMemories, setShowMemories] = useState(false);
-  const [notes, setNotes] = useState("");
   // Every window chooses a code or chat workspace before connecting. Mode stays
   // separate from picker visibility so restore and reopened pickers are explicit.
   const [needsProject, setNeedsProject] = useState(true);
@@ -1166,35 +1163,6 @@ function App(): React.ReactElement {
   const handleDeleteTask = useCallback((id: string) => {
     void deleteTask(id).then(setProjectTasks);
   }, []);
-
-  // Per-project notes: load from localStorage whenever the active project (cwd)
-  // changes, and write back on every edit. Keyed by cwd so each project keeps
-  // its own notebook; windows pointed at the same project share one.
-  const notesKey = state?.cwd ? `gg-notes:${state.cwd}` : null;
-  useEffect(() => {
-    if (!notesKey) {
-      setNotes("");
-      return;
-    }
-    try {
-      setNotes(localStorage.getItem(notesKey) ?? "");
-    } catch {
-      setNotes("");
-    }
-  }, [notesKey]);
-
-  const handleNotesChange = useCallback(
-    (value: string) => {
-      setNotes(value);
-      if (!notesKey) return;
-      try {
-        localStorage.setItem(notesKey, value);
-      } catch {
-        // Storage full/unavailable — keep the in-memory value for this session.
-      }
-    },
-    [notesKey],
-  );
 
   // Pin Ken to a model (or null → clear the pin, follow GG Coder). The
   // sidecar's ken_model_change broadcast updates state; the .then is just a
@@ -1970,13 +1938,7 @@ function App(): React.ReactElement {
               >
                 {"+ New"}
               </button>
-              <button
-                className="btn btn-sm btn-ghost"
-                title="Open your notes for this project"
-                onClick={() => setShowNotes(true)}
-              >
-                Notes
-              </button>
+              <ProjectNotes cwd={state?.cwd ?? null} />
               <button
                 className="btn btn-sm btn-ghost"
                 title="View and run this project's tasks"
@@ -2487,14 +2449,6 @@ function App(): React.ReactElement {
 
       {workspaceMode === "chat" && showMemories && (
         <MemoryModal onClose={() => setShowMemories(false)} />
-      )}
-
-      {workspaceMode === "code" && showNotes && (
-        <NotesModal
-          value={notes}
-          onChange={handleNotesChange}
-          onClose={() => setShowNotes(false)}
-        />
       )}
 
       {showScorecard && progress && (

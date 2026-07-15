@@ -134,6 +134,7 @@ import { awardPrompt, awardCommits } from "./core/progress/engine.js";
 import { detectNewCommits, repoKey } from "./core/progress/git-xp.js";
 import { rebuildFromSessions } from "./core/progress/rebuild.js";
 import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
+import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
 import {
   captureSidecarError,
   flushSidecarErrors,
@@ -771,7 +772,7 @@ async function main(): Promise<void> {
   // the daemon hands back from POST /session. The Rust shell routes each proxy
   // request to its window's session via the `x-gg-session` header (and the
   // `?session=` query for the SSE /events stream).
-  const sessions = new Map<string, SessionContext>();
+  const sessions = new AppSidecarSessionRouter<SessionContext>();
   const memoryStore = new MemoryStore({
     onChange: ({ memories }) => {
       for (const ctx of sessions.values()) {
@@ -895,18 +896,6 @@ async function main(): Promise<void> {
     }
   }
 
-  /** Resolve the target session id: the `x-gg-session` header, else a
-   *  `?session=` query param (used by the SSE /events connection). */
-  function sessionIdFromReq(req: http.IncomingMessage, url: string): string | null {
-    const header = req.headers["x-gg-session"];
-    if (typeof header === "string" && header.length > 0) return header;
-    try {
-      return new URL(url, `http://${host}`).searchParams.get("session");
-    } catch {
-      return null;
-    }
-  }
-
   const server = http.createServer(
     wrapSidecarHandler((req: http.IncomingMessage, res: http.ServerResponse) => {
       const url = req.url ?? "/";
@@ -948,7 +937,7 @@ async function main(): Promise<void> {
               { auth, paths, progress, memoryStore, jiwaStore },
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
             );
-            sessions.set(id, ctx);
+            sessions.add(id, ctx);
             log("INFO", "app-sidecar", "session created", {
               id,
               mode,
@@ -969,13 +958,23 @@ async function main(): Promise<void> {
       // Dispose a session: DELETE /session/:id.
       if (method === "DELETE" && url.startsWith("/session/")) {
         const id = decodeURIComponent(url.slice("/session/".length));
-        const ctx = sessions.get(id);
-        if (ctx) {
-          sessions.delete(id);
-          void ctx.dispose().catch(() => {});
-          log("INFO", "app-sidecar", "session disposed", { id });
-        }
-        daemonJson(res, 200, { ok: true });
+        // deleteAndDispose takes ownership out of the registry synchronously before
+        // awaiting disposal, so peer requests fail closed instead of reaching a
+        // context that is shutting down.
+        void sessions
+          .deleteAndDispose(id)
+          .then((disposed) => {
+            if (disposed) log("INFO", "app-sidecar", "session disposed", { id });
+            daemonJson(res, 200, { ok: true });
+          })
+          .catch((error) => {
+            captureSidecarError(error, "app-sidecar.session.dispose");
+            log("ERROR", "app-sidecar", "session disposal failed", {
+              id,
+              message: error instanceof Error ? error.message : String(error),
+            });
+            daemonJson(res, 500, { error: "session disposal failed" });
+          });
         return;
       }
 
@@ -1008,8 +1007,8 @@ async function main(): Promise<void> {
       }
 
       // ── Per-session delegation ───────────────────────────────────────────
-      const id = sessionIdFromReq(req, url);
-      const ctx = id ? sessions.get(id) : undefined;
+      const isEventStream = method === "GET" && (url === "/events" || url.startsWith("/events?"));
+      const ctx = sessions.resolveRequest(req, url, { allowQuery: isEventStream, host });
       if (!ctx) {
         daemonJson(res, 404, { error: "unknown session" });
         return;
@@ -1033,7 +1032,7 @@ async function main(): Promise<void> {
     // Radio playback is app-wide (one stream across all windows), so it stops
     // at the daemon level, not per session.
     stopRadio();
-    await Promise.all([...sessions.values()].map((c) => c.dispose().catch(() => {})));
+    await sessions.disposeAll();
     server.close();
     process.exit(0);
   }
@@ -1316,10 +1315,22 @@ async function createSession(
   const clients = new Set<SseClient>();
   let clientSeq = 0;
 
+  function sseFrame(type: string, data: unknown): string {
+    const taggedPayload = sessionEventFrame(opts.id, type, data);
+    const safePayload = redactValue(taggedPayload, { secrets: environmentSecrets(process.env) });
+    return `data: ${JSON.stringify(safePayload)}\n\n`;
+  }
+
   function broadcast(type: string, data: unknown): void {
-    const safePayload = redactValue({ type, data }, { secrets: environmentSecrets(process.env) });
-    const frame = `data: ${JSON.stringify(safePayload)}\n\n`;
-    for (const c of clients) c.res.write(frame);
+    const frame = sseFrame(type, data);
+    for (const client of clients) {
+      try {
+        if (client.res.destroyed) clients.delete(client);
+        else client.res.write(frame);
+      } catch {
+        clients.delete(client);
+      }
+    }
   }
 
   // Replace CLI-specific guidance (slash commands, CLI tool names) with
@@ -2523,11 +2534,19 @@ async function createSession(
       res.write(`retry: 1000\n\n`);
       const client: SseClient = { id: ++clientSeq, res };
       clients.add(client);
+      let keepAlive: NodeJS.Timeout | undefined;
+      let closed = false;
+      const cleanup = (): void => {
+        closed = true;
+        if (keepAlive) clearInterval(keepAlive);
+        clients.delete(client);
+      };
+      res.once("error", cleanup);
+      res.once("close", cleanup);
       const st = session.getState();
-      res.write(
-        `data: ${JSON.stringify({
-          type: "ready",
-          data: {
+      try {
+        res.write(
+          sseFrame("ready", {
             ...st,
             mode,
             chatAgent,
@@ -2539,14 +2558,22 @@ async function createSession(
             autopilot,
             ...kenStatePayload(),
             ...footerExtras(),
-          },
-        })}\n\n`,
-      );
-      const keepAlive = setInterval(() => res.write(`: ping\n\n`), 15000);
-      req.on("close", () => {
-        clearInterval(keepAlive);
-        clients.delete(client);
-      });
+          }),
+        );
+      } catch {
+        cleanup();
+      }
+      if (!closed) {
+        keepAlive = setInterval(() => {
+          try {
+            if (res.destroyed) cleanup();
+            else res.write(`: ping\n\n`);
+          } catch {
+            cleanup();
+          }
+        }, 15000);
+      }
+      req.once("close", cleanup);
       return;
     }
 

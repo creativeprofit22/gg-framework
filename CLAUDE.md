@@ -23,13 +23,13 @@ Workspace dependency spine: `gg-ai` → `gg-agent`; `gg-core` also depends on `g
 
 GG App starts one shared bundled Node daemon and creates isolated daemon sessions per native window and workspace pane. React calls typed wrappers in `gg-app/src/agent.ts`; those invoke registered Tauri commands in `gg-app/src-tauri/src/lib.rs`; Rust proxies to `packages/ggcoder/src/app-sidecar.ts` and emits pane/window-scoped events.
 
-- Keep provider and agent behavior in the shared package spine; GG App owns desktop UI, native windows, IPC, workspace layout, and PTYs.
+- Keep provider and agent behavior in the shared package spine; GG App owns desktop UI, native windows, IPC, and workspace layout.
 - New webview/backend calls require a registered Rust `#[tauri::command]` plus a typed `agent.ts` wrapper. The webview does not fetch the sidecar directly.
 - Sidecar-backed calls must pass through the existing readiness gate because the daemon can start or respawn asynchronously.
 - Provider errors reach GG App through the sidecar's `broadcastError`/`formatError` path; do not introduce bare provider-message SSE payloads.
 - Workspace targets, daemon sessions, and events are pane/window scoped; never route state or output across workspace boundaries.
-- Interactive terminals are Rust-owned PTYs in `src-tauri/src/terminal.rs`; they are separate from ggcoder's agent `bash` persistent shell. Restored terminal descriptors stay stopped and require an explicit restart before creating a PTY.
-- Packaged terminal-interaction smoke is currently deferred; do not run or extend `smoke-tauri-windows.mjs` until it is explicitly re-enabled.
+- GG App has no interactive terminal panes, PTY bridge, or Rust-owned shell runtime. The `ggcoder` agent `bash` tool and its persistent shell are separate and remain supported.
+- `smoke-tauri-windows.mjs` is a general packaged-window and process-isolation smoke; it does not test terminal interaction.
 - CLI logs: `~/.gg/debug.log`. GG App sidecar logs: `~/.gg/gg-app-sidecar.log`. App settings: `~/.gg/gg-app.json`.
 
 ## Commands

@@ -329,8 +329,9 @@ export function TerminalPane({
         {rearrangementEnabled && (
           <button
             type="button"
-            className="terminal-pane-drag-handle"
+            className="pane-drag-handle terminal-pane-drag-handle"
             draggable
+            data-pane-drag-handle={paneId}
             data-terminal-drag-handle={paneId}
             aria-label={`Move terminal ${paneId}`}
             aria-describedby={dragInstructionsId}

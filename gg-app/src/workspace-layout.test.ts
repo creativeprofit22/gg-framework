@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MAX_WORKSPACE_LAYOUT_DEPTH,
   MAX_WORKSPACE_LAYOUT_LEAVES,
+  MAX_WORKSPACE_PANES,
   addTerminalWorkspacePane,
   bootstrapDefaultTerminalWorkspacePane,
   defaultWorkspaceLayout,
@@ -13,6 +14,7 @@ import {
   isVisibleWorkspaceLeaf,
   loadWorkspaceLayout,
   moveTerminalWorkspacePane,
+  moveWorkspacePane,
   parseWorkspaceLayout,
   prepareTerminalMoveWorkspaceLayoutCandidate,
   preserveRejectedRecursiveWorkspaceLayout,
@@ -143,6 +145,12 @@ const descriptors = (count: number) =>
       (id) => [id, agent(`/${id}`)],
     ),
   );
+const leafGuardDescriptors = (count: number) =>
+  Object.fromEntries(
+    ["primary", ...Array.from({ length: count - 1 }, (_, index) => `pane-${index + 1}`)].map(
+      (id, index) => [id, index < MAX_WORKSPACE_PANES ? agent(`/${id}`) : terminal(`/${id}`)],
+    ),
+  );
 
 const leafGuardLayout = (leafCount: 63 | 64, agentCount = 4): WorkspaceLayout => {
   const agentIds = [
@@ -222,15 +230,58 @@ describe("v8 typed workspace schema", () => {
     );
   });
 
+  it("persists and hydrates 12 bound-or-unbound agent panes and rejects a 13th cleanly", () => {
+    const acceptedRoot = comb(MAX_WORKSPACE_PANES);
+    const acceptedPanes = Object.fromEntries(
+      Object.keys(descriptors(MAX_WORKSPACE_PANES)).map((id, index) => [
+        id,
+        index === 0 || index % 2 === 0 ? agent(`/${id}`) : null,
+      ]),
+    );
+    const candidate = record(8, acceptedRoot, acceptedPanes, `pane-${MAX_WORKSPACE_PANES - 1}`);
+
+    expect(validateWorkspaceLayoutCandidate(candidate)).not.toBeNull();
+
+    const { storage, values } = store();
+    const layout = validateWorkspaceLayoutCandidate(candidate)!;
+    expect(saveWorkspaceLayout(storage, "twelve-panes", layout)).toBe(true);
+    const hydrated = loadWorkspaceLayout(storage, "twelve-panes");
+    expect(hydrated.status).toBe("valid");
+    expect(workspaceLayoutLeafIds(hydrated.layout.root)).toHaveLength(MAX_WORKSPACE_PANES);
+    expect(Object.values(hydrated.layout.panes).filter((pane) => pane === null)).toHaveLength(
+      MAX_WORKSPACE_PANES / 2,
+    );
+
+    const rejectedPanes = {
+      primary: agent("/primary"),
+      ...Object.fromEntries(
+        Array.from({ length: MAX_WORKSPACE_PANES }, (_, index) => [`pane-${index + 1}`, null]),
+      ),
+    };
+    const rejectedRoot = comb(MAX_WORKSPACE_PANES + 1);
+    const rejected = record(8, rejectedRoot, rejectedPanes);
+    const rejectedLayout = canonical({ root: rejectedRoot, panes: rejectedPanes });
+    expect(validateWorkspaceLayoutCandidate(rejected)).toBeNull();
+    expect(saveWorkspaceLayout(storage, "thirteen-panes", rejectedLayout)).toBe(false);
+    expect(values.has(recursiveWorkspaceLayoutKey("thirteen-panes"))).toBe(false);
+
+    const rejectedRaw = JSON.stringify(rejected);
+    values.set(recursiveWorkspaceLayoutKey("thirteen-panes"), rejectedRaw);
+    const rejectedHydration = loadWorkspaceLayout(storage, "thirteen-panes");
+    expect(rejectedHydration.status).toBe("corrupt");
+    expect(rejectedHydration.rejectedRaw).toBe(rejectedRaw);
+    expect(workspaceLayoutLeafIds(rejectedHydration.layout.root)).toHaveLength(2);
+  });
+
   it("validates exactly 64 leaves and rejects 65 leaves or excess depth", () => {
     expect(
       validateWorkspaceLayoutCandidate(
-        record(8, comb(MAX_WORKSPACE_LAYOUT_LEAVES), descriptors(64)),
+        record(8, comb(MAX_WORKSPACE_LAYOUT_LEAVES), leafGuardDescriptors(64)),
       ),
     ).not.toBeNull();
     expect(
       validateWorkspaceLayoutCandidate(
-        record(8, comb(MAX_WORKSPACE_LAYOUT_LEAVES + 1), descriptors(65)),
+        record(8, comb(MAX_WORKSPACE_LAYOUT_LEAVES + 1), leafGuardDescriptors(65)),
       ),
     ).toBeNull();
     let root: WorkspaceLayoutNode = leaf("primary");
@@ -936,6 +987,53 @@ describe("terminal move reducer", () => {
     }
     const deepLayout = canonical({ root: deepRoot, panes: deepPanes });
     expect(moveTerminalWorkspacePane(deepLayout, moveRequest("primary", "left"))).toBe(deepLayout);
+  });
+
+  it("moves an agent pane without changing its pane or session identity", () => {
+    const layout = reducerLayout();
+    const moved = moveWorkspacePane(layout, {
+      sourcePaneId: "secondary",
+      targetPaneId: "primary",
+      placement: "left",
+    });
+
+    expect(moved).not.toBe(layout);
+    expect(workspaceLayoutLeafIds(moved.root)).toEqual(["secondary", "primary", "terminal-1"]);
+    expect(moved.focusedPaneId).toBe("secondary");
+    expect(moved.panes.secondary).toEqual({
+      kind: "agent",
+      cwd: "/b",
+      sessionPath: null,
+    });
+  });
+
+  it("moves an unbound chat pane and treats invalid and self drops as identity no-ops", () => {
+    const layout = canonical({
+      root: split(leaf("primary"), leaf("pane-1")),
+      panes: { primary: agent("/a"), "pane-1": null },
+    });
+    const moved = moveWorkspacePane(layout, {
+      sourcePaneId: "pane-1",
+      targetPaneId: "primary",
+      placement: "up",
+    });
+
+    expect(workspaceLayoutLeafIds(moved.root)).toEqual(["pane-1", "primary"]);
+    expect(moved.panes["pane-1"]).toBeNull();
+    expect(
+      moveWorkspacePane(layout, {
+        sourcePaneId: "pane-1",
+        targetPaneId: "pane-1",
+        placement: "left",
+      }),
+    ).toBe(layout);
+    expect(
+      moveWorkspacePane(layout, {
+        sourcePaneId: "missing",
+        targetPaneId: "primary",
+        placement: "left",
+      }),
+    ).toBe(layout);
   });
 
   it.each([

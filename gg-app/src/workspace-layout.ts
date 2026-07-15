@@ -7,7 +7,7 @@ export const MAX_SPLIT_RATIO = 90;
 export const DEFAULT_TERMINAL_DOCK_HEIGHT_PX = 260;
 export const MIN_TERMINAL_DOCK_HEIGHT_PX = 140;
 export const MAX_TERMINAL_DOCK_HEIGHT_PX = 2_000;
-export const MAX_WORKSPACE_PANES = 4;
+export const MAX_WORKSPACE_PANES = 12;
 /** Persisted-input and reducer-output corruption/resource guard, separate from creation policy. */
 export const MAX_WORKSPACE_LAYOUT_LEAVES = 64;
 /** A 64-leaf comb reaches depth 64 when the root is counted as depth 1. */
@@ -18,11 +18,18 @@ const MAX_WORKSPACE_PANE_ID_BYTES = 64;
 export type WorkspacePaneId = string;
 export type SplitDirection = "horizontal" | "vertical";
 export type DefaultTerminalBootstrap = "pending" | "complete";
-export type TerminalPanePlacement = "left" | "right" | "up" | "down";
+export type PanePlacement = "left" | "right" | "up" | "down";
+export interface PaneMoveRequest {
+  sourcePaneId: WorkspacePaneId;
+  targetPaneId: WorkspacePaneId;
+  placement: PanePlacement;
+}
+/** Compatibility aliases for callers that still describe terminal-only movement. */
+export type TerminalPanePlacement = PanePlacement;
 export interface TerminalPaneMoveRequest {
   terminalPaneId: WorkspacePaneId;
   targetPaneId: WorkspacePaneId;
-  placement: TerminalPanePlacement;
+  placement: PanePlacement;
 }
 export interface LeafNode {
   type: "leaf";
@@ -128,10 +135,24 @@ export function isValidWorkspacePaneId(value: unknown): value is WorkspacePaneId
   );
 }
 
-export function isTerminalPanePlacement(value: unknown): value is TerminalPanePlacement {
+export function isPanePlacement(value: unknown): value is PanePlacement {
   return value === "left" || value === "right" || value === "up" || value === "down";
 }
 
+export function isPaneMoveRequest(value: unknown): value is PaneMoveRequest {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return (
+    keys.length === 3 &&
+    keys.every((key) => ["sourcePaneId", "targetPaneId", "placement"].includes(key)) &&
+    isValidWorkspacePaneId(record.sourcePaneId) &&
+    isValidWorkspacePaneId(record.targetPaneId) &&
+    isPanePlacement(record.placement)
+  );
+}
+
+export const isTerminalPanePlacement = isPanePlacement;
 export function isTerminalPaneMoveRequest(value: unknown): value is TerminalPaneMoveRequest {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
@@ -139,9 +160,11 @@ export function isTerminalPaneMoveRequest(value: unknown): value is TerminalPane
   return (
     keys.length === 3 &&
     keys.every((key) => ["terminalPaneId", "targetPaneId", "placement"].includes(key)) &&
-    isValidWorkspacePaneId(record.terminalPaneId) &&
-    isValidWorkspacePaneId(record.targetPaneId) &&
-    isTerminalPanePlacement(record.placement)
+    isPaneMoveRequest({
+      sourcePaneId: record.terminalPaneId,
+      targetPaneId: record.targetPaneId,
+      placement: record.placement,
+    })
   );
 }
 export function workspaceLayoutKey(windowLabel: string): string {
@@ -270,7 +293,7 @@ export function insertWorkspaceLayoutLeafNearTarget(
   targetPaneId: WorkspacePaneId,
   placement: unknown,
 ): WorkspaceLayoutHelperResult<WorkspaceLayoutNode> {
-  if (!isTerminalPanePlacement(placement)) return { ok: false, reason: "invalid-placement" };
+  if (!isPanePlacement(placement)) return { ok: false, reason: "invalid-placement" };
   const direction: SplitDirection =
     placement === "left" || placement === "right" ? "horizontal" : "vertical";
   const sourceFirst = placement === "left" || placement === "up";
@@ -292,26 +315,24 @@ export function insertWorkspaceLayoutLeafNearTarget(
   return inserted ? { ok: true, value: nextRoot } : { ok: false, reason: "target-not-found" };
 }
 
-/** Foundation-level terminal movement validator used by the public reducer rollback boundary. */
-export function prepareTerminalMoveWorkspaceLayoutCandidate(
+/** Pane-neutral movement validator used by the public reducer rollback boundary. */
+export function prepareMoveWorkspacePaneCandidate(
   layout: WorkspaceLayout,
   request: unknown,
 ): WorkspaceLayoutHelperResult<WorkspaceLayout> {
-  if (!isTerminalPaneMoveRequest(request)) return { ok: false, reason: "invalid-request" };
-  if (request.terminalPaneId === request.targetPaneId)
+  if (!isPaneMoveRequest(request)) return { ok: false, reason: "invalid-request" };
+  if (request.sourcePaneId === request.targetPaneId)
     return { ok: false, reason: "same-source-target" };
 
-  const source = findWorkspaceLayoutLeaf(layout.root, request.terminalPaneId, layout.panes);
-  if (!source) return { ok: false, reason: "invalid-source" };
-  if (source.descriptorKind !== "terminal") return { ok: false, reason: "source-not-terminal" };
-  if (!isVisibleTerminalLeaf(layout, request.terminalPaneId))
-    return { ok: false, reason: "source-not-stopped-terminal" };
-  if (!isVisibleWorkspaceLeaf(layout, request.targetPaneId))
+  const visiblePaneIds = workspaceLayoutLeafIds(layout.root);
+  if (!visiblePaneIds.includes(request.sourcePaneId))
+    return { ok: false, reason: "invalid-source" };
+  if (!visiblePaneIds.includes(request.targetPaneId))
     return { ok: false, reason: "invalid-target" };
 
-  const removed = removeWorkspaceLayoutLeafAndCollapse(layout.root, request.terminalPaneId);
+  const removed = removeWorkspaceLayoutLeafAndCollapse(layout.root, request.sourcePaneId);
   if (!removed.ok) return removed;
-  if (!findWorkspaceLayoutLeaf(removed.value.root, request.targetPaneId, layout.panes))
+  if (!workspaceLayoutLeafIds(removed.value.root).includes(request.targetPaneId))
     return { ok: false, reason: "target-removed" };
 
   const inserted = insertWorkspaceLayoutLeafNearTarget(
@@ -324,12 +345,33 @@ export function prepareTerminalMoveWorkspaceLayoutCandidate(
 
   const normalized = normalizeLayout({
     root: inserted.value,
-    focusedPaneId: request.terminalPaneId,
+    focusedPaneId: request.sourcePaneId,
     panes: layout.panes,
     defaultTerminalBootstrap: layout.defaultTerminalBootstrap,
   });
   const valid = validateWorkspaceLayoutCandidate(normalized);
   return valid ? { ok: true, value: valid } : { ok: false, reason: "invalid-candidate" };
+}
+
+export function moveWorkspacePane(layout: WorkspaceLayout, request: unknown): WorkspaceLayout {
+  const candidate = prepareMoveWorkspacePaneCandidate(layout, request);
+  return candidate.ok ? candidate.value : layout;
+}
+
+/** Terminal-only compatibility boundary; terminal callers retain their previous validation. */
+export function prepareTerminalMoveWorkspaceLayoutCandidate(
+  layout: WorkspaceLayout,
+  request: unknown,
+): WorkspaceLayoutHelperResult<WorkspaceLayout> {
+  if (!isTerminalPaneMoveRequest(request)) return { ok: false, reason: "invalid-request" };
+  const terminalRequest = request as TerminalPaneMoveRequest;
+  if (!isVisibleTerminalLeaf(layout, terminalRequest.terminalPaneId))
+    return { ok: false, reason: "source-not-terminal" };
+  return prepareMoveWorkspacePaneCandidate(layout, {
+    sourcePaneId: terminalRequest.terminalPaneId,
+    targetPaneId: terminalRequest.targetPaneId,
+    placement: terminalRequest.placement,
+  });
 }
 
 export function moveTerminalWorkspacePane(
@@ -989,11 +1031,14 @@ export function validateWorkspaceLayoutCandidate(candidate: unknown): WorkspaceL
   const keys = Object.keys(rawPanes);
   if (keys.length !== ids.size || keys.some((key) => !ids.has(key))) return null;
   const panes: Record<string, WorkspacePaneValue> = {};
+  let visibleNonTerminalLeafCount = 0;
   for (const key of keys) {
     const descriptor = parseWorkspacePaneDescriptor(rawPanes[key]);
     if (descriptor === undefined) return null;
     panes[key] = descriptor;
+    if (descriptorKind(descriptor) !== "terminal") visibleNonTerminalLeafCount += 1;
   }
+  if (visibleNonTerminalLeafCount > MAX_WORKSPACE_PANES) return null;
   const focusedPaneId = typeof record.focusedPaneId === "string" ? record.focusedPaneId : "";
   const terminalOnly =
     root.type === "leaf" &&

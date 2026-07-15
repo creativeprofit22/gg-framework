@@ -159,7 +159,7 @@ describe("TerminalPane", () => {
 
     fireEvent.dragStart(handle, { dataTransfer });
     expect(setData).toHaveBeenCalledOnce();
-    expect(setData).toHaveBeenCalledWith("application/x-gg-terminal-pane", "terminal-1");
+    expect(setData).toHaveBeenCalledWith("application/x-gg-workspace-pane", "terminal-1");
     expect(dataTransfer.effectAllowed).toBe("move");
     expect(onTerminalDragStart).toHaveBeenCalledWith("terminal-1", handle);
 

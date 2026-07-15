@@ -27,14 +27,14 @@ import { toast } from "./toast";
 import { Toaster } from "./Toaster";
 import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
-import { TERMINAL_PANE_DRAG_MIME } from "./TerminalDropOverlay";
+import { PANE_DRAG_MIME } from "./PaneDropOverlay";
 import {
   addTerminalWorkspacePane,
   bootstrapDefaultTerminalWorkspacePane,
   loadWorkspaceLayout,
   MAX_WORKSPACE_LAYOUT_LEAVES,
   MAX_WORKSPACE_PANES,
-  moveTerminalWorkspacePane,
+  moveWorkspacePane,
   preserveRejectedRecursiveWorkspaceLayout,
   preserveRejectedWorkspaceLayout,
   removeWorkspacePane,
@@ -45,8 +45,8 @@ import {
   workspaceLayoutLeafIds,
   WORKSPACE_LAYOUT_VERSION,
   type SplitDirection,
-  type TerminalPaneMoveRequest,
-  type TerminalPanePlacement,
+  type PaneMoveRequest,
+  type PanePlacement,
   type WorkspaceLayout,
   type WorkspaceLayoutPath,
   type WorkspacePaneId,
@@ -62,9 +62,9 @@ const LAYOUT_LOAD_ERROR_WARNING =
   "Saved workspace layout could not be loaded. A safe layout was restored.";
 const STALE_TARGET_WARNING =
   "Some saved workspace panes were unavailable. A safe layout was restored.";
-const TERMINAL_DRAG_INSTRUCTIONS_ID = "terminal-rearrangement-instructions";
+const PANE_DRAG_INSTRUCTIONS_ID = "pane-rearrangement-instructions";
 
-interface ActiveTerminalDrag {
+interface ActivePaneDrag {
   sourcePaneId: WorkspacePaneId;
   handle: HTMLButtonElement;
   generation: number;
@@ -107,12 +107,12 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const focusedPaneIdRef = useRef(layout.focusedPaneId);
   const activePaneIdsRef = useRef(new Set(workspaceLayoutLeafIds(layout.root)));
   const [rearrangementEnabled, setRearrangementEnabled] = useState(false);
-  const [activeTerminalDrag, setActiveTerminalDrag] = useState<ActiveTerminalDrag | null>(null);
-  const activeTerminalDragRef = useRef<ActiveTerminalDrag | null>(null);
+  const [activePaneDrag, setActivePaneDrag] = useState<ActivePaneDrag | null>(null);
+  const activePaneDragRef = useRef<ActivePaneDrag | null>(null);
   const dragGenerationRef = useRef(0);
-  const [hoveredTerminalDrop, setHoveredTerminalDrop] = useState<{
+  const [hoveredPaneDrop, setHoveredPaneDrop] = useState<{
     targetPaneId: WorkspacePaneId;
-    placement: TerminalPanePlacement;
+    placement: PanePlacement;
   } | null>(null);
   const [rearrangementAnnouncement, setRearrangementAnnouncement] = useState("");
   const [windowFocused, setWindowFocused] = useState(true);
@@ -148,36 +148,33 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   }, [layout]);
 
   const markLayoutChanged = useCallback((): void => setRejectedLayoutChanged(true), []);
-  const focusTerminalDragHandle = useCallback((paneId: WorkspacePaneId): void => {
+  const focusPaneDragHandle = useCallback((paneId: WorkspacePaneId): void => {
     requestAnimationFrame(() => {
       document
-        .querySelector<HTMLButtonElement>(`[data-terminal-drag-handle="${CSS.escape(paneId)}"]`)
+        .querySelector<HTMLButtonElement>(
+          `[data-pane-drag-handle="${CSS.escape(paneId)}"], [data-terminal-drag-handle="${CSS.escape(paneId)}"]`,
+        )
         ?.focus();
     });
   }, []);
-  const clearTerminalDrag = useCallback((): ActiveTerminalDrag | null => {
-    const active = activeTerminalDragRef.current;
-    activeTerminalDragRef.current = null;
-    setActiveTerminalDrag(null);
-    setHoveredTerminalDrop(null);
+  const clearPaneDrag = useCallback((): ActivePaneDrag | null => {
+    const active = activePaneDragRef.current;
+    activePaneDragRef.current = null;
+    setActivePaneDrag(null);
+    setHoveredPaneDrop(null);
     return active;
   }, []);
-  const cancelTerminalDrag = useCallback(
+  const cancelPaneDrag = useCallback(
     (announce = true): void => {
-      const active = clearTerminalDrag();
+      const active = clearPaneDrag();
       if (!active) return;
-      if (announce) setRearrangementAnnouncement("Terminal move cancelled.");
+      if (announce) setRearrangementAnnouncement("Pane move cancelled.");
       requestAnimationFrame(() => {
         if (active.handle.isConnected) active.handle.focus();
-        else
-          document
-            .querySelector<HTMLButtonElement>(
-              `[data-terminal-drag-handle="${CSS.escape(active.sourcePaneId)}"]`,
-            )
-            ?.focus();
+        else focusPaneDragHandle(active.sourcePaneId);
       });
     },
-    [clearTerminalDrag],
+    [clearPaneDrag, focusPaneDragHandle],
   );
   const focusPane = useCallback((paneId: string): void => {
     focusedPaneIdRef.current = paneId;
@@ -268,92 +265,87 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     markLayoutChanged();
   }, [layout.focusedPaneId, layout.panes, markLayoutChanged, snapshots]);
 
-  const startTerminalDrag = useCallback(
+  const startPaneDrag = useCallback(
     (paneId: WorkspacePaneId, handle: HTMLButtonElement): void => {
       const current = layoutRef.current;
-      if (
-        !rearrangementEnabled ||
-        current.panes[paneId]?.kind !== "terminal" ||
-        !workspaceLayoutLeafIds(current.root).includes(paneId)
-      )
-        return;
-      cancelTerminalDrag(false);
+      if (!rearrangementEnabled || !workspaceLayoutLeafIds(current.root).includes(paneId)) return;
+      cancelPaneDrag(false);
       const active = { sourcePaneId: paneId, handle, generation: ++dragGenerationRef.current };
-      activeTerminalDragRef.current = active;
-      setActiveTerminalDrag(active);
-      setHoveredTerminalDrop(null);
-      setRearrangementAnnouncement(`Moving terminal ${paneId}. Choose a direction.`);
+      activePaneDragRef.current = active;
+      setActivePaneDrag(active);
+      setHoveredPaneDrop(null);
+      setRearrangementAnnouncement(`Moving pane ${paneId}. Choose a direction.`);
     },
-    [cancelTerminalDrag, rearrangementEnabled],
+    [cancelPaneDrag, rearrangementEnabled],
   );
 
-  const finishTerminalDrag = useCallback(
+  const finishPaneDrag = useCallback(
     (paneId: WorkspacePaneId): void => {
-      const active = activeTerminalDragRef.current;
+      const active = activePaneDragRef.current;
       if (active?.sourcePaneId === paneId && active.generation === dragGenerationRef.current)
-        cancelTerminalDrag();
+        cancelPaneDrag();
     },
-    [cancelTerminalDrag],
+    [cancelPaneDrag],
   );
 
-  const hoverTerminalDrop = useCallback(
-    (targetPaneId: WorkspacePaneId, placement: TerminalPanePlacement | null): void => {
-      const active = activeTerminalDragRef.current;
+  const hoverPaneDrop = useCallback(
+    (targetPaneId: WorkspacePaneId, placement: PanePlacement | null): void => {
+      const active = activePaneDragRef.current;
       if (!active || targetPaneId === active.sourcePaneId || !placement) {
-        setHoveredTerminalDrop(null);
+        setHoveredPaneDrop(null);
         return;
       }
       if (!workspaceLayoutLeafIds(layoutRef.current.root).includes(targetPaneId)) {
-        cancelTerminalDrag();
+        cancelPaneDrag();
         return;
       }
-      setHoveredTerminalDrop({ targetPaneId, placement });
+      setHoveredPaneDrop({ targetPaneId, placement });
     },
-    [cancelTerminalDrag],
+    [cancelPaneDrag],
   );
 
-  const commitTerminalDrop = useCallback(
-    (request: TerminalPaneMoveRequest): void => {
-      const active = activeTerminalDragRef.current;
+  const commitPaneDrop = useCallback(
+    (request: PaneMoveRequest): void => {
+      const active = activePaneDragRef.current;
       if (
         !active ||
         active.generation !== dragGenerationRef.current ||
-        active.sourcePaneId !== request.terminalPaneId ||
-        request.terminalPaneId === request.targetPaneId
+        active.sourcePaneId !== request.sourcePaneId ||
+        request.sourcePaneId === request.targetPaneId
       ) {
-        cancelTerminalDrag();
+        cancelPaneDrag();
         return;
       }
       const previous = layoutRef.current;
-      const next = moveTerminalWorkspacePane(previous, request);
+      const next = moveWorkspacePane(previous, request);
       if (next === previous) {
-        cancelTerminalDrag();
+        cancelPaneDrag();
         return;
       }
-      clearTerminalDrag();
+      clearPaneDrag();
       layoutRef.current = next;
       focusedPaneIdRef.current = next.focusedPaneId;
       activePaneIdsRef.current = new Set(workspaceLayoutLeafIds(next.root));
       setLayout(next);
       markLayoutChanged();
       setRearrangementAnnouncement(
-        `Terminal ${request.terminalPaneId} moved ${request.placement} of ${request.targetPaneId}.`,
+        `Pane ${request.sourcePaneId} moved ${request.placement} of ${request.targetPaneId}.`,
       );
-      focusTerminalDragHandle(request.terminalPaneId);
+      focusPaneDragHandle(request.sourcePaneId);
     },
-    [cancelTerminalDrag, clearTerminalDrag, focusTerminalDragHandle, markLayoutChanged],
+    [cancelPaneDrag, clearPaneDrag, focusPaneDragHandle, markLayoutChanged],
   );
 
   const toggleRearrangement = useCallback((): void => {
     setRearrangementEnabled((enabled) => {
       const next = !enabled;
-      if (!next) cancelTerminalDrag();
+      if (!next) cancelPaneDrag();
       setRearrangementAnnouncement(
-        next ? "Terminal rearrangement enabled." : "Terminal rearrangement disabled.",
+        next ? "Pane rearrangement enabled." : "Pane rearrangement disabled.",
       );
       return next;
     });
-  }, [cancelTerminalDrag]);
+  }, [cancelPaneDrag]);
 
   useEffect(() => {
     if (loadedLayout.status === "load-error") {
@@ -435,9 +427,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === "Escape" && activeTerminalDragRef.current) {
+      if (event.key === "Escape" && activePaneDragRef.current) {
         event.preventDefault();
-        cancelTerminalDrag();
+        cancelPaneDrag();
         return;
       }
       const meta = event.metaKey || event.ctrlKey;
@@ -465,7 +457,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [cancelTerminalDrag, focusPane, leafIds]);
+  }, [cancelPaneDrag, focusPane, leafIds]);
 
   useEffect(() => {
     const restoreFocusedInput = (): void => {
@@ -474,7 +466,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     };
     const onBlur = (): void => {
       setWindowFocused(false);
-      cancelTerminalDrag();
+      cancelPaneDrag();
     };
     window.addEventListener("focus", restoreFocusedInput);
     window.addEventListener("blur", onBlur);
@@ -482,18 +474,18 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       window.removeEventListener("focus", restoreFocusedInput);
       window.removeEventListener("blur", onBlur);
     };
-  }, [cancelTerminalDrag]);
+  }, [cancelPaneDrag]);
 
   useEffect(() => {
-    const onPointerCancel = (): void => cancelTerminalDrag();
+    const onPointerCancel = (): void => cancelPaneDrag();
     const onOutsideDrop = (event: DragEvent): void => {
       if (
-        activeTerminalDragRef.current &&
+        activePaneDragRef.current &&
         event.dataTransfer &&
-        Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME)
+        Array.from(event.dataTransfer.types).includes(PANE_DRAG_MIME)
       ) {
         event.preventDefault();
-        cancelTerminalDrag();
+        cancelPaneDrag();
       }
     };
     window.addEventListener("pointercancel", onPointerCancel);
@@ -502,26 +494,25 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       window.removeEventListener("pointercancel", onPointerCancel);
       window.removeEventListener("drop", onOutsideDrop);
     };
-  }, [cancelTerminalDrag]);
+  }, [cancelPaneDrag]);
 
   useEffect(() => {
-    const active = activeTerminalDragRef.current;
+    const active = activePaneDragRef.current;
     if (!active) return;
     const visible = new Set(leafIds);
     if (
       !visible.has(active.sourcePaneId) ||
-      (hoveredTerminalDrop && !visible.has(hoveredTerminalDrop.targetPaneId))
+      (hoveredPaneDrop && !visible.has(hoveredPaneDrop.targetPaneId))
     )
-      cancelTerminalDrag();
-  }, [cancelTerminalDrag, hoveredTerminalDrop, leafIds]);
+      cancelPaneDrag();
+  }, [cancelPaneDrag, hoveredPaneDrop, leafIds]);
 
   useEffect(() => {
-    const hasVisibleTerminal = leafIds.some((paneId) => layout.panes[paneId]?.kind === "terminal");
-    if (hasVisibleTerminal || !rearrangementEnabled) return;
-    cancelTerminalDrag();
+    if (leafIds.length > 1 || !rearrangementEnabled) return;
+    cancelPaneDrag();
     setRearrangementEnabled(false);
-    setRearrangementAnnouncement("Terminal rearrangement disabled.");
-  }, [cancelTerminalDrag, layout.panes, leafIds, rearrangementEnabled]);
+    setRearrangementAnnouncement("Pane rearrangement disabled.");
+  }, [cancelPaneDrag, leafIds, rearrangementEnabled]);
 
   useEffect(() => {
     const preventFileNavigation = (event: DragEvent): void => {
@@ -636,9 +627,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const closePane = useCallback(
     (paneId: WorkspacePaneId): void => {
       if (paneId === PRIMARY_PANE_ID || !leafIds.includes(paneId)) return;
-      if (layout.panes[paneId]?.kind === "terminal") {
-        void disposePaneSession(paneId).catch(() => {});
-      }
+      void disposePaneSession(paneId).catch(() => {});
       for (const stop of resizeCleanupRef.current.values()) stop();
       setConfirmPaneCloseId(null);
       setConfirmTerminalCloseId(null);
@@ -661,7 +650,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         if (nextFocus) inputActionsRef.current.get(nextFocus)?.focus();
       });
     },
-    [layout.panes, leafIds, markLayoutChanged],
+    [leafIds, markLayoutChanged],
   );
 
   const requestPaneClose = useCallback(
@@ -829,11 +818,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     (focusedDescriptor?.kind === "terminal" ||
       leafIds.filter((paneId) => layout.panes[paneId]?.kind !== "terminal").length <
         MAX_WORKSPACE_PANES);
-  const hasVisibleTerminal = leafIds.some((paneId) => layout.panes[paneId]?.kind === "terminal");
+  const canRearrange = leafIds.length > 1;
 
   return (
     <div
-      className={`workspace-shell${activeTerminalDrag ? " terminal-drag-active" : ""}`}
+      className={`workspace-shell${activePaneDrag ? " pane-drag-active" : ""}`}
       style={{ background: theme.background }}
     >
       {confettiNonce && <Confetti key={confettiNonce} />}
@@ -854,10 +843,10 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         <button
           type="button"
           className="workspace-rearrangement-toggle"
-          disabled={!hasVisibleTerminal}
+          disabled={!canRearrange}
           aria-pressed={rearrangementEnabled}
-          aria-label="Rearrange terminals"
-          title="Enable terminal drag handles"
+          aria-label="Rearrange panes"
+          title="Enable pane drag handles"
           onClick={toggleRearrangement}
         >
           Rearrange
@@ -869,9 +858,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           >{`${windowIndex}/${windowTotal}`}</span>
         )}
       </div>
-      <p id={TERMINAL_DRAG_INSTRUCTIONS_ID} className="visually-hidden">
-        Drag this handle onto the left, right, top, or bottom edge of a workspace pane. Press Escape
-        to cancel.
+      <p id={PANE_DRAG_INSTRUCTIONS_ID} className="visually-hidden">
+        Drag this handle onto the left, right, top, or bottom edge of another workspace pane. Press
+        Escape to cancel.
       </p>
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">
         {rearrangementAnnouncement}
@@ -888,9 +877,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           canSplit={canSplit}
           openingPaneId={openingPaneId}
           rearrangementEnabled={rearrangementEnabled}
-          activeTerminalDragSourceId={activeTerminalDrag?.sourcePaneId ?? null}
-          hoveredTerminalDrop={hoveredTerminalDrop}
-          dragInstructionsId={TERMINAL_DRAG_INSTRUCTIONS_ID}
+          activePaneDragSourceId={activePaneDrag?.sourcePaneId ?? null}
+          hoveredPaneDrop={hoveredPaneDrop}
+          dragInstructionsId={PANE_DRAG_INSTRUCTIONS_ID}
           renderPane={renderPane}
           onFocusPane={focusPane}
           onSnapshot={updateSnapshot}
@@ -901,11 +890,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           onOpenPaneWindow={(paneId) => void openPaneWindow(paneId)}
           onSplitFocusedPane={splitFocusedPane}
           onRequestPaneClose={requestPaneClose}
-          onTerminalDragStart={startTerminalDrag}
-          onTerminalDragEnd={finishTerminalDrag}
-          onTerminalDropHover={hoverTerminalDrop}
-          onTerminalDrop={commitTerminalDrop}
-          onTerminalDropReject={cancelTerminalDrag}
+          onPaneDragStart={startPaneDrag}
+          onPaneDragEnd={finishPaneDrag}
+          onPaneDropHover={hoverPaneDrop}
+          onPaneDrop={commitPaneDrop}
+          onPaneDropReject={cancelPaneDrag}
           onResizeByKeyboard={resizeByKeyboard}
           onStartPointerResize={startPointerResize}
         />

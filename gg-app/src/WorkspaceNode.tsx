@@ -1,15 +1,16 @@
+import { GripVertical } from "lucide-react";
 import { AgentPane, type AgentPaneProps, type PaneSnapshot } from "./AgentPane";
+import { PaneDropOverlay, PANE_DRAG_MIME } from "./PaneDropOverlay";
 import { PRIMARY_PANE_ID } from "./pane-routing";
 import { PaneSplitActions } from "./PaneSplitActions";
 import { TerminalPane } from "./TerminalPane";
-import { TerminalDropOverlay } from "./TerminalDropOverlay";
 import {
   MAX_SPLIT_RATIO,
   MIN_SPLIT_RATIO,
   workspaceLayoutLeafIds,
   type SplitDirection,
-  type TerminalPaneMoveRequest,
-  type TerminalPanePlacement,
+  type PaneMoveRequest,
+  type PanePlacement,
   type WorkspaceLayoutNode,
   type WorkspaceLayoutPath,
   type WorkspacePaneId,
@@ -31,8 +32,8 @@ export interface WorkspaceNodeProps {
   canSplit: boolean;
   openingPaneId: WorkspacePaneId | null;
   rearrangementEnabled: boolean;
-  activeTerminalDragSourceId: WorkspacePaneId | null;
-  hoveredTerminalDrop: { targetPaneId: WorkspacePaneId; placement: TerminalPanePlacement } | null;
+  activePaneDragSourceId: WorkspacePaneId | null;
+  hoveredPaneDrop: { targetPaneId: WorkspacePaneId; placement: PanePlacement } | null;
   dragInstructionsId: string;
   renderPane?: (props: AgentPaneProps) => React.ReactNode;
   onFocusPane: (paneId: WorkspacePaneId) => void;
@@ -44,14 +45,11 @@ export interface WorkspaceNodeProps {
   onOpenPaneWindow: (paneId: WorkspacePaneId) => void;
   onSplitFocusedPane: (direction: SplitDirection) => void;
   onRequestPaneClose: (paneId: WorkspacePaneId) => void;
-  onTerminalDragStart: (paneId: WorkspacePaneId, handle: HTMLButtonElement) => void;
-  onTerminalDragEnd: (paneId: WorkspacePaneId) => void;
-  onTerminalDropHover: (
-    targetPaneId: WorkspacePaneId,
-    placement: TerminalPanePlacement | null,
-  ) => void;
-  onTerminalDrop: (request: TerminalPaneMoveRequest) => void;
-  onTerminalDropReject: () => void;
+  onPaneDragStart: (paneId: WorkspacePaneId, handle: HTMLButtonElement) => void;
+  onPaneDragEnd: (paneId: WorkspacePaneId) => void;
+  onPaneDropHover: (targetPaneId: WorkspacePaneId, placement: PanePlacement | null) => void;
+  onPaneDrop: (request: PaneMoveRequest) => void;
+  onPaneDropReject: () => void;
   onResizeByKeyboard: (
     event: React.KeyboardEvent<HTMLDivElement>,
     path: WorkspaceLayoutPath,
@@ -86,25 +84,25 @@ export function WorkspaceNode({ path = [], ...props }: WorkspaceNodeProps): Reac
               initiallyStopped
               rearrangementEnabled={props.rearrangementEnabled}
               dragInstructionsId={props.dragInstructionsId}
-              onTerminalDragStart={props.onTerminalDragStart}
-              onTerminalDragEnd={props.onTerminalDragEnd}
+              onTerminalDragStart={props.onPaneDragStart}
+              onTerminalDragEnd={props.onPaneDragEnd}
               onRestart={() => props.onRestartTerminalPane(node.paneId, descriptor)}
               onRequestClose={(running) => props.onRequestTerminalPaneClose(node.paneId, running)}
             />
           </div>
-          {props.activeTerminalDragSourceId && (
-            <TerminalDropOverlay
+          {props.activePaneDragSourceId && (
+            <PaneDropOverlay
               enabled={props.rearrangementEnabled}
-              sourcePaneId={props.activeTerminalDragSourceId}
+              sourcePaneId={props.activePaneDragSourceId}
               targetPaneId={node.paneId}
               hoveredPlacement={
-                props.hoveredTerminalDrop?.targetPaneId === node.paneId
-                  ? props.hoveredTerminalDrop.placement
+                props.hoveredPaneDrop?.targetPaneId === node.paneId
+                  ? props.hoveredPaneDrop.placement
                   : null
               }
-              onHover={props.onTerminalDropHover}
-              onDrop={props.onTerminalDrop}
-              onReject={props.onTerminalDropReject}
+              onHover={props.onPaneDropHover}
+              onDrop={props.onPaneDrop}
+              onReject={props.onPaneDropReject}
             />
           )}
           {props.focusedPaneId === node.paneId && (
@@ -180,8 +178,9 @@ function WorkspaceAgentLeaf({
   canSplit,
   openingPaneId,
   rearrangementEnabled,
-  activeTerminalDragSourceId,
-  hoveredTerminalDrop,
+  activePaneDragSourceId,
+  hoveredPaneDrop,
+  dragInstructionsId,
   renderPane,
   onFocusPane,
   onSnapshot,
@@ -190,27 +189,36 @@ function WorkspaceAgentLeaf({
   onOpenPaneWindow,
   onSplitFocusedPane,
   onRequestPaneClose,
-  onTerminalDropHover,
-  onTerminalDrop,
-  onTerminalDropReject,
+  onPaneDragStart,
+  onPaneDragEnd,
+  onPaneDropHover,
+  onPaneDrop,
+  onPaneDropReject,
 }: Omit<WorkspaceNodeProps, "node" | "path"> & {
   paneId: WorkspacePaneId;
 }): React.ReactElement {
   const focused = focusedPaneId === paneId;
+  const usesManagedTarget =
+    layoutManaged ||
+    paneId.startsWith("pane-") ||
+    (paneId !== PRIMARY_PANE_ID && panes[paneId] !== null);
+  const reclaimNativeSession = Boolean(
+    usesManagedTarget &&
+    snapshots[paneId]?.restoreChecked &&
+    panes[paneId]?.kind !== "terminal" &&
+    panes[paneId],
+  );
   const paneProps: AgentPaneProps = {
     paneId,
     kind: paneId === PRIMARY_PANE_ID ? "primary" : "auxiliary",
     focused,
     windowFocused,
-    initialTarget:
-      layoutManaged ||
-      paneId.startsWith("pane-") ||
-      (paneId !== PRIMARY_PANE_ID && panes[paneId] !== null)
-        ? panes[paneId]
-        : undefined,
+    initialTarget: usesManagedTarget ? panes[paneId] : undefined,
     onFocus: onFocusPane,
     onSnapshot,
     onUserTargetChange,
+    workspaceOwnsSessionLifecycle: true,
+    reclaimNativeSession,
     registerInput,
   };
 
@@ -226,17 +234,36 @@ function WorkspaceAgentLeaf({
       <div className="workspace-pane-body">
         {layoutReady && <>{renderPane ? renderPane(paneProps) : <AgentPane {...paneProps} />}</>}
       </div>
-      {activeTerminalDragSourceId && (
-        <TerminalDropOverlay
+      {rearrangementEnabled && (
+        <button
+          type="button"
+          className="pane-drag-handle pane-drag-handle-agent"
+          draggable
+          data-pane-drag-handle={paneId}
+          aria-label={`Move pane ${paneId}`}
+          aria-describedby={dragInstructionsId}
+          title="Drag to move this pane"
+          onDragStart={(event) => {
+            event.dataTransfer.setData(PANE_DRAG_MIME, paneId);
+            event.dataTransfer.effectAllowed = "move";
+            onPaneDragStart(paneId, event.currentTarget);
+          }}
+          onDragEnd={() => onPaneDragEnd(paneId)}
+        >
+          <GripVertical size={15} aria-hidden="true" />
+        </button>
+      )}
+      {activePaneDragSourceId && (
+        <PaneDropOverlay
           enabled={rearrangementEnabled}
-          sourcePaneId={activeTerminalDragSourceId}
+          sourcePaneId={activePaneDragSourceId}
           targetPaneId={paneId}
           hoveredPlacement={
-            hoveredTerminalDrop?.targetPaneId === paneId ? hoveredTerminalDrop.placement : null
+            hoveredPaneDrop?.targetPaneId === paneId ? hoveredPaneDrop.placement : null
           }
-          onHover={onTerminalDropHover}
-          onDrop={onTerminalDrop}
-          onReject={onTerminalDropReject}
+          onHover={onPaneDropHover}
+          onDrop={onPaneDrop}
+          onReject={onPaneDropReject}
         />
       )}
       {focused && (

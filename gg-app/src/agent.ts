@@ -1420,6 +1420,16 @@ export function createPaneSession(
   return invoke<number>("agent_pane_create", { paneId, cwd, sessionPath: sessionPath ?? null });
 }
 
+/** Reuses the matching native pane target after a webview reload, or creates it
+ * when the whole app was restarted and only the persisted layout remains. */
+export function restorePaneSession(
+  paneId: string,
+  cwd: string,
+  sessionPath?: string,
+): Promise<number> {
+  return invoke<number>("agent_pane_restore", { paneId, cwd, sessionPath: sessionPath ?? null });
+}
+
 export function disposePaneSession(paneId: string, generation?: number): Promise<void> {
   return invoke("agent_pane_dispose", { paneId, generation: generation ?? null });
 }

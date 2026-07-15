@@ -4,6 +4,7 @@ import {
   createPaneAgentClient,
   createPaneSession,
   disposePaneSession,
+  restorePaneSession,
   restoreTarget,
   isSecondaryWindow,
   getDroppedPathInfo,
@@ -243,6 +244,10 @@ export interface AgentPaneProps {
   onFocus: (paneId: string) => void;
   onSnapshot: (snapshot: PaneSnapshot) => void;
   onUserTargetChange?: () => void;
+  /** The workspace explicitly disposes closed panes, allowing layout moves to remount safely. */
+  workspaceOwnsSessionLifecycle?: boolean;
+  /** Reclaim this exact native target after a workspace-owned remount. */
+  reclaimNativeSession?: boolean;
   registerInput: (paneId: string, actions: PaneInputActions | null) => void;
 }
 
@@ -255,6 +260,8 @@ export function AgentPane({
   onFocus,
   onSnapshot,
   onUserTargetChange,
+  workspaceOwnsSessionLifecycle = false,
+  reclaimNativeSession = false,
   registerInput,
 }: AgentPaneProps): React.ReactElement {
   const agentClient = useMemo(() => createPaneAgentClient(paneId), [paneId]);
@@ -497,26 +504,31 @@ export function AgentPane({
     [kind, paneId],
   );
   const bindAuxiliaryProject = useCallback(
-    async (cwd: string, sessionPath?: string): Promise<void> => {
+    async (cwd: string, sessionPath?: string, restore = false): Promise<void> => {
       const operation = ++auxiliaryCreateGenerationRef.current;
       let nativeGeneration: number | null = null;
       try {
         nativeGeneration = auxiliaryCreatedRef.current
           ? await selectProject(cwd, sessionPath, auxiliaryNativeGenerationRef.current ?? undefined)
-          : await createPaneSession(paneId, cwd, sessionPath);
+          : restore
+            ? await restorePaneSession(paneId, cwd, sessionPath)
+            : await createPaneSession(paneId, cwd, sessionPath);
         if (disposedRef.current || operation !== auxiliaryCreateGenerationRef.current) {
-          await disposeAuxiliary(nativeGeneration);
           throw new Error("Pane was closed or rebound while its session was being created");
         }
         auxiliaryNativeGenerationRef.current = nativeGeneration;
         await agentClient.waitForReady();
         if (disposedRef.current || operation !== auxiliaryCreateGenerationRef.current) {
-          await disposeAuxiliary(nativeGeneration);
           throw new Error("Pane was closed or rebound while its session was becoming ready");
         }
         auxiliaryCreatedRef.current = true;
       } catch (error) {
-        await disposeAuxiliary(nativeGeneration);
+        const superseded = operation !== auxiliaryCreateGenerationRef.current;
+        const supersededRestore = restore && superseded;
+        const supersededWorkspaceOperation = workspaceOwnsSessionLifecycle && superseded;
+        if (!supersededRestore && !supersededWorkspaceOperation) {
+          await disposeAuxiliary(nativeGeneration);
+        }
         if (operation === auxiliaryCreateGenerationRef.current) {
           auxiliaryCreatedRef.current = false;
           auxiliaryNativeGenerationRef.current = null;
@@ -524,7 +536,7 @@ export function AgentPane({
         throw error;
       }
     },
-    [agentClient, disposeAuxiliary, paneId, selectProject],
+    [agentClient, disposeAuxiliary, paneId, selectProject, workspaceOwnsSessionLifecycle],
   );
 
   useEffect(() => {
@@ -532,9 +544,10 @@ export function AgentPane({
     return () => {
       disposedRef.current = true;
       auxiliaryCreateGenerationRef.current += 1;
-      void disposeAuxiliary(auxiliaryNativeGenerationRef.current);
+      if (!workspaceOwnsSessionLifecycle)
+        void disposeAuxiliary(auxiliaryNativeGenerationRef.current);
     };
-  }, [disposeAuxiliary]);
+  }, [disposeAuxiliary, workspaceOwnsSessionLifecycle]);
   // Mirror of `state` for use inside the memoized event handler (which doesn't
   // re-capture state). Lets turn_end pick the right context-token formula by
   // provider without re-subscribing the SSE listener on every state change.
@@ -929,13 +942,14 @@ export function AgentPane({
     state?.sessionPath,
   ]);
 
-  // Restore the persisted internal-pane target after the native primary restore
-  // target has been consumed. A matching primary is already running; every other
-  // target is bound explicitly to its owning pane.
+  // Restore the persisted target. Initial primary startup consumes the native
+  // window restore target once; workspace-owned remounts reclaim the exact pane
+  // target directly so they never respawn or dispose its daemon session.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const nativeTarget = kind === "primary" ? await restoreTarget() : null;
+      const nativeTarget =
+        kind === "primary" && !reclaimNativeSession ? await restoreTarget() : null;
       if (cancelled) return;
 
       if (initialTarget === undefined) {
@@ -954,9 +968,18 @@ export function AgentPane({
       }
 
       if (kind === "primary") {
-        await selectProject(initialTarget.cwd, initialTarget.sessionPath ?? undefined);
+        if (reclaimNativeSession) {
+          await restorePaneSession(
+            paneId,
+            initialTarget.cwd,
+            initialTarget.sessionPath ?? undefined,
+          );
+          await agentClient.waitForReady();
+        } else {
+          await selectProject(initialTarget.cwd, initialTarget.sessionPath ?? undefined);
+        }
       } else {
-        await bindAuxiliaryProject(initialTarget.cwd, initialTarget.sessionPath ?? undefined);
+        await bindAuxiliaryProject(initialTarget.cwd, initialTarget.sessionPath ?? undefined, true);
       }
       if (!cancelled && !disposedRef.current) onProjectChosen();
     })()

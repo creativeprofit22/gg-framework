@@ -52,9 +52,9 @@ vi.mock("./workspace-layout", async () => {
       workspaceLayoutMock.rejectResolution
         ? Promise.reject(new Error("layout resolution failed"))
         : actual.resolveWorkspaceLayoutTargets(...args),
-    moveTerminalWorkspacePane: (...args: Parameters<typeof actual.moveTerminalWorkspacePane>) => {
+    moveWorkspacePane: (...args: Parameters<typeof actual.moveWorkspacePane>) => {
       workspaceLayoutMock.move(...args);
-      return actual.moveTerminalWorkspacePane(...args);
+      return actual.moveWorkspacePane(...args);
     },
   };
 });
@@ -141,7 +141,7 @@ vi.mock("./TerminalPane", async () => {
               aria-label={`Move terminal ${paneId}`}
               aria-describedby={dragInstructionsId}
               onDragStart={(event) => {
-                event.dataTransfer.setData("application/x-gg-terminal-pane", paneId);
+                event.dataTransfer.setData("application/x-gg-workspace-pane", paneId);
                 event.dataTransfer.effectAllowed = "move";
                 onTerminalDragStart?.(paneId, event.currentTarget);
               }}
@@ -180,6 +180,7 @@ function FakePane({
   initialTarget,
   onFocus,
   onSnapshot,
+  reclaimNativeSession,
   registerInput,
 }: AgentPaneProps): React.ReactElement {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -211,6 +212,7 @@ function FakePane({
       }
       data-initial-cwd={mountedTarget?.cwd ?? ""}
       data-initial-session={mountedTarget?.sessionPath ?? ""}
+      data-reclaim-native-session={String(Boolean(reclaimNativeSession))}
       onPointerDown={() => onFocus(paneId)}
       onFocusCapture={() => onFocus(paneId)}
     >
@@ -1879,29 +1881,32 @@ describe("WorkspaceShell pane resizing", () => {
     ).toBe("60");
   });
 
-  it("caps rapid split mutations at four leaves", async () => {
+  it("accepts 12 agent panes and rejects a 13th rapid split cleanly", async () => {
     render(<WorkspaceShell renderPane={renderPane} />);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
       fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
     }
 
-    await waitFor(() => expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(4));
-    expect(screen.queryByTestId("pane-pane-3")).toBeNull();
+    await waitFor(() => expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(12));
+    expect(screen.getByTestId("pane-pane-10")).not.toBeNull();
+    expect(screen.queryByTestId("pane-pane-11")).toBeNull();
   });
 
-  it("disables both split actions at the four-leaf cap", async () => {
+  it("disables both split actions at the 12-agent-pane cap", async () => {
     render(<WorkspaceShell renderPane={renderPane} />);
-    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
-    await screen.findByTestId("pane-pane-1");
-    fireEvent.click(screen.getByRole("button", { name: "Split Down" }));
-    await screen.findByTestId("pane-pane-2");
+    for (let pane = 1; pane <= 10; pane += 1) {
+      fireEvent.click(
+        screen.getByRole("button", { name: pane % 2 === 0 ? "Split Down" : "Split Right" }),
+      );
+      await screen.findByTestId(`pane-pane-${pane}`);
+    }
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Split Right" }).disabled).toBe(
       true,
     );
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Split Down" }).disabled).toBe(
       true,
     );
-    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(4);
+    expect(document.querySelectorAll(".workspace-pane-slot")).toHaveLength(12);
   });
   it("applies pointer drag deltas relative to the available pane width", () => {
     const { container } = render(<WorkspaceShell renderPane={renderPane} />);
@@ -2017,15 +2022,90 @@ describe("WorkspaceShell pane resizing", () => {
   });
 });
 
-describe("WorkspaceShell terminal rearrangement", () => {
+describe("WorkspaceShell pane rearrangement", () => {
+  it("moves an agent pane while preserving its pane ID and saved session identity", async () => {
+    saveTerminalMoveLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+    await waitFor(() =>
+      expect((savedRecursiveLayout().panes.secondary as { sessionPath?: string }).sessionPath).toBe(
+        "/sessions/secondary.jsonl",
+      ),
+    );
+    const sessionIdentity = savedRecursiveLayout().panes.secondary;
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
+    const handle = screen.getByRole("button", { name: "Move pane secondary" });
+    const dataTransfer = terminalDragTransfer();
+
+    fireEvent.dragStart(handle, { dataTransfer });
+    const leftZone = document.querySelector('[data-pane-id="primary"] [data-placement="left"]')!;
+    fireEvent.drop(leftZone, { dataTransfer });
+
+    await waitFor(() =>
+      expect(recursiveLeafIds(savedRecursiveLayout().root)).toEqual([
+        "secondary",
+        "primary",
+        "terminal-1",
+      ]),
+    );
+    expect(screen.getByTestId("pane-secondary").dataset.initialSession).toBe(
+      "/sessions/secondary.jsonl",
+    );
+    expect(savedRecursiveLayout().panes.secondary).toEqual(sessionIdentity);
+    expect(savedRecursiveLayout().panes.secondary).toEqual({
+      kind: "agent",
+      cwd: "/work/secondary",
+      sessionPath: "/sessions/secondary.jsonl",
+    });
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+    expect(workspaceLayoutMock.move).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sourcePaneId: "secondary", targetPaneId: "primary" }),
+    );
+  });
+
+  it("marks a moved primary pane to reclaim its existing native target", async () => {
+    saveTerminalMoveLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const primary = await screen.findByTestId("pane-primary");
+    expect(primary.dataset.reclaimNativeSession).toBe("true");
+    await waitFor(() =>
+      expect((savedRecursiveLayout().panes.primary as { sessionPath?: string }).sessionPath).toBe(
+        "/sessions/primary.jsonl",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
+    const handle = screen.getByRole("button", { name: "Move pane primary" });
+    const dataTransfer = terminalDragTransfer();
+    fireEvent.dragStart(handle, { dataTransfer });
+    const rightZone = document.querySelector(
+      '[data-pane-id="secondary"] [data-placement="right"]',
+    )!;
+    fireEvent.drop(rightZone, { dataTransfer });
+
+    await waitFor(() =>
+      expect(recursiveLeafIds(savedRecursiveLayout().root)).toEqual([
+        "secondary",
+        "primary",
+        "terminal-1",
+      ]),
+    );
+    expect(screen.getByTestId("pane-primary").dataset.reclaimNativeSession).toBe("true");
+    expect(screen.getByTestId("pane-primary").dataset.initialSession).toBe(
+      "/sessions/primary.jsonl",
+    );
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+  });
+
   it("defaults off, commits one reducer move, persists, announces, and restores moved focus", async () => {
     saveTerminalMoveLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("terminal-terminal-1");
-    const toggle = screen.getByRole("button", { name: "Rearrange terminals" });
+    const toggle = screen.getByRole("button", { name: "Rearrange panes" });
     expect(toggle.getAttribute("aria-pressed")).toBe("false");
     expect(screen.queryByRole("button", { name: "Move terminal terminal-1" })).toBeNull();
-    expect(document.querySelector(".terminal-drop-overlay")).toBeNull();
+    expect(document.querySelector(".pane-drop-overlay")).toBeNull();
 
     fireEvent.click(toggle);
     const { handle, dataTransfer } = startTerminalDrag();
@@ -2036,7 +2116,7 @@ describe("WorkspaceShell terminal rearrangement", () => {
 
     expect(workspaceLayoutMock.move).toHaveBeenCalledOnce();
     expect(workspaceLayoutMock.move.mock.calls[0]?.[1]).toEqual({
-      terminalPaneId: "terminal-1",
+      sourcePaneId: "terminal-1",
       targetPaneId: "primary",
       placement: "right",
     });
@@ -2047,7 +2127,7 @@ describe("WorkspaceShell terminal rearrangement", () => {
         "terminal-1",
       );
     });
-    expect(screen.getByText("Terminal terminal-1 moved right of primary.")).toBeTruthy();
+    expect(screen.getByText("Pane terminal-1 moved right of primary.")).toBeTruthy();
     await waitFor(() =>
       expect(document.activeElement).toBe(
         screen.getByRole("button", { name: "Move terminal terminal-1" }),
@@ -2061,7 +2141,7 @@ describe("WorkspaceShell terminal rearrangement", () => {
       saveTerminalMoveLayout();
       render(<WorkspaceShell renderPane={renderPane} />);
       await screen.findByTestId("terminal-terminal-1");
-      const toggle = screen.getByRole("button", { name: "Rearrange terminals" });
+      const toggle = screen.getByRole("button", { name: "Rearrange panes" });
       fireEvent.click(toggle);
       const { handle, dataTransfer } = startTerminalDrag();
 
@@ -2072,7 +2152,7 @@ describe("WorkspaceShell terminal rearrangement", () => {
       else if (path === "blur") fireEvent.blur(window);
       else fireEvent.click(toggle);
 
-      await waitFor(() => expect(document.querySelector(".terminal-drag-active")).toBeNull());
+      await waitFor(() => expect(document.querySelector(".pane-drag-active")).toBeNull());
       expect(workspaceLayoutMock.move).not.toHaveBeenCalled();
       expect(recursiveLeafIds(savedRecursiveLayout().root)).toEqual([
         "primary",
@@ -2080,7 +2160,7 @@ describe("WorkspaceShell terminal rearrangement", () => {
         "terminal-1",
       ]);
       if (path !== "mode-off") {
-        expect(screen.getByText("Terminal move cancelled.")).toBeTruthy();
+        expect(screen.getByText("Pane move cancelled.")).toBeTruthy();
         await waitFor(() => expect(document.activeElement).toBe(handle));
       }
     },
@@ -2090,22 +2170,23 @@ describe("WorkspaceShell terminal rearrangement", () => {
     saveTerminalMoveLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("terminal-terminal-1");
-    fireEvent.click(screen.getByRole("button", { name: "Rearrange terminals" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
     startTerminalDrag();
     fireEvent.click(screen.getByRole("button", { name: "Mock terminal close" }));
 
     await waitFor(() => expect(screen.queryByTestId("terminal-terminal-1")).toBeNull());
     expect(workspaceLayoutMock.move).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole("button", { name: "Rearrange terminals" }).hasAttribute("disabled"),
-    ).toBe(true);
+    expect(screen.getByRole("button", { name: "Rearrange panes" }).hasAttribute("disabled")).toBe(
+      false,
+    );
+    expect(document.querySelector(".pane-drag-active")).toBeNull();
   });
 
   it("cancels and restores source focus when the hovered target disappears", async () => {
     saveTerminalMoveLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("terminal-terminal-1");
-    fireEvent.click(screen.getByRole("button", { name: "Rearrange terminals" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
     const { dataTransfer } = startTerminalDrag();
     const secondaryLeft = document.querySelector(
       '[data-pane-id="secondary"] [data-placement="left"]',
@@ -2115,7 +2196,7 @@ describe("WorkspaceShell terminal rearrangement", () => {
 
     await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
     expect(workspaceLayoutMock.move).not.toHaveBeenCalled();
-    expect(screen.getByText("Terminal move cancelled.")).toBeTruthy();
+    expect(screen.getByText("Pane move cancelled.")).toBeTruthy();
     await waitFor(() =>
       expect(document.activeElement).toBe(
         screen.getByRole("button", { name: "Move terminal terminal-1" }),
@@ -2128,16 +2209,16 @@ describe("WorkspaceShell terminal rearrangement", () => {
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("terminal-terminal-1");
     await waitFor(() => expect(terminalMock.nativeListener).toBeTypeOf("function"));
-    fireEvent.click(screen.getByRole("button", { name: "Rearrange terminals" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
     startTerminalDrag();
 
     fireEvent.drop(window, { dataTransfer: terminalDragTransfer(["Files"]) });
-    expect(document.querySelector(".terminal-drag-active")).toBeTruthy();
+    expect(document.querySelector(".pane-drag-active")).toBeTruthy();
     act(() =>
       terminalMock.nativeListener?.({ payload: { type: "drop", paths: ["/tmp/example.txt"] } }),
     );
     expect(terminalMock.nativeDrops).toHaveBeenCalledWith("primary", ["/tmp/example.txt"]);
-    expect(document.querySelector(".terminal-drag-active")).toBeTruthy();
+    expect(document.querySelector(".pane-drag-active")).toBeTruthy();
     expect(workspaceLayoutMock.move).not.toHaveBeenCalled();
     fireEvent.keyDown(window, { key: "Escape" });
   });

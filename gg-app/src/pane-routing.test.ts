@@ -30,6 +30,28 @@ describe("pane event routing", () => {
     expect(matchesPaneEvent(event(PRIMARY_PANE_ID, "a"), "pane-3")).toBe(false);
   });
 
+  it("keeps 12 pane/session routes isolated", () => {
+    const fanout = createPaneEventFanout<TestEvent>();
+    const received = Array.from({ length: 12 }, () => [] as string[]);
+
+    received.forEach((messages, index) => {
+      const paneNumber = index + 1;
+      fanout.subscribe(
+        `pane-${paneNumber}`,
+        (value) => messages.push(value.data),
+        `session-${paneNumber}`,
+      );
+    });
+    for (let paneNumber = 12; paneNumber >= 1; paneNumber -= 1) {
+      fanout.dispatch(
+        event(`pane-${paneNumber}`, `message-${paneNumber}`, `session-${paneNumber}`),
+      );
+      fanout.dispatch(event(`pane-${paneNumber}`, "stale", `session-${paneNumber + 1}`));
+    }
+
+    expect(received).toEqual(Array.from({ length: 12 }, (_, index) => [`message-${index + 1}`]));
+  });
+
   it("accepts an untagged legacy event only for primary", () => {
     expect(matchesPaneEvent(event(undefined, "legacy"), PRIMARY_PANE_ID)).toBe(true);
     expect(matchesPaneEvent(event(undefined, "legacy"), "pane-b")).toBe(false);

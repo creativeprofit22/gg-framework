@@ -418,18 +418,18 @@ body {
   container-type: inline-size;
 }
 
-.terminal-drag-active {
+.pane-drag-active {
   cursor: grabbing;
 }
 
-.terminal-drop-overlay {
+.pane-drop-overlay {
   position: absolute;
   z-index: 20;
   inset: 0;
   pointer-events: none;
 }
 
-.terminal-drop-overlay::after {
+.pane-drop-overlay::after {
   position: absolute;
   z-index: 0;
   border: 2px solid color-mix(in srgb, var(--primary) 82%, white);
@@ -440,102 +440,102 @@ body {
   opacity: 0;
 }
 
-.terminal-drop-overlay[data-hovered-placement="left"]::after,
-.terminal-drop-overlay[data-hovered-placement="right"]::after {
+.pane-drop-overlay[data-hovered-placement="left"]::after,
+.pane-drop-overlay[data-hovered-placement="right"]::after {
   top: 0;
   bottom: 0;
   width: 50%;
   opacity: 1;
 }
 
-.terminal-drop-overlay[data-hovered-placement="left"]::after {
+.pane-drop-overlay[data-hovered-placement="left"]::after {
   left: 0;
 }
 
-.terminal-drop-overlay[data-hovered-placement="right"]::after {
+.pane-drop-overlay[data-hovered-placement="right"]::after {
   right: 0;
 }
 
-.terminal-drop-overlay[data-hovered-placement="up"]::after,
-.terminal-drop-overlay[data-hovered-placement="down"]::after {
+.pane-drop-overlay[data-hovered-placement="up"]::after,
+.pane-drop-overlay[data-hovered-placement="down"]::after {
   right: 0;
   left: 0;
   height: 50%;
   opacity: 1;
 }
 
-.terminal-drop-overlay[data-hovered-placement="up"]::after {
+.pane-drop-overlay[data-hovered-placement="up"]::after {
   top: 0;
 }
 
-.terminal-drop-overlay[data-hovered-placement="down"]::after {
+.pane-drop-overlay[data-hovered-placement="down"]::after {
   bottom: 0;
 }
 
-.terminal-drop-zone {
+.pane-drop-zone {
   position: absolute;
   z-index: 1;
   pointer-events: auto;
 }
 
-.terminal-drop-overlay-inert .terminal-drop-zone {
+.pane-drop-overlay-inert .pane-drop-zone {
   cursor: not-allowed;
 }
 
-.terminal-drop-zone-left,
-.terminal-drop-zone-right {
+.pane-drop-zone-left,
+.pane-drop-zone-right {
   top: 0;
   bottom: 0;
   width: 25%;
 }
 
-.terminal-drop-zone-left {
+.pane-drop-zone-left {
   left: 0;
 }
 
-.terminal-drop-zone-right {
+.pane-drop-zone-right {
   right: 0;
 }
 
-.terminal-drop-zone-up,
-.terminal-drop-zone-down {
+.pane-drop-zone-up,
+.pane-drop-zone-down {
   right: 25%;
   left: 25%;
   height: 25%;
 }
 
-.terminal-drop-zone-up {
+.pane-drop-zone-up {
   top: 0;
 }
 
-.terminal-drop-zone-down {
+.pane-drop-zone-down {
   bottom: 0;
 }
 
 @container (max-width: 420px) {
-  .terminal-drop-overlay::after {
+  .pane-drop-overlay::after {
     width: 36px !important;
     height: 36px !important;
     border-radius: 6px;
   }
 
-  .terminal-drop-overlay[data-hovered-placement="left"]::after {
+  .pane-drop-overlay[data-hovered-placement="left"]::after {
     top: calc(50% - 18px);
     bottom: auto;
   }
 
-  .terminal-drop-overlay[data-hovered-placement="right"]::after {
+  .pane-drop-overlay[data-hovered-placement="right"]::after {
     top: calc(50% - 18px);
     bottom: auto;
   }
 
-  .terminal-drop-overlay[data-hovered-placement="up"]::after {
+  .pane-drop-overlay[data-hovered-placement="up"]::after {
     right: auto;
     bottom: auto;
     left: calc(50% - 18px);
   }
 
-  .terminal-drop-overlay[data-hovered-placement="down"]::after {
+  .pane-drop-overlay[data-hovered-placement="down"]::after {
     top: auto;
     right: auto;
     left: calc(50% - 18px);
@@ -589,7 +589,7 @@ body {
   background: var(--surface-1);
 }
 
-.terminal-pane-drag-handle {
+.pane-drag-handle {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -604,16 +604,25 @@ body {
   cursor: grab;
 }
 
-.terminal-pane-drag-handle:hover,
-.terminal-pane-drag-handle:focus-visible {
+.pane-drag-handle:hover,
+.pane-drag-handle:focus-visible {
   color: var(--text);
   border-color: var(--primary);
   background: var(--surface-2);
   outline: none;
 }
 
-.terminal-pane-drag-handle:active {
+.pane-drag-handle:active {
   cursor: grabbing;
+}
+
+.pane-drag-handle-agent {
+  position: absolute;
+  z-index: 12;
+  top: 7px;
+  left: 8px;
+  background: var(--surface-1);
+  box-shadow: 0 0 0 1px var(--border);
 }
 
 .terminal-pane-title {

@@ -39,7 +39,14 @@ struct Daemon {
 
 const PRIMARY_PANE_ID: &str = "primary";
 const MAX_PANE_ID_LEN: usize = 64;
-const MAX_PANES_PER_WINDOW: usize = 4;
+const MAX_AGENT_PANES_PER_WINDOW: usize = 12;
+const MAX_PANE_TARGETS_PER_WINDOW: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaneKind {
+    Agent,
+    Terminal,
+}
 
 /// One pane's session inside the shared daemon. Pane IDs are scoped by their
 /// owning native window; daemon session IDs remain opaque runtime identities.
@@ -113,14 +120,6 @@ fn resolve_owned_pane<'a>(
     registry.get(owner_label)?.get(pane_id)
 }
 
-fn resolve_owned_pane_mut<'a>(
-    registry: &'a mut PaneRegistry,
-    owner_label: &str,
-    pane_id: &str,
-) -> Option<&'a mut PaneSession> {
-    registry.get_mut(owner_label)?.get_mut(pane_id)
-}
-
 pub(crate) fn owned_pane_cwd(
     windows: &Windows,
     owner_label: &str,
@@ -135,12 +134,13 @@ pub(crate) fn owned_pane_cwd(
         .ok_or_else(|| "terminal pane is not ready or belongs to another window".into())
 }
 
-fn record_pane_target(
+fn record_pane_target_with_kind(
     registry: &mut PaneRegistry,
     owner_label: &str,
     pane_id: &str,
     cwd: PathBuf,
     session_path: Option<String>,
+    kind: PaneKind,
 ) -> u64 {
     // Keep generation history outside pane entries so disposal + recreation of
     // the same ID cannot let an old async POST /session bind to the new target.
@@ -155,10 +155,64 @@ fn record_pane_target(
             session_path,
             generation,
             startup_error: None,
-            terminal_only: false,
+            terminal_only: kind == PaneKind::Terminal,
         },
     );
     generation
+}
+
+fn record_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) -> u64 {
+    record_pane_target_with_kind(
+        registry,
+        owner_label,
+        pane_id,
+        cwd,
+        session_path,
+        PaneKind::Agent,
+    )
+}
+
+fn create_pane_target_with_kind(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    cwd: PathBuf,
+    session_path: Option<String>,
+    kind: PaneKind,
+) -> Result<u64, String> {
+    validate_pane_id(pane_id)?;
+    let panes = registry.get(owner_label);
+    if panes.is_some_and(|panes| panes.contains_key(pane_id)) {
+        return Err(format!("pane '{pane_id}' already exists"));
+    }
+    if panes.is_some_and(|panes| panes.len() >= MAX_PANE_TARGETS_PER_WINDOW) {
+        return Err(format!(
+            "window cannot contain more than {MAX_PANE_TARGETS_PER_WINDOW} pane targets"
+        ));
+    }
+    if kind == PaneKind::Agent
+        && panes.is_some_and(|panes| {
+            panes.values().filter(|pane| !pane.terminal_only).count() >= MAX_AGENT_PANES_PER_WINDOW
+        })
+    {
+        return Err(format!(
+            "window cannot contain more than {MAX_AGENT_PANES_PER_WINDOW} agent panes"
+        ));
+    }
+    Ok(record_pane_target_with_kind(
+        registry,
+        owner_label,
+        pane_id,
+        cwd,
+        session_path,
+        kind,
+    ))
 }
 
 fn create_pane_target(
@@ -168,23 +222,55 @@ fn create_pane_target(
     cwd: PathBuf,
     session_path: Option<String>,
 ) -> Result<u64, String> {
-    validate_pane_id(pane_id)?;
-    let panes = registry.get(owner_label);
-    if panes.is_some_and(|panes| panes.contains_key(pane_id)) {
-        return Err(format!("pane '{pane_id}' already exists"));
-    }
-    if panes.is_some_and(|panes| panes.len() >= MAX_PANES_PER_WINDOW) {
-        return Err(format!(
-            "window cannot contain more than {MAX_PANES_PER_WINDOW} panes"
-        ));
-    }
-    Ok(record_pane_target(
+    create_pane_target_with_kind(
         registry,
         owner_label,
         pane_id,
         cwd,
         session_path,
-    ))
+        PaneKind::Agent,
+    )
+}
+
+/// Reclaim a matching agent target after a webview reload without launching a
+/// duplicate daemon session. A full native restart has no auxiliary targets, so
+/// the same path creates one and tells the caller to launch it.
+fn restore_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    cwd: PathBuf,
+    session_path: Option<String>,
+) -> Result<(u64, bool), String> {
+    validate_pane_id(pane_id)?;
+    if let Some(existing) = registry
+        .get_mut(owner_label)
+        .and_then(|panes| panes.get_mut(pane_id))
+    {
+        if existing.terminal_only {
+            return Err(format!("pane '{pane_id}' is a terminal target"));
+        }
+        let generated_session_path = existing.session_id.is_some()
+            && existing.session_path.is_none()
+            && session_path.is_some();
+        if existing.cwd.as_ref() != Some(&cwd)
+            || (existing.session_path != session_path && !generated_session_path)
+        {
+            return Err(format!(
+                "pane '{pane_id}' already exists with a different session target"
+            ));
+        }
+        if generated_session_path {
+            // A newly-created daemon session chooses its JSONL path after the
+            // native target is recorded. Adopt the path persisted by the pane so
+            // a webview reload can reclaim the still-running native session.
+            existing.session_path = session_path;
+        }
+        return Ok((existing.generation, false));
+    }
+
+    create_pane_target(registry, owner_label, pane_id, cwd, session_path)
+        .map(|generation| (generation, true))
 }
 
 fn dispose_pane_target(
@@ -3569,16 +3655,14 @@ fn register_terminal_target(
     target: &TerminalWindowTarget,
 ) -> Result<(), String> {
     let target = validate_terminal_window_target(target)?;
-    create_pane_target(
+    create_pane_target_with_kind(
         registry,
         owner_label,
         pane_id,
         target.cwd,
         target.session_path,
+        PaneKind::Terminal,
     )?;
-    resolve_owned_pane_mut(registry, owner_label, pane_id)
-        .ok_or_else(|| format!("pane '{pane_id}' does not exist"))?
-        .terminal_only = true;
     Ok(())
 }
 
@@ -3865,6 +3949,39 @@ fn agent_pane_create(
         session_path,
         generation,
     );
+    Ok(generation)
+}
+
+#[tauri::command]
+fn agent_pane_restore(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    pane_id: String,
+    cwd: String,
+    session_path: Option<String>,
+) -> Result<u64, String> {
+    let label = webview.label().to_string();
+    let (generation, created) = {
+        let windows: State<Windows> = app.state();
+        let mut map = windows.map.lock().unwrap();
+        restore_pane_target(
+            &mut map,
+            &label,
+            &pane_id,
+            PathBuf::from(&cwd),
+            session_path.clone(),
+        )?
+    };
+    if created {
+        launch_pane_session(
+            app,
+            label,
+            pane_id,
+            PathBuf::from(cwd),
+            session_path,
+            generation,
+        );
+    }
     Ok(generation)
 }
 
@@ -4855,6 +4972,7 @@ pub fn run() {
             terminal::terminal_close,
             terminal::terminal_open_external,
             agent_pane_create,
+            agent_pane_restore,
             agent_pane_dispose,
             dropped_path_info,
             permissions_status,
@@ -6680,78 +6798,321 @@ mod tests {
     }
 
     #[test]
-    fn pane_create_enforces_owner_scoped_limit_and_preserves_lifecycle() {
+    fn primary_pane_restore_reuses_the_exact_native_session() {
         let mut registry = PaneRegistry::new();
-        let first_generation = create_pane_target(
+        let cwd = PathBuf::from("/work/project");
+        let session_path = Some("/sessions/one.jsonl".to_string());
+
+        let (generation, created) = restore_pane_target(
             &mut registry,
             "main",
-            "first",
-            PathBuf::from("/p/first"),
+            PRIMARY_PANE_ID,
+            cwd.clone(),
+            session_path.clone(),
+        )
+        .unwrap();
+        assert!(created);
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            generation,
+            "daemon-session".into(),
+        ));
+
+        let (restored_generation, restored_created) =
+            restore_pane_target(&mut registry, "main", PRIMARY_PANE_ID, cwd, session_path).unwrap();
+        assert_eq!(restored_generation, generation);
+        assert!(!restored_created);
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", PRIMARY_PANE_ID)
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("daemon-session")
+        );
+    }
+
+    #[test]
+    fn pane_restore_adopts_a_daemon_generated_session_path() {
+        let mut registry = PaneRegistry::new();
+        let generation = create_pane_target(
+            &mut registry,
+            "main",
+            "pane-1",
+            PathBuf::from("/work/project"),
             None,
         )
         .unwrap();
-        for pane_id in ["second", "third", "fourth"] {
-            assert!(create_pane_target(
+        assert!(bind_pane_session(
+            &mut registry,
+            "main",
+            "pane-1",
+            generation,
+            "daemon-session".into(),
+        ));
+
+        let generated_path = Some("/sessions/generated.jsonl".to_string());
+        let (restored_generation, created) = restore_pane_target(
+            &mut registry,
+            "main",
+            "pane-1",
+            PathBuf::from("/work/project"),
+            generated_path.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(restored_generation, generation);
+        assert!(!created);
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "pane-1")
+                .unwrap()
+                .session_path,
+            generated_path
+        );
+    }
+
+    #[test]
+    fn pane_restore_rejects_a_different_target_for_an_existing_id() {
+        let mut registry = PaneRegistry::new();
+        create_pane_target(
+            &mut registry,
+            "main",
+            "pane-1",
+            PathBuf::from("/work/original"),
+            None,
+        )
+        .unwrap();
+
+        let error = restore_pane_target(
+            &mut registry,
+            "main",
+            "pane-1",
+            PathBuf::from("/work/different"),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "pane 'pane-1' already exists with a different session target"
+        );
+    }
+
+    #[test]
+    fn pane_create_accepts_twelve_rejects_thirteenth_and_preserves_isolation() {
+        let mut registry = PaneRegistry::new();
+        let mut generations = Vec::new();
+        for pane_number in 1..=MAX_AGENT_PANES_PER_WINDOW {
+            let pane_id = format!("pane-{pane_number}");
+            let generation = create_pane_target(
                 &mut registry,
                 "main",
-                pane_id,
+                &pane_id,
                 PathBuf::from(format!("/p/{pane_id}")),
-                None,
+                Some(format!("/sessions/{pane_id}")),
             )
-            .is_ok());
+            .unwrap();
+            assert!(bind_pane_session(
+                &mut registry,
+                "main",
+                &pane_id,
+                generation,
+                format!("session-{pane_number}"),
+            ));
+            generations.push(generation);
         }
-        assert_eq!(registry.get("main").unwrap().len(), MAX_PANES_PER_WINDOW);
+        assert_eq!(
+            registry.get("main").unwrap().len(),
+            MAX_AGENT_PANES_PER_WINDOW
+        );
 
         let duplicate = create_pane_target(
             &mut registry,
             "main",
-            "first",
+            "pane-1",
             PathBuf::from("/p/duplicate"),
             None,
         )
         .unwrap_err();
-        assert_eq!(duplicate, "pane 'first' already exists");
+        assert_eq!(duplicate, "pane 'pane-1' already exists");
 
-        assert!(create_pane_target(
+        for pane_number in 1..=MAX_AGENT_PANES_PER_WINDOW {
+            let pane_id = format!("pane-{pane_number}");
+            let session_id = format!("session-{pane_number}");
+            assert!(pane_bridge_is_active(
+                &registry,
+                "main",
+                &pane_id,
+                &session_id,
+            ));
+            let other_pane_id = format!("pane-{}", pane_number % MAX_AGENT_PANES_PER_WINDOW + 1);
+            assert!(!pane_bridge_is_active(
+                &registry,
+                "main",
+                &other_pane_id,
+                &session_id,
+            ));
+        }
+
+        let rejected = create_pane_target(
             &mut registry,
             "main",
-            "fifth",
-            PathBuf::from("/p/fifth"),
+            "pane-13",
+            PathBuf::from("/p/pane-13"),
             None,
         )
-        .is_err());
-        assert!(resolve_owned_pane(&registry, "main", "fifth").is_none());
-        assert_eq!(registry.get("main").unwrap().len(), MAX_PANES_PER_WINDOW);
+        .unwrap_err();
+        assert_eq!(rejected, "window cannot contain more than 12 agent panes");
+        assert!(resolve_owned_pane(&registry, "main", "pane-13").is_none());
+        assert_eq!(
+            registry.get("main").unwrap().len(),
+            MAX_AGENT_PANES_PER_WINDOW
+        );
 
         assert!(create_pane_target(
             &mut registry,
             "peer",
-            "fifth",
-            PathBuf::from("/peer/fifth"),
+            "pane-13",
+            PathBuf::from("/peer/pane-13"),
             None,
         )
         .is_ok());
         assert_eq!(registry.get("peer").unwrap().len(), 1);
 
-        let disposed = dispose_pane_target(&mut registry, "main", "first", false, None).unwrap();
-        assert_eq!(disposed.generation, first_generation);
+        let disposed = dispose_pane_target(&mut registry, "main", "pane-1", false, None).unwrap();
+        assert_eq!(disposed.generation, generations[0]);
         let recreated_generation = create_pane_target(
             &mut registry,
             "main",
-            "first",
+            "pane-1",
             PathBuf::from("/p/recreated"),
             None,
         )
         .unwrap();
-        assert!(recreated_generation > first_generation);
-        assert_eq!(registry.get("main").unwrap().len(), MAX_PANES_PER_WINDOW);
+        assert!(recreated_generation > generations[0]);
         assert_eq!(
-            resolve_owned_pane(&registry, "main", "first")
+            registry.get("main").unwrap().len(),
+            MAX_AGENT_PANES_PER_WINDOW
+        );
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "pane-1")
                 .unwrap()
                 .cwd
                 .as_deref(),
             Some(Path::new("/p/recreated"))
         );
+    }
+
+    #[test]
+    fn pane_capacity_counts_agents_and_terminals_independently() {
+        let cwd = std::env::current_dir().unwrap();
+        let terminal_target = TerminalWindowTarget {
+            cwd: cwd.to_string_lossy().into_owned(),
+            session_path: None,
+        };
+
+        let mut twelve_agents_then_terminal = PaneRegistry::new();
+        for pane_number in 1..=MAX_AGENT_PANES_PER_WINDOW {
+            create_pane_target(
+                &mut twelve_agents_then_terminal,
+                "main",
+                &format!("pane-{pane_number}"),
+                PathBuf::from(format!("/p/pane-{pane_number}")),
+                None,
+            )
+            .unwrap();
+        }
+        register_terminal_target(
+            &mut twelve_agents_then_terminal,
+            "main",
+            "terminal-1",
+            &terminal_target,
+        )
+        .unwrap();
+        assert_eq!(
+            twelve_agents_then_terminal.get("main").unwrap().len(),
+            MAX_AGENT_PANES_PER_WINDOW + 1
+        );
+        assert!(
+            resolve_owned_pane(&twelve_agents_then_terminal, "main", "terminal-1")
+                .unwrap()
+                .terminal_only
+        );
+
+        let mut eleven_agents_then_terminal = PaneRegistry::new();
+        for pane_number in 1..MAX_AGENT_PANES_PER_WINDOW {
+            create_pane_target(
+                &mut eleven_agents_then_terminal,
+                "main",
+                &format!("pane-{pane_number}"),
+                PathBuf::from(format!("/p/pane-{pane_number}")),
+                None,
+            )
+            .unwrap();
+        }
+        register_terminal_target(
+            &mut eleven_agents_then_terminal,
+            "main",
+            "terminal-1",
+            &terminal_target,
+        )
+        .unwrap();
+        create_pane_target(
+            &mut eleven_agents_then_terminal,
+            "main",
+            "pane-12",
+            PathBuf::from("/p/pane-12"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            eleven_agents_then_terminal
+                .get("main")
+                .unwrap()
+                .values()
+                .filter(|pane| !pane.terminal_only)
+                .count(),
+            MAX_AGENT_PANES_PER_WINDOW
+        );
+
+        let error = create_pane_target(
+            &mut eleven_agents_then_terminal,
+            "main",
+            "pane-13",
+            PathBuf::from("/p/pane-13"),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error, "window cannot contain more than 12 agent panes");
+        assert!(resolve_owned_pane(&eleven_agents_then_terminal, "main", "pane-13").is_none());
+    }
+
+    #[test]
+    fn pane_capacity_preserves_sixty_four_target_resource_guard() {
+        let mut registry = PaneRegistry::new();
+        for terminal_number in 1..=MAX_PANE_TARGETS_PER_WINDOW {
+            create_pane_target_with_kind(
+                &mut registry,
+                "main",
+                &format!("terminal-{terminal_number}"),
+                PathBuf::from("/p/shared"),
+                None,
+                PaneKind::Terminal,
+            )
+            .unwrap();
+        }
+
+        let error = create_pane_target_with_kind(
+            &mut registry,
+            "main",
+            "terminal-65",
+            PathBuf::from("/p/shared"),
+            None,
+            PaneKind::Terminal,
+        )
+        .unwrap_err();
+        assert_eq!(error, "window cannot contain more than 64 pane targets");
+        assert!(resolve_owned_pane(&registry, "main", "terminal-65").is_none());
     }
 
     #[test]

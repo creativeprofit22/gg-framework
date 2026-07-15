@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { StrictMode, useState, type ReactNode } from "react";
 import type * as ReferencedFilesModule from "./ReferencedFiles";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentPane } from "./AgentPane";
@@ -10,6 +10,7 @@ const agentMocks = vi.hoisted(() => ({
   createPaneAgentClient: vi.fn(),
   createPaneSession: vi.fn(),
   disposePaneSession: vi.fn(),
+  restorePaneSession: vi.fn(),
   restoreTarget: vi.fn(),
 }));
 
@@ -154,6 +155,7 @@ beforeEach(() => {
   Element.prototype.scrollTo = vi.fn();
   agentMocks.restoreTarget.mockResolvedValue({ cwd: "/work/project" });
   agentMocks.createPaneSession.mockResolvedValue(1);
+  agentMocks.restorePaneSession.mockResolvedValue(2);
   agentMocks.disposePaneSession.mockResolvedValue(undefined);
 });
 
@@ -239,19 +241,112 @@ describe("AgentPane pane isolation and lifecycle", () => {
     );
 
     render(
-      <AgentPane
-        {...props("pane-2", "auxiliary")}
-        initialTarget={{ cwd: "/saved/project", sessionPath: "/saved/session.jsonl" }}
-      />,
+      <StrictMode>
+        <AgentPane
+          {...props("pane-2", "auxiliary")}
+          initialTarget={{ cwd: "/saved/project", sessionPath: "/saved/session.jsonl" }}
+        />
+      </StrictMode>,
     );
 
     await waitFor(() => expect(auxiliary.getState).toHaveBeenCalled());
-    expect(agentMocks.createPaneSession).toHaveBeenCalledWith(
+    expect(agentMocks.restorePaneSession).toHaveBeenCalledWith(
       "pane-2",
       "/saved/project",
       "/saved/session.jsonl",
     );
+    expect(agentMocks.createPaneSession).not.toHaveBeenCalled();
+    expect(agentMocks.disposePaneSession).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "Choose test project" })).toBeNull();
+  });
+
+  it("reclaims primary and auxiliary routes across rearrangement and persisted reload", async () => {
+    const storageKey = "agent-pane-rearrangement-layout";
+    const targets = {
+      primary: { cwd: "/work/primary", sessionPath: "/sessions/primary.jsonl" },
+      "pane-2": { cwd: "/work/auxiliary", sessionPath: "/sessions/auxiliary.jsonl" },
+    } as const;
+    const clients = {
+      primary: client("primary"),
+      "pane-2": client("pane-2"),
+    };
+    clients.primary.getState.mockResolvedValue({
+      ...targets.primary,
+      sessionId: "native-primary",
+      model: "model",
+    });
+    clients["pane-2"].getState.mockResolvedValue({
+      ...targets["pane-2"],
+      sessionId: "native-auxiliary",
+      model: "model",
+    });
+    agentMocks.createPaneAgentClient.mockImplementation(
+      (paneId: "primary" | "pane-2") => clients[paneId],
+    );
+    agentMocks.restorePaneSession.mockImplementation((paneId: string) =>
+      Promise.resolve(paneId === "primary" ? 41 : 42),
+    );
+    localStorage.setItem(storageKey, JSON.stringify(["primary", "pane-2"]));
+
+    function PersistedPaneLayout(): React.ReactElement {
+      const [order, setOrder] = useState<Array<"primary" | "pane-2">>(
+        () => JSON.parse(localStorage.getItem(storageKey)!) as Array<"primary" | "pane-2">,
+      );
+      const [revision, setRevision] = useState(0);
+      const moveBothPanes = (): void => {
+        const moved = [...order].reverse() as Array<"primary" | "pane-2">;
+        localStorage.setItem(storageKey, JSON.stringify(moved));
+        setOrder(moved);
+        setRevision((value) => value + 1);
+      };
+      return (
+        <>
+          <button onClick={moveBothPanes}>Move both panes</button>
+          {order.map((paneId) => (
+            <AgentPane
+              key={`${revision}:${paneId}`}
+              {...props(paneId, paneId === "primary" ? "primary" : "auxiliary")}
+              initialTarget={targets[paneId]}
+              reclaimNativeSession
+              workspaceOwnsSessionLifecycle
+            />
+          ))}
+        </>
+      );
+    }
+
+    const firstView = render(<PersistedPaneLayout />);
+    await waitFor(() => expect(screen.getAllByRole("textbox")).toHaveLength(2));
+    expect(agentMocks.restorePaneSession).toHaveBeenCalledWith(
+      "primary",
+      targets.primary.cwd,
+      targets.primary.sessionPath,
+    );
+    expect(agentMocks.restorePaneSession).toHaveBeenCalledWith(
+      "pane-2",
+      targets["pane-2"].cwd,
+      targets["pane-2"].sessionPath,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Move both panes" }));
+    await waitFor(() => expect(agentMocks.restorePaneSession).toHaveBeenCalledTimes(4));
+    expect(JSON.parse(localStorage.getItem(storageKey)!)).toEqual(["pane-2", "primary"]);
+
+    firstView.unmount();
+    render(<PersistedPaneLayout />);
+    await waitFor(() => expect(agentMocks.restorePaneSession).toHaveBeenCalledTimes(6));
+    const restoredPaneIds = agentMocks.restorePaneSession.mock.calls.map(([paneId]) => paneId);
+    expect(restoredPaneIds.filter((paneId) => paneId === "primary")).toHaveLength(3);
+    expect(restoredPaneIds.filter((paneId) => paneId === "pane-2")).toHaveLength(3);
+    const routedClientIds = agentMocks.createPaneAgentClient.mock.calls.map(([paneId]) => paneId);
+    expect(new Set(routedClientIds)).toEqual(new Set(["primary", "pane-2"]));
+    expect(clients.primary.subscribe).toHaveBeenCalled();
+    expect(clients["pane-2"].subscribe).toHaveBeenCalled();
+    expect(agentMocks.restoreTarget).not.toHaveBeenCalled();
+    expect(agentMocks.createPaneSession).not.toHaveBeenCalled();
+    expect(agentMocks.disposePaneSession).not.toHaveBeenCalled();
+    expect(clients.primary.selectProject).not.toHaveBeenCalled();
+    expect(clients["pane-2"].selectProject).not.toHaveBeenCalled();
   });
 
   it("creates, waits, hydrates, and focuses an auxiliary pane", async () => {
@@ -362,6 +457,57 @@ describe("AgentPane pane isolation and lifecycle", () => {
     await waitFor(() => expect(primary.getState).toHaveBeenCalled());
     primaryRender.unmount();
     expect(agentMocks.disposePaneSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a restored auxiliary session alive when the workspace owns its lifecycle", async () => {
+    const auxiliary = client("pane-2");
+    agentMocks.createPaneAgentClient.mockReturnValue(auxiliary);
+    const view = render(
+      <AgentPane
+        {...props("pane-2", "auxiliary")}
+        initialTarget={{ cwd: "/saved/project", sessionPath: "/saved/session.jsonl" }}
+        workspaceOwnsSessionLifecycle
+      />,
+    );
+
+    await waitFor(() =>
+      expect(agentMocks.restorePaneSession).toHaveBeenCalledWith(
+        "pane-2",
+        "/saved/project",
+        "/saved/session.jsonl",
+      ),
+    );
+    await waitFor(() => expect(auxiliary.waitForReady).toHaveBeenCalled());
+    view.unmount();
+
+    expect(agentMocks.disposePaneSession).not.toHaveBeenCalled();
+  });
+
+  it("leaves a pending auxiliary create alive when the workspace owns its lifecycle", async () => {
+    let resolveCreate!: (generation: number) => void;
+    agentMocks.createPaneSession.mockReturnValue(
+      new Promise<number>((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    const auxiliary = client("pane-3");
+    agentMocks.createPaneAgentClient.mockImplementation((id: string) =>
+      id === "pane-3" ? auxiliary : client(id),
+    );
+    const view = render(
+      <AgentPane {...props("pane-3", "auxiliary")} workspaceOwnsSessionLifecycle />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Choose test project" }));
+    await waitFor(() => expect(agentMocks.createPaneSession).toHaveBeenCalledTimes(1));
+
+    view.unmount();
+    await act(async () => {
+      resolveCreate(3);
+      await Promise.resolve();
+    });
+
+    expect(agentMocks.disposePaneSession).not.toHaveBeenCalled();
+    expect(auxiliary.waitForReady).not.toHaveBeenCalled();
   });
 
   it("disposes pane-3 exactly once when create resolves after unmount", async () => {

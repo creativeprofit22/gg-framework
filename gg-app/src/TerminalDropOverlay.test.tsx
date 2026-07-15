@@ -66,9 +66,7 @@ describe("TerminalDropOverlay", () => {
     const { props, zone, container } = renderOverlay({ targetPaneId: "terminal-1" });
     const dataTransfer = transfer([TERMINAL_PANE_DRAG_MIME]);
 
-    expect(container.firstElementChild?.classList.contains("terminal-drop-overlay-inert")).toBe(
-      true,
-    );
+    expect(container.firstElementChild?.classList.contains("pane-drop-overlay-inert")).toBe(true);
     expect(fireEvent.dragOver(zone("left"), { dataTransfer })).toBe(true);
     fireEvent.drop(zone("left"), { dataTransfer });
 

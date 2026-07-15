@@ -9,6 +9,8 @@ import { WorkspaceShell } from "./WorkspaceShell";
 const bridge = vi.hoisted(() => ({
   disposePaneSession: vi.fn(() => Promise.resolve()),
 }));
+const paneMounts = new Map<string, number>();
+const paneUnmounts = new Map<string, number>();
 
 vi.mock("./agent", () => ({
   disposePaneSession: bridge.disposePaneSession,
@@ -19,6 +21,12 @@ vi.mock("./AgentPane", () => ({ AgentPane: () => null }));
 function FakePane(props: AgentPaneProps): React.ReactElement {
   const { initialTarget, onSnapshot, paneId = "primary", registerInput } = props;
   const input = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    paneMounts.set(paneId, (paneMounts.get(paneId) ?? 0) + 1);
+    return () => {
+      paneUnmounts.set(paneId, (paneUnmounts.get(paneId) ?? 0) + 1);
+    };
+  }, [paneId]);
   useEffect(() => {
     registerInput?.(paneId, {
       focus: () => input.current?.focus(),
@@ -50,6 +58,16 @@ function FakePane(props: AgentPaneProps): React.ReactElement {
 
 const renderPane = (props: AgentPaneProps): React.ReactNode => <FakePane {...props} />;
 
+function dragTransfer(types = ["application/x-gg-workspace-pane"]): DataTransfer {
+  return {
+    types,
+    effectAllowed: "none",
+    dropEffect: "none",
+    setData: vi.fn(),
+    getData: vi.fn(),
+  } as unknown as DataTransfer;
+}
+
 function saveTwoPaneLayout(): void {
   localStorage.setItem(
     "gg-workspace-layout-recursive:main",
@@ -71,8 +89,51 @@ function saveTwoPaneLayout(): void {
   );
 }
 
+function saveFourPaneLayout(): void {
+  localStorage.setItem(
+    "gg-workspace-layout-recursive:main",
+    JSON.stringify({
+      version: 9,
+      root: {
+        type: "split",
+        direction: "horizontal",
+        size: { type: "ratio", value: 55 },
+        first: {
+          type: "split",
+          direction: "vertical",
+          size: { type: "ratio", value: 60 },
+          first: { type: "leaf", paneId: "primary" },
+          second: { type: "leaf", paneId: "pane-1" },
+        },
+        second: {
+          type: "split",
+          direction: "vertical",
+          size: { type: "ratio", value: 40 },
+          first: { type: "leaf", paneId: "pane-2" },
+          second: { type: "leaf", paneId: "pane-3" },
+        },
+      },
+      focusedPaneId: "primary",
+      panes: {
+        primary: { kind: "agent", mode: "code", cwd: "/primary", sessionPath: "/p.jsonl" },
+        "pane-1": { kind: "agent", mode: "code", cwd: "/one", sessionPath: "/1.jsonl" },
+        "pane-2": {
+          kind: "agent",
+          mode: "chat",
+          chatAgent: "research",
+          cwd: "/two",
+          sessionPath: "/2.jsonl",
+        },
+        "pane-3": { kind: "agent", mode: "code", cwd: "/three", sessionPath: "/3.jsonl" },
+      },
+    }),
+  );
+}
+
 beforeEach(() => {
   localStorage.clear();
+  paneMounts.clear();
+  paneUnmounts.clear();
   vi.clearAllMocks();
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     callback(0);
@@ -113,6 +174,175 @@ describe("WorkspaceShell", () => {
       expect(saved.focusedPaneId).toBe("secondary");
       expect(saved.panes.secondary.sessionPath).toBe("/two.jsonl");
     });
+  });
+
+  it("opts into accessible pane drag controls and moves without remounting or disposing", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const secondaryPane = await screen.findByTestId("pane-secondary");
+    expect(screen.queryByRole("button", { name: "Move pane secondary" })).toBeNull();
+
+    const toggle = screen.getByRole("button", { name: "Rearrange panes" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+
+    const handle = screen.getByRole("button", { name: "Move pane secondary" });
+    const dataTransfer = dragTransfer();
+    fireEvent.dragStart(handle, { dataTransfer });
+    expect(dataTransfer.setData).toHaveBeenCalledWith(
+      "application/x-gg-workspace-pane",
+      "secondary",
+    );
+    expect(dataTransfer.setData).toHaveBeenCalledWith("text/plain", "secondary");
+    expect(dataTransfer.effectAllowed).toBe("move");
+    const leftZone = document.querySelector('[data-pane-id="primary"] [data-placement="left"]')!;
+    fireEvent.dragOver(leftZone, { dataTransfer });
+    expect(
+      document
+        .querySelector('[data-pane-id="primary"] .pane-drop-overlay')
+        ?.getAttribute("data-hovered-placement"),
+    ).toBe("left");
+    fireEvent.drop(leftZone, { dataTransfer });
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
+      expect(saved.root.first).toEqual({ type: "leaf", paneId: "secondary" });
+      expect(saved.focusedPaneId).toBe("secondary");
+    });
+    expect(screen.getByTestId("pane-secondary")).toBe(secondaryPane);
+    expect(paneMounts.get("secondary")).toBe(1);
+    expect(paneUnmounts.get("secondary") ?? 0).toBe(0);
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+    expect(screen.getByText("Pane secondary moved left of primary.")).toBeTruthy();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Move pane secondary" }),
+    );
+  });
+
+  it("preserves every pane host across a nested cross-parent move", async () => {
+    saveFourPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const paneIds = ["primary", "pane-1", "pane-2", "pane-3"];
+    const paneNodes = new Map(
+      await Promise.all(
+        paneIds.map(
+          async (paneId) => [paneId, await screen.findByTestId(`pane-${paneId}`)] as const,
+        ),
+      ),
+    );
+    const movedPaneInput = screen.getByRole("textbox", {
+      name: "pane-1 input",
+    }) as HTMLInputElement;
+    fireEvent.change(movedPaneInput, { target: { value: "draft survives move" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
+    const movedHandle = screen.getByRole("button", { name: "Move pane pane-1" });
+    const dataTransfer = dragTransfer();
+    fireEvent.dragStart(movedHandle, { dataTransfer });
+    const downZone = document.querySelector('[data-pane-id="pane-3"] [data-placement="down"]')!;
+    fireEvent.dragOver(downZone, { dataTransfer });
+    fireEvent.drop(downZone, { dataTransfer });
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
+      expect(saved.root).toEqual({
+        type: "split",
+        direction: "horizontal",
+        size: { type: "ratio", value: 55 },
+        first: { type: "leaf", paneId: "primary" },
+        second: {
+          type: "split",
+          direction: "vertical",
+          size: { type: "ratio", value: 40 },
+          first: { type: "leaf", paneId: "pane-2" },
+          second: {
+            type: "split",
+            direction: "vertical",
+            size: { type: "ratio", value: 50 },
+            first: { type: "leaf", paneId: "pane-3" },
+            second: { type: "leaf", paneId: "pane-1" },
+          },
+        },
+      });
+      expect(saved.focusedPaneId).toBe("pane-1");
+      expect(saved.panes).toEqual({
+        primary: { kind: "agent", mode: "code", cwd: "/primary", sessionPath: "/p.jsonl" },
+        "pane-1": { kind: "agent", mode: "code", cwd: "/one", sessionPath: "/1.jsonl" },
+        "pane-2": {
+          kind: "agent",
+          mode: "chat",
+          chatAgent: "research",
+          cwd: "/two",
+          sessionPath: "/2.jsonl",
+        },
+        "pane-3": { kind: "agent", mode: "code", cwd: "/three", sessionPath: "/3.jsonl" },
+      });
+    });
+
+    for (const paneId of paneIds) {
+      expect(screen.getByTestId(`pane-${paneId}`)).toBe(paneNodes.get(paneId));
+      expect(paneMounts.get(paneId)).toBe(1);
+      expect(paneUnmounts.get(paneId) ?? 0).toBe(0);
+    }
+    expect(screen.getByRole("textbox", { name: "pane-1 input" })).toBe(movedPaneInput);
+    expect(movedPaneInput.value).toBe("draft survives move");
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Move pane pane-1" }));
+  });
+
+  it.each(["Escape", "pointercancel", "dragend", "blur", "outside drop"])(
+    "cancels pane dragging through %s without changing the layout",
+    async (path) => {
+      saveTwoPaneLayout();
+      render(<WorkspaceShell renderPane={renderPane} />);
+      await screen.findByTestId("pane-secondary");
+      fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
+      const handle = screen.getByRole("button", { name: "Move pane secondary" });
+      const dataTransfer = dragTransfer();
+      fireEvent.dragStart(handle, { dataTransfer });
+
+      if (path === "Escape") fireEvent.keyDown(window, { key: "Escape" });
+      else if (path === "pointercancel") fireEvent.pointerCancel(window);
+      else if (path === "dragend") fireEvent.dragEnd(handle, { dataTransfer });
+      else if (path === "blur") fireEvent.blur(window);
+      else fireEvent.drop(window, { dataTransfer });
+
+      await waitFor(() => expect(document.querySelector(".pane-drag-active")).toBeNull());
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
+      expect(saved.root.first.paneId).toBe("primary");
+      expect(saved.root.second.paneId).toBe("secondary");
+      expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it("focuses visible panes with Ctrl/Cmd+1..4 shortcuts", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+
+    fireEvent.keyDown(window, { key: "2", ctrlKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "secondary input" }));
+    expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("true");
+    fireEvent.keyDown(window, { key: "1", metaKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "primary input" }));
+  });
+
+  it("keeps split, close, divider, and rearrangement controls discoverable by role and name", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+
+    expect(screen.getByRole("button", { name: "Split Right" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Split Down" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Close secondary pane" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Rearrange panes" })).toBeTruthy();
+    expect(
+      screen.getByRole("separator", { name: "Resize horizontal workspace panes" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("separator").getAttribute("aria-controls")).toBe(
+      "workspace-pane-primary workspace-pane-secondary",
+    );
   });
 
   it("resizes with pointer and keyboard and persists the ratio", async () => {

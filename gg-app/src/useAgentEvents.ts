@@ -2,6 +2,7 @@ import { useCallback, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { theme } from "./theme";
 import {
+  type PaneAgentClient,
   listCommands,
   type SidecarEvent,
   type SubAgentStatePayload,
@@ -16,7 +17,7 @@ import { type SubAgentLine } from "./SubAgentFeed";
 import { playSound } from "./sounds";
 import { findCompletedSteps, countPlanSteps } from "./plan-steps";
 import type { PendingAttachment } from "./attachments";
-import type { Item } from "./App";
+import type { Item } from "./transcript-types";
 
 /**
  * Build-session SSE event handling + assistant-streaming helpers, extracted from
@@ -112,6 +113,7 @@ function pickDoneVerb(toolsUsed: ReadonlySet<string>): string {
  * mirrors the memoized handler reads without re-subscribing.
  */
 export interface AgentEventsDeps {
+  client?: PaneAgentClient;
   setItems: Dispatch<SetStateAction<Item[]>>;
   nextId: () => number;
   /** Ken (mentor) event delegate — consulted first; ken events early-return. */
@@ -158,6 +160,7 @@ export interface AgentEvents {
 
 export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   const {
+    client,
     setItems,
     nextId,
     handleKenEvent,
@@ -769,7 +772,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             // A run may have created/removed `.gg/commands/*.md` (e.g.
             // /setup-commit writing commit.md). Refresh so the top-right
             // commit button flips /setup-commit → /commit without a restart.
-            void listCommands().then(setCommands);
+            void (client ? client.listCommands() : listCommands()).then(setCommands);
           }
           break;
         }
@@ -917,6 +920,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       }
     },
     [
+      client,
       handleKenEvent,
       handleAutopilotEvent,
       appendAssistant,

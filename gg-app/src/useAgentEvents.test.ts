@@ -99,7 +99,10 @@ function setup(
     stickToBottomRef: { current: true },
   };
 
-  const hook = renderHook(() => useAgentEvents(deps));
+  const hook = renderHook(
+    ({ hookDeps }: { hookDeps: AgentEventsDeps }) => useAgentEvents(hookDeps),
+    { initialProps: { hookDeps: deps } },
+  );
   return {
     hook,
     deps,
@@ -115,6 +118,28 @@ function setup(
 
 describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("uses the replacement client after the dependency changes", async () => {
+    const secondClient = {
+      listCommands: vi
+        .fn()
+        .mockResolvedValue([
+          { name: "new", aliases: [], description: "New command", source: "custom" },
+        ]),
+    };
+    const { hook, deps, getCommands } = setup();
+    hook.rerender({
+      hookDeps: { ...deps, client: secondClient as unknown as AgentEventsDeps["client"] },
+    });
+
+    await act(async () => hook.result.current.handleEvent(ev("run_end")));
+
+    expect(secondClient.listCommands).toHaveBeenCalledOnce();
+    expect(listCommands).not.toHaveBeenCalled();
+    expect(getCommands()).toEqual([
+      { name: "new", aliases: [], description: "New command", source: "custom" },
+    ]);
+  });
 
   it("keeps the run owned while cancellation is pending", () => {
     const { hook, getState, setRunning } = setup(() => false, {

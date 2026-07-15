@@ -14,7 +14,8 @@ vi.mock("./agent", () => ({ listCommands: vi.fn().mockResolvedValue([]) }));
 
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
-import type { AgentState, SidecarEvent } from "./agent";
+import { listCommands } from "./agent";
+import type { AgentState, SidecarEvent, SlashCommand } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
 
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
@@ -34,6 +35,9 @@ function setup(
   // Track the outputs the assertions read; spy the rest so nothing throws.
   let liveToolFeed: LiveToolEntry[] = [];
   let planReview: string | null = null;
+  let commands: SlashCommand[] = [
+    { name: "stale", aliases: [], description: "Stale command", source: "custom" },
+  ];
   const setLiveToolFeed = vi.fn(
     (u: LiveToolEntry[] | ((p: LiveToolEntry[]) => LiveToolEntry[])) => {
       liveToolFeed = typeof u === "function" ? u(liveToolFeed) : u;
@@ -83,7 +87,9 @@ function setup(
     }) as AgentEventsDeps["setPlanReview"],
     setQueuedCount: noop as unknown as AgentEventsDeps["setQueuedCount"],
     setAttachments: noop as unknown as AgentEventsDeps["setAttachments"],
-    setCommands: noop as unknown as AgentEventsDeps["setCommands"],
+    setCommands: ((update: SlashCommand[] | ((previous: SlashCommand[]) => SlashCommand[])) => {
+      commands = typeof update === "function" ? update(commands) : update;
+    }) as AgentEventsDeps["setCommands"],
     stateRef,
     planDoneRef: { current: new Set<number>() },
     planTotalRef: { current: 0 },
@@ -99,6 +105,7 @@ function setup(
     getItems: () => items,
     getLiveToolFeed: () => liveToolFeed,
     getPlanReview: () => planReview,
+    getCommands: () => commands,
     getState: () => agentState,
     setRunning,
     setTokens,
@@ -126,6 +133,19 @@ describe("useAgentEvents", () => {
     act(() => hook.result.current.handleEvent(ev("cancel_failed", { runState: "running" })));
     expect(getState()).toMatchObject({ running: true, runState: "running" });
     expect(setRunning).toHaveBeenLastCalledWith(true);
+  });
+
+  it("replaces stale commands when a run refresh returns an empty list", async () => {
+    vi.mocked(listCommands).mockResolvedValueOnce([]);
+    const { hook, getCommands } = setup();
+
+    await act(async () => {
+      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+      await Promise.resolve();
+    });
+
+    expect(listCommands).toHaveBeenCalledOnce();
+    expect(getCommands()).toEqual([]);
   });
 
   it("becomes idle only when the owning run emits run_end", () => {

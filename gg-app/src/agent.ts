@@ -50,6 +50,28 @@ export interface SidecarEvent {
   data: unknown;
 }
 
+export interface LocalPatchedUpdateEvent {
+  type: "started" | "line" | "completed" | "error";
+  message?: string;
+  line?: string;
+  stream?: "stdout" | "stderr";
+  exitCode?: number | null;
+  installerPath?: string | null;
+  opened?: "installer" | "folder" | "none";
+}
+
+export async function startLocalPatchedUpdate(repoRoot: string): Promise<void> {
+  await invoke("app_local_patched_update_start", { repoRoot });
+}
+
+export async function listenLocalPatchedUpdate(
+  onEvent: (event: LocalPatchedUpdateEvent) => void,
+): Promise<() => void> {
+  return appWindow.listen<LocalPatchedUpdateEvent>("local-patched-update", (event) => {
+    onEvent(event.payload);
+  });
+}
+
 export interface MemoryChangeEvent extends SidecarEvent {
   type: "memory_change";
   data: { count: number };

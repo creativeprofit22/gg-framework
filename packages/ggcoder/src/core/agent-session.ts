@@ -651,6 +651,21 @@ export class AgentSession {
     }
   }
 
+  /** Resolve a built-in or custom prompt-template command to model-facing text. */
+  private async resolvePromptCommandText(content: string): Promise<string | null> {
+    if (this.opts.coderSlashCommands === false) return null;
+    const parsed = this.slashCommands.parse(content);
+    if (!parsed) return null;
+
+    const builtinPromptCmd = getPromptCommand(parsed.name);
+    const customPromptCmd = builtinPromptCmd
+      ? undefined
+      : (await loadCustomCommands(this.cwd)).find((command) => command.name === parsed.name);
+    const promptText = builtinPromptCmd?.prompt ?? customPromptCmd?.prompt;
+    if (!promptText) return null;
+    return parsed.args ? `${promptText}\n\n## User Instructions\n\n${parsed.args}` : promptText;
+  }
+
   /**
    * Process user input. Handles slash commands or runs agent loop.
    */
@@ -664,20 +679,10 @@ export class AgentSession {
         ? parsedInput
         : null;
     if (parsed) {
-      // GG Coder alone can resolve its prompt-template and project commands.
-      const builtinPromptCmd = coderCommands ? getPromptCommand(parsed.name) : undefined;
-      const customCmds = coderCommands ? await loadCustomCommands(this.cwd) : [];
-      const customPromptCmd = !builtinPromptCmd
-        ? customCmds.find((c) => c.name === parsed.name)
-        : undefined;
-      const promptText = builtinPromptCmd?.prompt ?? customPromptCmd?.prompt;
+      const fullPrompt = await this.resolvePromptCommandText(content);
 
-      if (promptText) {
+      if (fullPrompt) {
         // Inject the prompt-template command as a user message to the agent
-        const fullPrompt = parsed.args
-          ? `${promptText}\n\n## User Instructions\n\n${parsed.args}`
-          : promptText;
-        // Run as a normal prompt (push message + agent loop)
         const userMessage: Message = { role: "user", content: fullPrompt };
         this.messages.push(userMessage);
         await this.persistMessage(userMessage);
@@ -707,11 +712,17 @@ export class AgentSession {
    * Prompt with multimodal attachments (images / videos) alongside optional
    * text. Images and videos become native content blocks the model can see;
    * non-media files are surfaced as a text note with their saved path so the
-   * agent can open them with its tools. Slash-command parsing is skipped —
-   * attachments are always a direct conversational turn.
+   * agent can open them with its tools. Prompt-template commands expand before
+   * attachment blocks are built, matching the text-only path.
    */
   async promptWithAttachments(text: string, attachments: SessionAttachment[]): Promise<void> {
-    const parts = this.buildAttachmentParts(text, attachments);
+    if (attachments.length === 0) {
+      await this.prompt(text);
+      return;
+    }
+
+    const resolvedText = (await this.resolvePromptCommandText(text)) ?? text;
+    const parts = this.buildAttachmentParts(resolvedText, attachments);
     if (parts.length === 0) return;
     const userMessage: Message = { role: "user", content: parts };
     this.messages.push(userMessage);
@@ -858,11 +869,16 @@ export class AgentSession {
    * TUI's getSteeringMessages ordering (minus user steering, which the app
    * delivers as normal prompts).
    */
-  private getHookSteeringMessages(): Message[] | null {
+  private async getHookSteeringMessages(): Promise<Message[] | null> {
     // User steering wins: drain any messages queued during this run first so the
     // agent sees them mid-loop instead of after it stops.
     if (this.userQueue.length > 0) {
-      const queued = this.userQueue.splice(0);
+      const queued = await Promise.all(
+        this.userQueue.splice(0).map(async (message) => ({
+          ...message,
+          text: (await this.resolvePromptCommandText(message.text)) ?? message.text,
+        })),
+      );
       // Frame each queued item as concurrent steering — without this wrapper
       // the model treats a mid-run message as a fresh request that supersedes
       // the original task and silently drops it. ONE message per queued item

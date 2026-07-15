@@ -19,17 +19,16 @@ import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
 
-interface Props {
-  /** Called after the agent has been re-pointed at `cwd` (+ optional session). */
+export interface ProjectPickerProps {
+  /** Called after the selected project/session has been bound to the owning pane. */
   onChosen: (cwd: string) => void;
-  /**
-   * When set, open straight to this project's session list (used by the "back
-   * to sessions" affordance from inside a project). Falls back to the full
-   * project list if the path isn't among the discovered projects.
-   */
   initialProjectPath?: string | null;
-  /** Shown when the picker is reachable from an open project (enables "back"). */
   onClose?: () => void;
+  waitForCatalogReady?: () => Promise<unknown>;
+  discoverProjects?: () => Promise<DiscoveredProject[]>;
+  discoverSessions?: (cwd: string) => Promise<RecentSession[]>;
+  bindProject?: (cwd: string, sessionPath?: string) => Promise<unknown>;
+  showWindowControls?: boolean;
 }
 
 /**
@@ -42,7 +41,12 @@ export function ProjectPicker({
   onChosen,
   initialProjectPath,
   onClose,
-}: Props): React.ReactElement {
+  waitForCatalogReady = waitForReady,
+  discoverProjects = listProjects,
+  discoverSessions = listSessions,
+  bindProject = selectProject,
+  showWindowControls = true,
+}: ProjectPickerProps): React.ReactElement {
   const [projects, setProjects] = useState<DiscoveredProject[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<DiscoveredProject | null>(null);
@@ -92,8 +96,8 @@ export function ProjectPicker({
   useEffect(() => {
     let cancelled = false;
     // The window's sidecar serves project discovery; wait for it before asking.
-    void waitForReady()
-      .then(() => listProjects())
+    void waitForCatalogReady()
+      .then(() => discoverProjects())
       .then((p) => {
         if (cancelled) return;
         setProjects(p);
@@ -117,7 +121,7 @@ export function ProjectPicker({
     setSelected(project);
     setSessions([]);
     setSessionsLoading(true);
-    void listSessions(project.path).then((s) => {
+    void discoverSessions(project.path).then((s) => {
       setSessions(s);
       setSessionsLoading(false);
     });
@@ -126,9 +130,7 @@ export function ProjectPicker({
   function choose(cwd: string, sessionPath?: string): void {
     if (busy) return;
     setBusy(true);
-    // Re-point this window's agent (respawns the sidecar), then let App re-run
-    // its ready flow against the new sidecar.
-    void selectProject(cwd, sessionPath)
+    void bindProject(cwd, sessionPath)
       .then(() => onChosen(cwd))
       .catch(() => setBusy(false));
   }
@@ -193,8 +195,12 @@ export function ProjectPicker({
               </button>
             </>
           )}
-          <RadioButton />
-          <WindowLayoutButton />
+          {showWindowControls && (
+            <>
+              <RadioButton />
+              <WindowLayoutButton />
+            </>
+          )}
         </span>
       </div>
 

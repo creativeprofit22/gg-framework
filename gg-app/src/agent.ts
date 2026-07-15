@@ -3,7 +3,7 @@
 // sidecar's plain-HTTP endpoints directly (mixed-content). Rust proxies for us:
 //   - invoke("agent_state" | "agent_prompt" | "agent_cancel")
 //   - listen("agent-event")  ← forwarded SSE frames
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { PRIMARY_PANE_ID, createPaneEventFanout } from "./pane-routing";
@@ -29,120 +29,6 @@ export const windowLabel = appWindow.label;
 
 /** True for secondary windows opened via the Windows button (not the main one). */
 export const isSecondaryWindow = appWindow.label !== "main";
-
-export interface TerminalInfo {
-  terminalId: string;
-  paneId: string;
-  cwd: string;
-  shell: string;
-  cols: number;
-  rows: number;
-}
-
-export type TerminalEvent =
-  | ArrayBuffer
-  | { type: "exit"; terminalId: string; paneId: string; exitCode: number | null }
-  | { type: "error"; terminalId: string; paneId: string; message: string };
-
-export interface TerminalClient {
-  readonly ready: Promise<TerminalInfo>;
-  input(data: Uint8Array): Promise<void>;
-  resize(cols: number, rows: number): Promise<void>;
-  close(): Promise<void>;
-}
-
-export function terminalInput(paneId: string, terminalId: string, data: Uint8Array): Promise<void> {
-  return invoke("terminal_input", data, {
-    headers: {
-      "Tauri-Terminal-Pane-Id": paneId,
-      "Tauri-Terminal-Id": terminalId,
-    },
-  });
-}
-
-export function terminalResize(
-  paneId: string,
-  terminalId: string,
-  cols: number,
-  rows: number,
-): Promise<void> {
-  return invoke("terminal_resize", { paneId, terminalId, cols, rows });
-}
-
-export function terminalClose(paneId: string, terminalId: string): Promise<void> {
-  return invoke("terminal_close", { paneId, terminalId });
-}
-
-export function openExternalTerminal(paneId: string): Promise<void> {
-  return invoke("terminal_open_external", { paneId });
-}
-
-export function registerStoppedTerminalTarget(
-  paneId: string,
-  cwd: string,
-  sessionPath: string | null,
-): Promise<void> {
-  return invoke("register_stopped_terminal_target", { paneId, cwd, sessionPath });
-}
-
-/**
- * Starts one PTY and keeps close authoritative even when React unmounts while
- * Rust is still spawning it.
- */
-export function createTerminal(
-  paneId: string,
-  cols: number,
-  rows: number,
-  onEvent: (event: TerminalEvent) => void,
-): TerminalClient {
-  const channel = new Channel<TerminalEvent>();
-  const pendingEvents: TerminalEvent[] = [];
-  let terminalId: string | undefined;
-  const forwardEvent = (event: TerminalEvent): void => {
-    if (
-      event instanceof ArrayBuffer ||
-      (event.paneId === paneId && event.terminalId === terminalId)
-    ) {
-      onEvent(event);
-    }
-  };
-  channel.onmessage = (event) => {
-    if (terminalId === undefined) pendingEvents.push(event);
-    else forwardEvent(event);
-  };
-  let closeRequested = false;
-  let closePromise: Promise<void> | undefined;
-  const ready = invoke<TerminalInfo>("terminal_create", {
-    paneId,
-    cols,
-    rows,
-    onEvent: channel,
-  }).then((info) => {
-    if (info.paneId !== paneId) throw new Error("terminal pane ID mismatch");
-    terminalId = info.terminalId;
-    for (const event of pendingEvents.splice(0)) forwardEvent(event);
-    return info;
-  });
-
-  const close = (): Promise<void> => {
-    closeRequested = true;
-    closePromise ??= ready.then((info) => terminalClose(paneId, info.terminalId));
-    return closePromise;
-  };
-
-  return {
-    ready,
-    async input(data) {
-      const info = await ready;
-      if (!closeRequested) await terminalInput(paneId, info.terminalId, data);
-    },
-    async resize(nextCols, nextRows) {
-      const info = await ready;
-      if (!closeRequested) await terminalResize(paneId, info.terminalId, nextCols, nextRows);
-    },
-    close,
-  };
-}
 
 /** Set the native (macOS overlay) window title bar text for THIS window. */
 export function setWindowTitle(title: string): void {
@@ -1022,21 +908,6 @@ export async function openPaneInNewWindow(paneId: string): Promise<void> {
     await invoke("open_pane_in_new_window", { paneId });
   } catch (e) {
     await logError(`open_pane_in_new_window failed: ${String(e)}`);
-    throw e;
-  }
-}
-
-export interface TerminalWindowTarget {
-  cwd: string;
-  sessionPath: string | null;
-}
-
-/** Copy one stopped terminal target into a new native window. */
-export async function openTerminalInNewWindow(target: TerminalWindowTarget): Promise<void> {
-  try {
-    await invoke("open_terminal_in_new_window", { target });
-  } catch (e) {
-    await logError(`open_terminal_in_new_window failed: ${String(e)}`);
     throw e;
   }
 }

@@ -7,8 +7,6 @@ import {
   newWindow,
   onWindowOrder,
   openPaneInNewWindow,
-  openTerminalInNewWindow,
-  registerStoppedTerminalTarget,
   setWindowTitle,
   validateWorkspaceTarget,
   windowLabel,
@@ -29,10 +27,7 @@ import { useAppUpdate } from "./update";
 import { useProgress } from "./useProgress";
 import { PANE_DRAG_MIME } from "./PaneDropOverlay";
 import {
-  addTerminalWorkspacePane,
-  bootstrapDefaultTerminalWorkspacePane,
   loadWorkspaceLayout,
-  MAX_WORKSPACE_LAYOUT_LEAVES,
   MAX_WORKSPACE_PANES,
   moveWorkspacePane,
   preserveRejectedRecursiveWorkspaceLayout,
@@ -50,7 +45,6 @@ import {
   type WorkspaceLayout,
   type WorkspaceLayoutPath,
   type WorkspacePaneId,
-  type WorkspacePaneTarget,
 } from "./workspace-layout";
 import { WorkspaceNode } from "./WorkspaceNode";
 
@@ -117,9 +111,6 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const [rearrangementAnnouncement, setRearrangementAnnouncement] = useState("");
   const [windowFocused, setWindowFocused] = useState(true);
   const [snapshots, setSnapshots] = useState<Record<string, PaneSnapshot>>({});
-  const [confirmTerminalCloseId, setConfirmTerminalCloseId] = useState<WorkspacePaneId | null>(
-    null,
-  );
   const [confirmPaneCloseId, setConfirmPaneCloseId] = useState<WorkspacePaneId | null>(null);
   const inputActionsRef = useRef(new Map<string, PaneInputActions>());
   const [windowIndex, setWindowIndex] = useState<number | null>(null);
@@ -151,9 +142,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   const focusPaneDragHandle = useCallback((paneId: WorkspacePaneId): void => {
     requestAnimationFrame(() => {
       document
-        .querySelector<HTMLButtonElement>(
-          `[data-pane-drag-handle="${CSS.escape(paneId)}"], [data-terminal-drag-handle="${CSS.escape(paneId)}"]`,
-        )
+        .querySelector<HTMLButtonElement>(`[data-pane-drag-handle="${CSS.escape(paneId)}"]`)
         ?.focus();
     });
   }, []);
@@ -190,80 +179,42 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     toast(message, "warning", 4000, false);
   }, []);
 
-  const updateSnapshot = useCallback(
-    (snapshot: PaneSnapshot): void => {
-      if (!activePaneIdsRef.current.has(snapshot.paneId)) return;
-      setSnapshots((previous) => {
-        const current = previous[snapshot.paneId];
-        if (
-          current?.cwd === snapshot.cwd &&
-          current.sessionPath === snapshot.sessionPath &&
-          current.sessionTitle === snapshot.sessionTitle &&
-          current.projectBound === snapshot.projectBound &&
-          current.restoreChecked === snapshot.restoreChecked &&
-          current.activeWork === snapshot.activeWork
-        )
-          return previous;
-        return { ...previous, [snapshot.paneId]: snapshot };
-      });
-      setLayout((previous) => {
-        const hydrated = {
-          ...previous,
-          panes: {
-            ...previous.panes,
-            [snapshot.paneId]:
-              snapshot.projectBound && snapshot.cwd
-                ? { cwd: snapshot.cwd, sessionPath: snapshot.sessionPath }
-                : snapshot.restoreChecked
-                  ? null
-                  : previous.panes[snapshot.paneId],
-          },
-        };
-        const bootstrapped =
-          snapshot.paneId === PRIMARY_PANE_ID &&
-          snapshot.restoreChecked &&
-          snapshot.projectBound &&
-          Boolean(snapshot.cwd?.trim())
-            ? bootstrapDefaultTerminalWorkspacePane(hydrated)
-            : hydrated;
-        if (bootstrapped !== hydrated) {
-          focusedPaneIdRef.current = bootstrapped.focusedPaneId;
-          activePaneIdsRef.current = new Set(workspaceLayoutLeafIds(bootstrapped.root));
-          markLayoutChanged();
-        }
-        return bootstrapped;
-      });
-    },
-    [markLayoutChanged],
-  );
+  const updateSnapshot = useCallback((snapshot: PaneSnapshot): void => {
+    if (!activePaneIdsRef.current.has(snapshot.paneId)) return;
+    setSnapshots((previous) => {
+      const current = previous[snapshot.paneId];
+      if (
+        current?.cwd === snapshot.cwd &&
+        current.sessionPath === snapshot.sessionPath &&
+        current.sessionTitle === snapshot.sessionTitle &&
+        current.projectBound === snapshot.projectBound &&
+        current.restoreChecked === snapshot.restoreChecked &&
+        current.activeWork === snapshot.activeWork
+      )
+        return previous;
+      return { ...previous, [snapshot.paneId]: snapshot };
+    });
+    setLayout((previous) => {
+      const hydrated = {
+        ...previous,
+        panes: {
+          ...previous.panes,
+          [snapshot.paneId]:
+            snapshot.projectBound && snapshot.cwd
+              ? { cwd: snapshot.cwd, sessionPath: snapshot.sessionPath }
+              : snapshot.restoreChecked
+                ? null
+                : previous.panes[snapshot.paneId],
+        },
+      };
+      return hydrated;
+    });
+  }, []);
 
   const registerInput = useCallback((paneId: string, actions: PaneInputActions | null): void => {
     if (actions) inputActionsRef.current.set(paneId, actions);
     else inputActionsRef.current.delete(paneId);
   }, []);
-
-  const addTerminalLeaf = useCallback((): void => {
-    const paneId = layout.focusedPaneId;
-    const snapshot = snapshots[paneId];
-    const descriptor = layout.panes[paneId];
-    if (
-      descriptor?.kind === "terminal" ||
-      !descriptor?.cwd ||
-      !snapshot?.restoreChecked ||
-      !snapshot.projectBound ||
-      snapshot.cwd !== descriptor.cwd ||
-      snapshot.sessionPath !== descriptor.sessionPath
-    )
-      return;
-    setLayout((previous) => {
-      const next = addTerminalWorkspacePane(previous, paneId);
-      if (next === previous) return previous;
-      focusedPaneIdRef.current = next.focusedPaneId;
-      activePaneIdsRef.current = new Set(workspaceLayoutLeafIds(next.root));
-      return next;
-    });
-    markLayoutChanged();
-  }, [layout.focusedPaneId, layout.panes, markLayoutChanged, snapshots]);
 
   const startPaneDrag = useCallback(
     (paneId: WorkspacePaneId, handle: HTMLButtonElement): void => {
@@ -404,12 +355,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
 
   useEffect(() => {
     if (!layoutReady) return;
-    if (
-      leafIds.some(
-        (paneId) => layout.panes[paneId]?.kind !== "terminal" && !snapshots[paneId]?.restoreChecked,
-      )
-    )
-      return;
+    if (leafIds.some((paneId) => !snapshots[paneId]?.restoreChecked)) return;
     if (loadedLayout.status === "corrupt" && !rejectedLayoutChanged) return;
     saveWorkspaceLayout(localStorage, windowLabel, {
       ...layout,
@@ -435,10 +381,6 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       const meta = event.metaKey || event.ctrlKey;
       if (!meta || event.altKey) return;
       const paneNumber = /^[1-4]$/.test(event.key) ? Number(event.key) : null;
-      const inTerminal =
-        event.target instanceof Element && event.target.closest(".terminal-pane") !== null;
-      const reserved = (!event.shiftKey && paneNumber !== null) || event.code === "Backquote";
-      if (inTerminal && !reserved) return;
       const paneId = paneNumber === null ? undefined : leafIds[paneNumber - 1];
       if (!event.shiftKey && paneId) {
         event.preventDefault();
@@ -630,7 +572,6 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       void disposePaneSession(paneId).catch(() => {});
       for (const stop of resizeCleanupRef.current.values()) stop();
       setConfirmPaneCloseId(null);
-      setConfirmTerminalCloseId(null);
       inputActionsRef.current.delete(paneId);
       setSnapshots((previous) => {
         const next = { ...previous };
@@ -659,26 +600,6 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       else closePane(paneId);
     },
     [closePane, snapshots],
-  );
-
-  const requestTerminalPaneClose = useCallback(
-    (paneId: WorkspacePaneId, running: boolean): void => {
-      if (running) setConfirmTerminalCloseId(paneId);
-      else closePane(paneId);
-    },
-    [closePane],
-  );
-
-  const restartTerminalPane = useCallback(
-    async (paneId: WorkspacePaneId, target: WorkspacePaneTarget): Promise<void> => {
-      const descriptor = layout.panes[paneId];
-      if (descriptor?.kind !== "terminal") throw new Error("terminal pane target is unavailable");
-      if (descriptor.cwd !== target.cwd || descriptor.sessionPath !== target.sessionPath) {
-        throw new Error("terminal pane target changed before restart");
-      }
-      await registerStoppedTerminalTarget(paneId, descriptor.cwd, descriptor.sessionPath);
-    },
-    [layout.panes],
   );
 
   const resizeByKeyboard = useCallback(
@@ -774,18 +695,11 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
         typeof descriptor.cwd === "string" &&
         Boolean(descriptor.cwd.trim()) &&
         (descriptor.sessionPath === null || typeof descriptor.sessionPath === "string");
-      const terminalTarget =
-        descriptor.kind === "terminal" && descriptor.stopped === true && validTarget
-          ? { cwd: descriptor.cwd, sessionPath: descriptor.sessionPath }
-          : null;
-      const validAgent =
-        (descriptor.kind === undefined || descriptor.kind === "agent") && validTarget;
-      if (!terminalTarget && !validAgent) return;
+      if (!validTarget) return;
       openingPaneIdRef.current = paneId;
       setOpeningPaneId(paneId);
       try {
-        if (terminalTarget) await openTerminalInNewWindow(terminalTarget);
-        else await openPaneInNewWindow(paneId);
+        await openPaneInNewWindow(paneId);
       } catch (error) {
         toast(
           `Couldn't open pane in a new window: ${error instanceof Error ? error.message : String(error)}`,
@@ -802,22 +716,7 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
   );
 
   const focusedSnapshot = snapshots[layout.focusedPaneId];
-  const focusedDescriptor = layout.panes[layout.focusedPaneId];
-  const canOpenTerminal =
-    leafIds.length < MAX_WORKSPACE_LAYOUT_LEAVES &&
-    focusedDescriptor?.kind !== "terminal" &&
-    Boolean(
-      focusedDescriptor?.cwd &&
-      focusedSnapshot?.restoreChecked &&
-      focusedSnapshot.projectBound &&
-      focusedSnapshot.cwd === focusedDescriptor.cwd &&
-      focusedSnapshot.sessionPath === focusedDescriptor.sessionPath,
-    );
-  const canSplit =
-    leafIds.length < MAX_WORKSPACE_LAYOUT_LEAVES &&
-    (focusedDescriptor?.kind === "terminal" ||
-      leafIds.filter((paneId) => layout.panes[paneId]?.kind !== "terminal").length <
-        MAX_WORKSPACE_PANES);
+  const canSplit = leafIds.length < MAX_WORKSPACE_PANES;
   const canRearrange = leafIds.length > 1;
 
   return (
@@ -830,16 +729,6 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       <div className="workspace-toolbar" data-tauri-drag-region>
         <RankBadge snapshot={progress} onClick={() => setShowScorecard(true)} />
         <ProjectNotes cwd={focusedSnapshot?.cwd ?? null} />
-        <button
-          type="button"
-          className="workspace-terminal-open"
-          disabled={!canOpenTerminal}
-          aria-label="Open terminal in focused pane"
-          title="Runs your default shell with your user permissions"
-          onClick={addTerminalLeaf}
-        >
-          Terminal
-        </button>
         <button
           type="button"
           className="workspace-rearrangement-toggle"
@@ -885,8 +774,6 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           onSnapshot={updateSnapshot}
           onUserTargetChange={markLayoutChanged}
           registerInput={registerInput}
-          onRequestTerminalPaneClose={requestTerminalPaneClose}
-          onRestartTerminalPane={restartTerminalPane}
           onOpenPaneWindow={(paneId) => void openPaneWindow(paneId)}
           onSplitFocusedPane={splitFocusedPane}
           onRequestPaneClose={requestPaneClose}
@@ -931,15 +818,6 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
             )}
           </span>
         </div>
-      )}
-      {confirmTerminalCloseId && (
-        <ConfirmModal
-          title="Close Terminal"
-          message="A shell is still running. Closing the terminal will stop it and its child processes."
-          confirmLabel="Close Terminal"
-          onConfirm={() => closePane(confirmTerminalCloseId)}
-          onClose={() => setConfirmTerminalCloseId(null)}
-        />
       )}
       {confirmPaneCloseId && (
         <ConfirmModal

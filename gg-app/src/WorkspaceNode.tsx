@@ -3,7 +3,6 @@ import { AgentPane, type AgentPaneProps, type PaneSnapshot } from "./AgentPane";
 import { PaneDropOverlay, PANE_DRAG_MIME } from "./PaneDropOverlay";
 import { PRIMARY_PANE_ID } from "./pane-routing";
 import { PaneSplitActions } from "./PaneSplitActions";
-import { TerminalPane } from "./TerminalPane";
 import {
   MAX_SPLIT_RATIO,
   MIN_SPLIT_RATIO,
@@ -14,7 +13,6 @@ import {
   type WorkspaceLayoutNode,
   type WorkspaceLayoutPath,
   type WorkspacePaneId,
-  type WorkspacePaneTarget,
   type WorkspacePaneValue,
 } from "./workspace-layout";
 
@@ -40,8 +38,6 @@ export interface WorkspaceNodeProps {
   onSnapshot: (snapshot: PaneSnapshot) => void;
   onUserTargetChange: () => void;
   registerInput: AgentPaneProps["registerInput"];
-  onRequestTerminalPaneClose: (paneId: WorkspacePaneId, running: boolean) => void;
-  onRestartTerminalPane: (paneId: WorkspacePaneId, target: WorkspacePaneTarget) => Promise<void>;
   onOpenPaneWindow: (paneId: WorkspacePaneId) => void;
   onSplitFocusedPane: (direction: SplitDirection) => void;
   onRequestPaneClose: (paneId: WorkspacePaneId) => void;
@@ -67,63 +63,6 @@ export interface WorkspaceNodeProps {
 export function WorkspaceNode({ path = [], ...props }: WorkspaceNodeProps): React.ReactElement {
   const { node } = props;
   if (node.type === "leaf") {
-    const descriptor = props.panes[node.paneId];
-    if (descriptor?.kind === "terminal") {
-      return (
-        <div
-          className={`workspace-pane-slot${props.focusedPaneId === node.paneId ? " pane-focused" : ""}`}
-          data-pane-id={node.paneId}
-          id={`workspace-pane-${node.paneId}`}
-          onPointerDownCapture={() => props.onFocusPane(node.paneId)}
-          onFocusCapture={() => props.onFocusPane(node.paneId)}
-        >
-          <div className="workspace-pane-body">
-            <TerminalPane
-              key={`${node.paneId}:${descriptor.cwd}:${descriptor.sessionPath ?? ""}`}
-              paneId={node.paneId}
-              initiallyStopped
-              rearrangementEnabled={props.rearrangementEnabled}
-              dragInstructionsId={props.dragInstructionsId}
-              onTerminalDragStart={props.onPaneDragStart}
-              onTerminalDragEnd={props.onPaneDragEnd}
-              onRestart={() => props.onRestartTerminalPane(node.paneId, descriptor)}
-              onRequestClose={(running) => props.onRequestTerminalPaneClose(node.paneId, running)}
-            />
-          </div>
-          {props.activePaneDragSourceId && (
-            <PaneDropOverlay
-              enabled={props.rearrangementEnabled}
-              sourcePaneId={props.activePaneDragSourceId}
-              targetPaneId={node.paneId}
-              hoveredPlacement={
-                props.hoveredPaneDrop?.targetPaneId === node.paneId
-                  ? props.hoveredPaneDrop.placement
-                  : null
-              }
-              onHover={props.onPaneDropHover}
-              onDrop={props.onPaneDrop}
-              onReject={props.onPaneDropReject}
-            />
-          )}
-          {props.focusedPaneId === node.paneId && (
-            <PaneSplitActions
-              canOpenInNewWindow={
-                descriptor.stopped === true &&
-                typeof descriptor.cwd === "string" &&
-                Boolean(descriptor.cwd.trim()) &&
-                (descriptor.sessionPath === null || typeof descriptor.sessionPath === "string")
-              }
-              canSplit={props.canSplit}
-              openingInNewWindow={props.openingPaneId === node.paneId}
-              openInNewWindowPending={props.openingPaneId !== null}
-              onOpenInNewWindow={() => props.onOpenPaneWindow(node.paneId)}
-              onSplitRight={() => props.onSplitFocusedPane("horizontal")}
-              onSplitDown={() => props.onSplitFocusedPane("vertical")}
-            />
-          )}
-        </div>
-      );
-    }
     return <WorkspaceAgentLeaf paneId={node.paneId} {...props} />;
   }
   const horizontal = node.direction === "horizontal";
@@ -203,10 +142,7 @@ function WorkspaceAgentLeaf({
     paneId.startsWith("pane-") ||
     (paneId !== PRIMARY_PANE_ID && panes[paneId] !== null);
   const reclaimNativeSession = Boolean(
-    usesManagedTarget &&
-    snapshots[paneId]?.restoreChecked &&
-    panes[paneId]?.kind !== "terminal" &&
-    panes[paneId],
+    usesManagedTarget && snapshots[paneId]?.restoreChecked && panes[paneId],
   );
   const paneProps: AgentPaneProps = {
     paneId,

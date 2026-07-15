@@ -436,6 +436,92 @@ describe("agent-only reducers and target resolution", () => {
     expect(removed.focusedPaneId).toBe("primary");
   });
 
+  describe("pane moves", () => {
+    const twoPaneLayout = () =>
+      validateWorkspaceLayoutCandidate(
+        canonical(split(leaf("primary"), leaf("secondary")), {
+          primary: agent("/primary", "/primary.jsonl"),
+          secondary: chatAgent("/chat", "research"),
+        }),
+      )!;
+
+    it.each([
+      ["left", "horizontal", ["secondary", "primary"]],
+      ["right", "horizontal", ["primary", "secondary"]],
+      ["up", "vertical", ["secondary", "primary"]],
+      ["down", "vertical", ["primary", "secondary"]],
+    ] as const)("moves a pane %s of its target", (placement, direction, orderedPaneIds) => {
+      const original = twoPaneLayout();
+      const moved = moveWorkspacePane(original, {
+        sourcePaneId: "secondary",
+        targetPaneId: "primary",
+        placement,
+      });
+
+      expect(moved).not.toBe(original);
+      expect(moved.root).toMatchObject({ type: "split", direction });
+      expect(workspaceLayoutLeafIds(moved.root)).toEqual(orderedPaneIds);
+      expect(moved.focusedPaneId).toBe("secondary");
+    });
+
+    it("collapses a nested source branch and reinserts the same leaf by the nested target", () => {
+      const root = split(
+        split(leaf("primary"), leaf("pane-1"), 60),
+        split(leaf("pane-2"), leaf("pane-3"), 40),
+        55,
+      );
+      const layout = validateWorkspaceLayoutCandidate(
+        canonical(root, {
+          primary: agent("/primary"),
+          "pane-1": agent("/one"),
+          "pane-2": agent("/two"),
+          "pane-3": agent("/three"),
+        }),
+      )!;
+
+      const moved = moveWorkspacePane(layout, {
+        sourcePaneId: "pane-1",
+        targetPaneId: "pane-3",
+        placement: "down",
+      });
+
+      expect(workspaceLayoutLeafIds(moved.root)).toEqual(["primary", "pane-2", "pane-3", "pane-1"]);
+      expect(JSON.stringify(moved.root)).toContain('"direction":"vertical"');
+      expect(moved.focusedPaneId).toBe("pane-1");
+    });
+
+    it("preserves descriptor identity and contains every pane exactly once", () => {
+      const original = twoPaneLayout();
+      const primaryDescriptor = original.panes.primary;
+      const secondaryDescriptor = original.panes.secondary;
+
+      const moved = moveWorkspacePane(original, {
+        sourcePaneId: "secondary",
+        targetPaneId: "primary",
+        placement: "left",
+      });
+
+      expect(moved.panes).not.toBe(original.panes);
+      expect(moved.panes.primary).toBe(primaryDescriptor);
+      expect(moved.panes.secondary).toBe(secondaryDescriptor);
+      expect(workspaceLayoutLeafIds(moved.root).sort()).toEqual(["primary", "secondary"]);
+      expect(Object.keys(moved.panes).sort()).toEqual(["primary", "secondary"]);
+      expect(original.root).toEqual(split(leaf("primary"), leaf("secondary")));
+    });
+
+    it.each([
+      { sourcePaneId: "primary", targetPaneId: "primary", placement: "left" },
+      { sourcePaneId: "missing", targetPaneId: "primary", placement: "left" },
+      { sourcePaneId: "secondary", targetPaneId: "missing", placement: "left" },
+      { sourcePaneId: "secondary", targetPaneId: "primary", placement: "center" },
+      { sourcePaneId: "secondary", targetPaneId: "primary" },
+      null,
+    ])("returns the original layout for rejected request %#", (request) => {
+      const original = twoPaneLayout();
+      expect(moveWorkspacePane(original, request)).toBe(original);
+    });
+  });
+
   it("splits, resizes, moves, and validates targets", async () => {
     let layout = validateWorkspaceLayoutCandidate(
       canonical(split(leaf("primary"), leaf("secondary")), {

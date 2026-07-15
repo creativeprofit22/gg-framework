@@ -5087,36 +5087,88 @@ body {
   border: 0;
 }
 
-/* Basic recursive agent workspace. */
-.workspace-shell,
-.workspace-grid {
+/* Recursive agent workspace interactions. */
+.workspace-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 0;
-}
-.workspace-shell {
   overflow: hidden;
   background: var(--bg);
 }
-.workspace-grid,
-.workspace-split {
-  display: grid;
+.workspace-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 30px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+  user-select: none;
+}
+.workspace-rearrangement-toggle {
+  padding: 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.workspace-rearrangement-toggle:hover:not(:disabled),
+.workspace-rearrangement-toggle:focus-visible:not(:disabled),
+.workspace-rearrangement-toggle[aria-pressed="true"] {
+  color: var(--text);
+  border-color: var(--primary);
+  outline: none;
+}
+.workspace-rearrangement-toggle[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--primary) 18%, var(--surface-2));
+}
+.workspace-rearrangement-toggle:disabled {
+  color: var(--text-dim);
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+.workspace-grid {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
   overflow: hidden;
 }
 .workspace-split {
-  width: 100%;
-  height: 100%;
+  position: absolute;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 .workspace-pane-slot {
-  position: relative;
+  position: absolute;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   outline: 1px solid transparent;
   outline-offset: -1px;
+  container-type: inline-size;
 }
 .workspace-pane-slot.pane-focused {
   outline-color: var(--primary);
@@ -5128,6 +5180,114 @@ body {
   height: 100%;
   min-width: 0;
   min-height: 0;
+}
+.pane-drag-active {
+  cursor: grabbing;
+}
+.pane-drop-overlay {
+  position: absolute;
+  z-index: 20;
+  inset: 0;
+  pointer-events: none;
+}
+.pane-drop-overlay::after {
+  position: absolute;
+  z-index: 0;
+  border: 2px solid color-mix(in srgb, var(--primary) 82%, white);
+  background: color-mix(in srgb, var(--primary) 24%, transparent);
+  box-shadow: inset 0 0 24px color-mix(in srgb, var(--primary) 12%, transparent);
+  content: "";
+  pointer-events: none;
+  opacity: 0;
+}
+.pane-drop-overlay[data-hovered-placement="left"]::after,
+.pane-drop-overlay[data-hovered-placement="right"]::after {
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  opacity: 1;
+}
+.pane-drop-overlay[data-hovered-placement="left"]::after {
+  left: 0;
+}
+.pane-drop-overlay[data-hovered-placement="right"]::after {
+  right: 0;
+}
+.pane-drop-overlay[data-hovered-placement="up"]::after,
+.pane-drop-overlay[data-hovered-placement="down"]::after {
+  right: 0;
+  left: 0;
+  height: 50%;
+  opacity: 1;
+}
+.pane-drop-overlay[data-hovered-placement="up"]::after {
+  top: 0;
+}
+.pane-drop-overlay[data-hovered-placement="down"]::after {
+  bottom: 0;
+}
+.pane-drop-zone {
+  position: absolute;
+  z-index: 1;
+  pointer-events: auto;
+}
+.pane-drop-overlay-inert .pane-drop-zone {
+  cursor: not-allowed;
+}
+.pane-drop-zone-left,
+.pane-drop-zone-right {
+  top: 0;
+  bottom: 0;
+  width: 25%;
+}
+.pane-drop-zone-left {
+  left: 0;
+}
+.pane-drop-zone-right {
+  right: 0;
+}
+.pane-drop-zone-up,
+.pane-drop-zone-down {
+  right: 25%;
+  left: 25%;
+  height: 25%;
+}
+.pane-drop-zone-up {
+  top: 0;
+}
+.pane-drop-zone-down {
+  bottom: 0;
+}
+.pane-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-button);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: grab;
+}
+.pane-drag-handle:hover,
+.pane-drag-handle:focus-visible {
+  color: var(--text);
+  border-color: var(--primary);
+  background: var(--surface-2);
+  outline: none;
+}
+.pane-drag-handle:active {
+  cursor: grabbing;
+}
+.pane-drag-handle-agent {
+  position: absolute;
+  z-index: 12;
+  top: 7px;
+  left: 8px;
+  background: var(--surface-1);
+  box-shadow: 0 0 0 1px var(--border);
 }
 .workspace-pane-actions {
   position: absolute;
@@ -5151,9 +5311,17 @@ body {
   cursor: pointer;
 }
 .workspace-pane-actions button:hover:not(:disabled),
-.workspace-pane-close:hover {
+.workspace-pane-actions button:focus-visible:not(:disabled),
+.workspace-pane-close:hover,
+.workspace-pane-close:focus-visible {
   border-color: var(--primary);
   color: var(--text);
+  outline: none;
+}
+.workspace-pane-actions button:focus-visible,
+.workspace-pane-close:focus-visible,
+.workspace-rearrangement-toggle:focus-visible {
+  box-shadow: 0 0 0 1px var(--primary);
 }
 .workspace-pane-actions button:disabled {
   cursor: not-allowed;
@@ -5167,22 +5335,30 @@ body {
   font-size: 18px;
 }
 .workspace-divider {
-  position: relative;
+  position: absolute;
   z-index: 10;
+  pointer-events: auto;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
   border: 0;
   outline: 0;
   background: var(--surface-1);
   touch-action: none;
 }
 .workspace-divider-horizontal {
+  min-width: 7px;
   cursor: col-resize;
 }
 .workspace-divider-vertical {
+  min-height: 7px;
   cursor: row-resize;
 }
 .workspace-divider-line {
   position: absolute;
   background: var(--border-strong);
+  transition: background-color var(--t-fast);
 }
 .workspace-divider-horizontal .workspace-divider-line {
   inset: 0 auto 0 3px;
@@ -5195,4 +5371,21 @@ body {
 .workspace-divider:hover .workspace-divider-line,
 .workspace-divider:focus-visible .workspace-divider-line {
   background: var(--primary);
+}
+.workspace-divider:focus-visible .workspace-divider-line {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 28%, transparent);
+}
+
+@container (max-width: 420px) {
+  .pane-drop-zone-left,
+  .pane-drop-zone-right {
+    width: max(25%, min(44px, 50%));
+  }
+
+  .pane-drop-zone-up,
+  .pane-drop-zone-down {
+    right: max(25%, min(44px, 50%));
+    left: max(25%, min(44px, 50%));
+    height: max(25%, min(44px, 50%));
+  }
 }

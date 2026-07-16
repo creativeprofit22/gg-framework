@@ -9,8 +9,10 @@ const appDir = join(here, "..");
 const repoRoot = join(appDir, "..");
 const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-const SAFE_LOCAL_BRANCH = "custom/local-customizations-v2";
+const SAFE_LOCAL_BRANCH = "custom/local-customizations";
+const LEGACY_LOCAL_BRANCH = "custom/local-customizations-v2";
 const READ_ONLY_SAFETY_BRANCH = "custom/local-customizations-safety";
+const ALLOWED_LOCAL_BRANCHES = new Set([SAFE_LOCAL_BRANCH, LEGACY_LOCAL_BRANCH]);
 const DEFAULT_REMOTE = "upstream";
 const FALLBACK_REMOTE = "origin";
 const DEFAULT_BRANCH = "main";
@@ -113,7 +115,7 @@ function ensureSafeBranch(options) {
     console.log(`Branch safety override enabled for ${branch || "(detached HEAD)"}.`);
     return;
   }
-  if (branch !== SAFE_LOCAL_BRANCH) {
+  if (!ALLOWED_LOCAL_BRANCHES.has(branch)) {
     throw new Error(
       `Refusing to update branch ${branch || "(detached HEAD)"}. Switch to ${SAFE_LOCAL_BRANCH}, or pass --allow-other-branch for an intentional override.`,
     );

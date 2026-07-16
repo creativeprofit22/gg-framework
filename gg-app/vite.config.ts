@@ -7,6 +7,10 @@ import react from "@vitejs/plugin-react";
 const configDir = dirname(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(configDir, "..");
 const customBuildLabel = "GG Coder Local Fork";
+const localForkBranches = new Set([
+  "custom/local-customizations",
+  "custom/local-customizations-v2",
+]);
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
@@ -23,13 +27,14 @@ function git(args: string[]): string | null {
   }
 }
 
+export function isLocalForkBranch(branch: string | null): boolean {
+  return branch !== null && localForkBranches.has(branch);
+}
+
 function isLocalForkCheckout(): boolean {
   const origin = git(["config", "--get", "remote.origin.url"]);
   const branch = git(["branch", "--show-current"]);
-  return Boolean(
-    origin?.includes("creativeprofit22/gg-framework") ||
-    branch === "custom/local-customizations-v2",
-  );
+  return Boolean(origin?.includes("creativeprofit22/gg-framework") || isLocalForkBranch(branch));
 }
 
 function buildEnvDefines(): Record<string, string> {

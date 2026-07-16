@@ -4,16 +4,16 @@ Official GG App updates replace the installed binary and cannot preserve source-
 
 ## Protected checkout
 
-Local-patched mode auto-detects the `custom/local-customizations-v2` branch and the configured fork origin. Detection fails closed when Git metadata is unavailable; set `VITE_GG_LOCAL_PATCHED=1` and `VITE_GG_SOURCE_ROOT=<repo>` explicitly for detached or exported builds.
+Local-patched mode auto-detects the canonical `custom/local-customizations` branch, the temporary `custom/local-customizations-v2` cutover branch, and the configured fork origin. Detection fails closed when Git metadata is unavailable; set `VITE_GG_LOCAL_PATCHED=1` and `VITE_GG_SOURCE_ROOT=<repo>` explicitly for detached or exported builds.
 
-The updater accepts `custom/local-customizations-v2` by default. `custom/local-customizations-safety` is a read-only reference and is never an update target. Use `--allow-other-branch` only for an intentional branch override.
+The updater accepts `custom/local-customizations` by default and temporarily accepts `custom/local-customizations-v2` during the cutover. `custom/local-customizations-safety` is a read-only reference and is never an update target. Use `--allow-other-branch` only for an intentional branch override.
 
 ## Update local fixes
 
 From the repository root:
 
 ```bash
-git switch custom/local-customizations-v2
+git switch custom/local-customizations
 pnpm --filter gg-app update:local-fixes -- --check
 ```
 

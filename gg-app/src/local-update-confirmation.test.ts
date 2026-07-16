@@ -12,9 +12,10 @@ describe("local update confirmation", () => {
     expect(shouldConfirmLocalUpdate(false, "available")).toBe(false);
   });
 
-  it("names the protected v2 rebase and safety behavior", () => {
+  it("names the canonical protected rebase and safety behavior", () => {
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("rebase");
-    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("custom/local-customizations-v2");
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("custom/local-customizations");
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).not.toContain("custom/local-customizations-v2");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("upstream/main");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("backup");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("build a patched installer");

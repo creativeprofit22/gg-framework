@@ -5,15 +5,22 @@
   "scripts": {
     "build": "pnpm -r build",
     "check": "pnpm -r check",
-    "lint": "eslint 'packages/*/src/**/*.{ts,tsx}' && pnpm --filter matey lint && pnpm --filter gg-app lint",
-    "lint:fix": "eslint 'packages/*/src/**/*.{ts,tsx}' --fix && pnpm --filter matey lint:fix && pnpm --filter gg-app lint:fix",
-    "format": "prettier --write 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}' && pnpm --filter gg-app format",
-    "format:check": "prettier --check 'packages/*/src/**/*.{ts,tsx}' 'Matey/**/*.{ts,tsx,css,html,json,md,yml}' && pnpm --filter gg-app format:check",
-    "test": "pnpm -r test",
+    "lint": "eslint \"packages/*/src/**/*.{ts,tsx}\" && pnpm --filter matey lint && pnpm --filter gg-app lint",
+    "lint:fix": "eslint \"packages/*/src/**/*.{ts,tsx}\" --fix && pnpm --filter matey lint:fix && pnpm --filter gg-app lint:fix",
+    "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\" \"Matey/**/*.{ts,tsx,css,html,json,md,yml}\" && pnpm --filter gg-app format",
+    "format:check": "prettier --check \"packages/*/src/**/*.{ts,tsx}\" \"Matey/**/*.{ts,tsx,css,html,json,md,yml}\" && pnpm --filter gg-app format:check",
+    "test": "pnpm test:clean-generated && pnpm -r test",
+    "test:clean-generated": "node --test scripts/clean-generated.test.mjs",
     "bench": "pnpm build && npx tsx benchmarks/run-comparison.ts",
     "app:update:local-fixes": "pnpm --filter gg-app update:local-fixes",
     "app:build:local-patched": "pnpm --filter gg-app build:local-patched",
-    "prepare": "pnpm build"
+    "prepare": "pnpm build",
+    "clean:web": "node scripts/clean-generated.mjs web",
+    "clean:tauri": "node scripts/clean-generated.mjs tauri",
+    "clean:tauri-schemas": "node scripts/clean-generated.mjs tauri-schemas",
+    "clean:cache": "node scripts/clean-generated.mjs cache",
+    "clean:packages": "node scripts/clean-generated.mjs packages",
+    "clean:app-bundle-inputs:dangerous": "node scripts/clean-generated.mjs app-bundle-inputs-dangerous"
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",

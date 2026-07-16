@@ -685,12 +685,14 @@ describe("WorkspaceShell", () => {
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("pane-secondary");
 
-    emitPaneSnapshot("primary", {
-      mode: "chat",
-      chatAgent: "research",
-      cwd: "/changed",
-      sessionPath: "/changed/session.jsonl",
-      projectBound: true,
+    await act(async () => {
+      emitPaneSnapshot("primary", {
+        mode: "chat",
+        chatAgent: "research",
+        cwd: "/changed",
+        sessionPath: "/changed/session.jsonl",
+        projectBound: true,
+      });
     });
 
     await waitFor(() => {
@@ -704,7 +706,9 @@ describe("WorkspaceShell", () => {
       });
     });
 
-    emitPaneSnapshot("primary", { cwd: null, sessionPath: null, projectBound: false });
+    await act(async () => {
+      emitPaneSnapshot("primary", { cwd: null, sessionPath: null, projectBound: false });
+    });
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
       expect(saved.panes.primary).toBeNull();

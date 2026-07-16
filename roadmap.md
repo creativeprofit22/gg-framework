@@ -2,10 +2,10 @@
 
 ## Current status
 
-- **Completed:** The pane-loop implementation work for Phase 0A and Phase 1A–1C landed in commit `50a50535`; no sub-phase is marked complete because required supervisor/memory evidence and the listed lint verification were not all captured.
-- **NEXT:** Sub-phase 0A — close the remaining acceptance gap by running a temporary external 120-second supervisor that reports the root PID and final output tail, and record elapsed/memory evidence where the harness exposes it.
+- **Completed:** Sub-phase 0A. The pane-loop implementation work for Phase 1A–1C landed in commit `50a50535`, but those later sub-phases remain partial pending their own acceptance evidence.
+- **NEXT:** Sub-phase 0B — add the CPU-bound foreground timeout fixture and its required host-deadline baseline.
 - **Blockers:** `packages/ggcoder/src/tools/bash-timeout.test.ts`, `packages/ggcoder/src/core/process-manager.test.ts`, and `packages/ggcoder/src/tools/task-output.test.ts` do not exist. The current background baseline also fails on Windows because `process-manager-dev-server-repro.test.ts` passes an unquoted `process.execPath` through Git Bash (`E:nodejsnode.exe: command not found`).
-- **First verification command:** `pnpm --filter gg-app exec vitest run src/WorkspaceShell.test.tsx` under a temporary external 120-second supervisor; after 0A is closed, start 0B with `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/tools/bash-timeout.test.ts`.
+- **First verification command:** `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/tools/bash-timeout.test.ts` after the required 0B fixture is added.
 - **Audit basis:** clean `custom/local-customizations` worktree at `50a50535`; source, tests, `.github/workflows/ci.yml`, package scripts, `git log`, and `git blame` inspected on 2026-07-16. Claims not exercised on macOS/Linux or in a desktop smoke are marked **Unverified**.
 
 ## Goal
@@ -47,11 +47,11 @@ Every sub-phase contains:
 
 # Phase 0 — Pin the incident safely
 
-## Sub-phase 0A — Add a bounded React-loop regression **(NEXT)**
+## Sub-phase 0A — Add a bounded React-loop regression **(COMPLETE)**
 
-**Status: Partial**
+**Status: Complete**
 
-**Evidence:** `gg-app/src/WorkspaceShell.test.tsx` defines `MAX_LIFECYCLE_EFFECT_EXECUTIONS` and the bounded `FakePane` lifecycle guard, and tests `preserves the record for an equivalent workspace snapshot` plus `keeps pane lifecycle callbacks and effects stable across unrelated rerenders`. `gg-app/src/WorkspaceShell.tsx` exports `mergePaneSnapshot`. Commit: `50a50535` (`Update desktop branding, discovery, and workspace reliability`). Verification on 2026-07-16: 41/41 focused tests passed in 4.04s and `pnpm --filter gg-app check` passed. Memory metrics and the required external-supervisor timeout report containing root PID/final output tail are **Unverified**.
+**Evidence:** `gg-app/src/WorkspaceShell.test.tsx` defines `MAX_LIFECYCLE_EFFECT_EXECUTIONS` and the bounded `FakePane` lifecycle guard, and tests `preserves the record for an equivalent workspace snapshot` plus `keeps pane lifecycle callbacks and effects stable across unrelated rerenders`. `gg-app/src/WorkspaceShell.tsx` exports `mergePaneSnapshot`. Commit: `50a50535` (`Update desktop branding, discovery, and workspace reliability`). Verification on 2026-07-16: a fresh external 120-second supervisor ran `pnpm --filter gg-app exec vitest run src/WorkspaceShell.test.tsx` with root PID `24552`; all 41/41 tests passed, the supervised elapsed time was 5.543s, peak sampled process-tree working set was 406.63 MiB, exit code was 0 (`passed`), the captured final output tail retained the Vitest pass summary, and the supervisor found zero surviving processes. The exact follow-up `pnpm --filter gg-app check` passed.
 
 ### Behavioral outcome
 

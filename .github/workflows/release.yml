@@ -98,6 +98,10 @@ jobs:
         run: node gg-app/scripts/smoke-sidecar.mjs
         shell: bash
 
+      - name: Windows packaged launch smoke
+        if: runner.os == 'Windows'
+        run: node gg-app/scripts/smoke-packaged-windows.mjs
+
       # Import the Developer ID Application cert into a throwaway CI keychain so
       # codesign can find it. macOS only, and only when the secret is present —
       # an empty APPLE_CERTIFICATE leaves the build unsigned but still green.

@@ -76,6 +76,7 @@ import { LoginScreen } from "./LoginScreen";
 import { Markdown, PromptSendProvider } from "./Markdown";
 import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
+import { formatBuildIdentity } from "./build-info";
 import {
   LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL,
   LOCAL_UPDATE_CONFIRMATION_MESSAGE,
@@ -115,6 +116,7 @@ const INPUT_PLACEHOLDER_INTERVAL_MS = 12_000;
 const PLACEHOLDER_SHUFFLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const PLACEHOLDER_SHUFFLE_FRAMES = 18;
 const PLACEHOLDER_SHUFFLE_FRAME_MS = 24;
+const BUILD_IDENTITY = formatBuildIdentity();
 
 // Autopilot Ken's "all clear" line, rotated so the auto-review loop doesn't
 // repeat the exact same sentence every time GG Coder's work checks out.
@@ -2373,10 +2375,18 @@ export function AgentPane({
               </span>
             ) : (
               <span className="footer-left footer-reveal" style={{ fontFamily: "var(--mono)" }}>
-                {runningTaskCount > 0 && <BackgroundTasksButton tasks={tasks} />}
+                {BUILD_IDENTITY && (
+                  <span className="footer-custom-build">{`◆ ${BUILD_IDENTITY}`}</span>
+                )}
+                {runningTaskCount > 0 && (
+                  <>
+                    {BUILD_IDENTITY && <FooterSep />}
+                    <BackgroundTasksButton tasks={tasks} />
+                  </>
+                )}
                 {state?.planMode && (
                   <>
-                    {runningTaskCount > 0 && <FooterSep />}
+                    {(BUILD_IDENTITY || runningTaskCount > 0) && <FooterSep />}
                     <span className="footer-plan">
                       <ShimmerText base={theme.secondary} bright="#ddd6fe">
                         {"\u25C6 plan mode"}

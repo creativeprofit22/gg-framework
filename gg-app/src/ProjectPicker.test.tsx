@@ -20,6 +20,9 @@ vi.mock("./agent", () => ({
   waitForReady: vi.fn(),
 }));
 vi.mock("./toast", () => ({ toast: mocks.toast }));
+vi.mock("./build-info", () => ({
+  formatBuildIdentity: () => "GG Coder Local Fork · abc1234",
+}));
 vi.mock("./RadioButton", () => ({ RadioButton: () => <button>Radio</button> }));
 vi.mock("./WindowLayoutButton", () => ({
   WindowLayoutButton: () => <button>Windows</button>,
@@ -59,6 +62,20 @@ afterEach(() => {
 });
 
 describe("ProjectPicker", () => {
+  it("renders the local-build identity in the picker header", () => {
+    render(
+      <ProjectPicker
+        onChosen={vi.fn()}
+        waitForCatalogReady={() => new Promise(() => {})}
+        showWindowControls={false}
+      />,
+    );
+
+    const identity = screen.getByText("GG Coder Local Fork · abc1234");
+    expect(identity.className).toBe("picker-build-identity");
+    expect(identity.getAttribute("title")).toBe("GG Coder Local Fork · abc1234");
+  });
+
   it("ignores a stale session response after another project is selected", async () => {
     const alphaSessions = deferred<RecentSession[]>();
     const betaSessions = deferred<RecentSession[]>();

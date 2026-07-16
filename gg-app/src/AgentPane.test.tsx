@@ -69,6 +69,9 @@ vi.mock("./ProjectPicker", () => ({
   ),
 }));
 vi.mock("./update", () => ({ useAppUpdate: () => ({ phase: "idle", progressLines: [] }) }));
+vi.mock("./build-info", () => ({
+  formatBuildIdentity: () => "GG Coder Local Fork · abc1234",
+}));
 vi.mock("./sounds", () => ({ playSound: vi.fn() }));
 vi.mock("./RadioButton", () => ({ RadioButton: () => null }));
 vi.mock("./agent", async (importOriginal) => {
@@ -160,6 +163,25 @@ describe("AgentPane lifecycle", () => {
     expect(home?.getAttribute("data-has-pane-ready")).toBe("true");
     expect(home?.getAttribute("data-has-pane-progress")).toBe("true");
     expect(pane.create).not.toHaveBeenCalled();
+  });
+
+  it("renders the local-build identity in the agent footer", async () => {
+    const pane = client("pane-1", 1);
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-1"
+        kind="auxiliary"
+        initialTarget={null}
+        workspaceOwnsSessionLifecycle
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    expect((await screen.findByText("◆ GG Coder Local Fork · abc1234")).className).toBe(
+      "footer-custom-build",
+    );
   });
 
   it("binds an auxiliary picker through its pane-scoped client", async () => {

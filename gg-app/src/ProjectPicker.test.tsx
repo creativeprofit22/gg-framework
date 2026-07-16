@@ -21,7 +21,7 @@ vi.mock("./agent", () => ({
 }));
 vi.mock("./toast", () => ({ toast: mocks.toast }));
 vi.mock("./build-info", () => ({
-  formatBuildIdentity: () => "GG Coder Local Fork · abc1234",
+  formatBuildIdentity: () => "Supah Coder Local Fork · abc1234",
 }));
 vi.mock("./RadioButton", () => ({ RadioButton: () => <button>Radio</button> }));
 vi.mock("./WindowLayoutButton", () => ({
@@ -71,9 +71,9 @@ describe("ProjectPicker", () => {
       />,
     );
 
-    const identity = screen.getByText("GG Coder Local Fork · abc1234");
+    const identity = screen.getByText("Supah Coder Local Fork · abc1234");
     expect(identity.className).toBe("picker-build-identity");
-    expect(identity.getAttribute("title")).toBe("GG Coder Local Fork · abc1234");
+    expect(identity.getAttribute("title")).toBe("Supah Coder Local Fork · abc1234");
   });
 
   it("ignores a stale session response after another project is selected", async () => {

@@ -1,13 +1,28 @@
 // @vitest-environment jsdom
 import { useState } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as AgentModule from "./agent";
 
 HTMLElement.prototype.scrollTo = vi.fn();
 
+const nativeMocks = vi.hoisted(() => ({
+  onDragDropEvent: vi.fn(async () => vi.fn()),
+  setWindowTitle: vi.fn(),
+  getDroppedPathInfo: vi.fn(async (paths: string[]) =>
+    paths.map((path) => ({ path, isDir: path.endsWith("folder") })),
+  ),
+  readDroppedFileAttachment: vi.fn(async (path: string) => ({
+    path,
+    name: "file.txt",
+    mime: "text/plain",
+    size: 4,
+    data: "dGVzdA==",
+  })),
+}));
+
 vi.mock("@tauri-apps/api/webview", () => ({
-  getCurrentWebview: () => ({ onDragDropEvent: vi.fn(async () => vi.fn()) }),
+  getCurrentWebview: () => ({ onDragDropEvent: nativeMocks.onDragDropEvent }),
 }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
@@ -70,7 +85,7 @@ vi.mock("./ProjectPicker", () => ({
 }));
 vi.mock("./update", () => ({ useAppUpdate: () => ({ phase: "idle", progressLines: [] }) }));
 vi.mock("./build-info", () => ({
-  formatBuildIdentity: () => "GG Coder Local Fork · abc1234",
+  formatBuildIdentity: () => "Supah Coder Local Fork · abc1234",
 }));
 vi.mock("./sounds", () => ({ playSound: vi.fn() }));
 vi.mock("./RadioButton", () => ({ RadioButton: () => null }));
@@ -79,15 +94,18 @@ vi.mock("./agent", async (importOriginal) => {
   return {
     ...actual,
     restoreTarget: vi.fn(async () => null),
-    setWindowTitle: vi.fn(),
+    setWindowTitle: nativeMocks.setWindowTitle,
     onWindowOrder: vi.fn(async () => vi.fn()),
     isSecondaryWindow: false,
     windowLabel: "main",
     createPaneAgentClient: vi.fn((paneId: string) => client(paneId, 1)),
+    getDroppedPathInfo: nativeMocks.getDroppedPathInfo,
+    readDroppedFileAttachment: nativeMocks.readDroppedFileAttachment,
   };
 });
 
 import { AgentPane } from "./AgentPane";
+import type { PaneInputActions } from "./AgentPane";
 import type { PaneAgentClient, PaneSessionTarget } from "./agent";
 
 const target: PaneSessionTarget = { mode: "code", cwd: "/work", sessionPath: "/session" };
@@ -136,7 +154,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     getSettings: vi.fn(),
     saveSettings: vi.fn(),
     listProjects: vi.fn(),
-    searchFiles: vi.fn(),
+    searchFiles: vi.fn(async () => []),
     listSessions: vi.fn(),
     getTelegramStatus: vi.fn(),
     saveTelegramConfig: vi.fn(),
@@ -150,7 +168,10 @@ function client(paneId: string, generation: number): PaneAgentClient {
   } as unknown as PaneAgentClient;
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.clearAllMocks();
+});
 describe("AgentPane lifecycle", () => {
   it("wires the restored home UI through the pane-scoped catalog client", async () => {
     const pane = client("primary", 1);
@@ -179,7 +200,7 @@ describe("AgentPane lifecycle", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    expect((await screen.findByText("◆ GG Coder Local Fork · abc1234")).className).toBe(
+    expect((await screen.findByText("◆ Supah Coder Local Fork · abc1234")).className).toBe(
       "footer-custom-build",
     );
   });
@@ -293,5 +314,59 @@ describe("AgentPane lifecycle", () => {
       <AgentPane client={pane} target={recoverTarget} generation={4} onLifecycleError={onError} />,
     );
     await waitFor(() => expect(pane.restore).toHaveBeenCalledWith(recoverTarget));
+  });
+
+  it.each(["@Supah question", "@Ken question"])(
+    "routes %s to the mentor client",
+    async (prompt) => {
+      const pane = client("pane-1", 1);
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      const input = await screen.findByRole("textbox");
+      await waitFor(() => expect(pane.selectWorkspace).toHaveBeenCalled());
+      fireEvent.change(input, { target: { value: prompt } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("question"));
+      expect(pane.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it("registers pane-local native-drop staging without subscribing or mutating the title", async () => {
+    const pane = client("pane-1", 1);
+    const actionsRef: { current: PaneInputActions | null } = { current: null };
+    render(
+      <AgentPane
+        client={pane}
+        registerInput={(_paneId, nextActions) => {
+          actionsRef.current = nextActions;
+        }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(actionsRef.current).toBeTruthy());
+
+    await act(async () => {
+      actionsRef.current?.handleNativeDrop(["/dropped/folder", "/dropped/file.txt"]);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect((input as HTMLTextAreaElement).value).toContain("/dropped/folder"));
+    expect(nativeMocks.readDroppedFileAttachment).toHaveBeenCalledWith("/dropped/file.txt");
+    expect(nativeMocks.onDragDropEvent).not.toHaveBeenCalled();
+    expect(nativeMocks.setWindowTitle).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary @file mentions on file search", async () => {
+    const pane = client("pane-1", 1);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "Review @src/brand" } });
+    await waitFor(() => expect(pane.searchFiles).toHaveBeenCalled());
+    expect(pane.sendKenPrompt).not.toHaveBeenCalled();
   });
 });

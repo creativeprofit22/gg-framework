@@ -98,6 +98,9 @@ jobs:
         run: node gg-app/scripts/smoke-sidecar.mjs
         shell: bash
 
+      - name: Test Rust backend
+        run: cargo test --manifest-path gg-app/src-tauri/Cargo.toml --locked
+
       - name: Windows packaged launch smoke
         if: runner.os == 'Windows'
         run: node gg-app/scripts/smoke-packaged-windows.mjs

@@ -1,4 +1,5 @@
-import { useState, type CSSProperties } from "react";
+/* eslint-disable react-hooks/refs -- The stable lifecycle dispatcher reads its ref only when a child invokes it outside render. */
+import { useCallback, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { CopyPlus, GripVertical, PanelBottom, PanelRight } from "lucide-react";
 import { AgentPane, type AgentPaneProps } from "./AgentPane";
 import { PaneDropOverlay, PANE_DRAG_MIME } from "./PaneDropOverlay";
@@ -58,6 +59,7 @@ export interface WorkspaceNodeProps {
   renderPane?: (props: AgentPaneProps) => React.ReactNode;
   onFocusPane: (paneId: WorkspacePaneId) => void;
   onSnapshot: NonNullable<AgentPaneProps["onSnapshot"]>;
+  onLifecycleError: (paneId: WorkspacePaneId, error: unknown) => void;
   registerInput: NonNullable<AgentPaneProps["registerInput"]>;
   onSplitPane: (paneId: WorkspacePaneId, direction: SplitDirection) => void;
   onCopyPane: (paneId: WorkspacePaneId) => void;
@@ -280,6 +282,7 @@ function WorkspaceAgentLeaf({
   renderPane,
   onFocusPane,
   onSnapshot,
+  onLifecycleError,
   registerInput,
   onSplitPane,
   onCopyPane,
@@ -295,6 +298,14 @@ function WorkspaceAgentLeaf({
   style: CSSProperties;
 }): React.ReactElement {
   const focused = focusedPaneId === paneId;
+  const lifecycleErrorContextRef = useRef({ paneId, onLifecycleError });
+  useLayoutEffect(() => {
+    lifecycleErrorContextRef.current = { paneId, onLifecycleError };
+  }, [paneId, onLifecycleError]);
+  const dispatchLifecycleError = useCallback((error: unknown): void => {
+    const current = lifecycleErrorContextRef.current;
+    current.onLifecycleError(current.paneId, error);
+  }, []);
   const [initialTarget] = useState(() => {
     const descriptor = panes[paneId];
     if (!descriptor) return null;
@@ -313,6 +324,7 @@ function WorkspaceAgentLeaf({
     initialTarget,
     onFocus: onFocusPane,
     onSnapshot,
+    onLifecycleError: dispatchLifecycleError,
     workspaceOwnsSessionLifecycle: true,
     registerInput,
   };

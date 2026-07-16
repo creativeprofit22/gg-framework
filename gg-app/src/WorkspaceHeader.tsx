@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { WorkspaceMode } from "./agent";
+import { PRODUCT_DISPLAY_NAME } from "./brand";
 
 interface WorkspaceHeaderProps {
   workspaceMode: WorkspaceMode;
@@ -37,7 +38,7 @@ export function WorkspaceHeader({
   stripExtras,
   children,
 }: WorkspaceHeaderProps): React.ReactElement {
-  const fallbackTitle = workspaceMode === "chat" ? "GG Chat" : "GG Coder";
+  const fallbackTitle = workspaceMode === "chat" ? "GG Chat" : PRODUCT_DISPLAY_NAME;
   const directory = cwd?.split(/[\\/]/).filter(Boolean).pop();
 
   return (

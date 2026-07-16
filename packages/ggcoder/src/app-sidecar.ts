@@ -95,7 +95,12 @@ import {
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
-import { discoverProjects } from "./core/project-discovery.js";
+import {
+  discoverProjects,
+  discoverProjectsRootFolders,
+  listRecentSessions,
+  mergeDiscoveredProjects,
+} from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
 import {
   loadTasksSync,
@@ -2661,9 +2666,16 @@ async function createSession(
     }
 
     if (method === "GET" && url === "/projects") {
-      // Scan ggcoder + Claude Code + Codex session stores for known projects.
-      void discoverProjects()
-        .then((projects) => json(res, 200, { projects }))
+      // Include configured root children before they have any agent session history.
+      void loadAppSettings()
+        .then(({ projectsRoot }) =>
+          Promise.all([discoverProjects(), discoverProjectsRootFolders(projectsRoot)]),
+        )
+        .then(([historyProjects, rootProjects]) =>
+          json(res, 200, {
+            projects: mergeDiscoveredProjects([...historyProjects, ...rootProjects]),
+          }),
+        )
         .catch((err) => {
           captureSidecarError(err, "app-sidecar.projects.discover");
           log("ERROR", "app-sidecar", "discoverProjects failed", {

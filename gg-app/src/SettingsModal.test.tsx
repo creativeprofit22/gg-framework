@@ -12,7 +12,7 @@ vi.mock("./agent", () => ({
   openPermissionsSettings: vi.fn(),
 }));
 vi.mock("./build-info", () => ({
-  formatBuildIdentity: () => "GG Coder Local Fork · abc1234",
+  formatBuildIdentity: () => "Supah Coder Local Fork · abc1234",
 }));
 vi.mock("./SoundButton", () => ({ SoundButton: () => <button>Sound</button> }));
 
@@ -22,7 +22,7 @@ describe("SettingsModal", () => {
   it("renders the local-build identity in Settings", () => {
     render(<SettingsModal onClose={vi.fn()} />);
 
-    const identity = screen.getByText("GG Coder Local Fork · abc1234");
+    const identity = screen.getByText("Supah Coder Local Fork · abc1234");
     expect(identity.className).toBe("modal-build-identity");
   });
 });

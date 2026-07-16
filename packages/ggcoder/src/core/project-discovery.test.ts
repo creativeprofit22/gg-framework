@@ -5,7 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as ConfigModule from "../config.js";
 import { encodeCwd } from "./encode-cwd.js";
-import { discoverProjects, listRecentSessions } from "./project-discovery.js";
+import {
+  discoverProjects,
+  discoverProjectsRootFolders,
+  discoveryPathKey,
+  listRecentSessions,
+  mergeDiscoveredProjects,
+  type DiscoveredProject,
+} from "./project-discovery.js";
 import { archiveColdSession, archiveSessionPath } from "./session-storage.js";
 
 // Holder the hoisted mock reads at call time (vi.mock is hoisted above imports,
@@ -91,6 +98,60 @@ describe("discoverProjects (ggcoder store)", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await fs.rm(tmp, { recursive: true, force: true });
+  });
+
+  it("lists direct child folders without session history and excludes files", async () => {
+    const root = path.join(tmp, "projects");
+    const child = path.join(root, "never-opened");
+    await fs.mkdir(child, { recursive: true });
+    await fs.writeFile(path.join(root, "notes.txt"), "not a project");
+
+    const projects = await discoverProjectsRootFolders(root);
+
+    expect(projects.map((project) => project.path)).toEqual([path.resolve(child)]);
+    expect(projects[0]?.sources).toEqual(["ggcoder"]);
+  });
+
+  it("returns no root projects for a missing or blank root", async () => {
+    await expect(discoverProjectsRootFolders(path.join(tmp, "missing"))).resolves.toEqual([]);
+    await expect(discoverProjectsRootFolders("   ")).resolves.toEqual([]);
+  });
+
+  it("collapses history/root duplicates, merges sources, and sorts newest first", () => {
+    const duplicate = path.join(tmp, "projects", "Alpha");
+    const older: DiscoveredProject = {
+      name: "Alpha",
+      path: duplicate,
+      lastActiveMs: 10,
+      lastActiveDisplay: "old",
+      sources: ["ggcoder"],
+    };
+    const history: DiscoveredProject = {
+      ...older,
+      path: path.join(duplicate, ".", "..", "Alpha"),
+      lastActiveMs: 30,
+      sources: ["claude-code"],
+    };
+    const newest: DiscoveredProject = {
+      name: "Beta",
+      path: path.join(tmp, "projects", "Beta"),
+      lastActiveMs: 50,
+      lastActiveDisplay: "new",
+      sources: ["codex"],
+    };
+
+    const merged = mergeDiscoveredProjects([older, history, newest], "linux");
+
+    expect(merged).toHaveLength(2);
+    expect(merged.map((project) => project.name)).toEqual(["Beta", "Alpha"]);
+    expect(merged[1]?.lastActiveMs).toBe(30);
+    expect(merged[1]?.sources).toEqual(["ggcoder", "claude-code"]);
+  });
+
+  it("uses a case-insensitive resolved comparison key on Windows", () => {
+    const mixed = path.join(tmp, "Projects", "Alpha");
+    expect(discoveryPathKey(mixed, "win32")).toBe(path.resolve(mixed).toLowerCase());
+    expect(discoveryPathKey(mixed, "linux")).toBe(path.resolve(mixed));
   });
 
   it("lists a project whose folder name contains an underscore (regression)", async () => {

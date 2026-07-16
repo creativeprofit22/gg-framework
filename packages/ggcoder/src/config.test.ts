@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { loadSavedSettings } from "./config.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ensureAppDirs, loadSavedSettings } from "./config.js";
 
 const tempDirs: string[] = [];
 
@@ -13,9 +13,25 @@ function tempSettingsPath(): string {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("ensureAppDirs", () => {
+  it("creates the global custom-command directory with owner-only POSIX permissions", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "ggcoder-home-"));
+    tempDirs.push(home);
+    vi.spyOn(os, "homedir").mockReturnValue(home);
+
+    const paths = await ensureAppDirs();
+    const commandsDir = path.join(paths.agentDir, "commands");
+    const stat = fs.statSync(commandsDir);
+
+    expect(stat.isDirectory()).toBe(true);
+    if (process.platform !== "win32") expect(stat.mode & 0o777).toBe(0o700);
+  });
 });
 
 describe("loadSavedSettings", () => {

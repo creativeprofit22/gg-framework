@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentPaneProps } from "./AgentPane";
-import { WorkspaceShell } from "./WorkspaceShell";
+import type { AgentPaneProps, PaneSnapshot } from "./AgentPane";
+import { clampWorkspaceSplitRatio, mergePaneSnapshot, WorkspaceShell } from "./WorkspaceShell";
 
 const bridge = vi.hoisted(() => ({
   copiedPaneRestoreTarget: vi.fn(() =>
@@ -21,21 +21,50 @@ const bridge = vi.hoisted(() => ({
     Promise.resolve({ windowLabel: "project-1", reusedWindow: false }),
   ),
   disposePaneSession: vi.fn(() => Promise.resolve()),
+  arrangeAllWindows: vi.fn(() => Promise.resolve()),
+  focusWindowByOffset: vi.fn(() => Promise.resolve()),
+  newWindow: vi.fn(() => Promise.resolve()),
+  setWindowTitle: vi.fn(),
+  nativeDropHandler: null as
+    | null
+    | ((event: { payload: { type: string; paths: string[] } }) => void),
 }));
 const paneMounts = new Map<string, number>();
 const paneUnmounts = new Map<string, number>();
+const paneDrops = new Map<string, string[][]>();
+const paneNativeDragStates = new Map<string, boolean[]>();
+const activeWorkPanes = new Set<string>();
+const failingRestorePanes = new Set<string>();
+const lifecycleEffectExecutions = new Map<string, number>();
+const lifecycleCallbacks = new Map<string, Array<AgentPaneProps["onLifecycleError"]>>();
+const latestPaneProps = new Map<string, AgentPaneProps>();
+const MAX_LIFECYCLE_EFFECT_EXECUTIONS = 8;
+
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: vi.fn(async (handler) => {
+      bridge.nativeDropHandler = handler;
+      return vi.fn();
+    }),
+  }),
+}));
 
 vi.mock("./agent", () => ({
   copiedPaneRestoreTarget: bridge.copiedPaneRestoreTarget,
   copyPaneToNewWindow: bridge.copyPaneToNewWindow,
   disposePaneSession: bridge.disposePaneSession,
+  arrangeAllWindows: bridge.arrangeAllWindows,
+  focusWindowByOffset: bridge.focusWindowByOffset,
+  newWindow: bridge.newWindow,
+  setWindowTitle: bridge.setWindowTitle,
   windowLabel: "main",
 }));
 vi.mock("./AgentPane", () => ({ AgentPane: () => null }));
 
 function FakePane(props: AgentPaneProps): React.ReactElement {
-  const { initialTarget, onSnapshot, paneId = "primary", registerInput } = props;
+  const { initialTarget, onLifecycleError, onSnapshot, paneId = "primary", registerInput } = props;
   const input = useRef<HTMLInputElement>(null);
+  latestPaneProps.set(paneId, props);
   useEffect(() => {
     paneMounts.set(paneId, (paneMounts.get(paneId) ?? 0) + 1);
     return () => {
@@ -43,9 +72,22 @@ function FakePane(props: AgentPaneProps): React.ReactElement {
     };
   }, [paneId]);
   useEffect(() => {
+    const executionCount = (lifecycleEffectExecutions.get(paneId) ?? 0) + 1;
+    lifecycleEffectExecutions.set(paneId, executionCount);
+    lifecycleCallbacks.set(paneId, [...(lifecycleCallbacks.get(paneId) ?? []), onLifecycleError]);
+    if (executionCount > MAX_LIFECYCLE_EFFECT_EXECUTIONS) {
+      throw new Error(
+        `Pane ${paneId} lifecycle effect exceeded ${MAX_LIFECYCLE_EFFECT_EXECUTIONS} executions; callback identity is churning`,
+      );
+    }
     registerInput?.(paneId, {
       focus: () => input.current?.focus(),
-      handleNativeDrop: () => undefined,
+      setNativeFileDragOver: (dragging) => {
+        paneNativeDragStates.set(paneId, [...(paneNativeDragStates.get(paneId) ?? []), dragging]);
+      },
+      handleNativeDrop: (paths) => {
+        paneDrops.set(paneId, [...(paneDrops.get(paneId) ?? []), paths]);
+      },
     });
     onSnapshot?.({
       paneId,
@@ -56,10 +98,11 @@ function FakePane(props: AgentPaneProps): React.ReactElement {
       sessionTitle: initialTarget?.cwd ?? null,
       projectBound: initialTarget !== null,
       restoreChecked: true,
-      activeWork: false,
+      activeWork: activeWorkPanes.has(paneId),
     });
+    if (failingRestorePanes.has(paneId)) onLifecycleError?.(new Error("stale target"));
     return () => registerInput?.(paneId, null);
-  }, [initialTarget, onSnapshot, paneId, registerInput]);
+  }, [initialTarget, onLifecycleError, onSnapshot, paneId, registerInput]);
   return (
     <div
       data-testid={`pane-${paneId}`}
@@ -72,6 +115,23 @@ function FakePane(props: AgentPaneProps): React.ReactElement {
 }
 
 const renderPane = (props: AgentPaneProps): React.ReactNode => <FakePane {...props} />;
+
+function emitPaneSnapshot(paneId: string, changes: Partial<Omit<PaneSnapshot, "paneId">>): void {
+  const props = latestPaneProps.get(paneId);
+  if (!props?.onSnapshot) throw new Error(`Pane ${paneId} has no captured snapshot callback`);
+  props.onSnapshot({
+    paneId,
+    mode: props.initialTarget?.mode ?? "code",
+    chatAgent: props.initialTarget?.chatAgent,
+    cwd: props.initialTarget?.cwd ?? null,
+    sessionPath: props.initialTarget?.sessionPath ?? null,
+    sessionTitle: props.initialTarget?.cwd ?? null,
+    projectBound: props.initialTarget !== null,
+    restoreChecked: true,
+    activeWork: false,
+    ...changes,
+  });
+}
 
 function dragTransfer(types = ["application/x-gg-workspace-pane"]): DataTransfer {
   return {
@@ -146,14 +206,27 @@ function saveFourPaneLayout(): void {
 }
 
 beforeEach(() => {
+  vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
   localStorage.clear();
   paneMounts.clear();
   paneUnmounts.clear();
+  paneDrops.clear();
+  paneNativeDragStates.clear();
+  activeWorkPanes.clear();
+  failingRestorePanes.clear();
+  lifecycleEffectExecutions.clear();
+  lifecycleCallbacks.clear();
+  latestPaneProps.clear();
   bridge.copiedPaneRestoreTarget.mockReset().mockResolvedValue(null);
   bridge.copyPaneToNewWindow
     .mockReset()
     .mockResolvedValue({ windowLabel: "project-1", reusedWindow: false });
   bridge.disposePaneSession.mockReset().mockResolvedValue(undefined);
+  bridge.arrangeAllWindows.mockReset().mockResolvedValue(undefined);
+  bridge.focusWindowByOffset.mockReset().mockResolvedValue(undefined);
+  bridge.newWindow.mockReset().mockResolvedValue(undefined);
+  bridge.setWindowTitle.mockReset();
+  bridge.nativeDropHandler = null;
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     callback(0);
     return 1;
@@ -162,7 +235,78 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe("mergePaneSnapshot", () => {
+  const baseSnapshot: PaneSnapshot = {
+    paneId: "primary",
+    generation: 1,
+    mode: "code",
+    cwd: "/project",
+    sessionPath: "/project/session.jsonl",
+    sessionTitle: "Project session",
+    projectBound: true,
+    restoreChecked: true,
+    activeWork: false,
+  };
+
+  it("preserves the record for an equivalent workspace snapshot", () => {
+    const snapshots = { primary: baseSnapshot };
+
+    expect(mergePaneSnapshot(snapshots, { ...baseSnapshot, generation: 2 })).toBe(snapshots);
+  });
+
+  it("normalizes chat defaults and ignores code-mode chat-agent noise", () => {
+    const chatSnapshot: PaneSnapshot = { ...baseSnapshot, mode: "chat", chatAgent: undefined };
+    const chatSnapshots = { primary: chatSnapshot };
+    expect(mergePaneSnapshot(chatSnapshots, { ...chatSnapshot, chatAgent: "general" })).toBe(
+      chatSnapshots,
+    );
+
+    const noisyCodeSnapshot: PaneSnapshot = { ...baseSnapshot, chatAgent: "research" };
+    const codeSnapshots = { primary: noisyCodeSnapshot };
+    expect(mergePaneSnapshot(codeSnapshots, { ...baseSnapshot, chatAgent: undefined })).toBe(
+      codeSnapshots,
+    );
+  });
+
+  it.each([
+    { field: "paneId", current: baseSnapshot, changes: { paneId: "secondary" } },
+    {
+      field: "mode",
+      current: baseSnapshot,
+      changes: { mode: "chat", chatAgent: "general" },
+    },
+    {
+      field: "chatAgent",
+      current: { ...baseSnapshot, mode: "chat" as const, chatAgent: "general" as const },
+      changes: { chatAgent: "research" },
+    },
+    { field: "cwd", current: baseSnapshot, changes: { cwd: "/other" } },
+    {
+      field: "sessionPath",
+      current: baseSnapshot,
+      changes: { sessionPath: "/other/session.jsonl" },
+    },
+    {
+      field: "sessionTitle",
+      current: baseSnapshot,
+      changes: { sessionTitle: "Other session" },
+    },
+    { field: "projectBound", current: baseSnapshot, changes: { projectBound: false } },
+    { field: "restoreChecked", current: baseSnapshot, changes: { restoreChecked: false } },
+    { field: "activeWork", current: baseSnapshot, changes: { activeWork: true } },
+  ] as const)("allocates when $field changes", ({ current, changes }) => {
+    const snapshots = { [current.paneId]: current };
+    const incoming = { ...current, ...changes } as PaneSnapshot;
+
+    const merged = mergePaneSnapshot(snapshots, incoming);
+
+    expect(merged).not.toBe(snapshots);
+    expect(merged[incoming.paneId]).toBe(incoming);
+  });
 });
 
 describe("WorkspaceShell", () => {
@@ -454,6 +598,239 @@ describe("WorkspaceShell", () => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
       expect(saved.root.size.value).toBe(55);
     });
+  });
+
+  it("keeps pane lifecycle callbacks and effects stable across unrelated rerenders", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+
+    const initialCallback = latestPaneProps.get("primary")?.onLifecycleError;
+    const initialExecutionCount = lifecycleEffectExecutions.get("primary");
+    expect(initialCallback).toBeTypeOf("function");
+    expect(initialExecutionCount).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
+
+    expect(latestPaneProps.get("primary")?.onLifecycleError).toBe(initialCallback);
+    expect(lifecycleEffectExecutions.get("primary")).toBe(initialExecutionCount);
+    expect(lifecycleCallbacks.get("primary")).toEqual([initialCallback]);
+  });
+
+  it("routes lifecycle errors through the pane that reported them", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+
+    latestPaneProps.get("secondary")?.onLifecycleError?.(new Error("secondary restore failed"));
+
+    expect(
+      await screen.findByText(/Pane secondary could not restore its saved session/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Pane primary could not restore its saved session/)).toBeNull();
+  });
+
+  it("updates the native title from a changed focused-pane snapshot", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+
+    emitPaneSnapshot("primary", { sessionTitle: "Renamed session" });
+
+    await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("Renamed session"));
+  });
+
+  it("gates closure after active work changes in a pane snapshot", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+
+    const titleCallCount = bridge.setWindowTitle.mock.calls.length;
+    emitPaneSnapshot("secondary", { activeWork: true });
+    await waitFor(() =>
+      expect(bridge.setWindowTitle.mock.calls.length).toBeGreaterThan(titleCallCount),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+
+    expect(screen.getByText(/Pane secondary has active work/)).toBeTruthy();
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  });
+
+  it("ignores repeated code-mode chat-agent defaults during target synchronization", async () => {
+    saveTwoPaneLayout();
+    const persist = vi.spyOn(Storage.prototype, "setItem");
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+    await waitFor(() => expect(persist).toHaveBeenCalled());
+
+    const persistenceCount = persist.mock.calls.length;
+    await act(async () => {
+      emitPaneSnapshot("primary", { chatAgent: "general" });
+      emitPaneSnapshot("primary", { chatAgent: "general" });
+    });
+
+    expect(persist).toHaveBeenCalledTimes(persistenceCount);
+    const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
+    expect(saved.panes.primary).toEqual({
+      kind: "agent",
+      mode: "code",
+      cwd: "/one",
+      sessionPath: "/one.jsonl",
+    });
+  });
+
+  it("persists changed pane target fields and project binding", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+
+    emitPaneSnapshot("primary", {
+      mode: "chat",
+      chatAgent: "research",
+      cwd: "/changed",
+      sessionPath: "/changed/session.jsonl",
+      projectBound: true,
+    });
+
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
+      expect(saved.panes.primary).toEqual({
+        kind: "agent",
+        mode: "chat",
+        chatAgent: "research",
+        cwd: "/changed",
+        sessionPath: "/changed/session.jsonl",
+      });
+    });
+
+    emitPaneSnapshot("primary", { cwd: null, sessionPath: null, projectBound: false });
+    await waitFor(() => {
+      const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
+      expect(saved.panes.primary).toBeNull();
+    });
+  });
+
+  it("routes native drag feedback, drops, and titles through the focused pane", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+    await waitFor(() => expect(bridge.nativeDropHandler).not.toBeNull());
+    await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("/one"));
+
+    bridge.nativeDropHandler?.({ payload: { type: "enter", paths: [] } });
+    expect(paneNativeDragStates.get("primary")).toEqual([true]);
+    bridge.nativeDropHandler?.({ payload: { type: "drop", paths: ["/first"] } });
+    expect(paneNativeDragStates.get("primary")).toEqual([true, false]);
+    expect(paneDrops.get("primary")).toEqual([["/first"]]);
+    expect(paneDrops.get("secondary")).toBeUndefined();
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+    await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("/two"));
+    bridge.nativeDropHandler?.({ payload: { type: "over", paths: [] } });
+    bridge.nativeDropHandler?.({ payload: { type: "leave", paths: [] } });
+    expect(paneNativeDragStates.get("secondary")).toEqual([true, false]);
+    bridge.nativeDropHandler?.({ payload: { type: "drop", paths: ["/second"] } });
+    expect(paneDrops.get("secondary")).toEqual([["/second"]]);
+  });
+
+  it("registers one global window shortcut action with multiple panes", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+
+    fireEvent.keyDown(window, { key: "n", ctrlKey: true });
+    expect(bridge.newWindow).toHaveBeenCalledOnce();
+  });
+
+  it("confirms active-work closure, supports cancel, then disposes once and restores focus", async () => {
+    activeWorkPanes.add("secondary");
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-secondary");
+
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+    expect(screen.getByText(/Pane secondary has active work/)).toBeTruthy();
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByTestId("pane-secondary")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
+    await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
+    expect(bridge.disposePaneSession).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "primary input" }));
+  });
+
+  it("warns once for a stale pane restore target", async () => {
+    failingRestorePanes.add("secondary");
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(
+      await screen.findByText(/Pane secondary could not restore its saved session/),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rearrange panes" }));
+    expect(screen.getAllByText(/Pane secondary could not restore its saved session/)).toHaveLength(
+      1,
+    );
+    expect(lifecycleEffectExecutions.get("secondary")).toBe(1);
+  });
+
+  it("warns once when workspace storage cannot be read", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage denied");
+    });
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByText(/Workspace layout could not be read/)).toBeTruthy();
+    expect(screen.getAllByText(/Workspace layout could not be read/)).toHaveLength(1);
+  });
+
+  it("warns once and preserves malformed workspace bytes", async () => {
+    localStorage.setItem("gg-workspace-layout-recursive:main", "{malformed");
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect(await screen.findByText(/Workspace layout was malformed/)).toBeTruthy();
+    expect(localStorage.getItem("gg-workspace-layout-recursive-rejected:main")).toBe("{malformed");
+    expect(screen.getAllByText(/Workspace layout was malformed/)).toHaveLength(1);
+  });
+
+  it("clamps horizontal, vertical, and nested splits to pixel minima with narrow fallback", () => {
+    const leaf = (paneId: string) => ({ type: "leaf" as const, paneId });
+    const horizontal = {
+      type: "split" as const,
+      direction: "horizontal" as const,
+      ratio: 50,
+      size: { type: "ratio" as const, value: 50 },
+      first: leaf("one"),
+      second: leaf("two"),
+    };
+    expect(clampWorkspaceSplitRatio(horizontal, [], "horizontal", 5, 1024)).toBeCloseTo(
+      (280 / 1017) * 100,
+    );
+    expect(clampWorkspaceSplitRatio(horizontal, [], "horizontal", 95, 500)).toBe(90);
+
+    const nested = {
+      ...horizontal,
+      first: {
+        type: "split" as const,
+        direction: "horizontal" as const,
+        ratio: 50,
+        size: { type: "ratio" as const, value: 50 },
+        first: leaf("one"),
+        second: leaf("three"),
+      },
+    };
+    expect(clampWorkspaceSplitRatio(nested, [], "horizontal", 10, 1200)).toBeCloseTo(
+      (567 / 1193) * 100,
+    );
+
+    const vertical = { ...horizontal, direction: "vertical" as const };
+    expect(clampWorkspaceSplitRatio(vertical, [], "vertical", 5, 800)).toBeCloseTo(
+      (280 / 793) * 100,
+    );
   });
 
   it("closes an auxiliary session, collapses the tree, and restores focus", async () => {

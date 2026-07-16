@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HomeScreen } from "./HomeScreen";
 
@@ -41,7 +41,7 @@ vi.mock("./update", () => ({
     install: vi.fn(),
   }),
 }));
-vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => <div>GG Coder</div> }));
+vi.mock("./AsciiLogo", () => ({ AsciiLogo: () => <div>Supah Coder</div> }));
 vi.mock("./HomeBackdrop", () => ({ HomeBackdrop: () => null }));
 vi.mock("./MemeLayer", () => ({ MemeLayer: () => null }));
 vi.mock("./SettingsModal", () => ({ SettingsModal: () => null }));
@@ -57,6 +57,15 @@ afterEach(() => {
 });
 
 describe("HomeScreen", () => {
+  it("shows the Supah Coder brand", async () => {
+    render(<HomeScreen onProjects={vi.fn()} onChat={vi.fn()} onLogin={vi.fn()} />);
+    await waitFor(() => {
+      expect(screen.getByText("Supah Coder")).toBeDefined();
+      expect(screen.getByText("Built for shipping real projects fast")).toBeDefined();
+      expect(screen.getByText("v0.21.1")).toBeDefined();
+    });
+  });
+
   it("reports pane-scoped startup failure while loading progress", async () => {
     const waitForAgentReady = vi.fn(() => Promise.reject(new Error("primary pane unavailable")));
     const loadProgress = vi.fn();

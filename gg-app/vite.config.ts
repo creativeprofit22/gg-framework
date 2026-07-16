@@ -6,7 +6,7 @@ import react from "@vitejs/plugin-react";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(configDir, "..");
-const customBuildLabel = "GG Coder Local Fork";
+const customBuildLabel = "Supah Coder Local Fork";
 const localForkBranches = new Set([
   "custom/local-customizations",
   "custom/local-customizations-v2",

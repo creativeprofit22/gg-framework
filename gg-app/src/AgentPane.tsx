@@ -1,11 +1,13 @@
 /* eslint-disable react-hooks/refs, react-hooks/immutability, react-hooks/preserve-manual-memoization -- Preserve the extracted v2 agent UI's established hook ordering and callbacks. */
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, memo } from "react";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import {
+  MENTOR_DISPLAY_NAME,
+  MENTOR_HANDLE,
+  PRODUCT_DISPLAY_NAME,
+  PRODUCT_SHORT_NAME,
+} from "./brand";
 import { theme } from "./theme";
 import {
-  newWindow,
-  focusWindowByOffset,
-  arrangeAllWindows,
   onWindowOrder,
   restoreTarget,
   createPaneAgentClient,
@@ -13,7 +15,6 @@ import {
   type PaneSessionTarget,
   isSecondaryWindow,
   windowLabel,
-  setWindowTitle,
   openProjectPath,
   type AgentState,
   type WorkspaceMode,
@@ -65,7 +66,6 @@ import { BackButton } from "./BackButton";
 import { AutopilotToggle } from "./AutopilotToggle";
 import { HomeScreen } from "./HomeScreen";
 import { initialEntryView, type EntryView } from "./app-entry-view";
-import { Toaster } from "./Toaster";
 import { Confetti } from "./Confetti";
 import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
@@ -95,15 +95,15 @@ import { fileToPending, toWire, attachmentToPending, type PendingAttachment } fr
 import type { Item } from "./transcript-types";
 import "./App.css";
 
-const DEFAULT_INPUT_PLACEHOLDER = "Type a message, / commands, @ files, @Ken for help";
+const DEFAULT_INPUT_PLACEHOLDER = `Type a message, / commands, @ files, ${MENTOR_HANDLE} for help`;
 const INPUT_PLACEHOLDERS = [
   DEFAULT_INPUT_PLACEHOLDER,
-  "Need a second opinion? Ask @Ken",
-  "Stuck on what to do next? Ask @Ken",
+  `Need a second opinion? Ask ${MENTOR_HANDLE}`,
+  `Stuck on what to do next? Ask ${MENTOR_HANDLE}`,
   DEFAULT_INPUT_PLACEHOLDER,
-  "Want a second set of eyes? Ask @Ken",
-  "Unsure how to proceed? Ask @Ken",
-  "Need a quick review? Ask @Ken",
+  `Want a second set of eyes? Ask ${MENTOR_HANDLE}`,
+  `Unsure how to proceed? Ask ${MENTOR_HANDLE}`,
+  `Need a quick review? Ask ${MENTOR_HANDLE}`,
 ] as const;
 const RUNNING_INPUT_PLACEHOLDERS = [
   "Agent is working. Add a follow-up if you want",
@@ -236,6 +236,7 @@ export interface PaneSnapshot {
 
 export interface PaneInputActions {
   focus: () => void;
+  setNativeFileDragOver: (dragging: boolean) => void;
   handleNativeDrop: (paths: string[]) => void;
 }
 
@@ -255,6 +256,7 @@ export interface AgentPaneProps {
   target?: PaneSessionTarget | null;
   generation?: number | null;
   onGenerationChange?: (generation: number) => void;
+  /** Stable in workspace hosts, so consumers may safely include it in effect dependencies. */
   onLifecycleError?: (error: unknown) => void;
 }
 
@@ -714,62 +716,6 @@ export function AgentPane({
     };
   }, []);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (disposed) return;
-        const payload = event.payload;
-        if (payload.type === "enter" || payload.type === "over") {
-          if (canHandleWindowFileDrop()) setIsFileDragOver(true);
-          return;
-        }
-        if (payload.type === "leave") {
-          setIsFileDragOver(false);
-          return;
-        }
-        setIsFileDragOver(false);
-        if (!canHandleWindowFileDrop() || payload.paths.length === 0) return;
-        void getDroppedPathInfo(payload.paths).then((infos) => {
-          if (disposed) return;
-          insertDroppedFolderPaths(infos.filter((info) => info.isDir).map((info) => info.path));
-          const filePaths = infos.filter((info) => !info.isDir).map((info) => info.path);
-          if (filePaths.length > 0) void addNativeDroppedFiles(filePaths);
-        });
-      })
-      .then((off) => {
-        if (disposed) off();
-        else unlisten = off;
-      });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [insertDroppedFolderPaths]);
-
-  // Keep the native window title aligned with the visible title-bar context.
-  useEffect(() => {
-    const fallbackTitle = workspaceMode === "chat" ? "GG Chat" : "GG Coder";
-    const title =
-      !needsProject && !showPicker
-        ? formatWorkspaceTitle(
-            state?.cwd,
-            state?.gitBranch,
-            fallbackTitle,
-            state?.gitDirtyFileCount,
-          )
-        : fallbackTitle;
-    setWindowTitle(title);
-  }, [
-    needsProject,
-    showPicker,
-    state?.cwd,
-    state?.gitBranch,
-    state?.gitDirtyFileCount,
-    workspaceMode,
-  ]);
-
   // Auto-grow the chat textarea to fit its content (up to a CSS max-height,
   // after which it scrolls). Runs whenever the input value changes.
   //
@@ -795,38 +741,6 @@ export function AgentPane({
     // clears sizes the now-in-flow textarea to its real content height.
   }, [input, enhanceAnim]);
 
-  // Keyboard shortcuts for multi-window navigation.
-  //   Cmd/Ctrl+N         → new project window
-  //   Cmd/Ctrl+`          → cycle forward through windows (reading order)
-  //   Cmd/Ctrl+Shift+`    → cycle backward
-  //   Cmd/Ctrl+Shift+A    → auto-arrange all windows into a clean grid
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      const meta = e.metaKey || e.ctrlKey;
-      if (!meta) return;
-      // New window: Cmd/Ctrl + N (no Shift/Alt).
-      if (e.key.toLowerCase() === "n" && !e.altKey && !e.shiftKey) {
-        e.preventDefault();
-        void newWindow();
-        return;
-      }
-      // Cycle windows: Cmd/Ctrl + Backquote (Shift = backward).
-      // Use e.code (physical key) — Shift turns ` into ~, but code stays stable.
-      if (e.code === "Backquote" && !e.altKey) {
-        e.preventDefault();
-        void focusWindowByOffset(e.shiftKey ? -1 : 1);
-        return;
-      }
-      // Auto-arrange all windows: Cmd/Ctrl + Shift + A.
-      if (e.shiftKey && (e.key === "a" || e.key === "A") && !e.altKey) {
-        e.preventDefault();
-        void arrangeAllWindows();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
   // Track whether THIS window holds OS focus (for the prominent input border).
   // The webview's own focus/blur events are instant — no IPC round-trip.
   const [windowFocused, setWindowFocused] = useState(true);
@@ -843,6 +757,7 @@ export function AgentPane({
   // a second click. Skips when the user is selecting text or focused elsewhere
   // intentionally (e.g. a menu button).
   useEffect(() => {
+    if (!focused) return;
     const focusInput = (): void => {
       const active = document.activeElement;
       if (active && active !== document.body && active.tagName === "BUTTON") return;
@@ -875,7 +790,7 @@ export function AgentPane({
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("mouseup", focusInput);
     };
-  }, []);
+  }, [focused]);
 
   // Subscribe to the reading-order broadcast from Rust so each window knows its
   // position (e.g. "1/4") and whether it's focused. Updates automatically when
@@ -898,6 +813,7 @@ export function AgentPane({
   // background/text. Capture phase so it fires even when a handler stops
   // propagation; left button only.
   useEffect(() => {
+    if (!focused) return;
     const INTERACTIVE = "button, a, [role='button'], [role='option'], label, summary, select";
     const onClick = (e: MouseEvent): void => {
       if (e.button !== 0) return;
@@ -912,7 +828,7 @@ export function AgentPane({
     };
     document.addEventListener("click", onClick, true);
     return () => document.removeEventListener("click", onClick, true);
-  }, []);
+  }, [focused]);
 
   // Build-session SSE handling + assistant-streaming helpers live in the
   // useAgentEvents hook (mirrors useKenMentor). It owns the event machine's
@@ -1311,12 +1227,12 @@ export function AgentPane({
   // with it (case-insensitive, word-boundary so `@kennedy.ts` still picks files),
   // Ken is "active": the file picker is suppressed and the input is tinted in
   // Ken's color with a shimmering marker, so it's obvious the message goes to Ken.
-  const kenActive = workspaceMode === "code" && /^@ken\b/i.test(input.trimStart());
+  const kenActive = workspaceMode === "code" && /^@(supah|ken)\b/i.test(input.trimStart());
   // Split the input for the `@Ken` highlight overlay: any leading whitespace,
   // the literal `@Ken` token (preserving the user's casing), then the rest. Only
   // the token shimmers; lead+rest render in the normal input color.
   const kenInputParts = (() => {
-    const m = /^(\s*)(@ken)/i.exec(input);
+    const m = /^(\s*)(@(supah|ken))/i.exec(input);
     if (!m) return null;
     return { lead: m[1], token: m[2], rest: input.slice(m[1].length + m[2].length) };
   })();
@@ -1621,7 +1537,7 @@ export function AgentPane({
     // `@Ken <prompt>` (case-insensitive, optional colon) routes to Ken Kai, the
     // read-only mentor agent — NOT GG Coder. Ken runs concurrently with any
     // build run; his reply streams into a magenta bubble via ken_* events.
-    const kenMatch = workspaceMode === "code" ? /^@ken\b:?\s*/i.exec(trimmed) : null;
+    const kenMatch = workspaceMode === "code" ? /^@(supah|ken)\b:?\s*/i.exec(trimmed) : null;
     if (kenMatch) {
       const question = trimmed.slice(kenMatch[0].length).trim();
       if (!question) return;
@@ -1840,7 +1756,7 @@ export function AgentPane({
       sessionTitle: formatWorkspaceTitle(
         state?.cwd,
         state?.gitBranch,
-        workspaceMode === "chat" ? "GG Chat" : "GG Coder",
+        workspaceMode === "chat" ? "GG Chat" : PRODUCT_DISPLAY_NAME,
         state?.gitDirtyFileCount,
       ),
       projectBound: !needsProject && Boolean(state?.cwd ?? target?.cwd),
@@ -1870,10 +1786,21 @@ export function AgentPane({
   useEffect(() => {
     registerInput?.(paneId, {
       focus: () => inputRef.current?.focus(),
-      handleNativeDrop: () => {},
+      setNativeFileDragOver: (dragging) => {
+        setIsFileDragOver(dragging && canHandleWindowFileDrop());
+      },
+      handleNativeDrop: (paths) => {
+        if (!canHandleWindowFileDrop() || paths.length === 0) return;
+        setIsFileDragOver(false);
+        void getDroppedPathInfo(paths).then((infos) => {
+          insertDroppedFolderPaths(infos.filter((info) => info.isDir).map((info) => info.path));
+          const filePaths = infos.filter((info) => !info.isDir).map((info) => info.path);
+          if (filePaths.length > 0) void addNativeDroppedFiles(filePaths);
+        });
+      },
     });
     return () => registerInput?.(paneId, null);
-  }, [paneId, registerInput]);
+  }, [insertDroppedFolderPaths, paneId, registerInput]);
 
   // Hold the entry render until the restore check resolves, so a window reopened
   // from the saved workspace jumps straight into its project instead of briefly
@@ -1921,7 +1848,6 @@ export function AgentPane({
             onClose={() => setEntryView("home")}
           />
         )}
-        <Toaster />
       </div>
     );
   }
@@ -2115,7 +2041,7 @@ export function AgentPane({
           screen. Anchoring to this non-scrolling sibling keeps it pinned to
           what the user is actually looking at, at any scroll position. */}
       <div className="transcript-frame">
-        {workspaceMode === "code" && kenPowerBanner && (
+        {focused && workspaceMode === "code" && kenPowerBanner && (
           <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
         )}
         <div className="transcript" ref={scrollRef} onScroll={onTranscriptScroll}>
@@ -2142,10 +2068,10 @@ export function AgentPane({
       </div>
 
       <div className="liveregion">
-        {workspaceMode === "code" && autopilotReviewing && (
+        {focused && workspaceMode === "code" && autopilotReviewing && (
           <AutopilotReviewBar onCancel={requestCancel} />
         )}
-        {workspaceMode === "code" && kenRunning && (
+        {focused && workspaceMode === "code" && kenRunning && (
           <KenActivityBar
             runStartTs={kenRunStartTs}
             tokens={kenTokens}
@@ -2438,17 +2364,21 @@ export function AgentPane({
                     currentModel={state?.model ?? ""}
                     onSelect={onSelectModel}
                     onClose={() => setModelMenuOpen(false)}
-                    title={workspaceMode === "chat" ? "GG model" : "GG Coder model"}
+                    title={workspaceMode === "chat" ? "GG model" : `${PRODUCT_DISPLAY_NAME} model`}
                   />
                 )}
                 <span className="model-label" style={{ color: theme.text }}>
-                  GG
+                  {PRODUCT_SHORT_NAME}
                 </span>
                 <button
                   className="model-button"
                   style={{ color: theme.text }}
                   disabled={running || models.length === 0}
-                  title={workspaceMode === "chat" ? "Switch GG's model" : "Switch GG Coder's model"}
+                  title={
+                    workspaceMode === "chat"
+                      ? "Switch GG's model"
+                      : `Switch ${PRODUCT_DISPLAY_NAME}'s model`
+                  }
                   onClick={() => {
                     setKenModelMenuOpen(false);
                     setModelMenuOpen((o) => !o);
@@ -2467,13 +2397,13 @@ export function AgentPane({
                         currentModel={state?.kenModel ?? state?.model ?? ""}
                         onSelect={(id) => onSelectKenModel(id)}
                         onClose={() => setKenModelMenuOpen(false)}
-                        title="Ken's model"
+                        title={`${MENTOR_DISPLAY_NAME}'s model`}
                         onSelectFollow={() => onSelectKenModel(null)}
                         followActive={!state?.kenModelOverride}
                       />
                     )}
                     <span className="model-label" style={{ color: theme.ken }}>
-                      Ken
+                      {MENTOR_DISPLAY_NAME}
                     </span>
                     <button
                       className="model-button"
@@ -2481,8 +2411,8 @@ export function AgentPane({
                       disabled={models.length === 0}
                       title={
                         state?.kenModelOverride
-                          ? "Ken is pinned to his own model — click to change"
-                          : "Ken follows GG Coder's model — click to pin one"
+                          ? `${MENTOR_DISPLAY_NAME} is pinned to a model — click to change`
+                          : `${MENTOR_DISPLAY_NAME} follows ${PRODUCT_DISPLAY_NAME}'s model — click to pin one`
                       }
                       onClick={() => {
                         setModelMenuOpen(false);
@@ -2514,7 +2444,7 @@ export function AgentPane({
           <span className="update-banner-dot" />
           {appUpdate.localPatched
             ? `${appUpdate.installLabel} — click to review the protected source update`
-            : `Ken just pushed a new update (${appUpdate.version}) — click here to install`}
+            : `${MENTOR_DISPLAY_NAME} just pushed a new update (${appUpdate.version}) — click here to install`}
         </button>
       )}
       {["installing", "completed", "error"].includes(appUpdate.phase) && (
@@ -2524,7 +2454,7 @@ export function AgentPane({
         </div>
       )}
 
-      {workspaceMode === "code" && showInitGit && (
+      {focused && workspaceMode === "code" && showInitGit && (
         <InitGitModal
           defaultName={defaultRepoName}
           onClose={() => setShowInitGit(false)}
@@ -2535,7 +2465,7 @@ export function AgentPane({
         />
       )}
 
-      {showLocalUpdateConfirm && (
+      {focused && showLocalUpdateConfirm && (
         <ConfirmModal
           title={LOCAL_UPDATE_CONFIRMATION_TITLE}
           message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
@@ -2548,7 +2478,7 @@ export function AgentPane({
         />
       )}
 
-      {confirmNewSession && (
+      {focused && confirmNewSession && (
         <ConfirmModal
           title={workspaceMode === "chat" ? "New Chat" : "New Session"}
           message={
@@ -2563,7 +2493,7 @@ export function AgentPane({
         />
       )}
 
-      {workspaceMode === "code" && planReview !== null && (
+      {focused && workspaceMode === "code" && planReview !== null && (
         <PlanReviewModal
           content={planReview}
           // Autopilot Ken reviews submitted plans himself; the indicator tells
@@ -2575,15 +2505,15 @@ export function AgentPane({
         />
       )}
 
-      {workspaceMode === "chat" && showMemories && (
+      {focused && workspaceMode === "chat" && showMemories && (
         <MemoryModal onClose={() => setShowMemories(false)} />
       )}
 
-      {showScorecard && progress && (
+      {focused && showScorecard && progress && (
         <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
       )}
 
-      {workspaceMode === "code" && showTasks && (
+      {focused && workspaceMode === "code" && showTasks && (
         <TasksModal
           tasks={projectTasks}
           running={running}
@@ -2620,7 +2550,7 @@ const TranscriptRow = memo(function TranscriptRow({
         return (
           <div className="user-msg command labelled user-ken-sent">
             <span className="command-shimmer" style={{ color: theme.ken }}>
-              Sent to GG Coder
+              Sent to {PRODUCT_DISPLAY_NAME}
             </span>
           </div>
         );
@@ -2719,8 +2649,8 @@ const TranscriptRow = memo(function TranscriptRow({
       // repeating the exact same sentence turn after turn.
       const copy: Record<Extract<Item, { kind: "autopilot" }>["phase"], string> = {
         prompted: item.body?.trim()
-          ? `Sending GG Coder back in:\n\n${item.body.trim()}`
-          : "Sending GG Coder back in for another pass.",
+          ? `Sending ${PRODUCT_DISPLAY_NAME} back in:\n\n${item.body.trim()}`
+          : `Sending ${PRODUCT_DISPLAY_NAME} back in for another pass.`,
         done: allClearCopy(item.copySeed, item.id),
         human: item.reason?.trim() ? item.reason.trim() : "Need you to weigh in on this one.",
         capped: "Paused autopilot after 3 rounds. Take a look before I keep going.",

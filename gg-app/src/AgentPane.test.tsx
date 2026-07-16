@@ -38,8 +38,16 @@ vi.mock("./useAgentEvents", () => ({
   useAgentEvents: () => ({ handleEvent: vi.fn(), pushItem: vi.fn(), endStreamingText: vi.fn() }),
 }));
 vi.mock("./HomeScreen", () => ({
-  HomeScreen: (props: { onProjects?: () => void }) => (
-    <div data-testid="home-screen" data-has-client={String("client" in props)}>
+  HomeScreen: (props: {
+    onProjects?: () => void;
+    waitForAgentReady?: () => Promise<unknown>;
+    loadProgress?: () => Promise<unknown>;
+  }) => (
+    <div
+      data-testid="home-screen"
+      data-has-pane-ready={String(typeof props.waitForAgentReady === "function")}
+      data-has-pane-progress={String(typeof props.loadProgress === "function")}
+    >
       <button onClick={props.onProjects}>Open projects</button>
     </div>
   ),
@@ -141,16 +149,16 @@ function client(paneId: string, generation: number): PaneAgentClient {
 
 afterEach(cleanup);
 describe("AgentPane lifecycle", () => {
-  it("keeps the restored home UI on explicit primary compatibility wrappers", async () => {
+  it("wires the restored home UI through the pane-scoped catalog client", async () => {
     const pane = client("primary", 1);
     render(<AgentPane client={pane} />);
 
     await waitFor(() =>
       expect(document.querySelector('[data-testid="home-screen"]')).not.toBeNull(),
     );
-    expect(
-      document.querySelector('[data-testid="home-screen"]')?.getAttribute("data-has-client"),
-    ).toBe("false");
+    const home = document.querySelector('[data-testid="home-screen"]');
+    expect(home?.getAttribute("data-has-pane-ready")).toBe("true");
+    expect(home?.getAttribute("data-has-pane-progress")).toBe("true");
     expect(pane.create).not.toHaveBeenCalled();
   });
 

@@ -36,13 +36,21 @@ interface Props {
   onProjects: () => void;
   onChat: () => void;
   onLogin: () => void;
+  waitForAgentReady?: () => Promise<unknown>;
+  loadProgress?: () => Promise<ProgressSnapshot>;
 }
 
 /**
  * App entry screen: the shimmering GG Coder banner over the primary actions.
  * Code and Chat require a configured workspace folder and connected AI provider.
  */
-export function HomeScreen({ onProjects, onChat, onLogin }: Props): React.ReactElement {
+export function HomeScreen({
+  onProjects,
+  onChat,
+  onLogin,
+  waitForAgentReady = waitForReady,
+  loadProgress = getProgress,
+}: Props): React.ReactElement {
   const [folderSet, setFolderSet] = useState(false);
   const [providerCount, setProviderCount] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
@@ -61,11 +69,16 @@ export function HomeScreen({ onProjects, onChat, onLogin }: Props): React.ReactE
     void getVersion()
       .then(setVersion)
       .catch(() => {});
-    void waitForReady()
-      .then(() => getProgress())
+    void waitForAgentReady()
+      .then(() => loadProgress())
       .then(setProgress)
-      .catch(() => {});
-  }, []);
+      .catch((error: unknown) => {
+        toast(
+          `Agent failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      });
+  }, [loadProgress, waitForAgentReady]);
 
   async function refresh(): Promise<void> {
     // Settings + auth are read NATIVELY (Rust) — do them first, WITHOUT waiting on

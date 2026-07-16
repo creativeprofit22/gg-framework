@@ -1894,6 +1894,8 @@ export function AgentPane({
               setEntryView("chats");
             }}
             onLogin={() => setEntryView("login")}
+            waitForAgentReady={catalogClient.waitForReady}
+            loadProgress={catalogClient.getProgress}
           />
         ) : entryView === "login" ? (
           <LoginScreen onClose={() => setEntryView("home")} />

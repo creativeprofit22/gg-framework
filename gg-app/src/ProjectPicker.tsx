@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import {
@@ -18,6 +18,7 @@ import { BackButton } from "./BackButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
+import { toast } from "./toast";
 
 export interface ProjectPickerProps {
   /** Called after the selected project/session has been bound to the owning pane. */
@@ -56,6 +57,7 @@ export function ProjectPicker({
   const [projectsRoot, setProjectsRoot] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [query, setQuery] = useState("");
+  const sessionRequestRef = useRef(0);
 
   const q = query.trim().toLowerCase();
   const filteredProjects = q
@@ -93,9 +95,35 @@ export function ProjectPicker({
     };
   }, []);
 
+  const openProject = useCallback(
+    (project: DiscoveredProject): void => {
+      const requestId = ++sessionRequestRef.current;
+      setSelected(project);
+      setSessions([]);
+      setSessionsLoading(true);
+      void discoverSessions(project.path)
+        .then((nextSessions) => {
+          if (requestId === sessionRequestRef.current) setSessions(nextSessions);
+        })
+        .catch(() => {
+          if (requestId === sessionRequestRef.current) setSessions([]);
+        })
+        .finally(() => {
+          if (requestId === sessionRequestRef.current) setSessionsLoading(false);
+        });
+    },
+    [discoverSessions],
+  );
+
+  useEffect(() => {
+    return () => {
+      sessionRequestRef.current += 1;
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
-    // The window's sidecar serves project discovery; wait for it before asking.
+    // The pane-scoped client must be ready before its project catalog is queried.
     void waitForCatalogReady()
       .then(() => discoverProjects())
       .then((p) => {
@@ -108,24 +136,18 @@ export function ProjectPicker({
           if (match) openProject(match);
         }
       })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setLoading(false);
+        toast(
+          `Agent failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
       });
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function openProject(project: DiscoveredProject): void {
-    setSelected(project);
-    setSessions([]);
-    setSessionsLoading(true);
-    void discoverSessions(project.path).then((s) => {
-      setSessions(s);
-      setSessionsLoading(false);
-    });
-  }
+  }, [discoverProjects, initialProjectPath, openProject, waitForCatalogReady]);
 
   function choose(cwd: string, sessionPath?: string): void {
     if (busy) return;
@@ -155,7 +177,13 @@ export function ProjectPicker({
     <div className="picker">
       <div className="picker-head" data-tauri-drag-region>
         {selected ? (
-          <BackButton label="All projects" onClick={() => setSelected(null)} />
+          <BackButton
+            label="All projects"
+            onClick={() => {
+              sessionRequestRef.current += 1;
+              setSelected(null);
+            }}
+          />
         ) : onClose ? (
           <BackButton label="Back" onClick={onClose} />
         ) : null}

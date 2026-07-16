@@ -7,12 +7,27 @@ import type { AgentPaneProps } from "./AgentPane";
 import { WorkspaceShell } from "./WorkspaceShell";
 
 const bridge = vi.hoisted(() => ({
+  copiedPaneRestoreTarget: vi.fn(() =>
+    Promise.resolve(
+      null as null | {
+        mode: "code" | "chat";
+        chatAgent?: "general" | "therapist" | "research";
+        cwd: string;
+        sessionPath: string | null;
+      },
+    ),
+  ),
+  copyPaneToNewWindow: vi.fn(() =>
+    Promise.resolve({ windowLabel: "project-1", reusedWindow: false }),
+  ),
   disposePaneSession: vi.fn(() => Promise.resolve()),
 }));
 const paneMounts = new Map<string, number>();
 const paneUnmounts = new Map<string, number>();
 
 vi.mock("./agent", () => ({
+  copiedPaneRestoreTarget: bridge.copiedPaneRestoreTarget,
+  copyPaneToNewWindow: bridge.copyPaneToNewWindow,
   disposePaneSession: bridge.disposePaneSession,
   windowLabel: "main",
 }));
@@ -134,7 +149,11 @@ beforeEach(() => {
   localStorage.clear();
   paneMounts.clear();
   paneUnmounts.clear();
-  vi.clearAllMocks();
+  bridge.copiedPaneRestoreTarget.mockReset().mockResolvedValue(null);
+  bridge.copyPaneToNewWindow
+    .mockReset()
+    .mockResolvedValue({ windowLabel: "project-1", reusedWindow: false });
+  bridge.disposePaneSession.mockReset().mockResolvedValue(undefined);
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
     callback(0);
     return 1;
@@ -150,6 +169,9 @@ describe("WorkspaceShell", () => {
   it("renders the agent-only workspace and splits right or down", async () => {
     render(<WorkspaceShell renderPane={renderPane} />);
     expect(await screen.findByTestId("pane-primary")).toBeTruthy();
+    await waitFor(() =>
+      expect(localStorage.getItem("gg-workspace-layout-recursive:main")).not.toBeNull(),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
     expect(await screen.findByTestId("pane-pane-1")).toBeTruthy();
@@ -174,6 +196,73 @@ describe("WorkspaceShell", () => {
       expect(saved.focusedPaneId).toBe("secondary");
       expect(saved.panes.secondary.sessionPath).toBe("/two.jsonl");
     });
+  });
+
+  it("copies only the focused pane to a new window and preserves the source", async () => {
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const source = await screen.findByTestId("pane-secondary");
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+    await waitFor(() => expect(source.dataset.focused).toBe("true"));
+    fireEvent.click(screen.getByRole("button", { name: "Copy to New Window" }));
+
+    await waitFor(() => expect(bridge.copyPaneToNewWindow).toHaveBeenCalledWith("secondary"));
+    expect(screen.getByTestId("pane-secondary")).toBe(source);
+    expect(screen.getByTestId("pane-primary")).toBeTruthy();
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+    expect(screen.getByText("Pane secondary copied to window project-1.")).toBeTruthy();
+  });
+
+  it("reports copy failure with successful rollback and keeps the focused source", async () => {
+    saveTwoPaneLayout();
+    bridge.copyPaneToNewWindow.mockRejectedValueOnce({ rollbackSucceeded: true });
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const source = await screen.findByTestId("pane-secondary");
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+    await waitFor(() => expect(source.dataset.focused).toBe("true"));
+    fireEvent.click(screen.getByRole("button", { name: "Copy to New Window" }));
+
+    expect(
+      await screen.findByText("Could not copy pane secondary; the new window was rolled back."),
+    ).toBeTruthy();
+    expect(screen.getByTestId("pane-secondary")).toBe(source);
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+  });
+
+  it("reports a reused destination window without altering the focused source", async () => {
+    saveTwoPaneLayout();
+    bridge.copyPaneToNewWindow.mockResolvedValueOnce({
+      windowLabel: "project-4",
+      reusedWindow: true,
+    });
+    render(<WorkspaceShell renderPane={renderPane} />);
+    const source = await screen.findByTestId("pane-secondary");
+
+    fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
+    await waitFor(() => expect(source.dataset.focused).toBe("true"));
+    fireEvent.click(screen.getByRole("button", { name: "Copy to New Window" }));
+
+    expect(
+      await screen.findByText("Pane secondary is already copied in window project-4."),
+    ).toBeTruthy();
+    expect(screen.getByTestId("pane-secondary")).toBe(source);
+  });
+
+  it("hydrates a copied window as exactly one primary pane", async () => {
+    bridge.copiedPaneRestoreTarget.mockResolvedValueOnce({
+      mode: "chat",
+      chatAgent: "research",
+      cwd: "/copied",
+      sessionPath: "/copied/session.jsonl",
+    });
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+
+    expect((await screen.findByTestId("pane-primary")).dataset.target).toBe("/copied");
+    expect(screen.queryByTestId("pane-secondary")).toBeNull();
+    expect(screen.queryByRole("separator")).toBeNull();
   });
 
   it("opts into accessible pane drag controls and moves without remounting or disposing", async () => {

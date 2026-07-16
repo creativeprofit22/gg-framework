@@ -447,6 +447,62 @@ struct RestoreTargets {
     map: Mutex<HashMap<String, RestoreEntry>>,
 }
 
+#[derive(Clone)]
+struct PaneCopyOperation {
+    source_owner: String,
+    target_label: String,
+    restore: RestoreEntry,
+    cloned_session_path: Option<PathBuf>,
+    started: bool,
+}
+
+#[derive(Default)]
+struct PaneCopyRegistry {
+    operations: HashMap<(String, String), PaneCopyOperation>,
+    target_owners: HashMap<String, (String, String)>,
+    rolling_back: HashSet<String>,
+}
+
+#[derive(Default)]
+struct PaneCopies {
+    map: Mutex<PaneCopyRegistry>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreparedPaneCopy {
+    copy_id: String,
+    window_label: String,
+    reused_window: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PaneCopyResult {
+    window_label: String,
+    reused_window: bool,
+}
+
+fn remove_copy_operation(
+    registry: &mut PaneCopyRegistry,
+    source_owner: &str,
+    copy_id: &str,
+) -> Option<PaneCopyOperation> {
+    let key = (source_owner.to_string(), copy_id.to_string());
+    let operation = registry.operations.remove(&key)?;
+    registry.target_owners.remove(&operation.target_label);
+    Some(operation)
+}
+
+fn consume_copy_restore_target(
+    copies: &PaneCopyRegistry,
+    targets: &mut HashMap<String, RestoreEntry>,
+    target_label: &str,
+) -> Option<RestoreEntry> {
+    copies.target_owners.get(target_label)?;
+    remove_restore_target(targets, target_label)
+}
+
 fn register_restore_target(
     targets: &mut HashMap<String, RestoreEntry>,
     label: String,
@@ -973,7 +1029,6 @@ fn agent_pane_status(webview: WebviewWindow, pane_id: String) -> Result<PaneStar
     status.ready &= port_for(&webview).is_some();
     Ok(status)
 }
-
 
 #[tauri::command]
 fn dropped_path_info(paths: Vec<String>) -> Vec<DroppedPathInfo> {
@@ -3367,6 +3422,353 @@ async fn setup_windows(app: tauri::AppHandle, count: usize) -> Result<(), String
     Ok(())
 }
 
+fn copy_window_label(copy_id: &str) -> String {
+    format!("copy-{copy_id}")
+}
+
+fn clone_pane_session_file(source: &Path, copy_id: &str) -> Result<PathBuf, String> {
+    if !source.is_file() {
+        return Err("the pane session is not available to copy".into());
+    }
+    let parent = source
+        .parent()
+        .ok_or("the pane session has no parent directory")?;
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("session");
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("jsonl");
+    let destination = parent.join(format!("{stem}-copy-{copy_id}.{extension}"));
+    if destination.exists() {
+        return Ok(destination);
+    }
+
+    // Copy to a sibling temporary file, validate complete JSONL, assign the
+    // duplicate a fresh durable session identity, then publish by atomic rename.
+    // The caller only allows idle panes, so no session writer is active.
+    let temporary = parent.join(format!(".{stem}-copy-{copy_id}.tmp"));
+    std::fs::copy(source, &temporary).map_err(|error| error.to_string())?;
+    let contents = std::fs::read_to_string(&temporary).map_err(|error| error.to_string())?;
+    let parsed = (|| -> Option<String> {
+        if !contents.ends_with('\n') {
+            return None;
+        }
+        let first_newline = contents.find('\n')?;
+        let mut header =
+            serde_json::from_str::<serde_json::Value>(&contents[..first_newline]).ok()?;
+        if header.get("type").and_then(|value| value.as_str()) != Some("session") {
+            return None;
+        }
+        if !contents[first_newline + 1..]
+            .lines()
+            .all(|line| serde_json::from_str::<serde_json::Value>(line).is_ok())
+        {
+            return None;
+        }
+        header["id"] = serde_json::Value::String(copy_id.to_string());
+        Some(format!("{}{}", header, &contents[first_newline..]))
+    })();
+    let Some(rewritten) = parsed else {
+        let _ = std::fs::remove_file(&temporary);
+        return Err("the pane session changed while it was being copied".into());
+    };
+    if let Err(error) = std::fs::write(&temporary, rewritten) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    std::fs::rename(&temporary, &destination).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        error.to_string()
+    })?;
+    Ok(destination)
+}
+
+/// Prepare an owner-scoped copy. The source pane stays registered and running;
+/// only its durable session file is snapshotted to a new path for the destination.
+#[tauri::command]
+async fn agent_pane_copy(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    client: tauri::State<'_, reqwest::Client>,
+    pane_id: String,
+    copy_id: String,
+) -> Result<PreparedPaneCopy, String> {
+    validate_pane_id(&pane_id)?;
+    validate_pane_id(&copy_id)?;
+    let owner = webview.label().to_string();
+
+    if let Some(existing) = app
+        .state::<PaneCopies>()
+        .map
+        .lock()
+        .unwrap()
+        .operations
+        .get(&(owner.clone(), copy_id.clone()))
+        .cloned()
+    {
+        return Ok(PreparedPaneCopy {
+            copy_id,
+            window_label: existing.target_label,
+            reused_window: true,
+        });
+    }
+
+    let source = {
+        let windows: State<Windows> = app.state();
+        let registry = windows.map.lock().unwrap();
+        resolve_owned_pane(&registry, &owner, &pane_id)
+            .cloned()
+            .ok_or_else(|| format!("pane '{pane_id}' does not exist in this window"))?
+    };
+    let session_id = source
+        .session_id
+        .clone()
+        .ok_or("pane session is not ready")?;
+    let state = sidecar_get_json(&webview, &pane_id, &client, "/state").await?;
+    if state.get("running").and_then(|value| value.as_bool()) == Some(true)
+        || state.get("runState").and_then(|value| value.as_str()) != Some("idle")
+    {
+        return Err("wait for the pane to finish before copying it".into());
+    }
+    let live_session_path = state
+        .get("sessionPath")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| source.session_path.as_ref().map(PathBuf::from))
+        .ok_or("pane session has not been persisted yet")?;
+
+    {
+        let windows: State<Windows> = app.state();
+        let registry = windows.map.lock().unwrap();
+        if !pane_identity_is_current(&registry, &owner, &pane_id, source.generation, &session_id) {
+            return Err("pane changed while the copy was being prepared".into());
+        }
+    }
+
+    let cloned_path = clone_pane_session_file(&live_session_path, &copy_id)?;
+    let cwd = source.cwd.ok_or("pane has no project target")?;
+    let restore = RestoreEntry {
+        mode: source.mode,
+        chat_agent: source.chat_agent,
+        cwd: cwd.to_string_lossy().to_string(),
+        session_path: Some(cloned_path.to_string_lossy().to_string()),
+    };
+    let target_label = {
+        let copies: State<PaneCopies> = app.state();
+        let mut registry = copies.map.lock().unwrap();
+        let key = (owner.clone(), copy_id.clone());
+        if let Some(existing) = registry.operations.get(&key) {
+            return Ok(PreparedPaneCopy {
+                copy_id,
+                window_label: existing.target_label.clone(),
+                reused_window: true,
+            });
+        }
+        let label = copy_window_label(&copy_id);
+        if app.get_webview_window(&label).is_some() || registry.target_owners.contains_key(&label) {
+            let _ = std::fs::remove_file(&cloned_path);
+            return Err("copy destination label is already in use".into());
+        }
+        registry.target_owners.insert(label.clone(), key.clone());
+        registry.operations.insert(
+            key,
+            PaneCopyOperation {
+                source_owner: owner,
+                target_label: label.clone(),
+                restore,
+                cloned_session_path: Some(cloned_path),
+                started: false,
+            },
+        );
+        label
+    };
+    Ok(PreparedPaneCopy {
+        copy_id,
+        window_label: target_label,
+        reused_window: false,
+    })
+}
+
+async fn rollback_pane_copy(app: &tauri::AppHandle, operation: PaneCopyOperation) {
+    remove_restore_target(
+        &mut app.state::<RestoreTargets>().map.lock().unwrap(),
+        &operation.target_label,
+    );
+    let panes = {
+        let windows: State<Windows> = app.state();
+        let mut registry = windows.map.lock().unwrap();
+        take_window_panes(&mut registry, &operation.target_label)
+    };
+    let daemon_port = *app.state::<Daemon>().port.lock().unwrap();
+    if let Some(port) = daemon_port {
+        for pane in panes {
+            if let Some(session_id) = pane.session_id {
+                daemon_delete_session(app, port, &session_id).await;
+            }
+        }
+    }
+    if let Some(path) = operation.cloned_session_path {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(window) = app.get_webview_window(&operation.target_label) {
+        app.state::<PaneCopies>()
+            .map
+            .lock()
+            .unwrap()
+            .rolling_back
+            .insert(operation.target_label.clone());
+        let _ = window.close();
+    }
+}
+
+/// Build/start the reserved destination. Retries with the same copy id focus the
+/// already-started window instead of creating another one.
+#[tauri::command]
+async fn agent_pane_copy_startup(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    copy_id: String,
+) -> Result<PaneCopyResult, String> {
+    validate_pane_id(&copy_id)?;
+    let owner = webview.label().to_string();
+    let operation = app
+        .state::<PaneCopies>()
+        .map
+        .lock()
+        .unwrap()
+        .operations
+        .get(&(owner.clone(), copy_id.clone()))
+        .cloned()
+        .ok_or("pane copy reservation does not exist")?;
+    if operation.source_owner != owner {
+        return Err("pane copy reservation belongs to another window".into());
+    }
+    if operation.started {
+        if let Some(window) = app.get_webview_window(&operation.target_label) {
+            let _ = window.set_focus();
+            return Ok(PaneCopyResult {
+                window_label: operation.target_label,
+                reused_window: true,
+            });
+        }
+        return Err("the copied window closed before startup completed".into());
+    }
+
+    register_restore_target(
+        &mut app.state::<RestoreTargets>().map.lock().unwrap(),
+        operation.target_label.clone(),
+        operation.restore.clone(),
+    );
+    let window = match build_app_window_with_visibility(&app, &operation.target_label, false) {
+        Ok(window) => window,
+        Err(error) => {
+            let removed = remove_copy_operation(
+                &mut app.state::<PaneCopies>().map.lock().unwrap(),
+                &owner,
+                &copy_id,
+            );
+            if let Some(removed) = removed {
+                rollback_pane_copy(&app, removed).await;
+            }
+            return Err(error);
+        }
+    };
+    start_window_session(
+        app.clone(),
+        operation.target_label.clone(),
+        operation.restore.mode,
+        operation.restore.chat_agent,
+        PathBuf::from(&operation.restore.cwd),
+        operation.restore.session_path.clone(),
+    );
+
+    let mut startup_error = None;
+    for _ in 0..600 {
+        if app.get_webview_window(&operation.target_label).is_none() {
+            startup_error = Some("copied window closed during startup".into());
+            break;
+        }
+        let status = {
+            let windows: State<Windows> = app.state();
+            let registry = windows.map.lock().unwrap();
+            pane_startup_status(&registry, &operation.target_label, PRIMARY_PANE_ID).ok()
+        };
+        if let Some(status) = status {
+            if let Some(error) = status.error {
+                startup_error = Some(error);
+                break;
+            }
+            if status.ready && port_for(&webview).is_some() {
+                let marked_started = app
+                    .state::<PaneCopies>()
+                    .map
+                    .lock()
+                    .unwrap()
+                    .operations
+                    .get_mut(&(owner.clone(), copy_id.clone()))
+                    .map(|operation| operation.started = true)
+                    .is_some();
+                if !marked_started {
+                    startup_error = Some("copy was closed during startup".into());
+                    break;
+                }
+                let _ = window.show();
+                let _ = window.set_focus();
+                snapshot_workspace(&app);
+                broadcast_window_order(&app);
+                return Ok(PaneCopyResult {
+                    window_label: operation.target_label,
+                    reused_window: false,
+                });
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let removed = remove_copy_operation(
+        &mut app.state::<PaneCopies>().map.lock().unwrap(),
+        &owner,
+        &copy_id,
+    );
+    if let Some(removed) = removed {
+        rollback_pane_copy(&app, removed).await;
+    }
+    Err(startup_error.unwrap_or_else(|| "copied pane did not start in time".into()))
+}
+
+/// Consume-once destination hydration. A source or unrelated window cannot read
+/// the target because ownership is looked up from the calling webview label.
+#[tauri::command]
+fn agent_pane_copy_restore(webview: WebviewWindow) -> Option<RestoreEntry> {
+    let copies: State<PaneCopies> = webview.state();
+    let targets: State<RestoreTargets> = webview.state();
+    let copies = copies.map.lock().unwrap();
+    let mut targets = targets.map.lock().unwrap();
+    consume_copy_restore_target(&copies, &mut targets, webview.label())
+}
+
+#[tauri::command]
+async fn agent_pane_copy_rollback(
+    webview: WebviewWindow,
+    app: tauri::AppHandle,
+    copy_id: String,
+) -> Result<(), String> {
+    validate_pane_id(&copy_id)?;
+    let operation = remove_copy_operation(
+        &mut app.state::<PaneCopies>().map.lock().unwrap(),
+        webview.label(),
+        &copy_id,
+    );
+    if let Some(operation) = operation {
+        rollback_pane_copy(&app, operation).await;
+    }
+    Ok(())
+}
+
 /// Open a single new project window with its own agent sidecar (default cwd) and
 /// focus it. Unlike `setup_windows`, this never re-tiles existing windows — it's
 /// the Cmd/Ctrl+N "new window" shortcut. Project selection happens per-window.
@@ -3389,7 +3791,6 @@ async fn new_window(app: tauri::AppHandle) -> Result<(), String> {
     broadcast_window_order(&app);
     Ok(())
 }
-
 
 /// The "What's new" modal lives in its OWN dedicated window so it appears EXACTLY
 /// once (the main webview decides; see WhatsNewTrigger) and centers on the user's
@@ -3628,13 +4029,7 @@ fn agent_pane_dispose(
     let pane = {
         let windows: State<Windows> = app.state();
         let mut registry = windows.map.lock().unwrap();
-        dispose_pane_target(
-            &mut registry,
-            webview.label(),
-            &pane_id,
-            false,
-            generation,
-        )?
+        dispose_pane_target(&mut registry, webview.label(), &pane_id, false, generation)?
     };
     if let (Some(port), Some(id)) = (port_for(&webview), pane.session_id) {
         tauri::async_runtime::spawn(async move {
@@ -4639,6 +5034,7 @@ pub fn run() {
         .manage(Daemon::default())
         .manage(Windows::default())
         .manage(RestoreTargets::default())
+        .manage(PaneCopies::default())
         .manage(AppExiting::default())
         .manage(FocusedWindow::default())
         .manage(MoveDebounce::default())
@@ -4650,6 +5046,10 @@ pub fn run() {
             agent_pane_create,
             agent_pane_restore,
             agent_pane_dispose,
+            agent_pane_copy,
+            agent_pane_copy_startup,
+            agent_pane_copy_restore,
+            agent_pane_copy_rollback,
             dropped_path_info,
             permissions_status,
             open_permissions_settings,
@@ -4747,12 +5147,63 @@ pub fn run() {
                     &mut app.state::<RestoreTargets>().map.lock().unwrap(),
                     window.label(),
                 );
+                // Rollback-created windows were never committed to the workspace;
+                // pruning by cwd could otherwise delete the still-open source copy.
+                let rolling_back = app
+                    .state::<PaneCopies>()
+                    .map
+                    .lock()
+                    .unwrap()
+                    .rolling_back
+                    .remove(window.label());
                 // A deliberate close (app NOT quitting) drops this window from the
                 // workspace so it doesn't reopen next launch. During quit the
                 // AppExiting flag is set, so the snapshot is preserved intact.
                 let exiting = app.state::<AppExiting>().0.load(Ordering::SeqCst);
-                if !exiting {
+                if !exiting && !rolling_back {
                     remove_window_from_workspace(app, window.label());
+                }
+                let stale_source_copies = {
+                    let copies: State<PaneCopies> = app.state();
+                    let mut registry = copies.map.lock().unwrap();
+                    if let Some(key) = registry.target_owners.get(window.label()).cloned() {
+                        let started = registry
+                            .operations
+                            .get(&key)
+                            .is_some_and(|operation| operation.started);
+                        if started {
+                            registry.target_owners.remove(window.label());
+                            registry.operations.remove(&key);
+                        }
+                    }
+                    let stale_keys: Vec<_> = registry
+                        .operations
+                        .iter()
+                        .filter(|(_, operation)| {
+                            operation.source_owner == window.label() && !operation.started
+                        })
+                        .map(|(key, _)| key.clone())
+                        .collect();
+                    stale_keys
+                        .into_iter()
+                        .filter_map(|key| {
+                            let operation = registry.operations.remove(&key)?;
+                            registry.target_owners.remove(&operation.target_label);
+                            Some(operation)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                for operation in stale_source_copies {
+                    remove_restore_target(
+                        &mut app.state::<RestoreTargets>().map.lock().unwrap(),
+                        &operation.target_label,
+                    );
+                    if let Some(path) = operation.cloned_session_path {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    if let Some(copy_window) = app.get_webview_window(&operation.target_label) {
+                        let _ = copy_window.close();
+                    }
                 }
                 // Dispose only THIS window's session in the shared daemon so
                 // other projects keep running. The daemon process itself is
@@ -5928,5 +6379,97 @@ mod tests {
             Some("/project")
         );
         assert!(remove_restore_target(&mut targets, "main").is_none());
+    }
+
+    fn copy_operation(owner: &str, target: &str) -> PaneCopyOperation {
+        PaneCopyOperation {
+            source_owner: owner.into(),
+            target_label: target.into(),
+            restore: RestoreEntry {
+                mode: WorkspaceMode::Code,
+                chat_agent: ChatAgent::General,
+                cwd: "/project".into(),
+                session_path: Some("/sessions/copy.jsonl".into()),
+            },
+            cloned_session_path: Some(PathBuf::from("/sessions/copy.jsonl")),
+            started: false,
+        }
+    }
+
+    #[test]
+    fn copy_restore_is_destination_scoped_and_consume_once() {
+        let key = ("main".to_string(), "copy-id".to_string());
+        let mut copies = PaneCopyRegistry::default();
+        copies
+            .operations
+            .insert(key.clone(), copy_operation("main", "copy-copy-id"));
+        copies.target_owners.insert("copy-copy-id".into(), key);
+        let mut targets = HashMap::from([(
+            "copy-copy-id".into(),
+            copy_operation("main", "copy-copy-id").restore,
+        )]);
+
+        assert!(consume_copy_restore_target(&copies, &mut targets, "main").is_none());
+        assert!(consume_copy_restore_target(&copies, &mut targets, "copy-copy-id").is_some());
+        assert!(consume_copy_restore_target(&copies, &mut targets, "copy-copy-id").is_none());
+    }
+
+    #[test]
+    fn copy_rollback_is_source_owner_scoped() {
+        let key = ("main".to_string(), "copy-id".to_string());
+        let mut copies = PaneCopyRegistry::default();
+        copies
+            .operations
+            .insert(key.clone(), copy_operation("main", "copy-copy-id"));
+        copies.target_owners.insert("copy-copy-id".into(), key);
+
+        assert!(remove_copy_operation(&mut copies, "peer", "copy-id").is_none());
+        assert!(copies.target_owners.contains_key("copy-copy-id"));
+        assert!(remove_copy_operation(&mut copies, "main", "copy-id").is_some());
+        assert!(copies.operations.is_empty());
+        assert!(copies.target_owners.is_empty());
+    }
+
+    #[test]
+    fn repeated_copy_id_reuses_the_reserved_window() {
+        let key = ("main".to_string(), "copy-id".to_string());
+        let mut copies = PaneCopyRegistry::default();
+        copies
+            .operations
+            .insert(key.clone(), copy_operation("main", "copy-copy-id"));
+        copies
+            .target_owners
+            .insert("copy-copy-id".into(), key.clone());
+
+        let first = copies.operations.get(&key).unwrap().target_label.clone();
+        let second = copies.operations.get(&key).unwrap().target_label.clone();
+        assert_eq!(first, second);
+        assert_eq!(copy_window_label("copy-id"), "copy-copy-id");
+    }
+
+    #[test]
+    fn session_clone_validates_complete_jsonl_before_publish() {
+        let dir = std::env::temp_dir().join(format!("gg-copy-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.jsonl");
+        std::fs::write(
+            &source,
+            "{\"type\":\"session\",\"id\":\"source\"}\n{\"type\":\"message\"}\n",
+        )
+        .unwrap();
+        let copied = clone_pane_session_file(&source, "valid").unwrap();
+        assert!(copied.is_file());
+        let copied_contents = std::fs::read_to_string(&copied).unwrap();
+        let copied_header: serde_json::Value =
+            serde_json::from_str(copied_contents.lines().next().unwrap()).unwrap();
+        assert_eq!(copied_header["id"], "valid");
+        assert!(!dir.join(".source-copy-valid.tmp").exists());
+
+        std::fs::write(&source, "{\"type\":\"session\"}\n{\"partial\":").unwrap();
+        assert!(clone_pane_session_file(&source, "partial").is_err());
+        assert!(!dir.join("source-copy-partial.jsonl").exists());
+        assert!(!dir.join(".source-copy-partial.tmp").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

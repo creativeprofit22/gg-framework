@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { disposePaneSession, windowLabel } from "./agent";
+import {
+  copiedPaneRestoreTarget,
+  copyPaneToNewWindow,
+  disposePaneSession,
+  windowLabel,
+  type RestoreTarget,
+} from "./agent";
 import { type AgentPaneProps, type PaneInputActions, type PaneSnapshot } from "./AgentPane";
 import { PANE_DRAG_MIME } from "./PaneDropOverlay";
 import {
@@ -12,6 +18,7 @@ import {
   splitWorkspacePane,
   updateWorkspaceSplitRatio,
   workspaceLayoutLeafIds,
+  WORKSPACE_LAYOUT_VERSION,
   type PaneMoveRequest,
   type PanePlacement,
   type SplitDirection,
@@ -48,10 +55,56 @@ export interface WorkspaceShellProps {
   renderPane?: (props: AgentPaneProps) => React.ReactNode;
 }
 
+function copiedPaneLayout(target: RestoreTarget): WorkspaceLayout {
+  return {
+    version: WORKSPACE_LAYOUT_VERSION,
+    root: { type: "leaf", paneId: "primary" },
+    focusedPaneId: "primary",
+    panes: {
+      primary: {
+        kind: "agent",
+        mode: target.mode,
+        ...(target.mode === "chat" ? { chatAgent: target.chatAgent ?? "general" } : {}),
+        cwd: target.cwd,
+        sessionPath: target.sessionPath,
+      },
+    },
+  };
+}
+
 export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.ReactElement {
-  const [layout, setLayout] = useState<WorkspaceLayout>(
-    () => loadWorkspaceLayout(localStorage, windowLabel).layout,
-  );
+  const [initialLayout, setInitialLayout] = useState<WorkspaceLayout | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void copiedPaneRestoreTarget().then((target) => {
+      if (!active) return;
+      if (target) {
+        const copied = copiedPaneLayout(target);
+        saveWorkspaceLayout(localStorage, windowLabel, copied);
+        setInitialLayout(copied);
+      } else {
+        setInitialLayout(loadWorkspaceLayout(localStorage, windowLabel).layout);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (!initialLayout) return <main className="workspace-shell" aria-busy="true" />;
+  return <ReadyWorkspaceShell initialLayout={initialLayout} renderPane={renderPane} />;
+}
+
+interface ReadyWorkspaceShellProps extends WorkspaceShellProps {
+  initialLayout: WorkspaceLayout;
+}
+
+function ReadyWorkspaceShell({
+  initialLayout,
+  renderPane,
+}: ReadyWorkspaceShellProps): React.ReactElement {
+  const [layout, setLayout] = useState<WorkspaceLayout>(initialLayout);
   const [snapshots, setSnapshots] = useState<Record<string, PaneSnapshot>>({});
   const [windowFocused, setWindowFocused] = useState(document.hasFocus());
   const [rearrangementEnabled, setRearrangementEnabled] = useState(false);
@@ -61,6 +114,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     placement: PanePlacement;
   } | null>(null);
   const [rearrangementAnnouncement, setRearrangementAnnouncement] = useState("");
+  const [copyAnnouncement, setCopyAnnouncement] = useState("");
+  const [copyingPaneId, setCopyingPaneId] = useState<WorkspacePaneId | null>(null);
   const inputActionsRef = useRef(new Map<string, PaneInputActions>());
   const layoutRef = useRef(layout);
   const activePaneDragRef = useRef<ActivePaneDrag | null>(null);
@@ -324,6 +379,45 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
     setLayout(next);
   }, []);
 
+  const copyPane = useCallback(
+    async (paneId: WorkspacePaneId): Promise<void> => {
+      if (copyingPaneId || paneId !== layoutRef.current.focusedPaneId) return;
+      const snapshot = snapshots[paneId];
+      if (!snapshot?.projectBound || !snapshot.cwd) {
+        setCopyAnnouncement("Choose a project before copying this pane.");
+        return;
+      }
+      if (snapshot.activeWork) {
+        setCopyAnnouncement("Wait for this pane to finish before copying it.");
+        return;
+      }
+      setCopyingPaneId(paneId);
+      setCopyAnnouncement(`Copying pane ${paneId} to a new window…`);
+      try {
+        const result = await copyPaneToNewWindow(paneId);
+        setCopyAnnouncement(
+          result.reusedWindow
+            ? `Pane ${paneId} is already copied in window ${result.windowLabel}.`
+            : `Pane ${paneId} copied to window ${result.windowLabel}.`,
+        );
+      } catch (error) {
+        const rollback =
+          typeof error === "object" &&
+          error !== null &&
+          "rollbackSucceeded" in error &&
+          (error as { rollbackSucceeded: boolean }).rollbackSucceeded;
+        setCopyAnnouncement(
+          rollback
+            ? `Could not copy pane ${paneId}; the new window was rolled back.`
+            : `Could not copy pane ${paneId}.`,
+        );
+      } finally {
+        setCopyingPaneId(null);
+      }
+    },
+    [copyingPaneId, snapshots],
+  );
+
   const closePane = useCallback(
     (paneId: WorkspacePaneId): void => {
       cancelPaneDrag(false);
@@ -428,6 +522,9 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">
         {rearrangementAnnouncement}
       </div>
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+        {copyAnnouncement}
+      </div>
       <div className="workspace-grid" data-pane-count={leafIds.length}>
         <WorkspaceNode
           node={layout.root}
@@ -444,6 +541,8 @@ export function WorkspaceShell({ renderPane }: WorkspaceShellProps): React.React
           onSnapshot={updateSnapshot}
           registerInput={registerInput}
           onSplitPane={splitPane}
+          onCopyPane={(paneId) => void copyPane(paneId)}
+          copyingPaneId={copyingPaneId}
           onClosePane={closePane}
           onPaneDragStart={startPaneDrag}
           onPaneDragEnd={finishPaneDrag}

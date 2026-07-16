@@ -1,5 +1,5 @@
 import { useState, type CSSProperties } from "react";
-import { GripVertical, PanelBottom, PanelRight } from "lucide-react";
+import { CopyPlus, GripVertical, PanelBottom, PanelRight } from "lucide-react";
 import { AgentPane, type AgentPaneProps } from "./AgentPane";
 import { PaneDropOverlay, PANE_DRAG_MIME } from "./PaneDropOverlay";
 import { PRIMARY_PANE_ID } from "./pane-routing";
@@ -60,6 +60,8 @@ export interface WorkspaceNodeProps {
   onSnapshot: NonNullable<AgentPaneProps["onSnapshot"]>;
   registerInput: NonNullable<AgentPaneProps["registerInput"]>;
   onSplitPane: (paneId: WorkspacePaneId, direction: SplitDirection) => void;
+  onCopyPane: (paneId: WorkspacePaneId) => void;
+  copyingPaneId: WorkspacePaneId | null;
   onClosePane: (paneId: WorkspacePaneId) => void;
   onPaneDragStart: (paneId: WorkspacePaneId, handle: HTMLButtonElement) => void;
   onPaneDragEnd: (paneId: WorkspacePaneId) => void;
@@ -280,6 +282,8 @@ function WorkspaceAgentLeaf({
   onSnapshot,
   registerInput,
   onSplitPane,
+  onCopyPane,
+  copyingPaneId,
   onClosePane,
   onPaneDragStart,
   onPaneDragEnd,
@@ -364,6 +368,15 @@ function WorkspaceAgentLeaf({
       )}
       {focused && (
         <div className="workspace-pane-actions" aria-label="Pane actions">
+          <button
+            type="button"
+            aria-label="Copy to New Window"
+            title="Copy to New Window"
+            disabled={copyingPaneId !== null}
+            onClick={() => onCopyPane(paneId)}
+          >
+            <CopyPlus size={15} aria-hidden="true" />
+          </button>
           <button
             type="button"
             aria-label="Split Right"

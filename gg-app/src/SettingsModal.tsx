@@ -12,6 +12,7 @@ import {
 } from "./agent";
 import { toast } from "./toast";
 import { SoundButton } from "./SoundButton";
+import { formatBuildIdentity } from "./build-info";
 
 interface Props {
   onClose: () => void;
@@ -23,6 +24,7 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
   const [projectsRoot, setProjectsRoot] = useState("");
   const [busy, setBusy] = useState(false);
   const [permissions, setPermissions] = useState<PermissionsStatus | null>(null);
+  const buildIdentity = formatBuildIdentity();
 
   useEffect(() => {
     // Native (Rust) read — no sidecar wait needed.
@@ -110,6 +112,11 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
           {"Browse\u2026"}
         </button>
       </div>
+      {buildIdentity && (
+        <div className="modal-build-identity" style={{ color: theme.textDim }}>
+          {buildIdentity}
+        </div>
+      )}
       <div className="modal-actions">
         <button className="modal-btn" onClick={onClose}>
           Cancel

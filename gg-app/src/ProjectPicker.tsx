@@ -18,6 +18,7 @@ import { BackButton } from "./BackButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
+import { formatBuildIdentity } from "./build-info";
 import { toast } from "./toast";
 
 export interface ProjectPickerProps {
@@ -58,6 +59,7 @@ export function ProjectPicker({
   const [showNew, setShowNew] = useState(false);
   const [query, setQuery] = useState("");
   const sessionRequestRef = useRef(0);
+  const buildIdentity = formatBuildIdentity();
 
   const q = query.trim().toLowerCase();
   const filteredProjects = q
@@ -188,6 +190,11 @@ export function ProjectPicker({
           <BackButton label="Back" onClick={onClose} />
         ) : null}
         <span className="picker-title">{selected ? selected.name : "Choose a project"}</span>
+        {buildIdentity && (
+          <span className="picker-build-identity" title={buildIdentity}>
+            {buildIdentity}
+          </span>
+        )}
         {!selected && !loading && <Badge>{projects.length}</Badge>}
         {!selected && !loading && projects.length > 0 && (
           <input

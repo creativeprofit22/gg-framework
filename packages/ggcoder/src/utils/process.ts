@@ -1,16 +1,24 @@
-/**
- * Kill a process and all its children by sending SIGKILL to the process group.
- * Falls back to killing just the process if process group kill fails.
- */
+import { spawnSync } from "node:child_process";
+
+/** Kill a process and its descendants on the current platform. */
 export function killProcessTree(pid: number): void {
-  try {
-    // Kill the entire process group (negative pid)
-    process.kill(-pid, "SIGKILL");
-  } catch {
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    if (result.status === 0) return;
+  } else {
     try {
-      process.kill(pid, "SIGKILL");
+      process.kill(-pid, "SIGKILL");
+      return;
     } catch {
-      // Process already exited
+      // Fall through when the process has no group or already exited.
     }
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    // Process already exited.
   }
 }

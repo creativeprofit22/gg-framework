@@ -18,7 +18,10 @@ describe("local update confirmation", () => {
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).not.toContain("custom/local-customizations-v2");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("upstream/main");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("backup");
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("verify the local fork");
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("run checks");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("build a patched installer");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("not install the official binary");
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("or push");
   });
 });

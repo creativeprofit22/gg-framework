@@ -1,7 +1,7 @@
-// Build a local-patched installer that keeps update checks visible while routing
-// installation through the guarded source updater. Official release builds are unchanged.
+// Build an unsigned local-patched installer. Official release builds are unchanged.
+import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,28 +28,21 @@ function requireSuccess(status) {
   if (status !== 0) process.exit(status);
 }
 
-function hasUpdatedBundleFile(dir, extension, startedAt) {
-  return (
-    existsSync(dir) &&
-    readdirSync(dir).some((name) => {
-      const path = join(dir, name);
-      return name.endsWith(extension) && statSync(path).mtimeMs >= startedAt;
-    })
-  );
+function newestFreshFile(dir, extension, startedAt) {
+  if (!existsSync(dir)) return null;
+  const candidates = readdirSync(dir)
+    .filter((name) => name.toLowerCase().endsWith(extension.toLowerCase()))
+    .map((name) => join(dir, name))
+    .filter((path) => statSync(path).mtimeMs >= startedAt)
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  return candidates[0] ?? null;
 }
 
-function localBundlesWereUpdatedAfter(startedAt) {
-  const bundleDir = join(srcTauri, "target", "release", "bundle");
-  if (process.platform === "win32") {
-    return (
-      hasUpdatedBundleFile(join(bundleDir, "msi"), ".msi", startedAt) &&
-      hasUpdatedBundleFile(join(bundleDir, "nsis"), ".exe", startedAt)
-    );
-  }
-  if (process.platform === "darwin") {
-    return hasUpdatedBundleFile(join(bundleDir, "dmg"), ".dmg", startedAt);
-  }
-  return hasUpdatedBundleFile(join(bundleDir, "appimage"), ".AppImage", startedAt);
+export function freshInstallerForPlatform(srcTauriRoot, platform, startedAt) {
+  const bundleDir = join(srcTauriRoot, "target", "release", "bundle");
+  if (platform === "win32") return newestFreshFile(join(bundleDir, "nsis"), ".exe", startedAt);
+  if (platform === "darwin") return newestFreshFile(join(bundleDir, "dmg"), ".dmg", startedAt);
+  return newestFreshFile(join(bundleDir, "appimage"), ".AppImage", startedAt);
 }
 
 function hostTriple() {
@@ -75,7 +68,26 @@ function localTauriConfigPath() {
   return configPath;
 }
 
-try {
+function installerMetadata(path) {
+  const stats = statSync(path);
+  return {
+    path,
+    size: stats.size,
+    mtimeMs: stats.mtimeMs,
+    sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
+  };
+}
+
+function writeInstallerManifest(metadata) {
+  const outputDir = join(repoRoot, ".gg", "local-fixes");
+  mkdirSync(outputDir, { recursive: true });
+  const path = join(outputDir, "latest-installer.json");
+  writeFileSync(path, `${JSON.stringify(metadata, null, 2)}\n`);
+  console.log(`Verified fresh installer: ${metadata.path}`);
+  console.log(`SHA-256: ${metadata.sha256}`);
+}
+
+async function main() {
   if (!env.GG_NODE_SOURCE) {
     const stagedNode = stagedNodePath();
     if (existsSync(stagedNode)) env.GG_NODE_SOURCE = stagedNode;
@@ -100,12 +112,19 @@ try {
     "--config",
     localTauriConfigPath(),
   ]);
-  if (buildStatus !== 0 && !localBundlesWereUpdatedAfter(bundleBuildStartedAt))
-    process.exit(buildStatus);
-  if (buildStatus !== 0) {
-    console.log("Local bundles were produced; ignoring updater/code-signing failure.");
+  if (buildStatus !== 0) process.exit(buildStatus);
+  const installer = freshInstallerForPlatform(srcTauri, process.platform, bundleBuildStartedAt);
+  if (!installer) {
+    console.error("Tauri did not produce a fresh installer for this build.");
+    process.exit(1);
   }
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
+  writeInstallerManifest(installerMetadata(installer));
+}
+
+const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (invokedDirectly) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
 }

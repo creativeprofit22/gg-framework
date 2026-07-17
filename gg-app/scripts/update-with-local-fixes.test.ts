@@ -1,117 +1,330 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
-import { isLocalForkBranch } from "../vite.config";
+import { afterEach, describe, expect, it } from "vitest";
+import { forceWithLeaseArgs, verifyLocalForkIdentity } from "./update-with-local-fixes.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
 const script = join(here, "update-with-local-fixes.mjs");
+const temporaryDirectories: string[] = [];
 
-function git(...args: string[]): string {
-  return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" });
+function tempDir(prefix: string): string {
+  const path = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(path);
+  return path;
 }
 
-function snapshot(): { head: string; refs: string; status: string } {
-  return {
-    head: git("rev-parse", "HEAD"),
-    refs: git("for-each-ref", "--format=%(refname) %(objectname)"),
-    status: git("status", "--porcelain=v1", "--untracked-files=all"),
-  };
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 }
 
-function runDryRunOnBranch(branch: string) {
-  const temporaryRepo = mkdtempSync(join(tmpdir(), "gg-local-branch-test-"));
-  try {
-    execFileSync("git", ["init", "--initial-branch", branch], { cwd: temporaryRepo });
-    execFileSync("git", ["remote", "add", "upstream", "https://example.com/upstream.git"], {
-      cwd: temporaryRepo,
-    });
-    return spawnSync(process.execPath, [script, "--dry-run", "--no-install", "--no-build"], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        GIT_DIR: join(temporaryRepo, ".git"),
-        GIT_WORK_TREE: temporaryRepo,
-      },
-    });
-  } finally {
-    rmSync(temporaryRepo, { force: true, recursive: true });
-  }
+function write(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content);
 }
 
-describe("local-fixes updater dry run", () => {
-  it("plans a guarded rebase/check without mutating git state", () => {
-    const before = snapshot();
-    const output = execFileSync(
-      process.execPath,
-      [script, "--dry-run", "--no-install", "--no-build", "--check"],
-      { cwd: repoRoot, encoding: "utf8" },
-    );
-    const after = snapshot();
+function configureRepository(repo: string): void {
+  git(repo, "config", "user.email", "local-update-test@example.com");
+  git(repo, "config", "user.name", "Local Update Test");
+}
 
-    expect(output).toContain("Protected branch: custom/local-customizations");
-    expect(output).toMatch(/\[dry-run] git fetch (?:upstream|origin) \+refs\/heads\/main:/);
-    expect(output).toMatch(/\[dry-run] git branch gg-local-before-update-/);
-    expect(output).toMatch(/\[dry-run] git rebase (?:upstream|origin)\/main/);
-    expect(output).toContain("pnpm");
-    expect(output).toContain("--filter gg-app check");
-    expect(output).not.toContain("git merge");
-    expect(output).not.toContain("downloadAndInstall");
-    expect(after).toEqual(before);
-  });
-
-  it.each(["custom/local-customizations", "custom/local-customizations-v2"])(
-    "accepts the canonical and temporary cutover branch: %s",
-    (branch) => {
-      const result = runDryRunOnBranch(branch);
-
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain("Protected branch: custom/local-customizations");
-    },
+function writeIdentityFixture(repo: string): void {
+  write(join(repo, ".gitignore"), ".gg/\n");
+  write(join(repo, "package.json"), '{"private":true}\n');
+  write(join(repo, "gg-app/package.json"), '{"version":"1.2.3"}\n');
+  write(join(repo, "gg-app/index.html"), "<title>Supah Coder</title>\n");
+  write(
+    join(repo, "gg-app/vite.config.ts"),
+    'const customBuildLabel = "Supah Coder Local Fork";\n',
   );
+  write(join(repo, "gg-app/src/brand.ts"), 'export const PRODUCT_DISPLAY_NAME = "Supah Coder";\n');
+  write(
+    join(repo, "gg-app/src/update-policy.ts"),
+    'const startLocalPatchedUpdate = () => {}; function route() { startLocalPatchedUpdate(); return "local-patched"; }\n',
+  );
+  write(
+    join(repo, "gg-app/src-tauri/Cargo.toml"),
+    '[package]\nname = "gg-app"\nversion = "1.2.3"\n',
+  );
+  write(
+    join(repo, "gg-app/src-tauri/Cargo.lock"),
+    '[[package]]\nname = "gg-app"\nversion = "1.2.3"\n',
+  );
+  write(
+    join(repo, "gg-app/src-tauri/tauri.conf.json"),
+    `${JSON.stringify(
+      {
+        productName: "GG Coder",
+        version: "1.2.3",
+        identifier: "com.ggcoder.app",
+        bundle: {
+          createUpdaterArtifacts: true,
+          windows: { nsis: { installerHooks: "windows/nsis-hooks.nsh" } },
+        },
+        plugins: {
+          updater: {
+            pubkey: "test-public-key",
+            endpoints: [
+              "https://github.com/KenKaiii/gg-framework/releases/latest/download/latest.json",
+            ],
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
 
-  it("always rejects the read-only safety checkout", () => {
-    const result = runDryRunOnBranch("custom/local-customizations-safety");
+interface Fixture {
+  root: string;
+  repo: string;
+  upstream: string;
+  origin: string;
+  initialDirtyStatus: string;
+}
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("read-only and can never be updated");
+function createUpdateFixture(conflict = false): Fixture {
+  const root = tempDir("gg-local-update-");
+  const upstream = join(root, "upstream.git");
+  const origin = join(root, "origin.git");
+  const repo = join(root, "work");
+  mkdirSync(repo);
+  git(root, "init", "--bare", upstream);
+  git(root, "init", "--bare", origin);
+  git(repo, "init", "--initial-branch", "main");
+  configureRepository(repo);
+  writeIdentityFixture(repo);
+  write(join(repo, "shared.txt"), "base\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "base");
+  git(repo, "remote", "add", "upstream", upstream);
+  git(repo, "remote", "add", "origin", origin);
+  git(repo, "push", "upstream", "main");
+  git(repo, "push", "origin", "main");
+
+  git(repo, "switch", "-c", "custom/local-customizations");
+  write(join(repo, conflict ? "shared.txt" : "local-one.txt"), conflict ? "local\n" : "one\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "local one");
+  git(repo, "push", "-u", "origin", "custom/local-customizations");
+  write(join(repo, "local-two.txt"), "two\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "local two unpushed");
+
+  git(repo, "switch", "main");
+  write(
+    join(repo, conflict ? "shared.txt" : "upstream.txt"),
+    conflict ? "upstream\n" : "advance\n",
+  );
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "upstream advance");
+  git(repo, "push", "upstream", "main");
+  git(repo, "switch", "custom/local-customizations");
+
+  write(join(repo, "local-two.txt"), "two\ndirty tracked\n");
+  write(join(repo, "dirty-untracked.txt"), "dirty untracked\n");
+  const initialDirtyStatus = git(repo, "status", "--porcelain=v1", "--untracked-files=all");
+  return { root, repo, upstream, origin, initialDirtyStatus };
+}
+
+function runUpdater(repo: string, args: string[], env: NodeJS.ProcessEnv = {}) {
+  return spawnSync(process.execPath, [script, ...args], {
+    cwd: repo,
+    encoding: "utf8",
+    env: { ...process.env, GG_LOCAL_UPDATE_REPO_ROOT: repo, ...env },
+  });
+}
+
+afterEach(() => {
+  for (const path of temporaryDirectories.splice(0)) {
+    rmSync(path, { force: true, recursive: true });
+  }
+});
+
+describe("local-fixes updater", () => {
+  it("dry-runs without changing this checkout", () => {
+    const before = {
+      head: git(repoRoot, "rev-parse", "HEAD"),
+      refs: git(repoRoot, "for-each-ref", "--format=%(refname) %(objectname)"),
+      status: git(repoRoot, "status", "--porcelain=v1", "--untracked-files=all"),
+    };
+    const result = runUpdater(repoRoot, ["--dry-run", "--no-install", "--no-build", "--check"]);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Push: disabled");
+    expect(result.stdout).toContain("git rebase --reapply-cherry-picks --empty=keep upstream/main");
+    expect(result.stdout).not.toContain("git merge");
+    expect({
+      head: git(repoRoot, "rev-parse", "HEAD"),
+      refs: git(repoRoot, "for-each-ref", "--format=%(refname) %(objectname)"),
+      status: git(repoRoot, "status", "--porcelain=v1", "--untracked-files=all"),
+    }).toEqual(before);
   });
 
-  it("never accepts the read-only safety branch as an update target", () => {
-    const before = snapshot();
-    const result = spawnSync(
-      process.execPath,
-      [
-        script,
-        "--dry-run",
-        "--allow-other-branch",
-        "--branch",
-        "custom/local-customizations-safety",
-        "--no-install",
-        "--no-build",
-      ],
-      { cwd: repoRoot, encoding: "utf8" },
-    );
+  it("allows a local-only override branch when origin has no matching ref", () => {
+    const fixture = createUpdateFixture();
+    git(fixture.repo, "branch", "-m", "custom/local-only");
+    const result = runUpdater(fixture.repo, [
+      "--allow-other-branch",
+      "--no-install",
+      "--no-build",
+      "--no-check",
+    ]);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain("continuing without push eligibility");
+    expect(result.stdout).not.toContain("git push");
+  });
+
+  it("does not print nonexistent recovery artifacts when the source fetch fails", () => {
+    const fixture = createUpdateFixture();
+    git(fixture.repo, "remote", "set-url", "upstream", join(fixture.root, "missing.git"));
+    const result = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("read-only and can never be an update target");
-    expect(snapshot()).toEqual(before);
+    expect(result.stderr).toContain("Failed to fetch upstream/main");
+    expect(result.stderr).not.toContain("Backup branch:");
+    expect(result.stderr).not.toContain("Manifest:");
+  });
+
+  it("rebases all local commits and restores tracked and untracked dirt", () => {
+    const fixture = createUpdateFixture();
+    const result = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(
+      git(fixture.repo, "log", "--reverse", "--format=%s", "upstream/main..HEAD").split(/\r?\n/),
+    ).toEqual(["local one", "local two unpushed"]);
+    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(
+      fixture.initialDirtyStatus,
+    );
+    expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe(
+      "dirty untracked\n",
+    );
+    expect(git(fixture.repo, "stash", "list")).toBe("");
+    const backupBranches = git(fixture.repo, "branch", "--format=%(refname:short)")
+      .split(/\r?\n/)
+      .filter((name) => name.startsWith("gg-local-before-update-"));
+    expect(backupBranches).toHaveLength(1);
+    const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
+    const manifest = JSON.parse(
+      readFileSync(join(backupRoot, readdirSync(backupRoot)[0], "manifest.json"), "utf8"),
+    );
+    expect(manifest.verified).toBe(true);
+    expect(manifest.phase).toBe("verified");
+    expect(manifest.dirtyWorkApplied).toBe(true);
+    expect(manifest.localCommits.map((commit: { subject: string }) => commit.subject)).toEqual([
+      "local one",
+      "local two unpushed",
+    ]);
+  });
+
+  it("stops on conflicts with the backup branch and dirty-work stash intact", () => {
+    const fixture = createUpdateFixture(true);
+    const result = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Rebase stopped for manual conflict review");
+    expect(result.stderr).toContain("Backup branch:");
+    expect(git(fixture.repo, "status", "--porcelain=v1")).toContain("UU shared.txt");
+    expect(git(fixture.repo, "stash", "list")).toContain("gg local update");
+    expect(
+      git(fixture.repo, "branch", "--format=%(refname:short)")
+        .split(/\r?\n/)
+        .some((name) => name.startsWith("gg-local-before-update-")),
+    ).toBe(true);
+  });
+
+  it("stops after a failed check without building or pushing", () => {
+    const fixture = createUpdateFixture();
+    const bin = join(fixture.root, "bin");
+    mkdirSync(bin);
+    if (process.platform === "win32") {
+      write(join(bin, "pnpm.cmd"), "@echo off\r\nexit /b 7\r\n");
+    } else {
+      const fakePnpm = join(bin, "pnpm");
+      write(fakePnpm, "#!/bin/sh\nexit 7\n");
+      chmodSync(fakePnpm, 0o755);
+    }
+    const result = runUpdater(fixture.repo, ["--no-install", "--no-build"], {
+      PATH: `${bin}${process.platform === "win32" ? ";" : ":"}${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("build failed");
+    expect(result.stderr).toContain("Backup branch:");
+    expect(result.stdout).not.toContain("build:local-patched");
+    expect(result.stdout).not.toContain("git push");
+    expect(git(fixture.repo, "stash", "list")).toContain("gg local update");
+    const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
+    const manifest = JSON.parse(
+      readFileSync(join(backupRoot, readdirSync(backupRoot)[0], "manifest.json"), "utf8"),
+    );
+    expect(manifest.phase).toBe("source-verified");
+    expect(manifest.dirtyWorkApplied).toBe(true);
+  });
+
+  it("rejects push when checks or build are disabled", () => {
+    const result = runUpdater(repoRoot, ["--dry-run", "--push", "--no-build"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--push requires checks and installer build");
+  });
+
+  it("uses an exact expected-OID lease that rejects a concurrent remote update", () => {
+    const root = tempDir("gg-local-lease-");
+    const origin = join(root, "origin.git");
+    const local = join(root, "local");
+    const other = join(root, "other");
+    git(root, "init", "--bare", origin);
+    mkdirSync(local);
+    git(local, "init", "--initial-branch", "custom/local-customizations");
+    configureRepository(local);
+    write(join(local, "file.txt"), "base\n");
+    git(local, "add", ".");
+    git(local, "commit", "-m", "base");
+    git(local, "remote", "add", "origin", origin);
+    git(local, "push", "-u", "origin", "custom/local-customizations");
+    const capturedOid = git(local, "rev-parse", "HEAD");
+
+    git(root, "clone", "--branch", "custom/local-customizations", origin, other);
+    configureRepository(other);
+    write(join(other, "other.txt"), "concurrent\n");
+    git(other, "add", ".");
+    git(other, "commit", "-m", "concurrent update");
+    git(other, "push", "origin", "custom/local-customizations");
+
+    write(join(local, "local.txt"), "verified local\n");
+    git(local, "add", ".");
+    git(local, "commit", "-m", "verified local update");
+    const rejected = spawnSync(
+      "git",
+      forceWithLeaseArgs("custom/local-customizations", capturedOid),
+      { cwd: local, encoding: "utf8" },
+    );
+    expect(rejected.status).not.toBe(0);
+    expect(git(other, "rev-parse", "HEAD")).toBe(
+      git(root, `--git-dir=${origin}`, "rev-parse", "refs/heads/custom/local-customizations"),
+    );
   });
 });
 
-describe("local-patched branch detection", () => {
-  it.each(["custom/local-customizations", "custom/local-customizations-v2"])(
-    "detects an accepted local branch: %s",
-    (branch) => {
-      expect(isLocalForkBranch(branch)).toBe(true);
-    },
-  );
-
-  it("does not detect the read-only safety branch by name", () => {
-    expect(isLocalForkBranch("custom/local-customizations-safety")).toBe(false);
+describe("local fork identity", () => {
+  it("pins branding, native identity, updater feed, and version lockstep", () => {
+    expect(verifyLocalForkIdentity(repoRoot)).toEqual({
+      version: "0.21.1",
+      productName: "GG Coder",
+      identifier: "com.ggcoder.app",
+    });
   });
 });

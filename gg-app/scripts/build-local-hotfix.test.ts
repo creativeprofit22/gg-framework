@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { freshInstallerForPlatform, runWithCargoTomlRestored } from "./build-local-hotfix.mjs";
+import {
+  freshInstallerForPlatform,
+  runWithCargoTomlRestored,
+  tauriBuildArgs,
+} from "./build-local-hotfix.mjs";
 
 const temporaryDirectories: string[] = [];
 
@@ -38,6 +42,33 @@ describe("local installer freshness", () => {
     utimesSync(installer, old, old);
 
     expect(freshInstallerForPlatform(root, "win32", Date.now())).toBeNull();
+  });
+});
+
+describe("Tauri build arguments", () => {
+  it("selects only NSIS on Windows and preserves non-Windows bundles", () => {
+    const configPath = "local-config.json";
+
+    expect(tauriBuildArgs("win32", configPath)).toEqual([
+      "--filter",
+      "gg-app",
+      "tauri",
+      "build",
+      "--bundles",
+      "nsis",
+      "--no-sign",
+      "--config",
+      configPath,
+    ]);
+    expect(tauriBuildArgs("darwin", configPath)).toEqual([
+      "--filter",
+      "gg-app",
+      "tauri",
+      "build",
+      "--no-sign",
+      "--config",
+      configPath,
+    ]);
   });
 });
 

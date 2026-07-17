@@ -58,6 +58,20 @@ export function runWithCargoTomlRestored(cargoTomlPath, build) {
   }
 }
 
+export function tauriBuildArgs(platform, configPath) {
+  const bundleArgs = platform === "win32" ? ["--bundles", "nsis"] : [];
+  return [
+    "--filter",
+    "gg-app",
+    "tauri",
+    "build",
+    ...bundleArgs,
+    "--no-sign",
+    "--config",
+    configPath,
+  ];
+}
+
 function stagedNodePath() {
   return join(
     srcTauri,
@@ -114,15 +128,7 @@ async function main() {
   const bundleBuildStartedAt = Date.now();
   const cargoTomlPath = join(srcTauri, "Cargo.toml");
   const buildStatus = runWithCargoTomlRestored(cargoTomlPath, () =>
-    run(pnpm, [
-      "--filter",
-      "gg-app",
-      "tauri",
-      "build",
-      "--no-sign",
-      "--config",
-      localTauriConfigPath(),
-    ]),
+    run(pnpm, tauriBuildArgs(process.platform, localTauriConfigPath())),
   );
   if (buildStatus !== 0) process.exit(buildStatus);
   const installer = freshInstallerForPlatform(srcTauri, process.platform, bundleBuildStartedAt);

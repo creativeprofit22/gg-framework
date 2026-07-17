@@ -12,7 +12,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { forceWithLeaseArgs, verifyLocalForkIdentity } from "./update-with-local-fixes.mjs";
+import {
+  forceWithLeaseArgs,
+  targetedVitestArgs,
+  verifyLocalForkIdentity,
+} from "./update-with-local-fixes.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
@@ -176,6 +180,18 @@ afterEach(() => {
 });
 
 describe("local-fixes updater", () => {
+  it("generates a direct Vitest command limited to the requested files", () => {
+    const requestedFiles = ["src/first.test.ts", "src/second.test.ts"];
+
+    const args = targetedVitestArgs("gg-app", requestedFiles);
+
+    expect(args).toEqual(["--filter", "gg-app", "exec", "vitest", "run", ...requestedFiles]);
+    expect(args).not.toContain("test");
+    expect(args).not.toContain("--");
+    expect(args.slice(5)).toEqual(requestedFiles);
+    expect(() => targetedVitestArgs("gg-app", [])).toThrow("without explicit test files");
+  });
+
   it("dry-runs without changing this checkout", () => {
     const before = {
       head: git(repoRoot, "rev-parse", "HEAD"),

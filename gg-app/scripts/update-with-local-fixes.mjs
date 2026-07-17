@@ -325,6 +325,13 @@ export function forceWithLeaseArgs(branch, expectedOid) {
   ];
 }
 
+export function targetedVitestArgs(packageName, paths) {
+  if (paths.length === 0) {
+    throw new Error(`Refusing to run the ${packageName} Vitest suite without explicit test files.`);
+  }
+  return ["--filter", packageName, "exec", "vitest", "run", ...paths];
+}
+
 function runWorkspaceChecks(options) {
   for (const packageName of ["@kenkaiiii/gg-ai", "@kenkaiiii/gg-agent", "@kenkaiiii/gg-core"]) {
     requireSuccess(
@@ -341,17 +348,13 @@ function runWorkspaceChecks(options) {
   requireSuccess(
     run(
       pnpm,
-      [
-        "--filter",
-        "gg-app",
-        "test",
-        "--",
+      targetedVitestArgs("gg-app", [
         "scripts/update-with-local-fixes.test.ts",
         "scripts/build-local-hotfix.test.ts",
         "src/brand-static.test.ts",
         "src/local-update-confirmation.test.ts",
         "src/update-policy.test.ts",
-      ],
+      ]),
       options,
     ),
     "gg-app targeted tests failed.",
@@ -361,7 +364,7 @@ function runWorkspaceChecks(options) {
     requireSuccess(
       run(
         pnpm,
-        ["--filter", "@kenkaiiii/ggcoder", "test", "--", "src/tools/bash-timeout.test.ts"],
+        targetedVitestArgs("@kenkaiiii/ggcoder", ["src/tools/bash-timeout.test.ts"]),
         options,
       ),
       "ggcoder timeout regression test failed.",

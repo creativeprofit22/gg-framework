@@ -47,18 +47,12 @@ describe("WorkspaceHeader", () => {
     expect(formatWorkspaceTitle("/work/app", "main", "Supah Coder", 3)).toBe(
       "app │ ⎇ main │ 3 uncommitted",
     );
-    expect(formatWorkspaceTitle("/work/app", null, "Supah Coder", 1)).toBe(
-      "app │ 1 uncommitted",
-    );
+    expect(formatWorkspaceTitle("/work/app", null, "Supah Coder", 1)).toBe("app │ 1 uncommitted");
   });
 
   it("uses Supah Coder as the fallback and replaces it with current project status", () => {
     const { rerender } = render(
-      <WorkspaceHeader
-        workspaceMode="code"
-        navHidden={false}
-        onToggleNav={() => {}}
-      >
+      <WorkspaceHeader workspaceMode="code" navHidden={false} onToggleNav={() => {}}>
         <button>New session</button>
       </WorkspaceHeader>,
     );

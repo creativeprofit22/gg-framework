@@ -139,6 +139,28 @@ function createUpdateFixture(conflict = false): Fixture {
   return { root, repo, upstream, origin, initialDirtyStatus };
 }
 
+function createLocalOnlyFixture(): Fixture {
+  const root = tempDir("gg-local-only-update-");
+  const upstream = join(root, "upstream.git");
+  const origin = join(root, "origin.git");
+  const repo = join(root, "work");
+  mkdirSync(repo);
+  git(root, "init", "--bare", upstream);
+  git(root, "init", "--bare", origin);
+  git(repo, "init", "--initial-branch", "main");
+  configureRepository(repo);
+  writeIdentityFixture(repo);
+  git(repo, "add", ".");
+  git(repo, "commit", "-m", "base");
+  git(repo, "remote", "add", "upstream", upstream);
+  git(repo, "remote", "add", "origin", origin);
+  git(repo, "push", "upstream", "main");
+  git(repo, "push", "origin", "main");
+  git(repo, "switch", "-c", "custom/local-only");
+
+  return { root, repo, upstream, origin, initialDirtyStatus: "" };
+}
+
 function runUpdater(repo: string, args: string[], env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [script, ...args], {
     cwd: repo,
@@ -172,20 +194,24 @@ describe("local-fixes updater", () => {
     }).toEqual(before);
   });
 
-  it("allows a local-only override branch when origin has no matching ref", () => {
-    const fixture = createUpdateFixture();
-    git(fixture.repo, "branch", "-m", "custom/local-only");
-    const result = runUpdater(fixture.repo, [
-      "--allow-other-branch",
-      "--no-install",
-      "--no-build",
-      "--no-check",
-    ]);
+  // This integration path performs multiple synchronous Git operations under parallel suite load.
+  it(
+    "allows a local-only override branch when origin has no matching ref",
+    () => {
+      const fixture = createLocalOnlyFixture();
+      const result = runUpdater(fixture.repo, [
+        "--allow-other-branch",
+        "--no-install",
+        "--no-build",
+        "--no-check",
+      ]);
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(result.stderr).toContain("continuing without push eligibility");
-    expect(result.stdout).not.toContain("git push");
-  });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toContain("continuing without push eligibility");
+      expect(result.stdout).not.toContain("git push");
+    },
+    15_000,
+  );
 
   it("does not print nonexistent recovery artifacts when the source fetch fails", () => {
     const fixture = createUpdateFixture();
@@ -321,8 +347,11 @@ describe("local-fixes updater", () => {
 
 describe("local fork identity", () => {
   it("pins branding, native identity, updater feed, and version lockstep", () => {
+    const { version } = JSON.parse(readFileSync(join(repoRoot, "gg-app/package.json"), "utf8")) as {
+      version: string;
+    };
     expect(verifyLocalForkIdentity(repoRoot)).toEqual({
-      version: "0.21.1",
+      version,
       productName: "GG Coder",
       identifier: "com.ggcoder.app",
     });

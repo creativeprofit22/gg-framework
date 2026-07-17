@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { freshInstallerForPlatform } from "./build-local-hotfix.mjs";
+import { freshInstallerForPlatform, runWithCargoTomlRestored } from "./build-local-hotfix.mjs";
 
 const temporaryDirectories: string[] = [];
 
@@ -38,5 +38,45 @@ describe("local installer freshness", () => {
     utimesSync(installer, old, old);
 
     expect(freshInstallerForPlatform(root, "win32", Date.now())).toBeNull();
+  });
+});
+
+describe("Cargo.toml restoration", () => {
+  const originalCargoToml = Buffer.from(
+    '[package]\r\nname = "gg-app"\r\nversion = "1.2.3"\r\n',
+    "utf8",
+  );
+
+  function cargoFixture(): string {
+    const root = mkdtempSync(join(tmpdir(), "gg-local-cargo-"));
+    temporaryDirectories.push(root);
+    const cargoTomlPath = join(root, "Cargo.toml");
+    writeFileSync(cargoTomlPath, originalCargoToml);
+    return cargoTomlPath;
+  }
+
+  it("restores the original CRLF bytes after a successful build", () => {
+    const cargoTomlPath = cargoFixture();
+
+    const result = runWithCargoTomlRestored(cargoTomlPath, () => {
+      writeFileSync(cargoTomlPath, '[package]\nversion = "9.9.9"\n');
+      return 0;
+    });
+
+    expect(result).toBe(0);
+    expect(readFileSync(cargoTomlPath)).toEqual(originalCargoToml);
+  });
+
+  it("restores the original CRLF bytes after a throwing build", () => {
+    const cargoTomlPath = cargoFixture();
+    const buildError = new Error("Tauri failed");
+
+    expect(() =>
+      runWithCargoTomlRestored(cargoTomlPath, () => {
+        writeFileSync(cargoTomlPath, '[package]\nversion = "9.9.9"\n');
+        throw buildError;
+      }),
+    ).toThrow(buildError);
+    expect(readFileSync(cargoTomlPath)).toEqual(originalCargoToml);
   });
 });

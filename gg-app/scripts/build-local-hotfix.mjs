@@ -49,6 +49,15 @@ function hostTriple() {
   return execFileSync("rustc", ["--print", "host-tuple"], { encoding: "utf8" }).trim();
 }
 
+export function runWithCargoTomlRestored(cargoTomlPath, build) {
+  const originalCargoToml = readFileSync(cargoTomlPath);
+  try {
+    return build();
+  } finally {
+    writeFileSync(cargoTomlPath, originalCargoToml);
+  }
+}
+
 function stagedNodePath() {
   return join(
     srcTauri,
@@ -103,15 +112,18 @@ async function main() {
   }
   requireSuccess(run(pnpm, ["--filter", "gg-app", "bundle:sidecar"]));
   const bundleBuildStartedAt = Date.now();
-  const buildStatus = run(pnpm, [
-    "--filter",
-    "gg-app",
-    "tauri",
-    "build",
-    "--no-sign",
-    "--config",
-    localTauriConfigPath(),
-  ]);
+  const cargoTomlPath = join(srcTauri, "Cargo.toml");
+  const buildStatus = runWithCargoTomlRestored(cargoTomlPath, () =>
+    run(pnpm, [
+      "--filter",
+      "gg-app",
+      "tauri",
+      "build",
+      "--no-sign",
+      "--config",
+      localTauriConfigPath(),
+    ]),
+  );
   if (buildStatus !== 0) process.exit(buildStatus);
   const installer = freshInstallerForPlatform(srcTauri, process.platform, bundleBuildStartedAt);
   if (!installer) {

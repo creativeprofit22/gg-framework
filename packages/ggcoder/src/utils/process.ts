@@ -65,8 +65,18 @@ export async function killProcessTreeAsync(
     });
     killer.unref();
     const succeeded = await new Promise<boolean>((resolve) => {
-      killer.once("error", () => resolve(false));
-      killer.once("close", (code) => resolve(code === 0));
+      let settled = false;
+      const settle = (result: boolean): void => {
+        if (settled) return;
+        settled = true;
+        killer.off("error", onError);
+        killer.off("close", onClose);
+        resolve(result);
+      };
+      const onError = (): void => settle(false);
+      const onClose = (code: number | null): void => settle(code === 0);
+      killer.once("error", onError);
+      killer.once("close", onClose);
     });
     if (!succeeded) killSingleProcess(pid, kill);
   } catch (error) {

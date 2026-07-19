@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { EventEmitter } from "node:events";
+import { EventEmitter, getEventListeners } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProcessManager } from "../core/process-manager.js";
 import { PersistentShell } from "../core/persistent-shell.js";
+import * as logger from "../core/logger.js";
 import { resolveShell } from "../core/shell.js";
 import { killProcessTree } from "../utils/process.js";
 import { createBashTool, executeForegroundCommand } from "./bash.js";
@@ -318,13 +319,30 @@ function createFakeChild(pid = 2_000_000_000): FakeChildHarness {
       emitter.emit("close", code, signal);
     },
     emitError(error) {
-      emitter.emit("error", error);
+      if (emitter.listenerCount("error") > 0) emitter.emit("error", error);
     },
   };
 }
 
 function operationsFor(child: ChildProcess): ToolOperations {
   return { ...localOperations, spawn: () => child };
+}
+
+function foregroundResourceCounts(fake: FakeChildHarness, signal: AbortSignal) {
+  return {
+    abort: getEventListeners(signal, "abort").length,
+    childClose: fake.child.listenerCount("close"),
+    childError: fake.child.listenerCount("error"),
+    stdoutData: fake.stdout.listenerCount("data"),
+    stdoutError: fake.stdout.listenerCount("error"),
+    stdoutEnd: fake.stdout.listenerCount("end"),
+    stdoutClose: fake.stdout.listenerCount("close"),
+    stderrData: fake.stderr.listenerCount("data"),
+    stderrError: fake.stderr.listenerCount("error"),
+    stderrEnd: fake.stderr.listenerCount("end"),
+    stderrClose: fake.stderr.listenerCount("close"),
+    timers: vi.getTimerCount(),
+  };
 }
 
 function foregroundExecution(
@@ -364,6 +382,7 @@ async function executeRendered(
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -697,6 +716,56 @@ if (selectedProbe !== undefined) {
       expect(outcome.reason).toBe("timedOut");
       expect(outcome.elapsedMs).toBe(1_250);
     });
+
+    it.each(["completed", "timedOut", "aborted", "spawnError"] as const)(
+      "returns every %s foreground resource to its listener and timer baseline",
+      async (path) => {
+        vi.useFakeTimers();
+        const controller = new AbortController();
+        const fake = createFakeChild();
+        const baseline = foregroundResourceCounts(fake, controller.signal);
+        const resultPromise = foregroundExecution(fake, {
+          timeoutMs: 200,
+          signal: controller.signal,
+          cleanupProcessTree: async () => {},
+        });
+
+        if (path === "completed") fake.emitClose(0);
+        if (path === "spawnError") fake.emitError(new Error("spawn failed"));
+        if (path === "timedOut") await vi.advanceTimersByTimeAsync(1_200);
+        if (path === "aborted") {
+          controller.abort();
+          await vi.advanceTimersByTimeAsync(1_000);
+        }
+
+        expect((await resultPromise).outcome.reason).toBe(path);
+        expect(foregroundResourceCounts(fake, controller.signal)).toEqual(baseline);
+      },
+    );
+
+    it("logs rejected cleanup without changing the selected abort result", async () => {
+      vi.useFakeTimers();
+      const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
+      const controller = new AbortController();
+      const fake = createFakeChild(2_000_000_014);
+      const resultPromise = foregroundExecution(fake, {
+        signal: controller.signal,
+        cleanupProcessTree: async () => {
+          throw new Error("cleanup rejected");
+        },
+      });
+
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect((await resultPromise).outcome.reason).toBe("aborted");
+      expect(warning).toHaveBeenCalledWith(
+        "WARN",
+        "bash",
+        "Foreground process-tree cleanup failed",
+        expect.objectContaining({ pid: "2000000014", error: "cleanup rejected" }),
+      );
+    });
   });
 
   describe("foreground result rendering", () => {
@@ -771,6 +840,85 @@ if (selectedProbe !== undefined) {
         ),
       ).resolves.toBe("Exit code: 1\nFailed to spawn: sync not found");
     });
+  });
+
+  it("renders persist:true aborts distinctly and preserves partial output", async () => {
+    const manager = new ProcessManager();
+    const controller = new AbortController();
+    const tool = createBashTool(process.cwd(), manager);
+
+    try {
+      const result = await tool.execute(
+        { command: "printf 'partial-before-abort\\n'; sleep 30", persist: true },
+        {
+          signal: controller.signal,
+          toolCallId: "bash-persistent-abort",
+          onUpdate(update) {
+            if (
+              typeof update === "object" &&
+              update !== null &&
+              "output" in update &&
+              String(update.output).includes("partial-before-abort")
+            ) {
+              controller.abort();
+            }
+          },
+        },
+      );
+
+      expect(result).toBe("Exit code: ABORTED\npartial-before-abort\n");
+    } finally {
+      manager.shutdownAll();
+    }
+  });
+
+  it("settles pre-aborted persistent runs as ABORTED without retaining listeners", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const cleanup = vi.fn(async (pid: number) => killProcessTree(pid));
+    const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024, cleanup);
+
+    await expect(shell.run("sleep 30", 5_000, controller.signal)).resolves.toEqual({
+      exitCode: "ABORTED",
+      output: "",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    expect((shell as unknown as { child: ChildProcess | null }).child).toBeNull();
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("cleans persistent-run listeners and logs rejected process cleanup", async () => {
+    const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
+    const controller = new AbortController();
+    const cleanup = vi.fn(async (pid: number) => {
+      killProcessTree(pid);
+      throw new Error("persistent cleanup rejected");
+    });
+    const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024, cleanup);
+    const runPromise = shell.run("sleep 30", 5_000, controller.signal);
+    const child = (shell as unknown as { child: ChildProcess }).child;
+
+    expect(child.listenerCount("exit")).toBe(1);
+    expect(child.listenerCount("error")).toBe(1);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(1);
+    controller.abort();
+
+    await expect(runPromise).resolves.toEqual({ exitCode: "ABORTED", output: "" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(child.listenerCount("exit")).toBe(0);
+    expect(child.listenerCount("error")).toBe(0);
+    expect(child.stdout?.listenerCount("data")).toBe(0);
+    expect(child.stderr?.listenerCount("data")).toBe(0);
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    expect(cleanup).toHaveBeenCalledWith(child.pid);
+    expect(warning).toHaveBeenCalledWith(
+      "WARN",
+      "bash",
+      "Persistent process-tree cleanup failed",
+      expect.objectContaining({ error: "persistent cleanup rejected" }),
+    );
   });
 
   it("returns a persistent timeout without sentinel or exit and resets shell state", async () => {

@@ -45,6 +45,8 @@ describe("killProcessTreeAsync on Windows", () => {
     killer.events.emit("close", 0);
     await cleanup;
     expect(killMock).not.toHaveBeenCalled();
+    expect(killer.events.listenerCount("error")).toBe(0);
+    expect(killer.events.listenerCount("close")).toBe(0);
   });
 
   it("falls back to direct SIGKILL when taskkill fails", async () => {
@@ -61,5 +63,7 @@ describe("killProcessTreeAsync on Windows", () => {
     await cleanup;
 
     expect(killMock).toHaveBeenCalledWith(8765, "SIGKILL");
+    expect(killer.events.listenerCount("error")).toBe(0);
+    expect(killer.events.listenerCount("close")).toBe(0);
   });
 });

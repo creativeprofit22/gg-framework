@@ -78,21 +78,27 @@ export function executeForegroundCommand({
   let deadlineTimer: NodeJS.Timeout | undefined;
   let cleanupGraceTimer: NodeJS.Timeout | undefined;
   let abortListenerRegistered = false;
+  let child: ReturnType<ToolOperations["spawn"]> | null = null;
+  let onStdoutData: ((data: Buffer) => void) | undefined;
+  let onStderrData: ((data: Buffer) => void) | undefined;
+  let flushStdout: (() => void) | undefined;
+  let flushStderr: (() => void) | undefined;
+  const onOutputPipeError = (): void => {};
+  let onChildClose: ((code: number | null, closeSignal: NodeJS.Signals | null) => void) | undefined;
+  let onChildError: ((error: Error) => void) | undefined;
 
   return new Promise((resolve) => {
-    const startCleanup = (cleanupPid: number): void => {
-      void cleanupProcessTree(cleanupPid).catch((error: unknown) => {
-        log("WARN", "bash", "Foreground process-tree cleanup failed", {
-          pid: String(cleanupPid),
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    };
+    const startedAt = Date.now();
 
-    const onAbort = (): void => {
-      if (settled || pendingInterruption) return;
-      pendingInterruption = "aborted";
-      if (pid !== null) startCleanup(pid);
+    const startCleanup = (cleanupPid: number): void => {
+      void Promise.resolve()
+        .then(() => cleanupProcessTree(cleanupPid))
+        .catch((error: unknown) => {
+          log("WARN", "bash", "Foreground process-tree cleanup failed", {
+            pid: String(cleanupPid),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
     };
 
     const finalize = (
@@ -106,6 +112,22 @@ export function executeForegroundCommand({
       if (deadlineTimer) clearTimeout(deadlineTimer);
       if (cleanupGraceTimer) clearTimeout(cleanupGraceTimer);
       if (abortListenerRegistered) signal.removeEventListener("abort", onAbort);
+      if (child && onChildClose) child.off("close", onChildClose);
+      if (child && onChildError) child.off("error", onChildError);
+      if (child?.stdout && onStdoutData) child.stdout.off("data", onStdoutData);
+      child?.stdout?.off("error", onOutputPipeError);
+      if (child?.stdout && flushStdout) {
+        child.stdout.off("end", flushStdout);
+        child.stdout.off("close", flushStdout);
+      }
+      if (child?.stderr && onStderrData) child.stderr.off("data", onStderrData);
+      child?.stderr?.off("error", onOutputPipeError);
+      if (child?.stderr && flushStderr) {
+        child.stderr.off("end", flushStderr);
+        child.stderr.off("close", flushStderr);
+      }
+      flushStdout?.();
+      flushStderr?.();
 
       resolve({
         outcome: {
@@ -123,9 +145,19 @@ export function executeForegroundCommand({
       });
     };
 
-    const startedAt = Date.now();
+    const interrupt = (reason: "timedOut" | "aborted"): void => {
+      if (settled || pendingInterruption) return;
+      pendingInterruption = reason;
+      if (pid !== null) startCleanup(pid);
+      cleanupGraceTimer = setTimeout(() => {
+        finalize(reason, null, null);
+      }, FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS);
+    };
+
+    const onAbort = (): void => interrupt("aborted");
+
     try {
-      const child = ops.spawn(shell.file, shell.args, {
+      child = ops.spawn(shell.file, shell.args, {
         cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
@@ -159,35 +191,31 @@ export function executeForegroundCommand({
       };
       // Output pipes can fail independently. Swallow their errors so the child
       // process close/error event remains the sole execution outcome authority.
-      const onOutputPipeError = (): void => {};
-      const flushStdout = flushDecoder(stdoutDecoder);
-      const flushStderr = flushDecoder(stderrDecoder);
-      child.stdout?.on("data", onData(stdoutDecoder));
+      onStdoutData = onData(stdoutDecoder);
+      onStderrData = onData(stderrDecoder);
+      flushStdout = flushDecoder(stdoutDecoder);
+      flushStderr = flushDecoder(stderrDecoder);
+      child.stdout?.on("data", onStdoutData);
       child.stdout?.on("error", onOutputPipeError);
       child.stdout?.once("end", flushStdout);
       child.stdout?.once("close", flushStdout);
-      child.stderr?.on("data", onData(stderrDecoder));
+      child.stderr?.on("data", onStderrData);
       child.stderr?.on("error", onOutputPipeError);
       child.stderr?.once("end", flushStderr);
       child.stderr?.once("close", flushStderr);
 
-      child.on("close", (code, closeSignal) => {
+      onChildClose = (code, closeSignal) => {
         const reason =
           pendingInterruption ?? (code === 0 ? ("completed" as const) : ("nonZeroExit" as const));
         finalize(reason, code, closeSignal);
-      });
-      child.on("error", (error) => {
+      };
+      onChildError = (error) => {
         finalize(pendingInterruption ?? "spawnError", null, null, error);
-      });
+      };
+      child.on("close", onChildClose);
+      child.on("error", onChildError);
 
-      deadlineTimer = setTimeout(() => {
-        if (settled || pendingInterruption) return;
-        pendingInterruption = "timedOut";
-        cleanupGraceTimer = setTimeout(() => {
-          finalize("timedOut", null, null);
-        }, FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS);
-        if (pid !== null) startCleanup(pid);
-      }, timeoutMs);
+      deadlineTimer = setTimeout(() => interrupt("timedOut"), timeoutMs);
 
       signal.addEventListener("abort", onAbort, { once: true });
       abortListenerRegistered = true;
@@ -293,7 +321,9 @@ export function createBashTool(
         const exitCode =
           res.exitCode === "TIMEOUT"
             ? `TIMEOUT (${timeoutMs ?? DEFAULT_TIMEOUT}ms) — session shell was reset; cd/env state is gone`
-            : String(res.exitCode);
+            : res.exitCode === "ABORTED"
+              ? "ABORTED"
+              : String(res.exitCode);
         return `Exit code: ${exitCode}\n${output}`;
       }
       if (run_in_background) {

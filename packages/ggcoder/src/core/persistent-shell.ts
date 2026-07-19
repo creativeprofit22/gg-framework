@@ -12,9 +12,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { killProcessTreeAsync } from "../utils/process.js";
+import { log } from "./logger.js";
 
 export interface PersistentRunResult {
-  exitCode: number | "TIMEOUT";
+  exitCode: number | "TIMEOUT" | "ABORTED";
   output: string;
 }
 
@@ -27,7 +28,19 @@ export class PersistentShell {
     private readonly cwd: string,
     private readonly env: NodeJS.ProcessEnv,
     private readonly maxOutputBytes: number,
+    private readonly cleanupProcessTree: (pid: number) => Promise<void> = killProcessTreeAsync,
   ) {}
+
+  private startCleanup(pid: number): void {
+    void Promise.resolve()
+      .then(() => this.cleanupProcessTree(pid))
+      .catch((error: unknown) => {
+        log("WARN", "bash", "Persistent process-tree cleanup failed", {
+          pid: String(pid),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
 
   /** True while a previous persistent command is still running. */
   get isBusy(): boolean {
@@ -131,34 +144,37 @@ export class PersistentShell {
         checkSentinel(capped ? scanTail : out, capped);
       };
 
-      const timer = setTimeout(() => {
-        const timedOutPid = child.pid ?? null;
+      const interrupt = (result: PersistentRunResult): void => {
+        if (done) return;
         if (this.child === child) this.child = null;
-        if (timedOutPid !== null) void killProcessTreeAsync(timedOutPid);
-        finish({ exitCode: "TIMEOUT", output: out });
-      }, timeoutMs);
-
-      const onAbort = (): void => {
-        this.kill();
-        finish({ exitCode: 1, output: out });
+        if (child.pid !== undefined) this.startCleanup(child.pid);
+        finish(result);
       };
-      signal.addEventListener("abort", onAbort, { once: true });
+      const onAbort = (): void => interrupt({ exitCode: "ABORTED", output: out });
 
       // `exit N` (or a crash) ends the session shell itself — the sentinel
       // never prints, so settle from the shell's own exit code. The next run()
       // starts a fresh session.
       const onExit = (code: number | null): void => {
-        this.child = null;
+        if (this.child === child) this.child = null;
         finish({ exitCode: code ?? 1, output: out.replace(/\n$/, "") });
       };
+      const onError = (): void => {
+        if (this.child === child) this.child = null;
+        finish({ exitCode: 1, output: "failed to spawn session bash" });
+      };
+
+      const timer = setTimeout(() => {
+        interrupt({ exitCode: "TIMEOUT", output: out });
+      }, timeoutMs);
+
       child.on("exit", onExit);
-
-      const onError = (): void => finish({ exitCode: 1, output: "failed to spawn session bash" });
       child.on("error", onError);
-
       child.stdout?.on("data", onData);
       child.stderr?.on("data", onData);
-      child.stdin?.write(wrapped);
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      if (!done) child.stdin?.write(wrapped);
     });
   }
 
@@ -167,6 +183,6 @@ export class PersistentShell {
     const childToKill = this.child;
     this.child = null;
     this.busy = false;
-    if (childToKill?.pid) void killProcessTreeAsync(childToKill.pid);
+    if (childToKill?.pid) this.startCleanup(childToKill.pid);
   }
 }

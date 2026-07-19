@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { ProcessManager } from "./process-manager.js";
 
+function quoteForPosixShell(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 async function waitForOutput(
   manager: ProcessManager,
   id: string,
@@ -116,48 +120,60 @@ describe("ProcessManager dev-server lifecycle repro", () => {
     }
   });
 
-  it("starts, reads, and stops a long-running Node HTTP server through the worker background path", async () => {
-    manager = new ProcessManager();
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-dev-server-repro-"));
-    const fixture = path.join(tmpDir, "dev-server.mjs");
-    await fs.writeFile(
-      fixture,
-      `import http from 'node:http';\n` +
-        `const server = http.createServer((_req, res) => res.end('ok'));\n` +
-        `server.listen(0, '127.0.0.1', () => {\n` +
-        `  const address = server.address();\n` +
-        `  console.log('DEV_SERVER_READY ' + address.port);\n` +
-        `});\n` +
-        `const interval = setInterval(() => console.log('DEV_SERVER_TICK'), 250);\n` +
-        `process.on('SIGTERM', () => {\n` +
-        `  console.log('DEV_SERVER_SIGTERM');\n` +
-        `  clearInterval(interval);\n` +
-        `  server.close(() => process.exit(0));\n` +
-        `});\n`,
-    );
+  it(
+    "starts, reads, and stops a long-running Node HTTP server through the worker background path",
+    {
+      // Phase 01 preserves the Windows SIGTERM-handler miss as expected-failure evidence.
+      // Phase 12 should remove `fails` when EOF-first graceful shutdown makes this pass.
+      fails: process.platform === "win32",
+      timeout: 15_000,
+    },
+    async () => {
+      manager = new ProcessManager();
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-dev-server-repro-"));
+      const fixture = path.join(tmpDir, "dev-server.mjs");
+      await fs.writeFile(
+        fixture,
+        `import http from 'node:http';\n` +
+          `const server = http.createServer((_req, res) => res.end('ok'));\n` +
+          `server.listen(0, '127.0.0.1', () => {\n` +
+          `  const address = server.address();\n` +
+          `  console.log('DEV_SERVER_READY ' + address.port);\n` +
+          `});\n` +
+          `const interval = setInterval(() => console.log('DEV_SERVER_TICK'), 250);\n` +
+          `process.on('SIGTERM', () => {\n` +
+          `  console.log('DEV_SERVER_SIGTERM');\n` +
+          `  clearInterval(interval);\n` +
+          `  server.close(() => process.exit(0));\n` +
+          `});\n`,
+      );
 
-    const started = await manager.start(`${process.execPath} ${fixture}`, tmpDir);
-    expect(started.pid).toBeGreaterThan(0);
-    expect(started.logFile).toMatch(/\.log$/);
+      const started = await manager.start(
+        `${quoteForPosixShell(process.execPath)} ${quoteForPosixShell(fixture)}`,
+        tmpDir,
+      );
+      expect(started.pid).toBeGreaterThan(0);
+      expect(started.logFile).toMatch(/\.log$/);
 
-    const initial = await waitForOutput(manager, started.id, (output) =>
-      output.includes("DEV_SERVER_READY"),
-    );
-    expect(initial).toContain("DEV_SERVER_READY");
+      const initial = await waitForOutput(manager, started.id, (output) =>
+        output.includes("DEV_SERVER_READY"),
+      );
+      expect(initial).toContain("DEV_SERVER_READY");
 
-    const fromStart = await manager.readOutput(started.id, true);
-    expect(fromStart.isRunning).toBe(true);
-    expect(fromStart.exitCode).toBeNull();
-    expect(fromStart.output).toContain("DEV_SERVER_READY");
+      const fromStart = await manager.readOutput(started.id, true);
+      expect(fromStart.isRunning).toBe(true);
+      expect(fromStart.exitCode).toBeNull();
+      expect(fromStart.output).toContain("DEV_SERVER_READY");
 
-    const stopped = await manager.stop(started.id);
-    expect(stopped).toBe(`Process ${started.id} stopped`);
+      const stopped = await manager.stop(started.id);
+      expect(stopped).toBe(`Process ${started.id} stopped`);
 
-    const final = await manager.readOutput(started.id, true);
-    expect(final.isRunning).toBe(false);
-    expect(final.exitCode).not.toBeNull();
-    expect(final.output).toContain("DEV_SERVER_SIGTERM");
-  }, 15_000);
+      const final = await manager.readOutput(started.id, true);
+      expect(final.isRunning).toBe(false);
+      expect(final.exitCode).not.toBeNull();
+      expect(final.output).toContain("DEV_SERVER_SIGTERM");
+    },
+  );
 
   const posixIt = process.platform === "win32" ? it.skip : it;
 

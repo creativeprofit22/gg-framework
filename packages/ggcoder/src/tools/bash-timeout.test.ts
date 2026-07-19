@@ -7,6 +7,7 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProcessManager } from "../core/process-manager.js";
+import { PersistentShell } from "../core/persistent-shell.js";
 import { resolveShell } from "../core/shell.js";
 import { killProcessTree } from "../utils/process.js";
 import { createBashTool, executeForegroundCommand } from "./bash.js";
@@ -240,7 +241,7 @@ async function runProbe(probe: ProbeName, evidenceFile: string): Promise<void> {
     expect(roles.map(({ role }) => role)).toContain(probe === "nested" ? "worker" : probe);
     expect(timeoutLine).toBe("Exit code: TIMEOUT (1000ms)");
     expect(elapsedMs).toBeGreaterThanOrEqual(750);
-    expect(elapsedMs).toBeLessThan(10_000);
+    expect(elapsedMs).toBeLessThan(probe === "nested" ? 10_000 : 4_000);
 
     if (probe === "cpu") {
       expect(result).toMatch(/FIXTURE_ROLE=cpu PID=\d+ PPID=\d+/);
@@ -332,6 +333,7 @@ function foregroundExecution(
     timeoutMs?: number;
     signal?: AbortSignal;
     onUpdate?: (output: string, totalBytes: number) => void;
+    cleanupProcessTree?: (pid: number) => Promise<void>;
   } = {},
 ) {
   return executeForegroundCommand({
@@ -341,6 +343,7 @@ function foregroundExecution(
     signal: options.signal ?? new AbortController().signal,
     ops: operationsFor(fake.child),
     onUpdate: options.onUpdate,
+    cleanupProcessTree: options.cleanupProcessTree,
   });
 }
 
@@ -350,7 +353,10 @@ async function executeRendered(
 ): Promise<string> {
   const tool = createBashTool(process.cwd(), new ProcessManager(), operationsFor(fake.child));
   const result = await tool.execute(
-    { command: "fixture command", timeout: options.timeoutMs ?? 5_000 },
+    {
+      command: "fixture command",
+      ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
+    },
     { signal: options.signal ?? new AbortController().signal, toolCallId: "bash-render" },
   );
   if (typeof result !== "string") throw new Error("Expected rendered bash output");
@@ -583,7 +589,7 @@ if (selectedProbe !== undefined) {
       expect(fulfillmentCount).toBe(1);
     });
 
-    it("records timeout metadata but waits for close to settle", async () => {
+    it("settles a no-close child after the fixed cleanup grace", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(70_000);
       const fake = createFakeChild(2_000_000_006);
@@ -594,25 +600,102 @@ if (selectedProbe !== undefined) {
         fulfillmentCount++;
         fulfilled = true;
       });
-      vi.advanceTimersByTime(1_250);
-      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(2_249);
       expect(fulfilled).toBe(false);
-      vi.advanceTimersByTime(40);
-      fake.emitClose(null, "SIGKILL");
-      fake.emitError(new Error("later error"));
+      await vi.advanceTimersByTimeAsync(1);
 
       const { outcome } = await resultPromise;
-      await Promise.resolve();
       expect(outcome).toEqual({
         reason: "timedOut",
         exitCode: null,
-        signal: "SIGKILL",
+        signal: null,
         startedAt: 70_000,
-        elapsedMs: 1_290,
+        elapsedMs: 2_250,
         pid: 2_000_000_006,
         error: null,
       });
       expect(fulfillmentCount).toBe(1);
+    });
+
+    it("settles at deadline plus fixed grace while process-tree cleanup is still pending", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(75_000);
+      const fake = createFakeChild(2_000_000_013);
+      let finishCleanup: (() => void) | undefined;
+      const cleanup = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishCleanup = resolve;
+          }),
+      );
+      const resultPromise = foregroundExecution(fake, {
+        timeoutMs: 400,
+        cleanupProcessTree: cleanup,
+      });
+      let fulfilled = false;
+      void resultPromise.then(() => {
+        fulfilled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(400);
+      expect(cleanup).toHaveBeenCalledWith(2_000_000_013);
+      expect(finishCleanup).toBeTypeOf("function");
+      await vi.advanceTimersByTimeAsync(999);
+      expect(fulfilled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      const { outcome } = await resultPromise;
+      expect(outcome.reason).toBe("timedOut");
+      expect(outcome.elapsedMs).toBe(1_400);
+      expect(finishCleanup).toBeTypeOf("function");
+      finishCleanup?.();
+    });
+
+    it("keeps timeout classification and close metadata during cleanup grace", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(80_000);
+      const fake = createFakeChild(2_000_000_009);
+      const resultPromise = foregroundExecution(fake, { timeoutMs: 300 });
+      let fulfillmentCount = 0;
+      void resultPromise.then(() => fulfillmentCount++);
+
+      await vi.advanceTimersByTimeAsync(300);
+      vi.advanceTimersByTime(40);
+      fake.emitClose(null, "SIGKILL");
+      fake.emitClose(0);
+      fake.emitError(new Error("later error"));
+
+      expect((await resultPromise).outcome).toEqual({
+        reason: "timedOut",
+        exitCode: null,
+        signal: "SIGKILL",
+        startedAt: 80_000,
+        elapsedMs: 340,
+        pid: 2_000_000_009,
+        error: null,
+      });
+      await Promise.resolve();
+      expect(fulfillmentCount).toBe(1);
+    });
+
+    it("claims an explicit timeout at its exact configured deadline", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(90_000);
+      const fake = createFakeChild(2_000_000_010);
+      const resultPromise = foregroundExecution(fake, { timeoutMs: 250 });
+      let fulfilled = false;
+      void resultPromise.then(() => {
+        fulfilled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(1_249);
+      expect(fulfilled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      const { outcome } = await resultPromise;
+      expect(outcome.reason).toBe("timedOut");
+      expect(outcome.elapsedMs).toBe(1_250);
     });
   });
 
@@ -640,19 +723,30 @@ if (selectedProbe !== undefined) {
       await expect(resultPromise).resolves.toContain("Exit code: ABORTED");
     });
 
-    it("keeps configured timeout rendering and close-dependent settlement", async () => {
+    it("renders configured timeout without a child close event", async () => {
       vi.useFakeTimers();
       const fake = createFakeChild();
       const resultPromise = executeRendered(fake, { timeoutMs: 1_750 });
+
+      await vi.advanceTimersByTimeAsync(2_750);
+
+      await expect(resultPromise).resolves.toContain("Exit code: TIMEOUT (1750ms)");
+    });
+
+    it("keeps the omitted timeout deadline at exactly 120000ms", async () => {
+      vi.useFakeTimers();
+      const fake = createFakeChild(2_000_000_012);
+      const resultPromise = executeRendered(fake);
       let fulfilled = false;
       void resultPromise.then(() => {
         fulfilled = true;
       });
-      vi.advanceTimersByTime(1_750);
-      await Promise.resolve();
+
+      await vi.advanceTimersByTimeAsync(120_999);
       expect(fulfilled).toBe(false);
-      fake.emitClose(null, "SIGKILL");
-      await expect(resultPromise).resolves.toContain("Exit code: TIMEOUT (1750ms)");
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(resultPromise).resolves.toContain("Exit code: TIMEOUT (120000ms)");
     });
 
     it("keeps the friendly emitted spawn failure message", async () => {
@@ -678,6 +772,42 @@ if (selectedProbe !== undefined) {
       ).resolves.toBe("Exit code: 1\nFailed to spawn: sync not found");
     });
   });
+
+  it("returns a persistent timeout without sentinel or exit and resets shell state", async () => {
+    const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "gg persistent-timeout-"));
+    const evidenceFile = path.join(tempDirectory, "silent.jsonl");
+    const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024);
+    const command = [
+      `export GG_PERSIST_TIMEOUT_STATE=lost;`,
+      quotePathForShell(process.execPath, false),
+      quotePathForShell(fixturePath("bash-timeout-silent.mjs"), false),
+      quotePathForShell(evidenceFile, false),
+    ].join(" ");
+    const startedAt = Date.now();
+
+    try {
+      const timedOut = await shell.run(command, 300, new AbortController().signal);
+      const elapsedMs = Date.now() - startedAt;
+      expect(timedOut.exitCode).toBe("TIMEOUT");
+      expect(elapsedMs).toBeGreaterThanOrEqual(200);
+      expect(elapsedMs).toBeLessThan(1_500);
+
+      const [firstSession] = await readFixtureEvidence(evidenceFile);
+      expect(firstSession?.role).toBe("silent");
+      const freshRun = await shell.run(
+        `printf 'STATE=%s\\nSHELL_PID=%s\\n' "\${GG_PERSIST_TIMEOUT_STATE:-fresh}" "$$"`,
+        2_000,
+        new AbortController().signal,
+      );
+      expect(freshRun.exitCode).toBe(0);
+      expect(freshRun.output).toContain("STATE=fresh");
+      expect(freshRun.output).not.toContain(`SHELL_PID=${firstSession?.ppid}`);
+    } finally {
+      shell.kill();
+      await cleanupRecordedPids(evidenceFile);
+      await fs.rm(tempDirectory, { recursive: true, force: true });
+    }
+  }, 10_000);
 
   it.each(knownProbes)(
     "bounds the %s foreground timeout probe",

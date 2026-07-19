@@ -317,14 +317,22 @@ describe("useAgentEvents", () => {
       hook.result.current.handleEvent(
         ev("tool_call_update", {
           toolCallId: "bash-1",
-          update: { type: "bash_progress", output: "All checks passed\n", totalBytes: 36 },
+          update: {
+            type: "bash_progress",
+            output: "\u001b[32mAll checks passed\u001b[39m\n",
+            totalBytes: 45,
+          },
         }),
       );
     });
 
-    expect(getLiveToolFeed()[0]?.progressOutput).toBe("Checking packages\nAll checks passed\n");
+    expect(getLiveToolFeed()[0]?.progressOutput).toBe(
+      "Checking packages\n\u001b[32mAll checks passed\u001b[39m\n",
+    );
     const progressPanel = render(createElement(LiveToolPanel, { entries: getLiveToolFeed() }));
     expect(progressPanel.container.textContent).toContain("All checks passed");
+    expect(progressPanel.container.textContent).not.toContain("\u001b");
+    expect(progressPanel.container.textContent).not.toContain("[32m");
 
     act(() => {
       hook.result.current.handleEvent(

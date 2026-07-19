@@ -3,7 +3,8 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import type { ForegroundExecutionOutcome, ForegroundExecutionReason } from "../types.js";
-import { killProcessTree } from "../utils/process.js";
+import { killProcessTreeAsync } from "../utils/process.js";
+import { log } from "../core/logger.js";
 import { truncateTail, MAX_BYTES } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
 import { writeOverflow } from "./overflow.js";
@@ -16,6 +17,7 @@ import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import { isCatastrophicCommand } from "../core/workspace-guard.js";
 
 const DEFAULT_TIMEOUT = 120_000; // 120 seconds
+const FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS = 1_000;
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB — cap buffered output to prevent OOM
 
 /**
@@ -54,6 +56,7 @@ interface ForegroundCommandOptions {
   signal: AbortSignal;
   ops: ToolOperations;
   onUpdate?: (output: string, totalBytes: number) => void;
+  cleanupProcessTree?: (pid: number) => Promise<void>;
 }
 
 export function executeForegroundCommand({
@@ -63,6 +66,7 @@ export function executeForegroundCommand({
   signal,
   ops,
   onUpdate,
+  cleanupProcessTree = killProcessTreeAsync,
 }: ForegroundCommandOptions): Promise<ForegroundCommandExecution> {
   const shell = resolveShell(command);
   const chunks: Buffer[] = [];
@@ -71,14 +75,24 @@ export function executeForegroundCommand({
   let pid: number | null = null;
   let pendingInterruption: "timedOut" | "aborted" | null = null;
   let settled = false;
-  let timer: NodeJS.Timeout | undefined;
+  let deadlineTimer: NodeJS.Timeout | undefined;
+  let cleanupGraceTimer: NodeJS.Timeout | undefined;
   let abortListenerRegistered = false;
 
   return new Promise((resolve) => {
+    const startCleanup = (cleanupPid: number): void => {
+      void cleanupProcessTree(cleanupPid).catch((error: unknown) => {
+        log("WARN", "bash", "Foreground process-tree cleanup failed", {
+          pid: String(cleanupPid),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    };
+
     const onAbort = (): void => {
       if (settled || pendingInterruption) return;
       pendingInterruption = "aborted";
-      if (pid !== null) killProcessTree(pid);
+      if (pid !== null) startCleanup(pid);
     };
 
     const finalize = (
@@ -89,7 +103,8 @@ export function executeForegroundCommand({
     ): void => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (cleanupGraceTimer) clearTimeout(cleanupGraceTimer);
       if (abortListenerRegistered) signal.removeEventListener("abort", onAbort);
 
       resolve({
@@ -162,13 +177,16 @@ export function executeForegroundCommand({
         finalize(reason, code, closeSignal);
       });
       child.on("error", (error) => {
-        finalize("spawnError", null, null, error);
+        finalize(pendingInterruption ?? "spawnError", null, null, error);
       });
 
-      timer = setTimeout(() => {
+      deadlineTimer = setTimeout(() => {
         if (settled || pendingInterruption) return;
         pendingInterruption = "timedOut";
-        if (pid !== null) killProcessTree(pid);
+        cleanupGraceTimer = setTimeout(() => {
+          finalize("timedOut", null, null);
+        }, FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS);
+        if (pid !== null) startCleanup(pid);
       }, timeoutMs);
 
       signal.addEventListener("abort", onAbort, { once: true });

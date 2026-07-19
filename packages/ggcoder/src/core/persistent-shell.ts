@@ -11,7 +11,7 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { killProcessTree } from "../utils/process.js";
+import { killProcessTreeAsync } from "../utils/process.js";
 
 export interface PersistentRunResult {
   exitCode: number | "TIMEOUT";
@@ -132,7 +132,9 @@ export class PersistentShell {
       };
 
       const timer = setTimeout(() => {
-        this.kill();
+        const timedOutPid = child.pid ?? null;
+        if (this.child === child) this.child = null;
+        if (timedOutPid !== null) void killProcessTreeAsync(timedOutPid);
         finish({ exitCode: "TIMEOUT", output: out });
       }, timeoutMs);
 
@@ -162,8 +164,9 @@ export class PersistentShell {
 
   /** Kill the session shell; the next run() starts a fresh one. */
   kill(): void {
-    if (this.child?.pid) killProcessTree(this.child.pid);
+    const childToKill = this.child;
     this.child = null;
     this.busy = false;
+    if (childToKill?.pid) void killProcessTreeAsync(childToKill.pid);
   }
 }

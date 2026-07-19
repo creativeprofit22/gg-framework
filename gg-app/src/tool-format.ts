@@ -112,6 +112,28 @@ function shorten(value: string, max = MAX_DETAIL): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
+// Terminal output can contain styling, hyperlinks, cursor controls, and other
+// non-printing bytes. Keep CR/LF/tab semantics for progress while making the
+// text safe to select and shorten as plain DOM content.
+const TERMINAL_SEQUENCE_PATTERN = new RegExp(
+  [
+    String.raw`\u001B\][\s\S]*?(?:\u0007|\u001B\\|$)`, // OSC
+    String.raw`\u001B[PX^_][\s\S]*?(?:\u001B\\|$)`, // DCS/SOS/PM/APC
+    String.raw`\u001B\[[0-?]*[ -/]*[@-~]`, // CSI
+    String.raw`\u009B[0-?]*[ -/]*[@-~]`, // 8-bit CSI
+    String.raw`\u001B[ -/]*[@-~]`, // Other two-byte ESC sequences
+  ].join("|"),
+  "g",
+);
+const NON_TEXT_CONTROL_PATTERN = new RegExp(
+  String.raw`[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]`,
+  "g",
+);
+
+function sanitizeTerminalText(value: string): string {
+  return value.replace(TERMINAL_SEQUENCE_PATTERN, "").replace(NON_TEXT_CONTROL_PATTERN, "");
+}
+
 function basename(p: string): string {
   const parts = p.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? p;
@@ -130,7 +152,7 @@ function firstLine(text: string): string {
 }
 
 function latestProgressLine(output: string): string {
-  const lines = output.split(/[\r\n]+/);
+  const lines = sanitizeTerminalText(output).split(/[\r\n]+/);
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trim();
     if (line) return shorten(line);

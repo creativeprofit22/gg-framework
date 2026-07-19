@@ -15,6 +15,8 @@ export interface LiveToolEntry {
   status: "running" | "done";
   isError?: boolean;
   result?: string;
+  /** Bounded tail of streamed foreground bash output (running only). */
+  progressOutput?: string;
   details?: unknown;
 }
 
@@ -41,6 +43,7 @@ export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
           done,
           isError: entry.isError,
           result: entry.result,
+          progressOutput: entry.progressOutput,
           details: entry.details,
         });
         const dotColor = done ? (entry.isError ? theme.error : theme.success) : theme.primary;

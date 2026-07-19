@@ -15,6 +15,25 @@ export interface CliConfig {
   outputFormat?: "text" | "json";
 }
 
+// ── Foreground Execution ────────────────────────────────────
+
+export type ForegroundExecutionReason =
+  | "completed"
+  | "nonZeroExit"
+  | "timedOut"
+  | "aborted"
+  | "spawnError";
+
+export interface ForegroundExecutionOutcome {
+  reason: ForegroundExecutionReason;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  startedAt: number;
+  elapsedMs: number;
+  pid: number | null;
+  error: Error | null;
+}
+
 // ── Session Persistence ────────────────────────────────────
 
 export interface SessionHeader {

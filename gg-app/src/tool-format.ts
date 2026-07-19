@@ -129,6 +129,15 @@ function firstLine(text: string): string {
   return shorten(text.split("\n")[0] ?? "");
 }
 
+function latestProgressLine(output: string): string {
+  const lines = output.split(/[\r\n]+/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (line) return shorten(line);
+  }
+  return "";
+}
+
 function plural(n: number, one: string, many = `${one}s`): string {
   return n === 1 ? one : many;
 }
@@ -211,7 +220,13 @@ function inlineSummary(name: string, result: string, details: unknown): string {
 export function buildToolLineParts(
   name: string,
   args: Record<string, unknown>,
-  input: { done: boolean; isError?: boolean; result?: string; details?: unknown },
+  input: {
+    done: boolean;
+    isError?: boolean;
+    result?: string;
+    progressOutput?: string;
+    details?: unknown;
+  },
 ): ToolLinePart[] {
   const verbs = VERBS[name] ?? humanizeName(name);
   const tone = getToolTone(name);
@@ -228,7 +243,8 @@ export function buildToolLineParts(
       : inlineSummary(name, input.result ?? "", input.details);
     if (summary) parts.push({ text: ` \u00b7 ${summary}`, dim: true });
   } else {
-    parts.push({ text: "\u2026" });
+    const progress = name === "bash" ? latestProgressLine(input.progressOutput ?? "") : "";
+    parts.push(progress ? { text: ` \u00b7 ${progress}`, dim: true } : { text: "\u2026" });
   }
   return parts;
 }

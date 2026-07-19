@@ -1,13 +1,16 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProcessManager } from "../core/process-manager.js";
 import { resolveShell } from "../core/shell.js";
 import { killProcessTree } from "../utils/process.js";
-import { createBashTool } from "./bash.js";
+import { createBashTool, executeForegroundCommand } from "./bash.js";
+import { localOperations, type ToolOperations } from "./operations.js";
 
 type ProbeName = "cpu" | "silent" | "nested";
 
@@ -293,6 +296,71 @@ async function assertSupervisedProbe(probe: ProbeName): Promise<void> {
   }
 }
 
+interface FakeChildHarness {
+  child: ChildProcess;
+  stdout: PassThrough;
+  stderr: PassThrough;
+  emitClose(code: number | null, signal?: NodeJS.Signals | null): void;
+  emitError(error: Error): void;
+}
+
+function createFakeChild(pid = 2_000_000_000): FakeChildHarness {
+  const emitter = new EventEmitter();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const child = Object.assign(emitter, { pid, stdout, stderr }) as unknown as ChildProcess;
+  return {
+    child,
+    stdout,
+    stderr,
+    emitClose(code, signal = null) {
+      emitter.emit("close", code, signal);
+    },
+    emitError(error) {
+      emitter.emit("error", error);
+    },
+  };
+}
+
+function operationsFor(child: ChildProcess): ToolOperations {
+  return { ...localOperations, spawn: () => child };
+}
+
+function foregroundExecution(
+  fake: FakeChildHarness,
+  options: {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    onUpdate?: (output: string, totalBytes: number) => void;
+  } = {},
+) {
+  return executeForegroundCommand({
+    command: "fixture command",
+    cwd: process.cwd(),
+    timeoutMs: options.timeoutMs ?? 5_000,
+    signal: options.signal ?? new AbortController().signal,
+    ops: operationsFor(fake.child),
+    onUpdate: options.onUpdate,
+  });
+}
+
+async function executeRendered(
+  fake: FakeChildHarness,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<string> {
+  const tool = createBashTool(process.cwd(), new ProcessManager(), operationsFor(fake.child));
+  const result = await tool.execute(
+    { command: "fixture command", timeout: options.timeoutMs ?? 5_000 },
+    { signal: options.signal ?? new AbortController().signal, toolCallId: "bash-render" },
+  );
+  if (typeof result !== "string") throw new Error("Expected rendered bash output");
+  return result;
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 const selectedProbe = process.env[PROBE_ENV];
 const knownProbes: ProbeName[] = ["cpu", "silent", "nested"];
 
@@ -307,6 +375,310 @@ if (selectedProbe !== undefined) {
     await runProbe(selectedProbe as ProbeName, evidenceFile);
   }, 60_000);
 } else {
+  describe("foreground execution outcomes", () => {
+    it("records completed metadata independently", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000);
+      const fake = createFakeChild(2_000_000_001);
+      const resultPromise = foregroundExecution(fake);
+      vi.advanceTimersByTime(25);
+      fake.emitClose(0);
+
+      const { outcome } = await resultPromise;
+      expect(outcome).toEqual({
+        reason: "completed",
+        exitCode: 0,
+        signal: null,
+        startedAt: 10_000,
+        elapsedMs: 25,
+        pid: 2_000_000_001,
+        error: null,
+      });
+    });
+
+    it("records a numeric non-zero exit", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(20_000);
+      const fake = createFakeChild(2_000_000_002);
+      const resultPromise = foregroundExecution(fake);
+      fake.emitClose(7);
+
+      expect((await resultPromise).outcome).toEqual({
+        reason: "nonZeroExit",
+        exitCode: 7,
+        signal: null,
+        startedAt: 20_000,
+        elapsedMs: 0,
+        pid: 2_000_000_002,
+        error: null,
+      });
+    });
+
+    it("preserves a signal without fabricating an exit code", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(30_000);
+      const fake = createFakeChild(2_000_000_003);
+      const resultPromise = foregroundExecution(fake);
+      fake.emitClose(null, "SIGTERM");
+
+      expect((await resultPromise).outcome).toEqual({
+        reason: "nonZeroExit",
+        exitCode: null,
+        signal: "SIGTERM",
+        startedAt: 30_000,
+        elapsedMs: 0,
+        pid: 2_000_000_003,
+        error: null,
+      });
+    });
+
+    it("keeps the first emitted spawn error when close races afterward", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(40_000);
+      const fake = createFakeChild(2_000_000_004);
+      const error = new Error("missing executable");
+      const resultPromise = foregroundExecution(fake);
+      let fulfillmentCount = 0;
+      void resultPromise.then(() => fulfillmentCount++);
+      fake.emitError(error);
+      fake.emitClose(0);
+      fake.emitError(new Error("later error"));
+
+      const { outcome } = await resultPromise;
+      await Promise.resolve();
+      expect(outcome).toEqual({
+        reason: "spawnError",
+        exitCode: null,
+        signal: null,
+        startedAt: 40_000,
+        elapsedMs: 0,
+        pid: 2_000_000_004,
+        error,
+      });
+      expect(fulfillmentCount).toBe(1);
+    });
+
+    it.each(["stdout", "stderr"] as const)(
+      "ignores %s pipe errors and settles exactly once from child close",
+      async (pipe) => {
+        vi.useFakeTimers();
+        vi.setSystemTime(45_000);
+        const fake = createFakeChild(2_000_000_007);
+        const resultPromise = foregroundExecution(fake);
+        let fulfillmentCount = 0;
+        let fulfilled = false;
+        void resultPromise.then(() => {
+          fulfillmentCount++;
+          fulfilled = true;
+        });
+
+        fake[pipe].emit("error", new Error(`${pipe} pipe failed`));
+        await Promise.resolve();
+        expect(fulfilled).toBe(false);
+
+        vi.advanceTimersByTime(15);
+        fake.emitClose(0);
+        fake.emitClose(9);
+        fake.emitError(new Error("later child error"));
+
+        const { outcome } = await resultPromise;
+        await Promise.resolve();
+        expect(outcome).toEqual({
+          reason: "completed",
+          exitCode: 0,
+          signal: null,
+          startedAt: 45_000,
+          elapsedMs: 15,
+          pid: 2_000_000_007,
+          error: null,
+        });
+        expect(fulfillmentCount).toBe(1);
+      },
+    );
+
+    it("preserves split UTF-8 characters in per-stream live updates and raw output", async () => {
+      const fake = createFakeChild(2_000_000_008);
+      const updates: string[] = [];
+      const totals: number[] = [];
+      const resultPromise = foregroundExecution(fake, {
+        onUpdate(output, totalBytes) {
+          updates.push(output);
+          totals.push(totalBytes);
+        },
+      });
+      const stdout = Buffer.from("stdout: 😀\n");
+      const stderr = Buffer.from("stderr: 界\n");
+      const stdoutSplit = stdout.indexOf(Buffer.from("😀")) + 2;
+      const stderrSplit = stderr.indexOf(Buffer.from("界")) + 1;
+
+      fake.stdout.write(stdout.subarray(0, stdoutSplit));
+      fake.stdout.write(stdout.subarray(stdoutSplit));
+      fake.stdout.end();
+      fake.stderr.write(stderr.subarray(0, stderrSplit));
+      fake.stderr.write(stderr.subarray(stderrSplit));
+      fake.stderr.end();
+      fake.emitClose(0);
+
+      const result = await resultPromise;
+      const expectedOutput = "stdout: 😀\nstderr: 界\n";
+      expect(updates.join("")).toBe(expectedOutput);
+      expect(updates.join("")).not.toContain("�");
+      expect(totals.at(-1)).toBe(Buffer.byteLength(expectedOutput));
+      expect(result.rawOutput).toBe(expectedOutput);
+    });
+
+    it("converts a synchronous spawn throw into a spawn error outcome", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(50_000);
+      const error = new Error("spawn threw");
+      const execution = executeForegroundCommand({
+        command: "fixture command",
+        cwd: process.cwd(),
+        timeoutMs: 5_000,
+        signal: new AbortController().signal,
+        ops: {
+          ...localOperations,
+          spawn: () => {
+            throw error;
+          },
+        },
+      });
+
+      expect((await execution).outcome).toEqual({
+        reason: "spawnError",
+        exitCode: null,
+        signal: null,
+        startedAt: 50_000,
+        elapsedMs: 0,
+        pid: null,
+        error,
+      });
+    });
+
+    it("records abort before close and settles exactly once", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(60_000);
+      const controller = new AbortController();
+      const fake = createFakeChild(2_000_000_005);
+      const resultPromise = foregroundExecution(fake, { signal: controller.signal });
+      let fulfillmentCount = 0;
+      void resultPromise.then(() => fulfillmentCount++);
+      controller.abort();
+      vi.advanceTimersByTime(30);
+      fake.emitClose(null, "SIGTERM");
+      fake.emitClose(0);
+      fake.emitError(new Error("later error"));
+
+      const { outcome } = await resultPromise;
+      await Promise.resolve();
+      expect(outcome).toEqual({
+        reason: "aborted",
+        exitCode: null,
+        signal: "SIGTERM",
+        startedAt: 60_000,
+        elapsedMs: 30,
+        pid: 2_000_000_005,
+        error: null,
+      });
+      expect(fulfillmentCount).toBe(1);
+    });
+
+    it("records timeout metadata but waits for close to settle", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(70_000);
+      const fake = createFakeChild(2_000_000_006);
+      const resultPromise = foregroundExecution(fake, { timeoutMs: 1_250 });
+      let fulfillmentCount = 0;
+      let fulfilled = false;
+      void resultPromise.then(() => {
+        fulfillmentCount++;
+        fulfilled = true;
+      });
+      vi.advanceTimersByTime(1_250);
+      await Promise.resolve();
+      expect(fulfilled).toBe(false);
+      vi.advanceTimersByTime(40);
+      fake.emitClose(null, "SIGKILL");
+      fake.emitError(new Error("later error"));
+
+      const { outcome } = await resultPromise;
+      await Promise.resolve();
+      expect(outcome).toEqual({
+        reason: "timedOut",
+        exitCode: null,
+        signal: "SIGKILL",
+        startedAt: 70_000,
+        elapsedMs: 1_290,
+        pid: 2_000_000_006,
+        error: null,
+      });
+      expect(fulfillmentCount).toBe(1);
+    });
+  });
+
+  describe("foreground result rendering", () => {
+    it("keeps numeric non-zero rendering", async () => {
+      const fake = createFakeChild();
+      const resultPromise = executeRendered(fake);
+      fake.emitClose(7);
+      await expect(resultPromise).resolves.toContain("Exit code: 7");
+    });
+
+    it("renders signal-only termination without inventing code 1", async () => {
+      const fake = createFakeChild();
+      const resultPromise = executeRendered(fake);
+      fake.emitClose(null, "SIGTERM");
+      await expect(resultPromise).resolves.toContain("Exit code: SIGNAL (SIGTERM)");
+    });
+
+    it("renders abort distinctly", async () => {
+      const controller = new AbortController();
+      const fake = createFakeChild();
+      const resultPromise = executeRendered(fake, { signal: controller.signal });
+      controller.abort();
+      fake.emitClose(null, "SIGTERM");
+      await expect(resultPromise).resolves.toContain("Exit code: ABORTED");
+    });
+
+    it("keeps configured timeout rendering and close-dependent settlement", async () => {
+      vi.useFakeTimers();
+      const fake = createFakeChild();
+      const resultPromise = executeRendered(fake, { timeoutMs: 1_750 });
+      let fulfilled = false;
+      void resultPromise.then(() => {
+        fulfilled = true;
+      });
+      vi.advanceTimersByTime(1_750);
+      await Promise.resolve();
+      expect(fulfilled).toBe(false);
+      fake.emitClose(null, "SIGKILL");
+      await expect(resultPromise).resolves.toContain("Exit code: TIMEOUT (1750ms)");
+    });
+
+    it("keeps the friendly emitted spawn failure message", async () => {
+      const fake = createFakeChild();
+      const resultPromise = executeRendered(fake);
+      fake.emitError(new Error("not found"));
+      fake.emitClose(1);
+      await expect(resultPromise).resolves.toBe("Exit code: 1\nFailed to spawn: not found");
+    });
+
+    it("keeps the friendly synchronous spawn failure message", async () => {
+      const tool = createBashTool(process.cwd(), new ProcessManager(), {
+        ...localOperations,
+        spawn: () => {
+          throw new Error("sync not found");
+        },
+      });
+      await expect(
+        tool.execute(
+          { command: "fixture command" },
+          { signal: new AbortController().signal, toolCallId: "bash-sync-spawn" },
+        ),
+      ).resolves.toBe("Exit code: 1\nFailed to spawn: sync not found");
+    });
+  });
+
   it.each(knownProbes)(
     "bounds the %s foreground timeout probe",
     async (probe) => {

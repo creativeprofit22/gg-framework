@@ -1,6 +1,8 @@
+import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
+import type { ForegroundExecutionOutcome, ForegroundExecutionReason } from "../types.js";
 import { killProcessTree } from "../utils/process.js";
 import { truncateTail, MAX_BYTES } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
@@ -36,6 +38,146 @@ export async function renderBashOutput(rawOutput: string): Promise<string> {
     : "";
   const c = compressToolOutput(rawOutput);
   return `[${c.notice}${overflowNotice}]\n${c.content}`;
+}
+
+export interface ForegroundCommandExecution {
+  outcome: ForegroundExecutionOutcome;
+  rawOutput: string;
+  outputCapped: boolean;
+  isCmdFallback: boolean;
+}
+
+interface ForegroundCommandOptions {
+  command: string;
+  cwd: string;
+  timeoutMs: number;
+  signal: AbortSignal;
+  ops: ToolOperations;
+  onUpdate?: (output: string, totalBytes: number) => void;
+}
+
+export function executeForegroundCommand({
+  command,
+  cwd,
+  timeoutMs,
+  signal,
+  ops,
+  onUpdate,
+}: ForegroundCommandOptions): Promise<ForegroundCommandExecution> {
+  const shell = resolveShell(command);
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let outputCapped = false;
+  let pid: number | null = null;
+  let pendingInterruption: "timedOut" | "aborted" | null = null;
+  let settled = false;
+  let timer: NodeJS.Timeout | undefined;
+  let abortListenerRegistered = false;
+
+  return new Promise((resolve) => {
+    const onAbort = (): void => {
+      if (settled || pendingInterruption) return;
+      pendingInterruption = "aborted";
+      if (pid !== null) killProcessTree(pid);
+    };
+
+    const finalize = (
+      reason: ForegroundExecutionReason,
+      exitCode: number | null,
+      closeSignal: NodeJS.Signals | null,
+      error: Error | null = null,
+    ): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (abortListenerRegistered) signal.removeEventListener("abort", onAbort);
+
+      resolve({
+        outcome: {
+          reason,
+          exitCode,
+          signal: closeSignal,
+          startedAt,
+          elapsedMs: Math.max(0, Date.now() - startedAt),
+          pid,
+          error,
+        },
+        rawOutput: Buffer.concat(chunks).toString("utf-8"),
+        outputCapped,
+        isCmdFallback: shell.isCmdFallback,
+      });
+    };
+
+    const startedAt = Date.now();
+    try {
+      const child = ops.spawn(shell.file, shell.args, {
+        cwd,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: getSafeToolEnv(),
+      });
+      pid = child.pid ?? null;
+
+      const stdoutDecoder = new StringDecoder("utf8");
+      const stderrDecoder = new StringDecoder("utf8");
+      const onData =
+        (decoder: StringDecoder) =>
+        (data: Buffer): void => {
+          if (outputCapped) return;
+          totalBytes += data.length;
+          if (totalBytes > MAX_OUTPUT_BYTES) {
+            outputCapped = true;
+            return;
+          }
+          chunks.push(data);
+          const output = decoder.write(data);
+          if (output) onUpdate?.(output, totalBytes);
+        };
+      const flushDecoder = (decoder: StringDecoder): (() => void) => {
+        let flushed = false;
+        return () => {
+          if (flushed) return;
+          flushed = true;
+          const output = decoder.end();
+          if (output) onUpdate?.(output, totalBytes);
+        };
+      };
+      // Output pipes can fail independently. Swallow their errors so the child
+      // process close/error event remains the sole execution outcome authority.
+      const onOutputPipeError = (): void => {};
+      const flushStdout = flushDecoder(stdoutDecoder);
+      const flushStderr = flushDecoder(stderrDecoder);
+      child.stdout?.on("data", onData(stdoutDecoder));
+      child.stdout?.on("error", onOutputPipeError);
+      child.stdout?.once("end", flushStdout);
+      child.stdout?.once("close", flushStdout);
+      child.stderr?.on("data", onData(stderrDecoder));
+      child.stderr?.on("error", onOutputPipeError);
+      child.stderr?.once("end", flushStderr);
+      child.stderr?.once("close", flushStderr);
+
+      child.on("close", (code, closeSignal) => {
+        const reason =
+          pendingInterruption ?? (code === 0 ? ("completed" as const) : ("nonZeroExit" as const));
+        finalize(reason, code, closeSignal);
+      });
+      child.on("error", (error) => {
+        finalize("spawnError", null, null, error);
+      });
+
+      timer = setTimeout(() => {
+        if (settled || pendingInterruption) return;
+        pendingInterruption = "timedOut";
+        if (pid !== null) killProcessTree(pid);
+      }, timeoutMs);
+
+      signal.addEventListener("abort", onAbort, { once: true });
+      abortListenerRegistered = true;
+      if (signal.aborted) onAbort();
+    } catch (error) {
+      finalize("spawnError", null, null, error instanceof Error ? error : new Error(String(error)));
+    }
+  });
 }
 
 const BashParams = z.object({
@@ -149,99 +291,54 @@ export function createBashTool(
       }
 
       const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
-
-      return new Promise<string>((resolve) => {
-        // Cross-platform shell: bash on macOS/Linux, Git Bash on Windows (or
-        // cmd.exe fallback). Hardcoding "bash" broke on Windows with `spawn
-        // bash ENOENT`, and accidentally hitting WSL's bash ran commands in a
-        // separate Linux filesystem (the "files not mounted" symptom).
-        const shell = resolveShell(command);
-        const child = ops.spawn(shell.file, shell.args, {
-          cwd,
-          detached: true,
-          stdio: ["ignore", "pipe", "pipe"],
-          env: getSafeToolEnv(),
-        });
-
-        const chunks: Buffer[] = [];
-        let totalBytes = 0;
-        let outputCapped = false;
-
-        const onData = (data: Buffer) => {
-          if (outputCapped) return;
-          totalBytes += data.length;
-          if (totalBytes > MAX_OUTPUT_BYTES) {
-            outputCapped = true;
-            return;
-          }
-          chunks.push(data);
-
-          // Stream progress to UI for live output display
-          if (context.onUpdate) {
-            context.onUpdate({
-              type: "bash_progress",
-              output: data.toString("utf-8"),
-              totalBytes,
-            });
-          }
-        };
-        child.stdout?.on("data", onData);
-        child.stderr?.on("data", onData);
-
-        let killed = false;
-        let timedOut = false;
-
-        // Timeout handling
-        const timer = setTimeout(() => {
-          timedOut = true;
-          killed = true;
-          if (child.pid) killProcessTree(child.pid);
-        }, effectiveTimeout);
-
-        // Abort signal handling
-        const onAbort = () => {
-          killed = true;
-          if (child.pid) killProcessTree(child.pid);
-        };
-        context.signal.addEventListener("abort", onAbort, { once: true });
-
-        child.on("close", async (code) => {
-          clearTimeout(timer);
-          context.signal.removeEventListener("abort", onAbort);
-
-          const rawOutput = Buffer.concat(chunks).toString("utf-8");
-          let output = await renderBashOutput(rawOutput);
-          if (outputCapped) {
-            output =
-              `[Output capped at ${MAX_OUTPUT_BYTES / 1024 / 1024} MB to prevent memory exhaustion]\n` +
-              output;
-          }
-          // Windows without Git Bash: commands ran under cmd.exe, NOT bash. Tell
-          // the model so it uses cmd syntax (no `ls`/`grep`/pipes/single-quotes)
-          // and doesn't misread failures as a wrong directory / environment.
-          if (shell.isCmdFallback) {
-            output =
-              "[Ran under Windows cmd.exe — bash is unavailable. Use cmd syntax " +
-              "(dir, findstr, type); POSIX commands and quoting will fail. " +
-              "Install Git for Windows to get bash.]\n" +
-              output;
-          }
-
-          const exitCode = timedOut
-            ? `TIMEOUT (${effectiveTimeout}ms)`
-            : killed
-              ? "KILLED"
-              : String(code ?? 1);
-
-          resolve(`Exit code: ${exitCode}\n${output}`);
-        });
-
-        child.on("error", (err) => {
-          clearTimeout(timer);
-          context.signal.removeEventListener("abort", onAbort);
-          resolve(`Exit code: 1\nFailed to spawn: ${err.message}`);
-        });
+      const execution = await executeForegroundCommand({
+        command,
+        cwd,
+        timeoutMs: effectiveTimeout,
+        signal: context.signal,
+        ops,
+        onUpdate: context.onUpdate
+          ? (output, totalBytes) =>
+              context.onUpdate?.({ type: "bash_progress", output, totalBytes })
+          : undefined,
       });
+      const { outcome } = execution;
+
+      if (outcome.reason === "spawnError") {
+        return `Exit code: 1\nFailed to spawn: ${outcome.error?.message ?? "Unknown error"}`;
+      }
+
+      let output = await renderBashOutput(execution.rawOutput);
+      if (execution.outputCapped) {
+        output =
+          `[Output capped at ${MAX_OUTPUT_BYTES / 1024 / 1024} MB to prevent memory exhaustion]\n` +
+          output;
+      }
+      // Windows without Git Bash: commands ran under cmd.exe, NOT bash. Tell
+      // the model so it uses cmd syntax (no `ls`/`grep`/pipes/single-quotes)
+      // and doesn't misread failures as a wrong directory / environment.
+      if (execution.isCmdFallback) {
+        output =
+          "[Ran under Windows cmd.exe — bash is unavailable. Use cmd syntax " +
+          "(dir, findstr, type); POSIX commands and quoting will fail. " +
+          "Install Git for Windows to get bash.]\n" +
+          output;
+      }
+
+      const exitCode =
+        outcome.reason === "completed"
+          ? "0"
+          : outcome.reason === "timedOut"
+            ? `TIMEOUT (${effectiveTimeout}ms)`
+            : outcome.reason === "aborted"
+              ? "ABORTED"
+              : outcome.exitCode !== null
+                ? String(outcome.exitCode)
+                : outcome.signal
+                  ? `SIGNAL (${outcome.signal})`
+                  : "FAILED (no exit code)";
+
+      return `Exit code: ${exitCode}\n${output}`;
     },
   };
 }

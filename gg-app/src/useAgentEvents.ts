@@ -59,6 +59,24 @@ export const HOOK_PRESENTATION: Record<HookKind, { text: string; color: string }
   },
 };
 
+interface BashProgressUpdate {
+  type: "bash_progress";
+  output: string;
+  totalBytes?: number;
+}
+
+const MAX_BASH_PROGRESS_CHARS = 8 * 1024;
+
+function isBashProgressUpdate(update: unknown): update is BashProgressUpdate {
+  if (typeof update !== "object" || update === null) return false;
+  const candidate = update as Record<string, unknown>;
+  return candidate.type === "bash_progress" && typeof candidate.output === "string";
+}
+
+function appendBoundedBashProgress(previous: string | undefined, output: string): string {
+  return `${previous ?? ""}${output}`.slice(-MAX_BASH_PROGRESS_CHARS);
+}
+
 function formatElapsed(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -537,10 +555,31 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "tool_call_update": {
+          const id = String(d.toolCallId ?? "");
+          const rawUpdate = d.update;
+
+          // Foreground bash emits output chunks while it runs. Keep only a bounded
+          // tail on the matching pinned row so long commands cannot grow UI memory.
+          if (isBashProgressUpdate(rawUpdate)) {
+            setLiveToolFeed((prev) =>
+              prev.map((entry) =>
+                entry.toolCallId === id && entry.name === "bash"
+                  ? {
+                      ...entry,
+                      progressOutput: appendBoundedBashProgress(
+                        entry.progressOutput,
+                        rawUpdate.output,
+                      ),
+                    }
+                  : entry,
+              ),
+            );
+            break;
+          }
+
           // Live progress from a running sub-agent (toolUseCount + the tool it's
           // currently running). Append distinct activities into its feed.
-          const id = String(d.toolCallId ?? "");
-          const update = d.update as
+          const update = rawUpdate as
             | {
                 toolUseCount?: number;
                 currentActivity?: string;
@@ -612,7 +651,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           setLiveToolFeed((prev) =>
             prev.map((entry) =>
               entry.toolCallId === id
-                ? { ...entry, status: "done" as const, isError, result, details }
+                ? {
+                    ...entry,
+                    status: "done" as const,
+                    isError,
+                    result,
+                    progressOutput: undefined,
+                    details,
+                  }
                 : entry,
             ),
           );

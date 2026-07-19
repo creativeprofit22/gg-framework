@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
-import { createRef } from "react";
+import { render, renderHook, act } from "@testing-library/react";
+import { createElement, createRef } from "react";
 import type { MutableRefObject } from "react";
 
 // playSound builds an <audio> element and ./agent calls Tauri APIs at module
@@ -16,7 +16,7 @@ import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
 import { listCommands } from "./agent";
 import type { AgentState, SidecarEvent, SlashCommand } from "./agent";
-import type { LiveToolEntry } from "./LiveToolPanel";
+import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
 
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;
@@ -288,6 +288,66 @@ describe("useAgentEvents", () => {
     });
     feed = getLiveToolFeed();
     expect(feed[0]).toMatchObject({ toolCallId: "t1", status: "done" });
+  });
+
+  it("streams bounded bash progress before replacing it with the final result", () => {
+    const { hook, getLiveToolFeed } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_start", {
+          toolCallId: "bash-1",
+          name: "bash",
+          args: { command: "pnpm check" },
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("tool_call_update", {
+          toolCallId: "bash-1",
+          update: { type: "bash_progress", output: "Checking packages\n", totalBytes: 18 },
+        }),
+      );
+    });
+
+    expect(getLiveToolFeed()[0]).toMatchObject({
+      status: "running",
+      progressOutput: "Checking packages\n",
+    });
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_update", {
+          toolCallId: "bash-1",
+          update: { type: "bash_progress", output: "All checks passed\n", totalBytes: 36 },
+        }),
+      );
+    });
+
+    expect(getLiveToolFeed()[0]?.progressOutput).toBe("Checking packages\nAll checks passed\n");
+    const progressPanel = render(createElement(LiveToolPanel, { entries: getLiveToolFeed() }));
+    expect(progressPanel.container.textContent).toContain("All checks passed");
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_update", {
+          toolCallId: "bash-1",
+          update: { type: "bash_progress", output: "x".repeat(9_000), totalBytes: 9_036 },
+        }),
+      );
+    });
+    expect(getLiveToolFeed()[0]?.progressOutput).toHaveLength(8 * 1024);
+
+    const result = "Exit code: 0\nAuthoritative final output";
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_end", { toolCallId: "bash-1", isError: false, result }),
+      );
+    });
+
+    expect(getLiveToolFeed()[0]).toMatchObject({
+      status: "done",
+      result,
+      progressOutput: undefined,
+    });
   });
 
   it("turn_end accumulates output tokens across turns", () => {

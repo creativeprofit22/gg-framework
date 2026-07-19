@@ -551,7 +551,101 @@ After presenting the list, ask which (if any) to install. Install nothing withou
     name: "setup",
     aliases: ["setup-project"],
     description: "Audit project setup",
-    prompt: `Audit this project across six categories and report gaps. Before the report, set up the narrowly scoped generated-artifact cleanup support described below. **Do not fix any other finding.** Wait for me to choose what to address after the report.
+    prompt: `Audit this project across six categories and report gaps. **Do not fix anything yet.** Wait for me to choose what to address after the report.
+
+Language-agnostic and project-agnostic — adapt findings to the languages and stack actually present. Ignore categories that don't apply (e.g. skip CI for a local-only scratchpad).
+
+## Categories
+
+### 1. Project hygiene
+
+- \`.gitignore\` present and covers the active language(s)?
+- \`README.md\` present with at least install + run instructions?
+- License file present (if this looks like a public/shareable project)?
+- \`.editorconfig\` present?
+- Git initialized? (\`.git\` directory exists)
+
+### 2. Toolchain version pinning
+
+- Language version pinned in a canonical file: \`.nvmrc\` / \`package.json#engines\` (Node), \`.python-version\` / \`pyproject.toml#requires-python\` (Python), \`rust-toolchain.toml\` (Rust), the \`go\` line in \`go.mod\`, \`.ruby-version\` (Ruby), etc.
+- Lockfile present and committed? (\`package-lock.json\`, \`pnpm-lock.yaml\`, \`yarn.lock\`, \`bun.lockb\`, \`uv.lock\`, \`poetry.lock\`, \`Cargo.lock\`, \`go.sum\`, \`Gemfile.lock\`, \`composer.lock\`)
+
+### 3. Code quality tooling
+
+For each active language, check that a formatter, linter, and (where applicable) type checker are configured:
+- **Formatter**: Prettier / ruff format / gofmt (built-in) / rustfmt (built-in) / clang-format / etc.
+- **Linter**: ESLint / Ruff / golangci-lint / Clippy / etc. — with a reasonable strictness preset
+- **Type checker** (statically-typed langs only): tsc strict, Pyright strict, mypy strict
+- **Test framework**: vitest / jest / pytest / go test / cargo test / rspec / etc.
+
+Report which are present, missing, or configured below the pack's strictness recommendation.
+
+### 4. Verify pipeline
+
+- Are \`lint\` / \`typecheck\` / \`format:check\` / \`test\` (or language-equivalent) wired as runnable commands? (scripts in \`package.json\`, \`pyproject.toml\`, a \`Makefile\`, or \`justfile\`)
+- Pre-commit hook configured? (\`.husky/\`, \`pre-commit\` framework, \`lefthook\`, etc.) — nice-to-have, not required.
+- CI config present? (\`.github/workflows/\`, \`.gitlab-ci.yml\`, \`.circleci/\`, etc.)
+
+### 5. Style pack alignment
+
+"Active style packs" refers specifically to the per-language sub-sections inside the **Language Style Packs** section in your system prompt (e.g. \`### TypeScript\`, \`### Python\`, \`### Go\`). It does **NOT** include the cross-cutting \`### Agent-Written Code\` preamble that sits above them — those are guidelines for how code is *written*, not project-scaffolding to audit. It also does **NOT** include Skills (\`.gg/skills/\`) or any other extension category. If the Language Style Packs section is absent or empty, **skip this entire section entirely** — do not substitute Skills or any other concept.
+
+When per-language packs are present, compare the project against each pack's **Tooling** bullet and the system prompt's **Verification** commands. For tool recommendations or config semantics, verify against official docs when local files are ambiguous:
+- Tooling: which strict-mode flags or lint-rule presets does the pack recommend that the project is missing? (e.g. \`tsconfig\` missing \`noUncheckedIndexedAccess\`, \`pyproject\` missing \`[tool.ruff]\`, Go project missing \`golangci-lint\` config).
+- Dependencies: list which pack-mentioned libs (Zod, Pydantic, thiserror, anyhow, etc.) the project uses, has an equivalent for, or lacks. **Observation only — no recommendation to install.**
+
+### 6. Documentation hygiene
+
+- \`CLAUDE.md\` or \`AGENTS.md\` present?
+- Public API documented? (top-level docstrings, type signatures, or README examples)
+- Architecture doc for non-trivial projects? (\`ARCHITECTURE.md\`, \`docs/architecture/\`, ADRs)
+
+## How to investigate
+
+- Read the project root + obvious config locations (\`./\`, \`.github/\`, \`.husky/\`, \`docs/\`).
+- Don't recurse into \`node_modules\`, \`dist\`, \`build\`, \`target\`, vendored folders.
+- Use \`ls\`, \`read\`, \`find\` (with name patterns) — do not \`grep\` source code for this audit; it's about scaffolding, not code review.
+- Cap at ~20 file reads total. If a file is huge (e.g. \`pnpm-lock.yaml\`), don't read its body — presence is what matters.
+
+## Output format
+
+A single Markdown report, organized by category. Within each category, mark each item as one of:
+- \`[OK]\` — present and reasonable
+- \`[GAP]\` — missing or misconfigured; safe to add/fix
+- \`[INFO]\` — observation only, no action implied
+- \`[N/A]\` — doesn't apply to this project (omit from output if obvious)
+
+Keep each line to one sentence. No prose paragraphs.
+
+At the end:
+
+\`\`\`
+## Summary
+
+<N> gaps in hygiene, <N> in tooling, <N> in verify pipeline, <N> in style-pack alignment.
+
+Which (if any) would you like me to fix? Options:
+- A) Add tasks for all [GAP] items that are safe + additive (no overwrites)
+- B) Add tasks for a category: hygiene / tooling / verify / style-pack alignment
+- C) Add tasks for specific items — tell me which
+- D) None — just the report
+\`\`\`
+
+## Rules
+
+- **Report only.** No edits, no installs, no commits without explicit user confirmation after the report.
+- **Task handoff for fixes.** If the user chooses A, B, or C, do not fix directly. Add one task per selected gap or tightly coupled gap group using the \`tasks\` tool (action=add). Each task needs a short title and a standalone prompt that includes the gap, affected files/configs, safe-additive constraints, implementation instructions, project verification commands, and instructions to verify relevant tool/config semantics against official docs before completing the task. Use kencode search only for code-level examples, not as proof of scaffolding requirements. After adding the tasks, tell the user exactly: "${TASKS_ADDED_NOTICE}" Do not begin executing them unless the user explicitly says so.
+- **No code refactors recommended.** This audit is about scaffolding/tooling, not code review. Use \`/scan\` or \`/verify\` for code-level findings.
+- **No dependency installations in the report.** Listing them as observations is fine; recommending installation is not — that's the user's call.
+- **Skip empty categories.** If a category has no findings, omit it.
+- **Adapt to scale.** A 50-line script doesn't need CI, a license, or an ARCHITECTURE.md. Use judgment.
+- **Brand-new empty project**: report "Empty project — nothing to audit. To bootstrap, tell me the stack you want and I'll scaffold from scratch." and stop.`,
+  },
+  {
+    name: "setup-cleanup",
+    aliases: [],
+    description: "Set up generated-artifact cleanup auditing",
+    prompt: `Set up the narrowly scoped generated-artifact cleanup support described below, then audit this project across six categories and report gaps. **Do not fix any other finding.** Wait for me to choose what to address after the report.
 
 Language-agnostic and project-agnostic — adapt discovery and findings to the languages and stack actually present. Ignore categories that don't apply (e.g. skip CI for a local-only scratchpad).
 
@@ -561,20 +655,20 @@ Apply this rule before creating support files or auditing categories: a brand-ne
 
 ## Generated-artifact cleanup support
 
-For every non-empty project, create or update exactly this setup-owned support set:
+For every non-empty project, create or update exactly this /setup-cleanup-owned support set:
 
 - \`scripts/audit-generated.mjs\` — a self-contained, dependency-free Node audit program.
 - \`scripts/audit-generated.test.mjs\` — deterministic \`node:test\` fixtures.
 - \`.gg/commands/cleanup.md\` — a project-specific command rendered from detected targets and literal repository-relative paths.
 
-These are the only files this command may edit automatically. Use the normal \`write\`/\`edit\` tools; do not use \`tasks\` for this setup-owned support, and do not add dependencies or package scripts. Verification must also remain write-free: keep output in tool results or compare it in memory; never create project-local scratch/output files or redirect to \`NUL\` or \`/dev/null\`.
+These are the only files this command may edit automatically. Use the normal \`write\`/\`edit\` tools; do not use \`tasks\` for this /setup-cleanup-owned support, and do not add dependencies or package scripts. Verification must also remain write-free: keep output in tool results or compare it in memory; never create project-local scratch/output files or redirect to \`NUL\` or \`/dev/null\`.
 
 ### Ownership and conflict handling
 
 1. Read all three destinations first when they exist.
-2. Put the versioned marker \`Generated by GG Coder /setup generated-audit v1\` in every generated file.
-3. Replace a destination only when it is absent or already contains that marker.
-4. If any destination exists without the marker, preserve it byte-for-byte, report the conflict, and do not partially create or replace any member of the three-file support set.
+2. Put the canonical versioned marker \`Generated by GG Coder /setup-cleanup generated-audit v1\` in every newly rendered generated file.
+3. Replace a destination only when it is absent or already contains either the canonical marker or the legacy marker \`Generated by GG Coder /setup generated-audit v1\`. When replacing a legacy-owned destination, emit the canonical /setup-cleanup marker.
+4. If any destination exists without either owned marker, preserve it byte-for-byte, report the conflict, and do not partially create or replace any member of the three-file support set.
 
 ### Bounded, evidence-led discovery
 
@@ -619,12 +713,12 @@ Generate \`scripts/audit-generated.test.mjs\` with \`node:test\`, temporary Git 
 - Zero mutation: snapshot each complete fixture tree before and after every successful and rejected production audit/CLI run, including relative path, object type, mode, bytes, link targets, and \`.git\`; require deep equality and repeat an audit.
 - A source guard rejecting filesystem mutator imports/calls, mutating Git verbs, and deletion/action flags in production.
 
-### Ordered setup and verification
+### Ordered /setup-cleanup and verification
 
 1. Apply the empty-project gate and ownership conflict checks.
 2. Perform bounded discovery and state the private candidate registry before writing.
 3. Create/update the project-agnostic audit program and fixture test without hard-coded paths copied from another project.
-4. Run \`node scripts/audit-generated.test.mjs\`; treat failure as incomplete setup and fix only the three support files.
+4. Run \`node scripts/audit-generated.test.mjs\`; treat failure as incomplete /setup-cleanup and fix only the three support files.
 5. Run \`node scripts/audit-generated.mjs --inspect\`, parse its stable output, and write the returned cleanup Markdown verbatim to \`.gg/commands/cleanup.md\`. Its frontmatter names \`cleanup\`; its body lists only detected target IDs, evidence, and literal paths, requires exactly one target when targets exist, invokes the audit program, treats refusal as failure, and forbids deletion.
 6. Re-read all three outputs, rerun the fixture test, rerun \`--inspect\`, and compare outputs. An unchanged rerun must be byte-identical; skip writes when bytes match.
 7. When a target exists, run one representative audit and compare \`git status --short\` before/after in memory; for no targets, verify the no-target inspect/command path.
@@ -682,7 +776,7 @@ When per-language packs are present, compare the project against each pack's **T
 - Read the project root + obvious config locations (\`./\`, \`.github/\`, \`.husky/\`, \`docs/\`).
 - Don't recurse into \`node_modules\`, \`dist\`, \`build\`, \`target\`, vendored folders.
 - Use \`ls\`, \`read\`, \`find\` (with name patterns) — do not \`grep\` source code for this audit; it's about scaffolding, not code review.
-- Cap at ~20 file reads total across setup inspection. If a file is huge (e.g. \`pnpm-lock.yaml\`), don't read its body — presence is what matters.
+- Cap at ~20 file reads total across /setup-cleanup inspection. If a file is huge (e.g. \`pnpm-lock.yaml\`), don't read its body — presence is what matters.
 
 ## Output format
 
@@ -712,7 +806,7 @@ Which (if any) would you like me to fix? Options:
 
 - **Only the generated support set is edited automatically.** The three marked files above are the sole write exception. Dependencies, package scripts, manifests, ignore rules, product code, documentation, and every reported setup gap remain report-only: no edits, installs, or commits without explicit user confirmation after the report.
 - **Task handoff for all reported fixes.** If the user chooses A, B, or C, do not fix directly. Add one task per selected gap or tightly coupled gap group using the \`tasks\` tool (action=add). Each task needs a short title and a standalone prompt that includes the gap, affected files/configs, safe-additive constraints, implementation instructions, project verification commands, and instructions to verify relevant tool/config semantics against official docs before completing the task. Use kencode search only for code-level examples, not as proof of scaffolding requirements. After adding the tasks, tell the user exactly: "${TASKS_ADDED_NOTICE}" Do not begin executing them unless the user explicitly says so.
-- **No deletion or cleanup mutation.** Neither setup nor the generated cleanup command may delete or alter audited artifacts.
+- **No deletion or cleanup mutation.** Neither /setup-cleanup nor the generated cleanup command may delete or alter audited artifacts.
 - **No code refactors recommended.** This audit is about scaffolding/tooling, not code review. Use \`/scan\` or \`/verify\` for code-level findings.
 - **No dependency installations in the report.** Listing them as observations is fine; recommending installation is not — that's the user's call.
 - **Skip empty categories.** If a category has no findings, omit it.

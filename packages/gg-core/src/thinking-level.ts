@@ -32,7 +32,10 @@ const ANTHROPIC_ADAPTIVE_THINKING_LEVELS: readonly ThinkingLevel[] = [
 ];
 
 function isOpenAIGptModel(provider: Provider, model: string): boolean {
-  return provider === "openai" && model.startsWith("gpt-");
+  return (
+    (provider === "openai" && model.startsWith("gpt-")) ||
+    (provider === "azure" && model === "azure:gpt-5.6-sol")
+  );
 }
 
 function isSakanaModel(provider: Provider): boolean {
@@ -84,9 +87,10 @@ export function getSupportedThinkingLevels(
 
   if (!isOpenAIGptModel(provider, model)) return [maxLevel];
 
-  const levels = model.startsWith("gpt-5.6-")
-    ? OPENAI_GPT_56_THINKING_LEVELS
-    : OPENAI_GPT_THINKING_LEVELS;
+  const levels =
+    model.startsWith("gpt-5.6-") || model === "azure:gpt-5.6-sol"
+      ? OPENAI_GPT_56_THINKING_LEVELS
+      : OPENAI_GPT_THINKING_LEVELS;
   const maxIndex = levels.indexOf(maxLevel);
   if (maxIndex === -1) return ["medium"];
   return levels.slice(0, maxIndex + 1);
@@ -128,4 +132,16 @@ export function clampThinkingLevel(
 ): ThinkingLevel | undefined {
   if (!current || isThinkingLevelSupported(provider, model, current)) return current;
   return getNextThinkingLevel(provider, model, undefined);
+}
+
+/** Restore a saved thinking preference against the model selected at startup.
+ * A deployment/config reload can change that model before a session is created. */
+export function resolveInitialThinkingLevel(
+  provider: Provider,
+  model: string,
+  enabled: boolean | undefined,
+  savedLevel: ThinkingLevel | undefined,
+): ThinkingLevel | undefined {
+  if (!enabled) return undefined;
+  return clampThinkingLevel(provider, model, savedLevel ?? getMaxThinkingLevel(model));
 }

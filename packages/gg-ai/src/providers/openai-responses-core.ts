@@ -1,4 +1,5 @@
-import type { ImageContent, Message, Tool } from "../types.js";
+import { GGAIError } from "../errors.js";
+import type { ContentPart, ImageContent, Message, Tool, ToolChoice } from "../types.js";
 import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
 import { readSseStream } from "../utils/sse.js";
 import { toolResultText } from "./transform.js";
@@ -17,6 +18,74 @@ export interface ResponsesUsagePayload {
 
 export interface ResponsesCompletedPayload extends ResponsesEvent {
   usage?: ResponsesUsagePayload;
+}
+
+export interface EncryptedReasoningItem extends Record<string, unknown> {
+  type: "reasoning";
+  id: string;
+  encrypted_content: string;
+  summary?: unknown;
+}
+
+/** Validate a standard encrypted Responses reasoning item before stateless replay. */
+export function isEncryptedReasoningItem(
+  data: Record<string, unknown>,
+): data is EncryptedReasoningItem {
+  return (
+    data.type === "reasoning" &&
+    typeof data.id === "string" &&
+    data.id.length > 0 &&
+    typeof data.encrypted_content === "string" &&
+    data.encrypted_content.length > 0
+  );
+}
+
+/** Serialize only validated provider-returned reasoning items. */
+export function serializeEncryptedReasoningItem(
+  data: Record<string, unknown>,
+): EncryptedReasoningItem | undefined {
+  return isEncryptedReasoningItem(data) ? data : undefined;
+}
+
+/** Preserve an encrypted reasoning item as the framework's raw content part. */
+export function parseEncryptedReasoningPart(
+  item: Record<string, unknown>,
+): ContentPart | undefined {
+  if (!isEncryptedReasoningItem(item)) return undefined;
+  return {
+    type: "raw",
+    data: { ...item, summary: Array.isArray(item.summary) ? item.summary : [] },
+  };
+}
+
+export interface ResponsesToolChoiceOptions {
+  transportName: string;
+  supportsNamedTool: boolean;
+}
+
+/** Convert and validate the framework tool policy for a standard Responses request. */
+export function serializeResponsesToolChoice(
+  choice: ToolChoice | undefined,
+  tools: Tool[] | undefined,
+  options: ResponsesToolChoiceOptions,
+): string | { type: "function"; name: string } {
+  const resolved = choice ?? "auto";
+  if (typeof resolved === "object") {
+    if (!options.supportsNamedTool) {
+      throw new GGAIError(
+        `${options.transportName} does not support selecting the named tool \`${resolved.name}\`; use auto, none, or required.`,
+        { source: "capability" },
+      );
+    }
+    return { type: "function", name: resolved.name };
+  }
+  if (resolved === "required" && !tools?.length) {
+    throw new GGAIError(
+      `${options.transportName} cannot require a tool call when no tools are configured.`,
+      { source: "capability" },
+    );
+  }
+  return resolved;
 }
 
 export interface ParseResponsesSseOptions {

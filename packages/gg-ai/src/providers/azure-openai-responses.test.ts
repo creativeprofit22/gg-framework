@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { ProviderError } from "../errors.js";
 import { streamAzureOpenAIResponses } from "./azure-openai-responses.js";
 
@@ -150,6 +151,7 @@ describe("streamAzureOpenAIResponses", () => {
           },
         ],
         stream: true,
+        store: false,
         instructions: "Be concise.",
       }),
       signal: undefined,
@@ -231,6 +233,195 @@ describe("streamAzureOpenAIResponses", () => {
     });
     expect(String(error)).not.toContain("test-key");
     expect(String(error)).not.toMatch(/<[^>]+>/);
+  });
+
+  it("sends standard request controls, tool-result images, and replays encrypted reasoning", async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse([
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { type: "reasoning", id: "rs_2" },
+        },
+        { type: "response.reasoning_summary_text.delta", delta: "Considering tools" },
+        { type: "response.reasoning_text.delta", delta: " carefully" },
+        { type: "response.reasoning_summary.delta", delta: " undocumented-summary" },
+        { type: "response.reasoning.delta", delta: " undocumented-reasoning" },
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: {
+            type: "reasoning",
+            id: "rs_2",
+            encrypted_content: "encrypted-new",
+            summary: [{ type: "summary_text", text: "Considering tools" }],
+          },
+        },
+        addedToolCall(1, "fc_2", "call_2", "inspect"),
+        {
+          type: "response.function_call_arguments.done",
+          output_index: 1,
+          item_id: "fc_2",
+          arguments: '{"path":"image.png"}',
+        },
+        completedToolCall(1, "fc_2", "call_2", "inspect", '{"path":"image.png"}'),
+        {
+          type: "response.completed",
+          response: {
+            usage: {
+              input_tokens: 30,
+              output_tokens: 5,
+              input_tokens_details: { cached_tokens: 10, cache_write_tokens: 4 },
+            },
+          },
+        },
+      ]);
+    });
+    const stream = streamAzureOpenAIResponses({
+      provider: "azure",
+      model: "gpt-5.6-sol",
+      messages: [
+        { role: "user", content: "Inspect the image." },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "raw",
+              data: {
+                type: "reasoning",
+                id: "rs_1",
+                encrypted_content: "encrypted-old",
+                summary: [],
+              },
+            },
+            { type: "tool_call", id: "call_1", itemId: "fc_1", name: "inspect", args: {} },
+          ],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool_result",
+              toolCallId: "call_1",
+              content: [{ type: "image", mediaType: "image/png", data: "aW1hZ2U=" }],
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          name: "inspect",
+          description: "Inspect a file",
+          parameters: z.object({ path: z.string() }),
+        },
+      ],
+      toolChoice: { name: "inspect" },
+      maxTokens: 4096,
+      thinking: "ultra",
+      promptCacheKey: "parent:subagent",
+      supportsImages: true,
+      apiKey: TEST_CREDENTIAL,
+      baseUrl: RESPONSES_URL,
+      fetch: fetchMock,
+    });
+    const events = [];
+    for await (const event of stream) events.push(event);
+
+    expect(requestBody).toMatchObject({
+      model: "gpt-5.6-sol",
+      stream: true,
+      store: false,
+      max_output_tokens: 4096,
+      prompt_cache_key: "parent:subagent",
+      tool_choice: { type: "function", name: "inspect" },
+      parallel_tool_calls: true,
+      reasoning: { effort: "xhigh", summary: "auto" },
+      include: ["reasoning.encrypted_content"],
+    });
+    expect(JSON.stringify(requestBody?.input)).toContain("encrypted-old");
+    expect(JSON.stringify(requestBody?.input)).toContain("data:image/png;base64,aW1hZ2U=");
+    await expect(stream.response).resolves.toEqual({
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "raw",
+            data: {
+              type: "reasoning",
+              id: "rs_2",
+              encrypted_content: "encrypted-new",
+              summary: [{ type: "summary_text", text: "Considering tools" }],
+            },
+          },
+          {
+            type: "tool_call",
+            id: "call_2",
+            itemId: "fc_2",
+            name: "inspect",
+            args: { path: "image.png" },
+          },
+        ],
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 20, outputTokens: 5, cacheRead: 10 },
+    });
+    expect(events.filter((event) => event.type === "thinking_delta")).toEqual([
+      { type: "thinking_delta", text: "" },
+      { type: "thinking_delta", text: "Considering tools" },
+      { type: "thinking_delta", text: " carefully" },
+    ]);
+    expect(events).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "toolcall_done", id: "call_2" })]),
+    );
+  });
+
+  it("rejects malformed encrypted reasoning items", async () => {
+    const stream = streamAzureOpenAIResponses({
+      provider: "azure",
+      model: "gpt-5.6-sol",
+      messages: [{ role: "user", content: "Think." }],
+      thinking: "high",
+      apiKey: TEST_CREDENTIAL,
+      baseUrl: RESPONSES_URL,
+      fetch: vi.fn(async () =>
+        sseResponse([
+          {
+            type: "response.output_item.done",
+            item: { type: "reasoning", id: "rs_bad", encrypted_content: 123 },
+          },
+        ]),
+      ),
+    });
+
+    await expect(stream.response).rejects.toMatchObject({
+      provider: "azure",
+      message: "Azure OpenAI returned a malformed response stream.",
+    });
+  });
+
+  it("forwards cancellation to fetch without replaying the request", async () => {
+    const controller = new AbortController();
+    const abortCause = new DOMException("Cancelled", "AbortError");
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      expect(init?.signal).toBe(controller.signal);
+      controller.abort();
+      throw abortCause;
+    });
+    const stream = streamAzureOpenAIResponses({
+      provider: "azure",
+      model: "gpt-5.6-sol",
+      messages: [{ role: "user", content: "Cancel." }],
+      apiKey: TEST_CREDENTIAL,
+      baseUrl: RESPONSES_URL,
+      signal: controller.signal,
+      fetch: fetchMock,
+    });
+
+    const error = await stream.response.catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ name: "AbortError" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("correlates parallel calls by output_index and accepts equivalent final JSON", async () => {

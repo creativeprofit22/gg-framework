@@ -63,4 +63,25 @@ describe("loadSavedSettings", () => {
     expect(settings.provider).toBe("xai");
     expect(settings.model).toBe("grok-4.5");
   });
+
+  it("restores an Azure model with Ultra thinking", () => {
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        defaultProvider: "azure",
+        defaultModel: "azure:gpt-5.6-sol",
+        thinkingEnabled: true,
+        thinkingLevel: "ultra",
+      }),
+      "utf-8",
+    );
+
+    expect(loadSavedSettings(settingsPath)).toMatchObject({
+      provider: "azure",
+      model: "azure:gpt-5.6-sol",
+      thinkingEnabled: true,
+      thinkingLevel: "ultra",
+    });
+  });
 });

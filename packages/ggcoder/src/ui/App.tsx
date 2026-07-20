@@ -2432,20 +2432,7 @@ export function App(props: AppProps) {
       if (props.settingsFile) {
         const sm = new SettingsManager(props.settingsFile);
         sm.load().then(async () => {
-          await sm.set(
-            "defaultProvider",
-            newProvider as
-              | "anthropic"
-              | "openai"
-              | "glm"
-              | "moonshot"
-              | "minimax"
-              | "xiaomi"
-              | "deepseek"
-              | "openrouter"
-              | "sakana"
-              | "xai",
-          );
+          await sm.set("defaultProvider", newProvider as Settings["defaultProvider"]);
           await sm.set("defaultModel", newModelId);
         });
       }

@@ -45,6 +45,7 @@ vi.mock("./mcp/index.js", async () => {
 });
 
 let originalHome: string | undefined;
+let originalUserProfile: string | undefined;
 let tmpHome: string;
 let tmpProject: string;
 
@@ -74,9 +75,11 @@ const providerModels = MODELS.filter(
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
+  originalUserProfile = process.env.USERPROFILE;
   tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "agent-session-home-"));
   tmpProject = await fs.mkdtemp(path.join(os.tmpdir(), "agent-session-project-"));
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
 
   shouldCompactMock.mockReset();
   compactMock.mockReset();
@@ -102,8 +105,8 @@ beforeEach(async () => {
       authProviders.map((provider) => [
         provider,
         {
-          accessToken: `test-${provider}-token`,
-          refreshToken: `test-${provider}-refresh`,
+          accessToken: "test-" + provider + "-token",
+          refreshToken: "test-" + provider + "-refresh",
           expiresAt: Date.now() + 3_600_000,
           ...(provider === "openai" ? { accountId: "chatgpt-account" } : {}),
         },
@@ -119,6 +122,8 @@ beforeEach(async () => {
 afterEach(async () => {
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
   await fs.rm(tmpHome, { recursive: true, force: true });
   await fs.rm(tmpProject, { recursive: true, force: true });
   vi.clearAllMocks();

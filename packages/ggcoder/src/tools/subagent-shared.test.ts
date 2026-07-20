@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentDefinition } from "../core/agents.js";
 import {
+  childSubAgentEnv,
   resolveAgentDefinition,
   resolveSubAgentCliEntry,
   selectSubAgent,
@@ -20,6 +21,26 @@ describe("selectSubAgent", () => {
     expect(selectSubAgent([shellAgent], "worker", "openai", "gpt-5.6-sol").model).toBe(
       "gpt-5.6-sol",
     );
+    expect(selectSubAgent([shellAgent], "worker", "azure", "azure:gpt-5.6-sol")).toMatchObject({
+      provider: "azure",
+      parentModel: "azure:gpt-5.6-sol",
+      model: "azure:gpt-5.6-sol",
+    });
+  });
+
+  it("passes Azure endpoint credentials only to agent child processes", () => {
+    const env = childSubAgentEnv({
+      AZURE_OPENAI_API_KEY: "azure-child-key",
+      AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1/responses",
+      AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
+    });
+
+    expect(env).toMatchObject({
+      AZURE_OPENAI_API_KEY: "azure-child-key",
+      AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1/responses",
+      AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
+      GG_SUBAGENT_DEPTH: "1",
+    });
   });
 });
 

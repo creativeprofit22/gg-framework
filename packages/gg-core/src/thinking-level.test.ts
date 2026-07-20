@@ -23,6 +23,21 @@ describe("thinking-level helpers", () => {
     expect(getSupportedThinkingLevels("openai", "gpt-5.6-luna")).toEqual(baseLevels);
     expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "max")).toBe("ultra");
     expect(getNextThinkingLevel("openai", "gpt-5.6-sol", "ultra")).toBeUndefined();
+
+    const azureSol = {
+      ...MODELS.find((model) => model.id === "gpt-5.6-sol")!,
+      id: "azure:gpt-5.6-sol",
+      name: "Azure GPT-5.6 Sol",
+      provider: "azure" as const,
+    };
+    MODELS.push(azureSol);
+    try {
+      expect(getSupportedThinkingLevels("azure", azureSol.id)).toEqual([...baseLevels, "ultra"]);
+      expect(getNextThinkingLevel("azure", azureSol.id, "max")).toBe("ultra");
+      expect(clampThinkingLevel("azure", azureSol.id, "ultra")).toBe("ultra");
+    } finally {
+      MODELS.splice(MODELS.indexOf(azureSol), 1);
+    }
   });
 
   it("cycles Anthropic adaptive Opus models through max, including xhigh", () => {

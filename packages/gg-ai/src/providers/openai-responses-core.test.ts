@@ -4,8 +4,11 @@ import type { StreamEvent, StreamResponse } from "../types.js";
 import { streamAzureOpenAIResponses } from "./azure-openai-responses.js";
 import { streamOpenAICodex } from "./openai-codex.js";
 import {
+  parseEncryptedReasoningPart,
   parseResponsesSse,
+  serializeEncryptedReasoningItem,
   serializeResponsesInput,
+  serializeResponsesToolChoice,
   serializeResponsesTools,
 } from "./openai-responses-core.js";
 
@@ -93,6 +96,32 @@ describe("provider-neutral Responses parsing", () => {
     );
   });
 
+  it("validates standard tool choices and encrypted reasoning replay items", () => {
+    const tools = [{ name: "read", description: "Read", parameters: z.object({}) }];
+    expect(
+      serializeResponsesToolChoice({ name: "read" }, tools, {
+        transportName: "Azure OpenAI",
+        supportsNamedTool: true,
+      }),
+    ).toEqual({ type: "function", name: "read" });
+    expect(() =>
+      serializeResponsesToolChoice("required", undefined, {
+        transportName: "Azure OpenAI",
+        supportsNamedTool: true,
+      }),
+    ).toThrow("Azure OpenAI cannot require a tool call when no tools are configured.");
+
+    const reasoning = {
+      type: "reasoning",
+      id: "rs_1",
+      encrypted_content: "encrypted",
+      summary: [{ type: "summary_text", text: "summary" }],
+    };
+    expect(serializeEncryptedReasoningItem(reasoning)).toBe(reasoning);
+    expect(parseEncryptedReasoningPart(reasoning)).toEqual({ type: "raw", data: reasoning });
+    expect(serializeEncryptedReasoningItem({ ...reasoning, encrypted_content: 1 })).toBeUndefined();
+  });
+
   it("serializes Zod tool declarations with explicit transport strictness", () => {
     const tools = serializeResponsesTools(
       [
@@ -169,7 +198,7 @@ describe("provider-neutral Responses parsing", () => {
     const azureTranscript = await collectStream(azure);
 
     expect(azureRequestBody).toBe(
-      '{"model":"test-deployment","input":[{"role":"user","content":[{"type":"input_text","text":"Say hello."}]}],"stream":true}',
+      '{"model":"test-deployment","input":[{"role":"user","content":[{"type":"input_text","text":"Say hello."}]}],"stream":true,"store":false}',
     );
     expect(azureTranscript).toBe(
       '{"events":[{"type":"text_delta","text":"Hello"},{"type":"done","stopReason":"end_turn"}],"response":{"message":{"role":"assistant","content":"Hello"},"stopReason":"end_turn","usage":{"inputTokens":7,"outputTokens":2}}}',

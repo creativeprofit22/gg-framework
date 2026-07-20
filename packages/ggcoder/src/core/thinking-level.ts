@@ -5,4 +5,5 @@ export {
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
   getNextThinkingLevel,
+  resolveInitialThinkingLevel,
 } from "@kenkaiiii/gg-core";

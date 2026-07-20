@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type { Provider } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "./agent-session.js";
 
 const sessions: AgentSession[] = [];
 
-async function systemPrompt(model: string, thinkingLevel: "high" | "ultra") {
+async function systemPrompt(
+  model: string,
+  thinkingLevel: "high" | "ultra",
+  provider: Provider = "openai",
+) {
   const session = new AgentSession({
-    provider: "openai",
+    provider,
     model,
     cwd: process.cwd(),
     systemPrompt: "base prompt",
@@ -35,6 +40,12 @@ describe("Sol/Terra async orchestration policy", () => {
       "only when the user or applicable project/skill instructions explicitly request",
     );
     expect(prompt).not.toContain("Proactively use spawn_agent");
+  });
+
+  it("applies the same Sol policy to the exact Azure deployment", async () => {
+    const prompt = await systemPrompt("azure:gpt-5.6-sol", "ultra", "azure");
+    expect(prompt).toContain("Proactively use spawn_agent");
+    expect(prompt).toContain("Start every independent child before calling wait_agent");
   });
 
   it("leaves other models unchanged", async () => {

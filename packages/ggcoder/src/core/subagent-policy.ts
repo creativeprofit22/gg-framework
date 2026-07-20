@@ -21,10 +21,10 @@ export function applyAsyncSubagentPolicy(
 ): string {
   const markerIndex = prompt.indexOf(ASYNC_ORCHESTRATION_MARKER);
   const basePrompt = markerIndex === -1 ? prompt : prompt.slice(0, markerIndex);
-  const supportsPolicy =
-    toolNames.includes("spawn_agent") &&
-    provider === "openai" &&
-    (model === "gpt-5.6-sol" || model === "gpt-5.6-terra");
+  const isOpenAISolOrTerra =
+    provider === "openai" && (model === "gpt-5.6-sol" || model === "gpt-5.6-terra");
+  const isAzureSol = provider === "azure" && model === "azure:gpt-5.6-sol";
+  const supportsPolicy = toolNames.includes("spawn_agent") && (isOpenAISolOrTerra || isAzureSol);
   if (!supportsPolicy) return basePrompt;
   return (
     basePrompt +

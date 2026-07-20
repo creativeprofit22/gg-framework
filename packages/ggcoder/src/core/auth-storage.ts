@@ -74,6 +74,16 @@ export class AuthStorage extends CoreAuthStorage {
     return super.hasProviderAuth(provider);
   }
 
+  override async isStaticApiKey(provider: string): Promise<boolean> {
+    if (provider === AZURE_OPENAI_PROVIDER) return true;
+    return super.isStaticApiKey(provider);
+  }
+
+  override async clearCredentials(provider: string): Promise<void> {
+    if (provider === AZURE_OPENAI_PROVIDER) return;
+    await super.clearCredentials(provider);
+  }
+
   override async resolveCredentials(
     provider: string,
     options?: { forceRefresh?: boolean; storageKeys?: string[] },

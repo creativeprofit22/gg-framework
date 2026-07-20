@@ -10,11 +10,15 @@ import type {
 import { StreamResult } from "../utils/event-stream.js";
 import { isJsonObject } from "../utils/json.js";
 import {
+  parseEncryptedReasoningPart,
   parseResponsesSse,
+  serializeEncryptedReasoningItem,
   serializeResponsesInput,
+  serializeResponsesToolChoice,
   serializeResponsesTools,
   type ResponsesCompletedPayload,
 } from "./openai-responses-core.js";
+import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 
 // eslint-disable-next-line no-control-regex -- Provider error text must not expose control characters.
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]+/g;
@@ -44,11 +48,30 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const url = parseResponsesUrl(requireOption(options.baseUrl, "baseUrl"));
   const fetchImpl = options.fetch ?? globalThis.fetch;
 
-  const { system, input } = serializeResponsesInput(options.messages);
-  const requestBody: Record<string, unknown> = { model, input, stream: true };
+  const { system, input } = serializeResponsesInput(options.messages, {
+    serializeRawAssistantPart: serializeEncryptedReasoningItem,
+    includeToolResultImages: options.supportsImages === true,
+  });
+  const requestBody: Record<string, unknown> = { model, input, stream: true, store: false };
   if (system !== undefined) requestBody.instructions = system;
+  if (options.maxTokens !== undefined) requestBody.max_output_tokens = options.maxTokens;
+  if (options.promptCacheKey) {
+    requestBody.prompt_cache_key = normalizePromptCacheKey(options.promptCacheKey);
+  }
   if (options.tools?.length) {
     requestBody.tools = serializeResponsesTools(options.tools, { strict: null });
+    requestBody.tool_choice = serializeResponsesToolChoice(options.toolChoice, options.tools, {
+      transportName: "Azure OpenAI",
+      supportsNamedTool: true,
+    });
+    requestBody.parallel_tool_calls = true;
+  }
+  if (options.thinking) {
+    requestBody.reasoning = {
+      effort: options.thinking === "ultra" ? "xhigh" : options.thinking,
+      summary: "auto",
+    };
+    requestBody.include = ["reasoning.encrypted_content"];
   }
 
   let response: Response;
@@ -85,6 +108,14 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const toolCallsByOutputIndex = new Map<number, PendingAzureToolCall>();
   const toolCallsByItem = new Map<string, PendingAzureToolCall>();
   const toolCallOrder: PendingAzureToolCall[] = [];
+  const orderedItems: Array<
+    | { kind: "reasoning"; itemId?: string; part?: ContentPart }
+    | { kind: "tool"; toolCall: PendingAzureToolCall }
+  > = [];
+  const reasoningItemsById = new Map<
+    string,
+    Extract<(typeof orderedItems)[number], { kind: "reasoning" }>
+  >();
 
   try {
     for await (const event of parseResponsesSse(response.body, {
@@ -100,9 +131,18 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         if (typeof event.delta !== "string") throw malformedStreamError();
         accumulatedText += event.delta;
         yield { type: "text_delta", text: event.delta };
+      } else if (isReasoningDeltaEvent(event.type)) {
+        if (typeof event.delta !== "string") throw malformedStreamError();
+        if (options.thinking) yield { type: "thinking_delta", text: event.delta };
       } else if (event.type === "response.output_item.added") {
         const item = objectValue(event.item);
-        if (item?.type === "function_call") {
+        if (item?.type === "reasoning") {
+          const itemId = nonEmptyString(item.id) ? item.id : undefined;
+          const pendingReasoning = { kind: "reasoning" as const, itemId };
+          orderedItems.push(pendingReasoning);
+          if (itemId) reasoningItemsById.set(itemId, pendingReasoning);
+          if (options.thinking) yield { type: "thinking_delta", text: "" };
+        } else if (item?.type === "function_call") {
           const outputIndex = parseOutputIndex(event.output_index);
           const parsedCall = parseFunctionCallItem(item, false);
           if (
@@ -119,6 +159,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
           bindItemId(toolCall, parsedCall.itemId, toolCallsByItem);
           toolCallsByOutputIndex.set(outputIndex, toolCall);
           toolCallOrder.push(toolCall);
+          orderedItems.push({ kind: "tool", toolCall });
         }
       } else if (event.type === "response.function_call_arguments.delta") {
         const toolCall = findToolCall(
@@ -149,7 +190,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         toolCall.argumentsDone = true;
       } else if (event.type === "response.output_item.done") {
         const item = objectValue(event.item);
-        if (item?.type === "function_call") {
+        if (item?.type === "reasoning") {
+          const part = parseEncryptedReasoningPart(item);
+          if (!part) throw malformedStreamError();
+          const pendingReasoning = reasoningItemsById.get(item.id as string);
+          if (pendingReasoning) pendingReasoning.part = part;
+          else orderedItems.push({ kind: "reasoning", itemId: item.id as string, part });
+        } else if (item?.type === "function_call") {
           const toolCall = findToolCall(
             event.output_index,
             item.id,
@@ -171,6 +218,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       } else if (event.type === "response.completed") {
         if (completedResponse) throw malformedStreamError();
         assertAllToolCallsCompleted(toolCallOrder);
+        if (orderedItems.some((item) => item.kind === "reasoning" && !item.part)) {
+          throw malformedStreamError();
+        }
         completedResponse = asCompletedResponse(event.response);
       } else {
         const streamError = toStreamProviderError(event, apiKey);
@@ -193,8 +243,17 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   }
 
   const content: ContentPart[] = [];
-  if (accumulatedText) content.push({ type: "text", text: accumulatedText });
-  for (const pending of toolCallOrder) {
+  let textInserted = false;
+  for (const item of orderedItems) {
+    if (item.kind === "reasoning") {
+      if (item.part) content.push(item.part);
+      continue;
+    }
+    if (accumulatedText && !textInserted) {
+      content.push({ type: "text", text: accumulatedText });
+      textInserted = true;
+    }
+    const pending = item.toolCall;
     const toolCall: ToolCall = {
       type: "tool_call",
       id: pending.id,
@@ -204,11 +263,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     };
     content.push(toolCall);
   }
+  if (accumulatedText && !textInserted) content.push({ type: "text", text: accumulatedText });
   const stopReason = toolCallOrder.length > 0 ? ("tool_use" as const) : ("end_turn" as const);
   const streamResponse: StreamResponse = {
     message: {
       role: "assistant",
-      content: toolCallOrder.length > 0 ? content : accumulatedText,
+      content: content.some((part) => part.type !== "text") ? content : accumulatedText,
     },
     stopReason,
     usage: toUsage(completedResponse.usage),
@@ -216,6 +276,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   yield { type: "done", stopReason };
   return streamResponse;
+}
+
+function isReasoningDeltaEvent(type: unknown): boolean {
+  return (
+    type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta"
+  );
 }
 
 function requireOption(value: string | undefined, name: string): string {

@@ -52,6 +52,7 @@ const VALID_PROVIDERS = new Set<Provider>([
   "anthropic",
   "xiaomi",
   "openai",
+  "azure",
   "gemini",
   "glm",
   "moonshot",
@@ -118,7 +119,14 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
   return result;
 }
 
-const VALID_THINKING_LEVELS = new Set<ThinkingLevel>(["low", "medium", "high", "xhigh", "max"]);
+const VALID_THINKING_LEVELS = new Set<ThinkingLevel>([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
 
 function isValidThinkingLevel(value: unknown): value is ThinkingLevel {
   return typeof value === "string" && VALID_THINKING_LEVELS.has(value as ThinkingLevel);

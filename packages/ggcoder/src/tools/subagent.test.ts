@@ -122,6 +122,61 @@ describe("createSubAgentTool fast-model fallback", () => {
     expect(spawnedModels()).toEqual(["gpt-5.6-luna"]);
   });
 
+  it("keeps Azure provider, deployment, endpoint environment, and cancellation in blocking children", async () => {
+    const previous = {
+      key: process.env.AZURE_OPENAI_API_KEY,
+      baseUrl: process.env.AZURE_OPENAI_BASE_URL,
+      deployment: process.env.AZURE_OPENAI_DEPLOYMENT,
+    };
+    process.env.AZURE_OPENAI_API_KEY = "azure-child-key";
+    process.env.AZURE_OPENAI_BASE_URL = "https://example.openai.azure.com/openai/v1/responses";
+    process.env.AZURE_OPENAI_DEPLOYMENT = "gpt-5.6-sol";
+    const worker = { ...owl, name: "worker", tools: ["read", "bash"] };
+    const child = new MockChildProcess();
+    spawnMock.mockReturnValueOnce(child);
+    const controller = new AbortController();
+    const tool = createSubAgentTool(
+      process.cwd(),
+      [worker],
+      () => "azure",
+      () => "azure:gpt-5.6-sol",
+      () => "azure-parent-cache",
+    );
+
+    try {
+      const result = tool.execute(
+        { agent: "worker", task: "Keep running." },
+        { signal: controller.signal, toolCallId: "azure-child" },
+      );
+      await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(1));
+      const [, args, options] = spawnMock.mock.calls[0]!;
+      expect(args).toEqual(
+        expect.arrayContaining(["--provider", "azure", "--model", "azure:gpt-5.6-sol"]),
+      );
+      expect(options).toMatchObject({
+        env: {
+          AZURE_OPENAI_API_KEY: "azure-child-key",
+          AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1/responses",
+          AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
+        },
+      });
+
+      controller.abort();
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      child.stdout.end();
+      child.stderr.end();
+      child.emit("close", null);
+      await expect(result).resolves.toMatchObject({ content: expect.any(String) });
+    } finally {
+      if (previous.key === undefined) delete process.env.AZURE_OPENAI_API_KEY;
+      else process.env.AZURE_OPENAI_API_KEY = previous.key;
+      if (previous.baseUrl === undefined) delete process.env.AZURE_OPENAI_BASE_URL;
+      else process.env.AZURE_OPENAI_BASE_URL = previous.baseUrl;
+      if (previous.deployment === undefined) delete process.env.AZURE_OPENAI_DEPLOYMENT;
+      else process.env.AZURE_OPENAI_DEPLOYMENT = previous.deployment;
+    }
+  });
+
   it("keeps the blocking contract while rejecting recursive process storms", async () => {
     const previousDepth = process.env[SUB_AGENT_DEPTH_ENV];
     process.env[SUB_AGENT_DEPTH_ENV] = String(MAX_BLOCKING_SUBAGENT_DEPTH);

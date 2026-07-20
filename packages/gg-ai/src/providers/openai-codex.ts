@@ -5,12 +5,9 @@ import type {
   StreamEvent,
   StreamOptions,
   StreamResponse,
-  Tool,
   ToolCall,
-  ToolChoice,
 } from "../types.js";
 import {
-  GGAIError,
   ProviderError,
   isRawHtmlErrorEcho,
   providerHtmlErrorMessage,
@@ -23,8 +20,11 @@ import { downgradeUnsupportedImages, downgradeUnsupportedVideos } from "./transf
 import { parseToolArguments } from "../utils/json.js";
 import { extractRequestIdFromMessage } from "../utils/request-id.js";
 import {
+  parseEncryptedReasoningPart,
   parseResponsesSse,
+  serializeEncryptedReasoningItem,
   serializeResponsesInput,
+  serializeResponsesToolChoice,
   serializeResponsesTools,
   type ResponsesInputAdapter,
   type ResponsesUsagePayload,
@@ -104,22 +104,6 @@ function isVisibleOutputItem(itemType: string | undefined): boolean {
   return itemType === "message";
 }
 
-function toCodexToolChoice(choice: ToolChoice | undefined, tools: Tool[] | undefined): string {
-  const resolved = choice ?? "auto";
-  if (typeof resolved === "object") {
-    throw new GGAIError(
-      `OpenAI Codex does not support selecting the named tool \`${resolved.name}\`; use auto, none, or required.`,
-      { source: "capability" },
-    );
-  }
-  if (resolved === "required" && !tools?.length) {
-    throw new GGAIError("OpenAI Codex cannot require a tool call when no tools are configured.", {
-      source: "capability",
-    });
-  }
-  return resolved;
-}
-
 export function streamOpenAICodex(options: StreamOptions): StreamResult {
   return new StreamResult(runStream(options), options.signal);
 }
@@ -143,7 +127,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     stream: true,
     instructions: system,
     input,
-    tool_choice: toCodexToolChoice(options.toolChoice, options.tools),
+    tool_choice: serializeResponsesToolChoice(options.toolChoice, options.tools, {
+      transportName: "OpenAI Codex",
+      supportsNamedTool: false,
+    }),
     parallel_tool_calls: !responsesLite,
     include: ["reasoning.encrypted_content"],
   };
@@ -489,13 +476,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
           // array). Re-emitting the exact item OpenAI returned is what keeps
           // store:false replay valid — reconstructing a subset risks dropping
           // fields the API echoes back.
-          orderedItems.push({
-            kind: "reasoning",
-            part: {
-              type: "raw",
-              data: { ...item, summary: Array.isArray(item.summary) ? item.summary : [] },
-            },
-          });
+          const part = parseEncryptedReasoningPart(item);
+          if (part) orderedItems.push({ kind: "reasoning", part });
         }
       }
       if (item?.type === "function_call") {
@@ -618,17 +600,6 @@ function remapCodexId(id: string, idMap: Map<string, string>): string {
   return mapped;
 }
 
-/** A raw content part that holds a Codex encrypted reasoning item for round-trip. */
-function isEncryptedReasoning(
-  data: Record<string, unknown>,
-): data is { type: "reasoning"; id: string; encrypted_content: string; summary?: unknown } {
-  return (
-    data.type === "reasoning" &&
-    typeof data.id === "string" &&
-    typeof data.encrypted_content === "string"
-  );
-}
-
 function createCodexInputAdapter(supportsImages: boolean | undefined): ResponsesInputAdapter {
   const idMap = new Map<string, string>();
   return {
@@ -643,9 +614,7 @@ function createCodexInputAdapter(supportsImages: boolean | undefined): Responses
       const [callId] = id.includes("|") ? id.split("|", 2) : [id];
       return remapCodexId(callId, idMap);
     },
-    serializeRawAssistantPart(data) {
-      return isEncryptedReasoning(data) ? data : undefined;
-    },
+    serializeRawAssistantPart: serializeEncryptedReasoningItem,
     includeToolResultImages: supportsImages !== false,
   };
 }

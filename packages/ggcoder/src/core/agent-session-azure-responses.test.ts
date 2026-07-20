@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 const RESPONSES_URL = "https://example.openai.azure.com/openai/v1/responses";
 
@@ -57,10 +58,30 @@ afterEach(async () => {
   if (originalAzureDeployment === undefined) delete process.env.AZURE_OPENAI_DEPLOYMENT;
   else process.env.AZURE_OPENAI_DEPLOYMENT = originalAzureDeployment;
   await Promise.all([
-    fs.rm(home, { recursive: true, force: true }),
-    fs.rm(project, { recursive: true, force: true }),
+    fs.rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }),
+    fs.rm(project, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }),
   ]);
 });
+
+async function createAzureSession(options: { signal?: AbortSignal } = {}) {
+  const { AgentSession } = await import("./agent-session.js");
+  const session = new AgentSession({
+    provider: "azure",
+    model: `azure:${process.env.AZURE_OPENAI_DEPLOYMENT}`,
+    baseUrl: RESPONSES_URL,
+    cwd: project,
+    systemPrompt: "Azure regression test.",
+    maxTurns: 3,
+    transient: true,
+    projectCustomization: false,
+    loadExtensions: false,
+    selfCorrectionHooks: false,
+    orchestrationPrompt: false,
+    ...options,
+  });
+  await session.initialize();
+  return session;
+}
 
 describe("AgentSession Azure Responses tool round trip", () => {
   it("declares, executes, submits, and follows an Azure function call with final text", async () => {
@@ -169,5 +190,183 @@ describe("AgentSession Azure Responses tool round trip", () => {
       ]),
     );
     expect(text.join("")).toBe("Azure tool complete.");
+  }, 10_000);
+
+  it("declares and executes an MCP-shaped tool through the normal Azure tool map", async () => {
+    process.env.AZURE_OPENAI_DEPLOYMENT = "gpt-5.6-sol";
+    const requestBodies: Record<string, unknown>[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requestBodies.push(body);
+      if (requestBodies.length === 1) {
+        return sseResponse([
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: "fc_mcp",
+              call_id: "call_mcp",
+              name: "mcp__demo__lookup",
+            },
+          },
+          {
+            type: "response.function_call_arguments.done",
+            output_index: 0,
+            item_id: "fc_mcp",
+            arguments: '{"query":"Azure"}',
+          },
+          {
+            type: "response.output_item.done",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: "fc_mcp",
+              call_id: "call_mcp",
+              name: "mcp__demo__lookup",
+              arguments: '{"query":"Azure"}',
+            },
+          },
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 8, output_tokens: 2 } },
+          },
+        ]);
+      }
+      return sseResponse([
+        { type: "response.output_text.delta", delta: "MCP complete." },
+        {
+          type: "response.completed",
+          response: { usage: { input_tokens: 10, output_tokens: 2 } },
+        },
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "azure",
+      model: "azure:gpt-5.6-sol",
+      baseUrl: RESPONSES_URL,
+      cwd: project,
+      systemPrompt: "Use the MCP tool.",
+      transient: true,
+      projectCustomization: false,
+      loadExtensions: false,
+      selfCorrectionHooks: false,
+      orchestrationPrompt: false,
+      additionalTools: [
+        {
+          name: "mcp__demo__lookup",
+          description: "Demo MCP lookup",
+          parameters: z.object({ query: z.string() }),
+          execute: async (args) => {
+            const { query } = z.object({ query: z.string() }).parse(args);
+            return { content: `MCP result for ${query}` };
+          },
+        },
+      ],
+    });
+
+    try {
+      await session.initialize();
+      await session.prompt("Use the MCP lookup.");
+    } finally {
+      await session.dispose();
+    }
+
+    expect(requestBodies[0]?.tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "function", name: "mcp__demo__lookup" }),
+      ]),
+    );
+    expect(requestBodies[1]?.input).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "function_call_output",
+          call_id: "call_mcp",
+          output: "MCP result for Azure",
+        }),
+      ]),
+    );
+  });
+});
+
+describe("AgentSession Azure retry boundary", () => {
+  it.each([429, 500])(
+    "retries transient Azure HTTP %s through the shared agent loop",
+    async (status) => {
+      process.env.AZURE_OPENAI_DEPLOYMENT = "gpt-5.6-sol";
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: { message: `temporary ${status}` } }), { status }),
+        )
+        .mockResolvedValueOnce(
+          sseResponse([
+            { type: "response.output_text.delta", delta: "Recovered." },
+            {
+              type: "response.completed",
+              response: { usage: { input_tokens: 5, output_tokens: 2 } },
+            },
+          ]),
+        );
+      vi.stubGlobal("fetch", fetchMock);
+      const session = await createAzureSession();
+
+      try {
+        await session.prompt("Recover from a transient Azure error.");
+      } finally {
+        await session.dispose();
+      }
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    },
+    10_000,
+  );
+
+  it("surfaces an Azure 401 after one request without rewriting environment or auth storage", async () => {
+    process.env.AZURE_OPENAI_DEPLOYMENT = "gpt-5.6-sol";
+    const authPath = path.join(home, ".gg", "auth.json");
+    const authBytes = '{"sentinel":{"accessToken":"unchanged"}}';
+    await fs.writeFile(authPath, authBytes, "utf-8");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: "revoked Azure key" } }), { status: 401 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const session = await createAzureSession();
+
+    try {
+      await expect(session.prompt("Do not replay a revoked key.")).rejects.toMatchObject({
+        provider: "azure",
+        statusCode: 401,
+      });
+    } finally {
+      await session.dispose();
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(process.env.AZURE_OPENAI_API_KEY).toBe("test-key");
+    await expect(fs.readFile(authPath, "utf-8")).resolves.toBe(authBytes);
+  });
+
+  it("stops an aborted Azure request without retry", async () => {
+    process.env.AZURE_OPENAI_DEPLOYMENT = "gpt-5.6-sol";
+    const controller = new AbortController();
+    const fetchMock = vi.fn<typeof fetch>(async () => {
+      controller.abort();
+      throw new DOMException("Cancelled", "AbortError");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const session = await createAzureSession({ signal: controller.signal });
+
+    try {
+      await expect(session.prompt("Cancel this Azure request.")).resolves.toBeUndefined();
+    } finally {
+      await session.dispose();
+    }
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

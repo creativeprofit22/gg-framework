@@ -36,16 +36,20 @@ function manager(
     cwd?: string;
     sessionRootDir?: string;
     maxPerModel?: number;
+    provider?: "openai" | "azure";
+    model?: string;
+    baseUrl?: string;
   } = {},
 ) {
   const instance = new SubAgentManager({
     cwd: options.cwd ?? process.cwd(),
     agents: options.agentDefs ?? agents,
-    getProvider: () => "openai",
-    getModel: () => "gpt-5.6-sol",
+    getProvider: () => options.provider ?? "openai",
+    getModel: () => options.model ?? "gpt-5.6-sol",
     getThinkingLevel: () => "ultra",
     getCacheKey: () => "parent-cache",
     getMaxPerModel: () => options.maxPerModel,
+    getBaseUrl: () => options.baseUrl,
     workerEntry,
     idleTimeoutMs: options.idleTimeoutMs,
     store: options.store,
@@ -60,7 +64,11 @@ afterEach(async () => {
   await Promise.all(activeManagers.map((instance) => instance.shutdownAll()));
   await Promise.all(activeManagers.map((instance) => instance.waitForPersistence()));
   await Promise.all(
-    tempDirs.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })),
+    tempDirs
+      .splice(0)
+      .map((directory) =>
+        fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }),
+      ),
   );
 });
 
@@ -83,6 +91,33 @@ describe("SubAgentManager", () => {
         promptCacheKey: "parent-cache:subagent:gpt-5.6-luna:fake",
       },
     });
+  });
+
+  it("initializes an async Azure worker with the parent deployment and endpoint", async () => {
+    const azureAgent = { ...agents[0]!, tools: ["read", "bash"] };
+    const instance = manager({
+      agentDefs: [azureAgent],
+      provider: "azure",
+      model: "azure:gpt-5.6-sol",
+      baseUrl: "https://example.openai.azure.com/openai/v1/responses",
+    });
+    const requestSpy = vi.spyOn(
+      instance as unknown as { request: (...args: unknown[]) => Promise<unknown> },
+      "request",
+    );
+
+    const child = await instance.spawn("azure-child", "slow", "fake");
+    const initializeCall = requestSpy.mock.calls.find(([, command]) => command === "initialize");
+    expect(initializeCall?.[2]).toMatchObject({
+      options: {
+        provider: "azure",
+        model: "azure:gpt-5.6-sol",
+        baseUrl: "https://example.openai.azure.com/openai/v1/responses",
+      },
+    });
+    await instance.interrupt(child.agent_id);
+    const interrupted = await instance.wait([child.agent_id], "all", 500);
+    expect(interrupted.agents[0]?.state).toBe("interrupted");
   });
 
   it("returns after launch and overlaps four child turns", async () => {

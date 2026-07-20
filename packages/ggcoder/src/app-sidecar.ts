@@ -92,6 +92,7 @@ import {
   clampThinkingLevel,
   getNextThinkingLevel,
   getSupportedThinkingLevels,
+  resolveInitialThinkingLevel,
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
@@ -1352,10 +1353,30 @@ async function createSession(
   }
 
   // Per-project thinking prefs win over the global settings.json fallback.
+  // Clamp after model resolution: a native Azure reload can replace the saved
+  // deployment with one that does not support the prior reasoning level.
   const thinkEnabled = projectPrefs?.thinkingEnabled ?? saved.thinkingEnabled;
-  const thinkingLevel: ThinkingLevel | undefined = thinkEnabled
+  const restoredThinkingLevel = thinkEnabled
     ? (projectPrefs?.thinkingLevel ?? saved.thinkingLevel ?? getMaxThinkingLevel(model))
     : undefined;
+  const thinkingLevel = resolveInitialThinkingLevel(
+    provider,
+    model,
+    thinkEnabled,
+    restoredThinkingLevel,
+  );
+  if (
+    projectPrefs &&
+    projectPrefs.provider === provider &&
+    thinkingLevel !== restoredThinkingLevel
+  ) {
+    await saveProjectModelPrefs(cwd, {
+      provider,
+      model,
+      thinkingEnabled: !!thinkingLevel,
+      thinkingLevel,
+    });
+  }
 
   // ── SSE fan-out (declared before the session so plan callbacks can use it) ─
   const clients = new Set<SseClient>();

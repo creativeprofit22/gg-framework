@@ -11,6 +11,7 @@ describe("buildMcpStdioEnv", () => {
       {
         AZURE_OPENAI_API_KEY: "azure-canary",
         AZURE_OPENAI_BASE_URL: "https://azure-canary.example",
+        AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
         PATH: "inherited-path",
         SystemRoot: "C:\\Windows",
       },
@@ -18,6 +19,7 @@ describe("buildMcpStdioEnv", () => {
 
     expect(env).not.toHaveProperty("AZURE_OPENAI_API_KEY");
     expect(env).not.toHaveProperty("AZURE_OPENAI_BASE_URL");
+    expect(env).not.toHaveProperty("AZURE_OPENAI_DEPLOYMENT");
     expect(env).toMatchObject({
       MCP_CUSTOM_VALUE: "configured",
       PATH: "configured-path",

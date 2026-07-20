@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MODELS } from "@kenkaiiii/gg-core/models";
 import {
@@ -44,6 +47,7 @@ describe("Azure OpenAI app boundaries", () => {
 
     const auth = new AuthStorage("unused-auth.json", completeEnvironment);
     await expect(auth.hasProviderAuth("azure")).resolves.toBe(true);
+    await expect(auth.isStaticApiKey("azure")).resolves.toBe(true);
     await expect(auth.resolveCredentials("azure")).resolves.toEqual({
       accessToken: "azure-test-secret",
       refreshToken: "",
@@ -51,6 +55,32 @@ describe("Azure OpenAI app boundaries", () => {
       baseUrl:
         "https://example.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
     });
+  });
+
+  it("keeps environment-owned Azure credentials untouched and delegates other clears", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "ggcoder-azure-auth-"));
+    const authPath = join(directory, "auth.json");
+    try {
+      const auth = new AuthStorage(authPath, completeEnvironment);
+      await auth.setCredentials("openai", {
+        accessToken: "persisted-openai-key",
+        refreshToken: "",
+        expiresAt: Number.POSITIVE_INFINITY,
+      });
+      const beforeAzureClear = await readFile(authPath, "utf8");
+
+      await auth.clearCredentials("azure");
+      expect(await readFile(authPath, "utf8")).toBe(beforeAzureClear);
+      await expect(auth.resolveCredentials("azure")).resolves.toMatchObject({
+        accessToken: "azure-test-secret",
+      });
+
+      await auth.clearCredentials("openai");
+      await expect(auth.getCredentials("openai")).resolves.toBeUndefined();
+      expect(await readFile(authPath, "utf8")).not.toBe(beforeAzureClear);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it.each(["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_DEPLOYMENT"] as const)(
@@ -138,12 +168,13 @@ describe("Azure OpenAI app boundaries", () => {
       id: "azure:gpt-5.6-sol",
       name: "Azure OpenAI (gpt-5.6-sol)",
       provider: "azure",
-      contextWindow: 128_000,
-      maxOutputTokens: 16_384,
-      supportsThinking: false,
-      supportsImages: false,
+      contextWindow: 1_050_000,
+      maxOutputTokens: 128_000,
+      supportsThinking: true,
+      supportsImages: true,
       supportsVideo: false,
-      maxThinkingLevel: "low",
+      costTier: "high",
+      maxThinkingLevel: "ultra",
     });
     expect(JSON.stringify(model)).not.toContain("azure-test-secret");
     expect(registerConfiguredAzureModel(completeEnvironment)).toBe(model);
@@ -151,7 +182,14 @@ describe("Azure OpenAI app boundaries", () => {
     expect(MODELS.filter((candidate) => candidate.id === "azure:gpt-5.6-sol")).toEqual([model]);
     expect(getDefaultModel("azure")).toBe(model);
     expect(getModelDisplayId(model!.id)).toBe("gpt-5.6-sol");
-    expect(getSupportedThinkingLevels("azure", model!.id)).toEqual([]);
+    expect(getSupportedThinkingLevels("azure", model!.id)).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultra",
+    ]);
     expect(resolveTransportModel("azure", model!.id, completeEnvironment)).toBe("gpt-5.6-sol");
 
     const selected = await resolveStartOrFallback(
@@ -164,6 +202,25 @@ describe("Azure OpenAI app boundaries", () => {
       provider: "azure",
       model: "azure:gpt-5.6-sol",
       loggedIn: true,
+    });
+  });
+
+  it("keeps non-Sol Azure deployment aliases conservative", () => {
+    const environment = {
+      ...completeEnvironment,
+      AZURE_OPENAI_DEPLOYMENT: "custom-sol-alias",
+    };
+    addedModelIds.add("azure:custom-sol-alias");
+
+    expect(registerConfiguredAzureModel(environment)).toMatchObject({
+      id: "azure:custom-sol-alias",
+      contextWindow: 128_000,
+      maxOutputTokens: 16_384,
+      supportsThinking: false,
+      supportsImages: false,
+      supportsVideo: false,
+      costTier: "medium",
+      maxThinkingLevel: "low",
     });
   });
 });

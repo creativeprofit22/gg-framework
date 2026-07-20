@@ -9,12 +9,14 @@ export interface AzureOpenAIEnvironment {
   AZURE_OPENAI_API_KEY?: string;
   AZURE_OPENAI_BASE_URL?: string;
   AZURE_OPENAI_DEPLOYMENT?: string;
+  AZURE_OPENAI_MODEL_ID?: string;
 }
 
 export interface AzureOpenAIConfig {
   apiKey: string;
   baseUrl: string;
   deployment: string;
+  modelIdentity?: string;
 }
 
 const MAX_AZURE_DEPLOYMENT_BYTES = 256;
@@ -37,7 +39,14 @@ export function resolveAzureOpenAIConfig(
   ) {
     return undefined;
   }
-  return { apiKey, baseUrl, deployment };
+  const candidateIdentity = environment.AZURE_OPENAI_MODEL_ID?.trim();
+  const modelIdentity =
+    candidateIdentity &&
+    new TextEncoder().encode(candidateIdentity).byteLength <= MAX_AZURE_DEPLOYMENT_BYTES &&
+    !UNICODE_CONTROL_CHARACTER.test(candidateIdentity)
+      ? candidateIdentity
+      : undefined;
+  return { apiKey, baseUrl, deployment, ...(modelIdentity ? { modelIdentity } : {}) };
 }
 
 function isAzureResponsesUrl(value: string): boolean {

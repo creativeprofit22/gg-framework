@@ -5,6 +5,8 @@ export interface ModelInfo {
   id: string;
   name: string;
   provider: Provider;
+  /** Canonical capability identity when the provider routes through a deployment alias. */
+  modelIdentity?: string;
   contextWindow: number;
   /**
    * ChatGPT Codex transport uses product-specific windows that can differ from

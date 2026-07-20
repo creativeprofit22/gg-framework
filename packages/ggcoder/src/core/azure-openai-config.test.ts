@@ -23,6 +23,7 @@ const completeEnvironment: AzureOpenAIEnvironment = {
   AZURE_OPENAI_BASE_URL:
     "https://example.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
   AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
+  AZURE_OPENAI_MODEL_ID: "gpt-5.6-sol",
 };
 
 const addedModelIds = new Set<string>();
@@ -43,6 +44,7 @@ describe("Azure OpenAI app boundaries", () => {
       baseUrl:
         "https://example.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
       deployment: "gpt-5.6-sol",
+      modelIdentity: "gpt-5.6-sol",
     });
 
     const auth = new AuthStorage("unused-auth.json", completeEnvironment);
@@ -205,15 +207,39 @@ describe("Azure OpenAI app boundaries", () => {
     });
   });
 
-  it("keeps non-Sol Azure deployment aliases conservative", () => {
+  it("maps a customer deployment name to explicit GPT-5.6 Sol capabilities", () => {
+    const environment = {
+      ...completeEnvironment,
+      AZURE_OPENAI_DEPLOYMENT: "customer-production-chat",
+    };
+    addedModelIds.add("azure:customer-production-chat");
+
+    const model = registerConfiguredAzureModel(environment);
+    expect(model).toMatchObject({
+      id: "azure:customer-production-chat",
+      modelIdentity: "gpt-5.6-sol",
+      contextWindow: 1_050_000,
+      maxOutputTokens: 128_000,
+      supportsThinking: true,
+      maxThinkingLevel: "ultra",
+    });
+    expect(resolveTransportModel("azure", model!.id, environment)).toBe("customer-production-chat");
+  });
+
+  it.each([
+    ["an absent identity", undefined],
+    ["an unknown identity", "customer-invented-model"],
+  ])("keeps Azure aliases conservative with %s", (_description, modelIdentity) => {
     const environment = {
       ...completeEnvironment,
       AZURE_OPENAI_DEPLOYMENT: "custom-sol-alias",
+      AZURE_OPENAI_MODEL_ID: modelIdentity,
     };
     addedModelIds.add("azure:custom-sol-alias");
 
     expect(registerConfiguredAzureModel(environment)).toMatchObject({
       id: "azure:custom-sol-alias",
+      modelIdentity,
       contextWindow: 128_000,
       maxOutputTokens: 16_384,
       supportsThinking: false,

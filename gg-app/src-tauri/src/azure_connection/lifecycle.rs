@@ -25,6 +25,14 @@ pub(crate) fn configure_daemon_azure_environment(
         .env("AZURE_OPENAI_API_KEY", &config.api_key)
         .env("AZURE_OPENAI_BASE_URL", &config.base_url)
         .env("AZURE_OPENAI_DEPLOYMENT", &config.deployment);
+    match &config.model_identity {
+        Some(model_identity) => {
+            command.env("AZURE_OPENAI_MODEL_ID", model_identity);
+        }
+        None => {
+            command.env_remove("AZURE_OPENAI_MODEL_ID");
+        }
+    }
 }
 
 pub(crate) type ReloadFuture<'a> =
@@ -244,7 +252,8 @@ mod tests {
         let config = SecureAzureConfig {
             api_key: canary.clone(),
             base_url: "https://secure.openai.azure.com/openai/v1/responses".into(),
-            deployment: "gpt-secure".into(),
+            deployment: "customer-production-chat".into(),
+            model_identity: Some("gpt-5.6-sol".into()),
         };
         let mut command = Command::new("node");
         configure_daemon_azure_environment(&mut command, Some(&config));
@@ -261,8 +270,21 @@ mod tests {
         assert_eq!(
             env.get(OsStr::new("AZURE_OPENAI_DEPLOYMENT"))
                 .and_then(|value| value.as_deref()),
-            Some(OsStr::new("gpt-secure"))
+            Some(OsStr::new("customer-production-chat"))
         );
+        assert_eq!(
+            env.get(OsStr::new("AZURE_OPENAI_MODEL_ID"))
+                .and_then(|value| value.as_deref()),
+            Some(OsStr::new("gpt-5.6-sol"))
+        );
+
+        let mut identity_absent = Command::new("node");
+        let mut legacy_config = config.clone();
+        legacy_config.model_identity = None;
+        configure_daemon_azure_environment(&mut identity_absent, Some(&legacy_config));
+        assert!(identity_absent
+            .get_envs()
+            .any(|(key, value)| key == OsStr::new("AZURE_OPENAI_MODEL_ID") && value.is_none()));
 
         let mut inherited = Command::new("node");
         configure_daemon_azure_environment(&mut inherited, None);

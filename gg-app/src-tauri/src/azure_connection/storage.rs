@@ -12,6 +12,8 @@ const METADATA_FILE: &str = "gg-app-azure.json";
 pub(super) struct AzureMetadata {
     pub(super) endpoint: String,
     pub(super) deployment: String,
+    #[serde(default)]
+    pub(super) model_identity: Option<String>,
 }
 
 #[derive(Debug)]
@@ -146,7 +148,17 @@ mod tests {
         AzureMetadata {
             endpoint: endpoint.to_owned(),
             deployment: deployment.to_owned(),
+            model_identity: Some("gpt-5.6-sol".to_owned()),
         }
+    }
+
+    #[test]
+    fn legacy_metadata_without_model_identity_remains_conservative() {
+        let metadata: AzureMetadata = serde_json::from_str(
+            r#"{"endpoint":"https://legacy.openai.azure.com","deployment":"customer-chat"}"#,
+        )
+        .unwrap();
+        assert_eq!(metadata.model_identity, None);
     }
 
     #[test]
@@ -170,6 +182,7 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("second"));
         assert!(!contents.contains("first"));
+        assert!(contents.contains("\"modelIdentity\": \"gpt-5.6-sol\""));
         assert!(!contents.contains("apiKey"));
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -14,9 +14,11 @@ use validation::{
     validate_optional_key, RemoteValidator, ReqwestRemoteValidator,
 };
 
+#[derive(Clone)]
 pub(crate) struct SecureAzureConfig {
     pub(crate) base_url: String,
     pub(crate) deployment: String,
+    pub(crate) model_identity: Option<String>,
     pub(crate) api_key: String,
 }
 
@@ -45,6 +47,7 @@ pub(crate) struct AzureEnvironment {
     pub(crate) api_key: Option<String>,
     pub(crate) base_url: Option<String>,
     pub(crate) deployment: Option<String>,
+    pub(crate) model_identity: Option<String>,
 }
 
 impl AzureEnvironment {
@@ -53,6 +56,7 @@ impl AzureEnvironment {
             api_key: std::env::var("AZURE_OPENAI_API_KEY").ok(),
             base_url: std::env::var("AZURE_OPENAI_BASE_URL").ok(),
             deployment: std::env::var("AZURE_OPENAI_DEPLOYMENT").ok(),
+            model_identity: std::env::var("AZURE_OPENAI_MODEL_ID").ok(),
         }
     }
 }
@@ -217,6 +221,7 @@ where
         Ok(Some(SecureAzureConfig {
             base_url: responses_url(&metadata.endpoint),
             deployment: metadata.deployment,
+            model_identity: metadata.model_identity,
             api_key,
         }))
     }
@@ -248,6 +253,7 @@ where
         let candidate = SecureAzureConfig {
             base_url: responses_url(&metadata.endpoint),
             deployment: metadata.deployment.clone(),
+            model_identity: metadata.model_identity.clone(),
             api_key: api_key.to_owned(),
         };
         self.validator.validate(&candidate).await?;
@@ -464,6 +470,7 @@ mod tests {
         AzureMetadata {
             endpoint: endpoint.to_owned(),
             deployment: deployment.to_owned(),
+            model_identity: Some("gpt-5.6-sol".to_owned()),
         }
     }
 
@@ -490,6 +497,7 @@ mod tests {
             api_key: Some("environment-secret".into()),
             base_url: Some("https://env.openai.azure.com/openai/v1/responses".into()),
             deployment: Some("gpt-env".into()),
+            model_identity: None,
         };
         let status = manager.status(&environment).unwrap();
         let ipc = serde_json::to_string(&status).unwrap();
@@ -512,6 +520,7 @@ mod tests {
             api_key: Some("environment-secret".into()),
             base_url: Some("https://env.openai.azure.com/openai/v1/responses".into()),
             deployment: Some("gpt-env".into()),
+            model_identity: None,
         };
         let status = manager.status(&environment).unwrap();
         assert_eq!(status.source, AzureConnectionSource::Environment);
@@ -533,6 +542,7 @@ mod tests {
         );
         let serialized = metadata.serialized.lock().unwrap();
         assert_eq!(serialized.len(), 1);
+        assert!(serialized[0].contains("\"modelIdentity\":\"gpt-5.6-sol\""));
         assert!(!serialized[0].contains(&canary));
         assert!(!serde_json::to_string(&status).unwrap().contains(&canary));
     }
@@ -576,9 +586,10 @@ mod tests {
     fn successful_removal_status_uses_environment_without_secure_store_reads() {
         let canary = canary();
         let environment = AzureEnvironment {
-            api_key: Some(canary),
+            api_key: Some(canary.clone()),
             base_url: Some("https://environment.openai.azure.com/openai/v1/responses".into()),
             deployment: Some("environment-deployment".into()),
+            model_identity: None,
         };
 
         let status = status_after_secure_removal(&environment);

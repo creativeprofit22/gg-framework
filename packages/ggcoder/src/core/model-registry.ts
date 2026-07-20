@@ -49,18 +49,26 @@ export function registerConfiguredAzureModel(
   const existing = MODELS.find((model) => model.id === id);
   if (existing) return existing;
 
-  const isExactSolDeployment = config.deployment === "gpt-5.6-sol";
+  const identityModel = config.modelIdentity
+    ? MODELS.find(
+        (candidate) => candidate.provider === "openai" && candidate.id === config.modelIdentity,
+      )
+    : undefined;
+  const conservativeCapabilities: Omit<ModelInfo, "id" | "name" | "provider"> = {
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    supportsThinking: false,
+    supportsImages: false,
+    supportsVideo: false,
+    costTier: "medium",
+    maxThinkingLevel: "low",
+  };
   const model: ModelInfo = {
+    ...(identityModel ?? conservativeCapabilities),
     id,
     name: `Azure OpenAI (${config.deployment})`,
     provider: AZURE_OPENAI_PROVIDER,
-    contextWindow: isExactSolDeployment ? 1_050_000 : 128_000,
-    maxOutputTokens: isExactSolDeployment ? 128_000 : 16_384,
-    supportsThinking: isExactSolDeployment,
-    supportsImages: isExactSolDeployment,
-    supportsVideo: false,
-    costTier: isExactSolDeployment ? "high" : "medium",
-    maxThinkingLevel: isExactSolDeployment ? "ultra" : "low",
+    modelIdentity: config.modelIdentity,
   };
   MODELS.push(model);
   return model;

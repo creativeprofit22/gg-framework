@@ -11,6 +11,7 @@ use super::{
 const MAX_ENDPOINT_LENGTH: usize = 2_048;
 const MAX_DEPLOYMENT_LENGTH: usize = 256;
 const MAX_API_KEY_LENGTH: usize = 8_192;
+const AZURE_SETUP_MODEL_ID: &str = "gpt-5.6-sol";
 const AZURE_HOST_SUFFIXES: [&str; 2] = [".openai.azure.com", ".cognitiveservices.azure.com"];
 const VALIDATION_OUTPUT_TOKENS: u8 = 16;
 const VALIDATION_TIMEOUT: Duration = Duration::from_secs(12);
@@ -127,6 +128,7 @@ pub(super) fn validate_metadata(
     Ok(AzureMetadata {
         endpoint: normalize_resource_endpoint(endpoint)?,
         deployment: normalize_deployment(deployment)?,
+        model_identity: Some(AZURE_SETUP_MODEL_ID.to_owned()),
     })
 }
 
@@ -215,10 +217,21 @@ pub(super) fn resolve_environment(environment: &AzureEnvironment) -> Option<Secu
     {
         return None;
     }
+    let model_identity = environment
+        .model_identity
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_DEPLOYMENT_LENGTH
+                && !value.chars().any(char::is_control)
+        })
+        .map(str::to_owned);
     Some(SecureAzureConfig {
         api_key: api_key.to_owned(),
         base_url: base_url.to_owned(),
         deployment: deployment.to_owned(),
+        model_identity,
     })
 }
 
@@ -363,6 +376,7 @@ mod tests {
                 "https://example.openai.azure.com/openai/v1/responses?api-version=preview".into(),
             ),
             deployment: Some("gpt-env".into()),
+            model_identity: Some("gpt-5.6-sol".into()),
         };
         assert!(
             resolve_environment(&complete).unwrap().api_key == canary,
@@ -413,6 +427,7 @@ mod tests {
         let config = SecureAzureConfig {
             base_url: source_url,
             deployment: "gpt-test".into(),
+            model_identity: None,
             api_key: canary.clone(),
         };
         let error = block_on(validator.validate(&config)).unwrap_err();
@@ -445,6 +460,7 @@ mod tests {
         let config = SecureAzureConfig {
             base_url: url,
             deployment: "gpt-test".into(),
+            model_identity: None,
             api_key: canary.clone(),
         };
         let error = block_on(validator.validate(&config)).unwrap_err();

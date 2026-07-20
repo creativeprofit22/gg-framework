@@ -45,7 +45,7 @@ import { modelDisplayName } from "./model-name";
 import { SlashMenu } from "./SlashMenu";
 import { FileMentionMenu } from "./FileMentionMenu";
 import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./ReferencedFiles";
-import { ContextMeter } from "./ContextMeter";
+import { ContextMeter, getContextPercent } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { TasksModal } from "./TasksModal";
 import { ProjectNotes } from "./ProjectNotes";
@@ -1252,10 +1252,7 @@ export function AgentPane({
 
   // Context-window usage percentage for the footer meter. 0 (hidden) until we
   // have both a window size and a real token reading from a completed turn.
-  const contextPct =
-    state?.contextWindow && contextTokens > 0
-      ? Math.min(100, Math.round((contextTokens / state.contextWindow) * 100))
-      : 0;
+  const contextPct = getContextPercent(contextTokens, state?.contextWindow);
 
   // Workflow commands matching the current `/prefix` (only while the input is a
   // single `/token` with no space yet). Empty when not in slash mode.

@@ -14,10 +14,11 @@ const environment: AzureOpenAIEnvironment = {
   AZURE_OPENAI_API_KEY: "azure-test-secret",
   AZURE_OPENAI_BASE_URL:
     "https://example.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
-  AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
+  AZURE_OPENAI_DEPLOYMENT: "customer-production-chat",
+  AZURE_OPENAI_MODEL_ID: "gpt-5.6-sol",
 };
-const modelId = "azure:gpt-5.6-sol";
-const conservativeDeployment = "production-chat";
+const modelId = "azure:customer-production-chat";
+const conservativeDeployment = "unidentified-production-chat";
 const conservativeModelId = `azure:${conservativeDeployment}`;
 
 afterEach(() => {
@@ -28,7 +29,7 @@ afterEach(() => {
 });
 
 describe("Azure sidecar thinking state", () => {
-  it("cycles the exact Azure Sol deployment through Ultra", () => {
+  it("cycles a custom Azure deployment mapped to Sol through Ultra", () => {
     const model = registerConfiguredAzureModel(environment)!;
 
     expect(getSupportedThinkingLevels(model.provider, model.id)).toEqual([
@@ -43,7 +44,7 @@ describe("Azure sidecar thinking state", () => {
     expect(getNextThinkingLevel(model.provider, model.id, "max")).toBe("ultra");
   });
 
-  it("preserves Ultra when recreating the exact Azure Sol deployment", () => {
+  it("preserves Ultra when recreating a custom Azure deployment mapped to Sol", () => {
     const model = registerConfiguredAzureModel(environment)!;
 
     expect(clampThinkingLevel(model.provider, model.id, "ultra")).toBe("ultra");
@@ -58,6 +59,7 @@ describe("Azure sidecar thinking state", () => {
     const reloadedModel = registerConfiguredAzureModel({
       ...environment,
       AZURE_OPENAI_DEPLOYMENT: conservativeDeployment,
+      AZURE_OPENAI_MODEL_ID: undefined,
     })!;
     const recreatedLevel = resolveInitialThinkingLevel(
       reloadedModel.provider,

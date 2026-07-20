@@ -31,10 +31,15 @@ const ANTHROPIC_ADAPTIVE_THINKING_LEVELS: readonly ThinkingLevel[] = [
   "max",
 ];
 
+function resolvedModelIdentity(model: string): string {
+  return getModel(model)?.modelIdentity ?? model;
+}
+
 function isOpenAIGptModel(provider: Provider, model: string): boolean {
+  const identity = resolvedModelIdentity(model);
   return (
-    (provider === "openai" && model.startsWith("gpt-")) ||
-    (provider === "azure" && model === "azure:gpt-5.6-sol")
+    (provider === "openai" && identity.startsWith("gpt-")) ||
+    (provider === "azure" && identity === "gpt-5.6-sol")
   );
 }
 
@@ -87,10 +92,10 @@ export function getSupportedThinkingLevels(
 
   if (!isOpenAIGptModel(provider, model)) return [maxLevel];
 
-  const levels =
-    model.startsWith("gpt-5.6-") || model === "azure:gpt-5.6-sol"
-      ? OPENAI_GPT_56_THINKING_LEVELS
-      : OPENAI_GPT_THINKING_LEVELS;
+  const identity = resolvedModelIdentity(model);
+  const levels = identity.startsWith("gpt-5.6-")
+    ? OPENAI_GPT_56_THINKING_LEVELS
+    : OPENAI_GPT_THINKING_LEVELS;
   const maxIndex = levels.indexOf(maxLevel);
   if (maxIndex === -1) return ["medium"];
   return levels.slice(0, maxIndex + 1);

@@ -4062,8 +4062,20 @@ body {
   cursor: pointer;
   padding: 0;
 }
-.bgtasks-kill:hover {
+.bgtasks-kill:hover:not(:disabled) {
   text-decoration: underline;
+}
+.bgtasks-kill:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.bgtasks-feedback {
+  max-width: 420px;
+  padding: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 /* ── Model picker (footer, opens upward) ── */

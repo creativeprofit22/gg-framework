@@ -90,14 +90,13 @@ describe("ProcessManager dev-server lifecycle repro", () => {
     }
   });
 
-  it("uses taskkill for Windows process-tree shutdown fallback", async () => {
-    const taskkill = vi.fn();
+  it("uses the shared PID-tree seam for Windows shutdown", async () => {
+    const killProcessTree = vi.fn();
+    const directKill = vi.fn() as unknown as typeof process.kill;
     manager = new ProcessManager({
       platform: "win32",
-      kill: vi.fn(() => {
-        throw new Error("force fallback");
-      }) as typeof process.kill,
-      spawnSync: taskkill as never,
+      kill: directKill,
+      killProcessTree,
     });
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-win-taskkill-"));
     const started = await manager.start(
@@ -105,17 +104,11 @@ describe("ProcessManager dev-server lifecycle repro", () => {
       tmpDir,
     );
     try {
-      const stopped = await manager.stop(started.id);
-      expect(stopped).toBe(`Process ${started.id} already exited`);
       manager.shutdownAll();
-      expect(taskkill).toHaveBeenCalledWith("taskkill", ["/pid", String(started.pid), "/T", "/F"], {
-        stdio: "ignore",
-      });
+      expect(killProcessTree).toHaveBeenCalledWith(started.pid);
+      expect(directKill).not.toHaveBeenCalled();
     } finally {
-      // This test deliberately mocks `kill` and `spawnSync`, so neither the
-      // simulated stop() nor shutdownAll() actually signals the real child
-      // spawned by start(). Reap it for real here — otherwise every run of
-      // this suite orphans a live `node -e setInterval` process forever.
+      // The shared tree-kill seam is mocked, so reap the real fixture here.
       killRealProcessTree(started.pid);
     }
   });

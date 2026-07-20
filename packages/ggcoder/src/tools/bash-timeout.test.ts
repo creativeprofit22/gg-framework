@@ -201,6 +201,85 @@ async function cleanupRecordedPids(evidenceFile: string): Promise<void> {
   }
 }
 
+async function waitForFixtureRoles(
+  evidenceFile: string,
+  expectedRoles: string[],
+  timeoutMs = 5_000,
+): Promise<FixtureEvidence[]> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const roles = await readFixtureEvidence(evidenceFile);
+    const recorded = new Set(roles.map(({ role }) => role));
+    if (expectedRoles.every((role) => recorded.has(role))) return roles;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  throw new Error(`Timed out waiting for fixture roles: ${expectedRoles.join(", ")}`);
+}
+
+async function waitForRecordedPidsToExit(
+  roles: FixtureEvidence[],
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const survivors = roles.filter(({ pid }) => isAlive(pid));
+    if (survivors.length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  const survivors = roles.filter(({ pid }) => isAlive(pid));
+  throw new Error(
+    `Windows process-tree cleanup left descendants alive: ${survivors
+      .map(({ role, pid }) => `${role}:${pid}`)
+      .join(", ")}`,
+  );
+}
+
+async function runWindowsPnpmTreeProbe(reason: "timeout" | "abort"): Promise<void> {
+  const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "gg-win-tree-"));
+  const evidenceFile = path.join(tempDirectory, `${reason}.jsonl`);
+  const manager = new ProcessManager();
+  const controller = new AbortController();
+  const fixtureArguments = [
+    fixturePath("bash-timeout-pnpm.cmd"),
+    process.execPath,
+    fixturePath("bash-timeout-package-manager-shim.mjs"),
+    evidenceFile,
+    fixturePath("bash-timeout-launcher.mjs"),
+    fixturePath("bash-timeout-worker.mjs"),
+  ];
+  const { isCmdFallback } = resolveShell("");
+  const command = fixtureArguments
+    .map((value) => quotePathForShell(value, isCmdFallback))
+    .join(" ");
+  try {
+    const execution = createBashTool(process.cwd(), manager).execute(
+      { command, timeout: reason === "timeout" ? 1_000 : 10_000 },
+      { signal: controller.signal, toolCallId: `windows-tree-${reason}` },
+    );
+    const roles = await waitForFixtureRoles(evidenceFile, [
+      "package-manager-shim",
+      "launcher",
+      "worker",
+    ]);
+    if (reason === "abort") controller.abort();
+
+    const result = await execution;
+    if (typeof result !== "string") throw new Error("Expected rendered bash output");
+    expect(result).toContain(
+      reason === "timeout" ? "Exit code: TIMEOUT (1000ms)" : "Exit code: ABORTED",
+    );
+
+    const byRole = new Map(roles.map((role) => [role.role, role]));
+    expect(byRole.get("launcher")?.ppid).toBe(byRole.get("package-manager-shim")?.pid);
+    expect(byRole.get("worker")?.ppid).toBe(byRole.get("launcher")?.pid);
+    await waitForRecordedPidsToExit(roles);
+  } finally {
+    manager.shutdownAll();
+    await cleanupRecordedPids(evidenceFile);
+    await fs.rm(tempDirectory, { recursive: true, force: true });
+  }
+}
+
 async function runProbe(probe: ProbeName, evidenceFile: string): Promise<void> {
   const manager = new ProcessManager();
   const fixtureArguments: Record<ProbeName, string[]> = {
@@ -956,6 +1035,24 @@ if (selectedProbe !== undefined) {
       await fs.rm(tempDirectory, { recursive: true, force: true });
     }
   }, 10_000);
+
+  const windowsIt = process.platform === "win32" ? it : it.skip;
+
+  windowsIt(
+    "kills the cmd-to-package-manager descendant tree on timeout",
+    async () => {
+      await runWindowsPnpmTreeProbe("timeout");
+    },
+    15_000,
+  );
+
+  windowsIt(
+    "kills the cmd-to-package-manager descendant tree on abort",
+    async () => {
+      await runWindowsPnpmTreeProbe("abort");
+    },
+    15_000,
+  );
 
   it.each(knownProbes)(
     "bounds the %s foreground timeout probe",

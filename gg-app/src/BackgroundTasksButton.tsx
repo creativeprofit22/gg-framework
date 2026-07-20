@@ -24,6 +24,8 @@ function shortCommand(cmd: string): string {
 
 export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): React.ReactElement {
   const [open, setOpen] = useState(false);
+  const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
+  const [killResult, setKillResult] = useState<{ ok: boolean; message: string } | null>(null);
   const ref = useRef<HTMLSpanElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -56,6 +58,17 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
     };
   }, [open]);
 
+  const handleKill = async (taskId: string): Promise<void> => {
+    if (pendingTaskId !== null) return;
+    setPendingTaskId(taskId);
+    setKillResult(null);
+    try {
+      setKillResult(await killTask(taskId));
+    } finally {
+      setPendingTaskId(null);
+    }
+  };
+
   const runningCount = tasks.filter((t) => t.exitCode === null).length;
   // Spinner color while anything runs; muted once all have exited.
   const accent = runningCount > 0 ? theme.warning : theme.textMuted;
@@ -67,6 +80,7 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
         className="bgtasks-button"
         style={{ color: accent, borderColor: theme.border }}
         title="Background tasks"
+        aria-label="Background tasks"
         onClick={() => setOpen((o) => !o)}
       >
         {"\u2699 "}
@@ -92,6 +106,7 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
             )}
             {tasks.map((t) => {
               const running = t.exitCode === null;
+              const pending = pendingTaskId === t.id;
               return (
                 <div key={t.id} className="bgtasks-item">
                   <span
@@ -110,15 +125,25 @@ export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): R
                     <button
                       className="bgtasks-kill"
                       style={{ color: theme.error }}
-                      title="Stop task"
-                      onClick={() => void killTask(t.id)}
+                      aria-label={`${pending ? "Stopping" : "Stop"} task: ${shortCommand(t.command)}`}
+                      disabled={pendingTaskId !== null}
+                      onClick={() => void handleKill(t.id)}
                     >
-                      kill
+                      {pending ? "stopping..." : "kill"}
                     </button>
                   )}
                 </div>
               );
             })}
+            {killResult && (
+              <div
+                className="bgtasks-feedback"
+                role={killResult.ok ? "status" : "alert"}
+                style={{ color: killResult.ok ? theme.success : theme.error }}
+              >
+                {killResult.message}
+              </div>
+            )}
           </div>,
           document.body,
         )}

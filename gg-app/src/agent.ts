@@ -111,6 +111,9 @@ export interface BackgroundTask {
   exitCode: number | null;
 }
 
+/** User-visible outcome of asking the sidecar to stop a background task. */
+export type KillTaskResult = { ok: true; message: string } | { ok: false; message: string };
+
 export type WorkspaceMode = "code" | "chat";
 export type ChatAgentId = "general" | "therapist" | "research";
 
@@ -835,14 +838,38 @@ export async function setRadioVolume(volume: number): Promise<number> {
   return Number.isFinite(res.volume) ? res.volume : volume;
 }
 
-/** Stop a background task by id. Returns the sidecar's status message, if any. */
-export async function killTask(id: string): Promise<string | null> {
+interface KillTaskResponse {
+  ok?: boolean;
+  message?: string;
+  error?: string;
+}
+
+function killTaskFailureMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  return "Could not stop the background task because the app could not reach the agent daemon.";
+}
+
+function killTaskResult(response: KillTaskResponse): KillTaskResult {
+  const message = response.message?.trim() || response.error?.trim();
+  if (!message) {
+    return { ok: false, message: "The agent daemon returned no stop status." };
+  }
+  const inferredFailure =
+    message.startsWith("Failed to stop process") ||
+    message.startsWith("No background process with id");
+  return { ok: response.ok ?? !inferredFailure, message };
+}
+
+/** Stop a background task by id while preserving sidecar and IPC failure details. */
+export async function killTask(id: string): Promise<KillTaskResult> {
   try {
-    const res = await invoke<{ message?: string }>("agent_kill_task", { paneId: "primary", id });
-    return res.message ?? null;
-  } catch (e) {
-    await logError(`agent_kill_task failed: ${String(e)}`);
-    return null;
+    const response = await invoke<KillTaskResponse>("agent_kill_task", { paneId: "primary", id });
+    return killTaskResult(response);
+  } catch (error) {
+    const message = killTaskFailureMessage(error);
+    await logError(`agent_kill_task failed: ${String(error)}`);
+    return { ok: false, message };
   }
 }
 
@@ -1567,7 +1594,7 @@ export interface PaneAgentClient {
   runTask(id: string): Promise<void>;
   runAllTasks(): Promise<void>;
   deleteTask(id: string): Promise<ProjectTask[]>;
-  killTask(id: string): Promise<string | null>;
+  killTask(id: string): Promise<KillTaskResult>;
   cycleThinking(): Promise<ThinkingState | null>;
   listCommands(): Promise<SlashCommand[]>;
   listModels(): Promise<ModelOption[]>;
@@ -1789,9 +1816,11 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     },
     async killTask(id) {
       try {
-        return (await call<{ message?: string }>("agent_kill_task", { id })).message ?? null;
-      } catch {
-        return null;
+        return killTaskResult(await call<KillTaskResponse>("agent_kill_task", { id }));
+      } catch (error) {
+        const message = killTaskFailureMessage(error);
+        await logError(`agent_kill_task failed: ${String(error)}`);
+        return { ok: false, message };
       }
     },
     async cycleThinking() {

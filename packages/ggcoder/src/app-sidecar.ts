@@ -3577,9 +3577,12 @@ async function createSession(
           return;
         }
         const message = await session.killBackgroundProcess(id);
+        const ok =
+          !message.startsWith("Failed to stop process") &&
+          !message.startsWith("No background process with id");
         // Push the updated task list right away rather than waiting for the poll.
         broadcast("tasks", { tasks: session.listBackgroundProcesses() });
-        json(res, 200, { message });
+        json(res, 200, { ok, message });
       });
       return;
     }

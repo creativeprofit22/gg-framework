@@ -11,6 +11,7 @@ use super::{
 const MAX_ENDPOINT_LENGTH: usize = 2_048;
 const MAX_DEPLOYMENT_LENGTH: usize = 256;
 const MAX_API_KEY_LENGTH: usize = 8_192;
+const AZURE_HOST_SUFFIXES: [&str; 2] = [".openai.azure.com", ".cognitiveservices.azure.com"];
 const VALIDATION_TIMEOUT: Duration = Duration::from_secs(12);
 
 pub(super) type ValidationFuture<'a> =
@@ -143,7 +144,10 @@ fn normalize_resource_endpoint(value: &str) -> Result<String, AzureConnectionErr
     }
     let parsed = reqwest::Url::parse(value).map_err(|_| invalid())?;
     let host = parsed.host_str().ok_or_else(invalid)?;
-    let resource = host.strip_suffix(".openai.azure.com").ok_or_else(invalid)?;
+    let resource = AZURE_HOST_SUFFIXES
+        .iter()
+        .find_map(|suffix| host.strip_suffix(suffix))
+        .ok_or_else(invalid)?;
     if parsed.scheme() != "https"
         || !parsed.username().is_empty()
         || parsed.password().is_some()
@@ -291,20 +295,46 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_resource_endpoints() {
-        assert_eq!(
-            normalize_resource_endpoint(" HTTPS://My-Resource.OPENAI.AZURE.COM/ ").unwrap(),
-            "https://my-resource.openai.azure.com"
-        );
+    fn accepts_official_resource_origins_and_builds_responses_urls() {
+        for (endpoint, normalized) in [
+            (
+                " HTTPS://My-Resource.OPENAI.AZURE.COM/ ",
+                "https://my-resource.openai.azure.com",
+            ),
+            (
+                "https://example-francecentral.cognitiveservices.azure.com",
+                "https://example-francecentral.cognitiveservices.azure.com",
+            ),
+            (
+                "https://my-resource.openai.azure.com:443",
+                "https://my-resource.openai.azure.com",
+            ),
+        ] {
+            let origin = normalize_resource_endpoint(endpoint).unwrap();
+            assert_eq!(origin, normalized);
+            assert_eq!(
+                responses_url(&origin),
+                format!("{normalized}/openai/v1/responses")
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_non_resource_origins() {
         for malformed in [
             "http://resource.openai.azure.com",
-            "https://user:pass@resource.openai.azure.com",
+            "https://user:password@resource.openai.azure.com",
             "https://resource.openai.azure.com/openai/v1/responses",
-            "https://resource.openai.azure.com?key=value",
+            "https://resource.openai.azure.com?api-version=preview",
             "https://resource.openai.azure.com#fragment",
             "https://resource.openai.azure.com:8443",
             "https://nested.resource.openai.azure.com",
+            "https://nested.resource.cognitiveservices.azure.com",
             "https://example.com",
+            "https://resource.openai.azure.com.example.com",
+            "https://resource.cognitiveservices.azure.com.example.com",
+            "https://127.0.0.1",
+            "https://localhost",
             "https://resource.openai.azure.com/\nheader",
         ] {
             let error = normalize_resource_endpoint(malformed).unwrap_err();

@@ -17,7 +17,7 @@ type RefreshOperation = "save" | "remove";
 const MAX_ENDPOINT_LENGTH = 2_048;
 const MAX_DEPLOYMENT_LENGTH = 256;
 const MAX_API_KEY_LENGTH = 8_192;
-const AZURE_HOST_SUFFIX = ".openai.azure.com";
+const AZURE_HOST_SUFFIXES = [".openai.azure.com", ".cognitiveservices.azure.com"] as const;
 const textEncoder = new TextEncoder();
 
 function exceedsByteLength(value: string, maximum: number): boolean {
@@ -26,12 +26,6 @@ function exceedsByteLength(value: string, maximum: number): boolean {
 
 function containsControlCharacter(value: string): boolean {
   return /\p{Cc}/u.test(value);
-}
-
-function hasExplicitPort(value: string): boolean {
-  const authority = /^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i.exec(value)?.[1] ?? "";
-  const hostAndPort = authority.slice(authority.lastIndexOf("@") + 1);
-  return /:\d+$/.test(hostAndPort);
 }
 
 function localErrors(
@@ -50,16 +44,14 @@ function localErrors(
   if (!invalidEndpoint) {
     try {
       const parsed = new URL(trimmedEndpoint);
-      const resource = parsed.hostname.endsWith(AZURE_HOST_SUFFIX)
-        ? parsed.hostname.slice(0, -AZURE_HOST_SUFFIX.length)
-        : "";
+      const suffix = AZURE_HOST_SUFFIXES.find((candidate) => parsed.hostname.endsWith(candidate));
+      const resource = suffix ? parsed.hostname.slice(0, -suffix.length) : "";
       const validPath = parsed.pathname === "/" || parsed.pathname === "";
       if (
         parsed.protocol !== "https:" ||
         !resource ||
         resource.includes(".") ||
         parsed.port ||
-        hasExplicitPort(trimmedEndpoint) ||
         parsed.username ||
         parsed.password ||
         parsed.search ||

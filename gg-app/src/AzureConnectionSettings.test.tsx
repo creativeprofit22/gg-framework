@@ -150,18 +150,56 @@ describe("AzureConnectionSettings", () => {
   });
 
   it.each([
-    {
-      name: "dotted Azure resource names",
-      label: "Endpoint",
-      value: "https://foo.bar.openai.azure.com",
-      error: /HTTPS Azure resource endpoint/,
-    },
-    {
-      name: "explicit endpoint ports",
-      label: "Endpoint",
-      value: "https://sample.openai.azure.com:443",
-      error: /HTTPS Azure resource endpoint/,
-    },
+    "https://example-francecentral.cognitiveservices.azure.com",
+    "https://sample.openai.azure.com/",
+    "https://sample.openai.azure.com:443",
+  ])("accepts the official Azure resource origin %s", async (endpoint) => {
+    agentMocks.save.mockResolvedValue(connected);
+    await renderState(disconnected);
+    fillConnection();
+    fireEvent.change(screen.getByLabelText("Endpoint"), { target: { value: endpoint } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Validate and connect" }));
+
+    await waitFor(() => expect(agentMocks.save).toHaveBeenCalledTimes(1));
+    expect(agentMocks.save).toHaveBeenCalledWith(expect.objectContaining({ endpoint }));
+    expect(screen.queryByText(/HTTPS Azure resource endpoint/)).toBeNull();
+  });
+
+  it.each([
+    ["HTTP", "http://resource.openai.azure.com"],
+    ["embedded credentials", "https://user:password@resource.openai.azure.com"],
+    ["a Responses path", "https://resource.openai.azure.com/openai/v1/responses"],
+    ["a query string", "https://resource.openai.azure.com?api-version=preview"],
+    ["a fragment", "https://resource.openai.azure.com#fragment"],
+    ["a non-default port", "https://resource.openai.azure.com:8443"],
+    ["a dotted OpenAI resource name", "https://nested.resource.openai.azure.com"],
+    [
+      "a dotted Cognitive Services resource name",
+      "https://nested.resource.cognitiveservices.azure.com",
+    ],
+    ["an unrelated domain", "https://example.com"],
+    ["a deceptive OpenAI suffix", "https://resource.openai.azure.com.example.com"],
+    [
+      "a deceptive Cognitive Services suffix",
+      "https://resource.cognitiveservices.azure.com.example.com",
+    ],
+    ["an IP address", "https://127.0.0.1"],
+    ["localhost", "https://localhost"],
+  ])("rejects endpoint with %s locally", async (_name, endpoint) => {
+    await renderState(disconnected);
+    fillConnection();
+    const invalidInput = screen.getByLabelText("Endpoint");
+    fireEvent.change(invalidInput, { target: { value: endpoint } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Validate and connect" }));
+
+    expect(await screen.findByText(/HTTPS Azure resource endpoint/)).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(invalidInput));
+    expect(agentMocks.save).not.toHaveBeenCalled();
+  });
+
+  it.each([
     {
       name: "oversized deployment names",
       label: "Deployment",

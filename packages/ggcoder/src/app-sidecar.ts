@@ -140,6 +140,7 @@ import { detectNewCommits, repoKey } from "./core/progress/git-xp.js";
 import { rebuildFromSessions } from "./core/progress/rebuild.js";
 import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
 import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
+import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import {
   captureSidecarError,
   flushSidecarErrors,
@@ -779,6 +780,7 @@ async function main(): Promise<void> {
   // request to its window's session via the `x-gg-session` header (and the
   // `?session=` query for the SSE /events stream).
   const sessions = new AppSidecarSessionRouter<SessionContext>();
+  const reloadCoordinator = new AppSidecarReloadCoordinator();
   const memoryStore = new MemoryStore({
     onChange: ({ memories }) => {
       for (const ctx of sessions.values()) {
@@ -919,6 +921,37 @@ async function main(): Promise<void> {
       }
 
       // ── Daemon-level routes (session lifecycle) ──────────────────────────
+      // Secret-free two-phase reload: reserve while Rust persists native config,
+      // then dispose every session and exit only if no pane has active work.
+      if (method === "POST" && url === "/admin/reload/prepare") {
+        const decision = reloadCoordinator.prepare(sessions.values());
+        daemonJson(
+          res,
+          decision.ok ? 200 : 409,
+          decision.ok ? { ok: true } : { error: decision.reason },
+        );
+        return;
+      }
+      if (method === "POST" && url === "/admin/reload/cancel") {
+        reloadCoordinator.cancel();
+        daemonJson(res, 200, { ok: true });
+        return;
+      }
+      if (method === "POST" && url === "/admin/reload") {
+        const decision = reloadCoordinator.begin(sessions.values());
+        if (!decision.ok) {
+          daemonJson(res, 409, { error: decision.reason });
+          return;
+        }
+        daemonJson(res, 202, { ok: true });
+        setImmediate(() => void shutdown());
+        return;
+      }
+      if (reloadCoordinator.shouldBlockSessionMutation(method)) {
+        daemonJson(res, 409, { error: "configuration refresh in progress" });
+        return;
+      }
+
       // Create a session for a window: { mode?, cwd, sessionPath? } → { sessionId }.
       if (method === "POST" && url === "/session") {
         void daemonReadBody(req).then(async (raw) => {
@@ -1039,7 +1072,7 @@ async function main(): Promise<void> {
     // at the daemon level, not per session.
     stopRadio();
     await sessions.disposeAll();
-    server.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     process.exit(0);
   }
   process.on("SIGINT", () => void shutdown());
@@ -1253,6 +1286,7 @@ interface SessionContext {
     method: string,
   ) => void;
   dispose: () => Promise<void>;
+  isRunning: () => boolean;
 }
 
 /**
@@ -4192,6 +4226,7 @@ async function createSession(
     broadcast,
     handle,
     dispose,
+    isRunning: () => running || autopilotActive || runLifecycle.running,
   };
 }
 

@@ -1,11 +1,15 @@
-#[allow(dead_code)] // Registered with Tauri in Stage 2 of the approved Azure connection plan.
 mod azure_connection;
+
+use azure_connection::commands::{
+    azure_connection_remove, azure_connection_save, azure_connection_status,
+    AzureConnectionMutations,
+};
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::SystemTime;
@@ -36,6 +40,12 @@ struct Daemon {
     /// Consecutive short-lived crashes. A daemon that stays up for the stable
     /// window resets this budget; repeated crashes hit a circuit breaker.
     respawn_attempts: Mutex<u32>,
+    /// Monotonic successful-spawn counter used to await a completed refresh.
+    generation: AtomicU64,
+    /// Distinguishes a requested configuration refresh from a process crash.
+    planned_reload: AtomicBool,
+    /// Window labels awaiting a complete pane recovery before model refresh.
+    model_refresh_windows: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4635,6 +4645,15 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         .env("ERROR_MOM_RELEASE", env!("CARGO_PKG_VERSION"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let secure_azure = azure_connection::secure_config()
+        .unwrap_or_else(|_| {
+            log::warn!("Azure secure configuration is unavailable; preserving inherited environment");
+            None
+        });
+    azure_connection::lifecycle::configure_daemon_azure_environment(
+        &mut cmd,
+        secure_azure.as_ref(),
+    );
     #[cfg(unix)]
     cmd.process_group(0);
 
@@ -4673,7 +4692,9 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                 if let Some(rest) = line.strip_prefix("GG_APP_LISTENING ") {
                     if let Ok(port) = rest.trim().parse::<u16>() {
                         log::info!("daemon listening on port {port}");
-                        *app2.state::<Daemon>().port.lock().unwrap() = Some(port);
+                        let daemon = app2.state::<Daemon>();
+                        *daemon.port.lock().unwrap() = Some(port);
+                        daemon.generation.fetch_add(1, Ordering::SeqCst);
                         // On a respawn the windows already exist with (now
                         // stale) sessions — re-create them all. On the initial
                         // spawn `restore_or_default_windows` drives creation.
@@ -4695,6 +4716,10 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
 
             let attempt = {
                 let daemon: State<Daemon> = app2.state();
+                let planned = daemon.planned_reload.swap(false, Ordering::SeqCst);
+                if planned {
+                    log::info!("daemon exited for Azure configuration refresh — respawning");
+                }
                 *daemon.port.lock().unwrap() = None;
                 if let Some(mut old_child) = daemon.child.lock().unwrap().take() {
                     match old_child.try_wait() {
@@ -4705,7 +4730,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                     }
                 }
                 let mut attempts = daemon.respawn_attempts.lock().unwrap();
-                if started_at.elapsed() >= DAEMON_STABLE_UPTIME {
+                if planned || started_at.elapsed() >= DAEMON_STABLE_UPTIME {
                     *attempts = 0;
                 }
                 *attempts += 1;
@@ -4890,6 +4915,7 @@ fn launch_pane_session(
                         "generation": generation,
                     }),
                 );
+                azure_connection::lifecycle::take_ready_model_refresh_windows(&app);
                 if pane_id == PRIMARY_PANE_ID {
                     let _ = app.emit_to(
                         EventTarget::webview_window(label.clone()),
@@ -5105,6 +5131,7 @@ pub fn run() {
         .manage(FocusedWindow::default())
         .manage(MoveDebounce::default())
         .manage(LocalPatchedUpdate::default())
+        .manage(AzureConnectionMutations::default())
         .manage(reqwest::Client::new())
         .invoke_handler(tauri::generate_handler![
             sidecar_port,
@@ -5170,6 +5197,9 @@ pub fn run() {
             app_auth_status,
             app_auth_apikey,
             app_auth_logout,
+            azure_connection_status,
+            azure_connection_save,
+            azure_connection_remove,
             agent_telegram_get,
             agent_telegram_save,
             agent_serve_status,

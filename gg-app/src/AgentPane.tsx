@@ -9,6 +9,7 @@ import {
 import { theme } from "./theme";
 import {
   onWindowOrder,
+  onModelsChanged,
   restoreTarget,
   createPaneAgentClient,
   type PaneAgentClient,
@@ -432,6 +433,7 @@ export function AgentPane({
   const [thinkingStartTs, setThinkingStartTs] = useState<number | null>(null);
   const [thinkingAccumMs, setThinkingAccumMs] = useState(0);
   const [models, setModels] = useState<ModelOption[]>([]);
+  const modelsRef = useRef<ModelOption[]>([]);
   // Footer + menus show the friendly registry name (e.g. "Gemini 3.5 Flash"),
   // not the raw wire id (e.g. "gemini-3-flash").
   const modelName = (id: string | undefined | null): string => modelDisplayName(models, id);
@@ -891,7 +893,8 @@ export function AgentPane({
       }
       const available = await client.listModels();
       if (!current()) return;
-      if (available.length > 0) setModels(available);
+      modelsRef.current = available;
+      setModels(available);
       const cmds = await client.listCommands();
       if (!current()) return;
       setCommands(cmds);
@@ -1120,6 +1123,47 @@ export function AgentPane({
     // connected window (needsProject stays false there).
     if (!needsProject) void hydrate();
   }, [needsProject, hydrate, hydrateNonce]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void onModelsChanged(() => {
+      void (async () => {
+        try {
+          await client.waitForReady();
+          const available = await client.listModels();
+          if (cancelled) return;
+          const unchanged =
+            available.length === modelsRef.current.length &&
+            available.every((model, index) => {
+              const current = modelsRef.current[index];
+              return (
+                current !== undefined &&
+                model.id === current.id &&
+                model.name === current.name &&
+                model.provider === current.provider
+              );
+            });
+          if (unchanged) return;
+          modelsRef.current = available;
+          setModels(available);
+          setModelMenuOpen(false);
+          setKenModelMenuOpen(false);
+        } catch {
+          // A later pane-ready/model event retries after transient respawn races.
+        }
+      })();
+    })
+      .then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [client]);
 
   // Open the Tasks modal, refreshing the list from the sidecar first so it
   // reflects any tasks the agent just added.

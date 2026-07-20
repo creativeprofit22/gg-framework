@@ -12,6 +12,7 @@ const nativeMocks = vi.hoisted(() => ({
   getDroppedPathInfo: vi.fn(async (paths: string[]) =>
     paths.map((path) => ({ path, isDir: path.endsWith("folder") })),
   ),
+  modelsChanged: null as null | (() => void),
   readDroppedFileAttachment: vi.fn(async (path: string) => ({
     path,
     name: "file.txt",
@@ -96,6 +97,10 @@ vi.mock("./agent", async (importOriginal) => {
     restoreTarget: vi.fn(async () => null),
     setWindowTitle: nativeMocks.setWindowTitle,
     onWindowOrder: vi.fn(async () => vi.fn()),
+    onModelsChanged: vi.fn(async (callback: () => void) => {
+      nativeMocks.modelsChanged = callback;
+      return vi.fn();
+    }),
     isSecondaryWindow: false,
     windowLabel: "main",
     createPaneAgentClient: vi.fn((paneId: string) => client(paneId, 1)),
@@ -171,6 +176,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  nativeMocks.modelsChanged = null;
 });
 describe("AgentPane lifecycle", () => {
   it("wires the restored home UI through the pane-scoped catalog client", async () => {
@@ -229,6 +235,38 @@ describe("AgentPane lifecycle", () => {
       ),
     );
     expect(onUserTargetChange).toHaveBeenCalledOnce();
+  });
+
+  it("reloads and replaces the pane model catalog after a native refresh", async () => {
+    const pane = client("pane-1", 1);
+    vi.mocked(pane.listModels).mockResolvedValue([
+      { id: "azure:gpt-old", name: "Azure old", provider: "azure" },
+    ]);
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-1"
+        kind="auxiliary"
+        initialTarget={null}
+        workspaceOwnsSessionLifecycle
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    vi.mocked(pane.listModels).mockClear().mockResolvedValue([]);
+    vi.mocked(pane.waitForReady).mockClear();
+
+    await act(async () => {
+      nativeMocks.modelsChanged?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(pane.listModels).toHaveBeenCalledOnce());
+    expect(pane.waitForReady).toHaveBeenCalledOnce();
   });
 
   it("separate pane clients create and subscribe independently", async () => {

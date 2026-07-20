@@ -73,6 +73,11 @@ export async function listenLocalPatchedUpdate(
   });
 }
 
+/** Subscribe this window to a secret-free model-catalog invalidation. */
+export async function onModelsChanged(onChange: () => void): Promise<() => void> {
+  return appWindow.listen("agent-models-changed", () => onChange());
+}
+
 export interface MemoryChangeEvent extends SidecarEvent {
   type: "memory_change";
   data: { count: number };
@@ -781,6 +786,39 @@ export async function authOAuthCode(code: string): Promise<void> {
  */
 export async function authLogout(provider: string): Promise<void> {
   await invoke("app_auth_logout", { provider });
+}
+
+export type AzureConnectionSource = "secure" | "environment" | "none";
+
+export interface AzureConnectionStatus {
+  configured: boolean;
+  source: AzureConnectionSource;
+  endpoint: string | null;
+  deployment: string | null;
+  endpointSummary: string | null;
+  deploymentSummary: string | null;
+  hasStoredKey: boolean;
+}
+
+export interface SaveAzureConnection {
+  endpoint: string;
+  deployment: string;
+  /** Blank preserves the existing operating-system vault entry. */
+  apiKey?: string;
+}
+
+export async function getAzureConnectionStatus(): Promise<AzureConnectionStatus> {
+  return invoke<AzureConnectionStatus>("azure_connection_status");
+}
+
+export async function saveAzureConnection(
+  connection: SaveAzureConnection,
+): Promise<AzureConnectionStatus> {
+  return invoke<AzureConnectionStatus>("azure_connection_save", { connection });
+}
+
+export async function removeAzureConnection(): Promise<AzureConnectionStatus> {
+  return invoke<AzureConnectionStatus>("azure_connection_remove");
 }
 
 /** Start a fresh session (clears history) for this window's current project. */

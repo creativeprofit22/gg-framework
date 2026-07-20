@@ -353,6 +353,30 @@ describe("agentLoop", () => {
     }
   });
 
+  it("accepts provider string content without retrying it as empty", async () => {
+    const text = "Provider-native string response";
+    mockStream.mockReturnValueOnce({
+      [Symbol.asyncIterator]: async function* () {
+        yield { type: "text_delta" as const, text };
+      },
+      response: Promise.resolve({
+        message: { role: "assistant" as const, content: text },
+        stopReason: "end_turn" as const,
+        usage: { inputTokens: 100, outputTokens: 50 },
+      }),
+    } as unknown as ReturnType<typeof stream>);
+
+    const { events, result } = await collectLoop([{ role: "user", content: "Hi" }], {
+      provider: "openai",
+      model: "test-model",
+    });
+
+    expect(mockStream).toHaveBeenCalledOnce();
+    expect(events).not.toContainEqual(expect.objectContaining({ type: "retry" }));
+    expect(result.message.content).toBe(text);
+    expect(result.totalTurns).toBe(1);
+  });
+
   it("forwards Codex transport identity separately from prompt cache routing", async () => {
     mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
 

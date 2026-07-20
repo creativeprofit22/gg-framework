@@ -124,30 +124,29 @@ function requireOption(value: string | undefined, name: string): string {
 }
 
 function parseResponsesUrl(value: string): string {
+  const configurationError = () =>
+    new ProviderError(
+      "azure",
+      "Azure OpenAI baseUrl must be a full HTTPS URL ending in /responses, without credentials or a fragment.",
+    );
+
   let url: URL;
   try {
     url = new URL(value);
-  } catch (cause) {
-    throw new ProviderError("azure", "Azure OpenAI baseUrl must be a valid HTTPS v1 URL.", {
-      cause,
-    });
+  } catch {
+    throw configurationError();
   }
 
-  const pathname = url.pathname.replace(/\/+$/, "");
   if (
     url.protocol !== "https:" ||
     url.username !== "" ||
     url.password !== "" ||
     url.hash !== "" ||
-    (pathname !== "/openai/v1" && !pathname.endsWith("/responses"))
+    !url.pathname.endsWith("/responses")
   ) {
-    throw new ProviderError(
-      "azure",
-      "Azure OpenAI baseUrl must be an HTTPS /openai/v1 base URL or full Responses URL without credentials or a fragment.",
-    );
+    throw configurationError();
   }
 
-  if (pathname === "/openai/v1") url.pathname = `${pathname}/responses`;
   return url.toString();
 }
 

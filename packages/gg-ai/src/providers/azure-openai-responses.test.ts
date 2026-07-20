@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ProviderError } from "../errors.js";
 import { streamAzureOpenAIResponses } from "./azure-openai-responses.js";
 
-const BASE_URL = "https://example-resource.openai.azure.com/openai/v1/";
-const RESPONSES_URL = `${BASE_URL}responses`;
+const RESPONSES_URL =
+  "https://example-resource.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview";
 const TEST_CREDENTIAL = "test-key";
 
 function sseResponse(events: Record<string, unknown>[]): Response {
@@ -50,7 +50,7 @@ describe("streamAzureOpenAIResponses", () => {
         },
       ],
       apiKey: TEST_CREDENTIAL,
-      baseUrl: BASE_URL,
+      baseUrl: RESPONSES_URL,
       fetch: fetchMock,
     });
     const events = [];
@@ -151,7 +151,7 @@ describe("streamAzureOpenAIResponses", () => {
       model: "test-deployment",
       messages: [{ role: "user", content: "Test streaming failure." }],
       apiKey: TEST_CREDENTIAL,
-      baseUrl: BASE_URL,
+      baseUrl: RESPONSES_URL,
       fetch: fetchMock,
     });
 
@@ -164,5 +164,50 @@ describe("streamAzureOpenAIResponses", () => {
     });
     expect(String(error)).not.toContain("test-key");
     expect(String(error)).not.toMatch(/<[^>]+>/);
+  });
+
+  it.each([
+    ["malformed URL", "not-a-url-secret-value"],
+    [
+      "v1 base URL",
+      "https://example-resource.openai.azure.com/openai/v1?api-version=secret-value",
+    ],
+    [
+      "non-HTTPS URL",
+      "http://example-resource.openai.azure.com/openai/v1/responses?api-version=secret-value",
+    ],
+    [
+      "embedded credentials",
+      "https://user:secret-value@example-resource.openai.azure.com/openai/v1/responses",
+    ],
+    [
+      "fragment",
+      "https://example-resource.openai.azure.com/openai/v1/responses#secret-value",
+    ],
+    [
+      "trailing slash",
+      "https://example-resource.openai.azure.com/openai/v1/responses/?api-version=secret-value",
+    ],
+  ])("rejects a $name before fetch without exposing its value", async (_name, baseUrl) => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const invalidStream = streamAzureOpenAIResponses({
+      provider: "azure",
+      model: "test-deployment",
+      messages: [{ role: "user", content: "Test invalid endpoint." }],
+      apiKey: TEST_CREDENTIAL,
+      baseUrl,
+      fetch: fetchMock,
+    });
+
+    const error = await invalidStream.response.catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({
+      provider: "azure",
+      message:
+        "Azure OpenAI baseUrl must be a full HTTPS URL ending in /responses, without credentials or a fragment.",
+    });
+    expect((error as Error).cause).toBeUndefined();
+    expect(String(error)).not.toContain("secret-value");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

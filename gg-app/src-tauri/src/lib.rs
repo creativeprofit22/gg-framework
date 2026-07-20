@@ -1,3 +1,6 @@
+#[allow(dead_code)] // Registered with Tauri in Stage 2 of the approved Azure connection plan.
+mod azure_connection;
+
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};

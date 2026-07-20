@@ -122,7 +122,7 @@ describe("AgentSession Azure Responses tool round trip", () => {
     const { AgentSession } = await import("./agent-session.js");
     const session = new AgentSession({
       provider: "azure",
-      model: "test-deployment",
+      model: "azure:test-deployment",
       baseUrl: RESPONSES_URL,
       cwd: project,
       systemPrompt: "Use tools when requested.",
@@ -144,6 +144,7 @@ describe("AgentSession Azure Responses tool round trip", () => {
     }
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(requestBodies.map((body) => body.model)).toEqual(["test-deployment", "test-deployment"]);
     expect(requestBodies[0]?.tools).toEqual(
       expect.arrayContaining([expect.objectContaining({ type: "function", name: "ls" })]),
     );

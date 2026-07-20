@@ -152,6 +152,7 @@ const ALL_PROVIDERS: Provider[] = [
   // US
   "anthropic",
   "openai",
+  "azure",
   "gemini",
   "xai",
   // China

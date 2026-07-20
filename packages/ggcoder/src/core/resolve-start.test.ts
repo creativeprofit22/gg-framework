@@ -1,12 +1,13 @@
 import { describe, it, expect } from "vitest";
 import type { Provider } from "@kenkaiiii/gg-ai";
-import { getDefaultModel } from "./model-registry.js";
+import { getDefaultModel, MODELS } from "./model-registry.js";
 import { resolveStartOrFallback, type ProviderAuthLookup } from "./resolve-start.js";
 
 const ALL: Provider[] = [
   "anthropic",
   "xiaomi",
   "openai",
+  "azure",
   "gemini",
   "glm",
   "moonshot",
@@ -31,11 +32,29 @@ describe("resolveStartOrFallback", () => {
     expect(res.model).toBe(getDefaultModel("anthropic").id);
   });
 
-  it("honors a non-anthropic preferred provider in the logged-out fallback", async () => {
+  it("honors a registered non-anthropic preferred provider in the logged-out fallback", async () => {
     const res = await resolveStartOrFallback(auth(), ALL, "openai", undefined);
     expect(res.loggedIn).toBe(false);
     expect(res.provider).toBe("openai");
     expect(res.model).toBe(getDefaultModel("openai").id);
+  });
+
+  it("boots on a registered fallback when stale settings reference unconfigured Azure", async () => {
+    const azureModels = MODELS.filter((model) => model.provider === "azure");
+    for (let index = MODELS.length - 1; index >= 0; index--) {
+      if (MODELS[index]?.provider === "azure") MODELS.splice(index, 1);
+    }
+
+    try {
+      const res = await resolveStartOrFallback(auth(), ALL, "azure", "azure:old-deployment");
+      expect(res).toEqual({
+        loggedIn: false,
+        provider: "anthropic",
+        model: getDefaultModel("anthropic").id,
+      });
+    } finally {
+      MODELS.push(...azureModels);
+    }
   });
 
   it("uses the preferred provider's default model when logged in with no saved model", async () => {

@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import type { Provider } from "@kenkaiiii/gg-ai";
-import { MODELS } from "../../core/model-registry.js";
+import { getModelDisplayId, MODELS } from "../../core/model-registry.js";
 import { SlashStyledSelectList } from "./SlashStyledSelectList.js";
 
 interface ModelSelectorProps {
@@ -16,6 +16,7 @@ const MAX_MODELS_TO_SHOW = 6;
 const PROVIDER_LABEL: Record<string, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
+  azure: "Azure OpenAI",
   gemini: "Gemini",
   glm: "Z.AI",
   moonshot: "Moonshot",
@@ -42,7 +43,7 @@ export function ModelSelector({
         const value = `${m.provider}:${m.id}`;
         const isCurrent = value === currentValue;
         return {
-          label: `${isCurrent ? "* " : "  "}${m.id}`,
+          label: `${isCurrent ? "* " : "  "}${getModelDisplayId(m.id)}`,
           value,
           description: PROVIDER_LABEL[m.provider] ?? m.provider,
         };

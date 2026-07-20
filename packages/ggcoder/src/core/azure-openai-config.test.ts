@@ -6,13 +6,19 @@ import {
   resolveAzureOpenAIConfig,
   type AzureOpenAIEnvironment,
 } from "./auth-storage.js";
-import { registerConfiguredAzureModel } from "./model-registry.js";
+import {
+  getDefaultModel,
+  getModelDisplayId,
+  registerConfiguredAzureModel,
+  resolveTransportModel,
+} from "./model-registry.js";
+import { resolveStartOrFallback } from "./resolve-start.js";
 
 const completeEnvironment: AzureOpenAIEnvironment = {
   AZURE_OPENAI_API_KEY: "azure-test-secret",
   AZURE_OPENAI_BASE_URL:
     "https://example.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
-  AZURE_OPENAI_DEPLOYMENT: "coding-deployment",
+  AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
 };
 
 const addedModelIds = new Set<string>();
@@ -32,7 +38,7 @@ describe("Azure OpenAI app boundaries", () => {
       apiKey: "azure-test-secret",
       baseUrl:
         "https://example.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
-      deployment: "coding-deployment",
+      deployment: "gpt-5.6-sol",
     });
 
     const auth = new AuthStorage("unused-auth.json", completeEnvironment);
@@ -82,13 +88,17 @@ describe("Azure OpenAI app boundaries", () => {
     expect(MODELS).toHaveLength(before);
   });
 
-  it("registers one complete Azure deployment without exposing its API key", () => {
-    addedModelIds.add("coding-deployment");
+  it("registers and selects a namespaced Azure deployment alongside the same OpenAI model ID", async () => {
+    addedModelIds.add("azure:gpt-5.6-sol");
+    const openAIModel = MODELS.find(
+      (candidate) => candidate.id === "gpt-5.6-sol" && candidate.provider === "openai",
+    );
     const model = registerConfiguredAzureModel(completeEnvironment);
 
+    expect(openAIModel).toBeDefined();
     expect(model).toMatchObject({
-      id: "coding-deployment",
-      name: "Azure OpenAI (coding-deployment)",
+      id: "azure:gpt-5.6-sol",
+      name: "Azure OpenAI (gpt-5.6-sol)",
       provider: "azure",
       contextWindow: 128_000,
       maxOutputTokens: 16_384,
@@ -98,20 +108,22 @@ describe("Azure OpenAI app boundaries", () => {
     });
     expect(JSON.stringify(model)).not.toContain("azure-test-secret");
     expect(registerConfiguredAzureModel(completeEnvironment)).toBe(model);
-    expect(MODELS.filter((candidate) => candidate.id === "coding-deployment")).toHaveLength(1);
-  });
+    expect(MODELS.filter((candidate) => candidate.id === "gpt-5.6-sol")).toEqual([openAIModel]);
+    expect(MODELS.filter((candidate) => candidate.id === "azure:gpt-5.6-sol")).toEqual([model]);
+    expect(getDefaultModel("azure")).toBe(model);
+    expect(getModelDisplayId(model!.id)).toBe("gpt-5.6-sol");
+    expect(resolveTransportModel("azure", model!.id, completeEnvironment)).toBe("gpt-5.6-sol");
 
-  it("rejects a deployment ID collision without changing the registry", () => {
-    const collidingModel = MODELS.find((model) => model.provider !== "azure")!;
-    const environment = {
-      ...completeEnvironment,
-      AZURE_OPENAI_DEPLOYMENT: collidingModel.id,
-    };
-    const before = [...MODELS];
-
-    expect(() => registerConfiguredAzureModel(environment)).toThrow(
-      `Azure OpenAI deployment ID "${collidingModel.id}" collides with the existing ${collidingModel.provider} model.`,
+    const selected = await resolveStartOrFallback(
+      { hasProviderAuth: async (provider) => provider === "azure" },
+      ["openai", "azure"],
+      "azure",
+      model!.id,
     );
-    expect(MODELS).toEqual(before);
+    expect(selected).toEqual({
+      provider: "azure",
+      model: "azure:gpt-5.6-sol",
+      loggedIn: true,
+    });
   });
 });

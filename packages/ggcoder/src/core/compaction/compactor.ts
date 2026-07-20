@@ -669,7 +669,10 @@ export async function compact(
   messages: Message[],
   options: {
     provider: Provider;
+    /** Registry/session model ID used for capabilities and summary-model selection. */
     model: string;
+    /** Provider wire model when it differs from the internal registry ID. */
+    transportModel?: string;
     apiKey?: string;
     accountId?: string;
     projectId?: string;
@@ -806,7 +809,7 @@ export async function compact(
     try {
       const result = stream({
         provider: options.provider,
-        model: summaryModel.id,
+        model: options.transportModel ?? summaryModel.id,
         messages: summaryMessages,
         maxTokens: MAX_SUMMARY_OUTPUT_TOKENS,
         apiKey: options.apiKey,

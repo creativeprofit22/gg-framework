@@ -8,7 +8,8 @@ import type { AgentSession as AgentSessionType } from "./agent-session.js";
 it("sends an AgentSession prompt through the registered Azure OpenAI deployment", async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "gg-azure-home-"));
   const project = await fs.mkdtemp(path.join(os.tmpdir(), "gg-azure-project-"));
-  const deployment = "integration-deployment";
+  const deployment = "gpt-5.6-sol";
+  const internalModelId = `azure:${deployment}`;
   const apiKey = "azure-integration-secret";
   const baseUrl =
     "https://integration.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview";
@@ -50,10 +51,18 @@ it("sends an AgentSession prompt through the registered Azure OpenAI deployment"
 
     const modelRegistry = await import("./model-registry.js");
     models = modelRegistry.MODELS;
-    const azureModel = models.find(
-      (model) => model.provider === "azure" && model.id === deployment,
+    const openAIModel = models.find(
+      (model) => model.provider === "openai" && model.id === deployment,
     );
-    expect(azureModel).toBeDefined();
+    const azureModel = models.find(
+      (model) => model.provider === "azure" && model.id === internalModelId,
+    );
+    expect(openAIModel).toBeDefined();
+    expect(azureModel).toMatchObject({
+      provider: "azure",
+      id: internalModelId,
+      name: "Azure OpenAI (gpt-5.6-sol)",
+    });
 
     const { AgentSession } = await import("./agent-session.js");
     session = new AgentSession({
@@ -72,6 +81,7 @@ it("sends an AgentSession prompt through the registered Azure OpenAI deployment"
     });
 
     await session.initialize();
+    expect(session.getState()).toMatchObject({ provider: "azure", model: internalModelId });
     await session.prompt("Reply through the Azure deployment.");
 
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -81,19 +91,19 @@ it("sends an AgentSession prompt through the registered Azure OpenAI deployment"
 
     const requestBody = JSON.parse(String(init?.body)) as {
       model: string;
-      input: Array<{ role: string; content: string }>;
+      input: Array<{ role: string; content: Array<{ type: string; text: string }> }>;
     };
     expect(requestBody.model).toBe(deployment);
     expect(requestBody.input).toContainEqual({
       role: "user",
-      content: "Reply through the Azure deployment.",
+      content: [{ type: "input_text", text: "Reply through the Azure deployment." }],
     });
     expect(receivedText).toBe(streamedText);
   } finally {
     await session?.dispose();
     if (models) {
       const index = models.findIndex(
-        (model) => model.provider === "azure" && model.id === deployment,
+        (model) => model.provider === "azure" && model.id === internalModelId,
       );
       if (index !== -1) models.splice(index, 1);
     }

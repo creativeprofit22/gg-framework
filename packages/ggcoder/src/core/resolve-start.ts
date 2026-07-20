@@ -1,5 +1,5 @@
 import type { Provider } from "@kenkaiiii/gg-ai";
-import { getDefaultModel, getModel } from "./model-registry.js";
+import { getDefaultModel, getModel, getModelsForProvider } from "./model-registry.js";
 
 /** A resolved startup provider + model for an AgentSession. */
 export interface ResolvedStart {
@@ -42,9 +42,16 @@ export async function resolveStartOrFallback(
   }
 
   if (loggedIn.length === 0) {
-    // Logged-out fallback: boot with the preferred provider's default model so
-    // the sidecar still starts and the login flow is reachable.
-    return { provider: preferred, model: getDefaultModel(preferred).id, loggedIn: false };
+    // A configured-at-runtime provider (currently Azure) may disappear when its
+    // environment is removed while project settings still remember it. Fall
+    // back to Anthropic rather than asking for a default model that no longer
+    // exists in the registry, so the sidecar still boots logged out.
+    const fallbackProvider = getModelsForProvider(preferred).length > 0 ? preferred : "anthropic";
+    return {
+      provider: fallbackProvider,
+      model: getDefaultModel(fallbackProvider).id,
+      loggedIn: false,
+    };
   }
 
   if (loggedIn.includes(preferred)) {

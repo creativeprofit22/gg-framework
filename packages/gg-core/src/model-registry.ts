@@ -536,6 +536,7 @@ export function getDefaultModel(provider: Provider): ModelInfo {
   if (provider === "openrouter") return MODELS.find((m) => m.id === "qwen/qwen3.6-plus")!;
   if (provider === "sakana") return MODELS.find((m) => m.id === "fugu")!;
   if (provider === "xai") return MODELS.find((m) => m.id === "grok-4.5")!;
+  if (provider === "azure") return MODELS.find((m) => m.provider === "azure")!;
   return MODELS.find((m) => m.id === "claude-sonnet-5")!;
 }
 

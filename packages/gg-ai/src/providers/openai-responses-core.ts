@@ -1,4 +1,7 @@
+import type { ImageContent, Message, Tool } from "../types.js";
+import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
 import { readSseStream } from "../utils/sse.js";
+import { toolResultText } from "./transform.js";
 
 /** Provider-neutral shape shared by public and private Responses SSE transports. */
 export type ResponsesEvent = Record<string, unknown>;
@@ -44,4 +47,132 @@ export async function* parseResponsesSse(
       options.onMalformedJson?.(cause);
     }
   }
+}
+
+export interface ResponsesInputAdapter {
+  encodeToolCallId?: (id: string) => { callId: string; itemId: string };
+  encodeToolResultId?: (id: string) => string;
+  serializeRawAssistantPart?: (data: Record<string, unknown>) => unknown | undefined;
+  includeToolResultImages?: boolean;
+}
+
+export interface SerializedResponsesInput {
+  system: string | undefined;
+  input: unknown[];
+}
+
+/** Serialize framework messages into the standard structured Responses input shape. */
+export function serializeResponsesInput(
+  messages: Message[],
+  adapter: ResponsesInputAdapter = {},
+): SerializedResponsesInput {
+  let system: string | undefined;
+  const input: unknown[] = [];
+
+  for (const message of messages) {
+    if (message.role === "system") {
+      system = message.content;
+      continue;
+    }
+
+    if (message.role === "user") {
+      const content =
+        typeof message.content === "string"
+          ? [{ type: "input_text", text: message.content }]
+          : message.content.map((part) =>
+              part.type === "text"
+                ? { type: "input_text", text: part.text }
+                : {
+                    type: "input_image",
+                    detail: "auto",
+                    image_url: `data:${part.mediaType};base64,${part.data}`,
+                  },
+            );
+      input.push({ role: "user", content });
+      continue;
+    }
+
+    if (message.role === "assistant") {
+      if (typeof message.content === "string") {
+        input.push(assistantTextItem(message.content));
+        continue;
+      }
+
+      for (const part of message.content) {
+        if (part.type === "raw") {
+          const serialized = adapter.serializeRawAssistantPart?.(part.data);
+          if (serialized !== undefined) input.push(serialized);
+        } else if (part.type === "text") {
+          input.push(assistantTextItem(part.text));
+        } else if (part.type === "tool_call") {
+          const ids = adapter.encodeToolCallId?.(part.id) ?? {
+            callId: part.id,
+            itemId: part.id,
+          };
+          input.push({
+            type: "function_call",
+            id: ids.itemId,
+            call_id: ids.callId,
+            name: part.name,
+            arguments: JSON.stringify(part.args),
+          });
+        }
+      }
+      continue;
+    }
+
+    const toolImages: ImageContent[] = [];
+    for (const result of message.content) {
+      const output = toolResultText(result.content);
+      input.push({
+        type: "function_call_output",
+        call_id: adapter.encodeToolResultId?.(result.toolCallId) ?? result.toolCallId,
+        output: output.length > 0 ? output : "(see attached image)",
+      });
+      if (adapter.includeToolResultImages && Array.isArray(result.content)) {
+        for (const block of result.content) {
+          if (block.type === "image") toolImages.push(block);
+        }
+      }
+    }
+    if (toolImages.length > 0) {
+      input.push({
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "Attached image(s) from tool result:" },
+          ...toolImages.map((image) => ({
+            type: "input_image",
+            detail: "auto",
+            image_url: `data:${image.mediaType};base64,${image.data}`,
+          })),
+        ],
+      });
+    }
+  }
+
+  return { system, input };
+}
+
+function assistantTextItem(text: string): Record<string, unknown> {
+  return {
+    type: "message",
+    role: "assistant",
+    content: [{ type: "output_text", text, annotations: [] }],
+    status: "completed",
+  };
+}
+
+/** Serialize framework function tools without applying transport request policy. */
+export function serializeResponsesTools(
+  tools: Tool[],
+  options: { strict: boolean | null },
+): unknown[] {
+  return tools.map((tool) => ({
+    type: "function",
+    name: tool.name,
+    description: tool.description,
+    parameters: resolveToolSchema(tool),
+    strict: options.strict,
+  }));
 }

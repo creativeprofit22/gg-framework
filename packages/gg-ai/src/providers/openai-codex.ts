@@ -2,8 +2,6 @@ import os from "node:os";
 import * as zstd from "@bokuweb/zstd-wasm";
 import type {
   ContentPart,
-  ImageContent,
-  Message,
   StreamEvent,
   StreamOptions,
   StreamResponse,
@@ -20,16 +18,17 @@ import {
 } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import { providerDiag } from "../utils/diag.js";
-import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
-import {
-  downgradeUnsupportedImages,
-  downgradeUnsupportedVideos,
-  toolResultText,
-} from "./transform.js";
+import { downgradeUnsupportedImages, downgradeUnsupportedVideos } from "./transform.js";
 import { parseToolArguments } from "../utils/json.js";
 import { extractRequestIdFromMessage } from "../utils/request-id.js";
-import { parseResponsesSse, type ResponsesUsagePayload } from "./openai-responses-core.js";
+import {
+  parseResponsesSse,
+  serializeResponsesInput,
+  serializeResponsesTools,
+  type ResponsesInputAdapter,
+  type ResponsesUsagePayload,
+} from "./openai-responses-core.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_CLIENT_VERSION = "0.144.1";
@@ -132,7 +131,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
   // Codex (GPT OAuth) has no video support — always strip video to a placeholder.
   const downgraded = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
-  const { system, input } = toCodexInput(downgraded, { supportsImages: options.supportsImages });
+  const { system, input } = serializeResponsesInput(
+    downgraded,
+    createCodexInputAdapter(options.supportsImages),
+  );
 
   const responsesLite = usesResponsesLite(options.model);
   const body: Record<string, unknown> = {
@@ -147,7 +149,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   };
 
   if (options.tools?.length) {
-    body.tools = toCodexTools(options.tools);
+    body.tools = serializeResponsesTools(options.tools, { strict: null });
   }
   // Always set a prompt_cache_key. OpenAI uses this key to route requests
   // with the same prefix to the same cache shard — without it, the codex
@@ -627,126 +629,25 @@ function isEncryptedReasoning(
   );
 }
 
-function toCodexInput(
-  messages: Message[],
-  options?: { supportsImages?: boolean },
-): { system: string | undefined; input: unknown[] } {
-  let system: string | undefined;
-  const input: unknown[] = [];
+function createCodexInputAdapter(supportsImages: boolean | undefined): ResponsesInputAdapter {
   const idMap = new Map<string, string>();
-
-  for (const msg of messages) {
-    if (msg.role === "system") {
-      system = msg.content;
-      continue;
-    }
-
-    if (msg.role === "user") {
-      const content =
-        typeof msg.content === "string"
-          ? [{ type: "input_text", text: msg.content }]
-          : msg.content.map((part) => {
-              if (part.type === "text") return { type: "input_text", text: part.text };
-              return {
-                type: "input_image",
-                detail: "auto",
-                image_url: `data:${part.mediaType};base64,${part.data}`,
-              };
-            });
-      input.push({ role: "user", content });
-      continue;
-    }
-
-    if (msg.role === "assistant") {
-      if (typeof msg.content === "string") {
-        input.push({
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text: msg.content, annotations: [] }],
-          status: "completed",
-        });
-        continue;
-      }
-
-      for (const part of msg.content) {
-        if (part.type === "raw" && isEncryptedReasoning(part.data)) {
-          // Re-emit the captured reasoning item verbatim in its original
-          // position so it precedes the following function_call (requires
-          // store:false + include reasoning.encrypted_content, both set on the
-          // request).
-          input.push(part.data);
-        } else if (part.type === "text") {
-          input.push({
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: part.text, annotations: [] }],
-            status: "completed",
-          });
-        } else if (part.type === "tool_call") {
-          const [callId, itemId] = part.id.includes("|")
-            ? part.id.split("|", 2)
-            : [part.id, part.id];
-          input.push({
-            type: "function_call",
-            id: remapCodexId(itemId, idMap),
-            call_id: remapCodexId(callId, idMap),
-            name: part.name,
-            arguments: JSON.stringify(part.args),
-          });
-        }
-        // thinking parts (and non-reasoning raw parts) are skipped for codex input
-      }
-      continue;
-    }
-
-    if (msg.role === "tool") {
-      const toolImages: ImageContent[] = [];
-      for (const result of msg.content) {
-        const [callId] = result.toolCallId.includes("|")
-          ? result.toolCallId.split("|", 2)
-          : [result.toolCallId];
-        const text = toolResultText(result.content);
-        input.push({
-          type: "function_call_output",
-          call_id: remapCodexId(callId, idMap),
-          output: text.length > 0 ? text : "(see attached image)",
-        });
-        if (options?.supportsImages !== false && Array.isArray(result.content)) {
-          for (const block of result.content) {
-            if (block.type === "image") toolImages.push(block);
-          }
-        }
-      }
-      if (toolImages.length > 0) {
-        input.push({
-          type: "message",
-          role: "user",
-          content: [
-            { type: "input_text", text: "Attached image(s) from tool result:" },
-            ...toolImages.map((img) => ({
-              type: "input_image",
-              detail: "auto",
-              image_url: `data:${img.mediaType};base64,${img.data}`,
-            })),
-          ],
-        });
-      }
-    }
-  }
-
-  return { system, input };
-}
-
-// ── Tool Conversion ────────────────────────────────────────
-
-function toCodexTools(tools: Tool[]): unknown[] {
-  return tools.map((tool) => ({
-    type: "function",
-    name: tool.name,
-    description: tool.description,
-    parameters: resolveToolSchema(tool),
-    strict: null,
-  }));
+  return {
+    encodeToolCallId(id) {
+      const [callId, itemId] = id.includes("|") ? id.split("|", 2) : [id, id];
+      return {
+        callId: remapCodexId(callId, idMap),
+        itemId: remapCodexId(itemId, idMap),
+      };
+    },
+    encodeToolResultId(id) {
+      const [callId] = id.includes("|") ? id.split("|", 2) : [id];
+      return remapCodexId(callId, idMap);
+    },
+    serializeRawAssistantPart(data) {
+      return isEncryptedReasoning(data) ? data : undefined;
+    },
+    includeToolResultImages: supportsImages !== false,
+  };
 }
 
 // HTTP error bodies may be JSON, useful plain text, or an HTML edge/proxy page.

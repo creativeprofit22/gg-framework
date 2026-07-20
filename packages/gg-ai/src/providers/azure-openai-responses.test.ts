@@ -78,12 +78,25 @@ describe("streamAzureOpenAIResponses", () => {
       body: JSON.stringify({
         model: "test-deployment",
         input: [
-          { role: "system", content: "Be concise." },
-          { role: "user", content: "Say hello." },
-          { role: "assistant", content: "Hello before." },
-          { role: "assistant", content: "Only send this." },
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "Say hello." }],
+          },
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Hello before.", annotations: [] }],
+            status: "completed",
+          },
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Only send this.", annotations: [] }],
+            status: "completed",
+          },
         ],
         stream: true,
+        instructions: "Be concise.",
       }),
       signal: undefined,
     });
@@ -168,10 +181,7 @@ describe("streamAzureOpenAIResponses", () => {
 
   it.each([
     ["malformed URL", "not-a-url-secret-value"],
-    [
-      "v1 base URL",
-      "https://example-resource.openai.azure.com/openai/v1?api-version=secret-value",
-    ],
+    ["v1 base URL", "https://example-resource.openai.azure.com/openai/v1?api-version=secret-value"],
     [
       "non-HTTPS URL",
       "http://example-resource.openai.azure.com/openai/v1/responses?api-version=secret-value",
@@ -180,10 +190,7 @@ describe("streamAzureOpenAIResponses", () => {
       "embedded credentials",
       "https://user:secret-value@example-resource.openai.azure.com/openai/v1/responses",
     ],
-    [
-      "fragment",
-      "https://example-resource.openai.azure.com/openai/v1/responses#secret-value",
-    ],
+    ["fragment", "https://example-resource.openai.azure.com/openai/v1/responses#secret-value"],
     [
       "trailing slash",
       "https://example-resource.openai.azure.com/openai/v1/responses/?api-version=secret-value",

@@ -1,11 +1,26 @@
 import { ProviderError } from "../errors.js";
-import type { Message, StreamEvent, StreamOptions, StreamResponse, Usage } from "../types.js";
+import type {
+  ContentPart,
+  StreamEvent,
+  StreamOptions,
+  StreamResponse,
+  ToolCall,
+  Usage,
+} from "../types.js";
 import { StreamResult } from "../utils/event-stream.js";
-import { parseResponsesSse, type ResponsesCompletedPayload } from "./openai-responses-core.js";
+import { parseToolArguments } from "../utils/json.js";
+import {
+  parseResponsesSse,
+  serializeResponsesInput,
+  serializeResponsesTools,
+  type ResponsesCompletedPayload,
+} from "./openai-responses-core.js";
 
-interface AzureInputMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
+interface PendingAzureToolCall {
+  id: string;
+  itemId: string;
+  name: string;
+  argsJson: string;
 }
 
 export function streamAzureOpenAIResponses(options: StreamOptions): StreamResult {
@@ -18,6 +33,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const url = parseResponsesUrl(requireOption(options.baseUrl, "baseUrl"));
   const fetchImpl = options.fetch ?? globalThis.fetch;
 
+  const { system, input } = serializeResponsesInput(options.messages);
+  const requestBody: Record<string, unknown> = { model, input, stream: true };
+  if (system !== undefined) requestBody.instructions = system;
+  if (options.tools?.length) {
+    requestBody.tools = serializeResponsesTools(options.tools, { strict: null });
+  }
+
   let response: Response;
   try {
     response = await fetchImpl(url, {
@@ -26,11 +48,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         "Content-Type": "application/json",
         "api-key": apiKey,
       },
-      body: JSON.stringify({
-        model,
-        input: toAzureInput(options.messages),
-        stream: true,
-      }),
+      body: JSON.stringify(requestBody),
       signal: options.signal,
     });
   } catch (cause) {
@@ -53,6 +71,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   let accumulatedText = "";
   let completedResponse: ResponsesCompletedPayload | undefined;
   let sawEvent = false;
+  const toolCallsByItem = new Map<string, PendingAzureToolCall>();
+  const toolCallOrder: PendingAzureToolCall[] = [];
+  const completedToolCallIds = new Set<string>();
 
   try {
     for await (const event of parseResponsesSse(response.body, {
@@ -65,11 +86,48 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       sawEvent = true;
 
       if (event.type === "response.output_text.delta") {
-        if (typeof event.delta !== "string") {
-          throw new ProviderError("azure", "Azure OpenAI returned a malformed response stream.");
-        }
+        if (typeof event.delta !== "string") throw malformedStreamError();
         accumulatedText += event.delta;
         yield { type: "text_delta", text: event.delta };
+      } else if (event.type === "response.output_item.added") {
+        const item = objectValue(event.item);
+        if (item?.type === "function_call") {
+          const toolCall = parseFunctionCallItem(item);
+          toolCallsByItem.set(toolCall.itemId, toolCall);
+          toolCallOrder.push(toolCall);
+        }
+      } else if (event.type === "response.function_call_arguments.delta") {
+        if (typeof event.item_id !== "string" || typeof event.delta !== "string") {
+          throw malformedStreamError();
+        }
+        const toolCall = toolCallsByItem.get(event.item_id);
+        if (!toolCall) throw malformedStreamError();
+        toolCall.argsJson += event.delta;
+        yield {
+          type: "toolcall_delta",
+          id: toolCall.id,
+          name: toolCall.name,
+          argsJson: event.delta,
+        };
+      } else if (event.type === "response.function_call_arguments.done") {
+        if (typeof event.item_id !== "string" || typeof event.arguments !== "string") {
+          throw malformedStreamError();
+        }
+        const toolCall = toolCallsByItem.get(event.item_id);
+        if (!toolCall) throw malformedStreamError();
+        toolCall.argsJson = event.arguments;
+      } else if (event.type === "response.output_item.done") {
+        const item = objectValue(event.item);
+        if (item?.type === "function_call") {
+          if (typeof item.id !== "string") throw malformedStreamError();
+          const toolCall = toolCallsByItem.get(item.id);
+          if (!toolCall) throw malformedStreamError();
+          if (typeof item.arguments === "string") toolCall.argsJson = item.arguments;
+          if (!completedToolCallIds.has(toolCall.id)) {
+            completedToolCallIds.add(toolCall.id);
+            yield toToolCallDoneEvent(toolCall);
+          }
+        }
       } else if (event.type === "response.completed") {
         completedResponse = asCompletedResponse(event.response);
       } else {
@@ -92,9 +150,29 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     );
   }
 
-  const stopReason = "end_turn" as const;
+  for (const toolCall of toolCallOrder) {
+    if (completedToolCallIds.has(toolCall.id)) continue;
+    completedToolCallIds.add(toolCall.id);
+    yield toToolCallDoneEvent(toolCall);
+  }
+
+  const content: ContentPart[] = [];
+  if (accumulatedText) content.push({ type: "text", text: accumulatedText });
+  for (const pending of toolCallOrder) {
+    const toolCall: ToolCall = {
+      type: "tool_call",
+      id: pending.id,
+      name: pending.name,
+      args: parseToolArguments(pending.argsJson),
+    };
+    content.push(toolCall);
+  }
+  const stopReason = toolCallOrder.length > 0 ? ("tool_use" as const) : ("end_turn" as const);
   const streamResponse: StreamResponse = {
-    message: { role: "assistant", content: accumulatedText },
+    message: {
+      role: "assistant",
+      content: toolCallOrder.length > 0 ? content : accumulatedText,
+    },
     stopReason,
     usage: toUsage(completedResponse.usage),
   };
@@ -137,24 +215,36 @@ function parseResponsesUrl(value: string): string {
   return url.toString();
 }
 
-function toAzureInput(messages: Message[]): AzureInputMessage[] {
-  const input: AzureInputMessage[] = [];
-
-  for (const message of messages) {
-    if (message.role === "system") {
-      input.push({ role: "system", content: message.content });
-      continue;
-    }
-    if (message.role !== "user" && message.role !== "assistant") continue;
-
-    const content =
-      typeof message.content === "string"
-        ? message.content
-        : message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
-    if (content) input.push({ role: message.role, content });
+function parseFunctionCallItem(item: Record<string, unknown>): PendingAzureToolCall {
+  if (
+    typeof item.call_id !== "string" ||
+    typeof item.id !== "string" ||
+    typeof item.name !== "string" ||
+    (item.arguments !== undefined && typeof item.arguments !== "string")
+  ) {
+    throw malformedStreamError();
   }
+  return {
+    id: item.call_id,
+    itemId: item.id,
+    name: item.name,
+    argsJson: item.arguments ?? "",
+  };
+}
 
-  return input;
+function toToolCallDoneEvent(
+  toolCall: PendingAzureToolCall,
+): Extract<StreamEvent, { type: "toolcall_done" }> {
+  return {
+    type: "toolcall_done",
+    id: toolCall.id,
+    name: toolCall.name,
+    args: parseToolArguments(toolCall.argsJson),
+  };
+}
+
+function malformedStreamError(): ProviderError {
+  return new ProviderError("azure", "Azure OpenAI returned a malformed response stream.");
 }
 
 function asCompletedResponse(value: unknown): ResponsesCompletedPayload {

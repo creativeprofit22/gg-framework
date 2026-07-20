@@ -115,7 +115,7 @@ describe("provider-neutral Responses parsing", () => {
     ]);
   });
 
-  it("keeps Codex and Azure request and result bytes unchanged at the extraction seam", async () => {
+  it("characterizes Codex and Azure request and result bytes at the shared seam", async () => {
     let codexRequestBody = "";
     vi.stubGlobal(
       "fetch",
@@ -163,7 +163,7 @@ describe("provider-neutral Responses parsing", () => {
     const azureTranscript = await collectStream(azure);
 
     expect(azureRequestBody).toBe(
-      '{"model":"test-deployment","input":[{"role":"user","content":"Say hello."}],"stream":true}',
+      '{"model":"test-deployment","input":[{"role":"user","content":[{"type":"input_text","text":"Say hello."}]}],"stream":true}',
     );
     expect(azureTranscript).toBe(
       '{"events":[{"type":"text_delta","text":"Hello"},{"type":"done","stopReason":"end_turn"}],"response":{"message":{"role":"assistant","content":"Hello"},"stopReason":"end_turn","usage":{"inputTokens":7,"outputTokens":2}}}',

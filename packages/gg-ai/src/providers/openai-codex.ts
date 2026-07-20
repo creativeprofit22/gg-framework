@@ -28,8 +28,8 @@ import {
   toolResultText,
 } from "./transform.js";
 import { parseToolArguments } from "../utils/json.js";
-import { readSseStream } from "../utils/sse.js";
 import { extractRequestIdFromMessage } from "../utils/request-id.js";
+import { parseResponsesSse, type ResponsesUsagePayload } from "./openai-responses-core.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_CLIENT_VERSION = "0.144.1";
@@ -283,7 +283,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const diagStart = Date.now();
   const diagSeen = new Set<string>();
 
-  for await (const event of parseSSE(response.body)) {
+  for await (const event of parseResponsesSse(response.body)) {
     const type = event.type as string | undefined;
     if (!type) continue;
 
@@ -517,11 +517,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // Response completed
     if (type === "response.completed" || type === "response.done") {
       const resp = event.response as Record<string, unknown> | undefined;
-      const usage = resp?.usage as
-        | (Record<string, number> & {
-            input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
-          })
-        | undefined;
+      const usage = resp?.usage as ResponsesUsagePayload | undefined;
       if (usage) {
         cacheRead = usage.input_tokens_details?.cached_tokens ?? 0;
         cacheWrite = usage.input_tokens_details?.cache_write_tokens ?? 0;
@@ -593,22 +589,6 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   yield { type: "done", stopReason };
   return streamResponse;
-}
-
-// ── SSE Parser ─────────────────────────────────────────────
-
-async function* parseSSE(
-  body: ReadableStream<Uint8Array>,
-): AsyncGenerator<Record<string, unknown>> {
-  for await (const event of readSseStream(body)) {
-    const data = event.data.trim();
-    if (!data || data === "[DONE]") continue;
-    try {
-      yield JSON.parse(data) as Record<string, unknown>;
-    } catch {
-      // skip malformed JSON
-    }
-  }
 }
 
 // ── Message Conversion ─────────────────────────────────────

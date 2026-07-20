@@ -1,19 +1,11 @@
 import { ProviderError } from "../errors.js";
 import type { Message, StreamEvent, StreamOptions, StreamResponse, Usage } from "../types.js";
 import { StreamResult } from "../utils/event-stream.js";
-import { readSseStream } from "../utils/sse.js";
+import { parseResponsesSse, type ResponsesCompletedPayload } from "./openai-responses-core.js";
 
 interface AzureInputMessage {
   role: "system" | "user" | "assistant";
   content: string;
-}
-
-interface AzureCompletedResponse {
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    input_tokens_details?: { cached_tokens?: number };
-  };
 }
 
 export function streamAzureOpenAIResponses(options: StreamOptions): StreamResult {
@@ -59,23 +51,18 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   }
 
   let accumulatedText = "";
-  let completedResponse: AzureCompletedResponse | undefined;
+  let completedResponse: ResponsesCompletedPayload | undefined;
   let sawEvent = false;
 
   try {
-    for await (const sseEvent of readSseStream(response.body)) {
-      const data = sseEvent.data.trim();
-      if (!data || data === "[DONE]") continue;
-      sawEvent = true;
-
-      let event: Record<string, unknown>;
-      try {
-        event = JSON.parse(data) as Record<string, unknown>;
-      } catch (cause) {
+    for await (const event of parseResponsesSse(response.body, {
+      onMalformedJson(cause): never {
         throw new ProviderError("azure", "Azure OpenAI returned a malformed response stream.", {
           cause,
         });
-      }
+      },
+    })) {
+      sawEvent = true;
 
       if (event.type === "response.output_text.delta") {
         if (typeof event.delta !== "string") {
@@ -170,11 +157,11 @@ function toAzureInput(messages: Message[]): AzureInputMessage[] {
   return input;
 }
 
-function asCompletedResponse(value: unknown): AzureCompletedResponse {
+function asCompletedResponse(value: unknown): ResponsesCompletedPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new ProviderError("azure", "Azure OpenAI returned a malformed response stream.");
   }
-  return value as AzureCompletedResponse;
+  return value as ResponsesCompletedPayload;
 }
 
 function toStreamProviderError(
@@ -241,7 +228,7 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function toUsage(usage: AzureCompletedResponse["usage"]): Usage {
+function toUsage(usage: ResponsesCompletedPayload["usage"]): Usage {
   const cachedTokens = usage?.input_tokens_details?.cached_tokens ?? 0;
   return {
     inputTokens: Math.max(0, (usage?.input_tokens ?? 0) - cachedTokens),

@@ -13,14 +13,20 @@ import {
 import { toast } from "./toast";
 import { SoundButton } from "./SoundButton";
 import { formatBuildIdentity } from "./build-info";
+import { AzureConnectionSettings } from "./AzureConnectionSettings";
 
 interface Props {
   onClose: () => void;
   /** Called with the saved projects root so callers can refresh. */
   onSaved?: (projectsRoot: string) => void;
+  onAzureConnectionChanged?: () => void;
 }
 
-export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
+export function SettingsModal({
+  onClose,
+  onSaved,
+  onAzureConnectionChanged,
+}: Props): React.ReactElement {
   const [projectsRoot, setProjectsRoot] = useState("");
   const [busy, setBusy] = useState(false);
   const [permissions, setPermissions] = useState<PermissionsStatus | null>(null);
@@ -68,7 +74,7 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
   }
 
   return (
-    <Modal title="Settings" onClose={onClose}>
+    <Modal title="Settings" onClose={onClose} className="settings-modal">
       {permissions?.applicable && (
         <>
           <div className="modal-label" style={{ color: theme.textMuted }}>
@@ -112,6 +118,7 @@ export function SettingsModal({ onClose, onSaved }: Props): React.ReactElement {
           {"Browse\u2026"}
         </button>
       </div>
+      <AzureConnectionSettings onConnectionChanged={onAzureConnectionChanged} />
       {buildIdentity && (
         <div className="modal-build-identity" style={{ color: theme.textDim }}>
           {buildIdentity}

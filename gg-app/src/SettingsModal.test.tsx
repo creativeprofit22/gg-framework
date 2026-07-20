@@ -15,6 +15,9 @@ vi.mock("./build-info", () => ({
   formatBuildIdentity: () => "Supah Coder Local Fork · abc1234",
 }));
 vi.mock("./SoundButton", () => ({ SoundButton: () => <button>Sound</button> }));
+vi.mock("./AzureConnectionSettings", () => ({
+  AzureConnectionSettings: () => <section>Azure settings</section>,
+}));
 
 afterEach(cleanup);
 

@@ -12,6 +12,7 @@ const MAX_ENDPOINT_LENGTH: usize = 2_048;
 const MAX_DEPLOYMENT_LENGTH: usize = 256;
 const MAX_API_KEY_LENGTH: usize = 8_192;
 const AZURE_HOST_SUFFIXES: [&str; 2] = [".openai.azure.com", ".cognitiveservices.azure.com"];
+const VALIDATION_OUTPUT_TOKENS: u8 = 16;
 const VALIDATION_TIMEOUT: Duration = Duration::from_secs(12);
 
 pub(super) type ValidationFuture<'a> =
@@ -52,7 +53,7 @@ impl RemoteValidator for ReqwestRemoteValidator {
                 .json(&serde_json::json!({
                     "model": config.deployment,
                     "input": "Reply with OK.",
-                    "max_output_tokens": 1,
+                    "max_output_tokens": VALIDATION_OUTPUT_TOKENS,
                     "stream": false
                 }))
                 .send()
@@ -397,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_validation_disables_redirects() {
+    fn remote_validation_uses_supported_token_budget_and_disables_redirects() {
         let canary = canary();
         let redirect_target = TcpListener::bind("127.0.0.1:0").unwrap();
         redirect_target.set_nonblocking(true).unwrap();
@@ -417,6 +418,7 @@ mod tests {
         let error = block_on(validator.validate(&config)).unwrap_err();
         let request = source_thread.join().unwrap();
         assert!(request.contains(&canary));
+        assert!(request.contains("\"max_output_tokens\":16"));
         assert_eq!(error.code, "validation_failed");
         thread::sleep(Duration::from_millis(100));
         assert!(redirect_target.accept().is_err());

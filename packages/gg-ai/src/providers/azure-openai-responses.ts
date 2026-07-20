@@ -8,7 +8,7 @@ import type {
   Usage,
 } from "../types.js";
 import { StreamResult } from "../utils/event-stream.js";
-import { parseToolArguments } from "../utils/json.js";
+import { isJsonObject } from "../utils/json.js";
 import {
   parseResponsesSse,
   serializeResponsesInput,
@@ -16,11 +16,22 @@ import {
   type ResponsesCompletedPayload,
 } from "./openai-responses-core.js";
 
+// eslint-disable-next-line no-control-regex -- Provider error text must not expose control characters.
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]+/g;
+
 interface PendingAzureToolCall {
   id: string;
-  itemId: string;
+  itemId?: string;
   name: string;
-  argsJson: string;
+  args?: Record<string, unknown>;
+  argumentsDone: boolean;
+}
+
+interface AzureFunctionCallItem {
+  id: string;
+  itemId?: string;
+  name: string;
+  arguments?: string;
 }
 
 export function streamAzureOpenAIResponses(options: StreamOptions): StreamResult {
@@ -71,9 +82,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   let accumulatedText = "";
   let completedResponse: ResponsesCompletedPayload | undefined;
   let sawEvent = false;
+  const toolCallsByOutputIndex = new Map<number, PendingAzureToolCall>();
   const toolCallsByItem = new Map<string, PendingAzureToolCall>();
   const toolCallOrder: PendingAzureToolCall[] = [];
-  const completedToolCallIds = new Set<string>();
 
   try {
     for await (const event of parseResponsesSse(response.body, {
@@ -92,17 +103,33 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       } else if (event.type === "response.output_item.added") {
         const item = objectValue(event.item);
         if (item?.type === "function_call") {
-          const toolCall = parseFunctionCallItem(item);
-          toolCallsByItem.set(toolCall.itemId, toolCall);
+          const outputIndex = parseOutputIndex(event.output_index);
+          const parsedCall = parseFunctionCallItem(item, false);
+          if (
+            toolCallsByOutputIndex.has(outputIndex) ||
+            toolCallOrder.some((toolCall) => toolCall.id === parsedCall.id)
+          ) {
+            throw malformedToolCallStreamError();
+          }
+          const toolCall: PendingAzureToolCall = {
+            id: parsedCall.id,
+            name: parsedCall.name,
+            argumentsDone: false,
+          };
+          bindItemId(toolCall, parsedCall.itemId, toolCallsByItem);
+          toolCallsByOutputIndex.set(outputIndex, toolCall);
           toolCallOrder.push(toolCall);
         }
       } else if (event.type === "response.function_call_arguments.delta") {
-        if (typeof event.item_id !== "string" || typeof event.delta !== "string") {
-          throw malformedStreamError();
+        const toolCall = findToolCall(
+          event.output_index,
+          event.item_id,
+          toolCallsByOutputIndex,
+          toolCallsByItem,
+        );
+        if (typeof event.delta !== "string" || toolCall.argumentsDone || toolCall.args) {
+          throw malformedToolCallStreamError();
         }
-        const toolCall = toolCallsByItem.get(event.item_id);
-        if (!toolCall) throw malformedStreamError();
-        toolCall.argsJson += event.delta;
         yield {
           type: "toolcall_delta",
           id: toolCall.id,
@@ -110,25 +137,40 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
           argsJson: event.delta,
         };
       } else if (event.type === "response.function_call_arguments.done") {
-        if (typeof event.item_id !== "string" || typeof event.arguments !== "string") {
-          throw malformedStreamError();
+        const toolCall = findToolCall(
+          event.output_index,
+          event.item_id,
+          toolCallsByOutputIndex,
+          toolCallsByItem,
+        );
+        if (typeof event.arguments !== "string" || toolCall.argumentsDone || toolCall.args) {
+          throw malformedToolCallStreamError();
         }
-        const toolCall = toolCallsByItem.get(event.item_id);
-        if (!toolCall) throw malformedStreamError();
-        toolCall.argsJson = event.arguments;
+        toolCall.argumentsDone = true;
       } else if (event.type === "response.output_item.done") {
         const item = objectValue(event.item);
         if (item?.type === "function_call") {
-          if (typeof item.id !== "string") throw malformedStreamError();
-          const toolCall = toolCallsByItem.get(item.id);
-          if (!toolCall) throw malformedStreamError();
-          if (typeof item.arguments === "string") toolCall.argsJson = item.arguments;
-          if (!completedToolCallIds.has(toolCall.id)) {
-            completedToolCallIds.add(toolCall.id);
-            yield toToolCallDoneEvent(toolCall);
+          const toolCall = findToolCall(
+            event.output_index,
+            item.id,
+            toolCallsByOutputIndex,
+            toolCallsByItem,
+          );
+          const completedCall = parseFunctionCallItem(item, true);
+          if (
+            toolCall.args ||
+            toolCall.id !== completedCall.id ||
+            toolCall.name !== completedCall.name
+          ) {
+            throw malformedToolCallStreamError();
           }
+          const args = parseCompleteToolArguments(completedCall.arguments!);
+          toolCall.args = args;
+          yield toToolCallDoneEvent(toolCall, args);
         }
       } else if (event.type === "response.completed") {
+        if (completedResponse) throw malformedStreamError();
+        assertAllToolCallsCompleted(toolCallOrder);
         completedResponse = asCompletedResponse(event.response);
       } else {
         const streamError = toStreamProviderError(event, apiKey);
@@ -150,12 +192,6 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     );
   }
 
-  for (const toolCall of toolCallOrder) {
-    if (completedToolCallIds.has(toolCall.id)) continue;
-    completedToolCallIds.add(toolCall.id);
-    yield toToolCallDoneEvent(toolCall);
-  }
-
   const content: ContentPart[] = [];
   if (accumulatedText) content.push({ type: "text", text: accumulatedText });
   for (const pending of toolCallOrder) {
@@ -163,7 +199,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       type: "tool_call",
       id: pending.id,
       name: pending.name,
-      args: parseToolArguments(pending.argsJson),
+      args: pending.args!,
     };
     content.push(toolCall);
   }
@@ -215,36 +251,107 @@ function parseResponsesUrl(value: string): string {
   return url.toString();
 }
 
-function parseFunctionCallItem(item: Record<string, unknown>): PendingAzureToolCall {
+function parseFunctionCallItem(
+  item: Record<string, unknown>,
+  requireArguments: boolean,
+): AzureFunctionCallItem {
   if (
-    typeof item.call_id !== "string" ||
-    typeof item.id !== "string" ||
-    typeof item.name !== "string" ||
-    (item.arguments !== undefined && typeof item.arguments !== "string")
+    !nonEmptyString(item.call_id) ||
+    (item.id !== undefined && !nonEmptyString(item.id)) ||
+    !nonEmptyString(item.name) ||
+    (requireArguments && typeof item.arguments !== "string") ||
+    (!requireArguments && item.arguments !== undefined && typeof item.arguments !== "string")
   ) {
-    throw malformedStreamError();
+    throw malformedToolCallStreamError();
   }
   return {
     id: item.call_id,
-    itemId: item.id,
+    ...(typeof item.id === "string" ? { itemId: item.id } : {}),
     name: item.name,
-    argsJson: item.arguments ?? "",
+    ...(typeof item.arguments === "string" ? { arguments: item.arguments } : {}),
   };
+}
+
+function parseOutputIndex(value: unknown): number {
+  if (!Number.isInteger(value) || (value as number) < 0) throw malformedToolCallStreamError();
+  return value as number;
+}
+
+function findToolCall(
+  outputIndex: unknown,
+  itemId: unknown,
+  toolCallsByOutputIndex: Map<number, PendingAzureToolCall>,
+  toolCallsByItem: Map<string, PendingAzureToolCall>,
+): PendingAzureToolCall {
+  const toolCall = toolCallsByOutputIndex.get(parseOutputIndex(outputIndex));
+  if (!toolCall) throw malformedToolCallStreamError();
+  bindItemId(toolCall, itemId, toolCallsByItem);
+  return toolCall;
+}
+
+function bindItemId(
+  toolCall: PendingAzureToolCall,
+  itemId: unknown,
+  toolCallsByItem: Map<string, PendingAzureToolCall>,
+): void {
+  if (itemId === undefined) return;
+  if (!nonEmptyString(itemId)) throw malformedToolCallStreamError();
+  const boundToolCall = toolCallsByItem.get(itemId);
+  if (
+    (toolCall.itemId && toolCall.itemId !== itemId) ||
+    (boundToolCall && boundToolCall !== toolCall)
+  ) {
+    throw malformedToolCallStreamError();
+  }
+  toolCall.itemId = itemId;
+  toolCallsByItem.set(itemId, toolCall);
+}
+
+function parseCompleteToolArguments(argsJson: string): Record<string, unknown> {
+  try {
+    const args = JSON.parse(argsJson) as unknown;
+    if (isJsonObject(args)) return args;
+  } catch {
+    // Fall through to the deterministic public protocol error.
+  }
+  throw malformedToolCallStreamError();
+}
+
+function assertAllToolCallsCompleted(toolCalls: PendingAzureToolCall[]): void {
+  if (toolCalls.some((toolCall) => !toolCall.args)) {
+    throw incompleteToolCallStreamError();
+  }
 }
 
 function toToolCallDoneEvent(
   toolCall: PendingAzureToolCall,
+  args: Record<string, unknown>,
 ): Extract<StreamEvent, { type: "toolcall_done" }> {
   return {
     type: "toolcall_done",
     id: toolCall.id,
     name: toolCall.name,
-    args: parseToolArguments(toolCall.argsJson),
+    args,
   };
+}
+
+function malformedToolCallStreamError(): ProviderError {
+  return new ProviderError("azure", "Azure OpenAI returned a malformed tool-call stream.");
+}
+
+function incompleteToolCallStreamError(): ProviderError {
+  return new ProviderError(
+    "azure",
+    "Azure OpenAI tool-call stream ended before all calls completed.",
+  );
 }
 
 function malformedStreamError(): ProviderError {
   return new ProviderError("azure", "Azure OpenAI returned a malformed response stream.");
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 function asCompletedResponse(value: unknown): ResponsesCompletedPayload {
@@ -350,7 +457,7 @@ function sanitizeErrorMessage(value: string | undefined, credential: string): st
   return value
     ?.replaceAll(credential, "[REDACTED]")
     .replace(/<[^>]*>/g, " ")
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(CONTROL_CHARACTERS, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 500);

@@ -13,6 +13,60 @@ function sseResponse(events: Record<string, unknown>[]): Response {
   });
 }
 
+function toolCallStream(events: Record<string, unknown>[]) {
+  return streamAzureOpenAIResponses({
+    provider: "azure",
+    model: "test-deployment",
+    messages: [{ role: "user", content: "Use tools." }],
+    apiKey: TEST_CREDENTIAL,
+    baseUrl: RESPONSES_URL,
+    fetch: vi.fn<typeof fetch>().mockResolvedValueOnce(sseResponse(events)),
+  });
+}
+
+function addedToolCall(
+  outputIndex: number,
+  itemId: string | undefined,
+  callId: string,
+  name: string,
+): Record<string, unknown> {
+  return {
+    type: "response.output_item.added",
+    output_index: outputIndex,
+    item: {
+      type: "function_call",
+      ...(itemId ? { id: itemId } : {}),
+      call_id: callId,
+      name,
+    },
+  };
+}
+
+function completedToolCall(
+  outputIndex: number,
+  itemId: string | undefined,
+  callId: string,
+  name: string,
+  argsJson: string,
+): Record<string, unknown> {
+  return {
+    type: "response.output_item.done",
+    output_index: outputIndex,
+    item: {
+      type: "function_call",
+      ...(itemId ? { id: itemId } : {}),
+      call_id: callId,
+      name,
+      arguments: argsJson,
+    },
+  };
+}
+
+const COMPLETED_RESPONSE = {
+  type: "response.completed",
+  response: { usage: { input_tokens: 8, output_tokens: 3 } },
+};
+
 describe("streamAzureOpenAIResponses", () => {
   it("streams text with the Azure wire contract and sanitizes non-2xx errors", async () => {
     const fetchMock = vi
@@ -177,6 +231,276 @@ describe("streamAzureOpenAIResponses", () => {
     });
     expect(String(error)).not.toContain("test-key");
     expect(String(error)).not.toMatch(/<[^>]+>/);
+  });
+
+  it("correlates parallel calls by output_index and accepts equivalent final JSON", async () => {
+    const stream = toolCallStream([
+      addedToolCall(0, "fc_weather", "call/public:weather-1", "weather"),
+      addedToolCall(1, "fc_time", "call.public.time+2", "time"),
+      {
+        type: "response.function_call_arguments.delta",
+        output_index: 0,
+        item_id: "fc_weather",
+        delta: '{"city":',
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        output_index: 1,
+        item_id: "fc_time",
+        delta: '{"zone":"UTC"}',
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        output_index: 0,
+        item_id: "fc_weather",
+        delta: '"Seattle","units":"celsius"}',
+      },
+      {
+        type: "response.function_call_arguments.done",
+        output_index: 1,
+        item_id: "fc_time",
+        arguments: '{"zone":"UTC"}',
+      },
+      completedToolCall(1, "fc_time", "call.public.time+2", "time", '{ "zone": "UTC" }'),
+      {
+        type: "response.function_call_arguments.done",
+        output_index: 0,
+        item_id: "fc_weather",
+        arguments: '{"city":"Seattle","units":"celsius"}',
+      },
+      completedToolCall(
+        0,
+        "fc_weather",
+        "call/public:weather-1",
+        "weather",
+        '{"units":"celsius","city":"Seattle"}',
+      ),
+      COMPLETED_RESPONSE,
+    ]);
+    const events = [];
+    for await (const event of stream) events.push(event);
+
+    await expect(stream.response).resolves.toEqual({
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "call/public:weather-1",
+            name: "weather",
+            args: { units: "celsius", city: "Seattle" },
+          },
+          {
+            type: "tool_call",
+            id: "call.public.time+2",
+            name: "time",
+            args: { zone: "UTC" },
+          },
+        ],
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 8, outputTokens: 3 },
+    });
+    expect(events).toEqual([
+      {
+        type: "toolcall_delta",
+        id: "call/public:weather-1",
+        name: "weather",
+        argsJson: '{"city":',
+      },
+      {
+        type: "toolcall_delta",
+        id: "call.public.time+2",
+        name: "time",
+        argsJson: '{"zone":"UTC"}',
+      },
+      {
+        type: "toolcall_delta",
+        id: "call/public:weather-1",
+        name: "weather",
+        argsJson: '"Seattle","units":"celsius"}',
+      },
+      { type: "toolcall_done", id: "call.public.time+2", name: "time", args: { zone: "UTC" } },
+      {
+        type: "toolcall_done",
+        id: "call/public:weather-1",
+        name: "weather",
+        args: { units: "celsius", city: "Seattle" },
+      },
+      { type: "done", stopReason: "tool_use" },
+    ]);
+  });
+
+  it("accepts function-call events without the optional item id", async () => {
+    const stream = toolCallStream([
+      addedToolCall(0, undefined, "call_1", "weather"),
+      { type: "response.function_call_arguments.delta", output_index: 0, delta: "{}" },
+      { type: "response.function_call_arguments.done", output_index: 0, arguments: "{}" },
+      completedToolCall(0, undefined, "call_1", "weather", "{}"),
+      COMPLETED_RESPONSE,
+    ]);
+
+    await expect(stream.response).resolves.toMatchObject({
+      message: {
+        content: [{ type: "tool_call", id: "call_1", name: "weather", args: {} }],
+      },
+      stopReason: "tool_use",
+    });
+  });
+
+  it.each([
+    {
+      name: "duplicate output_item.added event",
+      events: [
+        addedToolCall(0, "fc_1", "call_1", "weather"),
+        addedToolCall(0, "fc_1", "call_1", "weather"),
+      ],
+    },
+    {
+      name: "duplicate call_id",
+      events: [
+        addedToolCall(0, "fc_1", "call_1", "weather"),
+        addedToolCall(1, "fc_2", "call_1", "time"),
+      ],
+    },
+    {
+      name: "duplicate arguments.done event",
+      events: [
+        addedToolCall(0, "fc_1", "call_1", "weather"),
+        {
+          type: "response.function_call_arguments.done",
+          output_index: 0,
+          item_id: "fc_1",
+          arguments: "{}",
+        },
+        {
+          type: "response.function_call_arguments.done",
+          output_index: 0,
+          item_id: "fc_1",
+          arguments: "{}",
+        },
+      ],
+    },
+    {
+      name: "duplicate output_item.done event",
+      events: [
+        addedToolCall(0, "fc_1", "call_1", "weather"),
+        completedToolCall(0, "fc_1", "call_1", "weather", "{}"),
+        completedToolCall(0, "fc_1", "call_1", "weather", "{}"),
+      ],
+    },
+  ])("rejects a $name", async ({ events }) => {
+    const error = await toolCallStream(events).response.catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({
+      provider: "azure",
+      message: "Azure OpenAI returned a malformed tool-call stream.",
+    });
+    expect((error as Error).cause).toBeUndefined();
+  });
+
+  it.each(["{", "[]", '"secret argument text"'])(
+    "rejects malformed completed arguments without exposing them: %s",
+    async (argumentsJson) => {
+      const error = await toolCallStream([
+        addedToolCall(0, "fc_1", "call_1", "weather"),
+        completedToolCall(0, "fc_1", "call_1", "weather", argumentsJson),
+      ]).response.catch((cause: unknown) => cause);
+
+      expect(error).toBeInstanceOf(ProviderError);
+      expect(error).toMatchObject({
+        provider: "azure",
+        message: "Azure OpenAI returned a malformed tool-call stream.",
+      });
+      expect(String(error)).not.toContain(argumentsJson);
+      expect((error as Error).cause).toBeUndefined();
+    },
+  );
+
+  it.each([
+    {
+      name: "call_id on output_item.added",
+      events: [
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { type: "function_call", id: "fc_1", name: "weather" },
+        },
+      ],
+    },
+    {
+      name: "name on output_item.added",
+      events: [
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { type: "function_call", id: "fc_1", call_id: "call_1" },
+        },
+      ],
+    },
+    {
+      name: "call_id on output_item.done",
+      events: [
+        addedToolCall(0, "fc_1", "call_1", "weather"),
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: { type: "function_call", id: "fc_1", name: "weather", arguments: "{}" },
+        },
+      ],
+    },
+    {
+      name: "name on output_item.done",
+      events: [
+        addedToolCall(0, "fc_1", "call_1", "weather"),
+        {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: { type: "function_call", id: "fc_1", call_id: "call_1", arguments: "{}" },
+        },
+      ],
+    },
+  ])("rejects a function call missing $name", async ({ events }) => {
+    const error = await toolCallStream(events).response.catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({
+      provider: "azure",
+      message: "Azure OpenAI returned a malformed tool-call stream.",
+    });
+  });
+
+  it("rejects response completion while a tool call is incomplete", async () => {
+    const error = await toolCallStream([
+      addedToolCall(0, "fc_1", "call_1", "weather"),
+      {
+        type: "response.function_call_arguments.delta",
+        output_index: 0,
+        item_id: "fc_1",
+        delta: '{"city":"Seattle"}',
+      },
+      COMPLETED_RESPONSE,
+    ]).response.catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({
+      provider: "azure",
+      message: "Azure OpenAI tool-call stream ended before all calls completed.",
+    });
+  });
+
+  it("rejects stream termination before response completion after a completed tool call", async () => {
+    const error = await toolCallStream([
+      addedToolCall(0, "fc_1", "call_1", "weather"),
+      completedToolCall(0, "fc_1", "call_1", "weather", '{"city":"Seattle"}'),
+    ]).response.catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ProviderError);
+    expect(error).toMatchObject({
+      provider: "azure",
+      message: "Azure OpenAI response stream ended before response.completed.",
+    });
   });
 
   it.each([

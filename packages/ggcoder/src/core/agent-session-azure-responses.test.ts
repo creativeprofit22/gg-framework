@@ -71,25 +71,30 @@ describe("AgentSession Azure Responses tool round trip", () => {
         return sseResponse([
           {
             type: "response.output_item.added",
+            output_index: 0,
             item: { type: "function_call", id: "fc_1", call_id: "call_1", name: "ls" },
           },
           {
             type: "response.function_call_arguments.delta",
+            output_index: 0,
             item_id: "fc_1",
             delta: '{"path":',
           },
           {
             type: "response.function_call_arguments.delta",
+            output_index: 0,
             item_id: "fc_1",
             delta: '"."}',
           },
           {
             type: "response.function_call_arguments.done",
+            output_index: 0,
             item_id: "fc_1",
             arguments: '{"path":"."}',
           },
           {
             type: "response.output_item.done",
+            output_index: 0,
             item: {
               type: "function_call",
               id: "fc_1",

@@ -10,7 +10,8 @@ it("sends an AgentSession prompt through the registered Azure OpenAI deployment"
   const project = await fs.mkdtemp(path.join(os.tmpdir(), "gg-azure-project-"));
   const deployment = "integration-deployment";
   const apiKey = "azure-integration-secret";
-  const baseUrl = "https://integration.openai.azure.com/openai/v1";
+  const baseUrl =
+    "https://integration.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview";
   const streamedText = "Hello from mocked Azure.";
   let receivedText = "";
 
@@ -75,7 +76,7 @@ it("sends an AgentSession prompt through the registered Azure OpenAI deployment"
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0]!;
-    expect(url).toBe(`${baseUrl}/responses`);
+    expect(url).toBe(baseUrl);
     expect(new Headers(init?.headers).get("api-key")).toBe(apiKey);
 
     const requestBody = JSON.parse(String(init?.body)) as {

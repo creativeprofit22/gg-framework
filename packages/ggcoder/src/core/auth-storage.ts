@@ -17,15 +17,30 @@ export interface AzureOpenAIConfig {
   deployment: string;
 }
 
-/** Azure configuration is usable only when every required value is non-empty. */
+/** Azure configuration is usable only with a strict full Responses endpoint URL. */
 export function resolveAzureOpenAIConfig(
   environment: AzureOpenAIEnvironment = process.env,
 ): AzureOpenAIConfig | undefined {
   const apiKey = environment.AZURE_OPENAI_API_KEY?.trim();
   const baseUrl = environment.AZURE_OPENAI_BASE_URL?.trim();
   const deployment = environment.AZURE_OPENAI_DEPLOYMENT?.trim();
-  if (!apiKey || !baseUrl || !deployment) return undefined;
+  if (!apiKey || !baseUrl || !deployment || !isAzureResponsesUrl(baseUrl)) return undefined;
   return { apiKey, baseUrl, deployment };
+}
+
+function isAzureResponsesUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === "" &&
+      url.pathname.endsWith("/responses")
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

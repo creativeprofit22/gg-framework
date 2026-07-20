@@ -10,7 +10,8 @@ import { registerConfiguredAzureModel } from "./model-registry.js";
 
 const completeEnvironment: AzureOpenAIEnvironment = {
   AZURE_OPENAI_API_KEY: "azure-test-secret",
-  AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1",
+  AZURE_OPENAI_BASE_URL:
+    "https://example.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
   AZURE_OPENAI_DEPLOYMENT: "coding-deployment",
 };
 
@@ -29,7 +30,8 @@ describe("Azure OpenAI app boundaries", () => {
   it("resolves complete config as ephemeral AuthStorage credentials", async () => {
     expect(resolveAzureOpenAIConfig(completeEnvironment)).toEqual({
       apiKey: "azure-test-secret",
-      baseUrl: "https://example.openai.azure.com/openai/v1",
+      baseUrl:
+        "https://example.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
       deployment: "coding-deployment",
     });
 
@@ -39,7 +41,8 @@ describe("Azure OpenAI app boundaries", () => {
       accessToken: "azure-test-secret",
       refreshToken: "",
       expiresAt: Number.POSITIVE_INFINITY,
-      baseUrl: "https://example.openai.azure.com/openai/v1",
+      baseUrl:
+        "https://example.openai.azure.com/openai/v1/responses?api-version=2025-04-01-preview",
     });
   });
 
@@ -58,6 +61,26 @@ describe("Azure OpenAI app boundaries", () => {
       expect(MODELS).toHaveLength(before);
     },
   );
+
+  it.each([
+    "not-a-url",
+    "https://example.openai.azure.com/openai/v1",
+    "http://example.openai.azure.com/openai/v1/responses",
+    "https://user:password@example.openai.azure.com/openai/v1/responses",
+    "https://example.openai.azure.com/openai/v1/responses#fragment",
+    "https://example.openai.azure.com/openai/v1/responses/",
+  ])("rejects non-strict Responses endpoint %s at every app boundary", async (baseUrl) => {
+    const environment = { ...completeEnvironment, AZURE_OPENAI_BASE_URL: baseUrl };
+    expect(resolveAzureOpenAIConfig(environment)).toBeUndefined();
+
+    const auth = new AuthStorage("unused-auth.json", environment);
+    await expect(auth.hasProviderAuth("azure")).resolves.toBe(false);
+    await expect(auth.resolveCredentials("azure")).rejects.toBeInstanceOf(NotLoggedInError);
+
+    const before = MODELS.length;
+    expect(registerConfiguredAzureModel(environment)).toBeUndefined();
+    expect(MODELS).toHaveLength(before);
+  });
 
   it("registers one complete Azure deployment without exposing its API key", () => {
     addedModelIds.add("coding-deployment");

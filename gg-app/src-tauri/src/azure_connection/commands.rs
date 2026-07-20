@@ -1,7 +1,7 @@
 use super::lifecycle::{run_mutation_with_reload, NativeDaemonReloadClient};
 use super::{
-    production_manager, AzureConnectionError, AzureConnectionStatus, AzureEnvironment,
-    SaveAzureConnection,
+    production_manager, status_after_secure_removal, AzureConnectionError, AzureConnectionStatus,
+    AzureEnvironment, SaveAzureConnection,
 };
 
 #[derive(Default)]
@@ -35,7 +35,7 @@ pub(crate) async fn azure_connection_remove(
     let reloader = NativeDaemonReloadClient::new(app);
     run_mutation_with_reload(&reloader, async {
         manager.remove()?;
-        manager.status(&environment)
+        Ok(status_after_secure_removal(&environment))
     })
     .await
 }

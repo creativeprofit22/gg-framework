@@ -1128,27 +1128,36 @@ export function AgentPane({
     let cancelled = false;
     let unlisten: (() => void) | undefined;
     void onModelsChanged(() => {
+      // A catalog invalidation also marks a daemon respawn boundary. Close both
+      // menus immediately so React cannot retain options from the old catalog.
+      setModelMenuOpen(false);
+      setKenModelMenuOpen(false);
       void (async () => {
         try {
           await client.waitForReady();
-          const available = await client.listModels();
+          const [available, refreshedState] = await Promise.all([
+            client.listModels(),
+            client.getState(),
+          ]);
           if (cancelled) return;
-          const unchanged =
-            available.length === modelsRef.current.length &&
-            available.every((model, index) => {
-              const current = modelsRef.current[index];
-              return (
-                current !== undefined &&
-                model.id === current.id &&
-                model.name === current.name &&
-                model.provider === current.provider
-              );
-            });
-          if (unchanged) return;
           modelsRef.current = available;
           setModels(available);
-          setModelMenuOpen(false);
-          setKenModelMenuOpen(false);
+          setState((current) =>
+            current
+              ? {
+                  ...current,
+                  provider: refreshedState.provider,
+                  model: refreshedState.model,
+                  thinkingLevel: refreshedState.thinkingLevel,
+                  supportedThinkingLevels: refreshedState.supportedThinkingLevels,
+                  contextWindow: refreshedState.contextWindow,
+                  supportsVideo: refreshedState.supportsVideo,
+                  kenProvider: refreshedState.kenProvider,
+                  kenModel: refreshedState.kenModel,
+                  kenModelOverride: refreshedState.kenModelOverride,
+                }
+              : refreshedState,
+          );
         } catch {
           // A later pane-ready/model event retries after transient respawn races.
         }

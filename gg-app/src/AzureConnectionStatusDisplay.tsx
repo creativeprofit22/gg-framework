@@ -71,6 +71,16 @@ export function AzureConnectionStatusDisplay({
             <dd>Provided by environment</dd>
           </div>
         </dl>
+        {generalError && (
+          <p
+            id={generalErrorId}
+            className="modal-error azure-general-error"
+            role="alert"
+            style={{ color: theme.error }}
+          >
+            {generalError}
+          </p>
+        )}
         <p className="modal-hint" style={{ color: theme.textMuted }}>
           Managed with AZURE_OPENAI_BASE_URL, AZURE_OPENAI_DEPLOYMENT, and AZURE_OPENAI_API_KEY.
           Update them outside gg-app, then restart the app.

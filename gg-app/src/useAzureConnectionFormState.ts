@@ -10,7 +10,7 @@ import {
 } from "./agent";
 
 export type AzureFieldErrors = Partial<Record<AzureConnectionErrorField, string>>;
-export type AzurePendingState = "loading" | "saving" | "removing" | "refreshing" | null;
+export type AzurePendingState = "loading" | "saving" | "removing" | null;
 type RefreshOperation = "save" | "remove";
 
 function localErrors(
@@ -59,9 +59,8 @@ export function useAzureConnectionFormState(onConnectionChanged?: () => void) {
   const endpointRef = useRef<HTMLInputElement>(null);
   const deploymentRef = useRef<HTMLInputElement>(null);
   const keepConnectionRef = useRef<HTMLButtonElement>(null);
-  const refreshVersionRef = useRef(0);
-  const waitingForModelsRef = useRef(false);
-  const refreshOperationRef = useRef<RefreshOperation>("save");
+  const statusRequestRef = useRef(0);
+  const commandPendingRef = useRef(false);
   const onConnectionChangedRef = useRef(onConnectionChanged);
   const endpointErrorId = useId();
   const deploymentErrorId = useId();
@@ -81,26 +80,34 @@ export function useAzureConnectionFormState(onConnectionChanged?: () => void) {
     apiKeyRef.current = node;
   }, []);
 
-  const applyStatus = useCallback((nextStatus: AzureConnectionStatus): void => {
-    setStatus(nextStatus);
-    setEndpoint(nextStatus.endpoint ?? "");
-    setDeployment(nextStatus.deployment ?? "");
-    setEditing(nextStatus.source === "none");
-  }, []);
+  const applyStatus = useCallback(
+    (nextStatus: AzureConnectionStatus): void => {
+      clearApiKey();
+      setStatus(nextStatus);
+      setEndpoint(nextStatus.endpoint ?? "");
+      setDeployment(nextStatus.deployment ?? "");
+      setEditing(nextStatus.source === "none");
+    },
+    [clearApiKey],
+  );
 
   const loadStatus = useCallback(async (): Promise<void> => {
+    const request = ++statusRequestRef.current;
     setPending("loading");
     setGeneralError(null);
     try {
-      applyStatus(await getAzureConnectionStatus());
+      const nextStatus = await getAzureConnectionStatus();
+      if (statusRequestRef.current !== request) return;
+      applyStatus(nextStatus);
     } catch (error) {
+      if (statusRequestRef.current !== request) return;
       setGeneralError(
         error instanceof AzureConnectionCommandError
           ? error.message
           : "Azure connection status could not be loaded. Try again.",
       );
     } finally {
-      setPending(null);
+      if (statusRequestRef.current === request) setPending(null);
     }
   }, [applyStatus]);
 
@@ -116,20 +123,15 @@ export function useAzureConnectionFormState(onConnectionChanged?: () => void) {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void onModelsChanged(() => {
-      refreshVersionRef.current += 1;
-      if (waitingForModelsRef.current) {
-        waitingForModelsRef.current = false;
-        setPending(null);
-        setLiveStatus(
-          refreshOperationRef.current === "remove"
-            ? "Azure connection removed. Models refreshed."
-            : "Azure connection saved. Models refreshed.",
-        );
-      } else {
-        void getAzureConnectionStatus()
-          .then(applyStatus)
-          .catch(() => {});
-      }
+      const request = ++statusRequestRef.current;
+      void getAzureConnectionStatus()
+        .then((nextStatus) => {
+          if (!disposed && statusRequestRef.current === request) {
+            applyStatus(nextStatus);
+            if (!commandPendingRef.current) setPending(null);
+          }
+        })
+        .catch(() => {});
       onConnectionChangedRef.current?.();
     }).then((stopListening) => {
       if (disposed) stopListening();
@@ -137,10 +139,12 @@ export function useAzureConnectionFormState(onConnectionChanged?: () => void) {
     });
     return () => {
       disposed = true;
+      statusRequestRef.current += 1;
+      commandPendingRef.current = false;
       unlisten?.();
-      if (apiKeyRef.current) apiKeyRef.current.value = "";
+      clearApiKey();
     };
-  }, [applyStatus]);
+  }, [applyStatus, clearApiKey]);
 
   function focusFirstError(nextErrors: AzureFieldErrors): void {
     window.setTimeout(() => {
@@ -150,15 +154,17 @@ export function useAzureConnectionFormState(onConnectionChanged?: () => void) {
     });
   }
 
-  function handleCommandError(error: unknown): void {
+  function normalizeCommandError(error: unknown): AzureConnectionCommandError {
+    return error instanceof AzureConnectionCommandError
+      ? error
+      : new AzureConnectionCommandError(
+          "The Azure connection could not be updated. Try again.",
+          "unknown",
+        );
+  }
+
+  function showCommandError(safeError: AzureConnectionCommandError): void {
     clearApiKey();
-    const safeError =
-      error instanceof AzureConnectionCommandError
-        ? error
-        : new AzureConnectionCommandError(
-            "The Azure connection could not be updated. Try again.",
-            "unknown",
-          );
     if (safeError.field) {
       const nextErrors = { [safeError.field]: safeError.message };
       setErrors(nextErrors);
@@ -166,6 +172,28 @@ export function useAzureConnectionFormState(onConnectionChanged?: () => void) {
     } else {
       setGeneralError(safeError.message);
     }
+  }
+
+  async function handleCommandError(error: unknown, operation: RefreshOperation): Promise<void> {
+    const safeError = normalizeCommandError(error);
+    if (safeError.code !== "models_refresh_failed") {
+      showCommandError(safeError);
+      return;
+    }
+
+    // Native persistence has already succeeded for this code. Re-read the
+    // secret-free status rather than presenting the previous connection as live.
+    clearApiKey();
+    const request = ++statusRequestRef.current;
+    try {
+      const nextStatus = await getAzureConnectionStatus();
+      if (statusRequestRef.current === request) applyStatus(nextStatus);
+    } catch {
+      // Keep the explicit restart guidance even if the follow-up status read fails.
+    }
+    if (operation === "remove") setConfirmingRemove(false);
+    setErrors({});
+    setGeneralError(safeError.message);
   }
 
   async function submit(): Promise<void> {
@@ -186,7 +214,8 @@ export function useAzureConnectionFormState(onConnectionChanged?: () => void) {
       return;
     }
 
-    const refreshVersion = refreshVersionRef.current;
+    statusRequestRef.current += 1;
+    commandPendingRef.current = true;
     setErrors({});
     setGeneralError(null);
     setLiveStatus("Validating and saving securely.");
@@ -198,48 +227,41 @@ export function useAzureConnectionFormState(onConnectionChanged?: () => void) {
         ...(apiKey ? { apiKey } : {}),
       });
       clearApiKey();
+      statusRequestRef.current += 1;
       applyStatus(nextStatus);
       setEditing(false);
-      refreshOperationRef.current = "save";
-      if (refreshVersionRef.current > refreshVersion) {
-        setPending(null);
-        setLiveStatus("Azure connection saved. Models refreshed.");
-      } else {
-        waitingForModelsRef.current = true;
-        setPending("refreshing");
-        setLiveStatus("Connection saved. Refreshing models.");
-      }
+      commandPendingRef.current = false;
+      setPending(null);
+      setLiveStatus("Azure connection saved. Models refreshed.");
     } catch (error) {
+      await handleCommandError(error, "save");
+      commandPendingRef.current = false;
       setPending(null);
       setLiveStatus("");
-      handleCommandError(error);
     }
   }
 
   async function confirmRemove(): Promise<void> {
     if (pending) return;
-    const refreshVersion = refreshVersionRef.current;
+    statusRequestRef.current += 1;
+    commandPendingRef.current = true;
     setGeneralError(null);
     setLiveStatus("Removing the connection securely.");
     setPending("removing");
     try {
       const nextStatus = await removeAzureConnection();
       clearApiKey();
+      statusRequestRef.current += 1;
       applyStatus(nextStatus);
       setConfirmingRemove(false);
-      refreshOperationRef.current = "remove";
-      if (refreshVersionRef.current > refreshVersion) {
-        setPending(null);
-        setLiveStatus("Azure connection removed. Models refreshed.");
-      } else {
-        waitingForModelsRef.current = true;
-        setPending("refreshing");
-        setLiveStatus("Connection removed. Refreshing models.");
-      }
+      commandPendingRef.current = false;
+      setPending(null);
+      setLiveStatus("Azure connection removed. Models refreshed.");
     } catch (error) {
+      await handleCommandError(error, "remove");
+      commandPendingRef.current = false;
       setPending(null);
       setLiveStatus("");
-      handleCommandError(error);
     }
   }
 

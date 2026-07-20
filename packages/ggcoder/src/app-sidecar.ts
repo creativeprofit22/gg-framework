@@ -89,9 +89,9 @@ import { resolveStartOrFallback } from "./core/resolve-start.js";
 import { getGitBranch, getGitDirtyFileCount, isGitRepo } from "./utils/git.js";
 import { extractPlanSteps } from "./utils/plan-steps.js";
 import {
+  clampThinkingLevel,
   getNextThinkingLevel,
   getSupportedThinkingLevels,
-  isThinkingLevelSupported,
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
@@ -947,10 +947,15 @@ async function main(): Promise<void> {
         setImmediate(() => void shutdown());
         return;
       }
-      if (reloadCoordinator.shouldBlockSessionMutation(method)) {
+      const releaseMutation = reloadCoordinator.tryAcquireSessionMutation(method);
+      if (!releaseMutation) {
         daemonJson(res, 409, { error: "configuration refresh in progress" });
         return;
       }
+      // Keep the lease through asynchronous body reads and route completion. Both
+      // events may fire; coordinator releases are intentionally idempotent.
+      res.once("finish", releaseMutation);
+      res.once("close", releaseMutation);
 
       // Create a session for a window: { mode?, cwd, sessionPath? } → { sessionId }.
       if (method === "POST" && url === "/session") {
@@ -973,7 +978,7 @@ async function main(): Promise<void> {
           const id = randomUUID();
           try {
             const ctx = await createSession(
-              { auth, paths, progress, memoryStore, jiwaStore },
+              { auth, paths, progress, memoryStore, jiwaStore, reloadCoordinator },
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
             );
             sessions.add(id, ctx);
@@ -1303,6 +1308,7 @@ async function createSession(
     progress: ProgressManager;
     memoryStore: MemoryStore;
     jiwaStore: JiwaStore;
+    reloadCoordinator: AppSidecarReloadCoordinator;
   },
   opts: {
     id: string;
@@ -1312,7 +1318,7 @@ async function createSession(
     sessionPath?: string;
   },
 ): Promise<SessionContext> {
-  const { auth, progress, memoryStore, jiwaStore } = deps;
+  const { auth, progress, memoryStore, jiwaStore, reloadCoordinator } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
   let chatAgent = opts.chatAgent;
@@ -3152,88 +3158,105 @@ async function createSession(
           json(res, 202, { queued: true, count });
           return;
         }
+        // Keep an operation lease beyond the early 202 while preprocessing and
+        // the accepted turn run. The request lease alone ends with the response.
+        const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
+        if (!releaseOperation) {
+          json(res, 409, { error: "configuration refresh in progress" });
+          return;
+        }
         json(res, 202, { accepted: true });
-        // Webview display hint for this prompt's user bubble (kenSent shimmer
-        // label / enhancer highlight segments). Anchored +1 so it attaches to
-        // the user message the prompt below is about to push. Queued prompts
-        // skip this (their position in the run is unpredictable).
-        if (meta && (meta.kenSent === true || Array.isArray(meta.enhancements))) {
-          void session
-            .persistAppMarker(
-              "user_hint",
-              {
-                ...(meta.kenSent === true ? { kenSent: true } : {}),
-                ...(Array.isArray(meta.enhancements) ? { enhancements: meta.enhancements } : {}),
-              },
-              1,
-            )
-            .catch(() => {});
-        }
-        // Fresh user turn: clear any cancel flag left from a prior cycle so this
-        // turn's autopilot review can run.
-        autopilotCancelled = false;
-        // A typed message while a plan modal/review is pending (reject,
-        // feedback, anything) supersedes the pending plan — the bump also
-        // invalidates any in-flight Ken plan review.
-        clearPendingPlan();
-        // Gate inputs captured around the run: whether this turn is a workflow
-        // slash command (attachment prompts skip slash expansion entirely), and
-        // how many assistant messages the run actually adds. Computed even when
-        // autopilot is currently off — the toggle can flip ON mid-run, and the
-        // gate reads the post-run value.
-        const workflowCommand =
-          attachments.length === 0 && isWorkflowCommandText(text, await loadWorkflowCommandSpecs());
-        const assistantsBefore = countAssistantMessages(session.getMessages());
-        const messagesBefore = session.getMessages().length;
-        await runAgent(text, async () => {
-          if (attachments.length > 0) {
-            // Persist each attachment under .gg/uploads so files are inspectable
-            // by the agent's tools, then prompt with the media as native blocks.
-            const prepared = await prepareAttachments(cwd, attachments);
-            await session.promptWithAttachments(text, prepared);
-          } else {
-            // Pass the raw text straight through. AgentSession.prompt() is the
-            // single source of truth for slash-command expansion (built-in +
-            // `.gg/commands/*.md` custom), so the agent gets the right body
-            // while the webview keeps showing the short `/name`.
-            await session.prompt(text);
+        try {
+          // Webview display hint for this prompt's user bubble (kenSent shimmer
+          // label / enhancer highlight segments). Anchored +1 so it attaches to
+          // the user message the prompt below is about to push. Queued prompts
+          // skip this (their position in the run is unpredictable).
+          if (meta && (meta.kenSent === true || Array.isArray(meta.enhancements))) {
+            await session
+              .persistAppMarker(
+                "user_hint",
+                {
+                  ...(meta.kenSent === true ? { kenSent: true } : {}),
+                  ...(Array.isArray(meta.enhancements) ? { enhancements: meta.enhancements } : {}),
+                },
+                1,
+              )
+              .catch(() => {});
           }
-        });
-        // After the user's run settles, kick off Ken's auto-review loop — but
-        // only when the turn is actually reviewable (shouldStartAutopilotCycle):
-        // workflow commands (/compare, /bullet-proof, …) end with reports or
-        // A/B/C choices reserved for the USER; registry commands (/help) and
-        // failed runs add no assistant work to judge; a turn that ended in plan
-        // mode has a pending Accept/Reject modal Ken must not preempt. This is
-        // the ONLY entry point into the cycle besides the stranded-queue drain —
-        // it drives any follow-up GG Coder runs itself, so the shared runAgent
-        // finally never recurses.
-        const decision = shouldStartAutopilotCycle({
-          enabled: autopilot,
-          cancelled: autopilotCancelled,
-          planMode: session.getPlanMode(),
-          // A submitted plan (exit_plan fired) routes into the PLAN review
-          // branch — the cycle reviews the plan itself instead of skipping.
-          planPending: pendingPlanPath !== null,
-          workflowCommand,
-          assistantMessagesAdded: countAssistantMessages(session.getMessages()) - assistantsBefore,
-          // Skip the review API call outright for turns that only started a
-          // background process (dev server/watcher), ran a read-only lookup, or
-          // committed/pushed — Ken's autopilot contract already IGNOREs these,
-          // so there's no reason to pay for that verdict.
-          mechanicalOnly: isMechanicalOnlyTurn(
-            extractTurnToolCalls(session.getMessages(), messagesBefore),
-          ),
-        });
-        if (decision.start) {
-          log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
-          await runAutopilotCycle(text);
-        } else if (autopilot) {
-          log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
+          // Fresh user turn: clear any cancel flag left from a prior cycle so this
+          // turn's autopilot review can run.
+          autopilotCancelled = false;
+          // A typed message while a plan modal/review is pending (reject,
+          // feedback, anything) supersedes the pending plan — the bump also
+          // invalidates any in-flight Ken plan review.
+          clearPendingPlan();
+          // Gate inputs captured around the run: whether this turn is a workflow
+          // slash command (attachment prompts skip slash expansion entirely), and
+          // how many assistant messages the run actually adds. Computed even when
+          // autopilot is currently off — the toggle can flip ON mid-run, and the
+          // gate reads the post-run value.
+          const workflowCommand =
+            attachments.length === 0 &&
+            isWorkflowCommandText(text, await loadWorkflowCommandSpecs());
+          const assistantsBefore = countAssistantMessages(session.getMessages());
+          const messagesBefore = session.getMessages().length;
+          await runAgent(text, async () => {
+            if (attachments.length > 0) {
+              // Persist each attachment under .gg/uploads so files are inspectable
+              // by the agent's tools, then prompt with the media as native blocks.
+              const prepared = await prepareAttachments(cwd, attachments);
+              await session.promptWithAttachments(text, prepared);
+            } else {
+              // Pass the raw text straight through. AgentSession.prompt() is the
+              // single source of truth for slash-command expansion (built-in +
+              // `.gg/commands/*.md` custom), so the agent gets the right body
+              // while the webview keeps showing the short `/name`.
+              await session.prompt(text);
+            }
+          });
+          // After the user's run settles, kick off Ken's auto-review loop — but
+          // only when the turn is actually reviewable (shouldStartAutopilotCycle):
+          // workflow commands (/compare, /bullet-proof, …) end with reports or
+          // A/B/C choices reserved for the USER; registry commands (/help) and
+          // failed runs add no assistant work to judge; a turn that ended in plan
+          // mode has a pending Accept/Reject modal Ken must not preempt. This is
+          // the ONLY entry point into the cycle besides the stranded-queue drain —
+          // it drives any follow-up GG Coder runs itself, so the shared runAgent
+          // finally never recurses.
+          const decision = shouldStartAutopilotCycle({
+            enabled: autopilot,
+            cancelled: autopilotCancelled,
+            planMode: session.getPlanMode(),
+            // A submitted plan (exit_plan fired) routes into the PLAN review
+            // branch — the cycle reviews the plan itself instead of skipping.
+            planPending: pendingPlanPath !== null,
+            workflowCommand,
+            assistantMessagesAdded:
+              countAssistantMessages(session.getMessages()) - assistantsBefore,
+            // Skip the review API call outright for turns that only started a
+            // background process (dev server/watcher), ran a read-only lookup, or
+            // committed/pushed — Ken's autopilot contract already IGNOREs these,
+            // so there's no reason to pay for that verdict.
+            mechanicalOnly: isMechanicalOnlyTurn(
+              extractTurnToolCalls(session.getMessages(), messagesBefore),
+            ),
+          });
+          if (decision.start) {
+            log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
+            await runAutopilotCycle(text);
+          } else if (autopilot) {
+            log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
+          }
+          // A prompt sent while Ken was reviewing (build idle) queued but had no
+          // run to steer into — run it now as a fresh turn so it never strands.
+          await runStrandedQueue();
+        } catch (error) {
+          log("ERROR", "app-sidecar", "accepted prompt continuation failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        } finally {
+          releaseOperation();
         }
-        // A prompt sent while Ken was reviewing (build idle) queued but had no
-        // run to steer into — run it now as a fresh turn so it never strands.
-        await runStrandedQueue();
       });
       return;
     }
@@ -3443,8 +3466,19 @@ async function createSession(
           json(res, 409, { error: "cannot run a task while the agent is running" });
           return;
         }
+        const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
+        if (!releaseOperation) {
+          json(res, 409, { error: "configuration refresh in progress" });
+          return;
+        }
         json(res, 202, { accepted: true });
-        void runTasks(id, all);
+        void runTasks(id, all)
+          .catch((error) => {
+            log("ERROR", "app-sidecar", "accepted task continuation failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          })
+          .finally(releaseOperation);
       });
       return;
     }
@@ -3516,9 +3550,8 @@ async function createSession(
         // CLI): keep thinking on at the first supported tier if it was on but
         // the prior level is unsupported here; leave it off if it was off.
         const prevLevel = session.getThinkingLevel();
-        if (prevLevel && !isThinkingLevelSupported(target.provider, target.id, prevLevel)) {
-          session.setThinkingLevel(getNextThinkingLevel(target.provider, target.id, undefined));
-        }
+        const clampedLevel = clampThinkingLevel(target.provider, target.id, prevLevel);
+        if (clampedLevel !== prevLevel) session.setThinkingLevel(clampedLevel);
         // Persist per-project so THIS window/project restores its own model on
         // restart (not the single global slot every window shares). Keep the
         // global write too as a "last used" fallback for never-opened projects
@@ -3624,22 +3657,40 @@ async function createSession(
 
     if (method === "POST" && url === "/thinking") {
       const st = session.getState();
-      const next = getNextThinkingLevel(st.provider, st.model, session.getThinkingLevel());
+      const previous = session.getThinkingLevel();
+      const next = getNextThinkingLevel(st.provider, st.model, previous);
+      const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
+      if (!releaseOperation) {
+        json(res, 409, { error: "configuration refresh in progress" });
+        return;
+      }
       session.setThinkingLevel(next);
-      // Persist per-project so THIS window restores its thinking state on
-      // restart; keep the global write as a fallback (mirrors the CLI).
-      void saveProjectModelPrefs(cwd, {
-        provider: st.provider,
-        model: st.model,
-        thinkingEnabled: !!next,
-        thinkingLevel: next ?? undefined,
-      }).then(() => persistThinkingLevel(paths.settingsFile, next));
-      const payload = {
-        thinkingLevel: next ?? null,
-        supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
-      };
-      broadcast("thinking_change", payload);
-      json(res, 200, payload);
+      // Report completion only after both project and global preferences persist.
+      void (async () => {
+        try {
+          await saveProjectModelPrefs(cwd, {
+            provider: st.provider,
+            model: st.model,
+            thinkingEnabled: !!next,
+            thinkingLevel: next ?? undefined,
+          });
+          await persistThinkingLevel(paths.settingsFile, next);
+          const payload = {
+            thinkingLevel: next ?? null,
+            supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
+          };
+          broadcast("thinking_change", payload);
+          json(res, 200, payload);
+        } catch (error) {
+          session.setThinkingLevel(previous);
+          log("ERROR", "app-sidecar", "thinking preference persistence failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
+          json(res, 500, { error: "thinking preference persistence failed" });
+        } finally {
+          releaseOperation();
+        }
+      })();
       return;
     }
 

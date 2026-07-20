@@ -59,7 +59,7 @@ export function registerConfiguredAzureModel(
     supportsImages: false,
     supportsVideo: false,
     costTier: "medium",
-    maxThinkingLevel: "high",
+    maxThinkingLevel: "low",
   };
   MODELS.push(model);
   return model;

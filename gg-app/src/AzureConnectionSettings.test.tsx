@@ -136,19 +136,20 @@ describe("AzureConnectionSettings", () => {
     expect(screen.queryByLabelText("API key")).toBeNull();
   });
 
-  it("reports local field errors and focuses the first invalid field", async () => {
+  it("reports local field errors, clears the key, and focuses the first invalid field", async () => {
     await renderState(disconnected);
+    fillConnection();
+    fireEvent.change(screen.getByLabelText("Endpoint"), { target: { value: "http://invalid" } });
 
     fireEvent.click(screen.getByRole("button", { name: "Validate and connect" }));
 
     expect(await screen.findByText(/HTTPS Azure resource endpoint/)).toBeTruthy();
-    expect(screen.getByText("Enter the Azure deployment name.")).toBeTruthy();
-    expect(screen.getByText("Enter an Azure OpenAI API key.")).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Endpoint")));
+    expect(screen.getByLabelText("API key")).toHaveProperty("value", "");
     expect(agentMocks.save).not.toHaveBeenCalled();
   });
 
-  it("saves once, clears the key, and completes after the model refresh event", async () => {
+  it("completes a successful save without waiting for a model refresh event", async () => {
     const onConnectionChanged = vi.fn();
     agentMocks.getStatus.mockResolvedValue(disconnected);
     agentMocks.save.mockResolvedValue(connected);
@@ -159,18 +160,22 @@ describe("AzureConnectionSettings", () => {
     fillConnection();
 
     fireEvent.click(screen.getByRole("button", { name: "Validate and connect" }));
-    await screen.findByText("Connection saved. Refreshing models.");
+
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    expect(screen.getByText("Azure connection saved. Models refreshed.")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe(
+      "Azure connection saved. Models refreshed.",
+    );
+    expect(screen.getByRole("button", { name: "Edit" })).toHaveProperty("disabled", false);
     expect(agentMocks.save).toHaveBeenCalledTimes(1);
     expect(agentMocks.save).toHaveBeenCalledWith({
       endpoint: connected.endpoint,
       deployment: connected.deployment,
       apiKey: "canary-secret-value",
     });
+    expect(onConnectionChanged).not.toHaveBeenCalled();
     expect(container.innerHTML).not.toContain("canary-secret-value");
 
-    await act(async () => agentMocks.modelListener?.());
-    expect(screen.getByText("Azure connection saved. Models refreshed.")).toBeTruthy();
-    expect(onConnectionChanged).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     expect(screen.getByLabelText("API key")).toHaveProperty("value", "");
   });
@@ -193,8 +198,8 @@ describe("AzureConnectionSettings", () => {
     expect(keyInput.value).toBe("");
   });
 
-  it("requires confirmation before removing and handles environment fallback", async () => {
-    agentMocks.remove.mockResolvedValue(environment);
+  it("completes a successful removal without waiting for a model refresh event", async () => {
+    agentMocks.remove.mockResolvedValue(disconnected);
     await renderState(connected);
 
     fireEvent.click(screen.getByRole("button", { name: "Remove connection" }));
@@ -202,10 +207,89 @@ describe("AzureConnectionSettings", () => {
     expect(agentMocks.remove).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Remove connection" }));
 
-    await screen.findByText("Connection removed. Refreshing models.");
-    expect(agentMocks.remove).toHaveBeenCalledTimes(1);
-    await act(async () => agentMocks.modelListener?.());
-    expect(screen.getByText("Environment")).toBeTruthy();
+    expect(await screen.findByText("Not connected")).toBeTruthy();
     expect(screen.getByText("Azure connection removed. Models refreshed.")).toBeTruthy();
+    expect(screen.getByRole("status").textContent).toBe(
+      "Azure connection removed. Models refreshed.",
+    );
+    expect(screen.getByRole("button", { name: "Validate and connect" })).toHaveProperty(
+      "disabled",
+      false,
+    );
+    expect(agentMocks.remove).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("ignores a stale initial status response after a model refresh", async () => {
+    let resolveInitial!: (status: AzureConnectionStatus) => void;
+    let resolveRefresh!: (status: AzureConnectionStatus) => void;
+    agentMocks.getStatus
+      .mockReturnValueOnce(new Promise((resolve) => (resolveInitial = resolve)))
+      .mockReturnValueOnce(new Promise((resolve) => (resolveRefresh = resolve)));
+
+    render(<AzureConnectionSettings />);
+    await waitFor(() => expect(agentMocks.modelListener).toEqual(expect.any(Function)));
+    await act(async () => agentMocks.modelListener?.());
+    await act(async () => resolveRefresh(connected));
+    expect(await screen.findByText("Connected")).toBeTruthy();
+
+    await act(async () => resolveInitial(disconnected));
+    expect(screen.getByText("Connected")).toBeTruthy();
+    expect(screen.queryByText("Not connected")).toBeNull();
+  });
+
+  it("reflects a persisted save when only model refresh fails", async () => {
+    agentMocks.getStatus.mockResolvedValueOnce(disconnected).mockResolvedValueOnce(connected);
+    agentMocks.save.mockRejectedValue(
+      new AzureConnectionCommandError(
+        "The Azure connection changed, but models did not refresh. Restart gg-app to apply it.",
+        "models_refresh_failed",
+      ),
+    );
+    render(<AzureConnectionSettings />);
+    await screen.findByText("Not connected");
+    fillConnection();
+
+    fireEvent.click(screen.getByRole("button", { name: "Validate and connect" }));
+
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    expect(screen.getByText(/Restart gg-app to apply it/)).toBeTruthy();
+    expect(agentMocks.getStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it("reflects a persisted removal when only model refresh fails", async () => {
+    agentMocks.getStatus.mockResolvedValueOnce(connected).mockResolvedValueOnce(environment);
+    agentMocks.remove.mockRejectedValue(
+      new AzureConnectionCommandError(
+        "The Azure connection changed, but models did not refresh. Restart gg-app to apply it.",
+        "models_refresh_failed",
+      ),
+    );
+    render(<AzureConnectionSettings />);
+    await screen.findByText("Connected");
+    fireEvent.click(screen.getByRole("button", { name: "Remove connection" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove connection" }));
+
+    expect(await screen.findByText("Environment")).toBeTruthy();
+    expect(screen.getByText(/Restart gg-app to apply it/)).toBeTruthy();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("clears the password node on cancel and an external status transition", async () => {
+    agentMocks.getStatus.mockResolvedValueOnce(connected).mockResolvedValueOnce(environment);
+    render(<AzureConnectionSettings />);
+    await screen.findByText("Connected");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const cancelledKey = screen.getByLabelText("API key") as HTMLInputElement;
+    fireEvent.change(cancelledKey, { target: { value: "cancel-canary-secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel edit" }));
+    expect(cancelledKey.value).toBe("");
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const transitionedKey = screen.getByLabelText("API key") as HTMLInputElement;
+    fireEvent.change(transitionedKey, { target: { value: "transition-canary-secret" } });
+    await act(async () => agentMocks.modelListener?.());
+    expect(await screen.findByText("Environment")).toBeTruthy();
+    expect(transitionedKey.value).toBe("");
   });
 });

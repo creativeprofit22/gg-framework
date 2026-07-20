@@ -32,4 +32,21 @@ describe("AppSidecarReloadCoordinator", () => {
     expect(reload.shouldBlockSessionMutation("POST")).toBe(false);
     expect(reload.begin([])).toEqual({ ok: false, reason: "not-prepared" });
   });
+
+  it("refuses a reload reservation while a request-level mutation lease is active", () => {
+    const reload = new AppSidecarReloadCoordinator();
+    const release = reload.tryAcquireSessionMutation("POST");
+    expect(release).toEqual(expect.any(Function));
+
+    expect(reload.prepare([])).toEqual({ ok: false, reason: "active-runs" });
+    release?.();
+    release?.();
+
+    expect(reload.prepare([])).toEqual({ ok: true });
+    expect(reload.tryAcquireSessionMutation("POST")).toBeNull();
+    expect(reload.tryAcquireOperationMutation()).toBeNull();
+    reload.cancel();
+    expect(reload.tryAcquireSessionMutation("POST")).toEqual(expect.any(Function));
+    expect(reload.tryAcquireOperationMutation()).toEqual(expect.any(Function));
+  });
 });

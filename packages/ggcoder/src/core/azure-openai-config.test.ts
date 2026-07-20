@@ -12,6 +12,7 @@ import {
   registerConfiguredAzureModel,
   resolveTransportModel,
 } from "./model-registry.js";
+import { getSupportedThinkingLevels } from "./thinking-level.js";
 import { resolveStartOrFallback } from "./resolve-start.js";
 
 const completeEnvironment: AzureOpenAIEnvironment = {
@@ -69,6 +70,43 @@ describe("Azure OpenAI app boundaries", () => {
   );
 
   it.each([
+    ["256 ASCII bytes", "a".repeat(256)],
+    ["256 multibyte UTF-8 bytes", "é".repeat(128)],
+  ])("accepts a deployment containing %s", async (_description, deployment) => {
+    const environment = { ...completeEnvironment, AZURE_OPENAI_DEPLOYMENT: deployment };
+    expect(resolveAzureOpenAIConfig(environment)?.deployment).toBe(deployment);
+
+    const auth = new AuthStorage("unused-auth.json", environment);
+    await expect(auth.hasProviderAuth("azure")).resolves.toBe(true);
+
+    const modelId = `azure:${deployment}`;
+    addedModelIds.add(modelId);
+    expect(registerConfiguredAzureModel(environment)?.id).toBe(modelId);
+  });
+
+  it.each([
+    ["257 ASCII bytes", "a".repeat(257)],
+    ["258 multibyte UTF-8 bytes", "é".repeat(129)],
+    ["257 mixed UTF-8 bytes", `${"a".repeat(255)}é`],
+    ["an embedded C0 control character", "deployment\u0000name"],
+    ["an embedded C1 control character", "deployment\u0085name"],
+  ])(
+    "rejects a deployment containing %s at every app boundary",
+    async (_description, deployment) => {
+      const environment = { ...completeEnvironment, AZURE_OPENAI_DEPLOYMENT: deployment };
+      expect(resolveAzureOpenAIConfig(environment)).toBeUndefined();
+
+      const auth = new AuthStorage("unused-auth.json", environment);
+      await expect(auth.hasProviderAuth("azure")).resolves.toBe(false);
+      await expect(auth.resolveCredentials("azure")).rejects.toBeInstanceOf(NotLoggedInError);
+
+      const before = MODELS.length;
+      expect(registerConfiguredAzureModel(environment)).toBeUndefined();
+      expect(MODELS).toHaveLength(before);
+    },
+  );
+
+  it.each([
     "not-a-url",
     "https://example.openai.azure.com/openai/v1",
     "http://example.openai.azure.com/openai/v1/responses",
@@ -105,6 +143,7 @@ describe("Azure OpenAI app boundaries", () => {
       supportsThinking: false,
       supportsImages: false,
       supportsVideo: false,
+      maxThinkingLevel: "low",
     });
     expect(JSON.stringify(model)).not.toContain("azure-test-secret");
     expect(registerConfiguredAzureModel(completeEnvironment)).toBe(model);
@@ -112,6 +151,7 @@ describe("Azure OpenAI app boundaries", () => {
     expect(MODELS.filter((candidate) => candidate.id === "azure:gpt-5.6-sol")).toEqual([model]);
     expect(getDefaultModel("azure")).toBe(model);
     expect(getModelDisplayId(model!.id)).toBe("gpt-5.6-sol");
+    expect(getSupportedThinkingLevels("azure", model!.id)).toEqual([]);
     expect(resolveTransportModel("azure", model!.id, completeEnvironment)).toBe("gpt-5.6-sol");
 
     const selected = await resolveStartOrFallback(

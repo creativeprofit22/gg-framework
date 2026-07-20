@@ -101,6 +101,9 @@ impl MetadataStore for FileMetadataStore {
         std::fs::create_dir_all(parent).map_err(|_| MetadataStoreError::Unavailable)?;
         let serialized =
             serde_json::to_vec_pretty(metadata).map_err(|_| MetadataStoreError::Invalid)?;
+        // atomic-write-file creates its temporary file beside the destination.
+        // On Windows that preserves the containing ~/.gg directory's inherited ACL;
+        // on Unix we override the mode below so replacement never preserves 0644.
         #[allow(unused_mut)] // Mutated only on Unix to enforce private permissions.
         let mut options = atomic_write_file::OpenOptions::new();
         #[cfg(unix)]
@@ -191,5 +194,32 @@ mod tests {
         assert!(invalid
             .write(&metadata("https://x.openai.azure.com", "x"))
             .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_write_replaces_permissive_mode_with_private_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "gg-app-azure-private-mode-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(METADATA_FILE);
+        std::fs::write(&path, b"legacy metadata").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        FileMetadataStore::new(path.clone())
+            .write(&metadata("https://private.openai.azure.com", "private"))
+            .unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

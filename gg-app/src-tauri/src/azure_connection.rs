@@ -325,6 +325,27 @@ pub(crate) fn secure_config() -> Result<Option<SecureAzureConfig>, AzureConnecti
     production_manager()?.secure_config()
 }
 
+fn status_after_secure_removal(environment: &AzureEnvironment) -> AzureConnectionStatus {
+    if let Some(config) = resolve_environment(environment) {
+        return status_for(
+            AzureConnectionSource::Environment,
+            &config.base_url,
+            &config.deployment,
+            false,
+            false,
+        );
+    }
+    AzureConnectionStatus {
+        configured: false,
+        source: AzureConnectionSource::None,
+        endpoint: None,
+        deployment: None,
+        endpoint_summary: None,
+        deployment_summary: None,
+        has_stored_key: false,
+    }
+}
+
 fn restore_secret<S: SecretStore>(
     store: &S,
     previous: Option<&str>,
@@ -549,5 +570,25 @@ mod tests {
         assert_eq!(error.code, "secure_storage_remove_failed");
         assert_eq!(metadata.load().unwrap(), Some(saved));
         assert!(!serde_json::to_string(&error).unwrap().contains(&canary));
+    }
+
+    #[test]
+    fn successful_removal_status_uses_environment_without_secure_store_reads() {
+        let canary = canary();
+        let environment = AzureEnvironment {
+            api_key: Some(canary),
+            base_url: Some("https://environment.openai.azure.com/openai/v1/responses".into()),
+            deployment: Some("environment-deployment".into()),
+        };
+
+        let status = status_after_secure_removal(&environment);
+
+        assert_eq!(status.source, AzureConnectionSource::Environment);
+        assert_eq!(status.endpoint, None);
+        let deployment_summary = status.deployment_summary.as_deref().unwrap();
+        assert!(deployment_summary.starts_with('e'));
+        assert!(deployment_summary.ends_with('t'));
+        assert!(!deployment_summary.contains("environment-deployment"));
+        assert!(!status.has_stored_key);
     }
 }

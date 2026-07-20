@@ -17,6 +17,9 @@ export interface AzureOpenAIConfig {
   deployment: string;
 }
 
+const MAX_AZURE_DEPLOYMENT_BYTES = 256;
+const UNICODE_CONTROL_CHARACTER = /\p{Cc}/u;
+
 /** Azure configuration is usable only with a strict full Responses endpoint URL. */
 export function resolveAzureOpenAIConfig(
   environment: AzureOpenAIEnvironment = process.env,
@@ -24,7 +27,16 @@ export function resolveAzureOpenAIConfig(
   const apiKey = environment.AZURE_OPENAI_API_KEY?.trim();
   const baseUrl = environment.AZURE_OPENAI_BASE_URL?.trim();
   const deployment = environment.AZURE_OPENAI_DEPLOYMENT?.trim();
-  if (!apiKey || !baseUrl || !deployment || !isAzureResponsesUrl(baseUrl)) return undefined;
+  if (
+    !apiKey ||
+    !baseUrl ||
+    !deployment ||
+    !isAzureResponsesUrl(baseUrl) ||
+    new TextEncoder().encode(deployment).byteLength > MAX_AZURE_DEPLOYMENT_BYTES ||
+    UNICODE_CONTROL_CHARACTER.test(deployment)
+  ) {
+    return undefined;
+  }
   return { apiKey, baseUrl, deployment };
 }
 

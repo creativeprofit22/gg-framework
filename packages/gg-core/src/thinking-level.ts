@@ -1,5 +1,5 @@
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
-import { getMaxThinkingLevel } from "./model-registry.js";
+import { getMaxThinkingLevel, getModel } from "./model-registry.js";
 
 const OPENAI_GPT_THINKING_LEVELS: readonly ThinkingLevel[] = ["medium", "high", "xhigh"];
 const OPENAI_GPT_56_THINKING_LEVELS: readonly ThinkingLevel[] = [
@@ -57,6 +57,9 @@ export function getSupportedThinkingLevels(
   provider: Provider,
   model: string,
 ): readonly ThinkingLevel[] {
+  const registeredModel = getModel(model);
+  if (registeredModel && !registeredModel.supportsThinking) return [];
+
   const maxLevel = getMaxThinkingLevel(model);
   if (isAnthropicAdaptiveModel(provider, model)) {
     const levels = isAnthropicOpus48Or47Model(provider, model)
@@ -116,4 +119,13 @@ export function getNextThinkingLevel(
   const index = supportedLevels.indexOf(current);
   if (index === -1) return supportedLevels[0];
   return supportedLevels[index + 1];
+}
+
+export function clampThinkingLevel(
+  provider: Provider,
+  model: string,
+  current: ThinkingLevel | undefined,
+): ThinkingLevel | undefined {
+  if (!current || isThinkingLevelSupported(provider, model, current)) return current;
+  return getNextThinkingLevel(provider, model, undefined);
 }

@@ -17,6 +17,7 @@ import {
 import { McpOAuthStore } from "./oauth-store.js";
 import { isLocalhost, alternateLoopback, isNetworkError } from "./loopback.js";
 import { resolveStdioCommand } from "./resolve-stdio.js";
+import { buildMcpStdioEnv } from "./env.js";
 
 interface ConnectedServer {
   name: string;
@@ -263,7 +264,7 @@ export class MCPClientManager {
       transport = new StdioClientTransport({
         command: resolved.command,
         args: resolved.args,
-        env: { ...process.env, ...config.env } as Record<string, string>,
+        env: buildMcpStdioEnv(config.env),
         cwd: os.homedir(),
         stderr: "pipe",
       });

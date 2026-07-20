@@ -13,6 +13,7 @@ const nativeMocks = vi.hoisted(() => ({
     paths.map((path) => ({ path, isDir: path.endsWith("folder") })),
   ),
   modelsChanged: null as null | (() => void),
+  modelsUnlisten: vi.fn(),
   readDroppedFileAttachment: vi.fn(async (path: string) => ({
     path,
     name: "file.txt",
@@ -99,7 +100,7 @@ vi.mock("./agent", async (importOriginal) => {
     onWindowOrder: vi.fn(async () => vi.fn()),
     onModelsChanged: vi.fn(async (callback: () => void) => {
       nativeMocks.modelsChanged = callback;
-      return vi.fn();
+      return nativeMocks.modelsUnlisten;
     }),
     isSecondaryWindow: false,
     windowLabel: "main",
@@ -111,9 +112,16 @@ vi.mock("./agent", async (importOriginal) => {
 
 import { AgentPane } from "./AgentPane";
 import type { PaneInputActions } from "./AgentPane";
-import type { PaneAgentClient, PaneSessionTarget } from "./agent";
+import type { AgentState, PaneAgentClient, PaneSessionTarget } from "./agent";
 
 const target: PaneSessionTarget = { mode: "code", cwd: "/work", sessionPath: "/session" };
+const agentState = (model: string): AgentState => ({
+  provider: "azure",
+  model,
+  cwd: "/work",
+  mode: "code",
+  running: false,
+});
 function client(paneId: string, generation: number): PaneAgentClient {
   const empty = vi.fn(async () => []);
   return {
@@ -177,6 +185,7 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   nativeMocks.modelsChanged = null;
+  nativeMocks.modelsUnlisten.mockReset();
 });
 describe("AgentPane lifecycle", () => {
   it("wires the restored home UI through the pane-scoped catalog client", async () => {
@@ -267,6 +276,53 @@ describe("AgentPane lifecycle", () => {
 
     await waitFor(() => expect(pane.listModels).toHaveBeenCalledOnce());
     expect(pane.waitForReady).toHaveBeenCalledOnce();
+  });
+
+  it("closes an open model menu even when the refreshed catalog compares equal", async () => {
+    const pane = client("pane-1", 1);
+    const catalog = [{ id: "azure:gpt-old", name: "Azure old", provider: "azure" }];
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-old"));
+    vi.mocked(pane.listModels).mockResolvedValue(catalog);
+    const view = render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const modelButton = await screen.findByTitle("Switch Supah Coder's model");
+    await waitFor(() => expect((modelButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(modelButton);
+    expect(screen.getByText("Supah Coder model")).toBeTruthy();
+
+    await act(async () => {
+      nativeMocks.modelsChanged?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(screen.queryByText("Supah Coder model")).toBeNull());
+    view.unmount();
+    await waitFor(() => expect(nativeMocks.modelsUnlisten).toHaveBeenCalledOnce());
+  });
+
+  it("refreshes the active model state after daemon respawn", async () => {
+    const pane = client("pane-1", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-old"));
+    vi.mocked(pane.listModels).mockResolvedValue([
+      { id: "azure:gpt-old", name: "Azure old", provider: "azure" },
+    ]);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const modelButton = await screen.findByTitle("Switch Supah Coder's model");
+    await waitFor(() => expect(modelButton.textContent).toContain("Azure old"));
+    vi.mocked(pane.getState).mockReset().mockResolvedValue(agentState("azure:gpt-new"));
+    vi.mocked(pane.listModels)
+      .mockReset()
+      .mockResolvedValue([{ id: "azure:gpt-new", name: "Azure new", provider: "azure" }]);
+
+    await act(async () => {
+      nativeMocks.modelsChanged?.();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(modelButton.textContent).toContain("Azure new"));
   });
 
   it("separate pane clients create and subscribe independently", async () => {

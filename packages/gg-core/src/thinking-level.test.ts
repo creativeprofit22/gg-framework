@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { MODELS } from "./model-registry.js";
 import {
+  clampThinkingLevel,
   getNextThinkingLevel,
   getSupportedThinkingLevels,
   isThinkingLevelSupported,
@@ -62,6 +64,36 @@ describe("thinking-level helpers", () => {
     expect(getNextThinkingLevel("sakana", "fugu", "high")).toBe("xhigh");
     expect(getNextThinkingLevel("sakana", "fugu", "xhigh")).toBeUndefined();
     expect(isThinkingLevelSupported("sakana", "fugu", "medium")).toBe(false);
+  });
+
+  it("returns no levels for a registered model that does not support thinking", () => {
+    const model = {
+      id: "test-non-thinking-model",
+      name: "Test Non-Thinking Model",
+      provider: "azure" as const,
+      contextWindow: 1_000,
+      maxOutputTokens: 100,
+      supportsThinking: false,
+      supportsImages: false,
+      supportsVideo: false,
+      costTier: "low" as const,
+      maxThinkingLevel: "low" as const,
+    };
+    MODELS.push(model);
+
+    try {
+      expect(getSupportedThinkingLevels(model.provider, model.id)).toEqual([]);
+      expect(getNextThinkingLevel(model.provider, model.id, undefined)).toBeUndefined();
+      expect(getNextThinkingLevel(model.provider, model.id, "high")).toBeUndefined();
+      expect(clampThinkingLevel(model.provider, model.id, "high")).toBeUndefined();
+    } finally {
+      MODELS.splice(MODELS.indexOf(model), 1);
+    }
+  });
+
+  it("preserves fallback thinking behavior for unknown models", () => {
+    expect(getSupportedThinkingLevels("azure", "unknown-azure-model")).toEqual(["high"]);
+    expect(getNextThinkingLevel("azure", "unknown-azure-model", undefined)).toBe("high");
   });
 
   it("keeps non-cycling providers at their model's sole supported effort", () => {

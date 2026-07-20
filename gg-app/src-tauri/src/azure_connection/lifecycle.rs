@@ -52,9 +52,12 @@ where
             return Err(error);
         }
     };
-    if let Err(error) = reloader.reload().await {
+    if reloader.reload().await.is_err() {
         let _ = reloader.cancel().await;
-        return Err(error);
+        return Err(AzureConnectionError::general(
+            "models_refresh_failed",
+            "The Azure connection changed securely, but models did not refresh. Restart gg-app to apply the change.",
+        ));
     }
     Ok(result)
 }
@@ -291,8 +294,8 @@ mod tests {
                 self.calls.lock().unwrap().push("reload");
                 if self.fail_reload {
                     Err(AzureConnectionError::general(
-                        "models_refresh_failed",
-                        "The Azure connection changed securely, but models did not refresh. Restart gg-app to apply the change.",
+                        "models_refresh_unavailable",
+                        "Models could not refresh before the mutation result was classified.",
                     ))
                 } else {
                     Ok(())

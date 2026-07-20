@@ -854,6 +854,13 @@ const AZURE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
   validation_unavailable: "Azure validation is unavailable. Try again shortly.",
 };
 
+const AZURE_ERROR_FIELDS: Readonly<Partial<Record<string, AzureConnectionErrorField>>> = {
+  api_key_required: "apiKey",
+  invalid_api_key: "apiKey",
+  invalid_deployment: "deployment",
+  invalid_endpoint: "endpoint",
+};
+
 export function asAzureCommandError(error: unknown, fallback: string): AzureConnectionCommandError {
   let payload: unknown = error;
   if (typeof error === "string" && error.trimStart().startsWith("{")) {
@@ -865,14 +872,17 @@ export function asAzureCommandError(error: unknown, fallback: string): AzureConn
   }
   if (typeof payload === "object" && payload !== null) {
     const candidate = payload as { code?: unknown; field?: unknown };
-    const code = typeof candidate.code === "string" ? candidate.code : "unknown";
-    const field =
-      candidate.field === "endpoint" ||
-      candidate.field === "deployment" ||
-      candidate.field === "apiKey"
-        ? candidate.field
-        : null;
-    return new AzureConnectionCommandError(AZURE_ERROR_MESSAGES[code] ?? fallback, code, field);
+    const candidateCode = typeof candidate.code === "string" ? candidate.code : "";
+    const code = Object.prototype.hasOwnProperty.call(AZURE_ERROR_MESSAGES, candidateCode)
+      ? candidateCode
+      : "unknown";
+    const expectedField = AZURE_ERROR_FIELDS[code] ?? null;
+    const field = candidate.field === expectedField ? expectedField : null;
+    return new AzureConnectionCommandError(
+      code === "unknown" ? fallback : AZURE_ERROR_MESSAGES[code],
+      code,
+      field,
+    );
   }
   return new AzureConnectionCommandError(fallback, "unknown");
 }

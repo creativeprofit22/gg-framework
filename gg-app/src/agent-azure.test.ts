@@ -80,4 +80,27 @@ describe("Azure connection bridge", () => {
         "The Azure connection changed, but models did not refresh. Restart gg-app to apply it.",
     });
   });
+
+  it("rejects unallowlisted codes, fields, and native messages", () => {
+    const fallback = "Safe fallback.";
+    const unknown = asAzureCommandError(
+      {
+        code: "provider_body_canary-secret-value",
+        field: "apiKey",
+        message: "raw native canary-secret-value",
+      },
+      fallback,
+    );
+    expect(unknown).toMatchObject({ code: "unknown", field: null, message: fallback });
+
+    const invalidField = asAzureCommandError(
+      { code: "invalid_endpoint", field: "credential", message: "raw native message" },
+      fallback,
+    );
+    expect(invalidField).toMatchObject({
+      code: "invalid_endpoint",
+      field: null,
+      message: "Enter a valid HTTPS Azure resource endpoint.",
+    });
+  });
 });

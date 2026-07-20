@@ -149,6 +149,44 @@ describe("AzureConnectionSettings", () => {
     expect(agentMocks.save).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      name: "dotted Azure resource names",
+      label: "Endpoint",
+      value: "https://foo.bar.openai.azure.com",
+      error: /HTTPS Azure resource endpoint/,
+    },
+    {
+      name: "explicit endpoint ports",
+      label: "Endpoint",
+      value: "https://sample.openai.azure.com:443",
+      error: /HTTPS Azure resource endpoint/,
+    },
+    {
+      name: "oversized deployment names",
+      label: "Deployment",
+      value: "d".repeat(257),
+      error: /1 to 256 characters/,
+    },
+    {
+      name: "oversized API keys",
+      label: "API key",
+      value: "k".repeat(8_193),
+      error: /valid Azure OpenAI API key/,
+    },
+  ])("rejects $name locally and focuses the invalid field", async ({ label, value, error }) => {
+    await renderState(disconnected);
+    fillConnection();
+    const invalidInput = screen.getByLabelText(label);
+    fireEvent.change(invalidInput, { target: { value } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Validate and connect" }));
+
+    expect(await screen.findByText(error)).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(invalidInput));
+    expect(agentMocks.save).not.toHaveBeenCalled();
+  });
+
   it("completes a successful save without waiting for a model refresh event", async () => {
     const onConnectionChanged = vi.fn();
     agentMocks.getStatus.mockResolvedValue(disconnected);

@@ -13,35 +13,91 @@ export type AzureFieldErrors = Partial<Record<AzureConnectionErrorField, string>
 export type AzurePendingState = "loading" | "saving" | "removing" | null;
 type RefreshOperation = "save" | "remove";
 
+// Keep these byte limits aligned with src-tauri/src/azure_connection/validation.rs.
+const MAX_ENDPOINT_LENGTH = 2_048;
+const MAX_DEPLOYMENT_LENGTH = 256;
+const MAX_API_KEY_LENGTH = 8_192;
+const AZURE_HOST_SUFFIX = ".openai.azure.com";
+const textEncoder = new TextEncoder();
+
+function exceedsByteLength(value: string, maximum: number): boolean {
+  return textEncoder.encode(value).length > maximum;
+}
+
+function containsControlCharacter(value: string): boolean {
+  return /\p{Cc}/u.test(value);
+}
+
+function hasExplicitPort(value: string): boolean {
+  const authority = /^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/i.exec(value)?.[1] ?? "";
+  const hostAndPort = authority.slice(authority.lastIndexOf("@") + 1);
+  return /:\d+$/.test(hostAndPort);
+}
+
 function localErrors(
   endpoint: string,
   deployment: string,
   hasStoredKey: boolean,
-  apiKeyPresent: boolean,
+  apiKey: string,
 ): AzureFieldErrors {
   const errors: AzureFieldErrors = {};
   const trimmedEndpoint = endpoint.trim();
-  try {
-    const parsed = new URL(trimmedEndpoint);
-    const validPath = parsed.pathname === "/" || parsed.pathname === "";
-    if (
-      parsed.protocol !== "https:" ||
-      !parsed.hostname.endsWith(".openai.azure.com") ||
-      parsed.username ||
-      parsed.password ||
-      parsed.search ||
-      parsed.hash ||
-      !validPath
-    ) {
+  const invalidEndpoint =
+    !trimmedEndpoint ||
+    exceedsByteLength(trimmedEndpoint, MAX_ENDPOINT_LENGTH) ||
+    containsControlCharacter(trimmedEndpoint);
+
+  if (!invalidEndpoint) {
+    try {
+      const parsed = new URL(trimmedEndpoint);
+      const resource = parsed.hostname.endsWith(AZURE_HOST_SUFFIX)
+        ? parsed.hostname.slice(0, -AZURE_HOST_SUFFIX.length)
+        : "";
+      const validPath = parsed.pathname === "/" || parsed.pathname === "";
+      if (
+        parsed.protocol !== "https:" ||
+        !resource ||
+        resource.includes(".") ||
+        parsed.port ||
+        hasExplicitPort(trimmedEndpoint) ||
+        parsed.username ||
+        parsed.password ||
+        parsed.search ||
+        parsed.hash ||
+        !validPath
+      ) {
+        errors.endpoint =
+          "Enter an HTTPS Azure resource endpoint, such as https://example.openai.azure.com.";
+      }
+    } catch {
       errors.endpoint =
         "Enter an HTTPS Azure resource endpoint, such as https://example.openai.azure.com.";
     }
-  } catch {
+  } else {
     errors.endpoint =
       "Enter an HTTPS Azure resource endpoint, such as https://example.openai.azure.com.";
   }
-  if (!deployment.trim()) errors.deployment = "Enter the Azure deployment name.";
-  if (!hasStoredKey && !apiKeyPresent) errors.apiKey = "Enter an Azure OpenAI API key.";
+
+  const trimmedDeployment = deployment.trim();
+  if (
+    !trimmedDeployment ||
+    exceedsByteLength(trimmedDeployment, MAX_DEPLOYMENT_LENGTH) ||
+    containsControlCharacter(trimmedDeployment)
+  ) {
+    errors.deployment = "Enter an Azure deployment name containing 1 to 256 characters.";
+  }
+
+  const trimmedApiKey = apiKey.trim();
+  if (!hasStoredKey && !trimmedApiKey) {
+    errors.apiKey = "Enter an Azure OpenAI API key.";
+  } else if (
+    trimmedApiKey &&
+    (exceedsByteLength(trimmedApiKey, MAX_API_KEY_LENGTH) ||
+      containsControlCharacter(trimmedApiKey))
+  ) {
+    errors.apiKey = "Enter a valid Azure OpenAI API key.";
+  }
+
   return errors;
 }
 
@@ -200,12 +256,7 @@ export function useAzureConnectionFormState(onConnectionChanged?: () => void) {
     if (pending) return;
     const apiKeyInput = apiKeyRef.current;
     const apiKey = apiKeyInput ? apiKeyInput.value : "";
-    const nextErrors = localErrors(
-      endpoint,
-      deployment,
-      status?.hasStoredKey ?? false,
-      Boolean(apiKey),
-    );
+    const nextErrors = localErrors(endpoint, deployment, status?.hasStoredKey ?? false, apiKey);
     if (Object.keys(nextErrors).length > 0) {
       setErrors(nextErrors);
       setGeneralError(null);

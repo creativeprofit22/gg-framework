@@ -6,6 +6,7 @@ export type Provider =
   | "anthropic"
   | "xiaomi"
   | "openai"
+  | "azure"
   | "gemini"
   | "glm"
   | "moonshot"

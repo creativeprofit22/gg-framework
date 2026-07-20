@@ -57,7 +57,10 @@ export interface VideoContent {
 
 export interface ToolCall {
   type: "tool_call";
+  /** Public provider call ID used to correlate the tool result. */
   id: string;
+  /** Responses API function-call item ID, replayed independently from the public call ID. */
+  itemId?: string;
   name: string;
   args: Record<string, unknown>;
 }
@@ -166,7 +169,10 @@ export interface ToolCallDeltaEvent {
 
 export interface ToolCallDoneEvent {
   type: "toolcall_done";
+  /** Public provider call ID used to correlate the tool result. */
   id: string;
+  /** Responses API function-call item ID, when supplied by the provider. */
+  itemId?: string;
   name: string;
   args: Record<string, unknown>;
 }

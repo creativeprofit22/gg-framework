@@ -155,7 +155,7 @@ describe("AgentSession Azure Responses tool round trip", () => {
       expect.arrayContaining([
         expect.objectContaining({
           type: "function_call",
-          id: "call_1",
+          id: "fc_1",
           call_id: "call_1",
           name: "ls",
           arguments: '{"path":"."}',

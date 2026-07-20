@@ -198,6 +198,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const toolCall: ToolCall = {
       type: "tool_call",
       id: pending.id,
+      ...(pending.itemId ? { itemId: pending.itemId } : {}),
       name: pending.name,
       args: pending.args!,
     };
@@ -330,6 +331,7 @@ function toToolCallDoneEvent(
   return {
     type: "toolcall_done",
     id: toolCall.id,
+    ...(toolCall.itemId ? { itemId: toolCall.itemId } : {}),
     name: toolCall.name,
     args,
   };

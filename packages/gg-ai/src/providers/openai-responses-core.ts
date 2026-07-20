@@ -105,14 +105,12 @@ export function serializeResponsesInput(
         } else if (part.type === "text") {
           input.push(assistantTextItem(part.text));
         } else if (part.type === "tool_call") {
-          const ids = adapter.encodeToolCallId?.(part.id) ?? {
-            callId: part.id,
-            itemId: part.id,
-          };
+          const encodedIds = adapter.encodeToolCallId?.(part.id);
+          const itemId = part.itemId ?? encodedIds?.itemId;
           input.push({
             type: "function_call",
-            id: ids.itemId,
-            call_id: ids.callId,
+            ...(itemId ? { id: itemId } : {}),
+            call_id: encodedIds?.callId ?? part.id,
             name: part.name,
             arguments: JSON.stringify(part.args),
           });

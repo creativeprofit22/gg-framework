@@ -287,12 +287,14 @@ describe("streamAzureOpenAIResponses", () => {
           {
             type: "tool_call",
             id: "call/public:weather-1",
+            itemId: "fc_weather",
             name: "weather",
             args: { units: "celsius", city: "Seattle" },
           },
           {
             type: "tool_call",
             id: "call.public.time+2",
+            itemId: "fc_time",
             name: "time",
             args: { zone: "UTC" },
           },
@@ -320,10 +322,17 @@ describe("streamAzureOpenAIResponses", () => {
         name: "weather",
         argsJson: '"Seattle","units":"celsius"}',
       },
-      { type: "toolcall_done", id: "call.public.time+2", name: "time", args: { zone: "UTC" } },
+      {
+        type: "toolcall_done",
+        id: "call.public.time+2",
+        itemId: "fc_time",
+        name: "time",
+        args: { zone: "UTC" },
+      },
       {
         type: "toolcall_done",
         id: "call/public:weather-1",
+        itemId: "fc_weather",
         name: "weather",
         args: { units: "celsius", city: "Seattle" },
       },

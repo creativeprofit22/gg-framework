@@ -73,7 +73,13 @@ describe("provider-neutral Responses parsing", () => {
         content: [
           { type: "thinking", text: "private" },
           { type: "text", text: "Then call." },
-          { type: "tool_call", id: "call_1", name: "read", args: { path: "a.txt" } },
+          {
+            type: "tool_call",
+            id: "call_1",
+            itemId: "fc_1",
+            name: "read",
+            args: { path: "a.txt" },
+          },
         ],
       },
       {
@@ -83,7 +89,7 @@ describe("provider-neutral Responses parsing", () => {
     ]);
 
     expect(JSON.stringify(serialized)).toBe(
-      '{"system":"Be concise.","input":[{"role":"user","content":[{"type":"input_text","text":"Inspect this."},{"type":"input_image","detail":"auto","image_url":"data:image/png;base64,aW1hZ2U="}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"First answer.","annotations":[]}],"status":"completed"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Then call.","annotations":[]}],"status":"completed"},{"type":"function_call","id":"call_1","call_id":"call_1","name":"read","arguments":"{\\"path\\":\\"a.txt\\"}"},{"type":"function_call_output","call_id":"call_1","output":"contents"}]}',
+      '{"system":"Be concise.","input":[{"role":"user","content":[{"type":"input_text","text":"Inspect this."},{"type":"input_image","detail":"auto","image_url":"data:image/png;base64,aW1hZ2U="}]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"First answer.","annotations":[]}],"status":"completed"},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Then call.","annotations":[]}],"status":"completed"},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","arguments":"{\\"path\\":\\"a.txt\\"}"},{"type":"function_call_output","call_id":"call_1","output":"contents"}]}',
     );
   });
 

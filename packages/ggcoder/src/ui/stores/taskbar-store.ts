@@ -45,8 +45,8 @@ export function navigateTaskBar(index: number) {
   taskBarStore.setState({ selectedIndex: index });
 }
 
-export function killTask(pm: ProcessManager, id: string) {
-  pm.stop(id);
+export async function killTask(pm: ProcessManager, id: string): Promise<string> {
+  return pm.stop(id);
 }
 
 // ── Effects (call from component) ────────────────────────

@@ -13,7 +13,7 @@ interface FooterStatusRowProps {
   selectedIndex: number;
   onExpand: () => void;
   onCollapse: () => void;
-  onKill: (id: string) => void;
+  onKill: (id: string) => Promise<void>;
   onExit: () => void;
   onNavigate: (index: number) => void;
   theme: ReturnType<typeof useTheme>;

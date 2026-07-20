@@ -208,11 +208,18 @@ export class ProcessManager {
 
     // Wait up to 5s for close, then hard-kill a surviving POSIX tree.
     const exited = await new Promise<boolean>((resolve) => {
-      const timeout = setTimeout(() => resolve(false), 5000);
-      child.on("close", () => {
+      let settled = false;
+      const settle = (didExit: boolean): void => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timeout);
-        resolve(true);
-      });
+        child.removeListener("close", onClose);
+        resolve(didExit);
+      };
+      const onClose = (): void => settle(true);
+      const timeout = setTimeout(() => settle(false), 5000);
+
+      child.once("close", onClose);
     });
 
     if (!exited) {

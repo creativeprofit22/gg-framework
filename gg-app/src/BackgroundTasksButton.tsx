@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { theme } from "./theme";
-import { killTask, type BackgroundTask } from "./agent";
+import type { BackgroundTask, KillTaskResult } from "./agent";
 
 /**
  * Footer indicator for background tasks (bash run_in_background) — mirrors the
@@ -22,7 +22,15 @@ function shortCommand(cmd: string): string {
   return firstLine.length > 48 ? `${firstLine.slice(0, 47)}\u2026` : firstLine;
 }
 
-export function BackgroundTasksButton({ tasks }: { tasks: BackgroundTask[] }): React.ReactElement {
+interface BackgroundTasksButtonProps {
+  tasks: BackgroundTask[];
+  killTask: (id: string) => Promise<KillTaskResult>;
+}
+
+export function BackgroundTasksButton({
+  tasks,
+  killTask,
+}: BackgroundTasksButtonProps): React.ReactElement {
   const [open, setOpen] = useState(false);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
   const [killResult, setKillResult] = useState<{ ok: boolean; message: string } | null>(null);

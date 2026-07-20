@@ -15,8 +15,8 @@ import {
   expandTaskBar,
   collapseTaskBar,
   navigateTaskBar,
-  killTask,
 } from "./stores/taskbar-store.js";
+import { killTaskWithFeedback } from "./task-kill-feedback.js";
 import { playNotificationSound } from "../utils/sound.js";
 import {
   type Message,
@@ -941,8 +941,11 @@ export function App(props: AppProps) {
   const handleTaskBarExpand = useCallback(() => expandTaskBar(), []);
   const handleTaskBarCollapse = useCallback(() => collapseTaskBar(), []);
   const handleTaskKill = useCallback(
-    (id: string) => {
-      if (props.processManager) killTask(props.processManager, id);
+    async (id: string): Promise<void> => {
+      if (!props.processManager) return;
+      await killTaskWithFeedback(props.processManager, id, getId(), (item) => {
+        setLiveItems((prev) => [...prev, item]);
+      });
     },
     [props.processManager],
   );

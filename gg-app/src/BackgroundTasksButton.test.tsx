@@ -2,8 +2,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { killTask } = vi.hoisted(() => ({ killTask: vi.fn() }));
-vi.mock("./agent", () => ({ killTask }));
+const killTask = vi.fn();
 
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import type { BackgroundTask, KillTaskResult } from "./agent";
@@ -30,7 +29,7 @@ describe("BackgroundTasksButton task termination", () => {
       }),
     );
 
-    render(<BackgroundTasksButton tasks={[runningTask]} />);
+    render(<BackgroundTasksButton tasks={[runningTask]} killTask={killTask} />);
     fireEvent.click(screen.getByRole("button", { name: "Background tasks" }));
     fireEvent.click(screen.getByRole("button", { name: "Stop task: pnpm dev" }));
 
@@ -51,7 +50,7 @@ describe("BackgroundTasksButton task termination", () => {
       message: "Failed to stop process task-1: access denied.",
     });
 
-    render(<BackgroundTasksButton tasks={[runningTask]} />);
+    render(<BackgroundTasksButton tasks={[runningTask]} killTask={killTask} />);
     fireEvent.click(screen.getByRole("button", { name: "Background tasks" }));
     fireEvent.click(screen.getByRole("button", { name: "Stop task: pnpm dev" }));
 

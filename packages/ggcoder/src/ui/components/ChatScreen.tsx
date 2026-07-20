@@ -116,7 +116,7 @@ interface ChatScreenProps {
   selectedTaskIndex: number;
   onTaskBarExpand: () => void;
   onTaskBarCollapse: () => void;
-  onTaskKill: (id: string) => void;
+  onTaskKill: (id: string) => Promise<void>;
   onTaskBarExit: () => void;
   onTaskNavigate: (index: number) => void;
 }

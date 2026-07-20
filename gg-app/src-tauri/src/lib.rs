@@ -1550,7 +1550,7 @@ async fn agent_auth_logout(
         .map_err(|e| e.to_string())
 }
 
-/// Proxy: stop a background task by id. Returns `{ message }`.
+/// Proxy: stop a background task by id. Returns `{ ok, message }`.
 #[tauri::command]
 async fn agent_kill_task(
     webview: WebviewWindow,

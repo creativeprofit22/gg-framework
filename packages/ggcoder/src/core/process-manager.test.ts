@@ -45,13 +45,16 @@ describe("ProcessManager Windows termination", () => {
         killProcessTree,
       });
 
+      const baselineCloseListeners = child.listenerCount("close");
       const stopping = manager.stop(proc.id);
 
+      expect(child.listenerCount("close")).toBe(baselineCloseListeners + 1);
       expect(order).toEqual(["tree-kill"]);
       expect(killProcessTree).toHaveBeenCalledWith(proc.pid);
       expect(kill).not.toHaveBeenCalled();
       child.emit("close", 1);
       await expect(stopping).resolves.toBe(`Process ${proc.id} stopped`);
+      expect(child.listenerCount("close")).toBe(baselineCloseListeners);
     } finally {
       vi.useRealTimers();
     }
@@ -66,13 +69,25 @@ describe("ProcessManager Windows termination", () => {
         killProcessTree,
       });
 
+      const baselineCloseListeners = child.listenerCount("close");
       const stopping = manager.stop(proc.id);
+      expect(child.listenerCount("close")).toBe(baselineCloseListeners + 1);
       await vi.advanceTimersByTimeAsync(5000);
 
       await expect(stopping).resolves.toBe(
         `Failed to stop process ${proc.id}: process did not exit within 5 seconds and may still be running.`,
       );
-      expect(killProcessTree).toHaveBeenCalledOnce();
+      expect(child.listenerCount("close")).toBe(baselineCloseListeners);
+
+      const retrying = manager.stop(proc.id);
+      expect(child.listenerCount("close")).toBe(baselineCloseListeners + 1);
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(retrying).resolves.toBe(
+        `Failed to stop process ${proc.id}: process did not exit within 5 seconds and may still be running.`,
+      );
+
+      expect(child.listenerCount("close")).toBe(baselineCloseListeners);
+      expect(killProcessTree).toHaveBeenCalledTimes(2);
       expect(manager.list()).toContain(proc);
       expect(proc.exitCode).toBeNull();
       expect(

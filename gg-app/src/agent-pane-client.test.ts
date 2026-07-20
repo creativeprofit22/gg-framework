@@ -92,6 +92,10 @@ describe("pane agent client", () => {
       attachments: [],
       meta: { kenSent: true },
     });
+    expect(invoke).toHaveBeenCalledWith("agent_kill_task", {
+      paneId: "right",
+      id: "bg",
+    });
     expect(invoke).toHaveBeenCalledWith("agent_sessions", {
       paneId: "right",
       cwd: "/work",

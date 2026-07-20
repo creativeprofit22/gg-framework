@@ -2307,7 +2307,7 @@ export function AgentPane({
                 {runningTaskCount > 0 && (
                   <>
                     {BUILD_IDENTITY && <FooterSep />}
-                    <BackgroundTasksButton tasks={tasks} />
+                    <BackgroundTasksButton tasks={tasks} killTask={client.killTask} />
                   </>
                 )}
                 {state?.planMode && (

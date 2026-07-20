@@ -12,7 +12,7 @@ interface BackgroundTasksBarProps {
   selectedIndex: number;
   onExpand: () => void;
   onCollapse: () => void;
-  onKill: (id: string) => void;
+  onKill: (id: string) => Promise<void>;
   onExit: () => void;
   onNavigate: (index: number) => void;
   compact?: boolean;
@@ -104,7 +104,7 @@ export function BackgroundTasksBar({
       if (_input === "k" || _input === "K") {
         const task = tasks[selectedIndex];
         if (task) {
-          onKill(task.id);
+          onKill(task.id).catch(() => undefined);
         }
       }
     },

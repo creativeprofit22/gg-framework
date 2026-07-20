@@ -377,6 +377,40 @@ describe("agentLoop", () => {
     expect(result.totalTurns).toBe(1);
   });
 
+  it("retries whitespace-only string content before accepting non-empty string content", async () => {
+    const stringResult = (text: string) =>
+      ({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: "text_delta" as const, text };
+        },
+        response: Promise.resolve({
+          message: { role: "assistant" as const, content: text },
+          stopReason: "end_turn" as const,
+          usage: { inputTokens: 100, outputTokens: 50 },
+        }),
+      }) as unknown as ReturnType<typeof stream>;
+
+    mockStream
+      .mockReturnValueOnce(stringResult(" \n\t "))
+      .mockReturnValueOnce(stringResult("Recovered response"));
+
+    const { events, result } = await collectLoop([{ role: "user", content: "Hi" }], {
+      provider: "openai",
+      model: "test-model",
+    });
+
+    expect(mockStream).toHaveBeenCalledTimes(2);
+    expect(events).toContainEqual({
+      type: "retry",
+      reason: "empty_response",
+      attempt: 1,
+      maxAttempts: 2,
+      delayMs: 0,
+    });
+    expect(result.message.content).toBe("Recovered response");
+    expect(result.totalTurns).toBe(1);
+  });
+
   it("forwards Codex transport identity separately from prompt cache routing", async () => {
     mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
 

@@ -1141,7 +1141,7 @@ export async function* agentLoop(
       const content = response.message.content;
       const contentArr = Array.isArray(content) ? content : null;
       const hasActionableContent =
-        (typeof content === "string" && content.length > 0) ||
+        (typeof content === "string" && content.trim().length > 0) ||
         (contentArr !== null &&
           contentArr.some(
             (part) =>

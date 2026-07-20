@@ -1,3 +1,67 @@
-// Moved to @kenkaiiii/gg-core. Shim keeps relative imports + the
-// `@kenkaiiii/ggcoder/auth` subpath export resolving unchanged.
-export { AuthStorage, NotLoggedInError } from "@kenkaiiii/gg-core";
+import type { OAuthCredentials } from "@kenkaiiii/gg-core";
+import { AuthStorage as CoreAuthStorage, NotLoggedInError } from "@kenkaiiii/gg-core";
+
+export { NotLoggedInError } from "@kenkaiiii/gg-core";
+
+export const AZURE_OPENAI_PROVIDER = "azure";
+
+export interface AzureOpenAIEnvironment {
+  AZURE_OPENAI_API_KEY?: string;
+  AZURE_OPENAI_BASE_URL?: string;
+  AZURE_OPENAI_DEPLOYMENT?: string;
+}
+
+export interface AzureOpenAIConfig {
+  apiKey: string;
+  baseUrl: string;
+  deployment: string;
+}
+
+/** Azure configuration is usable only when every required value is non-empty. */
+export function resolveAzureOpenAIConfig(
+  environment: AzureOpenAIEnvironment = process.env,
+): AzureOpenAIConfig | undefined {
+  const apiKey = environment.AZURE_OPENAI_API_KEY?.trim();
+  const baseUrl = environment.AZURE_OPENAI_BASE_URL?.trim();
+  const deployment = environment.AZURE_OPENAI_DEPLOYMENT?.trim();
+  if (!apiKey || !baseUrl || !deployment) return undefined;
+  return { apiKey, baseUrl, deployment };
+}
+
+/**
+ * App-layer auth boundary. Azure credentials remain ephemeral while every
+ * persisted provider keeps the shared gg-core implementation unchanged.
+ */
+export class AuthStorage extends CoreAuthStorage {
+  constructor(
+    filePath?: string,
+    private readonly environment: AzureOpenAIEnvironment = process.env,
+  ) {
+    super(filePath);
+  }
+
+  override async hasProviderAuth(provider: string): Promise<boolean> {
+    if (provider === AZURE_OPENAI_PROVIDER) {
+      return resolveAzureOpenAIConfig(this.environment) !== undefined;
+    }
+    return super.hasProviderAuth(provider);
+  }
+
+  override async resolveCredentials(
+    provider: string,
+    options?: { forceRefresh?: boolean; storageKeys?: string[] },
+  ): Promise<OAuthCredentials> {
+    if (provider !== AZURE_OPENAI_PROVIDER) {
+      return super.resolveCredentials(provider, options);
+    }
+
+    const config = resolveAzureOpenAIConfig(this.environment);
+    if (!config) throw new NotLoggedInError(provider);
+    return {
+      accessToken: config.apiKey,
+      refreshToken: "",
+      expiresAt: Number.POSITIVE_INFINITY,
+      baseUrl: config.baseUrl,
+    };
+  }
+}

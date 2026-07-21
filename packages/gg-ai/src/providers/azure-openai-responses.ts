@@ -17,6 +17,7 @@ import {
   serializeResponsesToolChoice,
   serializeResponsesTools,
   type ResponsesCompletedPayload,
+  type ResponsesSseParseDiagnostic,
 } from "./openai-responses-core.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 
@@ -43,6 +44,28 @@ interface AzureFunctionCallItem {
   itemId?: string;
   name: string;
   arguments?: string;
+}
+
+export type AzureMalformedStreamStage =
+  | "json_parse"
+  | "text_delta"
+  | "reasoning_delta"
+  | "output_item_done_reasoning"
+  | "response_completed";
+
+export interface AzureMalformedStreamDiagnostic {
+  parserStage: AzureMalformedStreamStage;
+  causeKind: "syntax_error" | "error" | "non_error" | "none";
+}
+
+export class AzureMalformedStreamDiagnosticError extends Error {
+  readonly diagnostic: AzureMalformedStreamDiagnostic;
+
+  constructor(diagnostic: AzureMalformedStreamDiagnostic, cause?: unknown) {
+    super("Azure malformed stream diagnostic", { cause });
+    this.name = "AzureMalformedStreamDiagnosticError";
+    this.diagnostic = diagnostic;
+  }
 }
 
 export function streamAzureOpenAIResponses(options: StreamOptions): StreamResult {
@@ -124,20 +147,18 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   try {
     for await (const event of parseResponsesSse(response.body, {
-      onMalformedJson(cause): never {
-        throw new ProviderError("azure", "Azure OpenAI returned a malformed response stream.", {
-          cause,
-        });
+      onMalformedJson(diagnostic): never {
+        throw malformedStreamError("json_parse", diagnostic);
       },
     })) {
       sawEvent = true;
 
       if (event.type === "response.output_text.delta") {
-        if (typeof event.delta !== "string") throw malformedStreamError();
+        if (typeof event.delta !== "string") throw malformedStreamError("text_delta");
         accumulatedText += event.delta;
         yield { type: "text_delta", text: event.delta };
       } else if (isReasoningDeltaEvent(event.type)) {
-        if (typeof event.delta !== "string") throw malformedStreamError();
+        if (typeof event.delta !== "string") throw malformedStreamError("reasoning_delta");
         if (options.thinking) yield { type: "thinking_delta", text: event.delta };
       } else if (event.type === "response.output_item.added") {
         const item = objectValue(event.item);
@@ -197,10 +218,20 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         const item = objectValue(event.item);
         if (item?.type === "reasoning") {
           const part = parseEncryptedReasoningPart(item);
-          if (!part) throw malformedStreamError();
-          const pendingReasoning = reasoningItemsById.get(item.id as string);
-          if (pendingReasoning) pendingReasoning.part = part;
-          else orderedItems.push({ kind: "reasoning", itemId: item.id as string, part });
+          if (!part) {
+            if (!isNonReplayableTerminalReasoningItem(item)) {
+              throw malformedStreamError("output_item_done_reasoning");
+            }
+            const pendingReasoning = reasoningItemsById.get(item.id);
+            if (pendingReasoning) {
+              reasoningItemsById.delete(item.id);
+              orderedItems.splice(orderedItems.indexOf(pendingReasoning), 1);
+            }
+          } else {
+            const pendingReasoning = reasoningItemsById.get(item.id as string);
+            if (pendingReasoning) pendingReasoning.part = part;
+            else orderedItems.push({ kind: "reasoning", itemId: item.id as string, part });
+          }
         } else if (item?.type === "function_call") {
           const toolCall = findToolCall(
             event.output_index,
@@ -221,10 +252,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
           yield toToolCallDoneEvent(toolCall, args);
         }
       } else if (event.type === "response.completed") {
-        if (completedResponse) throw malformedStreamError();
+        if (completedResponse) throw malformedStreamError("response_completed");
         assertAllToolCallsCompleted(toolCallOrder);
         if (orderedItems.some((item) => item.kind === "reasoning" && !item.part)) {
-          throw malformedStreamError();
+          throw malformedStreamError("response_completed");
         }
         completedResponse = asCompletedResponse(event.response);
       } else {
@@ -593,12 +624,40 @@ function incompleteToolCallStreamError(): ProviderError {
   );
 }
 
-function malformedStreamError(): ProviderError {
-  return new ProviderError("azure", "Azure OpenAI returned a malformed response stream.");
+function malformedStreamError(
+  parserStage: AzureMalformedStreamStage,
+  parseDiagnostic?: ResponsesSseParseDiagnostic,
+): ProviderError {
+  const diagnostic = azureMalformedStreamDiagnostic(parserStage, parseDiagnostic);
+  return new ProviderError("azure", "Azure OpenAI returned a malformed response stream.", {
+    cause: new AzureMalformedStreamDiagnosticError(diagnostic),
+  });
+}
+
+function azureMalformedStreamDiagnostic(
+  parserStage: AzureMalformedStreamStage,
+  parseDiagnostic: ResponsesSseParseDiagnostic | undefined,
+): AzureMalformedStreamDiagnostic {
+  return {
+    parserStage,
+    causeKind: parseDiagnostic?.causeKind ?? "none",
+  };
 }
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function isNonReplayableTerminalReasoningItem(
+  item: Record<string, unknown>,
+): item is Record<string, unknown> & { id: string } {
+  return (
+    nonEmptyString(item.id) &&
+    (item.encrypted_content === undefined ||
+      item.encrypted_content === null ||
+      item.encrypted_content === "") &&
+    (item.status === undefined || item.status === "incomplete" || item.status === "completed")
+  );
 }
 
 function asNonStreamingResponse(
@@ -657,7 +716,7 @@ function malformedNonStreamingResponseError(cause?: unknown): ProviderError {
 
 function asCompletedResponse(value: unknown): ResponsesCompletedPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new ProviderError("azure", "Azure OpenAI returned a malformed response stream.");
+    throw malformedStreamError("response_completed");
   }
   return value as ResponsesCompletedPayload;
 }

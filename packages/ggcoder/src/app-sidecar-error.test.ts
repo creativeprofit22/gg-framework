@@ -56,4 +56,41 @@ describe("formatSidecarError", () => {
     expect(formatted.event).not.toHaveProperty("requestId");
     expect(JSON.stringify(formatted)).not.toContain("raw-secret");
   });
+
+  it("logs Azure malformed-stream diagnostics without exposing them to UI events", () => {
+    const sensitivePayload = `secret=${CREDENTIAL}&host=private-resource.openai.azure.com`;
+    const diagnosticCause = Object.assign(new Error(sensitivePayload), {
+      diagnostic: {
+        parserStage: "output_item_done_reasoning",
+        causeKind: "none",
+        eventType: "provider-message-secret",
+        eventKeys: ["arguments", "credential-secret"],
+        itemKeys: ["nested-secret"],
+        arbitraryNested: { credential: CREDENTIAL },
+      },
+    });
+    const formatted = formatSidecarError(
+      new ProviderError("azure", "Azure OpenAI returned a malformed response stream.", {
+        cause: diagnosticCause,
+      }),
+      (value) => value,
+      sidecarSensitiveValues({
+        AZURE_OPENAI_API_KEY: CREDENTIAL,
+        AZURE_OPENAI_BASE_URL: ENDPOINT,
+      }),
+    );
+
+    expect(formatted.logFields).toMatchObject({
+      parserStage: "output_item_done_reasoning",
+      causeKind: "none",
+    });
+    expect(Object.keys(formatted.logFields)).not.toEqual(
+      expect.arrayContaining(["eventType", "eventKeys", "itemKeys", "arbitraryNested"]),
+    );
+    expect(formatted.event).not.toHaveProperty("parserStage");
+    expect(JSON.stringify(formatted.event)).not.toContain("nested-secret");
+    expect(JSON.stringify(formatted)).not.toContain(CREDENTIAL);
+    expect(JSON.stringify(formatted)).not.toContain("private-resource.openai.azure.com");
+    expect(JSON.stringify(formatted)).not.toContain(sensitivePayload);
+  });
 });

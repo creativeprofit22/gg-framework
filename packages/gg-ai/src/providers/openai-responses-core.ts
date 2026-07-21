@@ -88,12 +88,17 @@ export function serializeResponsesToolChoice(
   return resolved;
 }
 
+export interface ResponsesSseParseDiagnostic {
+  stage: "json_parse";
+  causeKind: "syntax_error" | "error" | "non_error";
+}
+
 export interface ParseResponsesSseOptions {
   /**
    * Providers choose their existing malformed-frame policy at the transport edge.
    * Omitting this callback preserves the Codex behavior of ignoring malformed JSON.
    */
-  onMalformedJson?: (cause: unknown) => never;
+  onMalformedJson?: (diagnostic: ResponsesSseParseDiagnostic) => never;
 }
 
 /**
@@ -113,9 +118,21 @@ export async function* parseResponsesSse(
     try {
       yield JSON.parse(data) as ResponsesEvent;
     } catch (cause) {
-      options.onMalformedJson?.(cause);
+      options.onMalformedJson?.(toResponsesSseParseDiagnostic(cause));
     }
   }
+}
+
+function toResponsesSseParseDiagnostic(cause: unknown): ResponsesSseParseDiagnostic {
+  return {
+    stage: "json_parse",
+    causeKind:
+      cause instanceof SyntaxError
+        ? "syntax_error"
+        : cause instanceof Error
+          ? "error"
+          : "non_error",
+  };
 }
 
 export interface ResponsesInputAdapter {

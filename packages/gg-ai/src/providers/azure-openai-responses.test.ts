@@ -646,6 +646,56 @@ describe("streamAzureOpenAIResponses", () => {
     );
   });
 
+  it.each([
+    {
+      name: "incomplete terminal reasoning without encrypted content",
+      item: { type: "reasoning", id: "rs_empty", status: "incomplete" },
+    },
+    {
+      name: "sparse terminal reasoning with null encrypted content",
+      item: {
+        type: "reasoning",
+        id: "rs_null",
+        encrypted_content: null,
+        status: "completed",
+      },
+    },
+  ])("omits $name and completes the visible response", async ({ item }) => {
+    const stream = streamAzureOpenAIResponses({
+      provider: "azure",
+      model: "gpt-5.6-sol",
+      messages: [{ role: "user", content: "Think." }],
+      thinking: "high",
+      apiKey: TEST_CREDENTIAL,
+      baseUrl: RESPONSES_URL,
+      fetch: vi.fn(async () =>
+        sseResponse([
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { type: "reasoning", id: item.id },
+          },
+          { type: "response.output_item.done", output_index: 0, item },
+          { type: "response.output_text.delta", delta: "Visible text." },
+          COMPLETED_RESPONSE,
+        ]),
+      ),
+    });
+    const events = [];
+    for await (const event of stream) events.push(event);
+
+    expect(events).toEqual([
+      { type: "thinking_delta", text: "" },
+      { type: "text_delta", text: "Visible text." },
+      { type: "done", stopReason: "end_turn" },
+    ]);
+    await expect(stream.response).resolves.toEqual({
+      message: { role: "assistant", content: "Visible text." },
+      stopReason: "end_turn",
+      usage: { inputTokens: 8, outputTokens: 3 },
+    });
+  });
+
   it("rejects malformed encrypted reasoning items", async () => {
     const stream = streamAzureOpenAIResponses({
       provider: "azure",
@@ -658,16 +708,35 @@ describe("streamAzureOpenAIResponses", () => {
         sseResponse([
           {
             type: "response.output_item.done",
-            item: { type: "reasoning", id: "rs_bad", encrypted_content: 123 },
+            item: {
+              type: "reasoning",
+              id: "rs_bad",
+              encrypted_content: { credential: "encrypted-secret-value" },
+            },
           },
         ]),
       ),
     });
 
-    await expect(stream.response).rejects.toMatchObject({
+    const error = await stream.response.catch((cause: unknown) => cause);
+    expect(error).toMatchObject({
       provider: "azure",
       message: "Azure OpenAI returned a malformed response stream.",
+      cause: {
+        diagnostic: {
+          parserStage: "output_item_done_reasoning",
+          causeKind: "none",
+        },
+      },
     });
+    const diagnostic = (error as { cause: { diagnostic: Record<string, unknown> } }).cause
+      .diagnostic;
+    expect(diagnostic).toEqual({
+      parserStage: "output_item_done_reasoning",
+      causeKind: "none",
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain("encrypted-secret-value");
+    expect(JSON.stringify(error)).not.toContain("encrypted-secret-value");
   });
 
   it.each([undefined, false])(

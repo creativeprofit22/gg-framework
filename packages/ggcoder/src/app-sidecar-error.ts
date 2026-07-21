@@ -1,6 +1,14 @@
 import { environmentSecrets, formatError, redactText } from "@kenkaiiii/gg-ai";
 
 const SAFE_REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const MALFORMED_STREAM_STAGES = new Set([
+  "json_parse",
+  "text_delta",
+  "reasoning_delta",
+  "output_item_done_reasoning",
+  "response_completed",
+]);
+const CAUSE_KINDS = new Set(["syntax_error", "error", "non_error", "none"]);
 
 export interface SidecarErrorDetails {
   logFields: Record<string, string>;
@@ -42,6 +50,8 @@ export function formatSidecarError(
   const guidance = clean(formatted.guidance);
   const requestId = safeRequestId(formatted.requestId);
 
+  const diagnostic = azureMalformedStreamLogFields(err);
+
   return {
     logFields: {
       headline,
@@ -51,6 +61,7 @@ export function formatSidecarError(
       ...(formatted.statusCode != null ? { statusCode: String(formatted.statusCode) } : {}),
       ...(requestId ? { requestId } : {}),
       ...(formatted.resetsAt != null ? { resetsAt: String(formatted.resetsAt) } : {}),
+      ...diagnostic,
     },
     event: {
       headline,
@@ -61,6 +72,41 @@ export function formatSidecarError(
       ...(formatted.resetsAt != null ? { resetsAt: formatted.resetsAt } : {}),
     },
   };
+}
+
+function azureMalformedStreamLogFields(err: unknown): Record<string, string> {
+  for (let current = err, depth = 0; depth < 4; depth += 1) {
+    if (!current || typeof current !== "object") return {};
+    const diagnostic = ownValue(current, "diagnostic");
+    const fields = safeAzureMalformedStreamDiagnostic(diagnostic);
+    if (fields) return fields;
+    current = ownValue(current, "cause");
+  }
+  return {};
+}
+
+function safeAzureMalformedStreamDiagnostic(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const parserStage = ownValue(value, "parserStage");
+  const causeKind = ownValue(value, "causeKind");
+  if (
+    typeof parserStage !== "string" ||
+    !MALFORMED_STREAM_STAGES.has(parserStage) ||
+    typeof causeKind !== "string" ||
+    !CAUSE_KINDS.has(causeKind)
+  ) {
+    return undefined;
+  }
+
+  return {
+    parserStage,
+    causeKind,
+  };
+}
+
+function ownValue(value: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }
 
 function safeRequestId(value: string | undefined): string | undefined {

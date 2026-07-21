@@ -48,16 +48,23 @@ describe("provider-neutral Responses parsing", () => {
       '[{"type":"response.output_text.delta","delta":"one"},{"type":"response.completed","response":{}}]',
     );
 
+    let azureDiagnostic: unknown;
     const azureEvents = async () => {
       for await (const _event of parseResponsesSse(rawSseResponse(wire).body!, {
-        onMalformedJson(cause): never {
-          throw cause;
+        onMalformedJson(diagnostic): never {
+          azureDiagnostic = diagnostic;
+          throw new Error("stop parsing");
         },
       })) {
         // Consume through the malformed frame.
       }
     };
-    await expect(azureEvents()).rejects.toBeInstanceOf(SyntaxError);
+    await expect(azureEvents()).rejects.toThrow("stop parsing");
+    expect(azureDiagnostic).toEqual({
+      stage: "json_parse",
+      causeKind: "syntax_error",
+    });
+    expect(JSON.stringify(azureDiagnostic)).not.toContain("not-json");
   });
 
   it("serializes provider-neutral system, user, assistant, tool-call, and tool-result input", () => {

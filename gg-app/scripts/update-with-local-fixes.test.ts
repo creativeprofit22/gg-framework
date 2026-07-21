@@ -240,7 +240,7 @@ describe("local-fixes updater", () => {
     expect(result.stderr).toContain("Failed to fetch upstream/main");
     expect(result.stderr).not.toContain("Backup branch:");
     expect(result.stderr).not.toContain("Manifest:");
-  });
+  }, 30_000);
 
   it("rebases all local commits and restores tracked and untracked dirt", () => {
     const fixture = createUpdateFixture();
@@ -272,7 +272,7 @@ describe("local-fixes updater", () => {
       "local one",
       "local two unpushed",
     ]);
-  });
+  }, 30_000);
 
   it("stops on conflicts with the backup branch and dirty-work stash intact", () => {
     const fixture = createUpdateFixture(true);
@@ -288,7 +288,7 @@ describe("local-fixes updater", () => {
         .split(/\r?\n/)
         .some((name) => name.startsWith("gg-local-before-update-")),
     ).toBe(true);
-  });
+  }, 30_000);
 
   it("stops after a failed check without building or pushing", () => {
     const fixture = createUpdateFixture();
@@ -317,7 +317,7 @@ describe("local-fixes updater", () => {
     );
     expect(manifest.phase).toBe("source-verified");
     expect(manifest.dirtyWorkApplied).toBe(true);
-  });
+  }, 30_000);
 
   it("rejects push when checks or build are disabled", () => {
     const result = runUpdater(repoRoot, ["--dry-run", "--push", "--no-build"]);

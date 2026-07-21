@@ -18,14 +18,10 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
-import {
-  environmentSecrets,
-  formatError,
-  redactValue,
-  type ToolResultContent,
-} from "@kenkaiiii/gg-ai";
+import { environmentSecrets, redactValue, type ToolResultContent } from "@kenkaiiii/gg-ai";
 import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
+import { formatSidecarError, sidecarSensitiveValues } from "./app-sidecar-error.js";
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "./core/agent-session.js";
@@ -1444,43 +1440,27 @@ async function createSession(
   // Without this the webview only ever saw a raw provider string like
   // `400 {"code":"400",...}` with no "is this me or them / when does it reset"
   // context that the CLI has always given.
+  const sidecarErrorSecrets = sidecarSensitiveValues(process.env);
+
   function broadcastError(
     type: "error" | "ken_error" | "autopilot_error",
     logLabel: string,
     err: unknown,
   ): void {
-    const f = formatError(err);
-    const message = f.message ? desktopGuidance(f.message) : undefined;
-    const guidance = desktopGuidance(f.guidance);
+    const formatted = formatSidecarError(err, desktopGuidance, sidecarErrorSecrets);
     captureSidecarError(err, `app-sidecar.${logLabel.replaceAll(" ", "-")}`, {
       scope: type,
-      ...(f.provider ? { provider: f.provider } : {}),
-      ...(f.statusCode != null ? { status: String(f.statusCode) } : {}),
     });
-    log("ERROR", "app-sidecar", logLabel, {
-      headline: f.headline,
-      source: f.source,
-      ...(message ? { message } : {}),
-      ...(f.provider ? { provider: f.provider } : {}),
-      ...(f.statusCode != null ? { statusCode: String(f.statusCode) } : {}),
-      ...(f.requestId ? { requestId: f.requestId } : {}),
-    });
-    broadcast(type, {
-      headline: f.headline,
-      ...(message ? { message } : {}),
-      guidance,
-      ...(f.provider ? { provider: f.provider } : {}),
-      ...(f.statusCode != null ? { statusCode: f.statusCode } : {}),
-      ...(f.resetsAt != null ? { resetsAt: f.resetsAt } : {}),
-    });
+    log("ERROR", "app-sidecar", logLabel, formatted.logFields);
+    broadcast(type, formatted.event);
     // Persist the error row (display-only marker) so a resumed session shows
     // the same headline/message/guidance the live run did. Best-effort.
     void session
       .persistAppMarker("error", {
         scope: type,
-        headline: f.headline,
-        ...(message ? { message } : {}),
-        guidance,
+        headline: formatted.event.headline,
+        ...(formatted.event.message ? { message: formatted.event.message } : {}),
+        guidance: formatted.event.guidance,
       })
       .catch(() => {});
   }

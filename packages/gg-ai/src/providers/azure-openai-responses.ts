@@ -1,4 +1,4 @@
-import { ProviderError } from "../errors.js";
+import { ProviderError, readHeader } from "../errors.js";
 import type {
   ContentPart,
   StreamEvent,
@@ -22,6 +22,13 @@ import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 
 // eslint-disable-next-line no-control-regex -- Provider error text must not expose control characters.
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]+/g;
+const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+const SAFE_REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+
+interface AzureErrorMetadata {
+  requestId?: string;
+  resetsAt?: number;
+}
 
 interface PendingAzureToolCall {
   id: string;
@@ -92,13 +99,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 
   if (!response.ok) {
     const responseText = await response.text().catch(() => "");
-    throw new ProviderError(
-      "azure",
-      extractSafeErrorMessage(responseText, response.status, apiKey),
-      { statusCode: response.status },
-    );
+    throw toHttpProviderError(response, responseText, apiKey, url);
   }
 
+  const responseMetadata = azureErrorMetadata(response.headers, undefined, apiKey, url);
   if (!response.body) {
     throw new ProviderError("azure", "Azure OpenAI returned an empty response stream.");
   }
@@ -224,7 +228,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
         }
         completedResponse = asCompletedResponse(event.response);
       } else {
-        const streamError = toStreamProviderError(event, apiKey);
+        const streamError = toStreamProviderError(event, apiKey, url, responseMetadata);
         if (streamError) throw streamError;
       }
     }
@@ -330,11 +334,7 @@ async function* runNonStreaming(
 
   if (!response.ok) {
     const responseText = await response.text().catch(() => "");
-    throw new ProviderError(
-      "azure",
-      extractSafeErrorMessage(responseText, response.status, apiKey),
-      { statusCode: response.status },
-    );
+    throw toHttpProviderError(response, responseText, apiKey, url);
   }
 
   let value: unknown;
@@ -344,7 +344,13 @@ async function* runNonStreaming(
     throw malformedNonStreamingResponseError(cause);
   }
   const completedResponse = asNonStreamingResponse(value);
-  const providerError = toNonStreamingProviderError(completedResponse, apiKey);
+  const responseMetadata = azureErrorMetadata(response.headers, completedResponse, apiKey, url);
+  const providerError = toNonStreamingProviderError(
+    completedResponse,
+    apiKey,
+    url,
+    responseMetadata,
+  );
   if (providerError) throw providerError;
 
   const output = completedResponse.output;
@@ -606,12 +612,24 @@ function asNonStreamingResponse(
 function toNonStreamingProviderError(
   response: ResponsesCompletedPayload & Record<string, unknown>,
   credential: string,
+  endpoint: string,
+  metadata: AzureErrorMetadata,
 ): ProviderError | undefined {
   if (response.status === "failed" || response.error !== undefined) {
-    return toStreamProviderError({ type: "response.failed", response }, credential);
+    return toStreamProviderError(
+      { type: "response.failed", response },
+      credential,
+      endpoint,
+      metadata,
+    );
   }
   if (response.status === "incomplete") {
-    return toStreamProviderError({ type: "response.incomplete", response }, credential);
+    return toStreamProviderError(
+      { type: "response.incomplete", response },
+      credential,
+      endpoint,
+      metadata,
+    );
   }
   if (response.status !== undefined && response.status !== "completed") {
     return malformedNonStreamingResponseError();
@@ -647,40 +665,46 @@ function asCompletedResponse(value: unknown): ResponsesCompletedPayload {
 function toStreamProviderError(
   event: Record<string, unknown>,
   credential: string,
+  endpoint: string,
+  metadata: AzureErrorMetadata = {},
 ): ProviderError | undefined {
   if (event.type === "error") {
     const error = objectValue(event.error);
     const message = sanitizeErrorMessage(
       stringValue(error?.message) ?? stringValue(event.message),
       credential,
+      endpoint,
     );
     const statusCode = streamErrorStatus(
       stringValue(error?.type) ?? stringValue(error?.code) ?? stringValue(event.code),
     );
     return new ProviderError("azure", message ?? "Azure OpenAI stream returned an error.", {
       ...(statusCode ? { statusCode } : {}),
+      ...mergeAzureErrorMetadata(metadata, event, credential, endpoint),
     });
   }
 
   if (event.type === "response.failed") {
     const response = objectValue(event.response);
     const error = objectValue(response?.error);
-    const message = sanitizeErrorMessage(stringValue(error?.message), credential);
+    const message = sanitizeErrorMessage(stringValue(error?.message), credential, endpoint);
     const statusCode = streamErrorStatus(stringValue(error?.code));
     return new ProviderError("azure", message ?? "Azure OpenAI response failed.", {
       ...(statusCode ? { statusCode } : {}),
+      ...mergeAzureErrorMetadata(metadata, response, credential, endpoint),
     });
   }
 
   if (event.type === "response.incomplete") {
     const response = objectValue(event.response);
     const details = objectValue(response?.incomplete_details);
-    const reason = sanitizeErrorMessage(stringValue(details?.reason), credential);
+    const reason = sanitizeErrorMessage(stringValue(details?.reason), credential, endpoint);
     return new ProviderError(
       "azure",
       reason
         ? `Azure OpenAI response was incomplete: ${reason}.`
         : "Azure OpenAI response was incomplete.",
+      mergeAzureErrorMetadata(metadata, response, credential, endpoint),
     );
   }
 
@@ -717,33 +741,185 @@ function toUsage(usage: ResponsesCompletedPayload["usage"]): Usage {
   };
 }
 
-function extractSafeErrorMessage(body: string, status: number, apiKey: string): string {
-  let candidate: string | undefined;
-  try {
-    const parsed = JSON.parse(body) as unknown;
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const record = parsed as Record<string, unknown>;
-      const nested = record.error;
-      candidate =
-        nested && typeof nested === "object" && !Array.isArray(nested)
-          ? stringValue((nested as Record<string, unknown>).message)
-          : stringValue(record.message);
-    }
-  } catch {
-    if (!/<(?:!doctype|html|body|script|style)\b/i.test(body)) candidate = body;
-  }
-
-  return sanitizeErrorMessage(candidate, apiKey) || `Azure OpenAI returned HTTP ${status}.`;
+function toHttpProviderError(
+  response: Response,
+  body: string,
+  credential: string,
+  endpoint: string,
+): ProviderError {
+  const parsedBody = parseErrorBody(body);
+  return new ProviderError(
+    "azure",
+    extractSafeErrorMessage(parsedBody, response.status, credential, endpoint),
+    {
+      statusCode: response.status,
+      ...azureErrorMetadata(response.headers, parsedBody, credential, endpoint),
+    },
+  );
 }
 
-function sanitizeErrorMessage(value: string | undefined, credential: string): string | undefined {
+function extractSafeErrorMessage(
+  parsedBody: Record<string, unknown> | undefined,
+  status: number,
+  credential: string,
+  endpoint: string,
+): string {
+  const nested = objectValue(parsedBody?.error);
+  const candidate = stringValue(nested?.message) ?? stringValue(parsedBody?.message);
+  return (
+    sanitizeErrorMessage(candidate, credential, endpoint) || `Azure OpenAI returned HTTP ${status}.`
+  );
+}
+
+function sanitizeErrorMessage(
+  value: string | undefined,
+  credential: string,
+  endpoint: string,
+): string | undefined {
+  if (!value || /^\s*[[{]/.test(value) || /\bheaders?\s*[:=]/i.test(value)) return undefined;
+  const hostname = endpointHostname(endpoint);
+  const escapedHostname = hostname ? escapeRegExp(hostname) : undefined;
   return value
-    ?.replaceAll(credential, "[REDACTED]")
+    .replaceAll(credential, "[REDACTED]")
+    .replace(/\b(authorization|api-key|cookie|set-cookie)(\s*[:=]\s*)[^\s,;]+/gi, "$1$2[REDACTED]")
+    .replace(/\bhttps?:\/\/[^\s"'<>]+/gi, "[REDACTED]")
+    .replace(escapedHostname ? new RegExp(escapedHostname, "gi") : /$^/, "[REDACTED]")
     .replace(/<[^>]*>/g, " ")
     .replace(CONTROL_CHARACTERS, " ")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 500);
+}
+
+function parseErrorBody(body: string): Record<string, unknown> | undefined {
+  if (!body || body.length > 64 * 1024) return undefined;
+  try {
+    return objectValue(JSON.parse(body) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
+function azureErrorMetadata(
+  headers: unknown,
+  payload: Record<string, unknown> | undefined,
+  credential: string,
+  endpoint: string,
+): AzureErrorMetadata {
+  const requestId = sanitizeRequestId(
+    readHeader(headers, "apim-request-id", "x-request-id", "request-id", "x-ms-request-id") ??
+      requestIdFromPayload(payload),
+    credential,
+    endpoint,
+  );
+  const resetsAt = retryResetAt(headers, payload);
+  return {
+    ...(requestId ? { requestId } : {}),
+    ...(resetsAt ? { resetsAt } : {}),
+  };
+}
+
+function mergeAzureErrorMetadata(
+  metadata: AzureErrorMetadata,
+  payload: Record<string, unknown> | undefined,
+  credential: string,
+  endpoint: string,
+): AzureErrorMetadata {
+  return {
+    ...azureErrorMetadata(undefined, payload, credential, endpoint),
+    ...metadata,
+  };
+}
+
+function requestIdFromPayload(payload: Record<string, unknown> | undefined): string | undefined {
+  const error = objectValue(payload?.error);
+  const innerError = objectValue(error?.innererror) ?? objectValue(error?.inner_error);
+  return (
+    stringValue(payload?.request_id) ??
+    stringValue(error?.request_id) ??
+    stringValue(innerError?.request_id)
+  );
+}
+
+function sanitizeRequestId(
+  value: string | undefined,
+  credential: string,
+  endpoint: string,
+): string | undefined {
+  if (!value || value.includes(credential) || !SAFE_REQUEST_ID.test(value)) return undefined;
+  const hostname = endpointHostname(endpoint);
+  return hostname && value.toLowerCase().includes(hostname.toLowerCase()) ? undefined : value;
+}
+
+function retryResetAt(
+  headers: unknown,
+  payload: Record<string, unknown> | undefined,
+): number | undefined {
+  const error = objectValue(payload?.error);
+  const retryAfter = readHeader(headers, "retry-after");
+  const retryAfterMs = readHeader(headers, "retry-after-ms", "x-ms-retry-after-ms");
+  const resetDuration = readHeader(
+    headers,
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+  );
+  const bodyDelaySeconds = error?.retry_after ?? payload?.retry_after;
+  const bodyDelayMs = error?.retry_after_ms ?? payload?.retry_after_ms;
+  const delayMs =
+    parseRetryAfter(retryAfter) ??
+    boundedDelayMs(retryAfterMs, 1) ??
+    parseResetDuration(resetDuration) ??
+    boundedDelayMs(bodyDelaySeconds, 1_000) ??
+    boundedDelayMs(bodyDelayMs, 1);
+  return delayMs === undefined
+    ? undefined
+    : Math.floor(Date.now() / 1000) + Math.ceil(delayMs / 1000);
+}
+
+function parseRetryAfter(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return boundedDelayMs(seconds, 1_000);
+  const resetTime = Date.parse(value);
+  return Number.isFinite(resetTime) ? boundedDelayMs(resetTime - Date.now(), 1) : undefined;
+}
+
+function parseResetDuration(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim();
+  const parts = normalized.matchAll(/(\d+(?:\.\d+)?)\s*(ms|s|m|h)/gi);
+  let totalMs = 0;
+  let consumed = 0;
+  let sawPart = false;
+  for (const part of parts) {
+    if (normalized.slice(consumed, part.index).trim()) return undefined;
+    const unit = part[2]!.toLowerCase();
+    const unitMs = unit === "ms" ? 1 : unit === "s" ? 1_000 : unit === "m" ? 60_000 : 3_600_000;
+    totalMs += Number(part[1]) * unitMs;
+    consumed = part.index + part[0].length;
+    sawPart = true;
+  }
+  if (!sawPart || normalized.slice(consumed).trim()) return undefined;
+  return boundedDelayMs(totalMs, 1);
+}
+
+function boundedDelayMs(value: unknown, unitMs: number): number | undefined {
+  if (typeof value !== "number" && typeof value !== "string") return undefined;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
+  return Math.min(Math.ceil(numeric * unitMs), MAX_RETRY_AFTER_MS);
+}
+
+function endpointHostname(endpoint: string): string | undefined {
+  try {
+    return new URL(endpoint).hostname || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function stringValue(value: unknown): string | undefined {

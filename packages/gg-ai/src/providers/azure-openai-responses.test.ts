@@ -180,6 +180,139 @@ describe("streamAzureOpenAIResponses", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    { status: 429, header: "retry-after", value: "17", expectedDelaySeconds: 17 },
+    {
+      status: 503,
+      header: "x-ratelimit-reset-requests",
+      value: "1m9s",
+      expectedDelaySeconds: 69,
+    },
+  ])(
+    "keeps safe diagnostics and $header retry timing for HTTP $status",
+    async ({ status, header, value, expectedDelaySeconds }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+      try {
+        const result = streamAzureOpenAIResponses({
+          provider: "azure",
+          model: "test-deployment",
+          messages: [{ role: "user", content: "Retry safely." }],
+          apiKey: TEST_CREDENTIAL,
+          baseUrl: RESPONSES_URL,
+          fetch: vi.fn<typeof fetch>().mockResolvedValueOnce(
+            Response.json(
+              {
+                error: {
+                  message:
+                    "Capacity unavailable at example-resource.openai.azure.com with test-key",
+                },
+              },
+              {
+                status,
+                headers: {
+                  [header]: value,
+                  "apim-request-id": "req_safe-123",
+                },
+              },
+            ),
+          ),
+        });
+
+        const error = await result.response.catch((cause: unknown) => cause);
+        expect(error).toMatchObject({
+          provider: "azure",
+          statusCode: status,
+          requestId: "req_safe-123",
+          resetsAt: Math.floor(Date.now() / 1000) + expectedDelaySeconds,
+          message: "Capacity unavailable at [REDACTED] with [REDACTED]",
+        });
+        expect(String(error)).not.toContain("example-resource.openai.azure.com");
+        expect(String(error)).not.toContain(TEST_CREDENTIAL);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("bounds excessive retry timing and drops malformed host-leaking diagnostics", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    try {
+      const result = streamAzureOpenAIResponses({
+        provider: "azure",
+        model: "test-deployment",
+        messages: [{ role: "user", content: "Retry safely." }],
+        apiKey: TEST_CREDENTIAL,
+        baseUrl: RESPONSES_URL,
+        fetch: vi.fn<typeof fetch>().mockResolvedValueOnce(
+          new Response(
+            `not-json api-key: ${TEST_CREDENTIAL} host example-resource.openai.azure.com`,
+            {
+              status: 429,
+              headers: {
+                "retry-after": "999999",
+                "apim-request-id": "https://example-resource.openai.azure.com/private",
+              },
+            },
+          ),
+        ),
+      });
+
+      const error = await result.response.catch((cause: unknown) => cause);
+      expect(error).toMatchObject({
+        statusCode: 429,
+        resetsAt: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+        message: "Azure OpenAI returned HTTP 429.",
+      });
+      expect((error as ProviderError).requestId).toBeUndefined();
+      expect(JSON.stringify(error)).not.toContain(TEST_CREDENTIAL);
+      expect(JSON.stringify(error)).not.toContain("example-resource.openai.azure.com");
+      expect(JSON.stringify(error)).not.toContain("not-json");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves safe request and reset metadata from streamed failures", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    try {
+      const result = streamAzureOpenAIResponses({
+        provider: "azure",
+        model: "test-deployment",
+        messages: [{ role: "user", content: "Retry safely." }],
+        apiKey: TEST_CREDENTIAL,
+        baseUrl: RESPONSES_URL,
+        fetch: vi.fn<typeof fetch>().mockResolvedValueOnce(
+          new Response(
+            `data: ${JSON.stringify({
+              type: "error",
+              error: { type: "server_error", message: "Temporary failure" },
+            })}\n\n`,
+            {
+              status: 200,
+              headers: {
+                "content-type": "text/event-stream",
+                "retry-after-ms": "2500",
+                "x-request-id": "stream_req-456",
+              },
+            },
+          ),
+        ),
+      });
+
+      await expect(result.response).rejects.toMatchObject({
+        statusCode: 500,
+        requestId: "stream_req-456",
+        resetsAt: Math.floor(Date.now() / 1000) + 3,
+        message: "Temporary failure",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("normalizes a complete non-streaming response with reasoning, tools, and usage", async () => {
     let requestBody: Record<string, unknown> | undefined;
     const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {

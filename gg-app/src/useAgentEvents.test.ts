@@ -261,6 +261,33 @@ describe("useAgentEvents", () => {
     });
   });
 
+  it("keeps Azure reset guidance while dropping diagnostic-only fields from UI items", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("error", {
+          headline: "Azure OpenAI returned an error.",
+          message: "Temporary capacity failure",
+          guidance: "Retry shortly. The provider says to retry after 12:00 PM.",
+          resetsAt: 1_785_000_000,
+          requestId: "req_safe-123",
+          rawBody: '{"headers":{"api-key":"raw-secret"}}',
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "Azure OpenAI returned an error.",
+        message: "Temporary capacity failure",
+        guidance: "Retry shortly. The provider says to retry after 12:00 PM.",
+      }),
+    ]);
+    expect(JSON.stringify(getItems())).not.toContain("req_safe-123");
+    expect(JSON.stringify(getItems())).not.toContain("raw-secret");
+  });
+
   it("error with only a message (legacy shape) falls back to a flat text item", () => {
     const { hook, getItems } = setup();
     act(() => {

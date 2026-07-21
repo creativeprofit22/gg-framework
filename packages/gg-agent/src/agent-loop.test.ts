@@ -353,6 +353,47 @@ describe("agentLoop", () => {
     }
   });
 
+  it.each([
+    { statusCode: 429, reason: "rate_limit" as const },
+    { statusCode: 503, reason: "provider_error" as const },
+  ])("uses Azure reset metadata for $statusCode retry timing", async ({ statusCode, reason }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    try {
+      const resetsAt = Math.floor(Date.now() / 1000) + 12;
+      mockStream
+        .mockReturnValueOnce(
+          mockErrorResult(
+            new ProviderError("azure", "Temporary Azure failure", {
+              statusCode,
+              requestId: "req_safe-123",
+              resetsAt,
+            }),
+          ) as unknown as ReturnType<typeof stream>,
+        )
+        .mockReturnValueOnce(mockOkResult("Recovered") as unknown as ReturnType<typeof stream>);
+
+      const loopPromise = collectLoop([{ role: "user", content: "Hi" }], {
+        provider: "azure",
+        model: "test-deployment",
+      });
+      await vi.advanceTimersByTimeAsync(12_000);
+      const { events, result } = await loopPromise;
+
+      expect(events).toContainEqual({
+        type: "retry",
+        reason,
+        attempt: 1,
+        maxAttempts: 10,
+        delayMs: 12_000,
+      });
+      expect(mockStream).toHaveBeenCalledTimes(2);
+      expect(result.message.content).toEqual([{ type: "text", text: "Recovered" }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("accepts provider string content without retrying it as empty", async () => {
     const text = "Provider-native string response";
     mockStream.mockReturnValueOnce({

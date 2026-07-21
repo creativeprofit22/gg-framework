@@ -192,27 +192,28 @@ describe("local-fixes updater", () => {
     expect(() => targetedVitestArgs("gg-app", [])).toThrow("without explicit test files");
   });
 
-  it("dry-runs without changing this checkout", () => {
+  it("dry-runs without changing a named-branch checkout", () => {
+    const fixture = createLocalOnlyFixture();
     const before = {
-      head: git(repoRoot, "rev-parse", "HEAD"),
-      refs: git(repoRoot, "for-each-ref", "--format=%(refname) %(objectname)"),
-      status: git(repoRoot, "status", "--porcelain=v1", "--untracked-files=all"),
+      head: git(fixture.repo, "rev-parse", "HEAD"),
+      refs: git(fixture.repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+      status: git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all"),
     };
-    const result = runUpdater(repoRoot, [
+    const result = runUpdater(fixture.repo, [
       "--dry-run",
       "--no-install",
       "--no-build",
       "--check",
       "--allow-other-branch",
     ]);
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("Push: disabled");
     expect(result.stdout).toContain("git rebase --reapply-cherry-picks --empty=keep upstream/main");
     expect(result.stdout).not.toContain("git merge");
     expect({
-      head: git(repoRoot, "rev-parse", "HEAD"),
-      refs: git(repoRoot, "for-each-ref", "--format=%(refname) %(objectname)"),
-      status: git(repoRoot, "status", "--porcelain=v1", "--untracked-files=all"),
+      head: git(fixture.repo, "rev-parse", "HEAD"),
+      refs: git(fixture.repo, "for-each-ref", "--format=%(refname) %(objectname)"),
+      status: git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all"),
     }).toEqual(before);
   });
 

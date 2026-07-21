@@ -198,7 +198,13 @@ describe("local-fixes updater", () => {
       refs: git(repoRoot, "for-each-ref", "--format=%(refname) %(objectname)"),
       status: git(repoRoot, "status", "--porcelain=v1", "--untracked-files=all"),
     };
-    const result = runUpdater(repoRoot, ["--dry-run", "--no-install", "--no-build", "--check"]);
+    const result = runUpdater(repoRoot, [
+      "--dry-run",
+      "--no-install",
+      "--no-build",
+      "--check",
+      "--allow-other-branch",
+    ]);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("Push: disabled");
     expect(result.stdout).toContain("git rebase --reapply-cherry-picks --empty=keep upstream/main");
@@ -211,23 +217,19 @@ describe("local-fixes updater", () => {
   });
 
   // This integration path performs multiple synchronous Git operations under parallel suite load.
-  it(
-    "allows a local-only override branch when origin has no matching ref",
-    () => {
-      const fixture = createLocalOnlyFixture();
-      const result = runUpdater(fixture.repo, [
-        "--allow-other-branch",
-        "--no-install",
-        "--no-build",
-        "--no-check",
-      ]);
+  it("allows a local-only override branch when origin has no matching ref", () => {
+    const fixture = createLocalOnlyFixture();
+    const result = runUpdater(fixture.repo, [
+      "--allow-other-branch",
+      "--no-install",
+      "--no-build",
+      "--no-check",
+    ]);
 
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stderr).toContain("continuing without push eligibility");
-      expect(result.stdout).not.toContain("git push");
-    },
-    15_000,
-  );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain("continuing without push eligibility");
+    expect(result.stdout).not.toContain("git push");
+  }, 15_000);
 
   it("does not print nonexistent recovery artifacts when the source fetch fails", () => {
     const fixture = createUpdateFixture();

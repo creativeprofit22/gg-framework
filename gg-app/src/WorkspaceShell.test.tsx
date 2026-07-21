@@ -609,11 +609,47 @@ describe("WorkspaceShell", () => {
       width: 1000,
       height: 700,
     } as DOMRect);
+    const addWindowListener = vi.spyOn(window, "addEventListener");
 
-    fireEvent.pointerDown(divider, { button: 0, clientX: 500, pointerId: 4 });
-    fireEvent.pointerMove(window, { clientX: 600, pointerId: 4 });
+    const pointerDown = new PointerEvent("pointerdown", {
+      bubbles: true,
+      button: 0,
+      buttons: 1,
+      clientX: 500,
+      isPrimary: true,
+      pointerId: 4,
+      pointerType: "mouse",
+    });
+    expect([pointerDown.pointerId, pointerDown.clientX]).toEqual([4, 500]);
+    act(() => fireEvent(divider, pointerDown));
+    expect(addWindowListener.mock.calls.some(([type]) => type === "pointermove")).toBe(true);
+
+    const pointerMove = new PointerEvent("pointermove", {
+      bubbles: true,
+      button: -1,
+      buttons: 1,
+      clientX: 600,
+      isPrimary: true,
+      pointerId: 4,
+      pointerType: "mouse",
+    });
+    expect([pointerMove.pointerId, pointerMove.clientX]).toEqual([4, 600]);
+    act(() => fireEvent(window, pointerMove));
     await waitFor(() => expect(divider.getAttribute("aria-valuenow")).toBe("60"));
-    fireEvent.pointerUp(window, { pointerId: 4 });
+    act(() =>
+      fireEvent(
+        window,
+        new PointerEvent("pointerup", {
+          bubbles: true,
+          button: 0,
+          buttons: 0,
+          clientX: 600,
+          isPrimary: true,
+          pointerId: 4,
+          pointerType: "mouse",
+        }),
+      ),
+    );
     fireEvent.keyDown(divider, { key: "ArrowLeft" });
     await waitFor(() => expect(divider.getAttribute("aria-valuenow")).toBe("55"));
 

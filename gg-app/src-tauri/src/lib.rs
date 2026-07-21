@@ -4645,11 +4645,10 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         .env("ERROR_MOM_RELEASE", env!("CARGO_PKG_VERSION"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let secure_azure = azure_connection::secure_config()
-        .unwrap_or_else(|_| {
-            log::warn!("Azure secure configuration is unavailable; preserving inherited environment");
-            None
-        });
+    let secure_azure = azure_connection::secure_config().unwrap_or_else(|_| {
+        log::warn!("Azure secure configuration is unavailable; preserving inherited environment");
+        None
+    });
     azure_connection::lifecycle::configure_daemon_azure_environment(
         &mut cmd,
         secure_azure.as_ref(),

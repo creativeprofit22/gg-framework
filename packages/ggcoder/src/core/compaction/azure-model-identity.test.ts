@@ -9,7 +9,11 @@ const baseEnvironment: AzureOpenAIEnvironment = {
   AZURE_OPENAI_DEPLOYMENT: "customer-production-chat",
 };
 
-const registeredIds = ["azure:customer-production-chat", "azure:unknown-production-chat"] as const;
+const registeredIds = [
+  "azure:customer-production-chat",
+  "azure:gpt-5.6-sol",
+  "azure:unknown-production-chat",
+] as const;
 
 afterEach(() => {
   for (const id of registeredIds) {
@@ -28,6 +32,18 @@ describe("Azure compaction model identity", () => {
     const contextWindow = getContextWindow(model.id, { provider: "azure" });
     expect(contextWindow).toBe(1_050_000);
     expect(shouldCompact([], contextWindow, 0.85, 150_000)).toBe(false);
+  });
+
+  it("does not compact an exact legacy Sol deployment at the old conservative threshold", () => {
+    const model = registerConfiguredAzureModel({
+      ...baseEnvironment,
+      AZURE_OPENAI_DEPLOYMENT: "gpt-5.6-sol",
+    })!;
+
+    const contextWindow = getContextWindow(model.id, { provider: "azure" });
+    expect(model.modelIdentity).toBe("gpt-5.6-sol");
+    expect(contextWindow).toBe(1_050_000);
+    expect(shouldCompact([], contextWindow, 0.85, 283_927)).toBe(false);
   });
 
   it("compacts conservatively when an explicit identity is unknown", () => {

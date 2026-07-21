@@ -49,11 +49,10 @@ export function registerConfiguredAzureModel(
   const existing = MODELS.find((model) => model.id === id);
   if (existing) return existing;
 
-  const identityModel = config.modelIdentity
-    ? MODELS.find(
-        (candidate) => candidate.provider === "openai" && candidate.id === config.modelIdentity,
-      )
-    : undefined;
+  const modelIdentity = config.modelIdentity ?? config.deployment;
+  const identityModel = MODELS.find(
+    (candidate) => candidate.provider === "openai" && candidate.id === modelIdentity,
+  );
   const conservativeCapabilities: Omit<ModelInfo, "id" | "name" | "provider"> = {
     contextWindow: 128_000,
     maxOutputTokens: 16_384,
@@ -68,7 +67,7 @@ export function registerConfiguredAzureModel(
     id,
     name: `Azure OpenAI (${config.deployment})`,
     provider: AZURE_OPENAI_PROVIDER,
-    modelIdentity: config.modelIdentity,
+    modelIdentity: identityModel?.id ?? config.modelIdentity,
   };
   MODELS.push(model);
   return model;

@@ -207,6 +207,23 @@ describe("Azure OpenAI app boundaries", () => {
     });
   });
 
+  it("infers exact legacy deployment names as Azure model identities", () => {
+    const environment = { ...completeEnvironment, AZURE_OPENAI_MODEL_ID: undefined };
+    addedModelIds.add("azure:gpt-5.6-sol");
+
+    expect(registerConfiguredAzureModel(environment)).toMatchObject({
+      id: "azure:gpt-5.6-sol",
+      modelIdentity: "gpt-5.6-sol",
+      contextWindow: 1_050_000,
+      maxOutputTokens: 128_000,
+      supportsThinking: true,
+      supportsImages: true,
+      supportsVideo: false,
+      costTier: "high",
+      maxThinkingLevel: "ultra",
+    });
+  });
+
   it("maps a customer deployment name to explicit GPT-5.6 Sol capabilities", () => {
     const environment = {
       ...completeEnvironment,

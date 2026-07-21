@@ -981,18 +981,15 @@ describe("agentLoop", () => {
     ).rejects.toThrow("authentication failed");
   });
 
-  it("flips to non-streaming fallback after repeated stream stalls", async () => {
+  it("recovers repeated Azure stalls non-streaming without losing tools or usage", async () => {
     vi.useFakeTimers();
 
-    // First 2 calls stall (never yield, never resolve) and abort when signal fires.
-    // 3rd call returns a real response -- we assert it was made with streaming: false.
     const capturedOpts: StreamOptions[] = [];
     let callIndex = 0;
     mockStream.mockImplementation((opts: StreamOptions) => {
       capturedOpts.push(opts);
       callIndex++;
       if (callIndex <= 2) {
-        // Stalling stream: aborts only when the per-attempt signal fires
         const abortPromise = new Promise<never>((_, reject) => {
           opts.signal?.addEventListener(
             "abort",
@@ -1009,20 +1006,35 @@ describe("agentLoop", () => {
           response: abortPromise,
         } as unknown as ReturnType<typeof stream>;
       }
-      return mockOkResult("Recovered!") as unknown as ReturnType<typeof stream>;
+      if (callIndex === 3) {
+        return mockToolCallResult("inspect", {
+          inputTokens: 80,
+          outputTokens: 20,
+          cacheRead: 30,
+        }) as unknown as ReturnType<typeof stream>;
+      }
+      return mockOkResult("Recovered after inspection.") as unknown as ReturnType<typeof stream>;
     });
 
+    const inspect = vi.fn().mockResolvedValue({ content: "inspection complete" });
+    const inspectTool: AgentTool<typeof emptyParams> = {
+      name: "inspect",
+      description: "Inspect the target",
+      parameters: emptyParams,
+      execute: inspect,
+    };
     const messages: Message[] = [
       { role: "system", content: "sys" },
       { role: "user", content: "hi" },
     ];
 
-    const loopPromise = collectLoop(messages, { provider: "anthropic", model: "test" });
+    const loopPromise = collectLoop(messages, {
+      provider: "azure",
+      model: "test-deployment",
+      tools: [inspectTool],
+    });
 
-    // Advance past first-event idle timeout (45s) three times to drive through
-    // the two stalls + their exponential-backoff retry delays.
-    // 1st stall: 45s idle -> abort -> 1s retry delay
-    // 2nd stall: 45s idle -> abort -> 2s retry delay -> flag flips -> 3rd call succeeds
+    // Two 45s first-event stalls plus 1s/2s backoffs lead to the fallback call.
     for (let i = 0; i < 5; i++) {
       await vi.advanceTimersByTimeAsync(50_000);
     }
@@ -1030,19 +1042,35 @@ describe("agentLoop", () => {
     const { events, result } = await loopPromise;
     vi.useRealTimers();
 
-    expect(mockStream).toHaveBeenCalledTimes(3);
-    // First two calls: streaming mode (flag undefined => default true)
+    expect(mockStream).toHaveBeenCalledTimes(4);
     expect(capturedOpts[0].streaming).toBeUndefined();
     expect(capturedOpts[1].streaming).toBeUndefined();
-    // Third call: non-streaming fallback explicitly set
     expect(capturedOpts[2].streaming).toBe(false);
-
-    expect(events.some((e) => e.type === "agent_done")).toBe(true);
-    expect(result.totalTurns).toBe(1); // stall retries don't count as turns
-    const turnEnd = events.find((event) => event.type === "turn_end");
-    expect(turnEnd?.type === "turn_end" ? turnEnd.timing.ttftMs : 0).toBeGreaterThanOrEqual(90_000);
+    expect(capturedOpts[3].streaming).toBeUndefined();
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "tool_call_start", name: "inspect" }),
+        expect.objectContaining({ type: "tool_call_end", isError: false }),
+        expect.objectContaining({
+          type: "turn_end",
+          turn: 1,
+          usage: { inputTokens: 80, outputTokens: 20, cacheRead: 30 },
+        }),
+      ]),
+    );
+    expect(result.totalTurns).toBe(2);
+    expect(result.totalUsage).toEqual({
+      inputTokens: 180,
+      outputTokens: 70,
+      cacheRead: 30,
+    });
+    const firstTurnEnd = events.find((event) => event.type === "turn_end" && event.turn === 1);
     expect(
-      turnEnd?.type === "turn_end" ? turnEnd.timing.providerDurationMs : 0,
+      firstTurnEnd?.type === "turn_end" ? firstTurnEnd.timing.ttftMs : 0,
+    ).toBeGreaterThanOrEqual(90_000);
+    expect(
+      firstTurnEnd?.type === "turn_end" ? firstTurnEnd.timing.providerDurationMs : 0,
     ).toBeGreaterThanOrEqual(90_000);
   }, 30_000);
 

@@ -39,7 +39,8 @@ interface AzureFunctionCallItem {
 }
 
 export function streamAzureOpenAIResponses(options: StreamOptions): StreamResult {
-  return new StreamResult(runStream(options), options.signal);
+  const generator = options.streaming === false ? runNonStreaming(options) : runStream(options);
+  return new StreamResult(generator, options.signal);
 }
 
 async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
@@ -278,6 +279,178 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   return streamResponse;
 }
 
+async function* runNonStreaming(
+  options: StreamOptions,
+): AsyncGenerator<StreamEvent, StreamResponse> {
+  const apiKey = requireOption(options.apiKey, "apiKey");
+  const model = requireOption(options.model, "model");
+  const url = parseResponsesUrl(requireOption(options.baseUrl, "baseUrl"));
+  const fetchImpl = options.fetch ?? globalThis.fetch;
+
+  const { system, input } = serializeResponsesInput(options.messages, {
+    serializeRawAssistantPart: serializeEncryptedReasoningItem,
+    includeToolResultImages: options.supportsImages === true,
+  });
+  const requestBody: Record<string, unknown> = { model, input, stream: false, store: false };
+  if (system !== undefined) requestBody.instructions = system;
+  if (options.maxTokens !== undefined) requestBody.max_output_tokens = options.maxTokens;
+  if (options.promptCacheKey) {
+    requestBody.prompt_cache_key = normalizePromptCacheKey(options.promptCacheKey);
+  }
+  if (options.tools?.length) {
+    requestBody.tools = serializeResponsesTools(options.tools, { strict: null });
+    requestBody.tool_choice = serializeResponsesToolChoice(options.toolChoice, options.tools, {
+      transportName: "Azure OpenAI",
+      supportsNamedTool: true,
+    });
+    requestBody.parallel_tool_calls = true;
+  }
+  if (options.thinking) {
+    requestBody.reasoning = {
+      effort: options.thinking === "ultra" ? "xhigh" : options.thinking,
+      summary: "auto",
+    };
+    requestBody.include = ["reasoning.encrypted_content"];
+  }
+
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-key": apiKey,
+      },
+      body: JSON.stringify(requestBody),
+      signal: options.signal,
+    });
+  } catch (cause) {
+    throw new ProviderError("azure", "Azure OpenAI request failed.", { cause });
+  }
+
+  if (!response.ok) {
+    const responseText = await response.text().catch(() => "");
+    throw new ProviderError(
+      "azure",
+      extractSafeErrorMessage(responseText, response.status, apiKey),
+      { statusCode: response.status },
+    );
+  }
+
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch (cause) {
+    throw malformedNonStreamingResponseError(cause);
+  }
+  const completedResponse = asNonStreamingResponse(value);
+  const providerError = toNonStreamingProviderError(completedResponse, apiKey);
+  if (providerError) throw providerError;
+
+  const output = completedResponse.output;
+  if (!Array.isArray(output)) throw malformedNonStreamingResponseError();
+
+  let accumulatedText = "";
+  const toolCallIds = new Set<string>();
+  const orderedItems: Array<
+    { kind: "reasoning"; part: ContentPart } | { kind: "tool"; toolCall: ToolCall }
+  > = [];
+
+  for (const outputValue of output) {
+    const item = objectValue(outputValue);
+    if (!item || typeof item.type !== "string") throw malformedNonStreamingResponseError();
+
+    if (item.type === "reasoning") {
+      const part = parseEncryptedReasoningPart(item);
+      if (!part) throw malformedNonStreamingResponseError();
+      orderedItems.push({ kind: "reasoning", part });
+      if (options.thinking) {
+        yield { type: "thinking_delta", text: "" };
+        const summary = item.summary;
+        if (summary !== undefined && !Array.isArray(summary)) {
+          throw malformedNonStreamingResponseError();
+        }
+        for (const summaryValue of summary ?? []) {
+          const summaryItem = objectValue(summaryValue);
+          if (summaryItem?.type !== "summary_text" || typeof summaryItem.text !== "string") {
+            throw malformedNonStreamingResponseError();
+          }
+          yield { type: "thinking_delta", text: summaryItem.text };
+        }
+      }
+      continue;
+    }
+
+    if (item.type === "message") {
+      if (!Array.isArray(item.content)) throw malformedNonStreamingResponseError();
+      for (const contentValue of item.content) {
+        const contentItem = objectValue(contentValue);
+        if (contentItem?.type !== "output_text") continue;
+        if (typeof contentItem.text !== "string") throw malformedNonStreamingResponseError();
+        accumulatedText += contentItem.text;
+        yield { type: "text_delta", text: contentItem.text };
+      }
+      continue;
+    }
+
+    if (item.type === "function_call") {
+      const parsedCall = parseFunctionCallItem(item, true);
+      if (toolCallIds.has(parsedCall.id)) throw malformedNonStreamingToolCallError();
+      toolCallIds.add(parsedCall.id);
+      const args = parseNonStreamingToolArguments(parsedCall.arguments!);
+      const toolCall: ToolCall = {
+        type: "tool_call",
+        id: parsedCall.id,
+        ...(parsedCall.itemId ? { itemId: parsedCall.itemId } : {}),
+        name: parsedCall.name,
+        args,
+      };
+      orderedItems.push({ kind: "tool", toolCall });
+      yield {
+        type: "toolcall_delta",
+        id: parsedCall.id,
+        name: parsedCall.name,
+        argsJson: parsedCall.arguments!,
+      };
+      yield {
+        type: "toolcall_done",
+        id: parsedCall.id,
+        ...(parsedCall.itemId ? { itemId: parsedCall.itemId } : {}),
+        name: parsedCall.name,
+        args,
+      };
+    }
+  }
+
+  const content: ContentPart[] = [];
+  let textInserted = false;
+  for (const item of orderedItems) {
+    if (item.kind === "reasoning") {
+      content.push(item.part);
+      continue;
+    }
+    if (accumulatedText && !textInserted) {
+      content.push({ type: "text", text: accumulatedText });
+      textInserted = true;
+    }
+    content.push(item.toolCall);
+  }
+  if (accumulatedText && !textInserted) content.push({ type: "text", text: accumulatedText });
+
+  const stopReason = toolCallIds.size > 0 ? ("tool_use" as const) : ("end_turn" as const);
+  const streamResponse: StreamResponse = {
+    message: {
+      role: "assistant",
+      content: content.some((part) => part.type !== "text") ? content : accumulatedText,
+    },
+    stopReason,
+    usage: toUsage(completedResponse.usage),
+  };
+
+  yield { type: "done", stopReason };
+  return streamResponse;
+}
+
 function isReasoningDeltaEvent(type: unknown): boolean {
   return (
     type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta"
@@ -420,6 +593,48 @@ function malformedStreamError(): ProviderError {
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function asNonStreamingResponse(
+  value: unknown,
+): ResponsesCompletedPayload & Record<string, unknown> {
+  const response = objectValue(value);
+  if (!response) throw malformedNonStreamingResponseError();
+  return response as ResponsesCompletedPayload & Record<string, unknown>;
+}
+
+function toNonStreamingProviderError(
+  response: ResponsesCompletedPayload & Record<string, unknown>,
+  credential: string,
+): ProviderError | undefined {
+  if (response.status === "failed" || response.error !== undefined) {
+    return toStreamProviderError({ type: "response.failed", response }, credential);
+  }
+  if (response.status === "incomplete") {
+    return toStreamProviderError({ type: "response.incomplete", response }, credential);
+  }
+  if (response.status !== undefined && response.status !== "completed") {
+    return malformedNonStreamingResponseError();
+  }
+  return undefined;
+}
+
+function parseNonStreamingToolArguments(argsJson: string): Record<string, unknown> {
+  try {
+    const args = JSON.parse(argsJson) as unknown;
+    if (isJsonObject(args)) return args;
+  } catch {
+    // Fall through to the deterministic public protocol error.
+  }
+  throw malformedNonStreamingToolCallError();
+}
+
+function malformedNonStreamingToolCallError(): ProviderError {
+  return new ProviderError("azure", "Azure OpenAI returned a malformed tool call.");
+}
+
+function malformedNonStreamingResponseError(cause?: unknown): ProviderError {
+  return new ProviderError("azure", "Azure OpenAI returned a malformed response.", { cause });
 }
 
 function asCompletedResponse(value: unknown): ResponsesCompletedPayload {

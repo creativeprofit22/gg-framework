@@ -180,6 +180,142 @@ describe("streamAzureOpenAIResponses", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("normalizes a complete non-streaming response with reasoning, tools, and usage", async () => {
+    let requestBody: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({
+        id: "resp_1",
+        status: "completed",
+        output: [
+          {
+            type: "reasoning",
+            id: "rs_1",
+            encrypted_content: "encrypted-reasoning",
+            summary: [{ type: "summary_text", text: "Inspecting the request" }],
+          },
+          {
+            type: "message",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "I will inspect it." }],
+          },
+          {
+            type: "function_call",
+            id: "fc_1",
+            call_id: "call_1",
+            name: "inspect",
+            arguments: '{"path":"src/index.ts"}',
+          },
+        ],
+        usage: {
+          input_tokens: 30,
+          output_tokens: 7,
+          input_tokens_details: { cached_tokens: 11 },
+        },
+      });
+    });
+    const result = streamAzureOpenAIResponses({
+      provider: "azure",
+      model: "test-deployment",
+      messages: [{ role: "user", content: "Inspect the entry point." }],
+      tools: [
+        {
+          name: "inspect",
+          description: "Inspect a file",
+          parameters: z.object({ path: z.string() }),
+        },
+      ],
+      thinking: "high",
+      streaming: false,
+      apiKey: TEST_CREDENTIAL,
+      baseUrl: RESPONSES_URL,
+      fetch: fetchMock,
+    });
+    const events = [];
+    for await (const event of result) events.push(event);
+
+    expect(requestBody).toMatchObject({
+      model: "test-deployment",
+      stream: false,
+      store: false,
+      reasoning: { effort: "high", summary: "auto" },
+      include: ["reasoning.encrypted_content"],
+      parallel_tool_calls: true,
+    });
+    expect(events).toEqual([
+      { type: "thinking_delta", text: "" },
+      { type: "thinking_delta", text: "Inspecting the request" },
+      { type: "text_delta", text: "I will inspect it." },
+      {
+        type: "toolcall_delta",
+        id: "call_1",
+        name: "inspect",
+        argsJson: '{"path":"src/index.ts"}',
+      },
+      {
+        type: "toolcall_done",
+        id: "call_1",
+        itemId: "fc_1",
+        name: "inspect",
+        args: { path: "src/index.ts" },
+      },
+      { type: "done", stopReason: "tool_use" },
+    ]);
+    await expect(result.response).resolves.toEqual({
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "raw",
+            data: {
+              type: "reasoning",
+              id: "rs_1",
+              encrypted_content: "encrypted-reasoning",
+              summary: [{ type: "summary_text", text: "Inspecting the request" }],
+            },
+          },
+          { type: "text", text: "I will inspect it." },
+          {
+            type: "tool_call",
+            id: "call_1",
+            itemId: "fc_1",
+            name: "inspect",
+            args: { path: "src/index.ts" },
+          },
+        ],
+      },
+      stopReason: "tool_use",
+      usage: { inputTokens: 19, outputTokens: 7, cacheRead: 11 },
+    });
+  });
+
+  it("sanitizes provider failures returned by non-streaming Responses", async () => {
+    const result = streamAzureOpenAIResponses({
+      provider: "azure",
+      model: "test-deployment",
+      messages: [{ role: "user", content: "Try once." }],
+      streaming: false,
+      apiKey: TEST_CREDENTIAL,
+      baseUrl: RESPONSES_URL,
+      fetch: vi.fn<typeof fetch>().mockResolvedValueOnce(
+        Response.json({
+          status: "failed",
+          error: { code: "server_error", message: "<b>Failed</b> test-key" },
+        }),
+      ),
+    });
+
+    const error = await result.response.catch((cause: unknown) => cause);
+    expect(error).toMatchObject({
+      provider: "azure",
+      statusCode: 500,
+      message: "Failed [REDACTED]",
+    });
+    expect(String(error)).not.toContain("test-key");
+    expect(String(error)).not.toContain("<b>");
+  });
+
   it.each([
     {
       name: "error",
@@ -401,28 +537,32 @@ describe("streamAzureOpenAIResponses", () => {
     });
   });
 
-  it("forwards cancellation to fetch without replaying the request", async () => {
-    const controller = new AbortController();
-    const abortCause = new DOMException("Cancelled", "AbortError");
-    const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
-      expect(init?.signal).toBe(controller.signal);
-      controller.abort();
-      throw abortCause;
-    });
-    const stream = streamAzureOpenAIResponses({
-      provider: "azure",
-      model: "gpt-5.6-sol",
-      messages: [{ role: "user", content: "Cancel." }],
-      apiKey: TEST_CREDENTIAL,
-      baseUrl: RESPONSES_URL,
-      signal: controller.signal,
-      fetch: fetchMock,
-    });
+  it.each([undefined, false])(
+    "forwards cancellation to fetch in streaming=%s mode without replaying the request",
+    async (streaming) => {
+      const controller = new AbortController();
+      const abortCause = new DOMException("Cancelled", "AbortError");
+      const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
+        expect(init?.signal).toBe(controller.signal);
+        controller.abort();
+        throw abortCause;
+      });
+      const stream = streamAzureOpenAIResponses({
+        provider: "azure",
+        model: "gpt-5.6-sol",
+        messages: [{ role: "user", content: "Cancel." }],
+        apiKey: TEST_CREDENTIAL,
+        baseUrl: RESPONSES_URL,
+        signal: controller.signal,
+        ...(streaming === false ? { streaming } : {}),
+        fetch: fetchMock,
+      });
 
-    const error = await stream.response.catch((cause: unknown) => cause);
-    expect(error).toMatchObject({ name: "AbortError" });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
+      const error = await stream.response.catch((cause: unknown) => cause);
+      expect(error).toMatchObject({ name: "AbortError" });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("correlates parallel calls by output_index and accepts equivalent final JSON", async () => {
     const stream = toolCallStream([

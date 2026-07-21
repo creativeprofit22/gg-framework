@@ -95,7 +95,6 @@ import { loadCustomCommands } from "./core/custom-commands.js";
 import {
   discoverProjects,
   discoverProjectsRootFolders,
-  listRecentSessions,
   mergeDiscoveredProjects,
 } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";

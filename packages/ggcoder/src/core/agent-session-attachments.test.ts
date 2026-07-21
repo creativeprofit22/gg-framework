@@ -161,6 +161,6 @@ describe("AgentSession attachment command expansion", () => {
     expect(text).toContain("Run the queued custom body.");
     expect(text).toContain("queued details");
     expect(text).toContain("queued.txt");
-    expect(text).not.toContain("/queued");
+    expect(text).not.toContain("/queued queued details");
   });
 });

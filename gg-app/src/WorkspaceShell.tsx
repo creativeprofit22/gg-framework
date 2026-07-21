@@ -332,13 +332,15 @@ function ReadyWorkspaceShell({
   }, [layout, leafIds, snapshots]);
 
   useEffect(() => {
+    const scheduledPaneId = layout.focusedPaneId;
     requestAnimationFrame(() => {
-      if (paneToFocusAfterMoveRef.current === layout.focusedPaneId) {
+      if (layoutRef.current.focusedPaneId !== scheduledPaneId) return;
+      if (paneToFocusAfterMoveRef.current === scheduledPaneId) {
         paneToFocusAfterMoveRef.current = null;
-        focusPaneDragHandle(layout.focusedPaneId);
+        focusPaneDragHandle(scheduledPaneId);
         return;
       }
-      focusPaneInput(layout.focusedPaneId);
+      focusPaneInput(scheduledPaneId);
     });
   }, [focusPaneDragHandle, focusPaneInput, layout.focusedPaneId, leafIds]);
 

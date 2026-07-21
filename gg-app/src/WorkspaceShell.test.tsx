@@ -164,6 +164,18 @@ function saveTwoPaneLayout(): void {
   );
 }
 
+async function waitForInitialWorkspaceReady(): Promise<HTMLElement> {
+  const secondaryPane = await screen.findByTestId("pane-secondary");
+  await act(async () => {});
+  await waitFor(() => {
+    expect(lifecycleEffectExecutions.get("primary")).toBe(1);
+    expect(lifecycleEffectExecutions.get("secondary")).toBe(1);
+    expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("/one");
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "primary input" }));
+  });
+  return secondaryPane;
+}
+
 function saveFourPaneLayout(): void {
   localStorage.setItem(
     "gg-workspace-layout-recursive:main",
@@ -333,7 +345,9 @@ describe("WorkspaceShell", () => {
     expect((await screen.findByTestId("pane-primary")).dataset.target).toBe("/one");
     expect(screen.getByTestId("pane-secondary").dataset.target).toBe("/two");
     fireEvent.pointerDown(screen.getByTestId("pane-secondary"));
-    expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("true");
+    await waitFor(() =>
+      expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("true"),
+    );
 
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
@@ -343,19 +357,27 @@ describe("WorkspaceShell", () => {
   });
 
   it("copies only the focused pane to a new window and preserves the source", async () => {
+    let initialFocusFrame: FrameRequestCallback | undefined;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      initialFocusFrame ??= callback;
+      return 1;
+    });
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     const source = await screen.findByTestId("pane-secondary");
+    await act(async () => {});
+    expect(initialFocusFrame).toBeTypeOf("function");
 
     fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
-    await waitFor(() => expect(source.dataset.focused).toBe("true"));
+    act(() => initialFocusFrame?.(0));
+    expect(source.dataset.focused).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Copy to New Window" }));
 
     await waitFor(() => expect(bridge.copyPaneToNewWindow).toHaveBeenCalledWith("secondary"));
     expect(screen.getByTestId("pane-secondary")).toBe(source);
     expect(screen.getByTestId("pane-primary")).toBeTruthy();
     expect(bridge.disposePaneSession).not.toHaveBeenCalled();
-    expect(screen.getByText("Pane secondary copied to window project-1.")).toBeTruthy();
+    expect(await screen.findByText("Pane secondary copied to window project-1.")).toBeTruthy();
   });
 
   it("reports copy failure with successful rollback and keeps the focused source", async () => {
@@ -363,6 +385,7 @@ describe("WorkspaceShell", () => {
     bridge.copyPaneToNewWindow.mockRejectedValueOnce({ rollbackSucceeded: true });
     render(<WorkspaceShell renderPane={renderPane} />);
     const source = await screen.findByTestId("pane-secondary");
+    await act(async () => {});
 
     fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
     await waitFor(() => expect(source.dataset.focused).toBe("true"));
@@ -382,8 +405,7 @@ describe("WorkspaceShell", () => {
       reusedWindow: true,
     });
     render(<WorkspaceShell renderPane={renderPane} />);
-    const source = await screen.findByTestId("pane-secondary");
-
+    const source = await waitForInitialWorkspaceReady();
     fireEvent.focus(screen.getByRole("textbox", { name: "secondary input" }));
     await waitFor(() => expect(source.dataset.focused).toBe("true"));
     fireEvent.click(screen.getByRole("button", { name: "Copy to New Window" }));
@@ -553,6 +575,7 @@ describe("WorkspaceShell", () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("pane-secondary");
+    await act(async () => {});
 
     fireEvent.keyDown(window, { key: "2", ctrlKey: true });
     expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "secondary input" }));
@@ -589,10 +612,10 @@ describe("WorkspaceShell", () => {
 
     fireEvent.pointerDown(divider, { button: 0, clientX: 500, pointerId: 4 });
     fireEvent.pointerMove(window, { clientX: 600, pointerId: 4 });
-    expect(divider.getAttribute("aria-valuenow")).toBe("60");
+    await waitFor(() => expect(divider.getAttribute("aria-valuenow")).toBe("60"));
     fireEvent.pointerUp(window, { pointerId: 4 });
     fireEvent.keyDown(divider, { key: "ArrowLeft" });
-    expect(divider.getAttribute("aria-valuenow")).toBe("55");
+    await waitFor(() => expect(divider.getAttribute("aria-valuenow")).toBe("55"));
 
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);
@@ -603,7 +626,7 @@ describe("WorkspaceShell", () => {
   it("keeps pane lifecycle callbacks and effects stable across unrelated rerenders", async () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
-    await screen.findByTestId("pane-secondary");
+    await waitForInitialWorkspaceReady();
 
     const initialCallback = latestPaneProps.get("primary")?.onLifecycleError;
     const initialExecutionCount = lifecycleEffectExecutions.get("primary");
@@ -634,6 +657,7 @@ describe("WorkspaceShell", () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("pane-secondary");
+    await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("/one"));
 
     emitPaneSnapshot("primary", { sessionTitle: "Renamed session" });
 
@@ -643,7 +667,7 @@ describe("WorkspaceShell", () => {
   it("gates closure after active work changes in a pane snapshot", async () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
-    await screen.findByTestId("pane-secondary");
+    await waitForInitialWorkspaceReady();
 
     const titleCallCount = bridge.setWindowTitle.mock.calls.length;
     emitPaneSnapshot("secondary", { activeWork: true });
@@ -684,6 +708,7 @@ describe("WorkspaceShell", () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("pane-secondary");
+    await waitFor(() => expect(bridge.setWindowTitle).toHaveBeenLastCalledWith("/one"));
 
     await act(async () => {
       emitPaneSnapshot("primary", {
@@ -744,7 +769,7 @@ describe("WorkspaceShell", () => {
     await screen.findByTestId("pane-secondary");
 
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
-    expect(bridge.newWindow).toHaveBeenCalledOnce();
+    await waitFor(() => expect(bridge.newWindow).toHaveBeenCalledOnce());
   });
 
   it("confirms active-work closure, supports cancel, then disposes once and restores focus", async () => {

@@ -29,6 +29,7 @@ describe("thinking-level helpers", () => {
       id: "azure:gpt-5.6-sol",
       name: "Azure GPT-5.6 Sol",
       provider: "azure" as const,
+      modelIdentity: "gpt-5.6-sol",
     };
     MODELS.push(azureSol);
     try {

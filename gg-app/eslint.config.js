@@ -12,7 +12,9 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: true,
+        projectService: {
+          allowDefaultProject: ["src/ContextMeter.test.tsx"],
+        },
         tsconfigRootDir: import.meta.dirname,
       },
       globals: {

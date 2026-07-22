@@ -25,11 +25,13 @@ function fixture(): { root: string; nsis: string } {
 }
 
 describe("local installer freshness", () => {
-  it("selects a Windows NSIS installer created by the current build", () => {
+  it("selects a Windows NSIS installer with an explicit post-build-start timestamp", () => {
     const { root, nsis } = fixture();
     const startedAt = Date.now();
     const installer = join(nsis, "Supah-Coder_1.2.3_x64-setup.exe");
     writeFileSync(installer, "installer");
+    const completedAt = new Date(startedAt + 1_000);
+    utimesSync(installer, completedAt, completedAt);
 
     expect(freshInstallerForPlatform(root, "win32", startedAt)).toBe(installer);
   });

@@ -20,6 +20,7 @@
     "prebundle": "pnpm stage:node && pnpm bundle:sidecar",
     "installer:art": "node installer/build-art.mjs",
     "bump": "node scripts/bump-version.mjs",
+    "evidence:workspace-shell": "node scripts/workspace-shell-evidence.mjs",
     "test": "vitest run",
     "tauri": "tauri"
   },

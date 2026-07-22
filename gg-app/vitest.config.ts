@@ -9,6 +9,7 @@ export default defineConfig({
       "scripts/update-with-local-fixes.test.ts",
       "scripts/build-local-hotfix.test.ts",
       "scripts/smoke-packaged-windows.test.mjs",
+      "scripts/workspace-shell-evidence.test.mjs",
     ],
   },
 });

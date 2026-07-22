@@ -115,6 +115,20 @@ jobs:
         run: node gg-app/scripts/smoke-sidecar.mjs
         shell: bash
 
+      - name: Phase 00 workspace evidence
+        run: |
+          set -o pipefail
+          pnpm --filter gg-app evidence:workspace-shell 2>&1 | tee phase00-workspace-evidence-${{ runner.os }}.log
+        shell: bash
+
+      - name: Upload Phase 00 workspace evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase00-workspace-evidence-${{ runner.os }}
+          path: phase00-workspace-evidence-${{ runner.os }}.log
+          if-no-files-found: error
+
       - name: Frontend platform-class test
         run: pnpm --filter gg-app test
 

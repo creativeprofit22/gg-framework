@@ -11,13 +11,13 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Complete in code:** the bounded workspace-loop regression, stable pane lifecycle callback, and idempotent snapshot merge landed in `50a50535`.
-- **Evidence still open:** lint, stable-memory evidence, and macOS/Linux workspace coverage.
-- **Next phase:** Phase 00.
-- **Known blocker:** the required foreground timeout fixtures and `bash-timeout.test.ts`, `process-manager.test.ts`, and `task-output.test.ts` do not exist; the current Windows background repro also passes an unquoted `process.execPath` through Git Bash.
+- **Complete through Phase 05:** Phase 00 workspace evidence is closed, and Phases 01–05 are present in code and focused tests (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`).
+- **Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
+- **Next phase:** Phase 06 — Add POSIX TERM/KILL escalation.
+- **Current reliability gap:** POSIX foreground tree cleanup still force-kills the process group immediately, while background stop has only a partial TERM-then-kill path; cooperative TERM, forced escalation, and bounded direct/descendant fallback do not yet have the Phase 06 ownership tests.
 - **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive; those concepts remain intact. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
-- **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap rewrite changes documentation only.
+- **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
 
 ## Global constraints
 
@@ -84,6 +84,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 00 — Close workspace-loop evidence
 
+**Status:** Complete.
+
 **Outcome:** The already-landed pane-loop fix has complete acceptance evidence.
 
 **Scope**
@@ -112,7 +114,16 @@ All external references are evidence only. Copy behavior, not source text, unles
 - The suite covers split, restore, copy/rollback/reuse, nested moves without remount/disposal, drag cancellation, focus, close/active-work confirmation, pointer/keyboard resize, native drop, and title routing.
 - Linux and macOS CI pass; peak memory does not grow across repeated focused runs.
 
-**Hard stop:** Record the three-OS run links and memory/survivor evidence. Do not start Phase 01 with any warning, leak, lint failure, or unverified platform.
+**Completion evidence**
+
+- Green CI run: [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147).
+- Framework jobs: `windows-latest · node 22.x` passed; `macos-latest · node 22.x` passed; `ubuntu-latest · node 22.x` passed.
+- App jobs: `app · windows-latest` passed; `app · macos-latest` passed; `app · ubuntu-latest` passed.
+- Windows artifact: 3 runs; peak process-tree memory `[416923648, 406360064, 410021888]` bytes; growth `-6901760` bytes; 0 survivors.
+- macOS artifact: 3 runs; peak process-tree memory `[506019840, 525697024, 515801088]` bytes; growth `9781248` bytes; 0 survivors.
+- Linux artifact: 3 runs; peak process-tree memory `[518901760, 511025152, 511356928]` bytes; growth `-7544832` bytes; 0 survivors.
+
+**Hard stop — satisfied:** The three-OS run, exact memory sequences, and survivor evidence are recorded above; lint, typecheck, focused workspace tests, and all six CI jobs are green.
 
 ## Phase 01 — Add bounded foreground hang fixtures
 

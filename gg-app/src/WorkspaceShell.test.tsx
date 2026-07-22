@@ -604,7 +604,8 @@ describe("WorkspaceShell", () => {
   it("resizes with pointer and keyboard and persists the ratio", async () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
-    const divider = await screen.findByRole("separator");
+    await waitForInitialWorkspaceReady();
+    const divider = screen.getByRole("separator");
     vi.spyOn(divider.parentElement!, "getBoundingClientRect").mockReturnValue({
       width: 1000,
       height: 700,

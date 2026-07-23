@@ -14,7 +14,8 @@ import { killProcessTree } from "../utils/process.js";
 import { createBashTool, executeForegroundCommand } from "./bash.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 
-type ProbeName = "cpu" | "silent" | "nested";
+type BasicProbeName = "cpu" | "silent" | "nested";
+type ProbeName = BasicProbeName | "posix-cooperative" | "posix-ignore";
 
 interface FixtureEvidence {
   role: string;
@@ -228,10 +229,71 @@ async function waitForRecordedPidsToExit(
   } while (Date.now() < deadline);
   const survivors = roles.filter(({ pid }) => isAlive(pid));
   throw new Error(
-    `Windows process-tree cleanup left descendants alive: ${survivors
+    `Process-tree cleanup left descendants alive: ${survivors
       .map(({ role, pid }) => `${role}:${pid}`)
       .join(", ")}`,
   );
+}
+
+async function runPosixSignalProbe(
+  mode: "cooperative" | "ignore",
+  reason: "timeout" | "abort",
+  evidenceFile: string,
+): Promise<void> {
+  const controller = new AbortController();
+  const fixtureArguments = [
+    process.execPath,
+    fixturePath("bash-timeout-launcher.mjs"),
+    evidenceFile,
+    fixturePath("bash-timeout-posix-worker.mjs"),
+  ];
+  const command = `GG_BASH_TIMEOUT_POSIX_MODE=${mode} ${fixtureArguments
+    .map((value) => quotePathForShell(value, false))
+    .join(" ")}`;
+
+  try {
+    const execution = executeForegroundCommand({
+      command,
+      cwd: process.cwd(),
+      timeoutMs: reason === "timeout" ? 1_000 : 10_000,
+      signal: controller.signal,
+      ops: localOperations,
+    });
+    const initialRoles = await waitForFixtureRoles(evidenceFile, ["launcher", "worker"]);
+    if (reason === "abort") controller.abort();
+
+    const result = await execution;
+    expect(result.outcome.reason).toBe(reason === "timeout" ? "timedOut" : "aborted");
+    const roles = await waitForFixtureRoles(evidenceFile, ["worker-term"]);
+    const byRole = new Map(initialRoles.map((role) => [role.role, role]));
+    const wrapperPid = result.outcome.pid;
+    const launcher = byRole.get("launcher");
+    expect(wrapperPid).toBeGreaterThan(0);
+    expect(launcher?.pid === wrapperPid || launcher?.ppid === wrapperPid).toBe(true);
+    expect(byRole.get("worker")?.ppid).toBe(launcher?.pid);
+    expect(roles.find(({ role }) => role === "worker-term")?.pid).toBe(byRole.get("worker")?.pid);
+    await waitForRecordedPidsToExit(roles);
+    expect(wrapperPid === null || isAlive(wrapperPid)).toBe(false);
+  } finally {
+    await cleanupRecordedPids(evidenceFile);
+  }
+}
+
+async function assertSupervisedPosixProbe(mode: "cooperative" | "ignore"): Promise<void> {
+  const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "gg-posix-supervisor-"));
+  const evidenceFile = path.join(tempDirectory, `${mode}.jsonl`);
+  const probe: ProbeName = mode === "cooperative" ? "posix-cooperative" : "posix-ignore";
+  try {
+    const result = await superviseProbe(probe, evidenceFile);
+    expect(result.outerDeadlineFired).toBe(false);
+    expect(result.supervisorOutcome).toBe("child_closed");
+    expect(result.exitCode).toBe(0);
+    expect(result.roles.map(({ role }) => role)).toContain("worker-term");
+    await waitForRecordedPidsToExit(result.roles);
+  } finally {
+    await cleanupRecordedPids(evidenceFile);
+    await fs.rm(tempDirectory, { recursive: true, force: true });
+  }
 }
 
 async function runWindowsPnpmTreeProbe(reason: "timeout" | "abort"): Promise<void> {
@@ -280,9 +342,9 @@ async function runWindowsPnpmTreeProbe(reason: "timeout" | "abort"): Promise<voi
   }
 }
 
-async function runProbe(probe: ProbeName, evidenceFile: string): Promise<void> {
+async function runProbe(probe: BasicProbeName, evidenceFile: string): Promise<void> {
   const manager = new ProcessManager();
-  const fixtureArguments: Record<ProbeName, string[]> = {
+  const fixtureArguments: Record<BasicProbeName, string[]> = {
     cpu: [process.execPath, fixturePath("bash-timeout-cpu.mjs"), evidenceFile],
     silent: [process.execPath, fixturePath("bash-timeout-silent.mjs"), evidenceFile],
     nested: [
@@ -466,7 +528,8 @@ afterEach(() => {
 });
 
 const selectedProbe = process.env[PROBE_ENV];
-const knownProbes: ProbeName[] = ["cpu", "silent", "nested"];
+const basicProbes: BasicProbeName[] = ["cpu", "silent", "nested"];
+const knownProbes: ProbeName[] = [...basicProbes, "posix-cooperative", "posix-ignore"];
 
 if (selectedProbe !== undefined) {
   if (!knownProbes.includes(selectedProbe as ProbeName)) {
@@ -476,10 +539,36 @@ if (selectedProbe !== undefined) {
   if (!evidenceFile) throw new Error(`${EVIDENCE_ENV} is required for a probe process`);
 
   it(`runs the ${selectedProbe} timeout probe`, async () => {
-    await runProbe(selectedProbe as ProbeName, evidenceFile);
+    if (selectedProbe === "posix-cooperative") {
+      await runPosixSignalProbe("cooperative", "timeout", evidenceFile);
+    } else if (selectedProbe === "posix-ignore") {
+      await runPosixSignalProbe("ignore", "abort", evidenceFile);
+    } else {
+      await runProbe(selectedProbe as BasicProbeName, evidenceFile);
+    }
   }, 60_000);
 } else {
   describe("foreground execution outcomes", () => {
+    it("spawns the foreground shell as a detached process-group owner", async () => {
+      const fake = createFakeChild();
+      const spawnOperation = vi.fn(() => fake.child);
+      const execution = executeForegroundCommand({
+        command: "fixture command",
+        cwd: process.cwd(),
+        timeoutMs: 5_000,
+        signal: new AbortController().signal,
+        ops: { ...localOperations, spawn: spawnOperation },
+      });
+      fake.emitClose(0);
+      await execution;
+
+      expect(spawnOperation).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({ detached: true }),
+      );
+    });
+
     it("records completed metadata independently", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(10_000);
@@ -1036,7 +1125,24 @@ if (selectedProbe !== undefined) {
     }
   }, 10_000);
 
+  const posixIt = process.platform === "win32" ? it.skip : it;
   const windowsIt = process.platform === "win32" ? it : it.skip;
+
+  posixIt(
+    "lets a cooperative POSIX group record TERM and exit on timeout",
+    async () => {
+      await assertSupervisedPosixProbe("cooperative");
+    },
+    15_000,
+  );
+
+  posixIt(
+    "escalates a TERM-ignoring POSIX group to KILL on abort",
+    async () => {
+      await assertSupervisedPosixProbe("ignore");
+    },
+    15_000,
+  );
 
   windowsIt(
     "kills the cmd-to-package-manager descendant tree on timeout",
@@ -1054,7 +1160,7 @@ if (selectedProbe !== undefined) {
     15_000,
   );
 
-  it.each(knownProbes)(
+  it.each(basicProbes)(
     "bounds the %s foreground timeout probe",
     async (probe) => {
       await assertSupervisedProbe(probe);

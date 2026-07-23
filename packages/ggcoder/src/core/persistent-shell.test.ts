@@ -1,4 +1,5 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { spawn, type SpawnOptions } from "node:child_process";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import os from "node:os";
 import { PersistentShell } from "./persistent-shell.js";
 
@@ -19,6 +20,27 @@ d("PersistentShell", () => {
   }
 
   const signal = () => new AbortController().signal;
+
+  it("spawns the session shell as a detached process-group owner", async () => {
+    const spawnProcess = vi.fn((command: string, args: string[], options: SpawnOptions) =>
+      spawn(command, args, options),
+    );
+    shell = new PersistentShell(
+      os.tmpdir(),
+      { ...process.env, TERM: "dumb" },
+      1024 * 1024,
+      undefined,
+      spawnProcess,
+    );
+
+    await shell.run("true", 10_000, signal());
+
+    expect(spawnProcess).toHaveBeenCalledWith(
+      "bash",
+      ["--norc", "--noprofile"],
+      expect.objectContaining({ detached: true }),
+    );
+  });
 
   it("runs a command and returns output + exit code", async () => {
     const sh = make();

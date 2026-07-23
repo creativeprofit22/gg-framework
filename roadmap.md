@@ -13,8 +13,10 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 - **Complete through Phase 05:** Phase 00 workspace evidence is closed, and Phases 01–05 are present in code and focused tests (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`).
 - **Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
+- **2026-07-23 code audit:** All six Phase 01–05 commits are ancestors of `HEAD`; 60 focused foreground/process lifecycle tests, the ggcoder typecheck, and targeted ESLint pass on Windows. The real timeout/abort fixture removes the complete `cmd.exe → pnpm.cmd → node.exe → worker` tree.
 - **Next phase:** Phase 06 — Add POSIX TERM/KILL escalation.
 - **Current reliability gap:** POSIX foreground tree cleanup still force-kills the process group immediately, while background stop has only a partial TERM-then-kill path; cooperative TERM, forced escalation, and bounded direct/descendant fallback do not yet have the Phase 06 ownership tests.
+- **Later-track audit:** Phases 07–14 remain incomplete. Track B has not started: Notes authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`.
 - **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive; those concepts remain intact. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -123,9 +125,11 @@ All external references are evidence only. Copy behavior, not source text, unles
 - macOS artifact: 3 runs; peak process-tree memory `[506019840, 525697024, 515801088]` bytes; growth `9781248` bytes; 0 survivors.
 - Linux artifact: 3 runs; peak process-tree memory `[518901760, 511025152, 511356928]` bytes; growth `-7544832` bytes; 0 survivors.
 
-**Hard stop — satisfied:** The three-OS run, exact memory sequences, and survivor evidence are recorded above; lint, typecheck, focused workspace tests, and all six CI jobs are green.
+**Hard stop:** Satisfied — the three-OS run, exact memory sequences, and survivor evidence are recorded above; lint, typecheck, focused workspace tests, and all six CI jobs are green.
 
 ## Phase 01 — Add bounded foreground hang fixtures
+
+**Status:** Complete (`6c5ef6ad`).
 
 **Outcome:** Deterministic CPU-spin, silent-sleep, and nested-launcher fixtures expose the current host-deadline behavior without hanging CI.
 
@@ -154,9 +158,16 @@ All external references are evidence only. Copy behavior, not source text, unles
 - `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/tools/bash-timeout.test.ts` terminates predictably.
 - `pnpm --filter @kenkaiiii/ggcoder check` passes.
 
-**Hard stop:** Preserve baseline evidence, including any expected failure. Do not alter production timeout behavior in this phase.
+**Completion evidence**
+
+- CPU-spin, silent-sleep, and nested-launcher probes remain externally supervised and expose PID, elapsed-time, timeout, and output-tail evidence.
+- The 2026-07-23 Windows audit completed all three probes without firing the outer deadline.
+
+**Hard stop:** Satisfied — baseline fixtures and supervisor evidence are preserved; production behavior changed only in later phases.
 
 ## Phase 02 — Model one foreground execution outcome
+
+**Status:** Complete (`45618c8d`).
 
 **Outcome:** Every foreground execution settles exactly once with an explicit reason.
 
@@ -185,9 +196,16 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Abort and timeout render distinct user-facing results; spawn failure remains immediate.
 - Outcome/race tests and the ggcoder package typecheck pass.
 
-**Hard stop:** Do not start Phase 03 until race tests prove exactly one settlement and metadata fields are not conflated.
+**Completion evidence**
+
+- Focused tests cover all five reasons, preserve independent code/signal/timing/PID metadata, and prove first-settlement ownership across close/error/abort races.
+- The 2026-07-23 focused lifecycle run and ggcoder typecheck passed.
+
+**Hard stop:** Satisfied — race tests prove exactly one settlement and metadata fields remain distinct.
 
 ## Phase 03 — Enforce the host-owned foreground deadline
+
+**Status:** Complete (`eb5f8309`).
 
 **Outcome:** A foreground call returns `TIMEOUT` even when the child never yields or never emits `close`.
 
@@ -216,9 +234,16 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Timeout includes PID and elapsed time and resolves even if cleanup is only best-effort.
 - CPU-spin/sleep deadline tests and the ggcoder package typecheck pass.
 
-**Hard stop:** Do not start Phase 04 while any timeout result still depends on child `close`.
+**Completion evidence**
+
+- The host marks timeout at the configured deadline and settles after a fixed 1,000 ms cleanup grace even when cleanup or child `close` never resolves.
+- Focused tests preserve the exact 120,000 ms default and explicit override behavior.
+
+**Hard stop:** Satisfied — timeout settlement no longer depends on child `close`.
 
 ## Phase 04 — Make foreground finalization leak-free
+
+**Status:** Complete (`6b11811e`).
 
 **Outcome:** Every completion path releases timers and child, stream, and abort listeners.
 
@@ -247,16 +272,23 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Timeout/abort races still settle once.
 - Focused test, typecheck, and lint pass.
 
-**Hard stop:** Do not start Phase 05 with retained listeners or an unhandled cleanup error.
+**Completion evidence**
+
+- Listener/timer baseline tests cover success, timeout, abort, and spawn error; cleanup rejection is logged without replacing the selected result.
+- The 2026-07-23 focused lifecycle run, ggcoder typecheck, and targeted ESLint passed.
+
+**Hard stop:** Satisfied — foreground completion paths retain no tested listeners/timers and cleanup errors are handled.
 
 ## Phase 05 — Harden Windows process-tree termination
+
+**Status:** Complete (`52ccbc81`, `51666497`).
 
 **Outcome:** Windows cancellation removes the shell wrapper and descendants without targeting unrelated processes.
 
 **Scope**
 
 - Resolve `%SystemRoot%\System32\taskkill.exe` and invoke it with argv `/PID <pid> /T /F`.
-- Kill the tree before closing a ConPTY host.
+- Kill the PID tree before waiting for the tracked shell wrapper to close.
 - Treat an exited PID as success; log launch, access-denied, and non-zero failures.
 - Check liveness where practical to reduce PID-reuse risk.
 
@@ -277,10 +309,16 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 - `cmd.exe → pnpm.cmd → node.exe → worker` leaves no descendant after timeout or abort.
 - A dead PID is harmless; failed `taskkill` is observable and cannot crash the host.
-- ConPTY ordering is asserted; no process-name kill is issued.
+- PID-tree termination is asserted before close waiting; no process-name kill is issued.
 - Tests run on Windows CI and a local Windows desktop smoke.
 
-**Hard stop:** Do not start Phase 06 without a real descendant-survival assertion on Windows.
+**Completion evidence**
+
+- Unit tests cover absolute `taskkill.exe` resolution, PID-only argv, dead-PID success, launch/access/non-zero failures, liveness checks, and direct-PID fallback.
+- The 2026-07-23 Windows audit passed real timeout and abort probes and observed zero survivors across the `cmd.exe → pnpm.cmd → node.exe → worker` fixture tree.
+- The current ProcessManager uses tracked child processes rather than a ConPTY host; its ordering contract is tree termination before close waiting.
+
+**Hard stop:** Satisfied — a real Windows descendant-survival assertion passes for timeout and abort.
 
 ## Phase 06 — Add POSIX TERM/KILL escalation
 

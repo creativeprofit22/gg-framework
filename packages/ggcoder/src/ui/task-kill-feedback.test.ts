@@ -41,7 +41,7 @@ describe("background task kill feedback", () => {
     await expect(killTask(processManager, "bg-2")).resolves.toBe("status from stop");
   });
 
-  it("surfaces a Windows timeout as an existing-style live error item", () => {
+  it("renders the cross-platform stop failure prefix as a live error item", () => {
     expect(
       createTaskKillFeedback(
         "Failed to stop process bg-3: process did not exit within 5 seconds and may still be running.",

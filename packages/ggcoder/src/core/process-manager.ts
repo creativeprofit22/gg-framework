@@ -4,7 +4,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { killProcessTree } from "../utils/process.js";
+import { killProcessTree, killProcessTreeAsync } from "../utils/process.js";
 import { getSafeToolEnv } from "../tools/safe-env.js";
 import { resolveShell } from "./shell.js";
 
@@ -37,6 +37,7 @@ export interface ProcessManagerOps {
   platform?: NodeJS.Platform;
   kill?: typeof process.kill;
   killProcessTree?: (pid: number) => void;
+  killProcessTreeAsync?: (pid: number) => Promise<void>;
 }
 
 function stopProcessTree(pid: number, ops: ProcessManagerOps = {}): void {
@@ -45,6 +46,14 @@ function stopProcessTree(pid: number, ops: ProcessManagerOps = {}): void {
     return;
   }
   killProcessTree(pid, { platform: ops.platform, kill: ops.kill });
+}
+
+async function stopProcessTreeAsync(pid: number, ops: ProcessManagerOps = {}): Promise<void> {
+  if (ops.killProcessTreeAsync) {
+    await ops.killProcessTreeAsync(pid);
+    return;
+  }
+  await killProcessTreeAsync(pid, { platform: ops.platform, kill: ops.kill });
 }
 
 export class ProcessManager {
@@ -190,24 +199,8 @@ export class ProcessManager {
     }
 
     const isWindows = (this.ops.platform ?? process.platform) === "win32";
-    if (isWindows) {
-      // Kill the PID tree before the wrapper can exit and orphan descendants.
-      stopProcessTree(proc.pid, this.ops);
-    } else {
-      // Give POSIX process groups a graceful stop before the hard tree kill.
-      try {
-        (this.ops.kill ?? process.kill)(-proc.pid, "SIGTERM");
-      } catch {
-        try {
-          (this.ops.kill ?? process.kill)(proc.pid, "SIGTERM");
-        } catch {
-          return `Process ${id} already exited`;
-        }
-      }
-    }
-
-    // Wait up to 5s for close, then hard-kill a surviving POSIX tree.
-    const exited = await new Promise<boolean>((resolve) => {
+    // Own close before dispatching any signal: a cooperative process may exit synchronously.
+    const exited = new Promise<boolean>((resolve) => {
       let settled = false;
       const settle = (didExit: boolean): void => {
         if (settled) return;
@@ -218,15 +211,23 @@ export class ProcessManager {
       };
       const onClose = (): void => settle(true);
       const timeout = setTimeout(() => settle(false), 5000);
-
       child.once("close", onClose);
     });
 
-    if (!exited) {
-      if (isWindows) {
-        return `Failed to stop process ${id}: process did not exit within 5 seconds and may still be running.`;
-      }
+    if (isWindows) {
+      // Keep the Phase 05 immediate Windows tree-stop contract unchanged.
       stopProcessTree(proc.pid, this.ops);
+    } else {
+      // The shared policy owns TERM, its grace period, and conditional KILL.
+      try {
+        await stopProcessTreeAsync(proc.pid, this.ops);
+      } catch {
+        // Cleanup is best-effort and must not replace the stop lifecycle result.
+      }
+    }
+
+    if (!(await exited)) {
+      return `Failed to stop process ${id}: process did not exit within 5 seconds and may still be running.`;
     }
 
     return `Process ${id} stopped`;

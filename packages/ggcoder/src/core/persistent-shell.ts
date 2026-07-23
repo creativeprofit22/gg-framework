@@ -9,10 +9,12 @@
  * POSIX-only (needs a real bash). Callers must fall back to spawn-per-call
  * when bash is unavailable (Windows cmd.exe fallback path).
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { killProcessTreeAsync } from "../utils/process.js";
 import { log } from "./logger.js";
+
+type SpawnProcess = (command: string, args: string[], options: SpawnOptions) => ChildProcess;
 
 export interface PersistentRunResult {
   exitCode: number | "TIMEOUT" | "ABORTED";
@@ -29,6 +31,7 @@ export class PersistentShell {
     private readonly env: NodeJS.ProcessEnv,
     private readonly maxOutputBytes: number,
     private readonly cleanupProcessTree: (pid: number) => Promise<void> = killProcessTreeAsync,
+    private readonly spawnProcess: SpawnProcess = spawn,
   ) {}
 
   private startCleanup(pid: number): void {
@@ -52,7 +55,7 @@ export class PersistentShell {
       return this.child;
     }
     // Fresh session: no rc files so startup is fast and deterministic.
-    const child = spawn("bash", ["--norc", "--noprofile"], {
+    const child = this.spawnProcess("bash", ["--norc", "--noprofile"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env,

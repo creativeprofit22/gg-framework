@@ -1,9 +1,15 @@
 import type { spawn, spawnSync } from "node:child_process";
 import { type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as logger from "../core/logger.js";
-import { killProcessTree, killProcessTreeAsync, resolveWindowsTaskkillPath } from "./process.js";
+import {
+  DEFAULT_POSIX_TERM_GRACE_MS,
+  killProcessTree,
+  killProcessTreeAsync,
+  resolveWindowsTaskkillPath,
+} from "./process.js";
 
 function createKiller(): {
   child: ChildProcess;
@@ -33,6 +39,228 @@ function aliveKill(): typeof process.kill {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+function createPsHelper(): {
+  child: ChildProcess;
+  stdout: PassThrough;
+  events: EventEmitter;
+  kill: ReturnType<typeof vi.fn>;
+} {
+  const events = new EventEmitter();
+  const stdout = new PassThrough();
+  const kill = vi.fn(() => true);
+  return {
+    child: Object.assign(events, { stdout, kill }) as unknown as ChildProcess,
+    stdout,
+    events,
+    kill,
+  };
+}
+
+function successfulPsSync(stdout: string): typeof spawnSync {
+  return vi.fn(() => ({
+    pid: 1,
+    output: [null, stdout, ""],
+    stdout,
+    stderr: "",
+    status: 0,
+    signal: null,
+  })) as unknown as typeof spawnSync;
+}
+
+describe("POSIX process-tree cleanup", () => {
+  it.each([0, -1, Number.NaN, 1.5])(
+    "rejects invalid PID %s without constructing a PGID",
+    async (pid) => {
+      const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
+      const kill = aliveKill();
+      const spawnSyncMock = successfulPsSync("");
+      const spawnMock = vi.fn() as unknown as typeof spawn;
+
+      killProcessTree(pid, { platform: "linux", kill, spawnSync: spawnSyncMock });
+      await killProcessTreeAsync(pid, { platform: "linux", kill, spawn: spawnMock });
+
+      expect(kill).not.toHaveBeenCalled();
+      expect(spawnSyncMock).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+      expect(warning).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("hard-kills the exact process group without blocking", () => {
+    const kill = aliveKill();
+    const spawnSyncMock = successfulPsSync("20 10\n30 20\n");
+
+    killProcessTree(10, { platform: "linux", kill, spawnSync: spawnSyncMock });
+
+    expect(spawnSyncMock).toHaveBeenCalledWith("/bin/ps", ["-A", "-o", "pid=,ppid="], {
+      encoding: "utf8",
+      timeout: 150,
+      maxBuffer: 256 * 1024,
+      windowsHide: true,
+    });
+    expect(kill).toHaveBeenCalledWith(-10, "SIGKILL");
+  });
+
+  it("falls back deepest-first and caps the rooted descendant snapshot", () => {
+    const calls: Array<[number, NodeJS.Signals | number]> = [];
+    const kill = vi.fn((pid: number, signal?: NodeJS.Signals | number) => {
+      calls.push([pid, signal ?? 0]);
+      if (pid === -10 && signal === "SIGKILL") throw errno("EPERM", "group blocked");
+      return true;
+    }) as unknown as typeof process.kill;
+
+    killProcessTree(10, {
+      platform: "darwin",
+      kill,
+      spawnSync: successfulPsSync("20 10\n30 20\n40 10\n50 30\n999 998\n"),
+      posixMaxDescendants: 3,
+    });
+
+    const signals = calls.filter(([, signal]) => signal === "SIGKILL");
+    expect(signals).toEqual([
+      [-10, "SIGKILL"],
+      [30, "SIGKILL"],
+      [20, "SIGKILL"],
+      [40, "SIGKILL"],
+      [10, "SIGKILL"],
+    ]);
+    expect(calls.some(([pid]) => pid === 50 || pid === 999)).toBe(false);
+  });
+
+  it("degrades a failed synchronous snapshot to exact group/direct handling", () => {
+    const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
+    const kill = vi.fn((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === -77 && signal === "SIGKILL") throw errno("EPERM", "blocked");
+      return true;
+    }) as unknown as typeof process.kill;
+    const spawnSyncMock = vi.fn(() => {
+      throw errno("ENOENT", "missing ps");
+    }) as unknown as typeof spawnSync;
+
+    killProcessTree(77, { platform: "linux", kill, spawnSync: spawnSyncMock });
+
+    expect(warning).toHaveBeenCalledWith(
+      "WARN",
+      "process",
+      "POSIX descendant snapshot failed",
+      expect.objectContaining({ pid: "77", error: "missing ps" }),
+    );
+    expect(kill).toHaveBeenCalledWith(77, "SIGKILL");
+  });
+
+  it("uses TERM only when the group exits during the grace period", async () => {
+    vi.useFakeTimers();
+    const helper = createPsHelper();
+    let termSent = false;
+    const kill = vi.fn((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === -123 && signal === "SIGTERM") termSent = true;
+      if (signal === 0 && termSent) throw errno("ESRCH");
+      return true;
+    }) as unknown as typeof process.kill;
+    const cleanup = killProcessTreeAsync(123, {
+      platform: "linux",
+      kill,
+      spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+    });
+    helper.stdout.end("124 123\n");
+    helper.events.emit("close", 0);
+    await vi.advanceTimersByTimeAsync(DEFAULT_POSIX_TERM_GRACE_MS);
+    await cleanup;
+
+    expect(kill).toHaveBeenCalledWith(-123, "SIGTERM");
+    expect(kill).not.toHaveBeenCalledWith(-123, "SIGKILL");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("escalates a live group from TERM to KILL after the injected grace", async () => {
+    vi.useFakeTimers();
+    const helper = createPsHelper();
+    const kill = aliveKill();
+    const cleanup = killProcessTreeAsync(222, {
+      platform: "linux",
+      kill,
+      spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+      posixGraceMs: 25,
+    });
+    helper.stdout.end("");
+    helper.events.emit("close", 0);
+    await vi.advanceTimersByTimeAsync(24);
+    expect(kill).toHaveBeenCalledWith(-222, "SIGTERM");
+    expect(kill).not.toHaveBeenCalledWith(-222, "SIGKILL");
+    await vi.advanceTimersByTimeAsync(1);
+    await cleanup;
+    expect(kill).toHaveBeenCalledWith(-222, "SIGKILL");
+  });
+
+  it("falls back to snapshotted descendants when group signaling fails", async () => {
+    vi.useFakeTimers();
+    const helper = createPsHelper();
+    const kill = vi.fn((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === -300 && signal !== 0) throw errno("EPERM", "group blocked");
+      return true;
+    }) as unknown as typeof process.kill;
+    const cleanup = killProcessTreeAsync(300, {
+      platform: "linux",
+      kill,
+      spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+      posixGraceMs: 10,
+    });
+    helper.stdout.end("301 300\n302 301\n");
+    helper.events.emit("close", 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await cleanup;
+
+    const sentSignals = (kill as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, signal]) => signal === "SIGTERM" || signal === "SIGKILL",
+    );
+    expect(sentSignals).toEqual([
+      [-300, "SIGTERM"],
+      [302, "SIGTERM"],
+      [301, "SIGTERM"],
+      [300, "SIGTERM"],
+      [-300, "SIGKILL"],
+      [302, "SIGKILL"],
+      [301, "SIGKILL"],
+      [300, "SIGKILL"],
+    ]);
+  });
+
+  it("kills and reaps a timed-out ps helper and removes its listeners", async () => {
+    vi.useFakeTimers();
+    const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
+    const helper = createPsHelper();
+    const kill = vi.fn((_pid: number, signal?: NodeJS.Signals | number) => {
+      if (signal === "SIGTERM") throw errno("ESRCH");
+      return true;
+    }) as unknown as typeof process.kill;
+    const cleanup = killProcessTreeAsync(400, {
+      platform: "linux",
+      kill,
+      spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+      posixPsTimeoutMs: 20,
+    });
+
+    expect(helper.events.listenerCount("close")).toBe(1);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(helper.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(helper.events.listenerCount("close")).toBe(1);
+    helper.events.emit("close", null, "SIGKILL");
+    await cleanup;
+
+    expect(helper.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(helper.events.listenerCount("error")).toBe(0);
+    expect(helper.events.listenerCount("close")).toBe(0);
+    expect(helper.stdout.listenerCount("data")).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(warning).toHaveBeenCalledWith(
+      "WARN",
+      "process",
+      "POSIX descendant snapshot failed",
+      expect.objectContaining({ error: "ps timed out" }),
+    );
+  });
 });
 
 describe("killProcessTree on Windows", () => {

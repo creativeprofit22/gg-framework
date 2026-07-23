@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
 import type { ForegroundExecutionOutcome, ForegroundExecutionReason } from "../types.js";
-import { killProcessTreeAsync } from "../utils/process.js";
+import type { ProcessTarget } from "../utils/process.js";
 import { log } from "../core/logger.js";
 import { truncateTail, MAX_BYTES } from "./truncate.js";
 import { compressToolOutput } from "./compress.js";
@@ -56,7 +56,8 @@ interface ForegroundCommandOptions {
   signal: AbortSignal;
   ops: ToolOperations;
   onUpdate?: (output: string, totalBytes: number) => void;
-  cleanupProcessTree?: (pid: number) => Promise<void>;
+  cleanupProcessTree?: (target: ProcessTarget) => Promise<void>;
+  reapProcessWrapper?: (target: ProcessTarget) => void;
 }
 
 export function executeForegroundCommand({
@@ -66,19 +67,21 @@ export function executeForegroundCommand({
   signal,
   ops,
   onUpdate,
-  cleanupProcessTree = killProcessTreeAsync,
+  cleanupProcessTree = ops.process.cleanupProcessTree,
+  reapProcessWrapper: reapWrapper = ops.process.reapProcessWrapper,
 }: ForegroundCommandOptions): Promise<ForegroundCommandExecution> {
   const shell = resolveShell(command);
   const chunks: Buffer[] = [];
   let totalBytes = 0;
   let outputCapped = false;
   let pid: number | null = null;
+  let terminalIntent: "interruption" | "completion" | "spawnError" | null = null;
   let pendingInterruption: "timedOut" | "aborted" | null = null;
   let settled = false;
   let deadlineTimer: NodeJS.Timeout | undefined;
   let cleanupGraceTimer: NodeJS.Timeout | undefined;
   let abortListenerRegistered = false;
-  let child: ReturnType<ToolOperations["spawn"]> | null = null;
+  let child: ReturnType<ToolOperations["process"]["spawn"]> | null = null;
   let onStdoutData: ((data: Buffer) => void) | undefined;
   let onStderrData: ((data: Buffer) => void) | undefined;
   let flushStdout: (() => void) | undefined;
@@ -90,15 +93,37 @@ export function executeForegroundCommand({
   return new Promise((resolve) => {
     const startedAt = Date.now();
 
-    const startCleanup = (cleanupPid: number): void => {
+    const currentTarget = (): ProcessTarget | null => {
+      if (pid === null || child === null) return null;
+      const trackedChild = child;
+      return {
+        pid,
+        isExited: () =>
+          typeof trackedChild.exitCode === "number" ||
+          (trackedChild.signalCode !== null && trackedChild.signalCode !== undefined),
+      };
+    };
+
+    const startCleanup = (target: ProcessTarget): void => {
       void Promise.resolve()
-        .then(() => cleanupProcessTree(cleanupPid))
+        .then(() => cleanupProcessTree(target))
         .catch((error: unknown) => {
           log("WARN", "bash", "Foreground process-tree cleanup failed", {
-            pid: String(cleanupPid),
+            pid: String(target.pid),
             error: error instanceof Error ? error.message : String(error),
           });
         });
+    };
+
+    const reapCompletedWrapper = (target: ProcessTarget): void => {
+      try {
+        reapWrapper(target);
+      } catch (error) {
+        log("WARN", "bash", "Foreground wrapper cleanup failed", {
+          pid: String(target.pid),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     };
 
     const finalize = (
@@ -146,9 +171,11 @@ export function executeForegroundCommand({
     };
 
     const interrupt = (reason: "timedOut" | "aborted"): void => {
-      if (settled || pendingInterruption) return;
+      if (settled || terminalIntent !== null) return;
+      terminalIntent = "interruption";
       pendingInterruption = reason;
-      if (pid !== null) startCleanup(pid);
+      const target = currentTarget();
+      if (target) startCleanup(target);
       cleanupGraceTimer = setTimeout(() => {
         finalize(reason, null, null);
       }, FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS);
@@ -157,7 +184,7 @@ export function executeForegroundCommand({
     const onAbort = (): void => interrupt("aborted");
 
     try {
-      child = ops.spawn(shell.file, shell.args, {
+      child = ops.process.spawn(shell.file, shell.args, {
         cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
@@ -205,12 +232,24 @@ export function executeForegroundCommand({
       child.stderr?.once("close", flushStderr);
 
       onChildClose = (code, closeSignal) => {
-        const reason =
-          pendingInterruption ?? (code === 0 ? ("completed" as const) : ("nonZeroExit" as const));
-        finalize(reason, code, closeSignal);
+        if (terminalIntent === "interruption") {
+          finalize(pendingInterruption!, code, closeSignal);
+          return;
+        }
+        if (terminalIntent !== null) return;
+        terminalIntent = "completion";
+        const target = currentTarget();
+        if (target) reapCompletedWrapper(target);
+        finalize(code === 0 ? "completed" : "nonZeroExit", code, closeSignal);
       };
       onChildError = (error) => {
-        finalize(pendingInterruption ?? "spawnError", null, null, error);
+        if (terminalIntent === "interruption") {
+          finalize(pendingInterruption!, null, null, error);
+          return;
+        }
+        if (terminalIntent !== null) return;
+        terminalIntent = "spawnError";
+        finalize("spawnError", null, null, error);
       };
       child.on("close", onChildClose);
       child.on("error", onChildError);
@@ -308,7 +347,7 @@ export function createBashTool(
       // Persistent session mode — POSIX only; Windows-without-bash falls through
       // to the normal spawn path (cmd.exe fallback) below.
       if (persist && !run_in_background && !resolveShell(command).isCmdFallback) {
-        sessionShell ??= new PersistentShell(cwd, getSafeToolEnv(), MAX_OUTPUT_BYTES);
+        sessionShell ??= new PersistentShell(cwd, getSafeToolEnv(), MAX_OUTPUT_BYTES, ops.process);
         const res = await sessionShell.run(
           command,
           timeoutMs ?? DEFAULT_TIMEOUT,

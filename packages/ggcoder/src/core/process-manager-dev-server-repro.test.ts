@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { localProcessLifecycle } from "../tools/operations.js";
 import { ProcessManager } from "./process-manager.js";
 
 function quoteForPosixShell(value: string): string {
@@ -64,6 +66,33 @@ function parseGrandchildPid(output: string): number {
   return Number(match[1]);
 }
 
+interface DetachedEvidence {
+  role: string;
+  pid: number;
+  ppid: number;
+}
+
+async function waitForDetachedEvidence(
+  evidenceFile: string,
+  expectedRoles: string[],
+): Promise<DetachedEvidence[]> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const text = await fs.readFile(evidenceFile, "utf8").catch(() => "");
+    const evidence = text
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as DetachedEvidence);
+    const roles = new Set(evidence.map(({ role }) => role));
+    if (expectedRoles.every((role) => roles.has(role))) return evidence;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out waiting for detached evidence: ${expectedRoles.join(", ")}`);
+}
+
+function detachedFixturePath(name: string): string {
+  return fileURLToPath(new URL(`../tools/__fixtures__/${name}`, import.meta.url));
+}
+
 describe("ProcessManager dev-server lifecycle repro", () => {
   let manager: ProcessManager;
 
@@ -92,12 +121,7 @@ describe("ProcessManager dev-server lifecycle repro", () => {
 
   it("uses the shared PID-tree seam for Windows shutdown", async () => {
     const killProcessTree = vi.fn();
-    const directKill = vi.fn() as unknown as typeof process.kill;
-    manager = new ProcessManager({
-      platform: "win32",
-      kill: directKill,
-      killProcessTree,
-    });
+    manager = new ProcessManager({ ...localProcessLifecycle, killProcessTree });
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-win-taskkill-"));
     const started = await manager.start(
       `${JSON.stringify(process.execPath)} -e "setInterval(()=>{},1000)"`,
@@ -105,8 +129,9 @@ describe("ProcessManager dev-server lifecycle repro", () => {
     );
     try {
       manager.shutdownAll();
-      expect(killProcessTree).toHaveBeenCalledWith(started.pid);
-      expect(directKill).not.toHaveBeenCalled();
+      expect(killProcessTree).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: started.pid, isExited: expect.any(Function) }),
+      );
     } finally {
       // The shared tree-kill seam is mocked, so reap the real fixture here.
       killRealProcessTree(started.pid);
@@ -167,6 +192,41 @@ describe("ProcessManager dev-server lifecycle repro", () => {
       expect(final.output).toContain("DEV_SERVER_SIGTERM");
     },
   );
+
+  it("kills an independently detached worker during shutdownAll", async () => {
+    manager = new ProcessManager();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-shutdown-detached-"));
+    const evidenceFile = path.join(tmpDir, "evidence.jsonl");
+    const readinessFile = path.join(tmpDir, "worker.ready");
+    const command = [
+      process.execPath,
+      detachedFixturePath("bash-detached-launcher.mjs"),
+      evidenceFile,
+      detachedFixturePath("bash-detached-worker.mjs"),
+      readinessFile,
+      "hold",
+    ]
+      .map((value) => JSON.stringify(value))
+      .join(" ");
+    let evidence: DetachedEvidence[] = [];
+
+    try {
+      await manager.start(command, tmpDir);
+      evidence = await waitForDetachedEvidence(evidenceFile, [
+        "detached-launcher",
+        "detached-worker",
+      ]);
+      expect(evidence.every(({ pid }) => isProcessAlive(pid))).toBe(true);
+
+      manager.shutdownAll();
+
+      await Promise.all(evidence.map(({ pid }) => waitForProcessExit(pid)));
+    } finally {
+      manager.shutdownAll();
+      for (const { pid } of evidence) killRealProcessTree(pid);
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   const posixIt = process.platform === "win32" ? it.skip : it;
 

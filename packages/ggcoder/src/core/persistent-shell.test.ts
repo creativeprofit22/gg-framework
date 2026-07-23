@@ -1,6 +1,7 @@
 import { spawn, type SpawnOptions } from "node:child_process";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import os from "node:os";
+import { localProcessLifecycle } from "../tools/operations.js";
 import { PersistentShell } from "./persistent-shell.js";
 
 const isWindows = os.platform() === "win32";
@@ -25,13 +26,10 @@ d("PersistentShell", () => {
     const spawnProcess = vi.fn((command: string, args: string[], options: SpawnOptions) =>
       spawn(command, args, options),
     );
-    shell = new PersistentShell(
-      os.tmpdir(),
-      { ...process.env, TERM: "dumb" },
-      1024 * 1024,
-      undefined,
-      spawnProcess,
-    );
+    shell = new PersistentShell(os.tmpdir(), { ...process.env, TERM: "dumb" }, 1024 * 1024, {
+      ...localProcessLifecycle,
+      spawn: spawnProcess,
+    });
 
     await shell.run("true", 10_000, signal());
 

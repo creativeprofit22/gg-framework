@@ -121,8 +121,8 @@ export async function createTools(
   opts?: CreateToolsOptions,
 ): Promise<CreateToolsResult> {
   const readFiles: ReadTracker = new Map();
-  const processManager = new ProcessManager();
   const ops = opts?.operations ?? localOperations;
+  const processManager = new ProcessManager(ops.process);
   const planModeRef = opts?.planModeRef;
 
   // LSP diagnostics only make sense against the local filesystem — remote
@@ -262,4 +262,10 @@ export { createEnterPlanTool } from "./enter-plan.js";
 export { createExitPlanTool } from "./exit-plan.js";
 export { ProcessManager } from "../core/process-manager.js";
 export { LspManager } from "../core/lsp/manager.js";
-export { localOperations, type ToolOperations } from "./operations.js";
+export {
+  localOperations,
+  localProcessLifecycle,
+  type ProcessLifecycleAdapter,
+  type SpawnProcessOptions,
+  type ToolOperations,
+} from "./operations.js";

@@ -8,6 +8,7 @@ import {
   DEFAULT_POSIX_TERM_GRACE_MS,
   killProcessTree,
   killProcessTreeAsync,
+  reapProcessWrapper,
   resolveWindowsTaskkillPath,
 } from "./process.js";
 
@@ -103,6 +104,48 @@ describe("POSIX process-tree cleanup", () => {
     expect(kill).toHaveBeenCalledWith(-10, "SIGKILL");
   });
 
+  it("leaves descendants untouched when the root PID is reused during a synchronous snapshot", () => {
+    const spawnSyncMock = successfulPsSync("124 123\n");
+    const kill = aliveKill();
+    const isExited = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+
+    killProcessTree({ pid: 123, isExited }, { platform: "linux", kill, spawnSync: spawnSyncMock });
+
+    expect(spawnSyncMock).toHaveBeenCalledOnce();
+    expect(kill).not.toHaveBeenCalled();
+    expect(isExited).toHaveBeenCalledTimes(2);
+  });
+
+  it("kills captured descendants when the committed synchronous root exits before signaling", () => {
+    const spawnSyncMock = successfulPsSync("124 123\n");
+    const kill = aliveKill();
+    const isExited = vi
+      .fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+
+    killProcessTree({ pid: 123, isExited }, { platform: "linux", kill, spawnSync: spawnSyncMock });
+
+    expect(kill).toHaveBeenCalledWith(124, "SIGKILL");
+    expect(kill).not.toHaveBeenCalledWith(-123, "SIGKILL");
+    expect(kill).not.toHaveBeenCalledWith(123, "SIGKILL");
+    expect(isExited).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not snapshot or signal a live numeric PID after the original child exited", () => {
+    const spawnSyncMock = successfulPsSync("778 777\n");
+    const kill = aliveKill();
+
+    killProcessTree(
+      { pid: 777, isExited: () => true },
+      { platform: "linux", kill, spawnSync: spawnSyncMock },
+    );
+
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalled();
+  });
+
   it("falls back deepest-first and caps the rooted descendant snapshot", () => {
     const calls: Array<[number, NodeJS.Signals | number]> = [];
     const kill = vi.fn((pid: number, signal?: NodeJS.Signals | number) => {
@@ -150,6 +193,53 @@ describe("POSIX process-tree cleanup", () => {
     expect(kill).toHaveBeenCalledWith(77, "SIGKILL");
   });
 
+  it("leaves descendants untouched when the root PID is reused during an async snapshot", async () => {
+    const helper = createPsHelper();
+    const kill = aliveKill();
+    const isExited = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    const cleanup = killProcessTreeAsync(
+      { pid: 123, isExited },
+      {
+        platform: "linux",
+        kill,
+        spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+      },
+    );
+    helper.stdout.end("124 123\n");
+    helper.events.emit("close", 0);
+    await cleanup;
+
+    expect(kill).not.toHaveBeenCalled();
+    expect(isExited).toHaveBeenCalledTimes(2);
+  });
+
+  it("kills captured descendants when the committed async root exits before TERM signaling", async () => {
+    const helper = createPsHelper();
+    const kill = aliveKill();
+    const isExited = vi
+      .fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    const cleanup = killProcessTreeAsync(
+      { pid: 123, isExited },
+      {
+        platform: "linux",
+        kill,
+        spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+      },
+    );
+    helper.stdout.end("124 123\n");
+    helper.events.emit("close", 0);
+    await cleanup;
+
+    expect(kill).toHaveBeenCalledWith(124, "SIGKILL");
+    expect(kill).not.toHaveBeenCalledWith(-123, "SIGTERM");
+    expect(kill).not.toHaveBeenCalledWith(-123, "SIGKILL");
+    expect(kill).not.toHaveBeenCalledWith(123, "SIGKILL");
+    expect(isExited).toHaveBeenCalledTimes(3);
+  });
+
   it("uses TERM only when the group exits during the grace period", async () => {
     vi.useFakeTimers();
     const helper = createPsHelper();
@@ -192,6 +282,60 @@ describe("POSIX process-tree cleanup", () => {
     await vi.advanceTimersByTimeAsync(1);
     await cleanup;
     expect(kill).toHaveBeenCalledWith(-222, "SIGKILL");
+  });
+
+  it("re-checks the original child after TERM grace before KILL escalation", async () => {
+    vi.useFakeTimers();
+    const helper = createPsHelper();
+    const kill = aliveKill();
+    let exited = false;
+    const cleanup = killProcessTreeAsync(
+      { pid: 223, isExited: () => exited },
+      {
+        platform: "linux",
+        kill,
+        spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+        posixGraceMs: 25,
+      },
+    );
+    helper.stdout.end("");
+    helper.events.emit("close", 0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kill).toHaveBeenCalledWith(-223, "SIGTERM");
+
+    exited = true;
+    await vi.advanceTimersByTimeAsync(25);
+    await cleanup;
+
+    expect(kill).not.toHaveBeenCalledWith(-223, "SIGKILL");
+  });
+
+  it("kills captured detached descendants after the TERM-killed root exits", async () => {
+    vi.useFakeTimers();
+    const helper = createPsHelper();
+    let exited = false;
+    const kill = aliveKill();
+    const cleanup = killProcessTreeAsync(
+      { pid: 223, isExited: () => exited },
+      {
+        platform: "linux",
+        kill,
+        spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+        posixGraceMs: 25,
+      },
+    );
+    helper.stdout.end("224 223\n");
+    helper.events.emit("close", 0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(kill).toHaveBeenCalledWith(-223, "SIGTERM");
+
+    exited = true;
+    await vi.advanceTimersByTimeAsync(25);
+    await cleanup;
+
+    expect(kill).toHaveBeenCalledWith(224, "SIGKILL");
+    expect(kill).not.toHaveBeenCalledWith(-223, "SIGKILL");
+    expect(kill).not.toHaveBeenCalledWith(223, "SIGKILL");
   });
 
   it("falls back to snapshotted descendants when group signaling fails", async () => {
@@ -374,6 +518,30 @@ describe("killProcessTree on Windows", () => {
     expect(kill).toHaveBeenCalledTimes(1);
   });
 
+  it("skips taskkill when a live numeric PID no longer belongs to the original child", () => {
+    const kill = aliveKill();
+    const spawnSyncMock = vi.fn() as unknown as typeof spawnSync;
+
+    killProcessTree(
+      { pid: 4321, isExited: () => true },
+      { platform: "win32", kill, spawnSync: spawnSyncMock },
+    );
+
+    expect(kill).not.toHaveBeenCalled();
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("re-checks the original child immediately before launching taskkill", () => {
+    const kill = aliveKill();
+    const spawnSyncMock = vi.fn() as unknown as typeof spawnSync;
+    const isExited = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+
+    killProcessTree({ pid: 4321, isExited }, { platform: "win32", kill, spawnSync: spawnSyncMock });
+
+    expect(kill).toHaveBeenCalledWith(4321, 0);
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+
   it("passes an injected timeout to synchronous taskkill", () => {
     const spawnSyncMock = vi.fn(() => ({
       pid: 1,
@@ -444,6 +612,55 @@ describe("killProcessTree on Windows", () => {
   });
 });
 
+describe("exact-PID wrapper reap", () => {
+  it("signals only the positive wrapper PID on POSIX", () => {
+    const kill = aliveKill();
+
+    reapProcessWrapper(2468, { platform: "linux", kill });
+
+    expect(kill).toHaveBeenCalledWith(2468, 0);
+    expect(kill).toHaveBeenCalledWith(2468, "SIGKILL");
+    expect(kill).not.toHaveBeenCalledWith(-2468, expect.anything());
+  });
+
+  it("uses taskkill without tree traversal on Windows", () => {
+    const spawnSyncMock = vi.fn(() => ({
+      pid: 1,
+      output: [],
+      stdout: null,
+      stderr: null,
+      status: 0,
+      signal: null,
+    })) as unknown as typeof spawnSync;
+
+    reapProcessWrapper(2468, {
+      platform: "win32",
+      kill: aliveKill(),
+      spawnSync: spawnSyncMock,
+      env: { SystemRoot: "C:\\Windows" },
+    });
+
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      "C:\\Windows\\System32\\taskkill.exe",
+      ["/PID", "2468", "/F"],
+      { stdio: "ignore", windowsHide: true, timeout: 5_000 },
+    );
+  });
+
+  it("does nothing when the wrapper handle says its numeric PID was reused", () => {
+    const kill = aliveKill();
+    const spawnSyncMock = vi.fn() as unknown as typeof spawnSync;
+
+    reapProcessWrapper(
+      { pid: 2468, isExited: () => true },
+      { platform: "win32", kill, spawnSync: spawnSyncMock },
+    );
+
+    expect(kill).not.toHaveBeenCalled();
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("killProcessTreeAsync on Windows", () => {
   it("waits for success and cleans listeners", async () => {
     const killer = createKiller();
@@ -475,6 +692,41 @@ describe("killProcessTreeAsync on Windows", () => {
     expect(kill).toHaveBeenCalledTimes(1);
     expect(killer.events.listenerCount("error")).toBe(0);
     expect(killer.events.listenerCount("close")).toBe(0);
+  });
+
+  it("does not launch taskkill for an exited original child even when its PID probes live", async () => {
+    const spawnMock = vi.fn() as unknown as typeof spawn;
+    const kill = aliveKill();
+
+    await killProcessTreeAsync(
+      { pid: 4321, isExited: () => true },
+      { platform: "win32", spawn: spawnMock, kill },
+    );
+
+    expect(kill).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("re-checks the original child before direct-PID fallback", async () => {
+    const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
+    const killer = createKiller();
+    const kill = aliveKill();
+    let exited = false;
+    const cleanup = killProcessTreeAsync(
+      { pid: 4321, isExited: () => exited },
+      {
+        platform: "win32",
+        spawn: vi.fn(() => killer.child) as unknown as typeof spawn,
+        kill,
+      },
+    );
+
+    exited = true;
+    killer.events.emit("close", 1, null);
+    await cleanup;
+
+    expect(warning).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalledWith(4321, "SIGKILL");
   });
 
   it("times out taskkill, cleans listeners and timer, then falls back to the target PID", async () => {

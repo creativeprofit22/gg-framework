@@ -10,7 +10,7 @@ import { ProcessManager } from "../core/process-manager.js";
 import { PersistentShell } from "../core/persistent-shell.js";
 import * as logger from "../core/logger.js";
 import { resolveShell } from "../core/shell.js";
-import { killProcessTree } from "../utils/process.js";
+import { killProcessTree, type ProcessTarget } from "../utils/process.js";
 import { createBashTool, executeForegroundCommand } from "./bash.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 
@@ -124,15 +124,10 @@ async function superviseProbe(
     options.postTerminationDeadlineMs ?? POST_TERMINATION_DEADLINE_MS;
   let outputTail = "";
   let outerDeadlineFired = false;
+  let startupDeadline: NodeJS.Timeout | undefined;
   let deadline: NodeJS.Timeout | undefined;
   let hardDeadline: NodeJS.Timeout | undefined;
-
-  child.stdout.on("data", (chunk: Buffer) => {
-    outputTail = appendBounded(outputTail, chunk);
-  });
-  child.stderr.on("data", (chunk: Buffer) => {
-    outputTail = appendBounded(outputTail, chunk);
-  });
+  let armRuntimeDeadline = (): void => {};
 
   const settled = new Promise<{
     exitCode: number | null;
@@ -149,15 +144,7 @@ async function superviseProbe(
       resolved = true;
       resolve(result);
     };
-
-    child.once("error", () => {
-      settle({ exitCode: null, signal: null, supervisorOutcome: "child_error" });
-    });
-    child.once("close", (exitCode, signal) => {
-      settle({ exitCode, signal, supervisorOutcome: "child_closed" });
-    });
-
-    deadline = setTimeout(() => {
+    const terminateAtDeadline = (): void => {
       outerDeadlineFired = true;
       if (childPid > 0) terminate(childPid);
       hardDeadline = setTimeout(() => {
@@ -167,10 +154,32 @@ async function superviseProbe(
         child.unref();
         settle({ exitCode: null, signal: null, supervisorOutcome: "hard_deadline" });
       }, postTerminationDeadlineMs);
-    }, deadlineMs);
+    };
+
+    child.once("error", () => {
+      settle({ exitCode: null, signal: null, supervisorOutcome: "child_error" });
+    });
+    child.once("close", (exitCode, signal) => {
+      settle({ exitCode, signal, supervisorOutcome: "child_closed" });
+    });
+
+    startupDeadline = setTimeout(terminateAtDeadline, deadlineMs);
+    armRuntimeDeadline = () => {
+      if (deadline || outerDeadlineFired) return;
+      if (startupDeadline) clearTimeout(startupDeadline);
+      deadline = setTimeout(terminateAtDeadline, deadlineMs);
+    };
   });
 
+  const captureOutput = (chunk: Buffer): void => {
+    outputTail = appendBounded(outputTail, chunk);
+    if (/RUN|SUPERVISOR_FIXTURE_READY/.test(outputTail)) armRuntimeDeadline();
+  };
+  child.stdout.on("data", captureOutput);
+  child.stderr.on("data", captureOutput);
+
   const { exitCode, signal, supervisorOutcome } = await settled.finally(() => {
+    if (startupDeadline) clearTimeout(startupDeadline);
     if (deadline) clearTimeout(deadline);
     if (hardDeadline) clearTimeout(hardDeadline);
   });
@@ -420,7 +429,7 @@ async function assertSupervisedProbe(probe: ProbeName): Promise<void> {
 
     expect(result.roles.map(({ role }) => role)).toContain(probe === "nested" ? "worker" : probe);
     expect(result.elapsedMs).toBeLessThan(
-      SUPERVISOR_DEADLINE_MS + POST_TERMINATION_DEADLINE_MS + 3_000,
+      SUPERVISOR_DEADLINE_MS * 2 + POST_TERMINATION_DEADLINE_MS + 3_000,
     );
     expect(result.outerDeadlineFired).toBe(false);
     expect(result.supervisorOutcome).toBe("child_closed");
@@ -451,12 +460,22 @@ function createFakeChild(pid = 2_000_000_000): FakeChildHarness {
   const emitter = new EventEmitter();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  const childState: { exitCode: number | null; signalCode: NodeJS.Signals | null } = {
+    exitCode: null,
+    signalCode: null,
+  };
+  Object.defineProperties(emitter, {
+    exitCode: { get: () => childState.exitCode },
+    signalCode: { get: () => childState.signalCode },
+  });
   const child = Object.assign(emitter, { pid, stdout, stderr }) as unknown as ChildProcess;
   return {
     child,
     stdout,
     stderr,
     emitClose(code, signal = null) {
+      childState.exitCode = code;
+      childState.signalCode = signal;
       emitter.emit("close", code, signal);
     },
     emitError(error) {
@@ -465,8 +484,44 @@ function createFakeChild(pid = 2_000_000_000): FakeChildHarness {
   };
 }
 
+function createPersistentFakeChild(pid = 2_000_000_100): {
+  child: ChildProcess;
+  markExited(code?: number | null, signal?: NodeJS.Signals | null): void;
+} {
+  const emitter = new EventEmitter();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const childState: { exitCode: number | null; signalCode: NodeJS.Signals | null } = {
+    exitCode: null,
+    signalCode: null,
+  };
+  Object.defineProperties(emitter, {
+    exitCode: { get: () => childState.exitCode },
+    signalCode: { get: () => childState.signalCode },
+    killed: { get: () => false },
+  });
+  const child = Object.assign(emitter, {
+    pid,
+    stdin,
+    stdout,
+    stderr,
+    unref: vi.fn(),
+  }) as unknown as ChildProcess;
+  return {
+    child,
+    markExited(code = 0, signal = null) {
+      childState.exitCode = code;
+      childState.signalCode = signal;
+    },
+  };
+}
+
 function operationsFor(child: ChildProcess): ToolOperations {
-  return { ...localOperations, spawn: () => child };
+  return {
+    ...localOperations,
+    process: { ...localOperations.process, spawn: () => child },
+  };
 }
 
 function foregroundResourceCounts(fake: FakeChildHarness, signal: AbortSignal) {
@@ -492,7 +547,8 @@ function foregroundExecution(
     timeoutMs?: number;
     signal?: AbortSignal;
     onUpdate?: (output: string, totalBytes: number) => void;
-    cleanupProcessTree?: (pid: number) => Promise<void>;
+    cleanupProcessTree?: (target: ProcessTarget) => Promise<void>;
+    reapProcessWrapper?: (target: ProcessTarget) => void;
   } = {},
 ) {
   return executeForegroundCommand({
@@ -503,6 +559,7 @@ function foregroundExecution(
     ops: operationsFor(fake.child),
     onUpdate: options.onUpdate,
     cleanupProcessTree: options.cleanupProcessTree,
+    reapProcessWrapper: options.reapProcessWrapper,
   });
 }
 
@@ -557,7 +614,10 @@ if (selectedProbe !== undefined) {
         cwd: process.cwd(),
         timeoutMs: 5_000,
         signal: new AbortController().signal,
-        ops: { ...localOperations, spawn: spawnOperation },
+        ops: {
+          ...localOperations,
+          process: { ...localOperations.process, spawn: spawnOperation },
+        },
       });
       fake.emitClose(0);
       await execution;
@@ -567,6 +627,78 @@ if (selectedProbe !== undefined) {
         expect.any(Array),
         expect.objectContaining({ detached: true }),
       );
+    });
+
+    it("routes abort through the custom process lifecycle adapter", async () => {
+      const controller = new AbortController();
+      const fake = createFakeChild(2_000_000_018);
+      const cleanupProcessTree = vi.fn(async () => {});
+      const ops = operationsFor(fake.child);
+      ops.process = { ...ops.process, cleanupProcessTree };
+      const execution = executeForegroundCommand({
+        command: "fixture command",
+        cwd: process.cwd(),
+        timeoutMs: 5_000,
+        signal: controller.signal,
+        ops,
+      });
+
+      controller.abort();
+      fake.emitClose(null, "SIGTERM");
+
+      await expect(execution).resolves.toMatchObject({ outcome: { reason: "aborted" } });
+      expect(cleanupProcessTree).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: 2_000_000_018, isExited: expect.any(Function) }),
+      );
+    });
+
+    it("routes normal completion through the custom wrapper-reap adapter", async () => {
+      const fake = createFakeChild(2_000_000_019);
+      const reapProcessWrapper = vi.fn();
+      const ops = operationsFor(fake.child);
+      ops.process = { ...ops.process, reapProcessWrapper };
+      const execution = executeForegroundCommand({
+        command: "fixture command",
+        cwd: process.cwd(),
+        timeoutMs: 5_000,
+        signal: new AbortController().signal,
+        ops,
+      });
+
+      fake.emitClose(0);
+
+      await expect(execution).resolves.toMatchObject({ outcome: { reason: "completed" } });
+      expect(reapProcessWrapper).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: 2_000_000_019, isExited: expect.any(Function) }),
+      );
+    });
+
+    it.each([
+      [0, "completed"],
+      [7, "nonZeroExit"],
+    ] as const)("routes exit code %i through wrapper-only reap", async (code, reason) => {
+      const controller = new AbortController();
+      const fake = createFakeChild(2_000_000_020 + code);
+      const cleanupProcessTree = vi.fn(async () => {});
+      const reapProcessWrapper = vi.fn();
+      const resultPromise = foregroundExecution(fake, {
+        signal: controller.signal,
+        cleanupProcessTree,
+        reapProcessWrapper,
+      });
+
+      fake.emitClose(code);
+      const result = await resultPromise;
+      controller.abort();
+      await Promise.resolve();
+
+      expect(result.outcome.reason).toBe(reason);
+      expect(reapProcessWrapper).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: 2_000_000_020 + code, isExited: expect.any(Function) }),
+      );
+      const [target] = reapProcessWrapper.mock.calls[0] as [ProcessTarget];
+      expect(target.isExited?.()).toBe(true);
+      expect(cleanupProcessTree).not.toHaveBeenCalled();
     });
 
     it("records completed metadata independently", async () => {
@@ -731,8 +863,11 @@ if (selectedProbe !== undefined) {
         signal: new AbortController().signal,
         ops: {
           ...localOperations,
-          spawn: () => {
-            throw error;
+          process: {
+            ...localOperations.process,
+            spawn: () => {
+              throw error;
+            },
           },
         },
       });
@@ -811,7 +946,7 @@ if (selectedProbe !== undefined) {
       const fake = createFakeChild(2_000_000_013);
       let finishCleanup: (() => void) | undefined;
       const cleanup = vi.fn(
-        () =>
+        (_target: ProcessTarget) =>
           new Promise<void>((resolve) => {
             finishCleanup = resolve;
           }),
@@ -826,7 +961,11 @@ if (selectedProbe !== undefined) {
       });
 
       await vi.advanceTimersByTimeAsync(400);
-      expect(cleanup).toHaveBeenCalledWith(2_000_000_013);
+      expect(cleanup).toHaveBeenCalledWith(
+        expect.objectContaining({ pid: 2_000_000_013, isExited: expect.any(Function) }),
+      );
+      const [target] = cleanup.mock.calls[0] as [ProcessTarget];
+      expect(target.isExited?.()).toBe(false);
       expect(finishCleanup).toBeTypeOf("function");
       await vi.advanceTimersByTimeAsync(999);
       expect(fulfilled).toBe(false);
@@ -911,6 +1050,27 @@ if (selectedProbe !== undefined) {
       },
     );
 
+    it("ignores an abort dispatched after completed settlement", async () => {
+      const controller = new AbortController();
+      const fake = createFakeChild(2_000_000_015);
+      const cleanupProcessTree = vi.fn(async () => {});
+      const reapProcessWrapper = vi.fn();
+      const resultPromise = foregroundExecution(fake, {
+        signal: controller.signal,
+        cleanupProcessTree,
+        reapProcessWrapper,
+      });
+
+      fake.emitClose(0);
+      await expect(resultPromise).resolves.toMatchObject({ outcome: { reason: "completed" } });
+      controller.abort();
+      await Promise.resolve();
+
+      expect(reapProcessWrapper).toHaveBeenCalledOnce();
+      expect(cleanupProcessTree).not.toHaveBeenCalled();
+      expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+    });
+
     it("logs rejected cleanup without changing the selected abort result", async () => {
       vi.useFakeTimers();
       const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
@@ -934,6 +1094,108 @@ if (selectedProbe !== undefined) {
         expect.objectContaining({ pid: "2000000014", error: "cleanup rejected" }),
       );
     });
+  });
+
+  describe("detached foreground descendants", () => {
+    async function prepareDetachedRun(mode: "exit" | "hold") {
+      const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "gg-detached-foreground-"));
+      const evidenceFile = path.join(tempDirectory, "evidence.jsonl");
+      const readinessFile = path.join(tempDirectory, "worker.ready");
+      const { isCmdFallback } = resolveShell("");
+      const command = [
+        process.execPath,
+        fixturePath("bash-detached-launcher.mjs"),
+        evidenceFile,
+        fixturePath("bash-detached-worker.mjs"),
+        readinessFile,
+        mode,
+      ]
+        .map((value) => quotePathForShell(value, isCmdFallback))
+        .join(" ");
+      return { tempDirectory, evidenceFile, command };
+    }
+
+    it("leaves an intentionally detached worker alive after normal completion", async () => {
+      const fixture = await prepareDetachedRun("exit");
+      try {
+        const result = await executeForegroundCommand({
+          command: fixture.command,
+          cwd: process.cwd(),
+          timeoutMs: 5_000,
+          signal: new AbortController().signal,
+          ops: localOperations,
+        });
+        const roles = await waitForFixtureRoles(fixture.evidenceFile, [
+          "detached-launcher",
+          "detached-worker",
+        ]);
+        const worker = roles.find(({ role }) => role === "detached-worker");
+
+        expect(result.outcome.reason).toBe("completed");
+        expect(worker?.pid).toBeGreaterThan(0);
+        expect(worker && isAlive(worker.pid)).toBe(true);
+      } finally {
+        await cleanupRecordedPids(fixture.evidenceFile);
+        await fs.rm(fixture.tempDirectory, { recursive: true, force: true });
+      }
+    }, 15_000);
+
+    it("removes a TERM-ignoring detached worker after the TERM-killed root exits", async () => {
+      const fixture = await prepareDetachedRun("hold");
+      const timeoutMs = 8_000;
+      const startedAt = Date.now();
+      try {
+        const execution = executeForegroundCommand({
+          command: fixture.command,
+          cwd: process.cwd(),
+          timeoutMs,
+          signal: new AbortController().signal,
+          ops: localOperations,
+        });
+        const roles = await waitForFixtureRoles(
+          fixture.evidenceFile,
+          ["detached-launcher", "detached-worker"],
+          6_000,
+        );
+        const readinessElapsedMs = Date.now() - startedAt;
+
+        const result = await execution;
+        expect(readinessElapsedMs).toBeLessThan(timeoutMs - 1_000);
+        expect(result.outcome.reason).toBe("timedOut");
+        expect(result.outcome.elapsedMs).toBeGreaterThanOrEqual(timeoutMs - 100);
+        if (process.platform !== "win32") expect(result.outcome.signal).toBe("SIGTERM");
+        await waitForRecordedPidsToExit(roles);
+      } finally {
+        await cleanupRecordedPids(fixture.evidenceFile);
+        await fs.rm(fixture.tempDirectory, { recursive: true, force: true });
+      }
+    }, 20_000);
+
+    it("removes the launcher and detached worker after AbortSignal cancellation", async () => {
+      const fixture = await prepareDetachedRun("hold");
+      const controller = new AbortController();
+      try {
+        const execution = executeForegroundCommand({
+          command: fixture.command,
+          cwd: process.cwd(),
+          timeoutMs: 10_000,
+          signal: controller.signal,
+          ops: localOperations,
+        });
+        const roles = await waitForFixtureRoles(fixture.evidenceFile, [
+          "detached-launcher",
+          "detached-worker",
+        ]);
+        controller.abort();
+
+        expect((await execution).outcome.reason).toBe("aborted");
+        await waitForRecordedPidsToExit(roles);
+      } finally {
+        controller.abort();
+        await cleanupRecordedPids(fixture.evidenceFile);
+        await fs.rm(fixture.tempDirectory, { recursive: true, force: true });
+      }
+    }, 15_000);
   });
 
   describe("foreground result rendering", () => {
@@ -997,8 +1259,11 @@ if (selectedProbe !== undefined) {
     it("keeps the friendly synchronous spawn failure message", async () => {
       const tool = createBashTool(process.cwd(), new ProcessManager(), {
         ...localOperations,
-        spawn: () => {
-          throw new Error("sync not found");
+        process: {
+          ...localOperations.process,
+          spawn: () => {
+            throw new Error("sync not found");
+          },
         },
       });
       await expect(
@@ -1043,8 +1308,11 @@ if (selectedProbe !== undefined) {
   it("settles pre-aborted persistent runs as ABORTED without retaining listeners", async () => {
     const controller = new AbortController();
     controller.abort();
-    const cleanup = vi.fn(async (pid: number) => killProcessTree(pid));
-    const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024, cleanup);
+    const cleanup = vi.fn(async (target: ProcessTarget) => killProcessTree(target));
+    const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024, {
+      ...localOperations.process,
+      cleanupProcessTree: cleanup,
+    });
 
     await expect(shell.run("sleep 30", 5_000, controller.signal)).resolves.toEqual({
       exitCode: "ABORTED",
@@ -1054,17 +1322,22 @@ if (selectedProbe !== undefined) {
 
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
     expect((shell as unknown as { child: ChildProcess | null }).child).toBeNull();
-    expect(cleanup).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: expect.any(Number), isExited: expect.any(Function) }),
+    );
   });
 
   it("cleans persistent-run listeners and logs rejected process cleanup", async () => {
     const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
     const controller = new AbortController();
-    const cleanup = vi.fn(async (pid: number) => {
-      killProcessTree(pid);
+    const cleanup = vi.fn(async (target: ProcessTarget) => {
+      killProcessTree(target);
       throw new Error("persistent cleanup rejected");
     });
-    const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024, cleanup);
+    const shell = new PersistentShell(process.cwd(), process.env, 1024 * 1024, {
+      ...localOperations.process,
+      cleanupProcessTree: cleanup,
+    });
     const runPromise = shell.run("sleep 30", 5_000, controller.signal);
     const child = (shell as unknown as { child: ChildProcess }).child;
 
@@ -1080,7 +1353,9 @@ if (selectedProbe !== undefined) {
     expect(child.stdout?.listenerCount("data")).toBe(0);
     expect(child.stderr?.listenerCount("data")).toBe(0);
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
-    expect(cleanup).toHaveBeenCalledWith(child.pid);
+    expect(cleanup).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: child.pid, isExited: expect.any(Function) }),
+    );
     expect(warning).toHaveBeenCalledWith(
       "WARN",
       "bash",
@@ -1088,6 +1363,59 @@ if (selectedProbe !== undefined) {
       expect.objectContaining({ error: "persistent cleanup rejected" }),
     );
   });
+
+  it.each(["timeout", "abort", "kill"] as const)(
+    "guards persistent %s cleanup when the root PID is reused after snapshot",
+    async (mode) => {
+      if (mode === "timeout") vi.useFakeTimers();
+      const fake = createPersistentFakeChild();
+      const snapshotStarted: boolean[] = [];
+      const dispatchedSignals: number[] = [];
+      let releaseSnapshot: (() => void) | undefined;
+      const snapshotGate = new Promise<void>((resolve) => {
+        releaseSnapshot = resolve;
+      });
+      let target: ProcessTarget | undefined;
+      const cleanup = vi.fn(async (processTarget: ProcessTarget) => {
+        target = processTarget;
+        snapshotStarted.push(processTarget.isExited?.() ?? false);
+        await snapshotGate;
+        if (!(processTarget.isExited?.() ?? false)) dispatchedSignals.push(processTarget.pid);
+      });
+      const shell = new PersistentShell(process.cwd(), process.env, 1024, {
+        ...localOperations.process,
+        cleanupProcessTree: cleanup,
+        spawn: () => fake.child,
+      });
+
+      if (mode === "kill") {
+        (shell as unknown as { ensureChild(): ChildProcess }).ensureChild();
+        shell.kill();
+      } else {
+        const controller = new AbortController();
+        const run = shell.run("sleep 30", mode === "timeout" ? 25 : 5_000, controller.signal);
+        if (mode === "timeout") await vi.advanceTimersByTimeAsync(25);
+        else controller.abort();
+        await run;
+      }
+      await Promise.resolve();
+
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(target).toEqual(
+        expect.objectContaining({ pid: fake.child.pid, isExited: expect.any(Function) }),
+      );
+      expect(snapshotStarted).toEqual([false]);
+      expect(target?.isExited?.()).toBe(false);
+
+      fake.markExited();
+      expect(target?.isExited?.()).toBe(true);
+      releaseSnapshot?.();
+      await snapshotGate;
+      await Promise.resolve();
+
+      expect(dispatchedSignals).toEqual([]);
+    },
+  );
 
   it("returns a persistent timeout without sentinel or exit and resets shell state", async () => {
     const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "gg persistent-timeout-"));
@@ -1099,17 +1427,22 @@ if (selectedProbe !== undefined) {
       quotePathForShell(fixturePath("bash-timeout-silent.mjs"), false),
       quotePathForShell(evidenceFile, false),
     ].join(" ");
+    const timeoutMs = 5_000;
     const startedAt = Date.now();
 
     try {
-      const timedOut = await shell.run(command, 300, new AbortController().signal);
+      const timeoutPromise = shell.run(command, timeoutMs, new AbortController().signal);
+      const [firstSession] = await waitForFixtureRoles(evidenceFile, ["silent"], 3_000);
+      const readinessElapsedMs = Date.now() - startedAt;
+      const timedOut = await timeoutPromise;
       const elapsedMs = Date.now() - startedAt;
-      expect(timedOut.exitCode).toBe("TIMEOUT");
-      expect(elapsedMs).toBeGreaterThanOrEqual(200);
-      expect(elapsedMs).toBeLessThan(1_500);
 
-      const [firstSession] = await readFixtureEvidence(evidenceFile);
       expect(firstSession?.role).toBe("silent");
+      expect(readinessElapsedMs).toBeLessThan(timeoutMs - 1_000);
+      expect(timedOut.exitCode).toBe("TIMEOUT");
+      expect(elapsedMs).toBeGreaterThanOrEqual(timeoutMs - 100);
+      expect(elapsedMs).toBeLessThan(timeoutMs + 3_000);
+
       const freshRun = await shell.run(
         `printf 'STATE=%s\\nSHELL_PID=%s\\n' "\${GG_PERSIST_TIMEOUT_STATE:-fresh}" "$$"`,
         2_000,
@@ -1123,7 +1456,7 @@ if (selectedProbe !== undefined) {
       await cleanupRecordedPids(evidenceFile);
       await fs.rm(tempDirectory, { recursive: true, force: true });
     }
-  }, 10_000);
+  }, 15_000);
 
   const posixIt = process.platform === "win32" ? it.skip : it;
   const windowsIt = process.platform === "win32" ? it : it.skip;
@@ -1165,7 +1498,7 @@ if (selectedProbe !== undefined) {
     async (probe) => {
       await assertSupervisedProbe(probe);
     },
-    20_000,
+    35_000,
   );
 
   it("settles on its own hard deadline when termination cannot close the child", async () => {
@@ -1194,7 +1527,7 @@ if (selectedProbe !== undefined) {
       expect(result.exitCode).toBeNull();
       expect(result.outputTail).toContain("SUPERVISOR_FIXTURE_READY");
       expect(result.elapsedMs).toBeGreaterThanOrEqual(200);
-      expect(result.elapsedMs).toBeLessThan(1_000);
+      expect(result.elapsedMs).toBeLessThan(3_000);
       expect(terminationAttempts).toEqual([result.childPid, result.childPid]);
     } finally {
       if (childPid > 0) terminateSupervisedTree(childPid);

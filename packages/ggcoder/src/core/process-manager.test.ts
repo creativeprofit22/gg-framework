@@ -1,17 +1,71 @@
 import { EventEmitter } from "node:events";
+import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
+import type { ChildProcess } from "node:child_process";
+import type { ProcessTarget } from "../utils/process.js";
+import { localProcessLifecycle, type ProcessLifecycleAdapter } from "../tools/operations.js";
 import { ProcessManager, type BackgroundProcess } from "./process-manager.js";
 
-function trackedManager(ops: ConstructorParameters<typeof ProcessManager>[0] = {}): {
+interface FakeChildHarness {
+  child: ChildProcess;
+  stdout: PassThrough;
+  stderr: PassThrough;
+  emitSpawn(): void;
+  emitError(error: Error): void;
+  emitClose(code?: number | null): void;
+}
+
+function fakeChild(pid = 4321): FakeChildHarness {
+  const emitter = new EventEmitter();
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const state: { exitCode: number | null; signalCode: NodeJS.Signals | null } = {
+    exitCode: null,
+    signalCode: null,
+  };
+  Object.defineProperties(emitter, {
+    exitCode: { get: () => state.exitCode, configurable: true },
+    signalCode: { get: () => state.signalCode, configurable: true },
+  });
+  const child = Object.assign(emitter, {
+    pid,
+    stdin,
+    stdout,
+    stderr,
+    unref: vi.fn(),
+  }) as unknown as ChildProcess;
+  return {
+    child,
+    stdout,
+    stderr,
+    emitSpawn() {
+      emitter.emit("spawn");
+    },
+    emitError(error) {
+      emitter.emit("error", error);
+    },
+    emitClose(code = 0) {
+      state.exitCode = code;
+      emitter.emit("close", code, null);
+    },
+  };
+}
+
+function lifecycle(overrides: Partial<ProcessLifecycleAdapter> = {}): ProcessLifecycleAdapter {
+  return { ...localProcessLifecycle, ...overrides };
+}
+
+function trackedManager(adapter: ProcessLifecycleAdapter): {
   manager: ProcessManager;
-  child: EventEmitter;
+  child: ChildProcess;
   proc: BackgroundProcess;
 } {
-  const manager = new ProcessManager(ops);
-  const child = new EventEmitter();
+  const manager = new ProcessManager(adapter);
+  const { child } = fakeChild();
   const proc: BackgroundProcess = {
     id: "bg-test",
-    pid: 4321,
+    pid: child.pid!,
     command: "fixture",
     logFile: "fixture.log",
     startedAt: Date.now(),
@@ -20,233 +74,223 @@ function trackedManager(ops: ConstructorParameters<typeof ProcessManager>[0] = {
   };
   const internals = manager as unknown as {
     processes: Map<string, BackgroundProcess>;
-    children: Map<string, EventEmitter>;
+    children: Map<string, ChildProcess>;
   };
   internals.processes.set(proc.id, proc);
   internals.children.set(proc.id, child);
   return { manager, child, proc };
 }
 
-describe("ProcessManager POSIX termination", () => {
-  it("owns close before dispatch and routes stop through async tree cleanup", async () => {
-    vi.useFakeTimers();
-    try {
-      const order: string[] = [];
-      const childRef: { current?: EventEmitter } = {};
-      const killProcessTreeAsync = vi.fn(async () => {
-        const child = childRef.current!;
-        order.push(`cleanup:close-listeners=${child.listenerCount("close")}`);
-        child.emit("close", 0);
-      });
-      const tracked = trackedManager({ platform: "linux", killProcessTreeAsync });
-      const child = tracked.child;
-      childRef.current = child;
-      const baseline = child.listenerCount("close");
-
-      await expect(tracked.manager.stop(tracked.proc.id)).resolves.toBe(
-        `Process ${tracked.proc.id} stopped`,
-      );
-
-      expect(order).toEqual([`cleanup:close-listeners=${baseline + 1}`]);
-      expect(killProcessTreeAsync).toHaveBeenCalledWith(tracked.proc.pid);
-      expect(child.listenerCount("close")).toBe(baseline);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("waits for cooperative close after the shared cleanup returns", async () => {
-    vi.useFakeTimers();
-    try {
-      const killProcessTreeAsync = vi.fn(async () => {});
-      const { manager, child, proc } = trackedManager({ platform: "darwin", killProcessTreeAsync });
-      const stopping = manager.stop(proc.id);
-      await Promise.resolve();
-      expect(killProcessTreeAsync).toHaveBeenCalledOnce();
-      child.emit("close", 0);
-      await expect(stopping).resolves.toBe(`Process ${proc.id} stopped`);
-      expect(child.listenerCount("close")).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("reports a missing close as failure and keeps the process retryable", async () => {
-    vi.useFakeTimers();
-    try {
-      const killProcessTreeAsync = vi.fn(async () => {});
-      const { manager, child, proc } = trackedManager({ platform: "linux", killProcessTreeAsync });
-      const baseline = child.listenerCount("close");
-      const stopping = manager.stop(proc.id);
-      await Promise.resolve();
-      expect(child.listenerCount("close")).toBe(baseline + 1);
-      await vi.advanceTimersByTimeAsync(5000);
-      await expect(stopping).resolves.toBe(
-        `Failed to stop process ${proc.id}: process did not exit within 5 seconds and may still be running.`,
-      );
-      expect(child.listenerCount("close")).toBe(baseline);
-
-      const retrying = manager.stop(proc.id);
-      await vi.advanceTimersByTimeAsync(5000);
-      await expect(retrying).resolves.toBe(
-        `Failed to stop process ${proc.id}: process did not exit within 5 seconds and may still be running.`,
-      );
-      expect(killProcessTreeAsync).toHaveBeenCalledTimes(2);
-      expect(manager.list()).toContain(proc);
-      expect(
-        (manager as unknown as { children: Map<string, EventEmitter> }).children.get(proc.id),
-      ).toBe(child);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("reports cleanup rejection with no close as failure and keeps the process retryable", async () => {
-    vi.useFakeTimers();
-    try {
-      const killProcessTreeAsync = vi.fn(async () => {
-        throw new Error("group access denied");
-      });
-      const { manager, child, proc } = trackedManager({ platform: "linux", killProcessTreeAsync });
-      const stopping = manager.stop(proc.id);
-      await vi.advanceTimersByTimeAsync(5000);
-      await expect(stopping).resolves.toBe(
-        `Failed to stop process ${proc.id}: process did not exit within 5 seconds and may still be running.`,
-      );
-      expect(child.listenerCount("close")).toBe(0);
-
-      const retrying = manager.stop(proc.id);
-      await vi.advanceTimersByTimeAsync(5000);
-      await expect(retrying).resolves.toBe(
-        `Failed to stop process ${proc.id}: process did not exit within 5 seconds and may still be running.`,
-      );
-      expect(killProcessTreeAsync).toHaveBeenCalledTimes(2);
-      expect(manager.list()).toContain(proc);
-      expect(
-        (manager as unknown as { children: Map<string, EventEmitter> }).children.get(proc.id),
-      ).toBe(child);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("keeps synchronous shutdownAll on the immediate tree-kill seam", () => {
-    const killProcessTree = vi.fn();
-    const killProcessTreeAsync = vi.fn(async () => {});
-    const { manager, proc } = trackedManager({
-      platform: "linux",
-      killProcessTree,
-      killProcessTreeAsync,
+describe("ProcessManager lifecycle adapter", () => {
+  it("spawns background work through the adapter with piped output", async () => {
+    const fake = fakeChild(9876);
+    const spawn = vi.fn(() => {
+      queueMicrotask(() => fake.emitSpawn());
+      return fake.child;
     });
+    const reapProcessWrapper = vi.fn();
+    const manager = new ProcessManager(lifecycle({ spawn, reapProcessWrapper }));
 
-    manager.shutdownAll();
+    const started = await manager.start("echo remote", "/remote/workspace");
 
-    expect(killProcessTree).toHaveBeenCalledWith(proc.pid);
-    expect(killProcessTreeAsync).not.toHaveBeenCalled();
-  });
-});
-
-describe("ProcessManager Windows termination", () => {
-  it("dispatches PID-tree termination before waiting and reports confirmed close", async () => {
-    vi.useFakeTimers();
-    try {
-      const order: string[] = [];
-      const kill = vi.fn(() => {
-        order.push("direct-signal");
-        return true;
-      }) as unknown as typeof process.kill;
-      const killProcessTree = vi.fn(() => {
-        order.push("tree-kill");
-      });
-      const { manager, child, proc } = trackedManager({
-        platform: "win32",
-        kill,
-        killProcessTree,
-      });
-
-      const baselineCloseListeners = child.listenerCount("close");
-      const stopping = manager.stop(proc.id);
-
-      expect(child.listenerCount("close")).toBe(baselineCloseListeners + 1);
-      expect(order).toEqual(["tree-kill"]);
-      expect(killProcessTree).toHaveBeenCalledWith(proc.pid);
-      expect(kill).not.toHaveBeenCalled();
-      child.emit("close", 1);
-      await expect(stopping).resolves.toBe(`Process ${proc.id} stopped`);
-      expect(child.listenerCount("close")).toBe(baselineCloseListeners);
-    } finally {
-      vi.useRealTimers();
+    expect(started.pid).toBe(9876);
+    expect(spawn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Array),
+      expect.objectContaining({
+        cwd: "/remote/workspace",
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
+    );
+    fake.stdout.write("remote stdout\n");
+    fake.stderr.write("remote stderr\n");
+    fake.emitClose(0);
+    let output = "";
+    for (let attempt = 0; attempt < 20 && !output.includes("remote stderr"); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      output = (await manager.readOutput(started.id, true)).output;
     }
+    expect(output).toContain("remote stdout");
+    expect(output).toContain("remote stderr");
+    expect(reapProcessWrapper).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: 9876, isExited: expect.any(Function) }),
+    );
   });
 
-  it("reports failure and preserves tracking when the child does not close", async () => {
-    vi.useFakeTimers();
-    try {
-      const killProcessTree = vi.fn();
-      const { manager, child, proc } = trackedManager({
-        platform: "win32",
-        killProcessTree,
-      });
+  it("rejects a synchronous spawn throw without tracking a process", async () => {
+    const error = new Error("spawn threw");
+    const logStream = new PassThrough();
+    const endLog = vi.spyOn(logStream, "end");
+    const manager = new ProcessManager(
+      lifecycle({
+        spawn: () => {
+          throw error;
+        },
+      }),
+      () => logStream,
+    );
 
-      const baselineCloseListeners = child.listenerCount("close");
-      const stopping = manager.stop(proc.id);
-      expect(child.listenerCount("close")).toBe(baselineCloseListeners + 1);
-      await vi.advanceTimersByTimeAsync(5000);
+    await expect(manager.start("missing command", "/workspace")).rejects.toBe(error);
+    expect(manager.list()).toEqual([]);
+    expect(endLog).toHaveBeenCalledOnce();
+  });
 
-      await expect(stopping).resolves.toBe(
-        `Failed to stop process ${proc.id}: process did not exit within 5 seconds and may still be running.`,
-      );
-      expect(child.listenerCount("close")).toBe(baselineCloseListeners);
+  it("rejects an asynchronous startup error without tracking or unrefing the child", async () => {
+    const fake = fakeChild();
+    const error = new Error("ENOENT");
+    const logStream = new PassThrough();
+    const endLog = vi.spyOn(logStream, "end");
+    const manager = new ProcessManager(
+      lifecycle({
+        spawn: () => {
+          queueMicrotask(() => fake.emitError(error));
+          return fake.child;
+        },
+      }),
+      () => logStream,
+    );
+    const starting = manager.start("missing command", "/workspace");
 
-      const retrying = manager.stop(proc.id);
-      expect(child.listenerCount("close")).toBe(baselineCloseListeners + 1);
-      await vi.advanceTimersByTimeAsync(5000);
-      await expect(retrying).resolves.toBe(
-        `Failed to stop process ${proc.id}: process did not exit within 5 seconds and may still be running.`,
-      );
+    await expect(starting).rejects.toBe(error);
+    expect(manager.list()).toEqual([]);
+    expect(fake.child.unref).not.toHaveBeenCalled();
+    expect(fake.child.listenerCount("error")).toBeGreaterThan(0);
+    expect(endLog).toHaveBeenCalledOnce();
+    expect(() => fake.emitError(new Error("later failure"))).not.toThrow();
+  });
 
-      expect(child.listenerCount("close")).toBe(baselineCloseListeners);
-      expect(killProcessTree).toHaveBeenCalledTimes(2);
-      expect(manager.list()).toContain(proc);
-      expect(proc.exitCode).toBeNull();
+  it("tracks spawn before handling an immediate close", async () => {
+    const fake = fakeChild(7654);
+    const reapProcessWrapper = vi.fn();
+    const logStream = new PassThrough();
+    const endLog = vi.spyOn(logStream, "end");
+    const manager = new ProcessManager(
+      lifecycle({
+        spawn: () => {
+          queueMicrotask(() => {
+            fake.emitSpawn();
+            fake.emitClose(0);
+          });
+          return fake.child;
+        },
+        reapProcessWrapper,
+      }),
+      () => logStream,
+    );
+    const starting = manager.start("fast command", "/workspace");
+
+    await expect(starting).resolves.toMatchObject({ pid: 7654 });
+    await vi.waitFor(() => {
+      expect(manager.list()).toEqual([expect.objectContaining({ pid: 7654, exitCode: 0 })]);
+      expect((manager as unknown as { children: Map<string, ChildProcess> }).children.size).toBe(0);
+      expect(reapProcessWrapper).toHaveBeenCalledOnce();
+    });
+    expect(fake.child.unref).toHaveBeenCalledOnce();
+    expect(endLog).toHaveBeenCalledOnce();
+  });
+
+  it("keeps completion pending until the log stream flushes", async () => {
+    const fake = fakeChild(2468);
+    let finishLogFlush: (() => void) | undefined;
+    const logStream = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+      final(callback) {
+        finishLogFlush = callback;
+      },
+    });
+    const reapProcessWrapper = vi.fn();
+    const manager = new ProcessManager(
+      lifecycle({
+        spawn: () => {
+          queueMicrotask(() => fake.emitSpawn());
+          return fake.child;
+        },
+        reapProcessWrapper,
+      }),
+      () => logStream,
+    );
+
+    const started = await manager.start("flush logs", "/workspace");
+    fake.stdout.write("final output\n");
+    fake.emitClose(0);
+
+    expect(manager.list()).toEqual([expect.objectContaining({ exitCode: null })]);
+    expect(
+      (manager as unknown as { children: Map<string, ChildProcess> }).children.has(started.id),
+    ).toBe(true);
+    expect(reapProcessWrapper).not.toHaveBeenCalled();
+
+    finishLogFlush?.();
+    await vi.waitFor(() => {
+      expect(manager.list()).toEqual([expect.objectContaining({ exitCode: 0 })]);
       expect(
-        (manager as unknown as { children: Map<string, EventEmitter> }).children.get(proc.id),
-      ).toBe(child);
+        (manager as unknown as { children: Map<string, ChildProcess> }).children.has(started.id),
+      ).toBe(false);
+      expect(reapProcessWrapper).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("routes task stop through graceful target cleanup", async () => {
+    const childRef: { current?: ChildProcess } = {};
+    let capturedTarget: ProcessTarget | undefined;
+    const cleanupProcessTree = vi.fn(async (target: ProcessTarget) => {
+      capturedTarget = target;
+      childRef.current?.emit("close", 0, null);
+    });
+    const tracked = trackedManager(lifecycle({ cleanupProcessTree }));
+    childRef.current = tracked.child;
+
+    await expect(tracked.manager.stop(tracked.proc.id)).resolves.toBe(
+      `Process ${tracked.proc.id} stopped`,
+    );
+    expect(cleanupProcessTree).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: tracked.proc.pid, isExited: expect.any(Function) }),
+    );
+    expect(capturedTarget?.isExited?.()).toBe(false);
+    Object.defineProperty(tracked.child, "exitCode", { value: 0, configurable: true });
+    expect(capturedTarget?.isExited?.()).toBe(true);
+  });
+
+  it("keeps a process retryable when cleanup does not produce close", async () => {
+    vi.useFakeTimers();
+    try {
+      const cleanupProcessTree = vi.fn(async () => {});
+      const { manager, proc } = trackedManager(lifecycle({ cleanupProcessTree }));
+      const stopping = manager.stop(proc.id);
+      await vi.advanceTimersByTimeAsync(5000);
+
+      await expect(stopping).resolves.toContain("may still be running");
+      expect(manager.list()).toContain(proc);
+      expect(cleanupProcessTree).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("shutdownAll routes each live PID through the shared tree-kill seam", () => {
-    const order: string[] = [];
-    const killProcessTree = vi.fn((pid: number) => order.push(`tree:${pid}`));
-    const kill = vi.fn(() => {
-      order.push("direct-signal");
-      return true;
-    }) as unknown as typeof process.kill;
-    const { manager, proc } = trackedManager({ platform: "win32", kill, killProcessTree });
+  it("routes shutdown through immediate target cleanup", () => {
+    const killProcessTree = vi.fn();
+    const { manager, proc } = trackedManager(lifecycle({ killProcessTree }));
 
     manager.shutdownAll();
 
-    expect(order).toEqual([`tree:${proc.pid}`]);
-    expect(killProcessTree).toHaveBeenCalledWith(proc.pid);
-    expect(kill).not.toHaveBeenCalled();
+    expect(killProcessTree).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: proc.pid, isExited: expect.any(Function) }),
+    );
     expect(manager.list()[0]?.exitCode).toBe(1);
   });
 
-  it("treats already-closed and dead records as harmless", async () => {
+  it("does not clean up records that already completed naturally", () => {
     const killProcessTree = vi.fn();
-    const closed = trackedManager({ platform: "win32", killProcessTree });
-    closed.proc.exitCode = 0;
-    (closed.manager as unknown as { children: Map<string, EventEmitter> }).children.delete(
-      closed.proc.id,
+    const tracked = trackedManager(lifecycle({ killProcessTree }));
+    tracked.proc.exitCode = 0;
+    (tracked.manager as unknown as { children: Map<string, ChildProcess> }).children.delete(
+      tracked.proc.id,
     );
 
-    await expect(closed.manager.stop(closed.proc.id)).resolves.toBe(
-      `Process ${closed.proc.id} already exited (code 0)`,
-    );
-    closed.manager.shutdownAll();
+    tracked.manager.shutdownAll();
 
     expect(killProcessTree).not.toHaveBeenCalled();
   });

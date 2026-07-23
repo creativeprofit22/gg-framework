@@ -1,10 +1,12 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import fs from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import type { Writable } from "node:stream";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { killProcessTree, killProcessTreeAsync } from "../utils/process.js";
+import type { ProcessTarget } from "../utils/process.js";
+import { localProcessLifecycle, type ProcessLifecycleAdapter } from "../tools/operations.js";
 import { getSafeToolEnv } from "../tools/safe-env.js";
 import { resolveShell } from "./shell.js";
 
@@ -33,82 +35,135 @@ export interface ReadOutputResult {
 
 const BG_DIR = path.join(os.homedir(), ".gg", "bg");
 
-export interface ProcessManagerOps {
-  platform?: NodeJS.Platform;
-  kill?: typeof process.kill;
-  killProcessTree?: (pid: number) => void;
-  killProcessTreeAsync?: (pid: number) => Promise<void>;
-}
-
-function stopProcessTree(pid: number, ops: ProcessManagerOps = {}): void {
-  if (ops.killProcessTree) {
-    ops.killProcessTree(pid);
-    return;
-  }
-  killProcessTree(pid, { platform: ops.platform, kill: ops.kill });
-}
-
-async function stopProcessTreeAsync(pid: number, ops: ProcessManagerOps = {}): Promise<void> {
-  if (ops.killProcessTreeAsync) {
-    await ops.killProcessTreeAsync(pid);
-    return;
-  }
-  await killProcessTreeAsync(pid, { platform: ops.platform, kill: ops.kill });
+function processTarget(pid: number, child: ChildProcess): ProcessTarget {
+  return {
+    pid,
+    isExited: () => child.exitCode !== null || child.signalCode !== null,
+  };
 }
 
 export class ProcessManager {
   private processes = new Map<string, BackgroundProcess>();
   private children = new Map<string, ChildProcess>();
 
-  constructor(private readonly ops: ProcessManagerOps = {}) {}
+  constructor(
+    private readonly lifecycle: ProcessLifecycleAdapter = localProcessLifecycle,
+    private readonly createLogStream: (logFile: string) => Writable = (logFile) =>
+      createWriteStream(logFile, { flags: "w" }),
+  ) {}
 
   async start(command: string, cwd: string): Promise<StartResult> {
     await fsp.mkdir(BG_DIR, { recursive: true });
 
     const id = crypto.randomUUID().slice(0, 8);
     const logFile = path.join(BG_DIR, `${id}.log`);
-    const fd = fs.openSync(logFile, "w");
+    const logStream = this.createLogStream(logFile);
+    // A local logging failure must not crash the host or bypass target execution.
+    logStream.on("error", () => {});
 
-    // Cross-platform shell (see core/shell.ts): bash on POSIX, Git Bash on
-    // Windows, cmd.exe fallback. Same resolution as the foreground bash tool.
     const shell = resolveShell(command);
-    const child = spawn(shell.file, shell.args, {
-      cwd,
-      detached: true,
-      // stdin is a pipe so callers can drive interactive processes (REPLs,
-      // scaffolders, [Y/n] prompts) via sendInput(); stdout/stderr go to the log.
-      stdio: ["pipe", fd, fd],
-      env: getSafeToolEnv(),
-    });
+    let child: ChildProcess;
+    try {
+      child = this.lifecycle.spawn(shell.file, shell.args, {
+        cwd,
+        detached: true,
+        // Keep adapter-owned process I/O as pipes. Numeric descriptors would
+        // bypass remote/SSH/Docker adapters and execute logging on their target.
+        stdio: ["pipe", "pipe", "pipe"],
+        env: getSafeToolEnv(),
+      });
+    } catch (error) {
+      logStream.end();
+      throw error;
+    }
 
-    fs.closeSync(fd);
-
-    // Swallow EPIPE: writing to a process that has already exited would
-    // otherwise emit an unhandled 'error' and crash the host.
+    child.stdout?.pipe(logStream, { end: false });
+    child.stderr?.pipe(logStream, { end: false });
     child.stdin?.on("error", () => {});
 
-    const pid = child.pid!;
-    child.unref();
+    return new Promise<StartResult>((resolve, reject) => {
+      let startupSettled = false;
+      let proc: BackgroundProcess | undefined;
+      let pid: number | undefined;
+      let logEnded = false;
+      let settleLogFlush!: () => void;
+      const logFlushed = new Promise<void>((resolveFlush) => {
+        settleLogFlush = resolveFlush;
+      });
+      logStream.once("finish", settleLogFlush);
+      logStream.once("close", settleLogFlush);
+      logStream.once("error", settleLogFlush);
 
-    const proc: BackgroundProcess = {
-      id,
-      pid,
-      command,
-      logFile,
-      startedAt: Date.now(),
-      exitCode: null,
-      lastReadOffset: 0,
-    };
+      const endLog = (): void => {
+        if (logEnded) return;
+        logEnded = true;
+        logStream.end();
+      };
 
-    this.processes.set(id, proc);
-    this.children.set(id, child);
+      const onError = (error: Error): void => {
+        if (startupSettled) return;
+        startupSettled = true;
+        endLog();
+        reject(error);
+        // Keep this listener installed: ChildProcess may emit another error later,
+        // and an unhandled error event must never crash the agent host.
+      };
 
-    child.on("close", (code) => {
-      proc.exitCode = code ?? 1;
-      this.children.delete(id);
+      const onClose = (code: number | null): void => {
+        endLog();
+        if (!proc || pid === undefined) {
+          if (!startupSettled) {
+            startupSettled = true;
+            reject(new Error("Background process closed before startup completed"));
+          }
+          return;
+        }
+
+        const completedProcess = proc;
+        const completedPid = pid;
+        void logFlushed.then(() => {
+          completedProcess.exitCode = code ?? 1;
+          this.children.delete(id);
+          try {
+            this.lifecycle.reapProcessWrapper(processTarget(completedPid, child));
+          } catch {
+            // Completion is authoritative; wrapper reaping remains best-effort.
+          }
+        });
+      };
+
+      const onSpawn = (): void => {
+        if (startupSettled) return;
+        pid = child.pid;
+        if (pid === undefined) {
+          startupSettled = true;
+          endLog();
+          reject(new Error("Background process did not provide a PID"));
+          return;
+        }
+
+        proc = {
+          id,
+          pid,
+          command,
+          logFile,
+          startedAt: Date.now(),
+          exitCode: null,
+          lastReadOffset: 0,
+        };
+        this.processes.set(id, proc);
+        this.children.set(id, child);
+        child.unref();
+        startupSettled = true;
+        resolve({ id, pid, logFile });
+      };
+
+      // Register all terminal handlers before awaiting startup so fast failures
+      // and immediate exits cannot escape or be reported as false success.
+      child.on("error", onError);
+      child.on("close", onClose);
+      child.once("spawn", onSpawn);
     });
-
-    return { id, pid, logFile };
   }
 
   async readOutput(id: string, fromStart?: boolean): Promise<ReadOutputResult> {
@@ -143,12 +198,6 @@ export class ProcessManager {
     return { id, isRunning, exitCode: proc.exitCode, output };
   }
 
-  /**
-   * Write input to a running background process's stdin, enabling interactive
-   * control (answer prompts, drive a REPL, feed a scaffolder). By default a
-   * newline is appended (as if the user pressed Enter). Set `eof` to close
-   * stdin afterwards, signalling end-of-input (Ctrl-D) to the program.
-   */
   async sendInput(
     id: string,
     input: string,
@@ -198,8 +247,7 @@ export class ProcessManager {
       return `Process ${id} already exited (code ${proc.exitCode})`;
     }
 
-    const isWindows = (this.ops.platform ?? process.platform) === "win32";
-    // Own close before dispatching any signal: a cooperative process may exit synchronously.
+    const target = processTarget(proc.pid, child);
     const exited = new Promise<boolean>((resolve) => {
       let settled = false;
       const settle = (didExit: boolean): void => {
@@ -214,16 +262,10 @@ export class ProcessManager {
       child.once("close", onClose);
     });
 
-    if (isWindows) {
-      // Keep the Phase 05 immediate Windows tree-stop contract unchanged.
-      stopProcessTree(proc.pid, this.ops);
-    } else {
-      // The shared policy owns TERM, its grace period, and conditional KILL.
-      try {
-        await stopProcessTreeAsync(proc.pid, this.ops);
-      } catch {
-        // Cleanup is best-effort and must not replace the stop lifecycle result.
-      }
+    try {
+      await this.lifecycle.cleanupProcessTree(target);
+    } catch {
+      // Cleanup is best-effort and must not replace the stop lifecycle result.
     }
 
     if (!(await exited)) {
@@ -234,7 +276,6 @@ export class ProcessManager {
   }
 
   list(): BackgroundProcess[] {
-    // Prune completed processes older than 5 minutes to prevent Map growth
     const cutoff = Date.now() - 5 * 60 * 1000;
     for (const [id, proc] of this.processes) {
       if (proc.exitCode !== null && !this.children.has(id) && proc.startedAt < cutoff) {
@@ -246,8 +287,9 @@ export class ProcessManager {
 
   shutdownAll(): void {
     for (const [id, proc] of this.processes) {
-      if (this.children.has(id)) {
-        stopProcessTree(proc.pid, this.ops);
+      const child = this.children.get(id);
+      if (child) {
+        this.lifecycle.killProcessTree(processTarget(proc.pid, child));
         proc.exitCode = proc.exitCode ?? 1;
         this.children.delete(id);
       }

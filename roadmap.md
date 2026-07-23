@@ -11,12 +11,12 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Complete through Phase 05:** Phase 00 workspace evidence is closed, and Phases 01–05 are present in code and focused tests (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`).
+- **Complete through Phase 07:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, and Phase 07 is complete in the current working tree.
 - **Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
-- **2026-07-23 code audit:** All six Phase 01–05 commits are ancestors of `HEAD`; 60 focused foreground/process lifecycle tests, the ggcoder typecheck, and targeted ESLint pass on Windows. The real timeout/abort fixture removes the complete `cmd.exe → pnpm.cmd → node.exe → worker` tree.
-- **Next phase:** Phase 06 — Add POSIX TERM/KILL escalation.
-- **Current reliability gap:** POSIX foreground tree cleanup still force-kills the process group immediately, while background stop has only a partial TERM-then-kill path; cooperative TERM, forced escalation, and bounded direct/descendant fallback do not yet have the Phase 06 ownership tests.
-- **Later-track audit:** Phases 07–14 remain incomplete. Track B has not started: Notes authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`.
+- **2026-07-23 code audit:** The Phase 07 focused run passed 103 tests across process utilities, ProcessManager, detached shutdown, and foreground lifecycle coverage, with one expected Windows dev-server failure and three platform skips. The ggcoder typecheck, targeted ESLint, and Prettier checks passed.
+- **Next phase:** Phase 08 — Persist a foreground log before spawn.
+- **Current reliability gap:** Foreground output still has no per-execution persisted log created before spawn, so diagnostics and late readers continue to depend on in-memory stream handling.
+- **Later-track audit:** Phases 08–14 remain incomplete. Track B has not started: Notes authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`.
 - **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive; those concepts remain intact. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -322,6 +322,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 06 — Add POSIX TERM/KILL escalation
 
+**Status:** Complete (`68188bd7`, `b06223c0`).
+
 **Outcome:** POSIX timeout/cancellation removes a dedicated process group after a bounded graceful window.
 
 **Scope**
@@ -350,9 +352,16 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Group failure uses a bounded direct/descendant fallback; an exited process is harmless.
 - Linux group tests and macOS desktop smoke pass without signaling unrelated groups.
 
-**Hard stop:** Do not start Phase 07 until graceful and forced paths are separately proven.
+**Completion evidence**
+
+- The landed Phase 06 commits add bounded descendant snapshots, cooperative TERM handling, forced KILL escalation, direct/descendant fallback, helper timeouts, and focused lifecycle coverage.
+- The 2026-07-23 Phase 07 verification reran the Phase 06 utility and real process probes inside the 103-test focused matrix; the ggcoder typecheck and targeted ESLint passed.
+
+**Hard stop:** Satisfied — graceful TERM, forced KILL, bounded fallback, and helper cleanup remain separately covered.
 
 ## Phase 07 — Separate cancellation from normal completion
+
+**Status:** Complete.
 
 **Outcome:** Cancellation removes the full tree; normal completion preserves intentionally detached work.
 
@@ -382,7 +391,15 @@ All external references are evidence only. Copy behavior, not source text, unles
 - A late abort cannot convert completed cleanup into a tree kill.
 - Detectable PID reuse prevents cleanup against the new process.
 
-**Hard stop:** Do not start Phase 08 until normal completion and cancellation have opposite, deterministic descendant behavior.
+**Completion evidence**
+
+- The Windows host matrix proves a detached worker survives normal completion and is removed by timeout, AbortSignal cancellation, and `ProcessManager.shutdownAll()`; every survivor is force-cleaned in test `finally` blocks.
+- Focused utility tests prove tree versus exact-PID scope, Windows `/T` versus wrapper-only argv, guard checks before destructive phases, TERM-to-KILL re-checks, and live-but-reused PID no-ops.
+- Foreground race tests prove zero/non-zero completion can request only wrapper reap, interruption owns full-tree cleanup, and late abort dispatches no tree cleanup.
+- Verification command: `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/utils/process.test.ts src/core/process-manager.test.ts src/core/process-manager-dev-server-repro.test.ts src/tools/bash-timeout.test.ts` — 103 passed, 1 expected failure, 3 skipped across 107 tests.
+- `pnpm --filter @kenkaiiii/ggcoder check`, targeted ESLint, and targeted Prettier (including the detached fixtures and this roadmap) pass.
+
+**Hard stop:** Satisfied — normal completion and cancellation have opposite, deterministic detached-descendant behavior, and detectable PID reuse receives no destructive call.
 
 ## Phase 08 — Persist a foreground log before spawn
 

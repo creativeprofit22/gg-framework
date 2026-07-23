@@ -9,12 +9,11 @@
  * POSIX-only (needs a real bash). Callers must fall back to spawn-per-call
  * when bash is unavailable (Windows cmd.exe fallback path).
  */
-import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { killProcessTreeAsync } from "../utils/process.js";
+import type { ProcessTarget } from "../utils/process.js";
+import { localProcessLifecycle, type ProcessLifecycleAdapter } from "../tools/operations.js";
 import { log } from "./logger.js";
-
-type SpawnProcess = (command: string, args: string[], options: SpawnOptions) => ChildProcess;
 
 export interface PersistentRunResult {
   exitCode: number | "TIMEOUT" | "ABORTED";
@@ -30,16 +29,15 @@ export class PersistentShell {
     private readonly cwd: string,
     private readonly env: NodeJS.ProcessEnv,
     private readonly maxOutputBytes: number,
-    private readonly cleanupProcessTree: (pid: number) => Promise<void> = killProcessTreeAsync,
-    private readonly spawnProcess: SpawnProcess = spawn,
+    private readonly lifecycle: ProcessLifecycleAdapter = localProcessLifecycle,
   ) {}
 
-  private startCleanup(pid: number): void {
+  private startCleanup(target: ProcessTarget): void {
     void Promise.resolve()
-      .then(() => this.cleanupProcessTree(pid))
+      .then(() => this.lifecycle.cleanupProcessTree(target))
       .catch((error: unknown) => {
         log("WARN", "bash", "Persistent process-tree cleanup failed", {
-          pid: String(pid),
+          pid: String(target.pid),
           error: error instanceof Error ? error.message : String(error),
         });
       });
@@ -55,7 +53,7 @@ export class PersistentShell {
       return this.child;
     }
     // Fresh session: no rc files so startup is fast and deterministic.
-    const child = this.spawnProcess("bash", ["--norc", "--noprofile"], {
+    const child = this.lifecycle.spawn("bash", ["--norc", "--noprofile"], {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env,
@@ -150,7 +148,12 @@ export class PersistentShell {
       const interrupt = (result: PersistentRunResult): void => {
         if (done) return;
         if (this.child === child) this.child = null;
-        if (child.pid !== undefined) this.startCleanup(child.pid);
+        if (child.pid !== undefined) {
+          this.startCleanup({
+            pid: child.pid,
+            isExited: () => child.exitCode !== null || child.signalCode !== null,
+          });
+        }
         finish(result);
       };
       const onAbort = (): void => interrupt({ exitCode: "ABORTED", output: out });
@@ -160,6 +163,16 @@ export class PersistentShell {
       // starts a fresh session.
       const onExit = (code: number | null): void => {
         if (this.child === child) this.child = null;
+        if (child.pid !== undefined) {
+          try {
+            this.lifecycle.reapProcessWrapper({
+              pid: child.pid,
+              isExited: () => child.exitCode !== null || child.signalCode !== null,
+            });
+          } catch {
+            // The shell exit result remains authoritative if wrapper reaping fails.
+          }
+        }
         finish({ exitCode: code ?? 1, output: out.replace(/\n$/, "") });
       };
       const onError = (): void => {
@@ -186,6 +199,11 @@ export class PersistentShell {
     const childToKill = this.child;
     this.child = null;
     this.busy = false;
-    if (childToKill?.pid) this.startCleanup(childToKill.pid);
+    if (childToKill?.pid !== undefined) {
+      this.startCleanup({
+        pid: childToKill.pid,
+        isExited: () => childToKill.exitCode !== null || childToKill.signalCode !== null,
+      });
+    }
   }
 }

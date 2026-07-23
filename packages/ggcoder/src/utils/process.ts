@@ -2,7 +2,8 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { log } from "../core/logger.js";
 
-const TASKKILL_ARGUMENTS = (pid: number): string[] => ["/PID", String(pid), "/T", "/F"];
+const TASKKILL_TREE_ARGUMENTS = (pid: number): string[] => ["/PID", String(pid), "/T", "/F"];
+const TASKKILL_PROCESS_ARGUMENTS = (pid: number): string[] => ["/PID", String(pid), "/F"];
 const DEFAULT_TASKKILL_TIMEOUT_MS = 5_000;
 const POSIX_PS_PATH = "/bin/ps";
 const POSIX_PS_ARGUMENTS = ["-A", "-o", "pid=,ppid="];
@@ -10,6 +11,13 @@ const DEFAULT_POSIX_PS_TIMEOUT_MS = 150;
 const DEFAULT_POSIX_PS_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_POSIX_MAX_DESCENDANTS = 1_024;
 export const DEFAULT_POSIX_TERM_GRACE_MS = 500;
+
+export interface ProcessTarget {
+  pid: number;
+  isExited?: () => boolean;
+}
+
+export type ProcessTargetInput = number | ProcessTarget;
 
 export interface ProcessTreeKillOptions {
   platform?: NodeJS.Platform;
@@ -62,6 +70,18 @@ function errorDetail(error: unknown): string {
 
 function validPid(pid: number): boolean {
   return Number.isSafeInteger(pid) && pid > 0;
+}
+
+function resolveProcessTarget(target: ProcessTargetInput): ProcessTarget {
+  return typeof target === "number" ? { pid: target } : target;
+}
+
+function originalProcessExited(target: ProcessTarget): boolean {
+  try {
+    return target.isExited?.() ?? false;
+  } catch {
+    return false;
+  }
 }
 
 function isPidAlive(pid: number, kill: typeof process.kill): boolean {
@@ -208,19 +228,42 @@ async function snapshotDescendantsAsync(
   );
 }
 
-function fallbackSignal(
-  pid: number,
+function signalCapturedDescendants(
+  rootPid: number,
   descendants: number[],
   signal: NodeJS.Signals,
   kill: typeof process.kill,
 ): void {
-  for (const targetPid of [...descendants, pid]) {
+  for (const targetPid of descendants) {
     if (!isPidAlive(targetPid, kill)) continue;
     try {
       kill(targetPid, signal);
     } catch (error) {
       if (!isPidAlive(targetPid, kill)) continue;
-      warnPosix("POSIX process cleanup fallback failed", pid, {
+      warnPosix("POSIX captured-descendant cleanup failed", rootPid, {
+        targetPid: String(targetPid),
+        signal,
+        error: errorDetail(error),
+      });
+    }
+  }
+}
+
+function fallbackSignal(
+  target: ProcessTarget,
+  descendants: number[],
+  signal: NodeJS.Signals,
+  kill: typeof process.kill,
+): void {
+  for (const targetPid of [...descendants, target.pid]) {
+    if (originalProcessExited(target)) return;
+    if (!isPidAlive(targetPid, kill)) continue;
+    if (originalProcessExited(target)) return;
+    try {
+      kill(targetPid, signal);
+    } catch (error) {
+      if (!isPidAlive(targetPid, kill)) continue;
+      warnPosix("POSIX process cleanup fallback failed", target.pid, {
         targetPid: String(targetPid),
         signal,
         error: errorDetail(error),
@@ -230,25 +273,27 @@ function fallbackSignal(
 }
 
 function signalPosixGroup(
-  pid: number,
+  target: ProcessTarget,
   descendants: number[],
   signal: NodeJS.Signals,
   kill: typeof process.kill,
 ): "sent" | "dead" | "failed" {
+  if (originalProcessExited(target)) return "dead";
   try {
-    kill(-pid, signal);
+    kill(-target.pid, signal);
     return "sent";
   } catch (error) {
+    if (originalProcessExited(target)) return "dead";
     const targetsAlive =
-      descendants.some((targetPid) => isPidAlive(targetPid, kill)) || isPidAlive(pid, kill);
+      descendants.some((targetPid) => isPidAlive(targetPid, kill)) || isPidAlive(target.pid, kill);
     if (!targetsAlive) return "dead";
     if (errorCode(error) !== "ESRCH") {
-      warnPosix("POSIX process-group cleanup failed", pid, {
+      warnPosix("POSIX process-group cleanup failed", target.pid, {
         signal,
         error: errorDetail(error),
       });
     }
-    fallbackSignal(pid, descendants, signal, kill);
+    fallbackSignal(target, descendants, signal, kill);
     return "failed";
   }
 }
@@ -279,20 +324,21 @@ function warnTaskkillFailure(
   });
 }
 
-function killSingleProcess(pid: number, kill: typeof process.kill): void {
+function killSingleProcess(target: ProcessTarget, kill: typeof process.kill): void {
+  if (originalProcessExited(target)) return;
   try {
-    kill(pid, "SIGKILL");
+    kill(target.pid, "SIGKILL");
   } catch (error) {
-    if (!isPidAlive(pid, kill)) return;
+    if (originalProcessExited(target) || !isPidAlive(target.pid, kill)) return;
     log("WARN", "process", "Direct PID cleanup fallback failed", {
-      pid: String(pid),
+      pid: String(target.pid),
       error: errorDetail(error),
     });
   }
 }
 
 function handleWindowsTaskkillFailure(
-  pid: number,
+  target: ProcessTarget,
   executable: string,
   kill: typeof process.kill,
   details: {
@@ -302,10 +348,10 @@ function handleWindowsTaskkillFailure(
     timedOut?: boolean;
   },
 ): void {
-  if (!isPidAlive(pid, kill)) return;
+  if (originalProcessExited(target) || !isPidAlive(target.pid, kill)) return;
   const code = errorCode(details.error);
   warnTaskkillFailure(
-    pid,
+    target.pid,
     executable,
     details.timedOut
       ? "timed-out"
@@ -316,11 +362,16 @@ function handleWindowsTaskkillFailure(
           : "non-zero",
     details,
   );
-  killSingleProcess(pid, kill);
+  killSingleProcess(target, kill);
 }
 
 /** Kill a process and its descendants on the current platform. */
-export function killProcessTree(pid: number, options: ProcessTreeKillOptions = {}): void {
+export function killProcessTree(
+  targetInput: ProcessTargetInput,
+  options: ProcessTreeKillOptions = {},
+): void {
+  const target = resolveProcessTarget(targetInput);
+  const { pid } = target;
   const platform = options.platform ?? process.platform;
   const kill = options.kill ?? process.kill;
 
@@ -329,35 +380,43 @@ export function killProcessTree(pid: number, options: ProcessTreeKillOptions = {
       warnPosix("Refusing to clean up an invalid POSIX PID", pid);
       return;
     }
+    if (originalProcessExited(target)) return;
     const descendants = snapshotDescendantsSync(pid, options);
-    signalPosixGroup(pid, descendants, "SIGKILL", kill);
+    if (originalProcessExited(target)) return;
+    const groupResult = signalPosixGroup(target, descendants, "SIGKILL", kill);
+    if (groupResult !== "failed" || originalProcessExited(target)) {
+      signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
+    }
     return;
   }
 
-  if (!isPidAlive(pid, kill)) return;
+  if (originalProcessExited(target) || !isPidAlive(pid, kill)) return;
   const executable = resolveWindowsTaskkillPath(options.env);
+  if (originalProcessExited(target)) return;
   try {
-    const result = (options.spawnSync ?? spawnSync)(executable, TASKKILL_ARGUMENTS(pid), {
+    const result = (options.spawnSync ?? spawnSync)(executable, TASKKILL_TREE_ARGUMENTS(pid), {
       stdio: "ignore",
       windowsHide: true,
       timeout: options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS,
     });
     if (result.status === 0 && result.error === undefined) return;
-    handleWindowsTaskkillFailure(pid, executable, kill, {
+    handleWindowsTaskkillFailure(target, executable, kill, {
       error: result.error,
       status: result.status,
       signal: result.signal,
     });
   } catch (error) {
-    handleWindowsTaskkillFailure(pid, executable, kill, { error });
+    handleWindowsTaskkillFailure(target, executable, kill, { error });
   }
 }
 
 /** Gracefully terminate a process tree, escalating without replacing the caller's outcome. */
 export async function killProcessTreeAsync(
-  pid: number,
+  targetInput: ProcessTargetInput,
   options: AsyncProcessTreeKillOptions = {},
 ): Promise<void> {
+  const target = resolveProcessTarget(targetInput);
+  const { pid } = target;
   const platform = options.platform ?? process.platform;
   const kill = options.kill ?? process.kill;
 
@@ -366,27 +425,40 @@ export async function killProcessTreeAsync(
       warnPosix("Refusing to clean up an invalid POSIX PID", pid);
       return;
     }
+    if (originalProcessExited(target)) return;
     const descendants = await snapshotDescendantsAsync(pid, options);
-    const termResult = signalPosixGroup(pid, descendants, "SIGTERM", kill);
-    if (termResult === "dead") return;
+    if (originalProcessExited(target)) return;
+    const termResult = signalPosixGroup(target, descendants, "SIGTERM", kill);
+    if (termResult === "dead") {
+      signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
+      return;
+    }
     await new Promise<void>((resolve) =>
       setTimeout(resolve, options.posixGraceMs ?? DEFAULT_POSIX_TERM_GRACE_MS),
     );
+    if (originalProcessExited(target)) {
+      signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
+      return;
+    }
     if (!posixTargetsAlive(pid, descendants, termResult === "sent", kill)) return;
-    signalPosixGroup(pid, descendants, "SIGKILL", kill);
+    const killResult = signalPosixGroup(target, descendants, "SIGKILL", kill);
+    if (killResult !== "failed" || originalProcessExited(target)) {
+      signalCapturedDescendants(pid, descendants, "SIGKILL", kill);
+    }
     return;
   }
 
-  if (!isPidAlive(pid, kill)) return;
+  if (originalProcessExited(target) || !isPidAlive(pid, kill)) return;
   const executable = resolveWindowsTaskkillPath(options.env);
+  if (originalProcessExited(target)) return;
   let killer: ReturnType<typeof spawn>;
   try {
-    killer = (options.spawn ?? spawn)(executable, TASKKILL_ARGUMENTS(pid), {
+    killer = (options.spawn ?? spawn)(executable, TASKKILL_TREE_ARGUMENTS(pid), {
       stdio: "ignore",
       windowsHide: true,
     });
   } catch (error) {
-    handleWindowsTaskkillFailure(pid, executable, kill, { error });
+    handleWindowsTaskkillFailure(target, executable, kill, { error });
     return;
   }
 
@@ -427,7 +499,43 @@ export async function killProcessTreeAsync(
     killer.once("close", onClose);
   });
 
-  if (failure !== undefined) {
-    handleWindowsTaskkillFailure(pid, executable, kill, failure);
+  if (failure !== undefined && !originalProcessExited(target)) {
+    handleWindowsTaskkillFailure(target, executable, kill, failure);
+  }
+}
+
+/** Reap only the tracked wrapper PID, never its descendants or process group. */
+export function reapProcessWrapper(
+  targetInput: ProcessTargetInput,
+  options: ProcessTreeKillOptions = {},
+): void {
+  const target = resolveProcessTarget(targetInput);
+  const { pid } = target;
+  const platform = options.platform ?? process.platform;
+  const kill = options.kill ?? process.kill;
+
+  if (!validPid(pid) || originalProcessExited(target) || !isPidAlive(pid, kill)) return;
+  if (originalProcessExited(target)) return;
+
+  if (platform !== "win32") {
+    killSingleProcess(target, kill);
+    return;
+  }
+
+  const executable = resolveWindowsTaskkillPath(options.env);
+  try {
+    const result = (options.spawnSync ?? spawnSync)(executable, TASKKILL_PROCESS_ARGUMENTS(pid), {
+      stdio: "ignore",
+      windowsHide: true,
+      timeout: options.taskkillTimeoutMs ?? DEFAULT_TASKKILL_TIMEOUT_MS,
+    });
+    if (result.status === 0 && result.error === undefined) return;
+    handleWindowsTaskkillFailure(target, executable, kill, {
+      error: result.error,
+      status: result.status,
+      signal: result.signal,
+    });
+  } catch (error) {
+    handleWindowsTaskkillFailure(target, executable, kill, { error });
   }
 }

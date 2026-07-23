@@ -239,14 +239,15 @@ function signalPosixGroup(
     kill(-pid, signal);
     return "sent";
   } catch (error) {
-    if (errorCode(error) === "ESRCH") return "dead";
     const targetsAlive =
       descendants.some((targetPid) => isPidAlive(targetPid, kill)) || isPidAlive(pid, kill);
     if (!targetsAlive) return "dead";
-    warnPosix("POSIX process-group cleanup failed", pid, {
-      signal,
-      error: errorDetail(error),
-    });
+    if (errorCode(error) !== "ESRCH") {
+      warnPosix("POSIX process-group cleanup failed", pid, {
+        signal,
+        error: errorDetail(error),
+      });
+    }
     fallbackSignal(pid, descendants, signal, kill);
     return "failed";
   }

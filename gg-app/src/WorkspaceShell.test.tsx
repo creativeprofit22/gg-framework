@@ -345,9 +345,7 @@ describe("WorkspaceShell", () => {
     expect((await screen.findByTestId("pane-primary")).dataset.target).toBe("/one");
     expect(screen.getByTestId("pane-secondary").dataset.target).toBe("/two");
     fireEvent.pointerDown(screen.getByTestId("pane-secondary"));
-    await waitFor(() =>
-      expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("true"),
-    );
+    await waitFor(() => expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("true"));
 
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);

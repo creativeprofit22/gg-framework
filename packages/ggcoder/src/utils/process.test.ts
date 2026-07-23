@@ -227,6 +227,37 @@ describe("POSIX process-tree cleanup", () => {
     ]);
   });
 
+  it("falls back to live descendants when the process group no longer exists", async () => {
+    vi.useFakeTimers();
+    const helper = createPsHelper();
+    const kill = vi.fn((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === -350 && signal !== 0) throw errno("ESRCH");
+      return true;
+    }) as unknown as typeof process.kill;
+    const cleanup = killProcessTreeAsync(350, {
+      platform: "linux",
+      kill,
+      spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
+      posixGraceMs: 10,
+    });
+    helper.stdout.end("351 350\n");
+    helper.events.emit("close", 0);
+    await vi.advanceTimersByTimeAsync(10);
+    await cleanup;
+
+    const sentSignals = (kill as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, signal]) => signal === "SIGTERM" || signal === "SIGKILL",
+    );
+    expect(sentSignals).toEqual([
+      [-350, "SIGTERM"],
+      [351, "SIGTERM"],
+      [350, "SIGTERM"],
+      [-350, "SIGKILL"],
+      [351, "SIGKILL"],
+      [350, "SIGKILL"],
+    ]);
+  });
+
   it("kills and reaps a timed-out ps helper and removes its listeners", async () => {
     vi.useFakeTimers();
     const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
@@ -240,6 +271,7 @@ describe("POSIX process-tree cleanup", () => {
       kill,
       spawn: vi.fn(() => helper.child) as unknown as typeof spawn,
       posixPsTimeoutMs: 20,
+      posixGraceMs: 10,
     });
 
     expect(helper.events.listenerCount("close")).toBe(1);
@@ -247,6 +279,7 @@ describe("POSIX process-tree cleanup", () => {
     expect(helper.kill).toHaveBeenCalledWith("SIGKILL");
     expect(helper.events.listenerCount("close")).toBe(1);
     helper.events.emit("close", null, "SIGKILL");
+    await vi.advanceTimersByTimeAsync(10);
     await cleanup;
 
     expect(helper.kill).toHaveBeenCalledWith("SIGKILL");

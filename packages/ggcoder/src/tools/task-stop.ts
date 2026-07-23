@@ -12,7 +12,7 @@ export function createTaskStopTool(
   return {
     name: "task_stop",
     description:
-      "Stop a background process tree by ID. On POSIX, sends SIGTERM then hard-kills the tree after 5 seconds; on Windows, force-terminates the PID tree immediately.",
+      "Stop a background process tree by ID. On POSIX, sends SIGTERM, waits 500ms, then hard-kills survivors; on Windows, force-terminates the PID tree immediately.",
     parameters: TaskStopParams,
     async execute({ id }) {
       return processManager.stop(id);

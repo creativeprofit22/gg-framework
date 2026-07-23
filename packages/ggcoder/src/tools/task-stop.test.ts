@@ -9,7 +9,7 @@ describe("task_stop tool", () => {
     const tool = createTaskStopTool(processManager);
 
     expect(tool.description).toBe(
-      "Stop a background process tree by ID. On POSIX, sends SIGTERM then hard-kills the tree after 5 seconds; on Windows, force-terminates the PID tree immediately.",
+      "Stop a background process tree by ID. On POSIX, sends SIGTERM, waits 500ms, then hard-kills survivors; on Windows, force-terminates the PID tree immediately.",
     );
 
     const result = await tool.execute({ id: "bg-test" }, {

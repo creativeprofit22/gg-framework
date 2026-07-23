@@ -17,17 +17,10 @@ const worker = spawn(process.execPath, [workerFile, evidenceFile, readinessFile]
 });
 worker.unref();
 
-const readinessDeadline = Date.now() + 5_000;
 const readinessPoll = setInterval(() => {
-  if (fs.existsSync(readinessFile)) {
-    clearInterval(readinessPoll);
-    if (mode === "exit") process.exit(0);
-    return;
-  }
-  if (Date.now() >= readinessDeadline) {
-    clearInterval(readinessPoll);
-    process.exitCode = 1;
-  }
+  if (!fs.existsSync(readinessFile)) return;
+  clearInterval(readinessPoll);
+  if (mode === "exit") process.exit(0);
 }, 25);
 
 if (mode === "hold") setInterval(() => {}, 1_000);

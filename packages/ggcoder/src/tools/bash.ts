@@ -2,7 +2,12 @@ import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
-import type { ForegroundExecutionOutcome, ForegroundExecutionReason } from "../types.js";
+import type {
+  BashDiagnostics,
+  BashToolResultDetails,
+  ForegroundExecutionOutcome,
+  ForegroundExecutionReason,
+} from "../types.js";
 import type { ProcessTarget } from "../utils/process.js";
 import { log } from "../core/logger.js";
 import { truncateTail, MAX_BYTES } from "./truncate.js";
@@ -49,29 +54,69 @@ export interface ForegroundCommandExecution {
   isCmdFallback: boolean;
 }
 
+function bashDiagnostics(outcome: ForegroundExecutionOutcome): BashDiagnostics {
+  const { metadata } = outcome;
+  return {
+    executionId: metadata.executionId,
+    pid: metadata.pid,
+    command: metadata.command,
+    cwd: metadata.cwd,
+    startedAt: metadata.startedAt,
+    timeoutMs: metadata.timeoutMs,
+    reason: outcome.reason,
+    elapsedMs: outcome.elapsedMs,
+    logPath: metadata.logPath,
+  };
+}
+
+function formatForegroundDiagnostics(outcome: ForegroundExecutionOutcome): string {
+  const { metadata } = outcome;
+  return (
+    "Execution diagnostics:\n" +
+    `ID: ${metadata.executionId}\n` +
+    `PID: ${metadata.pid ?? "unavailable"}\n` +
+    `Command: ${metadata.command}\n` +
+    `CWD: ${metadata.cwd}\n` +
+    `Started: ${new Date(metadata.startedAt).toISOString()}\n` +
+    `Timeout: ${metadata.timeoutMs}ms\n` +
+    `Reason: ${outcome.reason}\n` +
+    `Elapsed: ${outcome.elapsedMs}ms\n` +
+    `Log: ${metadata.logPath}`
+  );
+}
+
 interface ForegroundCommandOptions {
   command: string;
   cwd: string;
   timeoutMs: number;
   signal: AbortSignal;
   ops: ToolOperations;
+  processManager: ProcessManager;
   onUpdate?: (output: string, totalBytes: number) => void;
   cleanupProcessTree?: (target: ProcessTarget) => Promise<void>;
   reapProcessWrapper?: (target: ProcessTarget) => void;
 }
 
-export function executeForegroundCommand({
+interface ForegroundOutputChunk {
+  source: "stdout" | "stderr";
+  data: Buffer;
+}
+
+export async function executeForegroundCommand({
   command,
   cwd,
   timeoutMs,
   signal,
   ops,
+  processManager,
   onUpdate,
   cleanupProcessTree = ops.process.cleanupProcessTree,
   reapProcessWrapper: reapWrapper = ops.process.reapProcessWrapper,
 }: ForegroundCommandOptions): Promise<ForegroundCommandExecution> {
+  const startedAt = Date.now();
+  const foregroundLog = await processManager.allocateForegroundLog();
   const shell = resolveShell(command);
-  const chunks: Buffer[] = [];
+  const chunks: ForegroundOutputChunk[] = [];
   let totalBytes = 0;
   let outputCapped = false;
   let pid: number | null = null;
@@ -82,6 +127,7 @@ export function executeForegroundCommand({
   let cleanupGraceTimer: NodeJS.Timeout | undefined;
   let abortListenerRegistered = false;
   let child: ReturnType<ToolOperations["process"]["spawn"]> | null = null;
+  let logBackpressured = false;
   let onStdoutData: ((data: Buffer) => void) | undefined;
   let onStderrData: ((data: Buffer) => void) | undefined;
   let flushStdout: (() => void) | undefined;
@@ -91,8 +137,6 @@ export function executeForegroundCommand({
   let onChildError: ((error: Error) => void) | undefined;
 
   return new Promise((resolve) => {
-    const startedAt = Date.now();
-
     const currentTarget = (): ProcessTarget | null => {
       if (pid === null || child === null) return null;
       const trackedChild = child;
@@ -126,6 +170,20 @@ export function executeForegroundCommand({
       }
     };
 
+    const writeForegroundLog = (record: string): void => {
+      if (foregroundLog.write(record) || logBackpressured || settled) return;
+      logBackpressured = true;
+      child?.stdout?.pause();
+      child?.stderr?.pause();
+      void foregroundLog.waitForDrain().then(() => {
+        if (!logBackpressured) return;
+        logBackpressured = false;
+        if (settled) return;
+        child?.stdout?.resume();
+        child?.stderr?.resume();
+      });
+    };
+
     const finalize = (
       reason: ForegroundExecutionReason,
       exitCode: number | null,
@@ -153,20 +211,41 @@ export function executeForegroundCommand({
       }
       flushStdout?.();
       flushStderr?.();
-
-      resolve({
+      if (logBackpressured) {
+        logBackpressured = false;
+        child?.stdout?.resume();
+        child?.stderr?.resume();
+      }
+      const result: ForegroundCommandExecution = {
         outcome: {
+          metadata: {
+            executionId: foregroundLog.executionId,
+            command,
+            cwd,
+            startedAt,
+            timeoutMs,
+            pid,
+            logPath: foregroundLog.logPath,
+          },
           reason,
           exitCode,
           signal: closeSignal,
-          startedAt,
           elapsedMs: Math.max(0, Date.now() - startedAt),
-          pid,
           error,
         },
-        rawOutput: Buffer.concat(chunks).toString("utf-8"),
+        rawOutput: Buffer.concat(chunks.map(({ data }) => data)).toString("utf-8"),
         outputCapped,
         isCmdFallback: shell.isCmdFallback,
+      };
+      void foregroundLog.close().then(() => {
+        if (foregroundLog.error) {
+          log("WARN", "bash", "Foreground log stream failed", {
+            executionId: foregroundLog.executionId,
+            logPath: foregroundLog.logPath,
+            error: foregroundLog.error.message,
+          });
+        }
+        resolve(result);
       });
     };
 
@@ -183,6 +262,13 @@ export function executeForegroundCommand({
 
     const onAbort = (): void => interrupt("aborted");
 
+    if (signal.aborted) {
+      terminalIntent = "interruption";
+      pendingInterruption = "aborted";
+      finalize("aborted", null, null);
+      return;
+    }
+
     try {
       child = ops.process.spawn(shell.file, shell.args, {
         cwd,
@@ -195,33 +281,38 @@ export function executeForegroundCommand({
       const stdoutDecoder = new StringDecoder("utf8");
       const stderrDecoder = new StringDecoder("utf8");
       const onData =
-        (decoder: StringDecoder) =>
+        (source: ForegroundOutputChunk["source"], decoder: StringDecoder) =>
         (data: Buffer): void => {
-          if (outputCapped) return;
           totalBytes += data.length;
+          const output = decoder.write(data);
+          if (output) writeForegroundLog(`[${source}] ${output}`);
+          if (outputCapped) return;
           if (totalBytes > MAX_OUTPUT_BYTES) {
             outputCapped = true;
             return;
           }
-          chunks.push(data);
-          const output = decoder.write(data);
+          chunks.push({ source, data });
           if (output) onUpdate?.(output, totalBytes);
         };
-      const flushDecoder = (decoder: StringDecoder): (() => void) => {
+      const flushDecoder = (
+        source: ForegroundOutputChunk["source"],
+        decoder: StringDecoder,
+      ): (() => void) => {
         let flushed = false;
         return () => {
           if (flushed) return;
           flushed = true;
           const output = decoder.end();
-          if (output) onUpdate?.(output, totalBytes);
+          if (output) writeForegroundLog(`[${source}] ${output}`);
+          if (output && !outputCapped) onUpdate?.(output, totalBytes);
         };
       };
       // Output pipes can fail independently. Swallow their errors so the child
       // process close/error event remains the sole execution outcome authority.
-      onStdoutData = onData(stdoutDecoder);
-      onStderrData = onData(stderrDecoder);
-      flushStdout = flushDecoder(stdoutDecoder);
-      flushStderr = flushDecoder(stderrDecoder);
+      onStdoutData = onData("stdout", stdoutDecoder);
+      onStderrData = onData("stderr", stderrDecoder);
+      flushStdout = flushDecoder("stdout", stdoutDecoder);
+      flushStderr = flushDecoder("stderr", stderrDecoder);
       child.stdout?.on("data", onStdoutData);
       child.stdout?.on("error", onOutputPipeError);
       child.stdout?.once("end", flushStdout);
@@ -384,6 +475,7 @@ export function createBashTool(
         timeoutMs: effectiveTimeout,
         signal: context.signal,
         ops,
+        processManager,
         onUpdate: context.onUpdate
           ? (output, totalBytes) =>
               context.onUpdate?.({ type: "bash_progress", output, totalBytes })
@@ -391,8 +483,15 @@ export function createBashTool(
       });
       const { outcome } = execution;
 
+      const diagnostics = formatForegroundDiagnostics(outcome);
+      const details: BashToolResultDetails = { bashDiagnostics: bashDiagnostics(outcome) };
       if (outcome.reason === "spawnError") {
-        return `Exit code: 1\nFailed to spawn: ${outcome.error?.message ?? "Unknown error"}`;
+        return {
+          content:
+            `Exit code: 1\nFailed to spawn: ${outcome.error?.message ?? "Unknown error"}\n\n` +
+            diagnostics,
+          details,
+        };
       }
 
       let output = await renderBashOutput(execution.rawOutput);
@@ -425,7 +524,10 @@ export function createBashTool(
                   ? `SIGNAL (${outcome.signal})`
                   : "FAILED (no exit code)";
 
-      return `Exit code: ${exitCode}\n${output}`;
+      return {
+        content: `Exit code: ${exitCode}\n${output}\n\n${diagnostics}`,
+        details,
+      };
     },
   };
 }

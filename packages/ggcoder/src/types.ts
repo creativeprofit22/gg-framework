@@ -24,14 +24,40 @@ export type ForegroundExecutionReason =
   | "aborted"
   | "spawnError";
 
+export interface ForegroundExecutionMetadata {
+  executionId: string;
+  command: string;
+  cwd: string;
+  startedAt: number;
+  timeoutMs: number;
+  pid: number | null;
+  logPath: string;
+}
+
 export interface ForegroundExecutionOutcome {
+  metadata: ForegroundExecutionMetadata;
   reason: ForegroundExecutionReason;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
-  startedAt: number;
   elapsedMs: number;
-  pid: number | null;
   error: Error | null;
+}
+
+/** Stable, serializable diagnostics exposed to hosts for foreground bash runs. */
+export interface BashDiagnostics {
+  executionId: string;
+  pid: number | null;
+  command: string;
+  cwd: string;
+  startedAt: number;
+  timeoutMs: number;
+  reason: ForegroundExecutionReason;
+  elapsedMs: number;
+  logPath: string;
+}
+
+export interface BashToolResultDetails {
+  bashDiagnostics: BashDiagnostics;
 }
 
 // ── Session Persistence ────────────────────────────────────

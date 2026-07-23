@@ -12,7 +12,7 @@ import {
   type SlashCommand,
 } from "./agent";
 import { formatTokenCount } from "./ActivityBar";
-import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
+import { getBashDiagnostics, type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
 import { playSound } from "./sounds";
 import { findCompletedSteps, countPlanSteps } from "./plan-steps";
@@ -783,8 +783,16 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           setItems((prev) =>
             prev.map((it) => (it.kind === "user" && it.queued ? { ...it, queued: false } : it)),
           );
-          // Exit the tool panel (mirrors ggcoder).
-          setLiveToolFeed([]);
+          // Keep completed foreground bash diagnostics reachable until the next
+          // run starts; all other ephemeral tool rows still leave with the run.
+          setLiveToolFeed((previous) =>
+            previous.filter(
+              (entry) =>
+                entry.name === "bash" &&
+                entry.status === "done" &&
+                getBashDiagnostics(entry.details) !== null,
+            ),
+          );
           // Safety: clear any lingering image-generation placeholders in case
           // tool_call_end didn't fire (e.g. hard cancel mid-fetch).
           setItems((prev) => prev.filter((it) => it.kind !== "generating_image"));

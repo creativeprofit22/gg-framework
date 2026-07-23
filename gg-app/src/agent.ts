@@ -51,6 +51,30 @@ export interface SidecarEvent {
   data: unknown;
 }
 
+export type BashExecutionReason =
+  | "completed"
+  | "nonZeroExit"
+  | "timedOut"
+  | "aborted"
+  | "spawnError";
+
+/** Serializable foreground-bash diagnostics delivered in tool result details. */
+export interface BashDiagnostics {
+  executionId: string;
+  pid: number | null;
+  command: string;
+  cwd: string;
+  startedAt: number;
+  timeoutMs: number;
+  reason: BashExecutionReason;
+  elapsedMs: number;
+  logPath: string;
+}
+
+export interface BashToolResultDetails {
+  bashDiagnostics: BashDiagnostics;
+}
+
 export interface LocalPatchedUpdateEvent {
   type: "started" | "line" | "completed" | "error";
   message?: string;

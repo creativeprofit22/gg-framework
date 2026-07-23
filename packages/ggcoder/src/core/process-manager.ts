@@ -34,6 +34,23 @@ export interface ReadOutputResult {
 }
 
 const BG_DIR = path.join(os.homedir(), ".gg", "bg");
+const FOREGROUND_DIR = path.join(os.homedir(), ".gg", "foreground");
+
+export interface ForegroundLogHandle {
+  executionId: string;
+  logPath: string;
+  readonly error: Error | null;
+  /** Returns false when producers must pause until waitForDrain() resolves. */
+  write(record: string | Buffer): boolean;
+  waitForDrain(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface ProcessManagerOptions {
+  foregroundLogRoot?: string;
+  createForegroundLogStream?: (logPath: string) => Writable;
+  createExecutionId?: () => string;
+}
 
 function processTarget(pid: number, child: ChildProcess): ProcessTarget {
   return {
@@ -50,7 +67,110 @@ export class ProcessManager {
     private readonly lifecycle: ProcessLifecycleAdapter = localProcessLifecycle,
     private readonly createLogStream: (logFile: string) => Writable = (logFile) =>
       createWriteStream(logFile, { flags: "w" }),
+    private readonly options: ProcessManagerOptions = {},
   ) {}
+
+  async allocateForegroundLog(): Promise<ForegroundLogHandle> {
+    const foregroundLogRoot = this.options.foregroundLogRoot ?? FOREGROUND_DIR;
+    await fsp.mkdir(foregroundLogRoot, { recursive: true });
+
+    const allocateFile = async (): Promise<{ executionId: string; logPath: string }> => {
+      for (;;) {
+        const executionId = (this.options.createExecutionId ?? crypto.randomUUID)();
+        const logPath = path.join(foregroundLogRoot, `${executionId}.log`);
+        try {
+          const file = await fsp.open(logPath, "wx");
+          await file.close();
+          return { executionId, logPath };
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+          throw error;
+        }
+      }
+    };
+    const { executionId, logPath } = await allocateFile();
+
+    const streamFactory =
+      this.options.createForegroundLogStream ??
+      ((foregroundLogPath: string) => createWriteStream(foregroundLogPath, { flags: "a" }));
+    const stream = streamFactory(logPath);
+    let streamError: Error | null = null;
+    let ended = false;
+    let settleClose!: () => void;
+    const closed = new Promise<void>((resolve) => {
+      settleClose = resolve;
+    });
+    stream.on("error", (error: Error) => {
+      streamError = error;
+      settleClose();
+    });
+    stream.once("finish", settleClose);
+    stream.once("close", settleClose);
+
+    if ((stream as Writable & { readonly pending?: boolean }).pending === true) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onOpen = (): void => {
+            stream.removeListener("error", onOpenError);
+            resolve();
+          };
+          const onOpenError = (error: Error): void => {
+            stream.removeListener("open", onOpen);
+            reject(error);
+          };
+          stream.once("open", onOpen);
+          stream.once("error", onOpenError);
+        });
+      } catch (error) {
+        stream.destroy();
+        throw error;
+      }
+    }
+
+    return {
+      executionId,
+      logPath,
+      get error() {
+        return streamError;
+      },
+      write(record) {
+        if (ended || streamError) return true;
+        try {
+          return stream.write(record);
+        } catch (error) {
+          streamError = error instanceof Error ? error : new Error(String(error));
+          return true;
+        }
+      },
+      waitForDrain() {
+        if (ended || streamError || stream.destroyed) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          const settle = (): void => {
+            stream.removeListener("drain", settle);
+            stream.removeListener("error", settle);
+            stream.removeListener("finish", settle);
+            stream.removeListener("close", settle);
+            resolve();
+          };
+          stream.once("drain", settle);
+          stream.once("error", settle);
+          stream.once("finish", settle);
+          stream.once("close", settle);
+        });
+      },
+      close() {
+        if (ended) return closed;
+        ended = true;
+        try {
+          stream.end();
+        } catch (error) {
+          streamError = error instanceof Error ? error : new Error(String(error));
+          settleClose();
+        }
+        return closed;
+      },
+    };
+  }
 
   async start(command: string, cwd: string): Promise<StartResult> {
     await fsp.mkdir(BG_DIR, { recursive: true });

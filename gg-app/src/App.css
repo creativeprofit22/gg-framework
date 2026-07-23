@@ -2780,11 +2780,14 @@ body {
 }
 
 /* ── Tool rows (status dot + styled verb/detail/summary) ── */
+.tool-entry {
+  min-width: 0;
+}
 .tool-row {
   display: flex;
   gap: 6px;
   padding: 1px 0;
-  align-items: baseline;
+  align-items: center;
 }
 .tool-dot {
   flex: 0 0 auto;
@@ -2800,6 +2803,69 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.tool-details-toggle,
+.bash-diagnostics-copy {
+  min-height: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+.tool-details-toggle {
+  flex: 0 0 auto;
+  padding: 1px 6px 1px 4px;
+  font-size: 11px;
+}
+.tool-details-toggle:hover,
+.bash-diagnostics-copy:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+  background: var(--surface-1);
+}
+.tool-details-toggle:focus-visible,
+.bash-diagnostics-copy:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.bash-diagnostics {
+  margin: 4px 0 7px 18px;
+  padding: 7px 8px;
+  border-left: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.bash-diagnostics dl {
+  margin: 0;
+  display: grid;
+  gap: 3px;
+}
+.bash-diagnostics dl > div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+}
+.bash-diagnostics dt {
+  color: var(--text-dim);
+}
+.bash-diagnostics dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.bash-diagnostics-copy {
+  margin-top: 7px;
+  padding: 2px 7px;
+  font-size: 11px;
 }
 
 /* ── Sub-agent in-chat feed (parallel delegations + live tool activity) ── */

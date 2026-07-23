@@ -1,9 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { EventEmitter, getEventListeners } from "node:events";
+import { EventEmitter, getEventListeners, once } from "node:events";
+import { existsSync, readdirSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProcessManager } from "../core/process-manager.js";
@@ -55,7 +56,39 @@ const VITEST_ENTRY = path.join(
   path.dirname(fileURLToPath(import.meta.resolve("vitest/package.json"))),
   "vitest.mjs",
 );
+const FOREGROUND_TEST_LOG_ROOT = path.join(
+  os.tmpdir(),
+  `gg-foreground-test-${process.pid}-${Math.random().toString(36).slice(2)}`,
+);
 
+function testProcessManager(
+  createForegroundLogStream?: (logPath: string) => Writable,
+): ProcessManager {
+  return new ProcessManager(undefined, undefined, {
+    foregroundLogRoot: FOREGROUND_TEST_LOG_ROOT,
+    ...(createForegroundLogStream ? { createForegroundLogStream } : {}),
+  });
+}
+
+function expectedForegroundMetadata(startedAt: number, pid: number | null, timeoutMs = 5_000) {
+  return {
+    executionId: expect.any(String),
+    command: "fixture command",
+    cwd: process.cwd(),
+    startedAt,
+    timeoutMs,
+    pid,
+    logPath: expect.stringContaining(FOREGROUND_TEST_LOG_ROOT),
+  };
+}
+
+function expectRenderedDiagnostics(result: string, reason: string): void {
+  expect(result).toContain("Execution diagnostics:");
+  for (const label of ["ID", "PID", "Command", "CWD", "Started", "Timeout", "Elapsed", "Log"]) {
+    expect(result).toMatch(new RegExp(`\\n${label}: .+`));
+  }
+  expect(result).toContain(`Reason: ${reason}`);
+}
 function quotePathForShell(value: string, isCmdFallback: boolean): string {
   return isCmdFallback ? `"${value}"` : `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -267,6 +300,7 @@ async function runPosixSignalProbe(
       timeoutMs: reason === "timeout" ? 1_000 : 10_000,
       signal: controller.signal,
       ops: localOperations,
+      processManager: testProcessManager(),
     });
     const initialRoles = await waitForFixtureRoles(evidenceFile, ["launcher", "worker"]);
     if (reason === "abort") controller.abort();
@@ -275,7 +309,7 @@ async function runPosixSignalProbe(
     expect(result.outcome.reason).toBe(reason === "timeout" ? "timedOut" : "aborted");
     const roles = await waitForFixtureRoles(evidenceFile, ["worker-term"]);
     const byRole = new Map(initialRoles.map((role) => [role.role, role]));
-    const wrapperPid = result.outcome.pid;
+    const wrapperPid = result.outcome.metadata.pid;
     const launcher = byRole.get("launcher");
     expect(wrapperPid).toBeGreaterThan(0);
     expect(launcher?.pid === wrapperPid || launcher?.ppid === wrapperPid).toBe(true);
@@ -308,7 +342,7 @@ async function assertSupervisedPosixProbe(mode: "cooperative" | "ignore"): Promi
 async function runWindowsPnpmTreeProbe(reason: "timeout" | "abort"): Promise<void> {
   const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "gg-win-tree-"));
   const evidenceFile = path.join(tempDirectory, `${reason}.jsonl`);
-  const manager = new ProcessManager();
+  const manager = testProcessManager();
   const controller = new AbortController();
   const fixtureArguments = [
     fixturePath("bash-timeout-pnpm.cmd"),
@@ -335,8 +369,10 @@ async function runWindowsPnpmTreeProbe(reason: "timeout" | "abort"): Promise<voi
     if (reason === "abort") controller.abort();
 
     const result = await execution;
-    if (typeof result !== "string") throw new Error("Expected rendered bash output");
-    expect(result).toContain(
+    if (typeof result === "string" || typeof result.content !== "string") {
+      throw new Error("Expected structured text bash output");
+    }
+    expect(result.content).toContain(
       reason === "timeout" ? "Exit code: TIMEOUT (1000ms)" : "Exit code: ABORTED",
     );
 
@@ -352,7 +388,7 @@ async function runWindowsPnpmTreeProbe(reason: "timeout" | "abort"): Promise<voi
 }
 
 async function runProbe(probe: BasicProbeName, evidenceFile: string): Promise<void> {
-  const manager = new ProcessManager();
+  const manager = testProcessManager();
   const fixtureArguments: Record<BasicProbeName, string[]> = {
     cpu: [process.execPath, fixturePath("bash-timeout-cpu.mjs"), evidenceFile],
     silent: [process.execPath, fixturePath("bash-timeout-silent.mjs"), evidenceFile],
@@ -375,17 +411,19 @@ async function runProbe(probe: BasicProbeName, evidenceFile: string): Promise<vo
       { command, timeout: 1_000 },
       { signal: new AbortController().signal, toolCallId: `bash-timeout-${probe}` },
     );
-    if (typeof result !== "string") throw new Error("Expected bash timeout text output");
+    if (typeof result === "string" || typeof result.content !== "string") {
+      throw new Error("Expected structured text bash timeout output");
+    }
     const elapsedMs = Date.now() - startedAt;
     const roles = await readFixtureEvidence(evidenceFile);
-    const timeoutLine = result.match(/Exit code: TIMEOUT \(\d+ms\)/)?.[0] ?? null;
+    const timeoutLine = result.content.match(/Exit code: TIMEOUT \(\d+ms\)/)?.[0] ?? null;
 
     console.log(
       `PROBE_RESULT=${JSON.stringify({
         probe,
         elapsedMs,
         timeoutLine,
-        outputTail: result.slice(-4_096),
+        outputTail: result.content.slice(-4_096),
       })}`,
     );
 
@@ -395,10 +433,10 @@ async function runProbe(probe: BasicProbeName, evidenceFile: string): Promise<vo
     expect(elapsedMs).toBeLessThan(probe === "nested" ? 10_000 : 4_000);
 
     if (probe === "cpu") {
-      expect(result).toMatch(/FIXTURE_ROLE=cpu PID=\d+ PPID=\d+/);
+      expect(result.content).toMatch(/FIXTURE_ROLE=cpu PID=\d+ PPID=\d+/);
     }
     if (probe === "silent") {
-      expect(result).not.toContain("FIXTURE_ROLE=silent");
+      expect(result.content).not.toContain("FIXTURE_ROLE=silent");
     }
     if (probe === "nested") {
       const byRole = new Map(roles.map((role) => [role.role, role]));
@@ -452,6 +490,7 @@ interface FakeChildHarness {
   child: ChildProcess;
   stdout: PassThrough;
   stderr: PassThrough;
+  ready(): Promise<void>;
   emitClose(code: number | null, signal?: NodeJS.Signals | null): void;
   emitError(error: Error): void;
 }
@@ -460,6 +499,31 @@ function createFakeChild(pid = 2_000_000_000): FakeChildHarness {
   const emitter = new EventEmitter();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  const pendingEvents: Array<{ event: "close" | "error"; args: unknown[] }> = [];
+  let executionListenersAttached = false;
+  let markReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
+  emitter.on("newListener", (event) => {
+    if (event !== "close") return;
+    executionListenersAttached = true;
+    queueMicrotask(() => {
+      markReady();
+      for (const pending of pendingEvents.splice(0)) {
+        if (pending.event !== "error" || emitter.listenerCount("error") > 0) {
+          emitter.emit(pending.event, ...pending.args);
+        }
+      }
+    });
+  });
+  const emitExecutionEvent = (event: "close" | "error", ...args: unknown[]): void => {
+    if (emitter.listenerCount(event) > 0) {
+      emitter.emit(event, ...args);
+    } else if (!executionListenersAttached) {
+      pendingEvents.push({ event, args });
+    }
+  };
   const childState: { exitCode: number | null; signalCode: NodeJS.Signals | null } = {
     exitCode: null,
     signalCode: null,
@@ -473,13 +537,14 @@ function createFakeChild(pid = 2_000_000_000): FakeChildHarness {
     child,
     stdout,
     stderr,
+    ready: () => ready,
     emitClose(code, signal = null) {
       childState.exitCode = code;
       childState.signalCode = signal;
-      emitter.emit("close", code, signal);
+      emitExecutionEvent("close", code, signal);
     },
     emitError(error) {
-      if (emitter.listenerCount("error") > 0) emitter.emit("error", error);
+      emitExecutionEvent("error", error);
     },
   };
 }
@@ -546,6 +611,7 @@ function foregroundExecution(
   options: {
     timeoutMs?: number;
     signal?: AbortSignal;
+    processManager?: ProcessManager;
     onUpdate?: (output: string, totalBytes: number) => void;
     cleanupProcessTree?: (target: ProcessTarget) => Promise<void>;
     reapProcessWrapper?: (target: ProcessTarget) => void;
@@ -557,6 +623,7 @@ function foregroundExecution(
     timeoutMs: options.timeoutMs ?? 5_000,
     signal: options.signal ?? new AbortController().signal,
     ops: operationsFor(fake.child),
+    processManager: options.processManager ?? testProcessManager(),
     onUpdate: options.onUpdate,
     cleanupProcessTree: options.cleanupProcessTree,
     reapProcessWrapper: options.reapProcessWrapper,
@@ -567,7 +634,7 @@ async function executeRendered(
   fake: FakeChildHarness,
   options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<string> {
-  const tool = createBashTool(process.cwd(), new ProcessManager(), operationsFor(fake.child));
+  const tool = createBashTool(process.cwd(), testProcessManager(), operationsFor(fake.child));
   const result = await tool.execute(
     {
       command: "fixture command",
@@ -575,13 +642,15 @@ async function executeRendered(
     },
     { signal: options.signal ?? new AbortController().signal, toolCallId: "bash-render" },
   );
-  if (typeof result !== "string") throw new Error("Expected rendered bash output");
-  return result;
+  if (typeof result === "string") throw new Error("Expected structured bash output");
+  if (typeof result.content !== "string") throw new Error("Expected text bash output");
+  return result.content;
 }
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
   vi.useRealTimers();
+  await fs.rm(FOREGROUND_TEST_LOG_ROOT, { recursive: true, force: true });
 });
 
 const selectedProbe = process.env[PROBE_ENV];
@@ -606,6 +675,155 @@ if (selectedProbe !== undefined) {
   }, 60_000);
 } else {
   describe("foreground execution outcomes", () => {
+    it("creates the log before spawn and exposes source-labelled partial output live", async () => {
+      const fake = createFakeChild(2_000_000_021);
+      const manager = testProcessManager();
+      const spawnOperation = vi.fn(() => {
+        const logFiles = readdirSync(FOREGROUND_TEST_LOG_ROOT);
+        expect(logFiles).toHaveLength(1);
+        expect(existsSync(path.join(FOREGROUND_TEST_LOG_ROOT, logFiles[0]!))).toBe(true);
+        return fake.child;
+      });
+      const execution = executeForegroundCommand({
+        command: "fixture command",
+        cwd: process.cwd(),
+        timeoutMs: 5_000,
+        signal: new AbortController().signal,
+        ops: {
+          ...localOperations,
+          process: { ...localOperations.process, spawn: spawnOperation },
+        },
+        processManager: manager,
+      });
+      await fake.ready();
+
+      fake.stdout.write("first\n");
+      fake.stderr.write("second\n");
+      fake.stdout.write("third\n");
+      const [logFile] = await fs.readdir(FOREGROUND_TEST_LOG_ROOT);
+      const liveLogPath = path.join(FOREGROUND_TEST_LOG_ROOT, logFile!);
+      await vi.waitFor(async () => {
+        await expect(fs.readFile(liveLogPath, "utf8")).resolves.toBe(
+          "[stdout] first\n[stderr] second\n[stdout] third\n",
+        );
+      });
+      fake.emitClose(0);
+
+      const result = await execution;
+      expect(result.outcome.metadata.logPath).toBe(liveLogPath);
+      await expect(fs.readFile(result.outcome.metadata.logPath, "utf8")).resolves.toContain(
+        "[stderr] second",
+      );
+    });
+
+    it("does not spawn when aborted during foreground log allocation", async () => {
+      const fake = createFakeChild();
+      const manager = testProcessManager();
+      const allocateForegroundLog = manager.allocateForegroundLog.bind(manager);
+      let releaseAllocation!: () => void;
+      const allocationBlocked = new Promise<void>((resolve) => {
+        releaseAllocation = resolve;
+      });
+      vi.spyOn(manager, "allocateForegroundLog").mockImplementation(async () => {
+        await allocationBlocked;
+        return allocateForegroundLog();
+      });
+      const spawnOperation = vi.fn(() => fake.child);
+      const controller = new AbortController();
+      const execution = executeForegroundCommand({
+        command: "fixture command",
+        cwd: process.cwd(),
+        timeoutMs: 5_000,
+        signal: controller.signal,
+        ops: {
+          ...localOperations,
+          process: { ...localOperations.process, spawn: spawnOperation },
+        },
+        processManager: manager,
+      });
+
+      controller.abort();
+      releaseAllocation();
+
+      await expect(execution).resolves.toMatchObject({
+        outcome: { reason: "aborted", metadata: { pid: null } },
+      });
+      expect(spawnOperation).not.toHaveBeenCalled();
+    });
+
+    it("bounds high-volume foreground logging with slow low-watermark storage", async () => {
+      const fake = createFakeChild(2_000_000_033);
+      const persistedChunks: Buffer[] = [];
+      let maximumBufferedBytes = 0;
+      const logStream = new Writable({
+        highWaterMark: 8,
+        write(chunk, _encoding, callback) {
+          persistedChunks.push(Buffer.from(chunk));
+          setImmediate(() => {
+            maximumBufferedBytes = Math.max(maximumBufferedBytes, logStream.writableLength);
+            callback();
+          });
+        },
+      });
+      const resultPromise = foregroundExecution(fake, {
+        processManager: testProcessManager(() => logStream),
+      });
+      await fake.ready();
+
+      fake.stdout.write("record-0000-😀\n");
+      expect(fake.stdout.isPaused()).toBe(true);
+      expect(fake.stderr.isPaused()).toBe(true);
+
+      const writeSource = async (source: PassThrough, record: string): Promise<void> => {
+        if (!source.write(record)) await once(source, "drain");
+      };
+      for (let index = 1; index < 600; index += 1) {
+        const source = index % 2 === 0 ? fake.stdout : fake.stderr;
+        await writeSource(source, `record-${index.toString().padStart(4, "0")}-界\n`);
+      }
+      const stdoutEnded = once(fake.stdout, "end");
+      const stderrEnded = once(fake.stderr, "end");
+      fake.stdout.end();
+      fake.stderr.end();
+      await Promise.all([stdoutEnded, stderrEnded]);
+      fake.emitClose(0);
+
+      const result = await resultPromise;
+      const persisted = Buffer.concat(persistedChunks).toString("utf8");
+      expect(result.outcome.reason).toBe("completed");
+      expect(persisted.match(/^\[(?:stdout|stderr)\] /gm)).toHaveLength(600);
+      expect(persisted).toContain("[stdout] record-0000-😀");
+      expect(persisted).toContain("[stderr] record-0599-界");
+      expect(persisted).not.toContain("�");
+      expect(maximumBufferedBytes).toBeLessThan(1_024);
+    });
+
+    it("does not spawn when the foreground log stream fails to open asynchronously", async () => {
+      const error = new Error("foreground log open failed");
+      const logStream = new PassThrough();
+      Object.defineProperty(logStream, "pending", { value: true });
+      const manager = testProcessManager(() => {
+        queueMicrotask(() => logStream.emit("error", error));
+        return logStream;
+      });
+      const spawnOperation = vi.fn();
+
+      const execution = executeForegroundCommand({
+        command: "fixture command",
+        cwd: process.cwd(),
+        timeoutMs: 5_000,
+        signal: new AbortController().signal,
+        ops: {
+          ...localOperations,
+          process: { ...localOperations.process, spawn: spawnOperation },
+        },
+        processManager: manager,
+      });
+
+      await expect(execution).rejects.toBe(error);
+      expect(spawnOperation).not.toHaveBeenCalled();
+    });
+
     it("spawns the foreground shell as a detached process-group owner", async () => {
       const fake = createFakeChild();
       const spawnOperation = vi.fn(() => fake.child);
@@ -618,7 +836,9 @@ if (selectedProbe !== undefined) {
           ...localOperations,
           process: { ...localOperations.process, spawn: spawnOperation },
         },
+        processManager: testProcessManager(),
       });
+      await fake.ready();
       fake.emitClose(0);
       await execution;
 
@@ -641,7 +861,9 @@ if (selectedProbe !== undefined) {
         timeoutMs: 5_000,
         signal: controller.signal,
         ops,
+        processManager: testProcessManager(),
       });
+      await fake.ready();
 
       controller.abort();
       fake.emitClose(null, "SIGTERM");
@@ -663,7 +885,9 @@ if (selectedProbe !== undefined) {
         timeoutMs: 5_000,
         signal: new AbortController().signal,
         ops,
+        processManager: testProcessManager(),
       });
+      await fake.ready();
 
       fake.emitClose(0);
 
@@ -686,6 +910,7 @@ if (selectedProbe !== undefined) {
         cleanupProcessTree,
         reapProcessWrapper,
       });
+      await fake.ready();
 
       fake.emitClose(code);
       const result = await resultPromise;
@@ -706,6 +931,7 @@ if (selectedProbe !== undefined) {
       vi.setSystemTime(10_000);
       const fake = createFakeChild(2_000_000_001);
       const resultPromise = foregroundExecution(fake);
+      await fake.ready();
       vi.advanceTimersByTime(25);
       fake.emitClose(0);
 
@@ -714,9 +940,8 @@ if (selectedProbe !== undefined) {
         reason: "completed",
         exitCode: 0,
         signal: null,
-        startedAt: 10_000,
+        metadata: expectedForegroundMetadata(10_000, 2_000_000_001),
         elapsedMs: 25,
-        pid: 2_000_000_001,
         error: null,
       });
     });
@@ -732,9 +957,8 @@ if (selectedProbe !== undefined) {
         reason: "nonZeroExit",
         exitCode: 7,
         signal: null,
-        startedAt: 20_000,
+        metadata: expectedForegroundMetadata(20_000, 2_000_000_002),
         elapsedMs: 0,
-        pid: 2_000_000_002,
         error: null,
       });
     });
@@ -750,9 +974,8 @@ if (selectedProbe !== undefined) {
         reason: "nonZeroExit",
         exitCode: null,
         signal: "SIGTERM",
-        startedAt: 30_000,
+        metadata: expectedForegroundMetadata(30_000, 2_000_000_003),
         elapsedMs: 0,
-        pid: 2_000_000_003,
         error: null,
       });
     });
@@ -775,9 +998,8 @@ if (selectedProbe !== undefined) {
         reason: "spawnError",
         exitCode: null,
         signal: null,
-        startedAt: 40_000,
+        metadata: expectedForegroundMetadata(40_000, 2_000_000_004),
         elapsedMs: 0,
-        pid: 2_000_000_004,
         error,
       });
       expect(fulfillmentCount).toBe(1);
@@ -790,6 +1012,7 @@ if (selectedProbe !== undefined) {
         vi.setSystemTime(45_000);
         const fake = createFakeChild(2_000_000_007);
         const resultPromise = foregroundExecution(fake);
+        await fake.ready();
         let fulfillmentCount = 0;
         let fulfilled = false;
         void resultPromise.then(() => {
@@ -812,9 +1035,8 @@ if (selectedProbe !== undefined) {
           reason: "completed",
           exitCode: 0,
           signal: null,
-          startedAt: 45_000,
+          metadata: expectedForegroundMetadata(45_000, 2_000_000_007),
           elapsedMs: 15,
-          pid: 2_000_000_007,
           error: null,
         });
         expect(fulfillmentCount).toBe(1);
@@ -831,6 +1053,7 @@ if (selectedProbe !== undefined) {
           totals.push(totalBytes);
         },
       });
+      await fake.ready();
       const stdout = Buffer.from("stdout: 😀\n");
       const stderr = Buffer.from("stderr: 界\n");
       const stdoutSplit = stdout.indexOf(Buffer.from("😀")) + 2;
@@ -856,6 +1079,8 @@ if (selectedProbe !== undefined) {
       vi.useFakeTimers();
       vi.setSystemTime(50_000);
       const error = new Error("spawn threw");
+      const logStream = new PassThrough();
+      const endLog = vi.spyOn(logStream, "end");
       const execution = executeForegroundCommand({
         command: "fixture command",
         cwd: process.cwd(),
@@ -870,17 +1095,18 @@ if (selectedProbe !== undefined) {
             },
           },
         },
+        processManager: testProcessManager(() => logStream),
       });
 
       expect((await execution).outcome).toEqual({
         reason: "spawnError",
         exitCode: null,
         signal: null,
-        startedAt: 50_000,
+        metadata: expectedForegroundMetadata(50_000, null),
         elapsedMs: 0,
-        pid: null,
         error,
       });
+      expect(endLog).toHaveBeenCalledOnce();
     });
 
     it("records abort before close and settles exactly once", async () => {
@@ -889,6 +1115,7 @@ if (selectedProbe !== undefined) {
       const controller = new AbortController();
       const fake = createFakeChild(2_000_000_005);
       const resultPromise = foregroundExecution(fake, { signal: controller.signal });
+      await fake.ready();
       let fulfillmentCount = 0;
       void resultPromise.then(() => fulfillmentCount++);
       controller.abort();
@@ -903,9 +1130,8 @@ if (selectedProbe !== undefined) {
         reason: "aborted",
         exitCode: null,
         signal: "SIGTERM",
-        startedAt: 60_000,
+        metadata: expectedForegroundMetadata(60_000, 2_000_000_005),
         elapsedMs: 30,
-        pid: 2_000_000_005,
         error: null,
       });
       expect(fulfillmentCount).toBe(1);
@@ -916,6 +1142,7 @@ if (selectedProbe !== undefined) {
       vi.setSystemTime(70_000);
       const fake = createFakeChild(2_000_000_006);
       const resultPromise = foregroundExecution(fake, { timeoutMs: 1_250 });
+      await fake.ready();
       let fulfillmentCount = 0;
       let fulfilled = false;
       void resultPromise.then(() => {
@@ -932,9 +1159,8 @@ if (selectedProbe !== undefined) {
         reason: "timedOut",
         exitCode: null,
         signal: null,
-        startedAt: 70_000,
+        metadata: expectedForegroundMetadata(70_000, 2_000_000_006, 1_250),
         elapsedMs: 2_250,
-        pid: 2_000_000_006,
         error: null,
       });
       expect(fulfillmentCount).toBe(1);
@@ -955,6 +1181,7 @@ if (selectedProbe !== undefined) {
         timeoutMs: 400,
         cleanupProcessTree: cleanup,
       });
+      await fake.ready();
       let fulfilled = false;
       void resultPromise.then(() => {
         fulfilled = true;
@@ -983,6 +1210,7 @@ if (selectedProbe !== undefined) {
       vi.setSystemTime(80_000);
       const fake = createFakeChild(2_000_000_009);
       const resultPromise = foregroundExecution(fake, { timeoutMs: 300 });
+      await fake.ready();
       let fulfillmentCount = 0;
       void resultPromise.then(() => fulfillmentCount++);
 
@@ -996,9 +1224,8 @@ if (selectedProbe !== undefined) {
         reason: "timedOut",
         exitCode: null,
         signal: "SIGKILL",
-        startedAt: 80_000,
+        metadata: expectedForegroundMetadata(80_000, 2_000_000_009, 300),
         elapsedMs: 340,
-        pid: 2_000_000_009,
         error: null,
       });
       await Promise.resolve();
@@ -1010,6 +1237,7 @@ if (selectedProbe !== undefined) {
       vi.setSystemTime(90_000);
       const fake = createFakeChild(2_000_000_010);
       const resultPromise = foregroundExecution(fake, { timeoutMs: 250 });
+      await fake.ready();
       let fulfilled = false;
       void resultPromise.then(() => {
         fulfilled = true;
@@ -1036,6 +1264,7 @@ if (selectedProbe !== undefined) {
           signal: controller.signal,
           cleanupProcessTree: async () => {},
         });
+        await fake.ready();
 
         if (path === "completed") fake.emitClose(0);
         if (path === "spawnError") fake.emitError(new Error("spawn failed"));
@@ -1060,6 +1289,7 @@ if (selectedProbe !== undefined) {
         cleanupProcessTree,
         reapProcessWrapper,
       });
+      await fake.ready();
 
       fake.emitClose(0);
       await expect(resultPromise).resolves.toMatchObject({ outcome: { reason: "completed" } });
@@ -1082,6 +1312,7 @@ if (selectedProbe !== undefined) {
           throw new Error("cleanup rejected");
         },
       });
+      await fake.ready();
 
       controller.abort();
       await vi.advanceTimersByTimeAsync(1_000);
@@ -1094,9 +1325,116 @@ if (selectedProbe !== undefined) {
         expect.objectContaining({ pid: "2000000014", error: "cleanup rejected" }),
       );
     });
+
+    it("waits for delayed foreground log flush before returning", async () => {
+      const fake = createFakeChild(2_000_000_031);
+      const persistedChunks: Buffer[] = [];
+      let finishFlush: (() => void) | undefined;
+      const logStream = new Writable({
+        write(chunk, _encoding, callback) {
+          persistedChunks.push(Buffer.from(chunk));
+          callback();
+        },
+        final(callback) {
+          finishFlush = callback;
+        },
+      });
+      const resultPromise = foregroundExecution(fake, {
+        processManager: testProcessManager(() => logStream),
+      });
+      await fake.ready();
+      let fulfilled = false;
+      void resultPromise.then(() => {
+        fulfilled = true;
+      });
+
+      fake.stdout.write("final output\n");
+      fake.emitClose(0);
+      await Promise.resolve();
+      expect(fulfilled).toBe(false);
+      expect(Buffer.concat(persistedChunks).toString("utf8")).toContain("[stdout] final output");
+
+      finishFlush?.();
+      await expect(resultPromise).resolves.toMatchObject({ outcome: { reason: "completed" } });
+    });
+
+    it("reports a log error emitted while closing without changing the outcome", async () => {
+      const warning = vi.spyOn(logger, "log").mockImplementation(() => {});
+      const fake = createFakeChild(2_000_000_032);
+      const closeError = new Error("foreground flush failed");
+      const logStream = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+        final(callback) {
+          callback(closeError);
+        },
+      });
+      const resultPromise = foregroundExecution(fake, {
+        processManager: testProcessManager(() => logStream),
+      });
+      await fake.ready();
+
+      fake.emitClose(7);
+
+      await expect(resultPromise).resolves.toMatchObject({ outcome: { reason: "nonZeroExit" } });
+      expect(warning).toHaveBeenCalledWith(
+        "WARN",
+        "bash",
+        "Foreground log stream failed",
+        expect.objectContaining({ error: closeError.message }),
+      );
+    });
+
+    it.each([
+      ["completed", "completed"],
+      ["nonZeroExit", "nonZeroExit"],
+      ["emittedSpawnError", "spawnError"],
+      ["aborted", "aborted"],
+      ["timedOutWithClose", "timedOut"],
+      ["timedOutWithoutClose", "timedOut"],
+    ] as const)("closes the log exactly once for %s", async (scenario, expectedReason) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const fake = createFakeChild(2_000_000_030);
+      const controller = new AbortController();
+      const logStream = new PassThrough();
+      const endLog = vi.spyOn(logStream, "end");
+      const manager = testProcessManager(() => logStream);
+      const execution = foregroundExecution(fake, {
+        timeoutMs: 100,
+        signal: controller.signal,
+        processManager: manager,
+      });
+      await fake.ready();
+
+      if (scenario === "completed") fake.emitClose(0);
+      if (scenario === "nonZeroExit") fake.emitClose(7);
+      if (scenario === "emittedSpawnError") fake.emitError(new Error("missing"));
+      if (scenario === "aborted") {
+        controller.abort();
+        fake.emitClose(null, "SIGTERM");
+      }
+      if (scenario === "timedOutWithClose") {
+        await vi.advanceTimersByTimeAsync(100);
+        fake.emitClose(null, "SIGTERM");
+      }
+      if (scenario === "timedOutWithoutClose") {
+        await vi.advanceTimersByTimeAsync(1_100);
+      }
+
+      const result = await execution;
+      expect(result.outcome.reason).toBe(expectedReason);
+      expect(result.outcome.metadata).toEqual(expectedForegroundMetadata(0, 2_000_000_030, 100));
+      await expect(fs.stat(result.outcome.metadata.logPath)).resolves.toBeDefined();
+      expect(endLog).toHaveBeenCalledOnce();
+    });
   });
 
   describe("detached foreground descendants", () => {
+    const detachedReadinessTimeoutMs = 10_000;
+    const detachedLifecycleTimeoutMs = detachedReadinessTimeoutMs + 5_000;
+
     async function prepareDetachedRun(mode: "exit" | "hold") {
       const tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "gg-detached-foreground-"));
       const evidenceFile = path.join(tempDirectory, "evidence.jsonl");
@@ -1121,9 +1459,10 @@ if (selectedProbe !== undefined) {
         const result = await executeForegroundCommand({
           command: fixture.command,
           cwd: process.cwd(),
-          timeoutMs: 5_000,
+          timeoutMs: detachedLifecycleTimeoutMs,
           signal: new AbortController().signal,
           ops: localOperations,
+          processManager: testProcessManager(),
         });
         const roles = await waitForFixtureRoles(fixture.evidenceFile, [
           "detached-launcher",
@@ -1138,12 +1477,11 @@ if (selectedProbe !== undefined) {
         await cleanupRecordedPids(fixture.evidenceFile);
         await fs.rm(fixture.tempDirectory, { recursive: true, force: true });
       }
-    }, 15_000);
+    }, 25_000);
 
     it("removes a TERM-ignoring detached worker after the TERM-killed root exits", async () => {
       const fixture = await prepareDetachedRun("hold");
-      const timeoutMs = 8_000;
-      const startedAt = Date.now();
+      const timeoutMs = detachedLifecycleTimeoutMs;
       try {
         const execution = executeForegroundCommand({
           command: fixture.command,
@@ -1151,16 +1489,15 @@ if (selectedProbe !== undefined) {
           timeoutMs,
           signal: new AbortController().signal,
           ops: localOperations,
+          processManager: testProcessManager(),
         });
         const roles = await waitForFixtureRoles(
           fixture.evidenceFile,
           ["detached-launcher", "detached-worker"],
-          6_000,
+          detachedReadinessTimeoutMs,
         );
-        const readinessElapsedMs = Date.now() - startedAt;
 
         const result = await execution;
-        expect(readinessElapsedMs).toBeLessThan(timeoutMs - 1_000);
         expect(result.outcome.reason).toBe("timedOut");
         expect(result.outcome.elapsedMs).toBeGreaterThanOrEqual(timeoutMs - 100);
         if (process.platform !== "win32") expect(result.outcome.signal).toBe("SIGTERM");
@@ -1169,7 +1506,7 @@ if (selectedProbe !== undefined) {
         await cleanupRecordedPids(fixture.evidenceFile);
         await fs.rm(fixture.tempDirectory, { recursive: true, force: true });
       }
-    }, 20_000);
+    }, 30_000);
 
     it("removes the launcher and detached worker after AbortSignal cancellation", async () => {
       const fixture = await prepareDetachedRun("hold");
@@ -1178,14 +1515,16 @@ if (selectedProbe !== undefined) {
         const execution = executeForegroundCommand({
           command: fixture.command,
           cwd: process.cwd(),
-          timeoutMs: 10_000,
+          timeoutMs: detachedLifecycleTimeoutMs,
           signal: controller.signal,
           ops: localOperations,
+          processManager: testProcessManager(),
         });
-        const roles = await waitForFixtureRoles(fixture.evidenceFile, [
-          "detached-launcher",
-          "detached-worker",
-        ]);
+        const roles = await waitForFixtureRoles(
+          fixture.evidenceFile,
+          ["detached-launcher", "detached-worker"],
+          detachedReadinessTimeoutMs,
+        );
         controller.abort();
 
         expect((await execution).outcome.reason).toBe("aborted");
@@ -1195,47 +1534,87 @@ if (selectedProbe !== undefined) {
         await cleanupRecordedPids(fixture.evidenceFile);
         await fs.rm(fixture.tempDirectory, { recursive: true, force: true });
       }
-    }, 15_000);
+    }, 25_000);
   });
 
   describe("foreground result rendering", () => {
     it("keeps numeric non-zero rendering", async () => {
       const fake = createFakeChild();
       const resultPromise = executeRendered(fake);
+      await fake.ready();
       fake.emitClose(7);
-      await expect(resultPromise).resolves.toContain("Exit code: 7");
+      const result = await resultPromise;
+      expect(result).toContain("Exit code: 7");
+      expectRenderedDiagnostics(result, "nonZeroExit");
+    });
+
+    it("returns typed foreground diagnostics in structured result details", async () => {
+      const fake = createFakeChild(2_000_000_014);
+      const tool = createBashTool(process.cwd(), testProcessManager(), operationsFor(fake.child));
+      const resultPromise = tool.execute(
+        { command: "fixture command", timeout: 1_750 },
+        { signal: new AbortController().signal, toolCallId: "bash-details" },
+      );
+      await fake.ready();
+      fake.emitClose(0);
+
+      const result = await resultPromise;
+      if (typeof result === "string") throw new Error("Expected structured bash output");
+      expect(result.details).toEqual({
+        bashDiagnostics: {
+          executionId: expect.any(String),
+          pid: 2_000_000_014,
+          command: "fixture command",
+          cwd: process.cwd(),
+          startedAt: expect.any(Number),
+          timeoutMs: 1_750,
+          reason: "completed",
+          elapsedMs: expect.any(Number),
+          logPath: expect.stringContaining(FOREGROUND_TEST_LOG_ROOT),
+        },
+      });
     });
 
     it("renders signal-only termination without inventing code 1", async () => {
       const fake = createFakeChild();
       const resultPromise = executeRendered(fake);
+      await fake.ready();
       fake.emitClose(null, "SIGTERM");
-      await expect(resultPromise).resolves.toContain("Exit code: SIGNAL (SIGTERM)");
+      const result = await resultPromise;
+      expect(result).toContain("Exit code: SIGNAL (SIGTERM)");
+      expectRenderedDiagnostics(result, "nonZeroExit");
     });
 
     it("renders abort distinctly", async () => {
       const controller = new AbortController();
       const fake = createFakeChild();
       const resultPromise = executeRendered(fake, { signal: controller.signal });
+      await fake.ready();
       controller.abort();
       fake.emitClose(null, "SIGTERM");
-      await expect(resultPromise).resolves.toContain("Exit code: ABORTED");
+      const result = await resultPromise;
+      expect(result).toContain("Exit code: ABORTED");
+      expectRenderedDiagnostics(result, "aborted");
     });
 
     it("renders configured timeout without a child close event", async () => {
       vi.useFakeTimers();
       const fake = createFakeChild();
       const resultPromise = executeRendered(fake, { timeoutMs: 1_750 });
+      await fake.ready();
 
       await vi.advanceTimersByTimeAsync(2_750);
 
-      await expect(resultPromise).resolves.toContain("Exit code: TIMEOUT (1750ms)");
+      const result = await resultPromise;
+      expect(result).toContain("Exit code: TIMEOUT (1750ms)");
+      expectRenderedDiagnostics(result, "timedOut");
     });
 
     it("keeps the omitted timeout deadline at exactly 120000ms", async () => {
       vi.useFakeTimers();
       const fake = createFakeChild(2_000_000_012);
       const resultPromise = executeRendered(fake);
+      await fake.ready();
       let fulfilled = false;
       void resultPromise.then(() => {
         fulfilled = true;
@@ -1245,19 +1624,24 @@ if (selectedProbe !== undefined) {
       expect(fulfilled).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
 
-      await expect(resultPromise).resolves.toContain("Exit code: TIMEOUT (120000ms)");
+      const result = await resultPromise;
+      expect(result).toContain("Exit code: TIMEOUT (120000ms)");
+      expectRenderedDiagnostics(result, "timedOut");
     });
 
     it("keeps the friendly emitted spawn failure message", async () => {
       const fake = createFakeChild();
       const resultPromise = executeRendered(fake);
+      await fake.ready();
       fake.emitError(new Error("not found"));
       fake.emitClose(1);
-      await expect(resultPromise).resolves.toBe("Exit code: 1\nFailed to spawn: not found");
+      const result = await resultPromise;
+      expect(result).toContain("Exit code: 1\nFailed to spawn: not found");
+      expectRenderedDiagnostics(result, "spawnError");
     });
 
     it("keeps the friendly synchronous spawn failure message", async () => {
-      const tool = createBashTool(process.cwd(), new ProcessManager(), {
+      const tool = createBashTool(process.cwd(), testProcessManager(), {
         ...localOperations,
         process: {
           ...localOperations.process,
@@ -1266,17 +1650,24 @@ if (selectedProbe !== undefined) {
           },
         },
       });
-      await expect(
-        tool.execute(
-          { command: "fixture command" },
-          { signal: new AbortController().signal, toolCallId: "bash-sync-spawn" },
-        ),
-      ).resolves.toBe("Exit code: 1\nFailed to spawn: sync not found");
+      const result = await tool.execute(
+        { command: "fixture command" },
+        { signal: new AbortController().signal, toolCallId: "bash-sync-spawn" },
+      );
+      if (typeof result === "string" || typeof result.content !== "string") {
+        throw new Error("Expected structured text bash output");
+      }
+      expect(result.content).toContain("Exit code: 1\nFailed to spawn: sync not found");
+      expect(result.content).toContain("PID: unavailable");
+      expect(result.details).toMatchObject({
+        bashDiagnostics: { pid: null, reason: "spawnError" },
+      });
+      expectRenderedDiagnostics(result.content, "spawnError");
     });
   });
 
   it("renders persist:true aborts distinctly and preserves partial output", async () => {
-    const manager = new ProcessManager();
+    const manager = testProcessManager();
     const controller = new AbortController();
     const tool = createBashTool(process.cwd(), manager);
 

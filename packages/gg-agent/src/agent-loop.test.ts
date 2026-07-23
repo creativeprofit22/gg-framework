@@ -1396,6 +1396,12 @@ describe("agentLoop", () => {
     expect(serializedMessages).not.toContain(canary);
     expect(serializedEvents).toContain("[REDACTED]");
     expect(serializedMessages).toContain("[REDACTED]");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_call_end",
+        details: { apiKey: "[REDACTED]" },
+      }),
+    );
   });
 
   it("redacts failed tool output before events and provider context", async () => {

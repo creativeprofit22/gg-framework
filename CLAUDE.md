@@ -1,83 +1,68 @@
 # gg-framework
 
-A pnpm monorepo for LLM streaming, tool-running agents, coding and media-agent CLIs, and Tauri/Electron desktop applications.
+A pnpm monorepo containing reusable LLM/agent libraries, coding and media-agent CLIs, a Tauri coding-agent desktop app, and an Electron UI prototype.
 
 ## Workspace map
 
-- `packages/gg-ai` (`@kenkaiiii/gg-ai`) — provider transports, streaming API/types, message transforms, and provider-error formatting.
-- `packages/gg-agent` (`@kenkaiiii/gg-agent`) — provider-independent agent loop, tool execution, events, and `Agent`/`AgentStream`.
-- `packages/gg-core` (`@kenkaiiii/gg-core`) — UI-free shared model registry, thinking levels, paths, auth/OAuth, usage, logging, Telegram, transcription, and updates.
-- `packages/ggcoder` (`@kenkaiiii/ggcoder`) — coding-agent engine/library, `ggcoder` CLI, `AgentSession`, tools, sessions, MCP/LSP/extensions, Ink TUI, and the app HTTP/SSE sidecar.
-- `packages/gg-boss` — multi-project coding-agent orchestrator and `ggboss` CLI.
-- `packages/gg-editor` — Resolve/Premiere video-editing agent and `ggeditor` CLI.
-- `packages/gg-editor-premiere-panel` — Premiere UXP/CEP panels and their installer CLI.
-- `packages/gg-voice` — realtime voice sessions/providers and agent bridges.
-- `packages/ggcoder-eyes` — perception-probe library and CLI.
-- `gg-app` — private React/Vite + Tauri 2 desktop app; Rust owns windows/IPC and bundles the ggcoder sidecar.
-- `Matey` — separate private Electron/Vite chat prototype.
-- `experiments/prompt-bench`, `benchmarks/`, and `bench/` — prompt and runtime benchmark harnesses.
-
 Workspace membership is defined by `pnpm-workspace.yaml`: `packages/*`, `gg-app`, `Matey`, and `experiments/*`.
 
-## Dependency and ownership boundaries
+- `packages/gg-ai` (`@kenkaiiii/gg-ai`) — provider transports, streaming APIs/types, message transforms, and provider errors.
+- `packages/gg-agent` (`@kenkaiiii/gg-agent`) — provider-independent agent loop, tool execution, and agent events.
+- `packages/gg-core` (`@kenkaiiii/gg-core`) — UI-free model registry, paths, auth/OAuth, usage, logging, Telegram, transcription, and updates.
+- `packages/ggcoder` (`@kenkaiiii/ggcoder`) — coding-agent library and `ggcoder` CLI, including tools, sessions, MCP/LSP support, Ink UI, Agent Home modes, and the internal app sidecar.
+- `packages/gg-boss` (`@kenkaiiii/gg-boss`) — multi-project orchestration library and `ggboss` CLI.
+- `packages/gg-editor` (`@kenkaiiii/gg-editor`) — Resolve/Premiere video-agent library and `ggeditor` CLI.
+- `packages/gg-editor-premiere-panel` — Premiere UXP/CEP panels and installer CLI.
+- `packages/gg-voice` — realtime voice providers and ggcoder/ggboss bridges.
+- `packages/ggcoder-eyes` — perception-probe library and CLI.
+- `gg-app` — private React/Vite frontend with a Tauri 2 Rust shell.
+- `Matey` — private Electron/Vite local chat UI prototype.
+- `experiments/prompt-bench`, `benchmarks/`, and `bench/` — prompt and runtime benchmark harnesses; only `experiments/*` is a workspace glob.
 
-```text
-gg-ai ──▶ gg-agent
-gg-ai ──▶ gg-core
-gg-ai + gg-agent + gg-core ──▶ ggcoder ──▶ gg-app sidecar
-framework/ggcoder ──▶ gg-boss, gg-editor
-gg-ai + gg-agent ──▶ gg-voice
-```
+## Package boundaries
 
-- Provider transports and raw provider-error wording belong in `gg-ai`.
-- Shared model metadata, thinking levels, paths, auth/OAuth, and logger core belong in UI-free `gg-core`; it must not depend on `gg-agent` or React/Ink.
-- ggcoder keeps compatibility re-exports for model/auth APIs, but implementations stay in `gg-core`.
-- App-only window, IPC, and presentation concerns stay in `gg-app`; agent behavior stays in the framework packages.
+- `gg-agent` and `gg-core` depend on `gg-ai`; `ggcoder` depends on all three.
+- `gg-boss` layers on the framework packages; `gg-editor` layers on `gg-ai`, `gg-agent`, and `ggcoder`; `gg-voice` layers on `gg-ai` and `gg-agent`.
+- Provider transport and raw provider-error behavior belongs in `gg-ai`.
+- Shared model/auth/path/logging behavior belongs in UI-free `gg-core`; ggcoder exposes compatibility entry points for selected model/auth APIs.
+- App presentation, windows, and native IPC belong in `gg-app`; reusable agent behavior belongs in framework packages.
 
 ## gg-app architecture
 
-- One shared Node daemon serves isolated logical sessions for windows/panes; do not restore the obsolete one-process-per-window design.
-- Data flows `React invoke → Rust Tauri command → localhost sidecar HTTP → AgentSession`, with SSE returned as window-scoped Tauri events.
-- `gg-app/src/agent.ts` is the webview IPC boundary. Add Rust commands to `invoke_handler!`, expose typed wrappers there, and await `waitForReady()` for sidecar-bound calls.
-- The webview must not fetch the localhost sidecar directly from the `tauri://` origin.
-- Provider failures cross the sidecar through `broadcastError`/`formatError`; keep raw details in logs rather than sending raw provider payloads to the UI.
-- CLI logs use `~/.gg/debug.log`; app daemon logs use `~/.gg/gg-app-sidecar.log`.
-- App settings are separate from CLI settings: `~/.gg/gg-app.json` versus `~/.gg/settings.json`.
-
-## Specialized subsystems
-
-- LSP diagnostics live in `packages/ggcoder/src/core/lsp/`; TS/JS servers ship with ggcoder, other language servers resolve from the project/PATH, and missing servers degrade silently.
-- MCP config is global at `~/.gg/mcp.json` or project-local at `.gg/mcp.json`; project entries win user-name collisions, provider defaults cannot be overridden, and connections load at startup.
-- UI-owned slash commands short-circuit before `packages/ggcoder/src/core/slash-commands.ts`; prompt-template commands also load from `.gg/commands/`.
+- Sidecar-backed agent operations flow `React → Tauri invoke → Rust localhost proxy → shared Node daemon → logical AgentSession`; native window, updater, permissions, file, and app-setting operations terminate in Rust.
+- One Node daemon serves isolated logical sessions for all windows and panes. Rust forwards sidecar SSE as window-scoped Tauri events.
+- `gg-app/src/agent.ts` is the typed webview IPC boundary; Rust commands are registered in `gg-app/src-tauri/src/lib.rs`.
+- The webview does not contact the localhost sidecar directly from the `tauri://` origin.
+- The sidecar source is `packages/ggcoder/src/app-sidecar.ts`. `gg-app/scripts/bundle-sidecar.mjs` requires `packages/ggcoder/dist/app-sidecar.js` and writes `gg-app/src-tauri/sidecar/app-sidecar.mjs` plus external runtime dependencies.
+- App project preferences live in `~/.gg/gg-app.json`; shared fallback/current model and thinking settings also use `~/.gg/settings.json`.
+- CLI logs use `~/.gg/debug.log`; app-daemon logs use `~/.gg/gg-app-sidecar.log`.
 
 ## Commands
 
+CI pins Node 22 and pnpm 10; the repository itself does not declare a `packageManager` field.
+
 ```bash
-pnpm install --frozen-lockfile       # install the pnpm 10 workspace
-pnpm build                           # recursive workspace builds
-pnpm check                           # recursive TypeScript checks
-pnpm test                            # generated-artifact audit test, then workspace tests
-pnpm lint                            # package, Matey, and gg-app lint
-pnpm format:check                    # package, Matey, and gg-app formatting check
-pnpm audit:generated:web             # inspect generated app web output
-pnpm audit:generated:tauri           # inspect Tauri target output
-pnpm audit:generated:sidecar-deps    # inspect staged sidecar dependencies
+pnpm install --frozen-lockfile
+pnpm build                    # recursive workspace build scripts
+pnpm check                    # recursive workspace check scripts
+pnpm test                     # generated-output audit tests, then recursive workspace tests
+pnpm lint                     # package sources, Matey, and gg-app
+pnpm format:check             # package sources, Matey, and gg-app
 ```
 
-Desktop development after building the sidecar source:
+Desktop development requires the sidecar build first:
 
 ```bash
 pnpm --filter @kenkaiiii/ggcoder build
 pnpm --filter gg-app tauri dev
 ```
 
-Pure webview changes use Vite HMR; Rust or sidecar changes require an app restart. `gg-app` sidecar bundling consumes `packages/ggcoder/dist/app-sidecar.js` by filesystem path, not a workspace dependency.
+Generated-output inspectors are `pnpm audit:generated:web`, `audit:generated:tauri`, `audit:generated:sidecar-deps`, `audit:generated:tauri-schemas`, `audit:generated:cache`, and `audit:generated:packages`.
 
 ## Generated and release workflows
 
-- `packages/gg-editor/src/skills.ts` is generated by the editor build/check/test scripts; Tauri `binaries/`, `sidecar/`, `target/`, and schema output are staged/generated artifacts.
-- The npm fixed Changesets group is `gg-ai`, `gg-agent`, `gg-core`, `ggcoder`, and `gg-boss`; do not hand-edit their versions.
-- npm release order: `pnpm changeset` → `pnpm changeset version` → `pnpm build` → commit the version changes → `pnpm changeset publish` → `git push --follow-tags`.
-- Desktop versioning is independent. Use `pnpm --filter gg-app bump <patch|minor|major|x.y.z>` to update `gg-app/package.json`, `tauri.conf.json`, `Cargo.toml`, and `Cargo.lock` together.
-- A pushed `v*` tag runs `.github/workflows/release.yml`, building macOS arm64 and Windows installers and publishing a non-draft GitHub release with updater JSON.
-- Desktop release builds `gg-ai`, `gg-agent`, and `ggcoder`, then runs `stage:node`, `bundle:sidecar`, the sidecar smoke test, and locked Rust tests before packaging.
+- `packages/gg-editor/src/skills.ts` is generated from `packages/gg-editor/src/skills/*.md` by the editor build, check, and test scripts; edit the Markdown sources instead.
+- `gg-app/src-tauri/binaries/`, `sidecar/`, `target/`, and `gen/schemas/` are staged/generated outputs.
+- The Changesets fixed-version group is `gg-ai`, `gg-agent`, `gg-core`, `ggcoder`, and `gg-boss`; there is no automated npm publish workflow in this repository.
+- Use `pnpm --filter gg-app bump <patch|minor|major|x.y.z>` to update the desktop version in `package.json`, `tauri.conf.json`, `Cargo.toml`, and `Cargo.lock` together.
+- A pushed `v*` tag runs `.github/workflows/release.yml` for macOS arm64 and Windows. The workflow builds `gg-ai`, `gg-agent`, and `ggcoder`, stages Node, bundles and smoke-tests the sidecar, runs locked Rust tests, and publishes a non-draft GitHub release with updater JSON.

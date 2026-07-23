@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, renderHook, act } from "@testing-library/react";
+import { fireEvent, render, renderHook, act } from "@testing-library/react";
 import { createElement, createRef } from "react";
 import type { MutableRefObject } from "react";
 
@@ -317,7 +317,7 @@ describe("useAgentEvents", () => {
     expect(feed[0]).toMatchObject({ toolCallId: "t1", status: "done" });
   });
 
-  it("streams bounded bash progress before replacing it with the final result", () => {
+  it("streams bounded bash progress before replacing it with the final result", async () => {
     const { hook, getLiveToolFeed } = setup();
     act(() => {
       hook.result.current.handleEvent(
@@ -371,10 +371,26 @@ describe("useAgentEvents", () => {
     });
     expect(getLiveToolFeed()[0]?.progressOutput).toHaveLength(8 * 1024);
 
-    const result = "Exit code: 0\nAuthoritative final output";
+    const result = "Exit code: TIMEOUT (120000ms)\nAuthoritative final output";
+    const bashDiagnostics = {
+      executionId: "exec-123",
+      pid: 4242,
+      command: "pnpm check",
+      cwd: "C:\\project",
+      startedAt: 1_785_000_000_000,
+      timeoutMs: 120_000,
+      reason: "timedOut",
+      elapsedMs: 2_003,
+      logPath: "C:\\Users\\dev\\.gg\\foreground\\exec-123.log",
+    };
     act(() => {
       hook.result.current.handleEvent(
-        ev("tool_call_end", { toolCallId: "bash-1", isError: false, result }),
+        ev("tool_call_end", {
+          toolCallId: "bash-1",
+          isError: false,
+          result,
+          details: { bashDiagnostics },
+        }),
       );
     });
 
@@ -382,7 +398,28 @@ describe("useAgentEvents", () => {
       status: "done",
       result,
       progressOutput: undefined,
+      details: { bashDiagnostics },
     });
+
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const completedPanel = render(createElement(LiveToolPanel, { entries: getLiveToolFeed() }));
+    fireEvent.click(completedPanel.getByRole("button", { name: "Details" }));
+    expect(completedPanel.getByText(bashDiagnostics.logPath)).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(completedPanel.getByRole("button", { name: "Copy diagnostics" }));
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith(
+      expect.stringContaining(`Log: ${bashDiagnostics.logPath}`),
+    );
+
+    act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: false })));
+    expect(getLiveToolFeed()).toHaveLength(1);
+    expect(getLiveToolFeed()[0]?.details).toEqual({ bashDiagnostics });
   });
 
   it("turn_end accumulates output tokens across turns", () => {

@@ -1,3 +1,6 @@
+import { useState } from "react";
+import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
+import type { BashDiagnostics, BashToolResultDetails } from "./agent";
 import { theme } from "./theme";
 import { buildToolLineParts, toneColor } from "./tool-format";
 
@@ -24,12 +27,138 @@ interface Props {
   entries: readonly LiveToolEntry[];
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function getBashDiagnostics(details: unknown): BashDiagnostics | null {
+  if (!isRecord(details) || !isRecord(details.bashDiagnostics)) return null;
+  const value = details.bashDiagnostics;
+  const validReason = ["completed", "nonZeroExit", "timedOut", "aborted", "spawnError"].includes(
+    String(value.reason),
+  );
+  if (
+    typeof value.executionId !== "string" ||
+    (typeof value.pid !== "number" && value.pid !== null) ||
+    typeof value.command !== "string" ||
+    typeof value.cwd !== "string" ||
+    typeof value.startedAt !== "number" ||
+    typeof value.timeoutMs !== "number" ||
+    !validReason ||
+    typeof value.elapsedMs !== "number" ||
+    typeof value.logPath !== "string"
+  ) {
+    return null;
+  }
+  return (details as unknown as BashToolResultDetails).bashDiagnostics;
+}
+
+function diagnosticsText(diagnostics: BashDiagnostics): string {
+  return [
+    `ID: ${diagnostics.executionId}`,
+    `PID: ${diagnostics.pid ?? "unavailable"}`,
+    `Reason: ${diagnostics.reason}`,
+    `Elapsed: ${diagnostics.elapsedMs}ms`,
+    `Log: ${diagnostics.logPath}`,
+  ].join("\n");
+}
+
+function BashDiagnosticsDetails({
+  diagnostics,
+  toolCallId,
+}: {
+  diagnostics: BashDiagnostics;
+  toolCallId: string;
+}): React.ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const panelId = `bash-diagnostics-${toolCallId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+
+  const copyDiagnostics = (): void => {
+    if (!navigator.clipboard) {
+      setCopyState("failed");
+      return;
+    }
+    void navigator.clipboard
+      .writeText(diagnosticsText(diagnostics))
+      .then(() => {
+        setCopyState("copied");
+        setTimeout(() => setCopyState("idle"), 1_500);
+      })
+      .catch(() => setCopyState("failed"));
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        className="tool-details-toggle"
+        aria-expanded={expanded}
+        aria-controls={panelId}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        {expanded ? (
+          <ChevronDown size={13} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={13} aria-hidden="true" />
+        )}
+        Details
+      </button>
+      {expanded ? (
+        <div className="bash-diagnostics" id={panelId}>
+          <dl>
+            <div>
+              <dt>ID</dt>
+              <dd>{diagnostics.executionId}</dd>
+            </div>
+            <div>
+              <dt>PID</dt>
+              <dd>{diagnostics.pid ?? "unavailable"}</dd>
+            </div>
+            <div>
+              <dt>Reason</dt>
+              <dd>{diagnostics.reason}</dd>
+            </div>
+            <div>
+              <dt>Elapsed</dt>
+              <dd>{diagnostics.elapsedMs}ms</dd>
+            </div>
+            <div>
+              <dt>Log path</dt>
+              <dd>{diagnostics.logPath}</dd>
+            </div>
+          </dl>
+          <button type="button" className="bash-diagnostics-copy" onClick={copyDiagnostics}>
+            {copyState === "copied" ? (
+              <Check size={13} aria-hidden="true" />
+            ) : (
+              <Copy size={13} aria-hidden="true" />
+            )}
+            {copyState === "copied"
+              ? "Copied"
+              : copyState === "failed"
+                ? "Copy failed"
+                : "Copy diagnostics"}
+          </button>
+          <span className="sr-only" aria-live="polite">
+            {copyState === "copied"
+              ? "Bash diagnostics copied"
+              : copyState === "failed"
+                ? "Could not copy bash diagnostics"
+                : ""}
+          </span>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 /**
  * Pinned, in-place panel of recent tool actions — a rolling window of the last
  * few calls shown directly above the activity bar. Mirrors the TUI
  * LiveToolPanel: tools (running AND done) live ONLY here, never in the
- * scrollback transcript. Each row is a status dot + bold tone-colored verb +
- * plain detail + dim inline summary. Done rows recolor the dot (green / red).
+ * scrollback transcript. Completed foreground bash rows expose diagnostics
+ * inline so desktop users can inspect and copy timeout/log details.
  */
 export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
   if (entries.length === 0) return null;
@@ -47,24 +176,35 @@ export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
           details: entry.details,
         });
         const dotColor = done ? (entry.isError ? theme.error : theme.success) : theme.primary;
+        const diagnostics =
+          done && entry.name === "bash" ? getBashDiagnostics(entry.details) : null;
         return (
-          <div className="tool-row" key={entry.toolCallId}>
-            <span className={`tool-dot${done ? "" : " blink"}`} style={{ color: dotColor }}>
-              {DOT}
-            </span>
-            <span className="tool-line">
-              {parts.map((p, i) => (
-                <span
-                  key={i}
-                  style={{
-                    color: p.dim ? theme.textDim : p.tone ? toneColor(p.tone) : theme.text,
-                    fontWeight: p.bold ? 600 : 400,
-                  }}
-                >
-                  {p.text}
-                </span>
-              ))}
-            </span>
+          <div className="tool-entry" key={entry.toolCallId}>
+            <div className="tool-row">
+              <span className={`tool-dot${done ? "" : " blink"}`} style={{ color: dotColor }}>
+                {DOT}
+              </span>
+              <span className="tool-line">
+                {parts.map((part, index) => (
+                  <span
+                    key={`${index}-${part.text}`}
+                    style={{
+                      color: part.dim
+                        ? theme.textDim
+                        : part.tone
+                          ? toneColor(part.tone)
+                          : theme.text,
+                      fontWeight: part.bold ? 600 : 400,
+                    }}
+                  >
+                    {part.text}
+                  </span>
+                ))}
+              </span>
+              {diagnostics ? (
+                <BashDiagnosticsDetails diagnostics={diagnostics} toolCallId={entry.toolCallId} />
+              ) : null}
+            </div>
           </div>
         );
       })}

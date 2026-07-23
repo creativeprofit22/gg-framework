@@ -186,6 +186,39 @@ async function request(
   });
 }
 
+describe("session event shape", () => {
+  it("serializes complete bash diagnostics in tool_call_end details", () => {
+    const diagnostics = {
+      executionId: "exec-123",
+      pid: 4242,
+      command: "sleep 2",
+      cwd: "C:\\project",
+      startedAt: 1_785_000_000_000,
+      timeoutMs: 1_000,
+      reason: "timedOut",
+      elapsedMs: 2_003,
+      logPath: "C:\\Users\\dev\\.gg\\foreground\\exec-123.log",
+    };
+    const serialized = sessionEventSseData("session-a", "tool_call_end", {
+      toolCallId: "bash-1",
+      result: "Exit code: TIMEOUT (1000ms)",
+      details: { bashDiagnostics: diagnostics },
+      isError: false,
+      durationMs: 2_005,
+    });
+    const frame = JSON.parse(serialized.slice("data: ".length)) as SessionEventFrame;
+
+    expect(frame).toEqual({
+      sessionId: "session-a",
+      type: "tool_call_end",
+      data: expect.objectContaining({
+        toolCallId: "bash-1",
+        details: { bashDiagnostics: diagnostics },
+      }),
+    });
+  });
+});
+
 describe("AppSidecarSessionRouter HTTP isolation", () => {
   it("keeps prompt, ordered events, cancel, state, history, and disposal isolated", async () => {
     const { baseUrl } = await startHarness();

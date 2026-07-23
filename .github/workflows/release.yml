@@ -88,6 +88,16 @@ jobs:
           pnpm --filter @kenkaiiii/gg-agent build
           pnpm --filter @kenkaiiii/ggcoder build
 
+      - name: Check release packages
+        run: |
+          pnpm --filter @kenkaiiii/ggcoder check
+          pnpm --filter gg-app check
+
+      - name: Test release packages
+        run: |
+          pnpm --filter @kenkaiiii/ggcoder test
+          pnpm --filter gg-app test
+
       - name: Stage node runtime + bundle sidecar
         run: |
           pnpm --filter gg-app stage:node

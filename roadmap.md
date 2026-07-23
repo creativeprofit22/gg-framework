@@ -11,12 +11,12 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Complete through Phase 07:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, and Phase 07 is complete in the current working tree.
+- **Complete through Phase 08:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, Phase 07 is landed in `d1771368`, and Phase 08 is implemented and verified.
 - **Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
-- **2026-07-23 code audit:** The Phase 07 focused run passed 103 tests across process utilities, ProcessManager, detached shutdown, and foreground lifecycle coverage, with one expected Windows dev-server failure and three platform skips. The ggcoder typecheck, targeted ESLint, and Prettier checks passed.
-- **Next phase:** Phase 08 — Persist a foreground log before spawn.
-- **Current reliability gap:** Foreground output still has no per-execution persisted log created before spawn, so diagnostics and late readers continue to depend on in-memory stream handling.
-- **Later-track audit:** Phases 08–14 remain incomplete. Track B has not started: Notes authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`.
+- **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
+- **Next phase:** Phase 09 — Bound output and report the final 100 lines.
+- **Current reliability gap:** Foreground logs are now allocated before spawn and remain live through terminal settlement; exact final-100-line tail handling and binary classification remain Phase 09.
+- **Later-track audit:** Phases 09–14 remain acceptance-incomplete. Phases 09–12 contain partial baseline behavior, but exact final-tail handling, complete retention, EOF-first shutdown, desktop diagnostics, and the release gate are not implemented. Track B has not started: Notes authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`.
 - **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive; those concepts remain intact. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -361,7 +361,7 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 07 — Separate cancellation from normal completion
 
-**Status:** Complete.
+**Status:** Complete (`d1771368`).
 
 **Outcome:** Cancellation removes the full tree; normal completion preserves intentionally detached work.
 
@@ -396,12 +396,14 @@ All external references are evidence only. Copy behavior, not source text, unles
 - The Windows host matrix proves a detached worker survives normal completion and is removed by timeout, AbortSignal cancellation, and `ProcessManager.shutdownAll()`; every survivor is force-cleaned in test `finally` blocks.
 - Focused utility tests prove tree versus exact-PID scope, Windows `/T` versus wrapper-only argv, guard checks before destructive phases, TERM-to-KILL re-checks, and live-but-reused PID no-ops.
 - Foreground race tests prove zero/non-zero completion can request only wrapper reap, interruption owns full-tree cleanup, and late abort dispatches no tree cleanup.
-- Verification command: `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/utils/process.test.ts src/core/process-manager.test.ts src/core/process-manager-dev-server-repro.test.ts src/tools/bash-timeout.test.ts` — 103 passed, 1 expected failure, 3 skipped across 107 tests.
+- Verification command: `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/utils/process.test.ts src/core/process-manager.test.ts src/core/process-manager-dev-server-repro.test.ts src/tools/bash-timeout.test.ts` — 106 passed, 1 expected failure, 3 skipped across 110 tests.
 - `pnpm --filter @kenkaiiii/ggcoder check`, targeted ESLint, and targeted Prettier (including the detached fixtures and this roadmap) pass.
 
 **Hard stop:** Satisfied — normal completion and cancellation have opposite, deterministic detached-descendant behavior, and detectable PID reuse receives no destructive call.
 
 ## Phase 08 — Persist a foreground log before spawn
+
+**Status:** Complete (2026-07-23).
 
 **Outcome:** Foreground output remains readable even when the child never closes.
 
@@ -430,7 +432,15 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Stdout/stderr origin survives combination; the log stream closes on every path.
 - Focused tests and typecheck pass.
 
-**Hard stop:** Do not start Phase 09 while log visibility depends on child `close`.
+**Completion evidence**
+
+- `ProcessManager` tests prove unique foreground IDs/paths, pre-created files, safe stream-error handling, idempotent closure, and unchanged background stream ownership.
+- Foreground lifecycle tests prove the log exists before spawn, partial stdout/stderr is readable with source labels while the child is alive, and completed, non-zero, emitted/synchronous spawn-error, aborted, timeout-with-close, and timeout-without-close paths close the log exactly once.
+- Every fresh foreground rendering path includes execution ID, PID or `unavailable`, command, cwd, start time, timeout, reason, elapsed time, and readable log path while preserving existing status and live UTF-8 output behavior.
+- Verification command: `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/core/process-manager.test.ts src/tools/bash-timeout.test.ts` — 65 passed and 2 platform tests skipped across 67 tests.
+- `pnpm --filter @kenkaiiii/ggcoder check`, targeted ESLint, and targeted Prettier (including this roadmap) pass.
+
+**Hard stop:** Satisfied — live partial-log visibility no longer depends on child `close`, and every terminal path has exactly-once closure coverage.
 
 ## Phase 09 — Bound output and report the final 100 lines
 

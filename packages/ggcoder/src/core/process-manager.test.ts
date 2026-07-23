@@ -1,4 +1,8 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
@@ -81,6 +85,142 @@ function trackedManager(adapter: ProcessLifecycleAdapter): {
   return { manager, child, proc };
 }
 
+describe("ProcessManager foreground logs", () => {
+  it("creates unique foreground log files before returning", async () => {
+    const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-foreground-logs-"));
+    try {
+      const manager = new ProcessManager(undefined, undefined, { foregroundLogRoot: logRoot });
+
+      const first = await manager.allocateForegroundLog();
+      const second = await manager.allocateForegroundLog();
+
+      expect(first.executionId).not.toBe(second.executionId);
+      expect(first.logPath).not.toBe(second.logPath);
+      expect(path.dirname(first.logPath)).toBe(logRoot);
+      await expect(fs.stat(first.logPath)).resolves.toMatchObject({ isFile: expect.any(Function) });
+      await expect(fs.stat(second.logPath)).resolves.toMatchObject({
+        isFile: expect.any(Function),
+      });
+      await Promise.all([first.close(), second.close()]);
+    } finally {
+      await fs.rm(logRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("opens the stream only after file creation and closes it safely exactly once", async () => {
+    const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-foreground-stream-"));
+    const logStream = new PassThrough();
+    const endLog = vi.spyOn(logStream, "end");
+    const createForegroundLogStream = vi.fn((logPath: string) => {
+      expect(existsSync(logPath)).toBe(true);
+      return logStream;
+    });
+    try {
+      const manager = new ProcessManager(undefined, undefined, {
+        foregroundLogRoot: logRoot,
+        createForegroundLogStream,
+      });
+      const handle = await manager.allocateForegroundLog();
+
+      expect(createForegroundLogStream).toHaveBeenCalledWith(handle.logPath);
+      expect(() => logStream.emit("error", new Error("disk failed"))).not.toThrow();
+      expect(handle.error?.message).toBe("disk failed");
+      expect(() => handle.write("ignored after failure")).not.toThrow();
+      const firstClose = handle.close();
+      const secondClose = handle.close();
+
+      expect(firstClose).toBe(secondClose);
+      await firstClose;
+      expect(endLog).toHaveBeenCalledOnce();
+    } finally {
+      await fs.rm(logRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes foreground stream backpressure until the buffered write drains", async () => {
+    const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-foreground-drain-"));
+    let finishWrite: (() => void) | undefined;
+    const logStream = new Writable({
+      highWaterMark: 1,
+      write(_chunk, _encoding, callback) {
+        finishWrite = callback;
+      },
+    });
+    try {
+      const manager = new ProcessManager(undefined, undefined, {
+        foregroundLogRoot: logRoot,
+        createForegroundLogStream: () => logStream,
+      });
+      const handle = await manager.allocateForegroundLog();
+
+      expect(handle.write("buffered output")).toBe(false);
+      const drained = handle.waitForDrain();
+      let didDrain = false;
+      void drained.then(() => {
+        didDrain = true;
+      });
+
+      await Promise.resolve();
+      expect(didDrain).toBe(false);
+      finishWrite?.();
+      await expect(drained).resolves.toBeUndefined();
+      await handle.close();
+    } finally {
+      await fs.rm(logRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps close pending until delayed buffered output flushes", async () => {
+    const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-foreground-flush-"));
+    let finishFlush: (() => void) | undefined;
+    const logStream = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+      final(callback) {
+        finishFlush = callback;
+      },
+    });
+    try {
+      const manager = new ProcessManager(undefined, undefined, {
+        foregroundLogRoot: logRoot,
+        createForegroundLogStream: () => logStream,
+      });
+      const handle = await manager.allocateForegroundLog();
+      handle.write("final output");
+      const closing = handle.close();
+      let closed = false;
+      void closing.then(() => {
+        closed = true;
+      });
+
+      await Promise.resolve();
+      expect(closed).toBe(false);
+      finishFlush?.();
+      await expect(closing).resolves.toBeUndefined();
+    } finally {
+      await fs.rm(logRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects synchronous foreground stream factory failures", async () => {
+    const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-foreground-factory-"));
+    const error = new Error("stream factory failed");
+    try {
+      const manager = new ProcessManager(undefined, undefined, {
+        foregroundLogRoot: logRoot,
+        createForegroundLogStream: () => {
+          throw error;
+        },
+      });
+
+      await expect(manager.allocateForegroundLog()).rejects.toBe(error);
+    } finally {
+      await fs.rm(logRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("ProcessManager lifecycle adapter", () => {
   it("spawns background work through the adapter with piped output", async () => {
     const fake = fakeChild(9876);
@@ -89,7 +229,10 @@ describe("ProcessManager lifecycle adapter", () => {
       return fake.child;
     });
     const reapProcessWrapper = vi.fn();
-    const manager = new ProcessManager(lifecycle({ spawn, reapProcessWrapper }));
+    const createForegroundLogStream = vi.fn(() => new PassThrough());
+    const manager = new ProcessManager(lifecycle({ spawn, reapProcessWrapper }), undefined, {
+      createForegroundLogStream,
+    });
 
     const started = await manager.start("echo remote", "/remote/workspace");
 
@@ -116,6 +259,7 @@ describe("ProcessManager lifecycle adapter", () => {
     expect(reapProcessWrapper).toHaveBeenCalledWith(
       expect.objectContaining({ pid: 9876, isExited: expect.any(Function) }),
     );
+    expect(createForegroundLogStream).not.toHaveBeenCalled();
   });
 
   it("rejects a synchronous spawn throw without tracking a process", async () => {

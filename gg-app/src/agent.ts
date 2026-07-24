@@ -67,8 +67,15 @@ export interface BashDiagnostics {
   startedAt: number;
   timeoutMs: number;
   reason: BashExecutionReason;
+  exitCode: number | null;
+  signal: string | null;
   elapsedMs: number;
   logPath: string;
+  tail: string;
+  outputCapped: boolean;
+  totalOutputBytes: number;
+  retainedOutputBytes: number;
+  droppedOutputBytes: number;
 }
 
 export interface BashToolResultDetails {

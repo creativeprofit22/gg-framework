@@ -6,6 +6,8 @@ import {
   sessionEventSseData,
   type SessionEventFrame,
 } from "./app-sidecar-session-router.js";
+import { BASH_DIAGNOSTICS_FIXTURE } from "./test-fixtures/bash-diagnostics.js";
+import type { BashDiagnostics } from "./types.js";
 
 interface FakeContext {
   transcript: string[];
@@ -188,17 +190,7 @@ async function request(
 
 describe("session event shape", () => {
   it("serializes complete bash diagnostics in tool_call_end details", () => {
-    const diagnostics = {
-      executionId: "exec-123",
-      pid: 4242,
-      command: "sleep 2",
-      cwd: "C:\\project",
-      startedAt: 1_785_000_000_000,
-      timeoutMs: 1_000,
-      reason: "timedOut",
-      elapsedMs: 2_003,
-      logPath: "C:\\Users\\dev\\.gg\\foreground\\exec-123.log",
-    };
+    const diagnostics = BASH_DIAGNOSTICS_FIXTURE satisfies BashDiagnostics;
     const serialized = sessionEventSseData("session-a", "tool_call_end", {
       toolCallId: "bash-1",
       result: "Exit code: TIMEOUT (1000ms)",

@@ -45,8 +45,15 @@ export function getBashDiagnostics(details: unknown): BashDiagnostics | null {
     typeof value.startedAt !== "number" ||
     typeof value.timeoutMs !== "number" ||
     !validReason ||
+    (typeof value.exitCode !== "number" && value.exitCode !== null) ||
+    (typeof value.signal !== "string" && value.signal !== null) ||
     typeof value.elapsedMs !== "number" ||
-    typeof value.logPath !== "string"
+    typeof value.logPath !== "string" ||
+    typeof value.tail !== "string" ||
+    typeof value.outputCapped !== "boolean" ||
+    typeof value.totalOutputBytes !== "number" ||
+    typeof value.retainedOutputBytes !== "number" ||
+    typeof value.droppedOutputBytes !== "number"
   ) {
     return null;
   }
@@ -58,8 +65,13 @@ function diagnosticsText(diagnostics: BashDiagnostics): string {
     `ID: ${diagnostics.executionId}`,
     `PID: ${diagnostics.pid ?? "unavailable"}`,
     `Reason: ${diagnostics.reason}`,
+    `Exit code: ${diagnostics.exitCode ?? "unavailable"}`,
+    `Signal: ${diagnostics.signal ?? "none"}`,
     `Elapsed: ${diagnostics.elapsedMs}ms`,
     `Log: ${diagnostics.logPath}`,
+    "",
+    "Final output:",
+    diagnostics.tail,
   ].join("\n");
 }
 
@@ -120,6 +132,14 @@ function BashDiagnosticsDetails({
               <dd>{diagnostics.reason}</dd>
             </div>
             <div>
+              <dt>Exit code</dt>
+              <dd>{diagnostics.exitCode ?? "unavailable"}</dd>
+            </div>
+            <div>
+              <dt>Signal</dt>
+              <dd>{diagnostics.signal ?? "none"}</dd>
+            </div>
+            <div>
               <dt>Elapsed</dt>
               <dd>{diagnostics.elapsedMs}ms</dd>
             </div>
@@ -128,6 +148,12 @@ function BashDiagnosticsDetails({
               <dd>{diagnostics.logPath}</dd>
             </div>
           </dl>
+          <div className="bash-diagnostics-tail">
+            <span>Final output</span>
+            <pre aria-label="Final command output" tabIndex={0}>
+              {diagnostics.tail || "(no output)"}
+            </pre>
+          </div>
           <button type="button" className="bash-diagnostics-copy" onClick={copyDiagnostics}>
             {copyState === "copied" ? (
               <Check size={13} aria-hidden="true" />

@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { fireEvent, render, renderHook, act } from "@testing-library/react";
 import { createElement, createRef } from "react";
 import type { MutableRefObject } from "react";
+import { BASH_DIAGNOSTICS_FIXTURE } from "../../packages/ggcoder/src/test-fixtures/bash-diagnostics";
 
 // playSound builds an <audio> element and ./agent calls Tauri APIs at module
 // scope (getCurrentWebviewWindow) which blow up in jsdom. Fully stub both. The
@@ -15,8 +16,34 @@ vi.mock("./agent", () => ({ listCommands: vi.fn().mockResolvedValue([]) }));
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
 import { listCommands } from "./agent";
-import type { AgentState, SidecarEvent, SlashCommand } from "./agent";
+import type { AgentState, BashDiagnostics, SidecarEvent, SlashCommand } from "./agent";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
+
+const FRONTEND_BASH_DIAGNOSTIC_FIELDS = [
+  "executionId",
+  "pid",
+  "command",
+  "cwd",
+  "startedAt",
+  "timeoutMs",
+  "reason",
+  "exitCode",
+  "signal",
+  "elapsedMs",
+  "logPath",
+  "tail",
+  "outputCapped",
+  "totalOutputBytes",
+  "retainedOutputBytes",
+  "droppedOutputBytes",
+] as const satisfies readonly (keyof BashDiagnostics)[];
+type MissingFrontendBashDiagnosticField = Exclude<
+  keyof BashDiagnostics,
+  (typeof FRONTEND_BASH_DIAGNOSTIC_FIELDS)[number]
+>;
+const FRONTEND_BASH_DIAGNOSTIC_CONTRACT_IS_COMPLETE: MissingFrontendBashDiagnosticField extends never
+  ? true
+  : false = true;
 
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;
@@ -372,17 +399,11 @@ describe("useAgentEvents", () => {
     expect(getLiveToolFeed()[0]?.progressOutput).toHaveLength(8 * 1024);
 
     const result = "Exit code: TIMEOUT (120000ms)\nAuthoritative final output";
-    const bashDiagnostics = {
-      executionId: "exec-123",
-      pid: 4242,
-      command: "pnpm check",
-      cwd: "C:\\project",
-      startedAt: 1_785_000_000_000,
-      timeoutMs: 120_000,
-      reason: "timedOut",
-      elapsedMs: 2_003,
-      logPath: "C:\\Users\\dev\\.gg\\foreground\\exec-123.log",
-    };
+    const bashDiagnostics = BASH_DIAGNOSTICS_FIXTURE;
+    expect(FRONTEND_BASH_DIAGNOSTIC_CONTRACT_IS_COMPLETE).toBe(true);
+    expect(Object.keys(bashDiagnostics).sort()).toEqual(
+      [...FRONTEND_BASH_DIAGNOSTIC_FIELDS].sort(),
+    );
     act(() => {
       hook.result.current.handleEvent(
         ev("tool_call_end", {
@@ -409,12 +430,21 @@ describe("useAgentEvents", () => {
     const completedPanel = render(createElement(LiveToolPanel, { entries: getLiveToolFeed() }));
     fireEvent.click(completedPanel.getByRole("button", { name: "Details" }));
     expect(completedPanel.getByText(bashDiagnostics.logPath)).toBeTruthy();
+    expect(completedPanel.getByText("Exit code")).toBeTruthy();
+    expect(completedPanel.getByText("unavailable")).toBeTruthy();
+    expect(completedPanel.getByText(bashDiagnostics.signal)).toBeTruthy();
+    expect(completedPanel.getByLabelText("Final command output").textContent).toBe(
+      bashDiagnostics.tail,
+    );
     await act(async () => {
       fireEvent.click(completedPanel.getByRole("button", { name: "Copy diagnostics" }));
       await Promise.resolve();
     });
     expect(writeText).toHaveBeenCalledWith(
-      expect.stringContaining(`Log: ${bashDiagnostics.logPath}`),
+      expect.stringContaining(`Exit code: unavailable\nSignal: ${bashDiagnostics.signal}`),
+    );
+    expect(writeText).toHaveBeenCalledWith(
+      expect.stringContaining(`Final output:\n${bashDiagnostics.tail}`),
     );
 
     act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: false })));

@@ -2862,6 +2862,30 @@ body {
   overflow-wrap: anywhere;
   user-select: text;
 }
+.bash-diagnostics-tail {
+  margin-top: 7px;
+}
+.bash-diagnostics-tail > span {
+  color: var(--text-dim);
+}
+.bash-diagnostics-tail pre {
+  max-height: 160px;
+  margin: 3px 0 0;
+  padding: 6px 7px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  font: inherit;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.bash-diagnostics-tail pre:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
 .bash-diagnostics-copy {
   margin-top: 7px;
   padding: 2px 7px;

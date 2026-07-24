@@ -13,6 +13,7 @@ import * as logger from "../core/logger.js";
 import { resolveShell } from "../core/shell.js";
 import { killProcessTree, type ProcessTarget } from "../utils/process.js";
 import { createBashTool, executeForegroundCommand } from "./bash.js";
+import { BOUNDED_OUTPUT_MAX_BYTES, BOUNDED_OUTPUT_MAX_LINES } from "./bounded-output-tail.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 
 type BasicProbeName = "cpu" | "silent" | "nested";
@@ -84,10 +85,24 @@ function expectedForegroundMetadata(startedAt: number, pid: number | null, timeo
 
 function expectRenderedDiagnostics(result: string, reason: string): void {
   expect(result).toContain("Execution diagnostics:");
-  for (const label of ["ID", "PID", "Command", "CWD", "Started", "Timeout", "Elapsed", "Log"]) {
+  for (const label of [
+    "ID",
+    "PID",
+    "Command",
+    "CWD",
+    "Started",
+    "Timeout",
+    "Exit code",
+    "Signal",
+    "Elapsed",
+    "Log",
+  ]) {
     expect(result).toMatch(new RegExp(`\\n${label}: .+`));
   }
   expect(result).toContain(`Reason: ${reason}`);
+  expect(result).toContain(`Final output (last ${BOUNDED_OUTPUT_MAX_LINES} lines):`);
+  expect(result).toContain("--- begin final output ---");
+  expect(result).toContain("--- end final output ---");
 }
 function quotePathForShell(value: string, isCmdFallback: boolean): string {
   return isCmdFallback ? `"${value}"` : `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -1068,11 +1083,117 @@ if (selectedProbe !== undefined) {
       fake.emitClose(0);
 
       const result = await resultPromise;
+      const persisted = await fs.readFile(result.outcome.metadata.logPath, "utf8");
       const expectedOutput = "stdout: 😀\nstderr: 界\n";
       expect(updates.join("")).toBe(expectedOutput);
       expect(updates.join("")).not.toContain("�");
       expect(totals.at(-1)).toBe(Buffer.byteLength(expectedOutput));
       expect(result.rawOutput).toBe(expectedOutput);
+      expect(persisted).toContain("😀");
+      expect(persisted).toContain("界");
+      expect(persisted).not.toContain("binary output omitted");
+      expect(persisted).not.toContain("�");
+    });
+
+    it("omits malformed non-NUL UTF-8 from returned output and the persisted log", async () => {
+      const fake = createFakeChild(2_000_000_044);
+      const resultPromise = foregroundExecution(fake);
+      await fake.ready();
+
+      fake.stdout.write("safe prefix\n");
+      fake.stdout.write(Buffer.from([0xe2]));
+      fake.stdout.write(Buffer.from([0x28, 0xa1]));
+      fake.stderr.write("safe stderr\n");
+      fake.emitClose(0);
+
+      const result = await resultPromise;
+      const persisted = await fs.readFile(result.outcome.metadata.logPath, "utf8");
+      expect(result.rawOutput).toContain("safe prefix");
+      expect(result.rawOutput).toContain("[stdout binary output omitted: 3 bytes]");
+      expect(result.rawOutput).toContain("safe stderr");
+      expect(result.rawOutput).not.toContain("�");
+      expect(persisted).toContain("[stdout] safe prefix");
+      expect(persisted).toContain("[stdout] [stdout binary output omitted: 3 bytes]");
+      expect(persisted).toContain("[stderr] safe stderr");
+      expect(persisted).not.toContain("�");
+    });
+
+    it("returns exactly the final 100 lines after a high-volume timeout", async () => {
+      vi.useFakeTimers();
+      const fake = createFakeChild(2_000_000_040);
+      const lines = Array.from({ length: 140 }, (_, index) => `timeout-line-${index}\n`);
+      const resultPromise = foregroundExecution(fake, {
+        timeoutMs: 100,
+        cleanupProcessTree: async () => {},
+      });
+      await fake.ready();
+      fake.stdout.write(lines.join(""));
+
+      await vi.advanceTimersByTimeAsync(1_100);
+
+      const result = await resultPromise;
+      expect(result.outcome.reason).toBe("timedOut");
+      expect(result.rawOutput).toBe(lines.slice(-BOUNDED_OUTPUT_MAX_LINES).join(""));
+      expect(result.rawOutput.split("\n").filter(Boolean)).toHaveLength(BOUNDED_OUTPUT_MAX_LINES);
+      expect(result.outputCapped).toBe(true);
+    });
+
+    it("preserves a non-newline-terminated final line", async () => {
+      const fake = createFakeChild(2_000_000_041);
+      const resultPromise = foregroundExecution(fake);
+      await fake.ready();
+      fake.stdout.write("complete\nfinal partial 😀");
+      fake.emitClose(0);
+
+      const result = await resultPromise;
+      expect(result.rawOutput).toBe("complete\nfinal partial 😀");
+      expect(result.rawOutput.endsWith("\n")).toBe(false);
+    });
+
+    it("bounds more than 10 MiB of text while keeping the latest output", async () => {
+      const fake = createFakeChild(2_000_000_042);
+      const logStream = new Writable({
+        highWaterMark: BOUNDED_OUTPUT_MAX_BYTES + 1024 * 1024,
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      });
+      const resultPromise = foregroundExecution(fake, {
+        processManager: testProcessManager(() => logStream),
+      });
+      await fake.ready();
+      fake.stdout.write("a".repeat(BOUNDED_OUTPUT_MAX_BYTES + 1_024));
+      fake.stderr.write("latest-output-界\n");
+      fake.emitClose(0);
+
+      const result = await resultPromise;
+      expect(Buffer.byteLength(result.rawOutput, "utf8")).toBeLessThanOrEqual(
+        BOUNDED_OUTPUT_MAX_BYTES,
+      );
+      expect(result.rawOutput.endsWith("latest-output-界\n")).toBe(true);
+      expect(result.rawOutput).not.toContain("�");
+      expect(result.outputCapped).toBe(true);
+    });
+
+    it("summarizes binary streams without corrupting the result or persisted text log", async () => {
+      const fake = createFakeChild(2_000_000_043);
+      const resultPromise = foregroundExecution(fake);
+      await fake.ready();
+      fake.stdout.write(Buffer.from([0x41, 0x00, 0x42, 0x43]));
+      fake.stdout.write(Buffer.from([0x01, 0x02, 0x03]));
+      fake.stderr.write("safe text\n");
+      fake.emitClose(0);
+
+      const result = await resultPromise;
+      const persisted = await fs.readFile(result.outcome.metadata.logPath, "utf8");
+      expect(result.rawOutput).toContain("[stdout binary output omitted: 7 bytes]");
+      expect(result.rawOutput).toContain("safe text");
+      expect(result.rawOutput).not.toContain("\0");
+      expect(result.rawOutput).not.toContain("�");
+      expect(persisted).toContain("[stdout] [stdout binary output omitted: 7 bytes]");
+      expect(persisted).toContain("[stderr] safe text");
+      expect(persisted).not.toContain("\0");
+      expect(persisted).not.toContain("�");
     });
 
     it("converts a synchronous spawn throw into a spawn error outcome", async () => {
@@ -1556,6 +1677,8 @@ if (selectedProbe !== undefined) {
         { signal: new AbortController().signal, toolCallId: "bash-details" },
       );
       await fake.ready();
+      const normalOutput = "normal-output-界\n";
+      fake.stdout.write(normalOutput);
       fake.emitClose(0);
 
       const result = await resultPromise;
@@ -1569,11 +1692,104 @@ if (selectedProbe !== undefined) {
           startedAt: expect.any(Number),
           timeoutMs: 1_750,
           reason: "completed",
+          exitCode: 0,
+          signal: null,
           elapsedMs: expect.any(Number),
           logPath: expect.stringContaining(FOREGROUND_TEST_LOG_ROOT),
+          tail: normalOutput,
+          outputCapped: false,
+          totalOutputBytes: Buffer.byteLength(normalOutput),
+          retainedOutputBytes: Buffer.byteLength(normalOutput),
+          droppedOutputBytes: 0,
         },
       });
     });
+
+    it("reports capped output byte counts without changing rendered result text", async () => {
+      const fake = createFakeChild(2_000_000_051);
+      const tool = createBashTool(process.cwd(), testProcessManager(), operationsFor(fake.child));
+      const resultPromise = tool.execute(
+        { command: "fixture command" },
+        { signal: new AbortController().signal, toolCallId: "bash-capped-details" },
+      );
+      await fake.ready();
+      const lines = Array.from({ length: 140 }, (_, index) => `capped-line-${index}\n`);
+      const completeOutput = lines.join("");
+      const retainedOutput = lines.slice(-BOUNDED_OUTPUT_MAX_LINES).join("");
+      fake.stdout.write(completeOutput);
+      fake.emitClose(0);
+
+      const result = await resultPromise;
+      if (typeof result === "string" || typeof result.content !== "string") {
+        throw new Error("Expected structured text bash output");
+      }
+      expect(result.details).toMatchObject({
+        bashDiagnostics: {
+          tail: retainedOutput,
+          outputCapped: true,
+          totalOutputBytes: Buffer.byteLength(completeOutput),
+          retainedOutputBytes: Buffer.byteLength(retainedOutput),
+          droppedOutputBytes: Buffer.byteLength(completeOutput) - Buffer.byteLength(retainedOutput),
+        },
+      });
+      expect(result.content).toContain("Exit code: 0\n");
+      expect(result.content).toContain(
+        `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / 10 MB.`,
+      );
+      expect(result.content).not.toContain("Total output bytes:");
+      expectRenderedDiagnostics(result.content, "completed");
+    });
+
+    it.each([
+      ["non-zero", "nonZeroExit", 7, null],
+      ["signal", "nonZeroExit", null, "SIGTERM"],
+      ["abort", "aborted", null, "SIGTERM"],
+      ["timeout-with-close", "timedOut", null, "SIGKILL"],
+      ["timeout-without-close", "timedOut", null, null],
+      ["spawn-error", "spawnError", null, null],
+    ] as const)(
+      "serializes exit code, signal, and tail for %s",
+      async (scenario, reason, expectedExitCode, expectedSignal) => {
+        if (scenario.startsWith("timeout")) vi.useFakeTimers();
+        const controller = new AbortController();
+        const fake = createFakeChild(2_000_000_050);
+        const ops = operationsFor(fake.child);
+        ops.process = { ...ops.process, cleanupProcessTree: async () => {} };
+        const tool = createBashTool(process.cwd(), testProcessManager(), ops);
+        const resultPromise = tool.execute(
+          { command: "fixture command", timeout: 1_000 },
+          { signal: controller.signal, toolCallId: `bash-details-${scenario}` },
+        );
+        await fake.ready();
+        fake.stdout.write(`${scenario}-tail`);
+
+        if (scenario === "non-zero") fake.emitClose(7);
+        if (scenario === "signal") fake.emitClose(null, "SIGTERM");
+        if (scenario === "abort") {
+          controller.abort();
+          fake.emitClose(null, "SIGTERM");
+        }
+        if (scenario === "timeout-with-close") {
+          await vi.advanceTimersByTimeAsync(1_000);
+          fake.emitClose(null, "SIGKILL");
+        }
+        if (scenario === "timeout-without-close") {
+          await vi.advanceTimersByTimeAsync(2_000);
+        }
+        if (scenario === "spawn-error") fake.emitError(new Error("spawn failed"));
+
+        const result = await resultPromise;
+        if (typeof result === "string") throw new Error("Expected structured bash output");
+        expect(result.details).toMatchObject({
+          bashDiagnostics: {
+            reason,
+            exitCode: expectedExitCode,
+            signal: expectedSignal,
+            tail: `${scenario}-tail`,
+          },
+        });
+      },
+    );
 
     it("renders signal-only termination without inventing code 1", async () => {
       const fake = createFakeChild();
@@ -1660,7 +1876,13 @@ if (selectedProbe !== undefined) {
       expect(result.content).toContain("Exit code: 1\nFailed to spawn: sync not found");
       expect(result.content).toContain("PID: unavailable");
       expect(result.details).toMatchObject({
-        bashDiagnostics: { pid: null, reason: "spawnError" },
+        bashDiagnostics: {
+          pid: null,
+          reason: "spawnError",
+          exitCode: null,
+          signal: null,
+          tail: "",
+        },
       });
       expectRenderedDiagnostics(result.content, "spawnError");
     });

@@ -1,4 +1,3 @@
-import { StringDecoder } from "node:string_decoder";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
@@ -20,10 +19,17 @@ import { PersistentShell } from "../core/persistent-shell.js";
 import { isReadOnlyCommand } from "./read-only-bash.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
 import { isCatastrophicCommand } from "../core/workspace-guard.js";
+import {
+  BOUNDED_OUTPUT_MAX_BYTES,
+  BOUNDED_OUTPUT_MAX_LINES,
+  BoundedOutputTail,
+  type BoundedOutputTailSnapshot,
+  OutputChunkDecoder,
+} from "./bounded-output-tail.js";
 
 const DEFAULT_TIMEOUT = 120_000; // 120 seconds
 const FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS = 1_000;
-const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // 10 MB — cap buffered output to prevent OOM
+const MAX_OUTPUT_BYTES = BOUNDED_OUTPUT_MAX_BYTES;
 
 /**
  * Render command output for the tool result. Over-limit output is compressed
@@ -51,10 +57,14 @@ export interface ForegroundCommandExecution {
   outcome: ForegroundExecutionOutcome;
   rawOutput: string;
   outputCapped: boolean;
+  outputSnapshot: BoundedOutputTailSnapshot;
   isCmdFallback: boolean;
 }
 
-function bashDiagnostics(outcome: ForegroundExecutionOutcome): BashDiagnostics {
+function bashDiagnostics(
+  outcome: ForegroundExecutionOutcome,
+  output: BoundedOutputTailSnapshot,
+): BashDiagnostics {
   const { metadata } = outcome;
   return {
     executionId: metadata.executionId,
@@ -64,12 +74,19 @@ function bashDiagnostics(outcome: ForegroundExecutionOutcome): BashDiagnostics {
     startedAt: metadata.startedAt,
     timeoutMs: metadata.timeoutMs,
     reason: outcome.reason,
+    exitCode: outcome.exitCode,
+    signal: outcome.signal,
     elapsedMs: outcome.elapsedMs,
     logPath: metadata.logPath,
+    tail: output.content,
+    outputCapped: output.capped,
+    totalOutputBytes: output.totalInputBytes,
+    retainedOutputBytes: output.retainedBytes,
+    droppedOutputBytes: Math.max(0, output.totalInputBytes - output.retainedBytes),
   };
 }
 
-function formatForegroundDiagnostics(outcome: ForegroundExecutionOutcome): string {
+function formatForegroundDiagnostics(outcome: ForegroundExecutionOutcome, tail: string): string {
   const { metadata } = outcome;
   return (
     "Execution diagnostics:\n" +
@@ -80,8 +97,15 @@ function formatForegroundDiagnostics(outcome: ForegroundExecutionOutcome): strin
     `Started: ${new Date(metadata.startedAt).toISOString()}\n` +
     `Timeout: ${metadata.timeoutMs}ms\n` +
     `Reason: ${outcome.reason}\n` +
+    `Exit code: ${outcome.exitCode ?? "none"}\n` +
+    `Signal: ${outcome.signal ?? "none"}\n` +
     `Elapsed: ${outcome.elapsedMs}ms\n` +
-    `Log: ${metadata.logPath}`
+    `Log: ${metadata.logPath}\n` +
+    `Final output (last ${BOUNDED_OUTPUT_MAX_LINES} lines):\n` +
+    "--- begin final output ---\n" +
+    tail +
+    (tail.endsWith("\n") || tail.length === 0 ? "" : "\n") +
+    "--- end final output ---"
   );
 }
 
@@ -97,9 +121,14 @@ interface ForegroundCommandOptions {
   reapProcessWrapper?: (target: ProcessTarget) => void;
 }
 
-interface ForegroundOutputChunk {
-  source: "stdout" | "stderr";
-  data: Buffer;
+type ForegroundOutputSource = "stdout" | "stderr";
+
+interface ForegroundOutputStreamState {
+  source: ForegroundOutputSource;
+  decoder: OutputChunkDecoder;
+  binary: boolean;
+  binaryBytes: number;
+  reportedBinaryBytes: number;
 }
 
 export async function executeForegroundCommand({
@@ -116,9 +145,8 @@ export async function executeForegroundCommand({
   const startedAt = Date.now();
   const foregroundLog = await processManager.allocateForegroundLog();
   const shell = resolveShell(command);
-  const chunks: ForegroundOutputChunk[] = [];
+  const outputTail = new BoundedOutputTail();
   let totalBytes = 0;
-  let outputCapped = false;
   let pid: number | null = null;
   let terminalIntent: "interruption" | "completion" | "spawnError" | null = null;
   let pendingInterruption: "timedOut" | "aborted" | null = null;
@@ -216,6 +244,7 @@ export async function executeForegroundCommand({
         child?.stdout?.resume();
         child?.stderr?.resume();
       }
+      const outputSnapshot = outputTail.snapshot();
       const result: ForegroundCommandExecution = {
         outcome: {
           metadata: {
@@ -233,8 +262,9 @@ export async function executeForegroundCommand({
           elapsedMs: Math.max(0, Date.now() - startedAt),
           error,
         },
-        rawOutput: Buffer.concat(chunks.map(({ data }) => data)).toString("utf-8"),
-        outputCapped,
+        rawOutput: outputSnapshot.content,
+        outputCapped: outputSnapshot.capped,
+        outputSnapshot,
         isCmdFallback: shell.isCmdFallback,
       };
       void foregroundLog.close().then(() => {
@@ -278,41 +308,76 @@ export async function executeForegroundCommand({
       });
       pid = child.pid ?? null;
 
-      const stdoutDecoder = new StringDecoder("utf8");
-      const stderrDecoder = new StringDecoder("utf8");
+      const stdoutState: ForegroundOutputStreamState = {
+        source: "stdout",
+        decoder: new OutputChunkDecoder(),
+        binary: false,
+        binaryBytes: 0,
+        reportedBinaryBytes: 0,
+      };
+      const stderrState: ForegroundOutputStreamState = {
+        source: "stderr",
+        decoder: new OutputChunkDecoder(),
+        binary: false,
+        binaryBytes: 0,
+        reportedBinaryBytes: 0,
+      };
+      const emitText = (source: ForegroundOutputSource, output: string): void => {
+        if (!output) return;
+        outputTail.append(output);
+        writeForegroundLog(`[${source}] ${output}`);
+        onUpdate?.(output, totalBytes);
+      };
+      const emitBinarySummary = (state: ForegroundOutputStreamState): void => {
+        if (state.binaryBytes === state.reportedBinaryBytes) return;
+        const marker = `[${state.source} binary output omitted: ${state.binaryBytes} bytes]\n`;
+        state.reportedBinaryBytes = state.binaryBytes;
+        outputTail.append(marker);
+        writeForegroundLog(`[${state.source}] ${marker}`);
+        onUpdate?.(marker, totalBytes);
+      };
       const onData =
-        (source: ForegroundOutputChunk["source"], decoder: StringDecoder) =>
+        (state: ForegroundOutputStreamState) =>
         (data: Buffer): void => {
           totalBytes += data.length;
-          const output = decoder.write(data);
-          if (output) writeForegroundLog(`[${source}] ${output}`);
-          if (outputCapped) return;
-          if (totalBytes > MAX_OUTPUT_BYTES) {
-            outputCapped = true;
+          if (state.binary) {
+            state.binaryBytes += data.length;
             return;
           }
-          chunks.push({ source, data });
-          if (output) onUpdate?.(output, totalBytes);
+          const decoded = state.decoder.write(data);
+          if (decoded.binary) {
+            state.binary = true;
+            state.binaryBytes += decoded.unsafeBytes;
+            emitBinarySummary(state);
+            return;
+          }
+          emitText(state.source, decoded.text);
         };
-      const flushDecoder = (
-        source: ForegroundOutputChunk["source"],
-        decoder: StringDecoder,
-      ): (() => void) => {
+      const flushDecoder = (state: ForegroundOutputStreamState): (() => void) => {
         let flushed = false;
         return () => {
           if (flushed) return;
           flushed = true;
-          const output = decoder.end();
-          if (output) writeForegroundLog(`[${source}] ${output}`);
-          if (output && !outputCapped) onUpdate?.(output, totalBytes);
+          if (state.binary) {
+            emitBinarySummary(state);
+            return;
+          }
+          const decoded = state.decoder.end();
+          if (decoded.binary) {
+            state.binary = true;
+            state.binaryBytes += decoded.unsafeBytes;
+            emitBinarySummary(state);
+            return;
+          }
+          emitText(state.source, decoded.text);
         };
       };
       // Output pipes can fail independently. Swallow their errors so the child
       // process close/error event remains the sole execution outcome authority.
-      onStdoutData = onData("stdout", stdoutDecoder);
-      onStderrData = onData("stderr", stderrDecoder);
-      flushStdout = flushDecoder("stdout", stdoutDecoder);
-      flushStderr = flushDecoder("stderr", stderrDecoder);
+      onStdoutData = onData(stdoutState);
+      onStderrData = onData(stderrState);
+      flushStdout = flushDecoder(stdoutState);
+      flushStderr = flushDecoder(stderrState);
       child.stdout?.on("data", onStdoutData);
       child.stdout?.on("error", onOutputPipeError);
       child.stdout?.once("end", flushStdout);
@@ -483,8 +548,10 @@ export function createBashTool(
       });
       const { outcome } = execution;
 
-      const diagnostics = formatForegroundDiagnostics(outcome);
-      const details: BashToolResultDetails = { bashDiagnostics: bashDiagnostics(outcome) };
+      const diagnostics = formatForegroundDiagnostics(outcome, execution.rawOutput);
+      const details: BashToolResultDetails = {
+        bashDiagnostics: bashDiagnostics(outcome, execution.outputSnapshot),
+      };
       if (outcome.reason === "spawnError") {
         return {
           content:
@@ -497,7 +564,9 @@ export function createBashTool(
       let output = await renderBashOutput(execution.rawOutput);
       if (execution.outputCapped) {
         output =
-          `[Output capped at ${MAX_OUTPUT_BYTES / 1024 / 1024} MB to prevent memory exhaustion]\n` +
+          `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / ` +
+          `${MAX_OUTPUT_BYTES / 1024 / 1024} MB. Complete sanitized log: ` +
+          `${outcome.metadata.logPath}]\n` +
           output;
       }
       // Windows without Git Bash: commands ran under cmd.exe, NOT bash. Tell

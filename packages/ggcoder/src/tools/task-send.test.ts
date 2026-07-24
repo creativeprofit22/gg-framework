@@ -110,8 +110,9 @@ describe("interactive background processes (task_send)", () => {
     expect(sent).toContain("task_output");
 
     await waitForOutput(manager, started.id, (o) => o.includes("ANSWER_yes"));
-    const read = await outputTool.execute({ id: started.id, from_start: true }, ctx);
-    expect(read).toContain("ANSWER_yes");
+    const result = await outputTool.execute({ id: started.id, from_start: true }, ctx);
+    const content = typeof result === "string" ? result : result.content;
+    expect(content).toContain("ANSWER_yes");
   }, 15_000);
 
   it("guards against empty sends", async () => {

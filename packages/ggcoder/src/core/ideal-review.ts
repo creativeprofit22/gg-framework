@@ -77,9 +77,9 @@ export class ReviewCoverageTracker {
 
   private display(filePath: string): string {
     const relative = path.relative(this.cwd, filePath);
-    return relative && !relative.startsWith(`..${path.sep}`) && relative !== ".."
-      ? relative
-      : filePath;
+    const displayPath =
+      relative && !relative.startsWith(`..${path.sep}`) && relative !== ".." ? relative : filePath;
+    return displayPath.split(path.sep).join("/");
   }
 }
 

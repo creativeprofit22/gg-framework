@@ -16,7 +16,7 @@ interface FakeChildHarness {
   stderr: PassThrough;
   emitSpawn(): void;
   emitError(error: Error): void;
-  emitClose(code?: number | null): void;
+  emitClose(code?: number | null, signal?: NodeJS.Signals | null): void;
 }
 
 function fakeChild(pid = 4321): FakeChildHarness {
@@ -49,9 +49,10 @@ function fakeChild(pid = 4321): FakeChildHarness {
     emitError(error) {
       emitter.emit("error", error);
     },
-    emitClose(code = 0) {
+    emitClose(code = 0, signal = null) {
       state.exitCode = code;
-      emitter.emit("close", code, null);
+      state.signalCode = signal;
+      emitter.emit("close", code, signal);
     },
   };
 }
@@ -73,8 +74,10 @@ function trackedManager(adapter: ProcessLifecycleAdapter): {
     command: "fixture",
     logFile: "fixture.log",
     startedAt: Date.now(),
+    completedAt: null,
     exitCode: null,
-    lastReadOffset: 0,
+    signal: null,
+    lastReadOffset: null,
   };
   const internals = manager as unknown as {
     processes: Map<string, BackgroundProcess>;
@@ -221,6 +224,289 @@ describe("ProcessManager foreground logs", () => {
   });
 });
 
+describe("ProcessManager retention", () => {
+  it("captures signal and completion time only after the background log flushes", async () => {
+    const fake = fakeChild(1357);
+    let now = 1_234_567;
+    let finishLogFlush: (() => void) | undefined;
+    const logStream = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+      final(callback) {
+        finishLogFlush = callback;
+      },
+    });
+    const manager = new ProcessManager(
+      lifecycle({
+        spawn: () => {
+          queueMicrotask(() => fake.emitSpawn());
+          return fake.child;
+        },
+      }),
+      () => logStream,
+      { now: () => now },
+    );
+
+    const started = await manager.start("signal fixture", "/workspace");
+    fake.emitClose(null, "SIGTERM");
+
+    expect(manager.list()).toEqual([
+      expect.objectContaining({
+        id: started.id,
+        exitCode: null,
+        signal: null,
+        completedAt: null,
+        isRunning: false,
+      }),
+    ]);
+
+    now = 1_234_999;
+    finishLogFlush?.();
+    await vi.waitFor(() => {
+      expect(manager.list()).toEqual([
+        expect.objectContaining({
+          id: started.id,
+          exitCode: null,
+          signal: "SIGTERM",
+          completedAt: 1_234_999,
+          isRunning: false,
+        }),
+      ]);
+    });
+  });
+
+  it("prunes completed records opportunistically from completion time", () => {
+    let now = 1_000;
+    const manager = new ProcessManager(undefined, undefined, {
+      now: () => now,
+      completedRecordRetentionMs: 5 * 60 * 1000,
+    });
+    const record: BackgroundProcess = {
+      id: "completed",
+      pid: 1,
+      command: "done",
+      logFile: "done.log",
+      startedAt: 0,
+      completedAt: 1_000,
+      exitCode: 0,
+      signal: null,
+      lastReadOffset: null,
+    };
+    const processes = (manager as unknown as { processes: Map<string, BackgroundProcess> })
+      .processes;
+    processes.set(record.id, record);
+
+    now = 300_999;
+    expect(manager.list()).toEqual([
+      {
+        id: record.id,
+        pid: record.pid,
+        command: record.command,
+        logFile: record.logFile,
+        startedAt: record.startedAt,
+        completedAt: record.completedAt,
+        exitCode: record.exitCode,
+        signal: record.signal,
+        isRunning: false,
+      },
+    ]);
+    now = 301_000;
+    expect(manager.list()).toEqual([]);
+  });
+
+  it("schedules completion-relative record expiry with an unrefed timer", async () => {
+    vi.useFakeTimers();
+    try {
+      let now = 10_000;
+      const manager = new ProcessManager(undefined, undefined, {
+        now: () => now,
+        completedRecordRetentionMs: 5 * 60 * 1000,
+      });
+      const record: BackgroundProcess = {
+        id: "scheduled",
+        pid: 2,
+        command: "done",
+        logFile: "done.log",
+        startedAt: 0,
+        completedAt: now,
+        exitCode: 0,
+        signal: null,
+        lastReadOffset: null,
+      };
+      const internals = manager as unknown as {
+        processes: Map<string, BackgroundProcess>;
+        recordExpiryTimers: Map<string, NodeJS.Timeout>;
+        scheduleRecordExpiry(id: string, completedAt: number): void;
+      };
+      internals.processes.set(record.id, record);
+      internals.scheduleRecordExpiry(record.id, record.completedAt!);
+
+      expect(internals.recordExpiryTimers.get(record.id)?.hasRef()).toBe(false);
+
+      now += 5 * 60 * 1000;
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+
+      expect(internals.processes.has(record.id)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("removes 48-hour logs while protecting active background and foreground logs", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-log-retention-"));
+    const backgroundLogRoot = path.join(root, "background");
+    const foregroundLogRoot = path.join(root, "foreground");
+    await Promise.all([
+      fs.mkdir(backgroundLogRoot, { recursive: true }),
+      fs.mkdir(foregroundLogRoot, { recursive: true }),
+    ]);
+    let now = 2_000_000_000_000;
+    const retentionMs = 48 * 60 * 60 * 1000;
+    const staleDate = new Date(now - retentionMs - 1);
+    const staleBackground = path.join(backgroundLogRoot, "stale.log");
+    const staleForeground = path.join(foregroundLogRoot, "stale.log");
+    const activeBackground = path.join(backgroundLogRoot, "active.log");
+    const freshBackground = path.join(backgroundLogRoot, "fresh.log");
+    await Promise.all([
+      fs.writeFile(staleBackground, "old"),
+      fs.writeFile(staleForeground, "old"),
+      fs.writeFile(activeBackground, "live"),
+      fs.writeFile(freshBackground, "fresh"),
+    ]);
+    await Promise.all([
+      fs.utimes(staleBackground, staleDate, staleDate),
+      fs.utimes(staleForeground, staleDate, staleDate),
+      fs.utimes(activeBackground, staleDate, staleDate),
+      fs.utimes(freshBackground, new Date(now), new Date(now)),
+    ]);
+
+    const manager = new ProcessManager(undefined, undefined, {
+      backgroundLogRoot,
+      foregroundLogRoot,
+      now: () => now,
+      logRetentionMs: retentionMs,
+      createExecutionId: () => "open-foreground",
+    });
+    const internals = manager as unknown as { activeBackgroundLogs: Set<string> };
+    internals.activeBackgroundLogs.add(activeBackground);
+
+    try {
+      const foreground = await manager.allocateForegroundLog();
+      await fs.utimes(foreground.logPath, staleDate, staleDate);
+
+      await expect(fs.stat(staleBackground)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.stat(staleForeground)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.stat(activeBackground)).resolves.toBeDefined();
+      await expect(fs.stat(freshBackground)).resolves.toBeDefined();
+
+      now += 60_001;
+      await manager.readOutput("unknown");
+      await expect(fs.stat(foreground.logPath)).resolves.toBeDefined();
+
+      await foreground.close();
+      now += 60_001;
+      await manager.readOutput("unknown");
+      await expect(fs.stat(foreground.logPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+      internals.activeBackgroundLogs.delete(activeBackground);
+      now += 60_001;
+      await manager.readOutput("unknown");
+      await expect(fs.stat(activeBackground)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(fs.stat(freshBackground)).resolves.toBeDefined();
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("throttles stale-log sweeps to once per minute", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-log-sweep-throttle-"));
+    const backgroundLogRoot = path.join(root, "background");
+    const foregroundLogRoot = path.join(root, "foreground");
+    await Promise.all([
+      fs.mkdir(backgroundLogRoot, { recursive: true }),
+      fs.mkdir(foregroundLogRoot, { recursive: true }),
+    ]);
+    let now = 2_000_000_000_000;
+    const manager = new ProcessManager(undefined, undefined, {
+      backgroundLogRoot,
+      foregroundLogRoot,
+      now: () => now,
+      logRetentionMs: 0,
+    });
+
+    try {
+      await manager.readOutput("first-sweep");
+      const staleLog = path.join(backgroundLogRoot, "eligible.log");
+      await fs.writeFile(staleLog, "old");
+      await fs.utimes(staleLog, new Date(now - 1), new Date(now - 1));
+
+      now += 59_999;
+      await manager.readOutput("throttled");
+      await expect(fs.stat(staleLog)).resolves.toBeDefined();
+
+      now += 1;
+      await manager.readOutput("next-sweep");
+      await expect(fs.stat(staleLog)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps lifecycle reads working when log cleanup operations fail", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-log-cleanup-failure-"));
+    const backgroundLogRoot = path.join(root, "background");
+    const foregroundLogRoot = path.join(root, "foreground");
+    const notADirectory = path.join(root, "not-a-directory");
+    await Promise.all([
+      fs.mkdir(backgroundLogRoot, { recursive: true }),
+      fs.mkdir(foregroundLogRoot, { recursive: true }),
+      fs.writeFile(notADirectory, "fixture"),
+    ]);
+    const statFailure = path.join(backgroundLogRoot, "stat-failure.log");
+    const unlinkFailure = path.join(foregroundLogRoot, "unlink-failure.log");
+    await Promise.all([fs.writeFile(statFailure, "old"), fs.writeFile(unlinkFailure, "old")]);
+    const originalStat = fs.stat;
+    const originalUnlink = fs.unlink;
+    const statSpy = vi.spyOn(fs, "stat").mockImplementation(async (filePath, options) => {
+      if (filePath === statFailure) throw new Error("stat failed");
+      return originalStat(filePath, options as never);
+    });
+    const unlinkSpy = vi.spyOn(fs, "unlink").mockImplementation(async (filePath) => {
+      if (filePath === unlinkFailure) throw new Error("unlink failed");
+      return originalUnlink(filePath);
+    });
+
+    try {
+      const enumerationFailureManager = new ProcessManager(undefined, undefined, {
+        backgroundLogRoot: notADirectory,
+        foregroundLogRoot: notADirectory,
+        logRetentionMs: 0,
+      });
+      const entryFailureManager = new ProcessManager(undefined, undefined, {
+        backgroundLogRoot,
+        foregroundLogRoot,
+        logRetentionMs: 0,
+      });
+
+      await expect(enumerationFailureManager.readOutput("missing")).resolves.toMatchObject({
+        output: 'No background process with id "missing"',
+      });
+      await expect(entryFailureManager.readOutput("missing")).resolves.toMatchObject({
+        output: 'No background process with id "missing"',
+      });
+      expect(enumerationFailureManager.list()).toEqual([]);
+      expect(entryFailureManager.list()).toEqual([]);
+      await expect(fs.readFile(statFailure, "utf8")).resolves.toBe("old");
+      await expect(fs.readFile(unlinkFailure, "utf8")).resolves.toBe("old");
+    } finally {
+      statSpy.mockRestore();
+      unlinkSpy.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("ProcessManager lifecycle adapter", () => {
   it("spawns background work through the adapter with piped output", async () => {
     const fake = fakeChild(9876);
@@ -361,15 +647,24 @@ describe("ProcessManager lifecycle adapter", () => {
     fake.stdout.write("final output\n");
     fake.emitClose(0);
 
-    expect(manager.list()).toEqual([expect.objectContaining({ exitCode: null })]);
+    expect(manager.list()).toEqual([
+      expect.objectContaining({
+        exitCode: null,
+        signal: null,
+        completedAt: null,
+        isRunning: false,
+      }),
+    ]);
     expect(
       (manager as unknown as { children: Map<string, ChildProcess> }).children.has(started.id),
-    ).toBe(true);
+    ).toBe(false);
     expect(reapProcessWrapper).not.toHaveBeenCalled();
 
     finishLogFlush?.();
     await vi.waitFor(() => {
-      expect(manager.list()).toEqual([expect.objectContaining({ exitCode: 0 })]);
+      expect(manager.list()).toEqual([
+        expect.objectContaining({ exitCode: 0, signal: null, completedAt: expect.any(Number) }),
+      ]);
       expect(
         (manager as unknown as { children: Map<string, ChildProcess> }).children.has(started.id),
       ).toBe(false);
@@ -407,7 +702,9 @@ describe("ProcessManager lifecycle adapter", () => {
       await vi.advanceTimersByTimeAsync(5000);
 
       await expect(stopping).resolves.toContain("may still be running");
-      expect(manager.list()).toContain(proc);
+      expect(manager.list()).toContainEqual(
+        expect.objectContaining({ id: proc.id, isRunning: true }),
+      );
       expect(cleanupProcessTree).toHaveBeenCalledOnce();
     } finally {
       vi.useRealTimers();
@@ -423,7 +720,7 @@ describe("ProcessManager lifecycle adapter", () => {
     expect(killProcessTree).toHaveBeenCalledWith(
       expect.objectContaining({ pid: proc.pid, isExited: expect.any(Function) }),
     );
-    expect(manager.list()[0]?.exitCode).toBe(1);
+    expect(manager.list()[0]).toMatchObject({ exitCode: null, signal: null, isRunning: true });
   });
 
   it("does not clean up records that already completed naturally", () => {

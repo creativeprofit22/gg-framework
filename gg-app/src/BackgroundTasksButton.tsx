@@ -6,8 +6,8 @@ import type { BackgroundTask, KillTaskResult } from "./agent";
 /**
  * Footer indicator for background tasks (bash run_in_background) — mirrors the
  * ggcoder TUI's BackgroundTasksBar. Shows a running count; clicking opens an
- * upward popover listing each task with its command, status, and a kill button.
- * Hidden by the caller when nothing is running.
+ * upward popover listing retained tasks with terminal status and stop controls.
+ * Hidden by the caller only after the backend expires every retained record.
  *
  * The popover is rendered through a portal to `document.body` and positioned
  * `fixed` (anchored to the button's rect). This is required because the footer's
@@ -20,6 +20,19 @@ import type { BackgroundTask, KillTaskResult } from "./agent";
 function shortCommand(cmd: string): string {
   const firstLine = cmd.split("\n")[0] ?? cmd;
   return firstLine.length > 48 ? `${firstLine.slice(0, 47)}\u2026` : firstLine;
+}
+
+function taskStatus(task: BackgroundTask): string {
+  if (task.isRunning) return `pid ${task.pid}`;
+  if (task.signal) return `signal ${task.signal}`;
+  if (task.exitCode !== null) return `exit ${task.exitCode}`;
+  return "completed";
+}
+
+function taskStatusTitle(task: BackgroundTask): string {
+  const completion =
+    task.completedAt === null ? "" : `Completed ${new Date(task.completedAt).toLocaleString()}. `;
+  return `${completion}Log: ${task.logFile}`;
 }
 
 interface BackgroundTasksButtonProps {
@@ -77,7 +90,7 @@ export function BackgroundTasksButton({
     }
   };
 
-  const runningCount = tasks.filter((t) => t.exitCode === null).length;
+  const runningCount = tasks.filter((task) => task.isRunning).length;
   // Spinner color while anything runs; muted once all have exited.
   const accent = runningCount > 0 ? theme.warning : theme.textMuted;
 
@@ -92,7 +105,7 @@ export function BackgroundTasksButton({
         onClick={() => setOpen((o) => !o)}
       >
         {"\u2699 "}
-        {runningCount} background task{runningCount === 1 ? "" : "s"}
+        {runningCount} running
       </button>
       {open &&
         createPortal(
@@ -113,7 +126,7 @@ export function BackgroundTasksButton({
               </div>
             )}
             {tasks.map((t) => {
-              const running = t.exitCode === null;
+              const running = t.isRunning;
               const pending = pendingTaskId === t.id;
               return (
                 <div key={t.id} className="bgtasks-item">
@@ -126,8 +139,12 @@ export function BackgroundTasksButton({
                   <span className="bgtasks-cmd" style={{ color: theme.text }} title={t.command}>
                     {shortCommand(t.command)}
                   </span>
-                  <span className="bgtasks-status" style={{ color: theme.textDim }}>
-                    {running ? `pid ${t.pid}` : `exit ${t.exitCode}`}
+                  <span
+                    className="bgtasks-status"
+                    style={{ color: theme.textDim }}
+                    title={taskStatusTitle(t)}
+                  >
+                    {taskStatus(t)}
                   </span>
                   {running && (
                     <button

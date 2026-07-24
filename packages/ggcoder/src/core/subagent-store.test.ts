@@ -46,8 +46,10 @@ describe("SubAgentStore", () => {
     const filePath = store.pathFor("/project", "parent-a");
     const stat = await fs.stat(filePath);
     const directoryStat = await fs.stat(path.dirname(filePath));
-    expect(stat.mode & 0o777).toBe(0o600);
-    expect(directoryStat.mode & 0o777).toBe(0o700);
+    if (process.platform !== "win32") {
+      expect(stat.mode & 0o777).toBe(0o600);
+      expect(directoryStat.mode & 0o777).toBe(0o700);
+    }
     expect(await fs.readFile(filePath, "utf-8")).not.toContain(secret);
     const loaded = await store.load("/project", "parent-a");
     expect(loaded).toHaveLength(20);

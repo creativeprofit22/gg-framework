@@ -53,6 +53,7 @@ function sleep(ms: number): Promise<void> {
 export class LspClient {
   private readonly proc: ChildProcess;
   private readonly conn: JsonRpcConnection;
+  private readonly exited: Promise<void>;
   private readonly versions = new Map<string, number>();
   private readonly published = new Map<string, LspDiagnostic[]>();
   private waiters: DiagnosticWaiter[] = [];
@@ -73,6 +74,7 @@ export class LspClient {
       stdio: ["pipe", "pipe", "ignore"],
       env: getSafeToolEnv(),
     });
+    this.exited = new Promise((resolve) => this.proc.once("exit", () => resolve()));
     this.proc.on("error", () => this.markDead());
     this.proc.on("exit", () => this.markDead());
     const { stdout, stdin } = this.proc;
@@ -195,10 +197,8 @@ export class LspClient {
   }
 
   /**
-   * Graceful shutdown/exit handshake with SIGKILL fallback. Synchronous so it
-   * is safe inside `process.on("exit")` handlers: the shutdown request and
-   * exit notification are written immediately; the SIGKILL timer covers
-   * servers that ignore them (and stdin EOF reaps them when we die first).
+   * Start graceful shutdown immediately. `waitForExit` lets async cleanup
+   * paths wait for Windows to release the server's working directory.
    */
   shutdown(): void {
     if (!this.alive) return;
@@ -208,6 +208,21 @@ export class LspClient {
       if (this.alive) this.proc.kill("SIGKILL");
     }, KILL_GRACE_MS);
     killTimer.unref();
+  }
+
+  async waitForExit(timeoutMs = SHUTDOWN_TIMEOUT_MS + KILL_GRACE_MS): Promise<void> {
+    if (!this.alive) return;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = await Promise.race([
+      this.exited.then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), timeoutMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (!timedOut || !this.alive) return;
+    this.proc.kill("SIGKILL");
+    await Promise.race([this.exited, new Promise<void>((resolve) => setTimeout(resolve, 500))]);
   }
 
   private markDead(): void {

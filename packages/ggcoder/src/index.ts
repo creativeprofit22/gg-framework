@@ -79,6 +79,7 @@ export type {
 export type {
   AgentSessionOptions,
   AgentSessionState,
+  BackgroundTaskSnapshot,
   BusEventMap,
   ContextWindowOptions,
   ModelInfo,

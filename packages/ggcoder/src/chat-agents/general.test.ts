@@ -10,18 +10,20 @@ function optionsOf(agent: unknown): AgentSessionOptions {
 
 describe("General chat agent", () => {
   it("uses an isolated session namespace outside GG Coder history", () => {
-    const coderSessions = path.join("/tmp", "gg", "sessions");
+    const coderSessions = path.resolve("tmp", "gg", "sessions");
     expect(chatAgentSessionsDir(coderSessions, "general")).toBe(
-      path.join("/tmp", "gg", "chat-sessions", "general"),
+      path.resolve("tmp", "gg", "chat-sessions", "general"),
     );
   });
 
   it("keeps caching and compaction on the shared spine while disabling coder behavior", () => {
+    const workspace = path.resolve("tmp", "workspace");
+    const sessionsDir = path.resolve("tmp", "gg", "sessions");
     const agent = createGeneralChatAgent({
       provider: "anthropic",
       model: "claude-test",
-      cwd: "/tmp/workspace",
-      sessionsDir: "/tmp/gg/sessions",
+      cwd: workspace,
+      sessionsDir,
     });
     const options = optionsOf(agent);
 
@@ -32,9 +34,9 @@ describe("General chat agent", () => {
       "Put facts about the user or their world in durable memory",
     );
     expect(options.systemPrompt).toContain("- Active agent: general");
-    expect(options.systemPrompt).toContain("- Workspace root: /tmp/workspace");
+    expect(options.systemPrompt).toContain(`- Workspace root: ${workspace}`);
     expect(options.promptCacheKeyPrefix).toBe("ggchat:general");
-    expect(options.sessionRootDir).toBe("/tmp/gg/chat-sessions/general");
+    expect(options.sessionRootDir).toBe(path.resolve("tmp", "gg", "chat-sessions", "general"));
     expect(options.coderSlashCommands).toBe(false);
     expect(options.selfCorrectionHooks).toBe(false);
     expect(options.projectCustomization).toBe(false);
@@ -50,9 +52,9 @@ describe("General chat agent", () => {
     const agent = createGeneralChatAgent({
       provider: "anthropic",
       model: "claude-test",
-      cwd: "/tmp/workspace",
-      sessionsDir: "/tmp/gg/sessions",
-      sessionId: "/tmp/gg/sessions/project/coder-session.jsonl",
+      cwd: path.resolve("tmp", "workspace"),
+      sessionsDir: path.resolve("tmp", "gg", "sessions"),
+      sessionId: path.resolve("tmp", "gg", "sessions", "project", "coder-session.jsonl"),
     });
     expect(optionsOf(agent).sessionId).toBeUndefined();
   });

@@ -16,8 +16,15 @@ export interface BackgroundProcess {
   command: string;
   logFile: string;
   startedAt: number;
+  completedAt: number | null;
   exitCode: number | null;
-  lastReadOffset: number;
+  signal: NodeJS.Signals | null;
+  lastReadOffset: number | null;
+}
+
+/** Serializable process state shared by orchestration and task-status surfaces. */
+export interface BackgroundTaskSnapshot extends Omit<BackgroundProcess, "lastReadOffset"> {
+  isRunning: boolean;
 }
 
 export interface StartResult {
@@ -30,11 +37,22 @@ export interface ReadOutputResult {
   id: string;
   isRunning: boolean;
   exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  completedAt: number | null;
   output: string;
+  startOffset: number;
+  endOffset: number;
+  skippedBytes: number;
+  remainingBytes: number;
+  logFile: string | null;
 }
 
 const BG_DIR = path.join(os.homedir(), ".gg", "bg");
 const FOREGROUND_DIR = path.join(os.homedir(), ".gg", "foreground");
+const DEFAULT_READ_CAP_BYTES = 256 * 1024;
+const DEFAULT_RECORD_RETENTION_MS = 5 * 60 * 1000;
+const DEFAULT_LOG_RETENTION_MS = 48 * 60 * 60 * 1000;
+const LOG_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export interface ForegroundLogHandle {
   executionId: string;
@@ -47,9 +65,14 @@ export interface ForegroundLogHandle {
 }
 
 export interface ProcessManagerOptions {
+  backgroundLogRoot?: string;
   foregroundLogRoot?: string;
   createForegroundLogStream?: (logPath: string) => Writable;
   createExecutionId?: () => string;
+  now?: () => number;
+  readCapBytes?: number;
+  completedRecordRetentionMs?: number;
+  logRetentionMs?: number;
 }
 
 function processTarget(pid: number, child: ChildProcess): ProcessTarget {
@@ -62,6 +85,11 @@ function processTarget(pid: number, child: ChildProcess): ProcessTarget {
 export class ProcessManager {
   private processes = new Map<string, BackgroundProcess>();
   private children = new Map<string, ChildProcess>();
+  private recordExpiryTimers = new Map<string, NodeJS.Timeout>();
+  private activeBackgroundLogs = new Set<string>();
+  private openForegroundLogs = new Set<string>();
+  private logSweepPromise: Promise<void> | null = null;
+  private lastLogSweepAt: number | null = null;
 
   constructor(
     private readonly lifecycle: ProcessLifecycleAdapter = localProcessLifecycle,
@@ -71,6 +99,8 @@ export class ProcessManager {
   ) {}
 
   async allocateForegroundLog(): Promise<ForegroundLogHandle> {
+    this.pruneExpiredRecords();
+    await this.sweepStaleLogs();
     const foregroundLogRoot = this.options.foregroundLogRoot ?? FOREGROUND_DIR;
     await fsp.mkdir(foregroundLogRoot, { recursive: true });
 
@@ -93,12 +123,22 @@ export class ProcessManager {
     const streamFactory =
       this.options.createForegroundLogStream ??
       ((foregroundLogPath: string) => createWriteStream(foregroundLogPath, { flags: "a" }));
-    const stream = streamFactory(logPath);
+    this.openForegroundLogs.add(logPath);
+    let stream: Writable;
+    try {
+      stream = streamFactory(logPath);
+    } catch (error) {
+      this.openForegroundLogs.delete(logPath);
+      throw error;
+    }
     let streamError: Error | null = null;
     let ended = false;
     let settleClose!: () => void;
     const closed = new Promise<void>((resolve) => {
-      settleClose = resolve;
+      settleClose = () => {
+        this.openForegroundLogs.delete(logPath);
+        resolve();
+      };
     });
     stream.on("error", (error: Error) => {
       streamError = error;
@@ -122,6 +162,7 @@ export class ProcessManager {
           stream.once("error", onOpenError);
         });
       } catch (error) {
+        this.openForegroundLogs.delete(logPath);
         stream.destroy();
         throw error;
       }
@@ -173,13 +214,29 @@ export class ProcessManager {
   }
 
   async start(command: string, cwd: string): Promise<StartResult> {
-    await fsp.mkdir(BG_DIR, { recursive: true });
+    this.pruneExpiredRecords();
+    await this.sweepStaleLogs();
+    const backgroundLogRoot = this.options.backgroundLogRoot ?? BG_DIR;
+    await fsp.mkdir(backgroundLogRoot, { recursive: true });
 
     const id = crypto.randomUUID().slice(0, 8);
-    const logFile = path.join(BG_DIR, `${id}.log`);
-    const logStream = this.createLogStream(logFile);
+    const logFile = path.join(backgroundLogRoot, `${id}.log`);
+    this.activeBackgroundLogs.add(logFile);
+    let logStream: Writable;
+    try {
+      logStream = this.createLogStream(logFile);
+    } catch (error) {
+      this.activeBackgroundLogs.delete(logFile);
+      throw error;
+    }
+    const markLogClosed = (): void => {
+      this.activeBackgroundLogs.delete(logFile);
+    };
     // A local logging failure must not crash the host or bypass target execution.
     logStream.on("error", () => {});
+    logStream.once("finish", markLogClosed);
+    logStream.once("close", markLogClosed);
+    logStream.once("error", markLogClosed);
 
     const shell = resolveShell(command);
     let child: ChildProcess;
@@ -229,7 +286,7 @@ export class ProcessManager {
         // and an unhandled error event must never crash the agent host.
       };
 
-      const onClose = (code: number | null): void => {
+      const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
         endLog();
         if (!proc || pid === undefined) {
           if (!startupSettled) {
@@ -241,9 +298,14 @@ export class ProcessManager {
 
         const completedProcess = proc;
         const completedPid = pid;
+        this.children.delete(id);
         void logFlushed.then(() => {
-          completedProcess.exitCode = code ?? 1;
-          this.children.delete(id);
+          // Preserve native child semantics: signal exits have no numeric code.
+          // Consumers use the explicit snapshot isRunning field for liveness.
+          completedProcess.exitCode = code;
+          completedProcess.signal = signal;
+          completedProcess.completedAt = this.now();
+          this.scheduleRecordExpiry(id, completedProcess.completedAt);
           try {
             this.lifecycle.reapProcessWrapper(processTarget(completedPid, child));
           } catch {
@@ -267,9 +329,11 @@ export class ProcessManager {
           pid,
           command,
           logFile,
-          startedAt: Date.now(),
+          startedAt: this.now(),
+          completedAt: null,
           exitCode: null,
-          lastReadOffset: 0,
+          signal: null,
+          lastReadOffset: null,
         };
         this.processes.set(id, proc);
         this.children.set(id, child);
@@ -286,36 +350,130 @@ export class ProcessManager {
     });
   }
 
-  async readOutput(id: string, fromStart?: boolean): Promise<ReadOutputResult> {
+  async readOutput(id: string, fromStart = false): Promise<ReadOutputResult> {
+    this.pruneExpiredRecords();
+    await this.sweepStaleLogs();
     const proc = this.processes.get(id);
     if (!proc) {
       return {
         id,
         isRunning: false,
         exitCode: null,
+        signal: null,
+        completedAt: null,
         output: `No background process with id "${id}"`,
+        startOffset: 0,
+        endOffset: 0,
+        skippedBytes: 0,
+        remainingBytes: 0,
+        logFile: null,
       };
     }
 
-    const offset = fromStart ? 0 : proc.lastReadOffset;
+    const configuredReadCap = Math.floor(this.options.readCapBytes ?? DEFAULT_READ_CAP_BYTES);
+    const readCap = Number.isFinite(configuredReadCap)
+      ? Math.max(4, configuredReadCap)
+      : DEFAULT_READ_CAP_BYTES;
+    const isLateSnapshot = !fromStart && proc.lastReadOffset === null;
+    const isRunning = this.children.has(id);
     let output = "";
+    let startOffset: number;
+    let endOffset: number;
+    let skippedBytes = 0;
+    let remainingBytes = 0;
 
     try {
-      const stat = await fsp.stat(proc.logFile);
-      if (stat.size > offset) {
-        const buf = Buffer.alloc(stat.size - offset);
-        const fh = await fsp.open(proc.logFile, "r");
-        const { bytesRead } = await fh.read(buf, 0, buf.length, offset);
-        await fh.close();
-        output = buf.subarray(0, bytesRead).toString("utf-8");
-        proc.lastReadOffset = offset + bytesRead;
+      // Freeze range selection at this size. Bytes appended after this stat are
+      // intentionally left for the next incremental read.
+      const snapshotSize = (await fsp.stat(proc.logFile)).size;
+      const previousOffset = proc.lastReadOffset ?? 0;
+      const requestedStart = fromStart
+        ? 0
+        : isLateSnapshot
+          ? Math.max(0, snapshotSize - readCap)
+          : previousOffset > snapshotSize
+            ? 0
+            : previousOffset;
+      const requestedLength = Math.min(readCap, Math.max(0, snapshotSize - requestedStart));
+
+      if (requestedLength > 0) {
+        const buffer = Buffer.alloc(requestedLength);
+        const file = await fsp.open(proc.logFile, "r");
+        let bytesRead = 0;
+        try {
+          ({ bytesRead } = await file.read(buffer, 0, buffer.length, requestedStart));
+        } finally {
+          await file.close();
+        }
+
+        let leadingBytes = 0;
+        if (isLateSnapshot && requestedStart > 0) {
+          while (leadingBytes < bytesRead && (buffer[leadingBytes]! & 0xc0) === 0x80) {
+            leadingBytes += 1;
+          }
+        }
+
+        const completePrefixLength = this.completeUtf8PrefixLength(
+          buffer.subarray(leadingBytes, bytesRead),
+        );
+        const reachedSnapshotEnd = requestedStart + bytesRead >= snapshotSize;
+        const consumedLength =
+          !isRunning && reachedSnapshotEnd ? bytesRead - leadingBytes : completePrefixLength;
+        startOffset = requestedStart + leadingBytes;
+        endOffset = startOffset + consumedLength;
+        output = buffer
+          .subarray(leadingBytes, leadingBytes + completePrefixLength)
+          .toString("utf-8");
+        proc.lastReadOffset = endOffset;
+      } else {
+        startOffset = requestedStart;
+        endOffset = requestedStart;
+        proc.lastReadOffset = requestedStart;
       }
+
+      skippedBytes = isLateSnapshot ? startOffset : 0;
+      remainingBytes = Math.max(0, snapshotSize - endOffset);
     } catch {
       output = "(failed to read log file)";
+      const cursor = proc.lastReadOffset ?? 0;
+      startOffset = cursor;
+      endOffset = cursor;
     }
 
-    const isRunning = this.children.has(id);
-    return { id, isRunning, exitCode: proc.exitCode, output };
+    return {
+      id,
+      isRunning,
+      exitCode: proc.exitCode,
+      signal: proc.signal,
+      completedAt: proc.completedAt,
+      output,
+      startOffset,
+      endOffset,
+      skippedBytes,
+      remainingBytes,
+      logFile: proc.logFile,
+    };
+  }
+
+  private completeUtf8PrefixLength(buffer: Buffer): number {
+    if (buffer.length === 0) return 0;
+
+    let continuationBytes = 0;
+    for (
+      let index = buffer.length - 1;
+      index >= 0 && (buffer[index]! & 0xc0) === 0x80;
+      index -= 1
+    ) {
+      continuationBytes += 1;
+    }
+
+    const leadIndex = buffer.length - continuationBytes - 1;
+    if (leadIndex < 0) return buffer.length;
+    const lead = buffer[leadIndex]!;
+    const expectedBytes =
+      (lead & 0x80) === 0 ? 1 : (lead & 0xe0) === 0xc0 ? 2 : (lead & 0xf0) === 0xe0 ? 3 : 4;
+    const availableBytes = continuationBytes + 1;
+    return availableBytes < expectedBytes ? leadIndex : buffer.length;
   }
 
   async sendInput(
@@ -323,12 +481,14 @@ export class ProcessManager {
     input: string,
     opts: { enter?: boolean; eof?: boolean } = {},
   ): Promise<string> {
+    this.pruneExpiredRecords();
+    await this.sweepStaleLogs();
     const proc = this.processes.get(id);
     if (!proc) return `No background process with id "${id}"`;
 
     const child = this.children.get(id);
-    if (!child || proc.exitCode !== null) {
-      return `Process ${id} already exited (code ${proc.exitCode})`;
+    if (!child) {
+      return `Process ${id} already exited (${this.formatTerminalStatus(proc)})`;
     }
 
     const stdin = child.stdin;
@@ -359,12 +519,14 @@ export class ProcessManager {
   }
 
   async stop(id: string): Promise<string> {
+    this.pruneExpiredRecords();
+    void this.sweepStaleLogs();
     const proc = this.processes.get(id);
     if (!proc) return `No background process with id "${id}"`;
 
     const child = this.children.get(id);
-    if (!child || proc.exitCode !== null) {
-      return `Process ${id} already exited (code ${proc.exitCode})`;
+    if (!child) {
+      return `Process ${id} already exited (${this.formatTerminalStatus(proc)})`;
     }
 
     const target = processTarget(proc.pid, child);
@@ -395,24 +557,125 @@ export class ProcessManager {
     return `Process ${id} stopped`;
   }
 
-  list(): BackgroundProcess[] {
-    const cutoff = Date.now() - 5 * 60 * 1000;
-    for (const [id, proc] of this.processes) {
-      if (proc.exitCode !== null && !this.children.has(id) && proc.startedAt < cutoff) {
-        this.processes.delete(id);
-      }
-    }
-    return Array.from(this.processes.values());
+  list(): BackgroundTaskSnapshot[] {
+    this.pruneExpiredRecords();
+    void this.sweepStaleLogs();
+    return Array.from(this.processes.values(), (proc) => ({
+      id: proc.id,
+      pid: proc.pid,
+      command: proc.command,
+      logFile: proc.logFile,
+      startedAt: proc.startedAt,
+      completedAt: proc.completedAt,
+      exitCode: proc.exitCode,
+      signal: proc.signal,
+      isRunning: this.children.has(proc.id),
+    }));
   }
 
   shutdownAll(): void {
-    for (const [id, proc] of this.processes) {
-      const child = this.children.get(id);
+    this.pruneExpiredRecords();
+    void this.sweepStaleLogs();
+    for (const proc of this.processes.values()) {
+      const child = this.children.get(proc.id);
       if (child) {
         this.lifecycle.killProcessTree(processTarget(proc.pid, child));
-        proc.exitCode = proc.exitCode ?? 1;
-        this.children.delete(id);
       }
     }
+  }
+
+  private formatTerminalStatus(proc: BackgroundProcess): string {
+    if (proc.signal) return `signal ${proc.signal}`;
+    if (proc.exitCode !== null) return `code ${proc.exitCode}`;
+    return "completion pending";
+  }
+
+  private now(): number {
+    return (this.options.now ?? Date.now)();
+  }
+
+  private sweepStaleLogs(): Promise<void> {
+    if (this.logSweepPromise) return this.logSweepPromise;
+
+    const now = this.now();
+    if (this.lastLogSweepAt !== null && now - this.lastLogSweepAt < LOG_SWEEP_INTERVAL_MS) {
+      return Promise.resolve();
+    }
+    this.lastLogSweepAt = now;
+
+    this.logSweepPromise = this.removeStaleLogFiles(now)
+      .catch(() => {})
+      .finally(() => {
+        this.logSweepPromise = null;
+      });
+    return this.logSweepPromise;
+  }
+
+  private async removeStaleLogFiles(now: number): Promise<void> {
+    const retentionMs = Math.max(0, this.options.logRetentionMs ?? DEFAULT_LOG_RETENTION_MS);
+    const cutoff = now - retentionMs;
+    const roots = new Set([
+      this.options.backgroundLogRoot ?? BG_DIR,
+      this.options.foregroundLogRoot ?? FOREGROUND_DIR,
+    ]);
+    const protectedPaths = new Set([...this.activeBackgroundLogs, ...this.openForegroundLogs]);
+
+    await Promise.all(
+      Array.from(roots, async (root) => {
+        let entries;
+        try {
+          entries = await fsp.readdir(root, { withFileTypes: true });
+        } catch {
+          return;
+        }
+
+        await Promise.all(
+          entries.map(async (entry) => {
+            if (!entry.isFile()) return;
+            const logPath = path.join(root, entry.name);
+            if (protectedPaths.has(logPath)) return;
+            try {
+              const stat = await fsp.stat(logPath);
+              if (stat.mtimeMs < cutoff) await fsp.unlink(logPath);
+            } catch {
+              // Log retention is best-effort and must never break process lifecycle methods.
+            }
+          }),
+        );
+      }),
+    );
+  }
+
+  private pruneExpiredRecords(): void {
+    const retentionMs = Math.max(
+      0,
+      this.options.completedRecordRetentionMs ?? DEFAULT_RECORD_RETENTION_MS,
+    );
+    const cutoff = this.now() - retentionMs;
+    for (const [id, proc] of this.processes) {
+      if (proc.completedAt !== null && !this.children.has(id) && proc.completedAt <= cutoff) {
+        this.processes.delete(id);
+        const timer = this.recordExpiryTimers.get(id);
+        if (timer) clearTimeout(timer);
+        this.recordExpiryTimers.delete(id);
+      }
+    }
+  }
+
+  private scheduleRecordExpiry(id: string, completedAt: number): void {
+    const existingTimer = this.recordExpiryTimers.get(id);
+    if (existingTimer) clearTimeout(existingTimer);
+
+    const retentionMs = Math.max(
+      0,
+      this.options.completedRecordRetentionMs ?? DEFAULT_RECORD_RETENTION_MS,
+    );
+    const delay = Math.max(0, completedAt + retentionMs - this.now());
+    const timer = setTimeout(() => {
+      this.recordExpiryTimers.delete(id);
+      this.pruneExpiredRecords();
+    }, delay);
+    timer.unref();
+    this.recordExpiryTimers.set(id, timer);
   }
 }

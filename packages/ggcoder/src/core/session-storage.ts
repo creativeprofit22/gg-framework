@@ -169,7 +169,9 @@ export async function openSessionReadStream(filePath: string): Promise<{
 }
 
 async function syncFile(filePath: string): Promise<void> {
-  const handle = await fs.open(filePath, "r");
+  // Windows rejects fsync on a read-only handle with EPERM. A read/write handle
+  // preserves the same durability barrier on every supported platform.
+  const handle = await fs.open(filePath, "r+");
   try {
     await handle.sync();
   } finally {

@@ -5,17 +5,22 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { writeOverflow, cleanupToolOutputs, getToolOutputRoot } from "./overflow.js";
 
 let originalHome: string | undefined;
+let originalUserProfile: string | undefined;
 let tmpHome: string;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
+  originalUserProfile = process.env.USERPROFILE;
   tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "overflow-home-"));
   process.env.HOME = tmpHome;
+  process.env.USERPROFILE = tmpHome;
 });
 
 afterEach(async () => {
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
   await fs.rm(tmpHome, { recursive: true, force: true });
 });
 

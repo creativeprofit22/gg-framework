@@ -11,8 +11,21 @@ const runningTask: BackgroundTask = {
   id: "task-1",
   pid: 4242,
   command: "pnpm dev",
+  logFile: "/tmp/task-1.log",
   startedAt: 1,
+  completedAt: null,
   exitCode: null,
+  signal: null,
+  isRunning: true,
+};
+
+const signalCompletedTask: BackgroundTask = {
+  ...runningTask,
+  id: "task-2",
+  command: "pnpm watch",
+  completedAt: 2,
+  signal: "SIGTERM",
+  isRunning: false,
 };
 
 describe("BackgroundTasksButton task termination", () => {
@@ -42,6 +55,30 @@ describe("BackgroundTasksButton task termination", () => {
     expect((await screen.findByRole("status")).textContent).toBe("Process task-1 stopped");
     expect(screen.getByText("pnpm dev")).toBeTruthy();
     expect(killTask).toHaveBeenCalledWith("task-1");
+  });
+
+  it("keeps retained signal completions reachable without a stop affordance", () => {
+    render(<BackgroundTasksButton tasks={[signalCompletedTask]} killTask={killTask} />);
+
+    expect(screen.getByRole("button", { name: "Background tasks" }).textContent).toContain(
+      "0 running",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Background tasks" }));
+
+    expect(screen.getByText("signal SIGTERM")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop task: pnpm watch" })).toBeNull();
+  });
+
+  it("renders normal completion codes separately from signal status", () => {
+    render(
+      <BackgroundTasksButton
+        tasks={[{ ...signalCompletedTask, exitCode: 7, signal: null }]}
+        killTask={killTask}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Background tasks" }));
+
+    expect(screen.getByText("exit 7")).toBeTruthy();
   });
 
   it("shows an actionable failure and retains the running task", async () => {

@@ -7,6 +7,8 @@ import {
   type SessionEventFrame,
 } from "./app-sidecar-session-router.js";
 import { BASH_DIAGNOSTICS_FIXTURE } from "./test-fixtures/bash-diagnostics.js";
+import type { BackgroundTaskSnapshot } from "./core/process-manager.js";
+import type { TaskOutputDetails } from "./tools/task-output.js";
 import type { BashDiagnostics } from "./types.js";
 
 interface FakeContext {
@@ -189,6 +191,60 @@ async function request(
 }
 
 describe("session event shape", () => {
+  it("serializes the complete native background-task snapshot", () => {
+    const task = {
+      id: "bg-signal",
+      pid: 4242,
+      command: "pnpm watch",
+      logFile: "/tmp/bg-signal.log",
+      startedAt: 1,
+      completedAt: 2,
+      exitCode: null,
+      signal: "SIGTERM",
+      isRunning: false,
+    } satisfies BackgroundTaskSnapshot;
+    const serialized = sessionEventSseData("session-a", "tasks", { tasks: [task] });
+    const frame = JSON.parse(serialized.slice("data: ".length)) as SessionEventFrame;
+
+    expect(frame).toEqual({
+      sessionId: "session-a",
+      type: "tasks",
+      data: { tasks: [task] },
+    });
+  });
+
+  it("serializes complete task_output metadata in tool_call_end details", () => {
+    const taskOutput = {
+      isRunning: false,
+      exitCode: null,
+      signal: "SIGTERM",
+      completedAt: Date.UTC(2026, 6, 24, 12, 34, 56),
+      startOffset: 262_144,
+      endOffset: 524_288,
+      skippedBytes: 262_144,
+      remainingBytes: 128,
+      logFile: "/tmp/bg-task.log",
+      presentationCapped: true,
+    } satisfies TaskOutputDetails;
+    const serialized = sessionEventSseData("session-a", "tool_call_end", {
+      toolCallId: "task-output-1",
+      result: "Process bg-task: exited (signal SIGTERM)",
+      details: { taskOutput },
+      isError: false,
+      durationMs: 12,
+    });
+    const frame = JSON.parse(serialized.slice("data: ".length)) as SessionEventFrame;
+
+    expect(frame).toEqual({
+      sessionId: "session-a",
+      type: "tool_call_end",
+      data: expect.objectContaining({
+        toolCallId: "task-output-1",
+        details: { taskOutput },
+      }),
+    });
+  });
+
   it("serializes complete bash diagnostics in tool_call_end details", () => {
     const diagnostics = BASH_DIAGNOSTICS_FIXTURE satisfies BashDiagnostics;
     const serialized = sessionEventSseData("session-a", "tool_call_end", {

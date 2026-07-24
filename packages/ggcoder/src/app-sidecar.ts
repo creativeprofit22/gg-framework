@@ -2436,7 +2436,7 @@ async function createSession(
         lastTasksJson = next;
         broadcast("tasks", { tasks });
       }
-      const active = running || tasks.length > 0;
+      const active = running || tasks.some((task) => task.isRunning);
       scheduleTasksPoll(active ? 1500 : 5000);
     }, delay);
     tasksPoll.unref?.();

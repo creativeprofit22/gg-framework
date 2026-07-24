@@ -30,14 +30,17 @@ vi.mock("./mcp/index.js", async () => {
 });
 
 let originalHome: string | undefined;
+let originalUserProfile: string | undefined;
 let tempHome: string;
 let tempProject: string;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
+  originalUserProfile = process.env.USERPROFILE;
   tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "agent-tail-home-"));
   tempProject = await fs.mkdtemp(path.join(os.tmpdir(), "agent-tail-project-"));
   process.env.HOME = tempHome;
+  process.env.USERPROFILE = tempHome;
   observedPrompts.length = 0;
   agentLoopMock.mockClear();
   await fs.mkdir(path.join(tempHome, ".gg"), { recursive: true });
@@ -56,6 +59,8 @@ beforeEach(async () => {
 afterEach(async () => {
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
   await Promise.all([
     fs.rm(tempHome, { recursive: true, force: true }),
     fs.rm(tempProject, { recursive: true, force: true }),

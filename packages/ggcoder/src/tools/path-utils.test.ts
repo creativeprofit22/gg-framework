@@ -6,13 +6,15 @@ import { resolvePath, rejectSymlink } from "./path-utils.js";
 
 describe("resolvePath", () => {
   it("resolves relative path from cwd", () => {
-    const result = resolvePath("/home/user/project", "src/index.ts");
-    expect(result).toBe(path.resolve("/home/user/project", "src/index.ts"));
+    const cwd = path.resolve("home", "user", "project");
+    const result = resolvePath(cwd, "src/index.ts");
+    expect(result).toBe(path.resolve(cwd, "src/index.ts"));
   });
 
   it("returns absolute path as-is", () => {
-    const result = resolvePath("/home/user/project", "/etc/hosts");
-    expect(result).toBe("/etc/hosts");
+    const absolutePath = path.resolve(path.parse(process.cwd()).root, "etc", "hosts");
+    const result = resolvePath(path.resolve("home", "user", "project"), absolutePath);
+    expect(result).toBe(absolutePath);
   });
 
   it("expands ~ to home directory", () => {

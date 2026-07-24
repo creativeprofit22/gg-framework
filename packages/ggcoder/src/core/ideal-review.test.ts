@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildIdealReviewMessage,
@@ -129,10 +130,10 @@ describe("buildIdealReviewMessage", () => {
 });
 
 describe("detectTestDrift", () => {
-  const cwd = "/proj";
+  const cwd = path.resolve(path.parse(process.cwd()).root, "proj");
   const exists = (files: string[]) => {
-    const set = new Set(files);
-    return (p: string) => set.has(p);
+    const set = new Set(files.map((file) => path.resolve(file)));
+    return (candidate: string) => set.has(path.resolve(candidate));
   };
 
   it("flags a changed source whose sibling test exists but was not touched", () => {

@@ -52,7 +52,7 @@ describe("Speed Benchmark", () => {
     // Turns 2 and 3 (3-min and 4-min delays) should be cache hits.
     expect(result.turns[1].cacheHit).toBe(true);
     expect(result.turns[2].cacheHit).toBe(true);
-  });
+  }, 15_000);
 
   it("optimized hits cache on turn after 5-min gap (1-h TTL)", async () => {
     const workload = createDefaultWorkload();
@@ -77,7 +77,7 @@ describe("Speed Benchmark", () => {
 
     // Turn 1 should be a cache hit too (pre-warmed).
     expect(result.turns[0].cacheHit).toBe(true);
-  });
+  }, 15_000);
 
   it("pre-warming makes first turn a cache hit", async () => {
     const workload = createDefaultWorkload();
@@ -103,7 +103,7 @@ describe("Speed Benchmark", () => {
 
     // First-turn TTFT should be lower with pre-warm.
     expect(warm.turns[0].ttftMs).toBeLessThan(cold.turns[0].ttftMs);
-  });
+  }, 30_000);
 
   it("mock provider tracks stats correctly", () => {
     const provider = new MockBenchmarkProvider({

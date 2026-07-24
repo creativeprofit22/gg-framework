@@ -82,6 +82,24 @@ export interface BashToolResultDetails {
   bashDiagnostics: BashDiagnostics;
 }
 
+/** Bounded background-process output metadata delivered in tool result details. */
+export interface TaskOutputDetails {
+  isRunning: boolean;
+  exitCode: number | null;
+  signal: string | null;
+  completedAt: number | null;
+  startOffset: number;
+  endOffset: number;
+  skippedBytes: number;
+  remainingBytes: number;
+  logFile: string | null;
+  presentationCapped: boolean;
+}
+
+export interface TaskOutputToolResultDetails {
+  taskOutput: TaskOutputDetails;
+}
+
 export interface LocalPatchedUpdateEvent {
   type: "started" | "line" | "completed" | "error";
   message?: string;
@@ -137,14 +155,18 @@ export function isJiwaChangeEvent(event: SidecarEvent): event is JiwaChangeEvent
   );
 }
 
-/** A background process (bash run_in_background), mirrored from the sidecar. */
+/** Exact serializable background-task snapshot mirrored from ProcessManager. */
 export interface BackgroundTask {
   id: string;
   pid: number;
   command: string;
+  logFile: string;
   startedAt: number;
-  /** null while running; a number once the process has exited. */
+  completedAt: number | null;
+  /** Native child exit code; null while running or when terminated by signal. */
   exitCode: number | null;
+  signal: string | null;
+  isRunning: boolean;
 }
 
 /** User-visible outcome of asking the sidecar to stop a background task. */

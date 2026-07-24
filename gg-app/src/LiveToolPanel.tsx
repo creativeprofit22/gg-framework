@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
-import type { BashDiagnostics, BashToolResultDetails } from "./agent";
+import type { BashDiagnostics, BashToolResultDetails, TaskOutputDetails } from "./agent";
 import { theme } from "./theme";
-import { buildToolLineParts, toneColor } from "./tool-format";
+import { buildToolLineParts, getTaskOutputDetails, toneColor } from "./tool-format";
+
+export { getTaskOutputDetails } from "./tool-format";
 
 // BLACK_CIRCLE — ⏺, matching the TUI status figure.
 const DOT = "\u23FA";
@@ -73,6 +75,106 @@ function diagnosticsText(diagnostics: BashDiagnostics): string {
     "Final output:",
     diagnostics.tail,
   ].join("\n");
+}
+
+function TaskOutputDetailsView({
+  details,
+  toolCallId,
+}: {
+  details: TaskOutputDetails;
+  toolCallId: string;
+}): React.ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  const panelId = `task-output-details-${toolCallId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  const terminalStatus = details.isRunning
+    ? "Running"
+    : details.signal
+      ? `Exited with signal ${details.signal}`
+      : details.exitCode !== null
+        ? `Exited with code ${details.exitCode}`
+        : "Completed";
+  const guidance = [
+    details.skippedBytes > 0
+      ? "Earlier history was skipped. Read again with from_start=true to replay from byte 0."
+      : null,
+    details.remainingBytes > 0
+      ? "More output is unread. Run task_output again to read the next page."
+      : null,
+    details.presentationCapped
+      ? "This page was condensed for presentation. Use the retained log for the complete output."
+      : null,
+  ].filter((message): message is string => message !== null);
+
+  return (
+    <>
+      <button
+        type="button"
+        className="tool-details-toggle"
+        aria-label="Task output details"
+        aria-expanded={expanded}
+        aria-controls={panelId}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        {expanded ? (
+          <ChevronDown size={13} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={13} aria-hidden="true" />
+        )}
+        Details
+      </button>
+      {expanded ? (
+        <div className="bash-diagnostics task-output-details" id={panelId}>
+          <dl>
+            <div>
+              <dt>Status</dt>
+              <dd>{terminalStatus}</dd>
+            </div>
+            <div>
+              <dt>Exit code</dt>
+              <dd>{details.exitCode ?? "unavailable"}</dd>
+            </div>
+            <div>
+              <dt>Signal</dt>
+              <dd>{details.signal ?? "none"}</dd>
+            </div>
+            <div>
+              <dt>Completed</dt>
+              <dd>
+                {details.completedAt === null
+                  ? "unavailable"
+                  : new Date(details.completedAt).toISOString()}
+              </dd>
+            </div>
+            <div>
+              <dt>Byte range</dt>
+              <dd>
+                {details.startOffset}-{details.endOffset} (end exclusive)
+              </dd>
+            </div>
+            <div>
+              <dt>Skipped</dt>
+              <dd>{details.skippedBytes} bytes</dd>
+            </div>
+            <div>
+              <dt>Unread</dt>
+              <dd>{details.remainingBytes} bytes</dd>
+            </div>
+            <div>
+              <dt>Retained log</dt>
+              <dd>{details.logFile ?? "unavailable"}</dd>
+            </div>
+          </dl>
+          {guidance.length > 0 ? (
+            <ul className="task-output-guidance">
+              {guidance.map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </>
+  );
 }
 
 function BashDiagnosticsDetails({
@@ -183,8 +285,8 @@ function BashDiagnosticsDetails({
  * Pinned, in-place panel of recent tool actions — a rolling window of the last
  * few calls shown directly above the activity bar. Mirrors the TUI
  * LiveToolPanel: tools (running AND done) live ONLY here, never in the
- * scrollback transcript. Completed foreground bash rows expose diagnostics
- * inline so desktop users can inspect and copy timeout/log details.
+ * scrollback transcript. Completed foreground bash and task_output rows expose
+ * bounded diagnostics inline without replaying full process output.
  */
 export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
   if (entries.length === 0) return null;
@@ -204,6 +306,8 @@ export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
         const dotColor = done ? (entry.isError ? theme.error : theme.success) : theme.primary;
         const diagnostics =
           done && entry.name === "bash" ? getBashDiagnostics(entry.details) : null;
+        const taskOutput =
+          done && entry.name === "task_output" ? getTaskOutputDetails(entry.details) : null;
         return (
           <div className="tool-entry" key={entry.toolCallId}>
             <div className="tool-row">
@@ -229,6 +333,9 @@ export function LiveToolPanel({ entries }: Props): React.ReactElement | null {
               </span>
               {diagnostics ? (
                 <BashDiagnosticsDetails diagnostics={diagnostics} toolCallId={entry.toolCallId} />
+              ) : null}
+              {taskOutput ? (
+                <TaskOutputDetailsView details={taskOutput} toolCallId={entry.toolCallId} />
               ) : null}
             </div>
           </div>

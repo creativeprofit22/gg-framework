@@ -1291,10 +1291,6 @@ export function AgentPane({
   // Never open while `@Ken` is active — that token addresses Ken, not a file.
   const mentionOpen = mention !== null && fileMatches.length > 0 && !kenActive;
   const clampedFileIndex = fileMatches.length > 0 ? fileIndex % fileMatches.length : 0;
-  // Footer background-tasks indicator only shows while something is actually
-  // running (exited tasks shouldn't keep the bar item around).
-  const runningTaskCount = tasks.filter((t) => t.exitCode === null).length;
-
   // True when `text` is a known workflow command invocation (first token).
   function isWorkflowCommand(text: string): boolean {
     if (!text.startsWith("/")) return false;
@@ -2354,7 +2350,7 @@ export function AgentPane({
                 {BUILD_IDENTITY && (
                   <span className="footer-custom-build">{`◆ ${BUILD_IDENTITY}`}</span>
                 )}
-                {runningTaskCount > 0 && (
+                {tasks.length > 0 && (
                   <>
                     {BUILD_IDENTITY && <FooterSep />}
                     <BackgroundTasksButton tasks={tasks} killTask={client.killTask} />
@@ -2362,7 +2358,7 @@ export function AgentPane({
                 )}
                 {state?.planMode && (
                   <>
-                    {(BUILD_IDENTITY || runningTaskCount > 0) && <FooterSep />}
+                    {(BUILD_IDENTITY || tasks.length > 0) && <FooterSep />}
                     <span className="footer-plan">
                       <ShimmerText base={theme.secondary} bright="#ddd6fe">
                         {"\u25C6 plan mode"}

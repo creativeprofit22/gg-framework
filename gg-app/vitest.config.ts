@@ -3,6 +3,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     globals: true,
+    // Git and PowerShell integration fixtures contend heavily on Windows.
+    // Four workers preserves parallel coverage without violating hard deadlines.
+    maxWorkers: process.platform === "win32" ? 4 : undefined,
     include: [
       "src/**/*.test.ts",
       "src/**/*.test.tsx",

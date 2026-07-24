@@ -2891,6 +2891,17 @@ body {
   padding: 2px 7px;
   font-size: 11px;
 }
+.task-output-details dl > div {
+  grid-template-columns: 76px minmax(0, 1fr);
+}
+.task-output-guidance {
+  margin: 7px 0 0;
+  padding-inline-start: 16px;
+  color: var(--text-secondary);
+}
+.task-output-guidance li + li {
+  margin-top: 3px;
+}
 
 /* ── Sub-agent in-chat feed (parallel delegations + live tool activity) ── */
 .subagents {

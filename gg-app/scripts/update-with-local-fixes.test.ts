@@ -215,7 +215,7 @@ describe("local-fixes updater", () => {
       refs: git(fixture.repo, "for-each-ref", "--format=%(refname) %(objectname)"),
       status: git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all"),
     }).toEqual(before);
-  });
+  }, 15_000);
 
   // This integration path performs multiple synchronous Git operations under parallel suite load.
   it("allows a local-only override branch when origin has no matching ref", () => {

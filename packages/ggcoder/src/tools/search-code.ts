@@ -67,8 +67,8 @@ export function createSearchCodeTool(
         } catch {
           continue; // unreadable file — skip
         }
-        // Use the cwd-relative path so headers are stable regardless of `path` scope.
-        const rel = path.relative(cwd, abs);
+        // Use stable POSIX-style headers regardless of the host or `path` scope.
+        const rel = path.relative(cwd, abs).split(path.sep).join("/");
         for (const chunk of chunkFile(rel, source)) chunks.push(chunk);
       }
 

@@ -33,8 +33,8 @@ describe("LspManager", () => {
   });
 
   afterEach(async () => {
-    for (const manager of managers) manager.shutdownAll();
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    await Promise.all(managers.map((manager) => manager.shutdownAll()));
+    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
 
   function makeManager(

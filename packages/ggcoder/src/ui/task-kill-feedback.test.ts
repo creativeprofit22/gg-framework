@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ProcessManager } from "../core/process-manager.js";
+import type { BackgroundTaskSnapshot, ProcessManager } from "../core/process-manager.js";
+import { formatBackgroundTaskStatus } from "./components/BackgroundTasksBar.js";
 import { killTask } from "./stores/taskbar-store.js";
 import { createTaskKillFeedback, killTaskWithFeedback } from "./task-kill-feedback.js";
 
@@ -8,6 +9,26 @@ function processManagerWithStop(stop: ProcessManager["stop"]): ProcessManager {
 }
 
 describe("background task kill feedback", () => {
+  it("formats native completion status independently from explicit liveness", () => {
+    const task: BackgroundTaskSnapshot = {
+      id: "bg-1",
+      pid: 123,
+      command: "fixture",
+      logFile: "fixture.log",
+      startedAt: 1,
+      completedAt: 2,
+      exitCode: null,
+      signal: "SIGTERM",
+      isRunning: false,
+    };
+
+    expect(formatBackgroundTaskStatus(task)).toBe("signal SIGTERM");
+    expect(formatBackgroundTaskStatus({ ...task, exitCode: 7, signal: null })).toBe("exit 7");
+    expect(formatBackgroundTaskStatus({ ...task, completedAt: null, isRunning: true })).toBe(
+      "running",
+    );
+  });
+
   it("returns and awaits ProcessManager.stop before the result reaches the UI", async () => {
     let resolveStop!: (result: string) => void;
     const stop = vi.fn(

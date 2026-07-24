@@ -70,6 +70,7 @@ export class LspManager {
   private readonly warmKeys = new Set<string>();
   private readonly latestOutcomes = new Map<string, LspDiagnosticOutcome>();
   private shutDown = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(
     private readonly cwd: string,
@@ -133,18 +134,22 @@ export class LspManager {
     return [...this.latestOutcomes.values()].reverse();
   }
 
-  /** Shut down every pooled server. Safe in process exit handlers. */
-  shutdownAll(): void {
+  /** Shut down every pooled server and wait for native handles to be released. */
+  async shutdownAll(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.shutDown = true;
-    for (const pending of this.clients.values()) {
-      void pending
-        .then((resolution) => {
-          if (resolution.status === "ready") resolution.client.shutdown();
-        })
-        .catch(() => {});
-    }
+    const pendingClients = [...this.clients.values()];
     this.clients.clear();
     this.warmKeys.clear();
+    this.shutdownPromise = Promise.all(
+      pendingClients.map(async (pending) => {
+        const resolution = await pending.catch(() => null);
+        if (resolution?.status !== "ready") return;
+        resolution.client.shutdown();
+        await resolution.client.waitForExit();
+      }),
+    ).then(() => undefined);
+    return this.shutdownPromise;
   }
 
   private outcome(
@@ -214,9 +219,10 @@ export class LspManager {
         log("INFO", "lsp", `${spec.id} language server not available`, { root });
         return { status: "unavailable" };
       }
+      let client: LspClient | null = null;
       try {
         const startedAt = Date.now();
-        const client = new LspClient(spec, root, command);
+        client = new LspClient(spec, root, command);
         await client.initialize(INIT_TIMEOUT_MS);
         if (!client.isAlive) return { status: "server_failed" };
         log("INFO", "lsp", `${spec.id} server initialized`, {
@@ -225,6 +231,10 @@ export class LspManager {
         });
         return { status: "ready", client };
       } catch (error) {
+        if (client) {
+          client.shutdown();
+          await client.waitForExit();
+        }
         log("WARN", "lsp", `${spec.id} server failed to start`, {
           root,
           error: error instanceof Error ? error.message : String(error),

@@ -51,8 +51,10 @@ describe("task_stop tool", () => {
       command: "remote command",
       logFile: "remote.log",
       startedAt: Date.now(),
+      completedAt: null,
       exitCode: null,
-      lastReadOffset: 0,
+      signal: null,
+      lastReadOffset: null,
     };
     const internals = manager as unknown as {
       processes: Map<string, BackgroundProcess>;

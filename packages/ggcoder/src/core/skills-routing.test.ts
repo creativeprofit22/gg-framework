@@ -51,7 +51,7 @@ describe("skill routing prompts", () => {
       const evidenceSkill = skills.find((candidate) => candidate.name === "evidence-led-ui");
 
       expect(evidenceSkill?.source).toBe("bundled");
-      expect(evidenceSkill?.root).toContain("assets/skills/evidence-led-ui");
+      expect(evidenceSkill?.root).toContain(path.join("assets", "skills", "evidence-led-ui"));
       expect(evidenceSkill?.content).toContain("# Evidence-Led UI");
     } finally {
       await fs.rm(root, { recursive: true, force: true });

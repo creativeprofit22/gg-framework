@@ -16,7 +16,14 @@ vi.mock("./agent", () => ({ listCommands: vi.fn().mockResolvedValue([]) }));
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
 import { listCommands } from "./agent";
-import type { AgentState, BashDiagnostics, SidecarEvent, SlashCommand } from "./agent";
+import type {
+  AgentState,
+  BackgroundTask,
+  BashDiagnostics,
+  SidecarEvent,
+  SlashCommand,
+  TaskOutputDetails,
+} from "./agent";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
 
 const FRONTEND_BASH_DIAGNOSTIC_FIELDS = [
@@ -45,6 +52,58 @@ const FRONTEND_BASH_DIAGNOSTIC_CONTRACT_IS_COMPLETE: MissingFrontendBashDiagnost
   ? true
   : false = true;
 
+const FRONTEND_TASK_OUTPUT_FIELDS = [
+  "isRunning",
+  "exitCode",
+  "signal",
+  "completedAt",
+  "startOffset",
+  "endOffset",
+  "skippedBytes",
+  "remainingBytes",
+  "logFile",
+  "presentationCapped",
+] as const satisfies readonly (keyof TaskOutputDetails)[];
+type MissingFrontendTaskOutputField = Exclude<
+  keyof TaskOutputDetails,
+  (typeof FRONTEND_TASK_OUTPUT_FIELDS)[number]
+>;
+const FRONTEND_TASK_OUTPUT_CONTRACT_IS_COMPLETE: MissingFrontendTaskOutputField extends never
+  ? true
+  : false = true;
+
+const TASK_OUTPUT_DETAILS_FIXTURE: TaskOutputDetails = {
+  isRunning: false,
+  exitCode: 0,
+  signal: null,
+  completedAt: Date.UTC(2026, 6, 24, 12, 34, 56),
+  startOffset: 0,
+  endOffset: 4_096,
+  skippedBytes: 0,
+  remainingBytes: 0,
+  logFile: "/tmp/background/task-output.log",
+  presentationCapped: false,
+};
+
+const FRONTEND_BACKGROUND_TASK_FIELDS = [
+  "id",
+  "pid",
+  "command",
+  "logFile",
+  "startedAt",
+  "completedAt",
+  "exitCode",
+  "signal",
+  "isRunning",
+] as const satisfies readonly (keyof BackgroundTask)[];
+type MissingFrontendBackgroundTaskField = Exclude<
+  keyof BackgroundTask,
+  (typeof FRONTEND_BACKGROUND_TASK_FIELDS)[number]
+>;
+const FRONTEND_BACKGROUND_TASK_CONTRACT_IS_COMPLETE: MissingFrontendBackgroundTaskField extends never
+  ? true
+  : false = true;
+
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;
 
@@ -61,6 +120,7 @@ function setup(
 
   // Track the outputs the assertions read; spy the rest so nothing throws.
   let liveToolFeed: LiveToolEntry[] = [];
+  let tasks: BackgroundTask[] = [];
   let planReview: string | null = null;
   let commands: SlashCommand[] = [
     { name: "stale", aliases: [], description: "Stale command", source: "custom" },
@@ -96,7 +156,9 @@ function setup(
     handleKenEvent,
     handleAutopilotEvent: () => false,
     setState,
-    setTasks: noop as unknown as AgentEventsDeps["setTasks"],
+    setTasks: ((update: BackgroundTask[] | ((previous: BackgroundTask[]) => BackgroundTask[])) => {
+      tasks = typeof update === "function" ? update(tasks) : update;
+    }) as AgentEventsDeps["setTasks"],
     setProjectTasks: noop as unknown as AgentEventsDeps["setProjectTasks"],
     setStatus: noop as unknown as AgentEventsDeps["setStatus"],
     setRunning,
@@ -134,6 +196,7 @@ function setup(
     deps,
     getItems: () => items,
     getLiveToolFeed: () => liveToolFeed,
+    getTasks: () => tasks,
     getPlanReview: () => planReview,
     getCommands: () => commands,
     getState: () => agentState,
@@ -144,6 +207,32 @@ function setup(
 
 describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("keeps the complete background-task snapshot from ready and tasks events", () => {
+    expect(FRONTEND_BACKGROUND_TASK_CONTRACT_IS_COMPLETE).toBe(true);
+    const signalTask: BackgroundTask = {
+      id: "bg-signal",
+      pid: 4242,
+      command: "pnpm watch",
+      logFile: "/tmp/bg-signal.log",
+      startedAt: 1,
+      completedAt: 2,
+      exitCode: null,
+      signal: "SIGTERM",
+      isRunning: false,
+    };
+    expect(Object.keys(signalTask).sort()).toEqual([...FRONTEND_BACKGROUND_TASK_FIELDS].sort());
+    const { hook, getTasks } = setup();
+
+    act(() =>
+      hook.result.current.handleEvent(ev("ready", { running: false, tasks: [signalTask] })),
+    );
+    expect(getTasks()).toEqual([signalTask]);
+
+    const normalTask = { ...signalTask, exitCode: 7, signal: null };
+    act(() => hook.result.current.handleEvent(ev("tasks", { tasks: [normalTask] })));
+    expect(getTasks()).toEqual([normalTask]);
+  });
 
   it("uses the replacement client after the dependency changes", async () => {
     const secondClient = {
@@ -342,6 +431,128 @@ describe("useAgentEvents", () => {
     });
     feed = getLiveToolFeed();
     expect(feed[0]).toMatchObject({ toolCallId: "t1", status: "done" });
+  });
+
+  it("keeps structured task_output metadata on tool_call_end", () => {
+    expect(FRONTEND_TASK_OUTPUT_CONTRACT_IS_COMPLETE).toBe(true);
+    expect(Object.keys(TASK_OUTPUT_DETAILS_FIXTURE).sort()).toEqual(
+      [...FRONTEND_TASK_OUTPUT_FIELDS].sort(),
+    );
+    const { hook, getLiveToolFeed } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_start", {
+          toolCallId: "task-output-1",
+          name: "task_output",
+          args: { id: "background-1" },
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "task-output-1",
+          isError: false,
+          result: "Process background-1: exited (code 0)",
+          details: { taskOutput: TASK_OUTPUT_DETAILS_FIXTURE },
+        }),
+      );
+    });
+
+    expect(getLiveToolFeed()[0]).toMatchObject({
+      name: "task_output",
+      status: "done",
+      details: { taskOutput: TASK_OUTPUT_DETAILS_FIXTURE },
+    });
+  });
+
+  it.each([
+    ["running", { isRunning: true, exitCode: null, completedAt: null }, "running"],
+    ["normal exit", {}, "exit 0"],
+    ["signal exit", { exitCode: null, signal: "SIGTERM" }, "signal SIGTERM"],
+    ["skipped history", { skippedBytes: 512 }, "512 skipped"],
+    ["remaining page", { remainingBytes: 128 }, "128 unread"],
+    ["presentation cap", { presentationCapped: true }, "output capped"],
+  ] satisfies [string, Partial<TaskOutputDetails>, string][])(
+    "renders the task_output %s inline summary",
+    (_label, overrides, expectedSummary) => {
+      const details = { ...TASK_OUTPUT_DETAILS_FIXTURE, ...overrides };
+      const panel = render(
+        createElement(LiveToolPanel, {
+          entries: [
+            {
+              toolCallId: "task-output-summary",
+              name: "task_output",
+              args: { id: "background-1" },
+              status: "done",
+              result: "bounded result text",
+              details: { taskOutput: details },
+            },
+          ],
+        }),
+      );
+
+      expect(panel.container.textContent).toContain(expectedSummary);
+      panel.unmount();
+    },
+  );
+
+  it("shows bounded task_output metadata and recovery guidance without the output body", () => {
+    const taskOutput: TaskOutputDetails = {
+      ...TASK_OUTPUT_DETAILS_FIXTURE,
+      exitCode: null,
+      signal: "SIGTERM",
+      startOffset: 262_144,
+      endOffset: 524_288,
+      skippedBytes: 262_144,
+      remainingBytes: 128,
+      presentationCapped: true,
+    };
+    const panel = render(
+      createElement(LiveToolPanel, {
+        entries: [
+          {
+            toolCallId: "task-output-details",
+            name: "task_output",
+            args: { id: "background-1" },
+            status: "done",
+            result: "DO NOT RENDER THE 256 KIB OUTPUT BODY",
+            details: { taskOutput },
+          },
+        ],
+      }),
+    );
+
+    expect(panel.container.textContent).not.toContain("DO NOT RENDER THE 256 KIB OUTPUT BODY");
+    fireEvent.click(panel.getByRole("button", { name: "Task output details" }));
+    expect(panel.getByText("Exited with signal SIGTERM")).toBeTruthy();
+    expect(panel.getByText("262144-524288 (end exclusive)")).toBeTruthy();
+    expect(panel.getByText("262144 bytes")).toBeTruthy();
+    expect(panel.getByText("128 bytes")).toBeTruthy();
+    expect(panel.getByText(taskOutput.logFile!)).toBeTruthy();
+    expect(panel.getByText(/from_start=true/)).toBeTruthy();
+    expect(panel.getByText(/read the next page/)).toBeTruthy();
+    expect(panel.getByText(/condensed for presentation/)).toBeTruthy();
+  });
+
+  it("suppresses malformed task_output metadata", () => {
+    const panel = render(
+      createElement(LiveToolPanel, {
+        entries: [
+          {
+            toolCallId: "task-output-invalid",
+            name: "task_output",
+            args: { id: "background-1" },
+            status: "done",
+            result: "bounded result text",
+            details: {
+              taskOutput: { ...TASK_OUTPUT_DETAILS_FIXTURE, endOffset: -1 },
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(panel.queryByRole("button", { name: "Task output details" })).toBeNull();
+    expect(panel.container.textContent).toBe("⏺Read output background-1");
   });
 
   it("streams bounded bash progress before replacing it with the final result", async () => {

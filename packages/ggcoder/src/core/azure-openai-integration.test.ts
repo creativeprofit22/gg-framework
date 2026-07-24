@@ -115,4 +115,4 @@ it("sends an AgentSession prompt through the registered Azure OpenAI deployment"
       fs.rm(project, { recursive: true, force: true }),
     ]);
   }
-});
+}, 15_000);

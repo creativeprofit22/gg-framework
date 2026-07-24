@@ -11,13 +11,14 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Complete through Phase 09:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, Phase 07 is landed in `d1771368`, Phase 08 is landed in `969c57f9`, and Phase 09 is verified in the current worktree.
+- **Complete through Phase 10:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, Phase 07 is landed in `d1771368`, Phase 08 is landed in `969c57f9`, and Phases 09–10 are verified in the current worktree.
 - **Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
-- **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–08 are implemented. The ggcoder typecheck, targeted ESLint, targeted Prettier, and roadmap coverage check passed. The expanded focused matrix reported 152 passed, 1 expected failure, and 3 skips, but one nested-launcher probe missed its worker evidence under concurrent load; the same probe passed immediately in isolation. Treat this as a fixture-flakiness warning to monitor.
-- **Next phase:** Phase 10 — Support late readers and explicit retention.
-- **Current reliability gap:** Foreground execution now keeps a final 100-line / 10 MiB UTF-8-safe tail and complete sanitized text log with structured terminal diagnostics. Background record/log retention remains implicit, and late-reader allocation is still unbounded.
-- **Later-track audit:** Phases 10–13 contain partial baseline behavior only: background reads support offsets and `from_start`, completed records are lazily dropped from memory, explicit background mode and manual EOF exist, and basic bash diagnostics reach the desktop. Acceptance remains incomplete because record/log retention is not explicit or tested, log files are not expired, reads can allocate the full unread file, stop does not attempt EOF first, diagnostics lack exit/signal/final-tail fields, and desktop smoke evidence is absent. Phase 14 has not run.
+- **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
+- **2026-07-24 Phase 10 evidence:** The focused background/foreground matrix passed 116 tests with 1 expected failure and 3 platform skips across 120 tests. Bounded allocation, byte offsets, UTF-8 paging, flush-gated completion, record expiry, stale-log sweeping, and hard-deadline foreground cleanup are covered; the ggcoder typecheck and targeted ESLint/Prettier checks pass.
+- **Next phase:** Phase 11 — Enforce explicit foreground/background modes.
+- **Current reliability gap:** Background reads and retention are now bounded and explicit. Command classes still lack an owning foreground/background mode matrix, and `task_stop` does not attempt EOF before tree termination.
+- **Later-track audit:** Phases 11–13 contain partial baseline behavior only: explicit foreground/background selection and manual EOF exist, and complete structured bash diagnostics reach the desktop through isolated sidecar sessions. Acceptance remains incomplete because command classes lack an owning mode matrix, `task_stop` does not attempt EOF first, and desktop smoke evidence is absent. Phase 14 has not run.
 - **Notes baseline:** Track B has not started. Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository or Rust IPC command exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -488,6 +489,16 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 10 — Support late readers and explicit retention
 
+**Status:** Complete — verified 2026-07-24.
+
+**Implementation evidence**
+
+- `readOutput()` keeps one shared byte cursor, returns a first late-reader tail snapshot, and pages replay/incremental reads through a 256 KiB allocation cap.
+- Range metadata separates permanently skipped history from bytes still retrievable on the next call; raw offsets survive truncation and both UTF-8 range boundaries without paging-induced replacement characters.
+- Completion publishes native nullable exit status, close signal, and completion time only after background log flush settlement; explicit `isRunning` snapshots keep liveness separate from terminal metadata.
+- Completed records remain addressable for five minutes from `completedAt`; closed background and foreground logs become sweep-eligible after 48 hours while active/open paths remain protected.
+- `task_output` is sequential, renders terminal/range metadata, and points capped or presentation-compressed output to the retained process log without writing duplicate overflow artifacts.
+
 **Outcome:** A late `task_output` reader receives current output, and completed records/logs expire predictably.
 
 **Scope**
@@ -506,17 +517,20 @@ All external references are evidence only. Copy behavior, not source text, unles
 - `packages/ggcoder/src/core/process-manager.test.ts`
 - `packages/ggcoder/src/tools/task-output.ts`
 - `packages/ggcoder/src/tools/task-output.test.ts`
+- `packages/ggcoder/src/tools/task-stop.test.ts`
 
 **References:** [REL-11](#reference-register)
 
-**Acceptance tests**
+**Acceptance evidence**
 
-- Late reader gets current snapshot first; the next read returns only new bytes.
-- `from_start` returns the retained log.
-- Expiry prevents unbounded file/map growth while completion remains observable after the initiating turn.
-- Flush is attempted before timeout returns.
+- Late-reader coverage proves the current bounded tail arrives first and the next default read contains only newly appended bytes.
+- `from_start=true` begins at byte zero, paginates through exact offsets, and leaves the shared cursor at the returned end offset.
+- Allocation never exceeds 256 KiB; tests cover leading continuation alignment, trailing code-point retention across both paged and live appends, and safe truncation reset.
+- Flush-gated tests prove normal and native nullable signal completion metadata, explicit snapshot liveness, five-minute scheduled/opportunistic record expiry, 48-hour log eligibility, one-minute sweep throttling, active/open protection, and best-effort cleanup failures.
+- Verification command: `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/core/process-manager.test.ts src/tools/task-output.test.ts src/tools/task-send.test.ts src/tools/task-stop.test.ts src/core/process-manager-dev-server-repro.test.ts src/tools/bash-timeout.test.ts` — 116 passed, 1 expected failure, and 3 platform tests skipped across 120 tests.
+- `pnpm --filter @kenkaiiii/ggcoder check`, targeted ESLint, and targeted Prettier (including this roadmap) pass.
 
-**Hard stop:** Document the chosen retention duration and prove offset correctness before Phase 11.
+**Hard stop:** Satisfied — five-minute completed-record retention, 48-hour closed-log retention, 256 KiB byte-range/UTF-8 correctness, retained-log recovery, flush settlement, and foreground hard-deadline evidence are green before Phase 11.
 
 ## Phase 11 — Enforce explicit foreground/background modes
 

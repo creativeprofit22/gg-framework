@@ -1,6 +1,6 @@
 # gg-framework
 
-A pnpm monorepo containing reusable LLM/agent libraries, coding and media-agent CLIs, a Tauri coding-agent desktop app, and an Electron UI prototype.
+A pnpm monorepo containing reusable LLM/agent libraries, coding and media-agent CLIs, a Tauri coding-agent desktop app, and an Electron local chat UI.
 
 ## Workspace map
 
@@ -16,7 +16,7 @@ Workspace membership is defined by `pnpm-workspace.yaml`: `packages/*`, `gg-app`
 - `packages/gg-voice` — realtime voice providers and ggcoder/ggboss bridges.
 - `packages/ggcoder-eyes` — perception-probe library and CLI.
 - `gg-app` — private React/Vite frontend with a Tauri 2 Rust shell.
-- `Matey` — private Electron/Vite local chat UI prototype.
+- `Matey` — private Electron/Vite local chat UI.
 - `experiments/prompt-bench`, `benchmarks/`, and `bench/` — prompt and runtime benchmark harnesses; only `experiments/*` is a workspace glob.
 
 ## Package boundaries
@@ -35,11 +35,11 @@ Workspace membership is defined by `pnpm-workspace.yaml`: `packages/*`, `gg-app`
 - The webview does not contact the localhost sidecar directly from the `tauri://` origin.
 - The sidecar source is `packages/ggcoder/src/app-sidecar.ts`. `gg-app/scripts/bundle-sidecar.mjs` requires `packages/ggcoder/dist/app-sidecar.js` and writes `gg-app/src-tauri/sidecar/app-sidecar.mjs` plus external runtime dependencies.
 - App project preferences live in `~/.gg/gg-app.json`; shared fallback/current model and thinking settings also use `~/.gg/settings.json`.
-- CLI logs use `~/.gg/debug.log`; app-daemon logs use `~/.gg/gg-app-sidecar.log`.
+- `ggcoder` logs use `~/.gg/debug.log`; `ggeditor` uses `~/.gg/ggeditor.log`; the app daemon uses `~/.gg/gg-app-sidecar.log`.
 
 ## Commands
 
-CI pins Node 22 and pnpm 10; the repository itself does not declare a `packageManager` field.
+CI pins Node 22 and pnpm 10; the repository itself does not declare a `packageManager` field. CI's framework matrix targets `gg-ai`, `gg-agent`, `ggcoder`, and `gg-boss`; its app matrix separately stages/smoke-tests the sidecar and runs app and Rust tests.
 
 ```bash
 pnpm install --frozen-lockfile

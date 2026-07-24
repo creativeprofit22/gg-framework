@@ -2,6 +2,7 @@
 // Builds the same styled tool line the TUI shows:
 //   ● Read App.tsx · 42 lines      (done)
 //   ● Running pnpm check…          (running)
+import type { TaskOutputDetails, TaskOutputToolResultDetails } from "./agent";
 import { theme } from "./theme";
 
 const MAX_DETAIL = 44;
@@ -37,6 +38,7 @@ const VERBS: Record<string, VerbPair> = {
   write: { running: "Writing", done: "Wrote" },
   edit: { running: "Updating", done: "Updated" },
   bash: { running: "Running", done: "Ran" },
+  task_output: { running: "Reading output", done: "Read output" },
   web_fetch: { running: "Fetching", done: "Fetched" },
   web_search: { running: "Searching web", done: "Searched web" },
   subagent: { running: "Delegating", done: "Delegated" },
@@ -177,6 +179,8 @@ function toolDetail(name: string, args: Record<string, unknown>): { text: string
       return { text: shorten(String(args.pattern ?? "")), quote: true };
     case "bash":
       return { text: firstLine(String(args.command ?? "")), quote: false };
+    case "task_output":
+      return { text: shorten(String(args.id ?? "")), quote: false };
     case "web_fetch":
       return { text: hostOf(String(args.url ?? "")), quote: false };
     case "web_search":
@@ -195,6 +199,58 @@ function toolDetail(name: string, args: Record<string, unknown>): { text: string
 
 function countNonEmptyLines(result: string): number {
   return result.split("\n").filter((line) => line.length > 0).length;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+export function getTaskOutputDetails(details: unknown): TaskOutputDetails | null {
+  if (!isRecord(details) || !isRecord(details.taskOutput)) return null;
+  const value = details.taskOutput;
+  if (
+    typeof value.isRunning !== "boolean" ||
+    (value.exitCode !== null && !isNonNegativeInteger(value.exitCode)) ||
+    (typeof value.signal !== "string" && value.signal !== null) ||
+    (value.completedAt !== null &&
+      (typeof value.completedAt !== "number" ||
+        !Number.isFinite(value.completedAt) ||
+        Number.isNaN(new Date(value.completedAt).getTime()))) ||
+    !isNonNegativeInteger(value.startOffset) ||
+    !isNonNegativeInteger(value.endOffset) ||
+    value.endOffset < value.startOffset ||
+    !isNonNegativeInteger(value.skippedBytes) ||
+    !isNonNegativeInteger(value.remainingBytes) ||
+    (typeof value.logFile !== "string" && value.logFile !== null) ||
+    typeof value.presentationCapped !== "boolean"
+  ) {
+    return null;
+  }
+  return (details as unknown as TaskOutputToolResultDetails).taskOutput;
+}
+
+function taskOutputSummary(details: unknown): string {
+  const taskOutput = getTaskOutputDetails(details);
+  if (!taskOutput) return "";
+  const status = taskOutput.isRunning
+    ? "running"
+    : taskOutput.signal
+      ? `signal ${taskOutput.signal}`
+      : taskOutput.exitCode !== null
+        ? `exit ${taskOutput.exitCode}`
+        : "completed";
+  const summary = [
+    status,
+    `bytes ${taskOutput.startOffset}-${taskOutput.endOffset}`,
+    taskOutput.skippedBytes > 0 ? `${taskOutput.skippedBytes} skipped` : null,
+    taskOutput.remainingBytes > 0 ? `${taskOutput.remainingBytes} unread` : null,
+    taskOutput.presentationCapped ? "output capped" : null,
+  ];
+  return summary.filter((part): part is string => part !== null).join(" · ");
 }
 
 function inlineSummary(name: string, result: string, details: unknown): string {
@@ -220,6 +276,8 @@ function inlineSummary(name: string, result: string, details: unknown): string {
       const exit = result.match(/Exit code: (\S+)/)?.[1];
       return exit ? `exit ${exit}` : "";
     }
+    case "task_output":
+      return taskOutputSummary(details);
     case "grep": {
       const matches = result
         .split("\n")

@@ -18,7 +18,7 @@ import { InputArea, type PasteInfo } from "./InputArea.js";
 import { FooterStatusRow } from "./FooterStatusRow.js";
 import type { LiveToolEntry } from "./LiveToolPanel.js";
 import type { ActivityPhase, RetryInfo } from "../hooks/useAgentLoop.js";
-import type { BackgroundProcess } from "../../core/process-manager.js";
+import type { BackgroundTaskSnapshot } from "../../core/process-manager.js";
 
 interface ChatInputControls {
   onSubmit: (value: string, images: ImageAttachment[], paste?: PasteInfo) => void;
@@ -110,7 +110,7 @@ interface ChatScreenProps {
   planMode: boolean;
   exitPending: boolean;
   footerStatusLayout: FooterStatusLayoutDecision;
-  backgroundTasks: BackgroundProcess[];
+  backgroundTasks: BackgroundTaskSnapshot[];
   taskBarFocused: boolean;
   taskBarExpanded: boolean;
   selectedTaskIndex: number;

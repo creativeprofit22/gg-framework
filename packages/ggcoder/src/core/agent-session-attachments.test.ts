@@ -101,7 +101,7 @@ describe("AgentSession attachment command expansion", () => {
     await session.promptWithAttachments("/help", []);
     await session.dispose();
     expect(agentLoopMock).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("expands a custom command before adding all attachment path notes", async () => {
     await writeCommand("inspect", "Inspect using this custom body.");

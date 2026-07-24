@@ -63,7 +63,7 @@ import {
   type LspManager,
   type ProcessManager,
 } from "../tools/index.js";
-import type { BackgroundProcess } from "./process-manager.js";
+import type { BackgroundTaskSnapshot } from "./process-manager.js";
 import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
 import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
 import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
@@ -1816,7 +1816,7 @@ export class AgentSession {
   }
 
   /** Snapshot of background processes (bash run_in_background), newest-state. */
-  listBackgroundProcesses(): BackgroundProcess[] {
+  listBackgroundProcesses(): BackgroundTaskSnapshot[] {
     return this.processManager?.list() ?? [];
   }
 

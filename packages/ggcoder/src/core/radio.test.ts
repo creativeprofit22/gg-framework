@@ -89,7 +89,9 @@ describe("radio", () => {
 
     expect(mocks.spawn).not.toHaveBeenCalled();
     expect(mocks.createConnection).toHaveBeenCalledWith(
-      expect.stringMatching(/gg-radio-.+\.sock$/),
+      expect.stringMatching(
+        process.platform === "win32" ? /^\\\\\.\\pipe\\gg-radio-/ : /gg-radio-.+\.sock$/,
+      ),
     );
     expect(mocks.socket.end).toHaveBeenCalledWith(
       `${JSON.stringify({ command: ["set_property", "volume", 42] })}\n`,

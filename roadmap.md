@@ -11,13 +11,14 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Complete through Phase 08:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, Phase 07 is landed in `d1771368`, and Phase 08 is implemented and verified.
+- **Complete through Phase 09:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, Phase 07 is landed in `d1771368`, Phase 08 is landed in `969c57f9`, and Phase 09 is verified in the current worktree.
 - **Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
-- **Next phase:** Phase 09 — Bound output and report the final 100 lines.
-- **Current reliability gap:** Foreground logs are now allocated before spawn and remain live through terminal settlement; exact final-100-line tail handling and binary classification remain Phase 09.
-- **Later-track audit:** Phases 09–14 remain acceptance-incomplete. Phases 09–12 contain partial baseline behavior, but exact final-tail handling, complete retention, EOF-first shutdown, desktop diagnostics, and the release gate are not implemented. Track B has not started: Notes authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`.
-- **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive; those concepts remain intact. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
+- **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–08 are implemented. The ggcoder typecheck, targeted ESLint, targeted Prettier, and roadmap coverage check passed. The expanded focused matrix reported 152 passed, 1 expected failure, and 3 skips, but one nested-launcher probe missed its worker evidence under concurrent load; the same probe passed immediately in isolation. Treat this as a fixture-flakiness warning to monitor.
+- **Next phase:** Phase 10 — Support late readers and explicit retention.
+- **Current reliability gap:** Foreground execution now keeps a final 100-line / 10 MiB UTF-8-safe tail and complete sanitized text log with structured terminal diagnostics. Background record/log retention remains implicit, and late-reader allocation is still unbounded.
+- **Later-track audit:** Phases 10–13 contain partial baseline behavior only: background reads support offsets and `from_start`, completed records are lazily dropped from memory, explicit background mode and manual EOF exist, and basic bash diagnostics reach the desktop. Acceptance remains incomplete because record/log retention is not explicit or tested, log files are not expired, reads can allocate the full unread file, stop does not attempt EOF first, diagnostics lack exit/signal/final-tail fields, and desktop smoke evidence is absent. Phase 14 has not run.
+- **Notes baseline:** Track B has not started. Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository or Rust IPC command exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
 
@@ -444,6 +445,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 09 — Bound output and report the final 100 lines
 
+**Status:** Complete.
+
 **Outcome:** Large/non-terminating output cannot exhaust memory, and timeout reports contain an exact final 100-line tail.
 
 **Scope**
@@ -460,7 +463,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 - `packages/ggcoder/src/tools/bash.ts`
 - `packages/ggcoder/src/tools/truncate.ts`
-- `packages/ggcoder/src/tools/truncate-utils.ts`
+- new bounded-tail utility under `packages/ggcoder/src/tools/`
+- `packages/ggcoder/src/types.ts`
 - `packages/ggcoder/src/tools/bash-timeout.test.ts`
 
 **References:** [REL-09](#reference-register), [REL-10](#reference-register)
@@ -472,7 +476,15 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Binary output cannot corrupt the result or text log.
 - Existing truncation/compression tests and focused timeout tests pass.
 
-**Hard stop:** Do not start Phase 10 without exact tail and memory-bound assertions.
+**Completion evidence**
+
+- The rolling-tail utility proves exact final-100-line retention, terminal-newline and partial-line semantics, UTF-8-safe oversized-line suffixes, direct retained-byte accounting at or below 10 MiB, and conservative text/binary classification.
+- Foreground lifecycle coverage proves more than 10 MiB of text returns the latest output, timeout returns exactly 100 logical lines, partial final lines survive, binary streams produce byte-count summaries without raw NUL or replacement-character corruption, and the complete sanitized log remains source-labelled and backpressured.
+- Structured and textual diagnostics now expose reason, exit code, signal, elapsed time, PID, log path, and a delimited final-tail section across success, non-zero exit, signal exit, abort, timeout with/without close, and spawn errors.
+- Verification command: `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/tools/bounded-output-tail.test.ts src/tools/truncate.test.ts src/tools/truncate-utils.test.ts src/tools/compress-integration.test.ts src/tools/bash-timeout.test.ts` — 109 passed and 2 platform tests skipped across 111 tests.
+- `pnpm --filter @kenkaiiii/ggcoder check`, targeted ESLint, and targeted Prettier (including this roadmap) pass.
+
+**Hard stop:** Satisfied — exact rolling-tail, retained-byte-bound, binary-safe log, complete diagnostics, truncation/compression, and foreground lifecycle assertions are green.
 
 ## Phase 10 — Support late readers and explicit retention
 

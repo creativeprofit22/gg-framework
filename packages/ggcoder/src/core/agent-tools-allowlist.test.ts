@@ -1,15 +1,13 @@
 import { describe, it, expect } from "vitest";
 import os from "node:os";
-import { parseAgentFile } from "./agents.js";
+import { BUNDLED_AGENTS, parseAgentFile } from "./agents.js";
+import { AgentSession, resolveEffectiveAllowedTools } from "./agent-session.js";
 import { createTools } from "../tools/index.js";
 
-// Mirror of AgentSession.isToolAllowed (private): with an allow-list, a tool
-// passes only when its exact name is listed (MCP server whitelisting is a
-// separate opt-in the subagent path doesn't use). Kept in lockstep with the
-// real filter so this test tracks production behavior.
 function filterToAllowed(toolNames: string[], allowed: string[] | undefined): string[] {
-  if (!allowed || allowed.length === 0) return toolNames;
-  return toolNames.filter((name) => allowed.includes(name));
+  const effective = resolveEffectiveAllowedTools(allowed);
+  if (!effective) return toolNames;
+  return toolNames.filter((name) => effective.has(name));
 }
 
 describe("agent tools frontmatter → allow-list enforcement", () => {
@@ -43,11 +41,10 @@ describe("agent tools frontmatter → allow-list enforcement", () => {
 
       const allowedNames = filterToAllowed(allNames, agent.tools);
 
-      // The mutating tools must NOT survive the agent's allow-list.
-      for (const banned of ["write", "edit", "bash"]) {
+      // Read-only lists gain no managed-process controls or unrelated tools.
+      for (const banned of ["write", "edit", "bash", "task_output", "task_send", "task_stop"]) {
         expect(allowedNames).not.toContain(banned);
       }
-      // Exactly the declared read-only tools survive.
       expect(allowedNames.sort()).toEqual(["grep", "read"]);
     } finally {
       processManager.shutdownAll();
@@ -67,8 +64,12 @@ describe("agent tools frontmatter → allow-list enforcement", () => {
     });
     try {
       const allNames = tools.map((t) => t.name);
-      // Empty/unset allow-list is a pass-through: the child keeps every tool.
-      const allowedNames = filterToAllowed(allNames, agent.tools);
+      // The subagent omits --tools for an empty declaration, so the child receives
+      // undefined and keeps every tool.
+      const allowedNames = filterToAllowed(
+        allNames,
+        agent.tools.length > 0 ? agent.tools : undefined,
+      );
       expect(allowedNames).toEqual(allNames);
       for (const tool of ["read", "write", "edit", "bash"]) {
         expect(allowedNames).toContain(tool);
@@ -76,6 +77,55 @@ describe("agent tools frontmatter → allow-list enforcement", () => {
     } finally {
       processManager.shutdownAll();
       lspManager?.shutdownAll();
+    }
+  });
+
+  it("adds exactly the three managed-process controls when bash is allowed", () => {
+    const effective = resolveEffectiveAllowedTools(["bash"]);
+
+    expect([...effective!]).toEqual(["bash", "task_output", "task_send", "task_stop"]);
+    expect(effective?.has("write")).toBe(false);
+    expect(effective?.has("tasks")).toBe(false);
+  });
+
+  it("gives bundled bash agents live controls and matching system guidance", async () => {
+    for (const agentName of ["auditor", "skeptic"]) {
+      const agent = BUNDLED_AGENTS.find((candidate) => candidate.name === agentName);
+      expect(agent).toBeDefined();
+
+      const session = new AgentSession({
+        provider: "openai",
+        model: "gpt-5.5-codex",
+        cwd: os.tmpdir(),
+        transient: true,
+        allowedTools: agent!.tools,
+        projectCustomization: false,
+        loadExtensions: false,
+        coderSlashCommands: false,
+        selfCorrectionHooks: false,
+        orchestrationPrompt: false,
+      });
+      try {
+        await session.initialize();
+        const liveToolNames = (session as unknown as { tools: Array<{ name: string }> }).tools.map(
+          (tool) => tool.name,
+        );
+        expect(liveToolNames.sort()).toEqual(
+          [...agent!.tools, "task_output", "task_send", "task_stop"].sort(),
+        );
+        expect(liveToolNames).not.toContain("write");
+        expect(liveToolNames).not.toContain("edit");
+
+        const prompt = String(session.getMessages()[0]?.content ?? "");
+        // Only controls with non-obvious usage have dedicated system-prompt hints;
+        // task_send remains available through the live provider tool schema.
+        for (const toolName of ["task_output", "task_stop"]) {
+          expect(prompt).toContain(`**${toolName}**`);
+        }
+        expect(prompt).not.toContain("**write**");
+      } finally {
+        await session.dispose();
+      }
     }
   });
 });

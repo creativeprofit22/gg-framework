@@ -177,10 +177,12 @@ export interface AgentSessionOptions {
   /**
    * If provided, the session's tool set is filtered to ONLY these tool names
    * after `createTools()` runs, and the system prompt's Tools section lists only
-   * them. Used by read-only advisory sessions (e.g. the Ken mentor agent) to
-   * register a safe subset — excluded mutating tools (write/edit/bash/…) are
-   * never registered, so a hallucinated call can't change the repo. Default
-   * (undefined) = all tools, preserving every existing caller's behavior.
+   * them. Allowing `bash` also implicitly allows its managed-background-process
+   * controls: `task_output`, `task_send`, and `task_stop`. No other dependencies
+   * are added. Used by read-only advisory sessions (e.g. the Ken mentor agent) to
+   * register a safe subset — because Ken omits `bash`, it also receives none of
+   * those task controls. Default (undefined) = all tools, preserving every
+   * existing caller's behavior.
    */
   allowedTools?: string[];
   /**
@@ -221,6 +223,23 @@ export interface AgentSessionOptions {
   orchestrationPrompt?: boolean;
   /** Host-provided tools appended to this session only (for example, chat delegation). */
   additionalTools?: AgentTool[];
+}
+
+// ── Tool allow-list policy ─────────────────────────────────
+
+const BASH_MANAGED_PROCESS_TOOLS = ["task_output", "task_send", "task_stop"] as const;
+
+/** Expand explicit tool dependencies while preserving strict filtering otherwise. */
+export function resolveEffectiveAllowedTools(
+  allowedTools?: readonly string[],
+): ReadonlySet<string> | undefined {
+  if (!allowedTools) return undefined;
+
+  const effective = new Set(allowedTools);
+  if (effective.has("bash")) {
+    for (const toolName of BASH_MANAGED_PROCESS_TOOLS) effective.add(toolName);
+  }
+  return effective;
 }
 
 // ── Tool-result policy ─────────────────────────────────────
@@ -390,9 +409,11 @@ export class AgentSession {
   private currentLeafId: string | null = null;
 
   private opts: AgentSessionOptions;
+  private readonly effectiveAllowedTools: ReadonlySet<string> | undefined;
 
   constructor(options: AgentSessionOptions) {
     this.opts = options;
+    this.effectiveAllowedTools = resolveEffectiveAllowedTools(options.allowedTools);
     this.provider = options.provider;
     this.model = options.model;
     this.cwd = options.cwd;
@@ -506,11 +527,12 @@ export class AgentSession {
         : {}),
     });
     const tools = [...builtInTools, ...(this.opts.additionalTools ?? [])];
-    // Apply the optional tool allow-list (read-only advisory sessions). Filtering
-    // here means the excluded tools are never registered with the agent loop, so
-    // a hallucinated call can't mutate the repo — and buildSystemPrompt below is
-    // fed the same filtered names so the Tools section matches exactly.
-    this.tools = this.opts.allowedTools ? tools.filter((t) => this.isToolAllowed(t.name)) : tools;
+    // Apply the effective tool allow-list. Filtering here means excluded tools
+    // are never registered with the agent loop, while the bash dependency closure
+    // makes its managed-process controls available to both the live map and prompt.
+    this.tools = this.effectiveAllowedTools
+      ? tools.filter((tool) => this.isToolAllowed(tool.name))
+      : tools;
     this.rebuildReadTool = rebuildReadTool;
     this.processManager = processManager;
     this.lspManager = lspManager;
@@ -647,15 +669,14 @@ export class AgentSession {
   /**
    * Whether a tool name is permitted for this session. With no `allowedTools`
    * everything passes (default behavior). Otherwise a tool is allowed when its
-   * name is in `allowedTools`, OR it's an MCP tool (`mcp__<server>__<tool>`)
-   * whose `<server>` is in `allowedMcpServers`. The MCP-prefix rule lets a
-   * whitelisted research server (e.g. kencode-search) expose all its tools
-   * without hard-coding each one, while every other tool stays blocked.
+   * name is in the effective allow-list (including bash's managed-process
+   * controls), OR it's an MCP tool (`mcp__<server>__<tool>`) whose `<server>` is
+   * in `allowedMcpServers`. Every unrelated tool stays blocked.
    */
   private isToolAllowed(name: string): boolean {
-    const allowed = this.opts.allowedTools;
+    const allowed = this.effectiveAllowedTools;
     if (!allowed) return true;
-    if (allowed.includes(name)) return true;
+    if (allowed.has(name)) return true;
     const mcpWhitelist = this.opts.allowedMcpServers;
     if (mcpWhitelist && name.startsWith("mcp__")) {
       const server = name.slice("mcp__".length).split("__")[0];

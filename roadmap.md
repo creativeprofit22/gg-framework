@@ -11,14 +11,15 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Complete through Phase 10:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, Phase 07 is landed in `d1771368`, Phase 08 is landed in `969c57f9`, and Phases 09–10 are verified in the current worktree.
+- **Complete through Phase 11:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, Phase 07 is landed in `d1771368`, Phase 08 is landed in `969c57f9`, and Phases 09–11 are verified in the current worktree.
 - **Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
 - **2026-07-24 Phase 10 evidence:** The focused background/foreground matrix passed 116 tests with 1 expected failure and 3 platform skips across 120 tests. Bounded allocation, byte offsets, UTF-8 paging, flush-gated completion, record expiry, stale-log sweeping, and hard-deadline foreground cleanup are covered; the ggcoder typecheck and targeted ESLint/Prettier checks pass.
-- **Next phase:** Phase 11 — Enforce explicit foreground/background modes.
-- **Current reliability gap:** Background reads and retention are now bounded and explicit. Command classes still lack an owning foreground/background mode matrix, and `task_stop` does not attempt EOF before tree termination.
-- **Later-track audit:** Phases 11–13 contain partial baseline behavior only: explicit foreground/background selection and manual EOF exist, and complete structured bash diagnostics reach the desktop through isolated sidecar sessions. Acceptance remains incomplete because command classes lack an owning mode matrix, `task_stop` does not attempt EOF first, and desktop smoke evidence is absent. Phase 14 has not run.
+- **2026-07-24 Phase 11 evidence:** The focused lifecycle and explicit command-mode matrix passed 112 tests with 1 expected failure and 3 platform skips across 116 tests. Its 11 owning rows cover six finite foreground classes and five long-lived/interactive background classes; the ggcoder typecheck, targeted ESLint/Prettier, roadmap coverage, and diff checks pass.
+- **Next phase:** Phase 12 — Add EOF-first interactive shutdown.
+- **Current reliability gap:** Explicit command modes now have an owning matrix, while `task_stop` still does not attempt EOF before tree termination.
+- **Later-track audit:** Phase 11 is complete. Phases 12–13 contain partial baseline behavior only: manual EOF exists, and complete structured bash diagnostics reach the desktop through isolated sidecar sessions. Acceptance remains incomplete because `task_stop` does not attempt EOF first and desktop smoke evidence is absent. Phase 14 has not run.
 - **Notes baseline:** Track B has not started. Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository or Rust IPC command exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -521,7 +522,7 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 **References:** [REL-11](#reference-register)
 
-**Acceptance evidence**
+**Acceptance tests**
 
 - Late-reader coverage proves the current bounded tail arrives first and the next default read contains only newly appended bytes.
 - `from_start=true` begins at byte zero, paginates through exact offsets, and leaves the shared cursor at the returned end offset.
@@ -533,6 +534,14 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Hard stop:** Satisfied — five-minute completed-record retention, 48-hour closed-log retention, 256 KiB byte-range/UTF-8 correctness, retained-log recovery, flush settlement, and foreground hard-deadline evidence are green before Phase 11.
 
 ## Phase 11 — Enforce explicit foreground/background modes
+
+**Status:** Complete — verified 2026-07-24.
+
+**Implementation evidence**
+
+- `createBashTool()` derives one explicit foreground/background mode from `run_in_background === true`; finite work remains foreground by default and `persist:true` remains foreground-only.
+- The bash tool contract names finite build/test/lint/format/migration/one-shot work and long-lived dev/watch/REPL/scaffolder/input-waiting work without command-name classification.
+- `bash-mode.test.ts` injects fake child processes through one lifecycle adapter, proving exact stdio, spawn/close settlement boundaries, managed metadata, writable background stdin, and later-turn output/completion reads without real framework processes.
 
 **Outcome:** Finite commands return final status under a deadline; long-lived/interactive commands return managed background metadata immediately.
 
@@ -550,20 +559,21 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Affected seams**
 
 - `packages/ggcoder/src/tools/bash.ts`
+- `packages/ggcoder/src/tools/bash-mode.test.ts`
 - `packages/ggcoder/src/core/process-manager.ts`
 - `packages/ggcoder/src/tools/task-send.ts`
-- related focused tests
 
 **References:** [REL-08](#reference-register), [REL-11](#reference-register)
 
 **Acceptance tests**
 
-- `vitest run` stays foreground with a 120-second outer deadline.
-- `vite`, `next dev`, and representative watch commands return ID/PID/log immediately.
-- Finite lint/build returns final status; foreground stdin is ignored; background stdin is writable.
-- Background completion remains observable after the initiating turn.
+- Six finite rows cover `vitest run`, build, lint, format, migration, and one-shot work; each stays pending until close, uses ignored stdin, returns final status, and records the 120,000 ms default or explicit override in structured diagnostics.
+- Five explicit-background rows cover Vite, Next dev, watch, REPL, and input-waiting/scaffolder work; each resolves after `spawn` without `close` and returns an eight-character ID, PID, log path, and all three control commands.
+- Every background row sends input through `task_send`, observes the exact stdin bytes, then reads output and terminal metadata through `task_output` after the initiating bash call has returned.
+- Verification command: `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/tools/bash-mode.test.ts src/tools/task-send.test.ts src/core/process-manager.test.ts src/core/process-manager-dev-server-repro.test.ts src/tools/bash-timeout.test.ts` — 112 passed, 1 expected failure, and 3 platform tests skipped across 116 tests.
+- `pnpm --filter @kenkaiiii/ggcoder check`, targeted ESLint, targeted Prettier, the exact roadmap coverage script, and `git diff --check` pass.
 
-**Hard stop:** Do not start Phase 12 until each command class has an owning contract test.
+**Hard stop:** Satisfied — every finite and long-lived/interactive command class has an owning contract row, and lifecycle regressions remain green before Phase 12.
 
 ## Phase 12 — Add EOF-first interactive shutdown
 

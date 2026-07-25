@@ -64,11 +64,12 @@ jobs:
         run: node packages/gg-boss/dist/cli.js --help
         shell: bash
 
-  # Distribution-critical cross-OS job: stages the per-platform Node runtime,
-  # bundles the sidecar, boots it with the bundled runtime (smoke), and runs the
-  # Rust unit tests that gate path/window-chrome resolution. The full
-  # `tauri build` lives in release.yml; this keeps CI fast while still
-  # exercising the per-OS spawn path that breaks installed bundles.
+  # Distribution-critical cross-OS job: typechecks and production-builds the
+  # frontend, stages the per-platform Node runtime, bundles and boots the sidecar
+  # with that runtime (smoke), and runs the Rust unit tests that gate
+  # path/window-chrome resolution. The full `tauri build` lives in release.yml;
+  # this keeps CI fast while still exercising the per-OS spawn path that breaks
+  # installed bundles.
   app:
     name: app · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -104,6 +105,11 @@ jobs:
           pnpm --filter @kenkaiiii/gg-ai build
           pnpm --filter @kenkaiiii/gg-agent build
           pnpm --filter @kenkaiiii/ggcoder build
+
+      - name: Frontend typecheck + production build
+        run: |
+          pnpm --filter gg-app check
+          pnpm --filter gg-app build
 
       - name: Stage node runtime + bundle sidecar
         run: |

@@ -428,13 +428,17 @@ const BashParams = z.object({
     .int()
     .min(1000)
     .optional()
-    .describe("Timeout in milliseconds (default: 120000)"),
+    .describe(
+      "Foreground timeout in milliseconds (default: 120000). Finite build, test, lint, " +
+        "format, migration, and one-shot commands wait for completion in foreground.",
+    ),
   run_in_background: z
     .boolean()
     .optional()
     .describe(
-      "Run the command in the background. Returns a process ID immediately. " +
-        "Use task_output to read output and task_stop to stop it.",
+      "Run long-lived or interactive commands in managed background mode. Use true for dev " +
+        "servers, watchers, REPLs, scaffolders, and programs waiting for input; the call returns " +
+        "after spawn with an ID, PID, and log. Default false for finite foreground commands.",
     ),
   persist: z
     .boolean()
@@ -469,21 +473,23 @@ export function createBashTool(
       "Returns exit code and combined stdout/stderr. " +
       "Use cmd.exe syntax (dir, findstr, type, del); POSIX commands and bash syntax " +
       "(ls, grep, cat, &&-chains relying on bash semantics, $(...), single-quoting) will fail. " +
-      "Long output is truncated (tail kept). " +
-      "Set run_in_background=true for long-running OR interactive processes " +
-      "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input). " +
-      "Use task_output to read output, task_send to type input/answer prompts, and " +
+      "Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait " +
+      "for final status under the default 120000ms timeout. Long output is truncated (tail kept). " +
+      "Set run_in_background=true for long-lived or interactive commands " +
+      "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns " +
+      "after spawn. Use task_output to read output, task_send to type input/answer prompts, and " +
       "task_stop to stop background processes."
     : "Execute a bash command. The shell's working directory is already set to the project root — " +
       "don't cd into it redundantly. Use cd only when you need a different directory. " +
       "Returns exit code and combined stdout/stderr. " +
       "Commands run in a non-interactive bash shell with TERM=dumb. " +
-      "Long output is truncated (tail kept). " +
-      "Set run_in_background=true for long-running OR interactive processes " +
-      "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input). " +
-      "Use task_output to read output, task_send to type input/answer prompts, and " +
+      "Finite build, test, lint, format, migration, and one-shot commands run in foreground and wait " +
+      "for final status under the default 120000ms timeout. Long output is truncated (tail kept). " +
+      "Set run_in_background=true for long-lived or interactive commands " +
+      "(dev servers, watchers, REPLs, scaffolders, programs that prompt for input); the call returns " +
+      "after spawn. Use task_output to read output, task_send to type input/answer prompts, and " +
       "task_stop to stop background processes. " +
-      "Set persist=true to run in a session shell where cd/env state survives across " +
+      "Set persist=true to run in a foreground session shell where cd/env state survives across " +
       "persist:true calls.";
   return {
     name: "bash",
@@ -491,6 +497,7 @@ export function createBashTool(
     parameters: BashParams,
     executionMode: "sequential",
     async execute({ command, timeout: timeoutMs, run_in_background, persist }, context) {
+      const commandMode = run_in_background === true ? "background" : "foreground";
       if (isPlanModeActive(planModeRef) && !isReadOnlyCommand(command)) {
         return planModeRestriction("bash");
       }
@@ -502,7 +509,7 @@ export function createBashTool(
       }
       // Persistent session mode — POSIX only; Windows-without-bash falls through
       // to the normal spawn path (cmd.exe fallback) below.
-      if (persist && !run_in_background && !resolveShell(command).isCmdFallback) {
+      if (persist && commandMode === "foreground" && !resolveShell(command).isCmdFallback) {
         sessionShell ??= new PersistentShell(cwd, getSafeToolEnv(), MAX_OUTPUT_BYTES, ops.process);
         const res = await sessionShell.run(
           command,
@@ -521,7 +528,7 @@ export function createBashTool(
               : String(res.exitCode);
         return `Exit code: ${exitCode}\n${output}`;
       }
-      if (run_in_background) {
+      if (commandMode === "background") {
         const result = await processManager.start(command, cwd);
         return (
           `Background process started.\n` +

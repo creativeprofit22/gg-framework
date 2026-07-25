@@ -10,6 +10,7 @@ import {
   INJECTED_PROMPT_LABEL,
 } from "./ken-context.js";
 import { USER_INSTRUCTIONS_HEADER } from "./autopilot-gate.js";
+import { resolveEffectiveAllowedTools } from "./agent-session.js";
 import { PROMPT_COMMANDS } from "./prompt-commands.js";
 import { createTools } from "../tools/index.js";
 import type { Message } from "@kenkaiiii/gg-ai";
@@ -27,11 +28,12 @@ const KEN_ALLOWED_TOOLS = [
 ];
 const KEN_ALLOWED_MCP_SERVERS = ["kencode-search"];
 
-// Mirror of AgentSession.isToolAllowed (which is private): a tool passes when
-// its name is in the allow-list, OR it's an mcp__<server>__<tool> whose server
-// is whitelisted. Kept in lockstep so this test tracks the real filter.
+const KEN_EFFECTIVE_ALLOWED_TOOLS = resolveEffectiveAllowedTools(KEN_ALLOWED_TOOLS)!;
+
+// Match AgentSession's exact-name and MCP-server gates while exercising the
+// production dependency closure used by the live tool map.
 function isToolAllowed(name: string): boolean {
-  if (KEN_ALLOWED_TOOLS.includes(name)) return true;
+  if (KEN_EFFECTIVE_ALLOWED_TOOLS.has(name)) return true;
   if (name.startsWith("mcp__")) {
     const server = name.slice("mcp__".length).split("__")[0];
     return KEN_ALLOWED_MCP_SERVERS.includes(server);
@@ -47,8 +49,18 @@ describe("Ken allowedTools filter", () => {
     try {
       const kenTools = tools.filter((t) => isToolAllowed(t.name)).map((t) => t.name);
 
-      // The mutating / orchestration tools must NOT survive the filter.
-      for (const banned of ["write", "edit", "bash", "tasks", "subagent", "generate_image"]) {
+      // Ken omits bash, so the closure must add none of its process controls.
+      for (const banned of [
+        "write",
+        "edit",
+        "bash",
+        "task_output",
+        "task_send",
+        "task_stop",
+        "tasks",
+        "subagent",
+        "generate_image",
+      ]) {
         expect(kenTools).not.toContain(banned);
       }
       // The read-only research/vision tools must survive.

@@ -54,6 +54,7 @@ function truncateCommand(command: string, maxLen: number): string {
 
 export function formatBackgroundTaskStatus(task: BackgroundTaskSnapshot): string {
   if (task.isRunning) return "running";
+  if (task.completedAt === null) return "completion pending";
   if (task.signal) return `signal ${task.signal}`;
   if (task.exitCode !== null) return `exit ${task.exitCode}`;
   return "completed";

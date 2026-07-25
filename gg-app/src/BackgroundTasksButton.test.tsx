@@ -19,6 +19,13 @@ const runningTask: BackgroundTask = {
   isRunning: true,
 };
 
+const completionPendingTask: BackgroundTask = {
+  ...runningTask,
+  id: "task-pending",
+  command: "pnpm build",
+  isRunning: false,
+};
+
 const signalCompletedTask: BackgroundTask = {
   ...runningTask,
   id: "task-2",
@@ -55,6 +62,14 @@ describe("BackgroundTasksButton task termination", () => {
     expect((await screen.findByRole("status")).textContent).toBe("Process task-1 stopped");
     expect(screen.getByText("pnpm dev")).toBeTruthy();
     expect(killTask).toHaveBeenCalledWith("task-1");
+  });
+
+  it("shows completion pending while the process log is still settling", () => {
+    render(<BackgroundTasksButton tasks={[completionPendingTask]} killTask={killTask} />);
+    fireEvent.click(screen.getByRole("button", { name: "Background tasks" }));
+
+    expect(screen.getByText("completion pending")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop task: pnpm build" })).toBeNull();
   });
 
   it("keeps retained signal completions reachable without a stop affordance", () => {

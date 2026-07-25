@@ -7,14 +7,20 @@ import { localOperations, localProcessLifecycle } from "./operations.js";
 import { createTaskStopTool } from "./task-stop.js";
 
 describe("task_stop tool", () => {
-  it("documents platform-specific process-tree termination and delegates by ID", async () => {
+  it("documents EOF-first bounded shutdown and delegates the final result by ID", async () => {
     const processManager = new ProcessManager();
-    const stop = vi.spyOn(processManager, "stop").mockResolvedValue("Process bg-test stopped");
+    const finalResult =
+      "Process bg-test stopped gracefully via stdin EOF " +
+      "(code=0, signal=none, completedAt=123). Final output:\ndone\n";
+    const stop = vi.spyOn(processManager, "stop").mockResolvedValue(finalResult);
     const tool = createTaskStopTool(processManager);
 
     expect(tool.description).toBe(
-      "Stop a background process tree by ID using the configured execution target's cleanup lifecycle.",
+      "Stop a managed background process by closing stdin (EOF) first, waiting up to two seconds " +
+        "for a clean exit, then escalating through configured process-tree cleanup if needed. " +
+        "Returns the final state and unread output.",
     );
+    expect(tool.executionMode).toBe("sequential");
 
     const result = await tool.execute({ id: "bg-test" }, {
       signal: new AbortController().signal,
@@ -22,7 +28,7 @@ describe("task_stop tool", () => {
 
     expect(stop).toHaveBeenCalledOnce();
     expect(stop).toHaveBeenCalledWith("bg-test");
-    expect(result).toBe("Process bg-test stopped");
+    expect(result).toBe(finalResult);
   });
 
   it("routes task_stop through the manager's custom lifecycle adapter", async () => {
@@ -69,7 +75,13 @@ describe("task_stop tool", () => {
       signal: new AbortController().signal,
     } as never);
 
-    expect(result).toBe(`Process ${proc.id} stopped`);
+    expect(result).toMatch(
+      new RegExp(
+        `^Process ${proc.id} stopped after process-tree cleanup ` +
+          `\\(code=0, signal=none, completedAt=\\d+\\)\\. Final output:\\n` +
+          `\\(failed to read log file\\)$`,
+      ),
+    );
     expect(cleanupProcessTree).toHaveBeenCalledWith(
       expect.objectContaining({ pid: 7654, isExited: expect.any(Function) }),
     );

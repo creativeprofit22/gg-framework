@@ -11,16 +11,17 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Implementation status:** Phases 00–11 are complete and landed.
+- **Implementation status:** Phases 00–12 are complete and landed.
 - **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
 - **2026-07-24 Phase 10 evidence:** The focused background/foreground matrix passed 116 tests with 1 expected failure and 3 platform skips across 120 tests. Bounded allocation, byte offsets, UTF-8 paging, flush-gated completion, record expiry, stale-log sweeping, and hard-deadline foreground cleanup are covered; the ggcoder typecheck and targeted ESLint/Prettier checks pass.
 - **2026-07-24 Phase 11 evidence:** The focused lifecycle and explicit command-mode matrix passed 112 tests with 1 expected failure and 3 platform skips across 116 tests. Its 11 owning rows cover six finite foreground classes and five long-lived/interactive background classes; the ggcoder typecheck, targeted ESLint/Prettier, roadmap coverage, and diff checks pass.
+- **2026-07-25 Phase 12 evidence:** The focused lifecycle matrix passed 134 tests with 3 platform skips across 137 tests and no expected failures. EOF-capable shutdown exits cleanly with code 0, EOF-ignoring shutdown escalates once after 2,000 ms, stop output waits for flush-settled metadata and final unread output, and text/newline/EOF controls are independent. The ggcoder typecheck, targeted ESLint/Prettier, roadmap coverage, and diff checks pass.
 - **Current-head Phase 00 evidence:** Commit `40692c2f` waits for the snapshot-driven workspace readiness signal before closing a pane with active work and dismisses the preceding lifecycle-error toast. Local verification passed the 41-test suite, three supervised Windows repeats, gg-app typecheck, targeted lint/format, and diff checks. CI run [`30145553034`](https://github.com/creativeprofit22/gg-framework/actions/runs/30145553034) is green across all six Windows, macOS, and Linux jobs; every platform completed three supervised workspace repeats with zero survivors.
-- **Next phase:** Phase 12 — Add EOF-first interactive shutdown.
-- **Current reliability gap:** Explicit command modes now have an owning matrix, while `task_stop` still does not attempt EOF before tree termination.
-- **Later-track audit:** Phase 12 is pending with only manual EOF input available. Phase 13 is partially implemented: complete structured bash diagnostics reach the desktop through isolated sidecar sessions, but desktop smoke evidence is absent. Phase 14 and all of Track B, Phases 15–26, have not started.
+- **Next phase:** Phase 13 — Verify desktop-sidecar timeout diagnostics.
+- **Current reliability gap:** Managed background shutdown is EOF-first and bounded; Phase 13 still lacks desktop smoke evidence for complete, isolated timeout diagnostics.
+- **Later-track audit:** Phase 13 is partially implemented: complete structured bash diagnostics reach the desktop through isolated sidecar sessions, but desktop smoke evidence is absent. Phase 14 and all of Track B, Phases 15–26, have not started.
 - **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository or Rust IPC command exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -579,36 +580,48 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 12 — Add EOF-first interactive shutdown
 
-**Status:** Pending — manual EOF input exists, but EOF-first `task_stop` shutdown and escalation are not implemented.
+**Status:** Complete — verified 2026-07-25.
+
+**Implementation evidence**
+
+- `ProcessManager.stop()` closes open writable background stdin first, waits a production 2,000 ms grace, delegates escalation to the existing lifecycle adapter, and applies a separate 5,000 ms flush-settlement bound.
+- Managed completion resolves only after child close, background-log flush, terminal metadata publication, and wrapper reaping; successful stop output reuses the bounded shared output cursor.
+- `task_send` preserves omitted text and controls text, newline, and EOF independently; `task_stop` is sequential and returns the final completion state plus unread output.
+- The real Node HTTP-server fixture consumes stdin EOF, exits with code 0 on Windows, and no longer carries an expected-failure marker.
 
 **Outcome:** EOF-capable protocols exit cleanly before tree termination escalates.
 
 **Scope**
 
-- End stdin first for protocols configured for EOF shutdown.
-- Wait a bounded grace, then terminate the tree if still alive.
-- Await exit or a bounded terminal cleanup state before reporting stopped.
+- End stdin first for tracked background processes with open writable piped stdin.
+- Wait a bounded grace, then terminate the tree through the existing lifecycle adapter if still alive.
+- Await close and flush-gated terminal settlement before reporting stopped.
 
 **Non-goals**
 
-- No EOF for ordinary foreground commands or protocols that do not support it.
+- No EOF for ordinary foreground commands, children without writable stdin, or `shutdownAll()` cleanup; no command-name classification or platform cleanup retuning.
 
 **Affected seams**
 
 - `packages/ggcoder/src/core/process-manager.ts`
+- `packages/ggcoder/src/core/process-manager.test.ts`
+- `packages/ggcoder/src/core/process-manager-dev-server-repro.test.ts`
 - `packages/ggcoder/src/tools/task-send.ts`
 - `packages/ggcoder/src/tools/task-send.test.ts`
-- `packages/ggcoder/src/core/process-manager.test.ts`
+- `packages/ggcoder/src/tools/task-stop.ts`
+- `packages/ggcoder/src/tools/task-stop.test.ts`
 
 **References:** [REL-12](#reference-register)
 
 **Acceptance tests**
 
-- EOF-capable fixture exits without kill; EOF-ignoring fixture escalates after the grace period.
-- `task_send` controls text, newline, and EOF independently.
-- Stopped task includes final state and output and does not report early.
+- EOF-capable fixture exits with code 0 and no tree cleanup; EOF-ignoring fixture receives exactly one cleanup call after the 2,000 ms grace.
+- `task_send` controls text, newline, and EOF independently, including EOF-only without a hidden newline.
+- `task_stop` remains pending through close and log flush, returns bounded final state/output, and returns a retryable failure when terminal settlement never arrives.
+- Verification command: `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/core/process-manager.test.ts src/tools/task-send.test.ts src/tools/task-stop.test.ts src/tools/task-output.test.ts src/core/process-manager-dev-server-repro.test.ts src/tools/bash-mode.test.ts src/tools/bash-timeout.test.ts` — 134 passed and 3 platform tests skipped across 137 tests, with no expected failures.
+- `pnpm --filter @kenkaiiii/ggcoder check`, targeted ESLint, targeted Prettier, the exact roadmap coverage script, and `git diff --check` pass.
 
-**Hard stop:** Do not start Phase 13 until both graceful and escalation fixtures pass.
+**Hard stop:** Satisfied — both graceful EOF and delayed escalation fixtures pass, and the real Windows dev-server path exits cleanly with code 0.
 
 ## Phase 13 — Verify desktop-sidecar timeout diagnostics
 

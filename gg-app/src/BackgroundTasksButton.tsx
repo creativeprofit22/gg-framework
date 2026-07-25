@@ -24,6 +24,7 @@ function shortCommand(cmd: string): string {
 
 function taskStatus(task: BackgroundTask): string {
   if (task.isRunning) return `pid ${task.pid}`;
+  if (task.completedAt === null) return "completion pending";
   if (task.signal) return `signal ${task.signal}`;
   if (task.exitCode !== null) return `exit ${task.exitCode}`;
   return "completed";

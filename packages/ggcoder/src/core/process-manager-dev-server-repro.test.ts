@@ -140,12 +140,7 @@ describe("ProcessManager dev-server lifecycle repro", () => {
 
   it(
     "starts, reads, and stops a long-running Node HTTP server through the worker background path",
-    {
-      // Phase 01 preserves the Windows SIGTERM-handler miss as expected-failure evidence.
-      // Phase 12 should remove `fails` when EOF-first graceful shutdown makes this pass.
-      fails: process.platform === "win32",
-      timeout: 15_000,
-    },
+    { timeout: 15_000 },
     async () => {
       manager = new ProcessManager();
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-dev-server-repro-"));
@@ -159,8 +154,9 @@ describe("ProcessManager dev-server lifecycle repro", () => {
           `  console.log('DEV_SERVER_READY ' + address.port);\n` +
           `});\n` +
           `const interval = setInterval(() => console.log('DEV_SERVER_TICK'), 250);\n` +
-          `process.on('SIGTERM', () => {\n` +
-          `  console.log('DEV_SERVER_SIGTERM');\n` +
+          `process.stdin.resume();\n` +
+          `process.stdin.on('end', () => {\n` +
+          `  console.log('DEV_SERVER_EOF');\n` +
           `  clearInterval(interval);\n` +
           `  server.close(() => process.exit(0));\n` +
           `});\n`,
@@ -184,12 +180,14 @@ describe("ProcessManager dev-server lifecycle repro", () => {
       expect(fromStart.output).toContain("DEV_SERVER_READY");
 
       const stopped = await manager.stop(started.id);
-      expect(stopped).toBe(`Process ${started.id} stopped`);
+      expect(stopped).toContain(`Process ${started.id} stopped gracefully via stdin EOF`);
+      expect(stopped).toContain("code=0");
+      expect(stopped).toContain("DEV_SERVER_EOF");
 
       const final = await manager.readOutput(started.id, true);
       expect(final.isRunning).toBe(false);
-      expect(final.exitCode).not.toBeNull();
-      expect(final.output).toContain("DEV_SERVER_SIGTERM");
+      expect(final.exitCode).toBe(0);
+      expect(final.output).toContain("DEV_SERVER_EOF");
     },
   );
 

@@ -229,6 +229,14 @@ describe("useAgentEvents", () => {
     );
     expect(getTasks()).toEqual([signalTask]);
 
+    const completionPendingTask: BackgroundTask = {
+      ...signalTask,
+      completedAt: null,
+      signal: null,
+    };
+    act(() => hook.result.current.handleEvent(ev("tasks", { tasks: [completionPendingTask] })));
+    expect(getTasks()).toEqual([completionPendingTask]);
+
     const normalTask = { ...signalTask, exitCode: 7, signal: null };
     act(() => hook.result.current.handleEvent(ev("tasks", { tasks: [normalTask] })));
     expect(getTasks()).toEqual([normalTask]);

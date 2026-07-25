@@ -9,7 +9,7 @@ function processManagerWithStop(stop: ProcessManager["stop"]): ProcessManager {
 }
 
 describe("background task kill feedback", () => {
-  it("formats native completion status independently from explicit liveness", () => {
+  it("formats running, pending, and native completion statuses", () => {
     const task: BackgroundTaskSnapshot = {
       id: "bg-1",
       pid: 123,
@@ -27,6 +27,14 @@ describe("background task kill feedback", () => {
     expect(formatBackgroundTaskStatus({ ...task, completedAt: null, isRunning: true })).toBe(
       "running",
     );
+    expect(
+      formatBackgroundTaskStatus({
+        ...task,
+        completedAt: null,
+        exitCode: null,
+        signal: null,
+      }),
+    ).toBe("completion pending");
   });
 
   it("returns and awaits ProcessManager.stop before the result reaches the UI", async () => {
@@ -65,14 +73,14 @@ describe("background task kill feedback", () => {
   it("renders the cross-platform stop failure prefix as a live error item", () => {
     expect(
       createTaskKillFeedback(
-        "Failed to stop process bg-3: process did not exit within 5 seconds and may still be running.",
+        "Failed to stop process bg-3: process did not reach a terminal settled state within 5000 ms and may still be running.",
         "ui-3",
       ),
     ).toEqual({
       kind: "error",
       headline: "Could not stop background task.",
       message:
-        "Failed to stop process bg-3: process did not exit within 5 seconds and may still be running.",
+        "Failed to stop process bg-3: process did not reach a terminal settled state within 5000 ms and may still be running.",
       guidance: "The task may still be running. Try stopping it again.",
       id: "ui-3",
     });

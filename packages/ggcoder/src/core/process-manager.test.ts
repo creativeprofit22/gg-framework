@@ -8,10 +8,15 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import type { ProcessTarget } from "../utils/process.js";
 import { localProcessLifecycle, type ProcessLifecycleAdapter } from "../tools/operations.js";
-import { ProcessManager, type BackgroundProcess } from "./process-manager.js";
+import {
+  ProcessManager,
+  type BackgroundProcess,
+  type ProcessManagerOptions,
+} from "./process-manager.js";
 
 interface FakeChildHarness {
   child: ChildProcess;
+  stdin: PassThrough;
   stdout: PassThrough;
   stderr: PassThrough;
   emitSpawn(): void;
@@ -41,6 +46,7 @@ function fakeChild(pid = 4321): FakeChildHarness {
   }) as unknown as ChildProcess;
   return {
     child,
+    stdin,
     stdout,
     stderr,
     emitSpawn() {
@@ -61,12 +67,15 @@ function lifecycle(overrides: Partial<ProcessLifecycleAdapter> = {}): ProcessLif
   return { ...localProcessLifecycle, ...overrides };
 }
 
-function trackedManager(adapter: ProcessLifecycleAdapter): {
+function trackedManager(
+  adapter: ProcessLifecycleAdapter,
+  options: ProcessManagerOptions = {},
+): {
   manager: ProcessManager;
   child: ChildProcess;
   proc: BackgroundProcess;
 } {
-  const manager = new ProcessManager(adapter);
+  const manager = new ProcessManager(adapter, undefined, options);
   const { child } = fakeChild();
   const proc: BackgroundProcess = {
     id: "bg-test",
@@ -86,6 +95,64 @@ function trackedManager(adapter: ProcessLifecycleAdapter): {
   internals.processes.set(proc.id, proc);
   internals.children.set(proc.id, child);
   return { manager, child, proc };
+}
+
+async function managedStopHarness(
+  onCleanup: ((fake: FakeChildHarness, target: ProcessTarget) => void | Promise<void>) | undefined,
+  options: ProcessManagerOptions = {},
+): Promise<{
+  manager: ProcessManager;
+  fake: FakeChildHarness;
+  started: { id: string; pid: number; logFile: string };
+  cleanupProcessTree: ReturnType<typeof vi.fn>;
+  flushLog(): Promise<void>;
+  removeLogRoot(): Promise<void>;
+}> {
+  const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-stop-lifecycle-"));
+  const fake = fakeChild();
+  const chunks: Buffer[] = [];
+  let logPath: string | undefined;
+  let finishLogFlush: (() => void) | undefined;
+  const cleanupProcessTree = vi.fn(async (target: ProcessTarget) => {
+    await onCleanup?.(fake, target);
+  });
+  const manager = new ProcessManager(
+    lifecycle({
+      spawn: () => {
+        queueMicrotask(() => fake.emitSpawn());
+        return fake.child;
+      },
+      cleanupProcessTree,
+    }),
+    (createdLogPath) => {
+      logPath = createdLogPath;
+      return new Writable({
+        write(chunk, _encoding, callback) {
+          chunks.push(Buffer.from(chunk));
+          callback();
+        },
+        final(callback) {
+          finishLogFlush = callback;
+        },
+      });
+    },
+    { backgroundLogRoot: logRoot, ...options },
+  );
+  const started = await manager.start("stop fixture", "/workspace");
+
+  return {
+    manager,
+    fake,
+    started,
+    cleanupProcessTree,
+    async flushLog() {
+      if (!logPath || !finishLogFlush) throw new Error("Log finalization has not started");
+      await fs.writeFile(logPath, Buffer.concat(chunks));
+      finishLogFlush();
+      await Promise.resolve();
+    },
+    removeLogRoot: () => fs.rm(logRoot, { recursive: true, force: true }),
+  };
 }
 
 describe("ProcessManager foreground logs", () => {
@@ -672,40 +739,234 @@ describe("ProcessManager lifecycle adapter", () => {
     });
   });
 
-  it("routes task stop through graceful target cleanup", async () => {
-    const childRef: { current?: ChildProcess } = {};
-    let capturedTarget: ProcessTarget | undefined;
-    const cleanupProcessTree = vi.fn(async (target: ProcessTarget) => {
-      capturedTarget = target;
-      childRef.current?.emit("close", 0, null);
-    });
-    const tracked = trackedManager(lifecycle({ cleanupProcessTree }));
-    childRef.current = tracked.child;
+  it("waits for managed completion when stop races after native close", async () => {
+    const harness = await managedStopHarness(undefined);
+    try {
+      harness.fake.stdout.write("natural shutdown\n");
+      harness.fake.emitClose(0);
 
-    await expect(tracked.manager.stop(tracked.proc.id)).resolves.toBe(
-      `Process ${tracked.proc.id} stopped`,
-    );
-    expect(cleanupProcessTree).toHaveBeenCalledWith(
-      expect.objectContaining({ pid: tracked.proc.pid, isExited: expect.any(Function) }),
-    );
-    expect(capturedTarget?.isExited?.()).toBe(false);
-    Object.defineProperty(tracked.child, "exitCode", { value: 0, configurable: true });
-    expect(capturedTarget?.isExited?.()).toBe(true);
+      const stopping = harness.manager.stop(harness.started.id);
+      let result: string | undefined;
+      void stopping.then((value) => {
+        result = value;
+      });
+      await Promise.resolve();
+      expect(result).toBeUndefined();
+      expect(harness.cleanupProcessTree).not.toHaveBeenCalled();
+
+      await harness.flushLog();
+      await expect(stopping).resolves.toMatch(
+        new RegExp(
+          `^Process ${harness.started.id} already exited ` +
+            `\\(code=0, signal=none, completedAt=\\d+\\)\\. Final output:\\nnatural shutdown\\n$`,
+        ),
+      );
+      expect(harness.cleanupProcessTree).not.toHaveBeenCalled();
+    } finally {
+      await harness.removeLogRoot();
+    }
   });
 
-  it("keeps a process retryable when cleanup does not produce close", async () => {
+  it("ends stdin first and waits for close plus log flush before graceful success", async () => {
+    vi.useFakeTimers();
+    const harness = await managedStopHarness(undefined);
+    try {
+      const endStdin = vi.spyOn(harness.fake.stdin, "end");
+      const stopping = harness.manager.stop(harness.started.id);
+      let result: string | undefined;
+      void stopping.then((value) => {
+        result = value;
+      });
+
+      await Promise.resolve();
+      expect(harness.fake.stdin.writableEnded).toBe(true);
+      expect(endStdin).toHaveBeenCalledOnce();
+      expect(harness.cleanupProcessTree).not.toHaveBeenCalled();
+
+      harness.fake.stdout.write("shutdown complete\n");
+      harness.fake.emitClose(0);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(result).toBeUndefined();
+      expect(harness.cleanupProcessTree).not.toHaveBeenCalled();
+
+      await harness.flushLog();
+      await expect(stopping).resolves.toMatch(
+        new RegExp(
+          `^Process ${harness.started.id} stopped gracefully via stdin EOF ` +
+            `\\(code=0, signal=none, completedAt=\\d+\\)\\. Final output:\\nshutdown complete\\n$`,
+        ),
+      );
+      expect(harness.cleanupProcessTree).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await harness.removeLogRoot();
+    }
+  });
+
+  it("waits 2 seconds before escalating once and remains pending through log settlement", async () => {
+    vi.useFakeTimers();
+    const events: string[] = [];
+    const harness = await managedStopHarness((fake, target) => {
+      events.push(`cleanup:${target.pid}`);
+      fake.stderr.write("forced shutdown\n");
+      fake.emitClose(null, "SIGTERM");
+    });
+    try {
+      harness.fake.stdin.once("finish", () => events.push("stdin EOF"));
+      const stopping = harness.manager.stop(harness.started.id);
+      let settled = false;
+      void stopping.then(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(events).toEqual(["stdin EOF"]);
+      expect(harness.cleanupProcessTree).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(events).toEqual(["stdin EOF", `cleanup:${harness.started.pid}`]);
+      expect(harness.cleanupProcessTree).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+
+      await harness.flushLog();
+      await expect(stopping).resolves.toContain(
+        `Process ${harness.started.id} stopped after process-tree cleanup ` +
+          `(code=null, signal=SIGTERM, completedAt=`,
+      );
+      await expect(stopping).resolves.toContain("Final output:\nforced shutdown\n");
+    } finally {
+      vi.useRealTimers();
+      await harness.removeLogRoot();
+    }
+  });
+
+  it("shares one EOF-first stop across concurrent callers", async () => {
+    vi.useFakeTimers();
+    const harness = await managedStopHarness((fake) => fake.emitClose(null, "SIGTERM"));
+    try {
+      const endStdin = vi.spyOn(harness.fake.stdin, "end");
+      const firstStop = harness.manager.stop(harness.started.id);
+      const secondStop = harness.manager.stop(harness.started.id);
+
+      expect(secondStop).toBe(firstStop);
+      expect(endStdin).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(harness.cleanupProcessTree).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(harness.cleanupProcessTree).toHaveBeenCalledOnce();
+      await harness.flushLog();
+
+      const [firstResult, secondResult] = await Promise.all([firstStop, secondStop]);
+      expect(secondResult).toBe(firstResult);
+      expect(firstResult).toContain("stopped after process-tree cleanup");
+      expect(endStdin).toHaveBeenCalledOnce();
+      expect(harness.cleanupProcessTree).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+      await harness.removeLogRoot();
+    }
+  });
+
+  it("skips EOF grace and cleans up directly when stdin is closed", async () => {
+    vi.useFakeTimers();
+    const harness = await managedStopHarness((fake) => fake.emitClose(0));
+    try {
+      harness.fake.stdin.destroy();
+      const stopping = harness.manager.stop(harness.started.id);
+      await Promise.resolve();
+
+      expect(harness.cleanupProcessTree).toHaveBeenCalledOnce();
+      await harness.flushLog();
+      await expect(stopping).resolves.toContain("stopped after process-tree cleanup");
+    } finally {
+      vi.useRealTimers();
+      await harness.removeLogRoot();
+    }
+  });
+
+  it("treats cleanup errors as best-effort when the process still exits", async () => {
+    vi.useFakeTimers();
+    const harness = await managedStopHarness(
+      async (fake) => {
+        queueMicrotask(() => fake.emitClose(0));
+        throw new Error("cleanup failed");
+      },
+      { eofGraceMs: 10 },
+    );
+    try {
+      const stopping = harness.manager.stop(harness.started.id);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(harness.cleanupProcessTree).toHaveBeenCalledOnce();
+
+      await harness.flushLog();
+      await expect(stopping).resolves.toContain("stopped after process-tree cleanup");
+    } finally {
+      vi.useRealTimers();
+      await harness.removeLogRoot();
+    }
+  });
+
+  it("keeps a process retryable when EOF and cleanup do not produce terminal settlement", async () => {
     vi.useFakeTimers();
     try {
       const cleanupProcessTree = vi.fn(async () => {});
-      const { manager, proc } = trackedManager(lifecycle({ cleanupProcessTree }));
+      const { manager, proc } = trackedManager(lifecycle({ cleanupProcessTree }), {
+        eofGraceMs: 2_000,
+        terminalSettlementMs: 5_000,
+      });
       const stopping = manager.stop(proc.id);
-      await vi.advanceTimersByTimeAsync(5000);
 
-      await expect(stopping).resolves.toContain("may still be running");
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(cleanupProcessTree).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(cleanupProcessTree).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(4_999);
+      let settled = false;
+      void stopping.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(stopping).resolves.toMatch(
+        /^Failed to stop process bg-test: .*may still be running\.$/,
+      );
       expect(manager.list()).toContainEqual(
         expect.objectContaining({ id: proc.id, isRunning: true }),
       );
       expect(cleanupProcessTree).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not accumulate close listeners across timed-out stop retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const cleanupProcessTree = vi.fn(async () => {});
+      const { manager, child, proc } = trackedManager(lifecycle({ cleanupProcessTree }), {
+        eofGraceMs: 10,
+        terminalSettlementMs: 20,
+      });
+
+      const firstStop = manager.stop(proc.id);
+      expect(child.listenerCount("close")).toBe(1);
+      await vi.advanceTimersByTimeAsync(10);
+      expect(cleanupProcessTree).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(firstStop).resolves.toContain("Failed to stop process");
+      expect(child.listenerCount("close")).toBe(0);
+
+      const secondStop = manager.stop(proc.id);
+      expect(child.listenerCount("close")).toBe(1);
+      await Promise.resolve();
+      expect(cleanupProcessTree).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(secondStop).resolves.toContain("Failed to stop process");
+      expect(child.listenerCount("close")).toBe(0);
     } finally {
       vi.useRealTimers();
     }

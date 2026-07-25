@@ -52,6 +52,8 @@ const FOREGROUND_DIR = path.join(os.homedir(), ".gg", "foreground");
 const DEFAULT_READ_CAP_BYTES = 256 * 1024;
 const DEFAULT_RECORD_RETENTION_MS = 5 * 60 * 1000;
 const DEFAULT_LOG_RETENTION_MS = 48 * 60 * 60 * 1000;
+const DEFAULT_EOF_GRACE_MS = 2_000;
+const DEFAULT_TERMINAL_SETTLEMENT_MS = 5_000;
 const LOG_SWEEP_INTERVAL_MS = 60 * 1000;
 
 export interface ForegroundLogHandle {
@@ -73,6 +75,14 @@ export interface ProcessManagerOptions {
   readCapBytes?: number;
   completedRecordRetentionMs?: number;
   logRetentionMs?: number;
+  eofGraceMs?: number;
+  terminalSettlementMs?: number;
+}
+
+interface NativeCloseDeferred {
+  child: ChildProcess;
+  promise: Promise<void>;
+  cancel: (() => void) | null;
 }
 
 function processTarget(pid: number, child: ChildProcess): ProcessTarget {
@@ -85,6 +95,9 @@ function processTarget(pid: number, child: ChildProcess): ProcessTarget {
 export class ProcessManager {
   private processes = new Map<string, BackgroundProcess>();
   private children = new Map<string, ChildProcess>();
+  private completions = new Map<string, Promise<void>>();
+  private nativeCloseDeferreds = new Map<string, NativeCloseDeferred>();
+  private stopOperations = new Map<string, Promise<string>>();
   private recordExpiryTimers = new Map<string, NodeJS.Timeout>();
   private activeBackgroundLogs = new Set<string>();
   private openForegroundLogs = new Set<string>();
@@ -258,11 +271,20 @@ export class ProcessManager {
     child.stderr?.pipe(logStream, { end: false });
     child.stdin?.on("error", () => {});
 
+    let settleNativeClose!: () => void;
+    const nativeClose = new Promise<void>((resolveNativeClose) => {
+      settleNativeClose = resolveNativeClose;
+    });
+
     return new Promise<StartResult>((resolve, reject) => {
       let startupSettled = false;
       let proc: BackgroundProcess | undefined;
       let pid: number | undefined;
       let logEnded = false;
+      let settleCompletion!: () => void;
+      const completion = new Promise<void>((resolveCompletion) => {
+        settleCompletion = resolveCompletion;
+      });
       let settleLogFlush!: () => void;
       const logFlushed = new Promise<void>((resolveFlush) => {
         settleLogFlush = resolveFlush;
@@ -287,6 +309,7 @@ export class ProcessManager {
       };
 
       const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+        settleNativeClose();
         endLog();
         if (!proc || pid === undefined) {
           if (!startupSettled) {
@@ -311,6 +334,7 @@ export class ProcessManager {
           } catch {
             // Completion is authoritative; wrapper reaping remains best-effort.
           }
+          settleCompletion();
         });
       };
 
@@ -337,6 +361,8 @@ export class ProcessManager {
         };
         this.processes.set(id, proc);
         this.children.set(id, child);
+        this.completions.set(id, completion);
+        this.nativeCloseDeferreds.set(id, { child, promise: nativeClose, cancel: null });
         child.unref();
         startupSettled = true;
         resolve({ id, pid, logFile });
@@ -478,7 +504,7 @@ export class ProcessManager {
 
   async sendInput(
     id: string,
-    input: string,
+    input?: string,
     opts: { enter?: boolean; eof?: boolean } = {},
   ): Promise<string> {
     this.pruneExpiredRecords();
@@ -496,8 +522,8 @@ export class ProcessManager {
       return `Process ${id} is not accepting input (stdin is closed).`;
     }
 
-    const enter = opts.enter ?? true;
-    const text = input + (enter ? "\n" : "");
+    const enter = opts.enter ?? input !== undefined;
+    const text = (input ?? "") + (enter ? "\n" : "");
 
     try {
       if (text.length > 0) {
@@ -518,43 +544,88 @@ export class ProcessManager {
     return `${summary} Use task_output with id="${id}" to read the response.`;
   }
 
-  async stop(id: string): Promise<string> {
+  stop(id: string): Promise<string> {
     this.pruneExpiredRecords();
     void this.sweepStaleLogs();
+
+    const existingOperation = this.stopOperations.get(id);
+    if (existingOperation) return existingOperation;
+
     const proc = this.processes.get(id);
-    if (!proc) return `No background process with id "${id}"`;
+    if (!proc) return Promise.resolve(`No background process with id "${id}"`);
 
     const child = this.children.get(id);
-    if (!child) {
-      return `Process ${id} already exited (${this.formatTerminalStatus(proc)})`;
-    }
+    const operation = child
+      ? this.performStop(id, proc, child)
+      : this.reportCompletedProcess(id, proc);
+    this.stopOperations.set(id, operation);
+    const clearOperation = (): void => {
+      if (this.stopOperations.get(id) === operation) this.stopOperations.delete(id);
+    };
+    void operation.then(clearOperation, clearOperation);
+    return operation;
+  }
 
-    const target = processTarget(proc.pid, child);
-    const exited = new Promise<boolean>((resolve) => {
-      let settled = false;
-      const settle = (didExit: boolean): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        child.removeListener("close", onClose);
-        resolve(didExit);
-      };
-      const onClose = (): void => settle(true);
-      const timeout = setTimeout(() => settle(false), 5000);
-      child.once("close", onClose);
-    });
+  private async performStop(
+    id: string,
+    proc: BackgroundProcess,
+    child: ChildProcess,
+  ): Promise<string> {
+    const nativeClose = this.getNativeClose(id, proc, child);
+    const terminalSettled = this.waitForTerminalSettlement(id, proc, nativeClose);
 
     try {
-      await this.lifecycle.cleanupProcessTree(target);
-    } catch {
-      // Cleanup is best-effort and must not replace the stop lifecycle result.
-    }
+      const stdin = child.stdin;
+      const canSendEof =
+        stdin !== null &&
+        stdin !== undefined &&
+        stdin.writable !== false &&
+        !stdin.destroyed &&
+        !stdin.writableEnded;
+      let attemptedEof = false;
+      let stoppedGracefully = false;
 
-    if (!(await exited)) {
-      return `Failed to stop process ${id}: process did not exit within 5 seconds and may still be running.`;
-    }
+      if (canSendEof) {
+        try {
+          stdin.end();
+          attemptedEof = true;
+        } catch {
+          // A failed EOF attempt falls through to adapter-owned tree cleanup.
+        }
+      }
 
-    return `Process ${id} stopped`;
+      if (attemptedEof) {
+        const eofGraceMs = this.boundedDuration(this.options.eofGraceMs, DEFAULT_EOF_GRACE_MS);
+        stoppedGracefully = await this.settlesWithin(nativeClose, eofGraceMs);
+      }
+
+      if (!stoppedGracefully) {
+        try {
+          await this.lifecycle.cleanupProcessTree(processTarget(proc.pid, child));
+        } catch {
+          // Cleanup is best-effort; terminal settlement remains authoritative.
+        }
+      }
+
+      const terminalSettlementMs = this.boundedDuration(
+        this.options.terminalSettlementMs,
+        DEFAULT_TERMINAL_SETTLEMENT_MS,
+      );
+      if (!(await this.settlesWithin(terminalSettled, terminalSettlementMs))) {
+        return `Failed to stop process ${id}: process did not reach a terminal settled state within ${terminalSettlementMs} ms and may still be running.`;
+      }
+
+      const final = await this.readOutput(id);
+      const method = stoppedGracefully ? "gracefully via stdin EOF" : "after process-tree cleanup";
+      const finalOutput = final.output.length > 0 ? final.output : "(no unread output)";
+      return (
+        `Process ${id} stopped ${method} ` +
+        `(code=${final.exitCode ?? "null"}, signal=${final.signal ?? "none"}, ` +
+        `completedAt=${final.completedAt ?? "pending"}). Final output:\n${finalOutput}`
+      );
+    } finally {
+      if (this.children.get(id) === child) this.cancelInjectedNativeClose(id, child);
+    }
   }
 
   list(): BackgroundTaskSnapshot[] {
@@ -584,10 +655,99 @@ export class ProcessManager {
     }
   }
 
+  private async reportCompletedProcess(id: string, proc: BackgroundProcess): Promise<string> {
+    if (proc.completedAt === null) await this.completions.get(id);
+    const final = await this.readOutput(id);
+    const finalOutput = final.output.length > 0 ? final.output : "(no unread output)";
+    return (
+      `Process ${id} already exited ` +
+      `(code=${final.exitCode ?? "null"}, signal=${final.signal ?? "none"}, ` +
+      `completedAt=${final.completedAt ?? "pending"}). Final output:\n${finalOutput}`
+    );
+  }
+
   private formatTerminalStatus(proc: BackgroundProcess): string {
     if (proc.signal) return `signal ${proc.signal}`;
     if (proc.exitCode !== null) return `code ${proc.exitCode}`;
     return "completion pending";
+  }
+
+  private getNativeClose(id: string, proc: BackgroundProcess, child: ChildProcess): Promise<void> {
+    const existing = this.nativeCloseDeferreds.get(id);
+    if (existing?.child === child) return existing.promise;
+    existing?.cancel?.();
+
+    const settleInjectedRecord = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (this.children.get(id) === child) this.children.delete(id);
+      proc.exitCode = code;
+      proc.signal = signal;
+      proc.completedAt = this.now();
+      this.scheduleRecordExpiry(id, proc.completedAt);
+    };
+
+    if (child.exitCode !== null || child.signalCode !== null) {
+      settleInjectedRecord(child.exitCode, child.signalCode);
+      return Promise.resolve();
+    }
+
+    // Tests and adapters may inject a tracked child without going through start().
+    // Share one cancellable listener across each stop attempt so retries cannot leak listeners.
+    let resolveNativeClose!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      resolveNativeClose = resolve;
+    });
+    const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+      settleInjectedRecord(code, signal);
+      resolveNativeClose();
+    };
+    const deferred: NativeCloseDeferred = {
+      child,
+      promise,
+      cancel: () => {
+        child.removeListener("close", onClose);
+        if (this.nativeCloseDeferreds.get(id) === deferred) {
+          this.nativeCloseDeferreds.delete(id);
+        }
+      },
+    };
+    child.once("close", onClose);
+    this.nativeCloseDeferreds.set(id, deferred);
+    return promise;
+  }
+
+  private cancelInjectedNativeClose(id: string, child: ChildProcess): void {
+    const deferred = this.nativeCloseDeferreds.get(id);
+    if (deferred?.child === child) deferred.cancel?.();
+  }
+
+  private waitForTerminalSettlement(
+    id: string,
+    proc: BackgroundProcess,
+    nativeClose: Promise<void>,
+  ): Promise<void> {
+    const managedCompletion = this.completions.get(id);
+    if (managedCompletion) return managedCompletion;
+    if (proc.completedAt !== null) return Promise.resolve();
+    return nativeClose;
+  }
+
+  private settlesWithin(settlement: Promise<void>, timeoutMs: number): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (result: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(result);
+      };
+      const timeout = setTimeout(() => finish(false), timeoutMs);
+      void settlement.then(() => finish(true));
+    });
+  }
+
+  private boundedDuration(configured: number | undefined, fallback: number): number {
+    if (configured === undefined || !Number.isFinite(configured)) return fallback;
+    return Math.max(0, Math.floor(configured));
   }
 
   private now(): number {
@@ -655,6 +815,10 @@ export class ProcessManager {
     for (const [id, proc] of this.processes) {
       if (proc.completedAt !== null && !this.children.has(id) && proc.completedAt <= cutoff) {
         this.processes.delete(id);
+        this.completions.delete(id);
+        this.stopOperations.delete(id);
+        this.nativeCloseDeferreds.get(id)?.cancel?.();
+        this.nativeCloseDeferreds.delete(id);
         const timer = this.recordExpiryTimers.get(id);
         if (timer) clearTimeout(timer);
         this.recordExpiryTimers.delete(id);

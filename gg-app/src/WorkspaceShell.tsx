@@ -218,8 +218,13 @@ function ReadyWorkspaceShell({
   const [copyAnnouncement, setCopyAnnouncement] = useState("");
   const [copyingPaneId, setCopyingPaneId] = useState<WorkspacePaneId | null>(null);
   const [confirmPaneCloseId, setConfirmPaneCloseId] = useState<WorkspacePaneId | null>(null);
+  const [closingPaneIds, setClosingPaneIds] = useState<ReadonlySet<WorkspacePaneId>>(
+    () => new Set(),
+  );
   const warnedRestorePanesRef = useRef(new Set<WorkspacePaneId>());
   const inputActionsRef = useRef(new Map<string, PaneInputActions>());
+  const paneGenerationsRef = useRef(new Map<WorkspacePaneId, number>());
+  const closingPaneIdsRef = useRef(new Set<WorkspacePaneId>());
   const nativeDragPaneRef = useRef<WorkspacePaneId | null>(null);
   const layoutRef = useRef(layout);
   const activePaneDragRef = useRef<ActivePaneDrag | null>(null);
@@ -352,6 +357,9 @@ function ReadyWorkspaceShell({
 
   const updateSnapshot = useCallback((snapshot: PaneSnapshot): void => {
     if (!workspaceLayoutLeafIds(layoutRef.current.root).includes(snapshot.paneId)) return;
+    if (typeof snapshot.generation === "number") {
+      paneGenerationsRef.current.set(snapshot.paneId, snapshot.generation);
+    }
     setSnapshots((previous) => mergePaneSnapshot(previous, snapshot));
     if (!snapshot.restoreChecked) return;
     setLayout((previous) => {
@@ -593,32 +601,49 @@ function ReadyWorkspaceShell({
   );
 
   const performClosePane = useCallback(
-    (paneId: WorkspacePaneId): void => {
+    async (paneId: WorkspacePaneId): Promise<void> => {
+      if (closingPaneIdsRef.current.has(paneId)) return;
+      closingPaneIdsRef.current.add(paneId);
+      setClosingPaneIds(new Set(closingPaneIdsRef.current));
       cancelPaneDrag(false);
-      setConfirmPaneCloseId(null);
-      void disposePaneSession(paneId).catch(() => {});
-      warnedRestorePanesRef.current.delete(paneId);
-      inputActionsRef.current.delete(paneId);
-      setSnapshots((previous) => {
-        const nextSnapshots = { ...previous };
-        delete nextSnapshots[paneId];
-        return nextSnapshots;
-      });
-      const nextLayout = removeWorkspacePane(layoutRef.current, paneId);
-      layoutRef.current = nextLayout;
-      setLayout(nextLayout);
-      requestAnimationFrame(() => focusPaneInput(nextLayout.focusedPaneId));
+      try {
+        const generation = paneGenerationsRef.current.get(paneId);
+        if (generation === undefined) await disposePaneSession(paneId);
+        else await disposePaneSession(paneId, generation);
+        setConfirmPaneCloseId((current) => (current === paneId ? null : current));
+        warnedRestorePanesRef.current.delete(paneId);
+        inputActionsRef.current.delete(paneId);
+        paneGenerationsRef.current.delete(paneId);
+        setSnapshots((previous) => {
+          const nextSnapshots = { ...previous };
+          delete nextSnapshots[paneId];
+          return nextSnapshots;
+        });
+        const nextLayout = removeWorkspacePane(layoutRef.current, paneId);
+        layoutRef.current = nextLayout;
+        setLayout(nextLayout);
+        requestAnimationFrame(() => focusPaneInput(nextLayout.focusedPaneId));
+      } catch {
+        toast(
+          `Pane ${paneId} stayed open because its session could not be disposed. Try closing it again.`,
+          "error",
+        );
+      } finally {
+        closingPaneIdsRef.current.delete(paneId);
+        setClosingPaneIds(new Set(closingPaneIdsRef.current));
+      }
     },
     [cancelPaneDrag, focusPaneInput],
   );
 
   const closePane = useCallback(
     (paneId: WorkspacePaneId): void => {
+      if (closingPaneIdsRef.current.has(paneId)) return;
       if (snapshots[paneId]?.activeWork) {
         setConfirmPaneCloseId(paneId);
         return;
       }
-      performClosePane(paneId);
+      void performClosePane(paneId);
     },
     [performClosePane, snapshots],
   );
@@ -756,6 +781,7 @@ function ReadyWorkspaceShell({
           onSplitPane={splitPane}
           onCopyPane={(paneId) => void copyPane(paneId)}
           copyingPaneId={copyingPaneId}
+          closingPaneIds={closingPaneIds}
           onClosePane={closePane}
           onPaneDragStart={startPaneDrag}
           onPaneDragEnd={finishPaneDrag}
@@ -771,8 +797,10 @@ function ReadyWorkspaceShell({
           title="Close Pane"
           message={`Pane ${confirmPaneCloseId} has active work. Closing it will stop that work and dispose its session.`}
           confirmLabel="Close Pane"
-          onConfirm={() => performClosePane(confirmPaneCloseId)}
+          busy={closingPaneIds.has(confirmPaneCloseId)}
+          onConfirm={() => void performClosePane(confirmPaneCloseId)}
           onClose={() => {
+            if (closingPaneIdsRef.current.has(confirmPaneCloseId)) return;
             const paneId = confirmPaneCloseId;
             setConfirmPaneCloseId(null);
             requestAnimationFrame(() => focusPaneInput(paneId));

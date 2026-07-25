@@ -11,16 +11,17 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Complete through Phase 11:** Phase 00 workspace evidence is closed, Phases 01–05 remain landed (`6c5ef6ad`, `45618c8d`, `eb5f8309`, `6b11811e`, `52ccbc81`, and `51666497`), Phase 06 is landed in `68188bd7` and `b06223c0`, Phase 07 is landed in `d1771368`, Phase 08 is landed in `969c57f9`, and Phases 09–11 are verified in the current worktree.
-- **Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
+- **Implementation status:** Phases 00–11 are complete and landed.
+- **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
 - **2026-07-24 Phase 10 evidence:** The focused background/foreground matrix passed 116 tests with 1 expected failure and 3 platform skips across 120 tests. Bounded allocation, byte offsets, UTF-8 paging, flush-gated completion, record expiry, stale-log sweeping, and hard-deadline foreground cleanup are covered; the ggcoder typecheck and targeted ESLint/Prettier checks pass.
 - **2026-07-24 Phase 11 evidence:** The focused lifecycle and explicit command-mode matrix passed 112 tests with 1 expected failure and 3 platform skips across 116 tests. Its 11 owning rows cover six finite foreground classes and five long-lived/interactive background classes; the ggcoder typecheck, targeted ESLint/Prettier, roadmap coverage, and diff checks pass.
+- **Current-head Phase 00 evidence:** Commit `40692c2f` waits for the snapshot-driven workspace readiness signal before closing a pane with active work and dismisses the preceding lifecycle-error toast. Local verification passed the 41-test suite, three supervised Windows repeats, gg-app typecheck, targeted lint/format, and diff checks. CI run [`30145553034`](https://github.com/creativeprofit22/gg-framework/actions/runs/30145553034) is green across all six Windows, macOS, and Linux jobs; every platform completed three supervised workspace repeats with zero survivors.
 - **Next phase:** Phase 12 — Add EOF-first interactive shutdown.
 - **Current reliability gap:** Explicit command modes now have an owning matrix, while `task_stop` still does not attempt EOF before tree termination.
-- **Later-track audit:** Phase 11 is complete. Phases 12–13 contain partial baseline behavior only: manual EOF exists, and complete structured bash diagnostics reach the desktop through isolated sidecar sessions. Acceptance remains incomplete because `task_stop` does not attempt EOF first and desktop smoke evidence is absent. Phase 14 has not run.
-- **Notes baseline:** Track B has not started. Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository or Rust IPC command exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
+- **Later-track audit:** Phase 12 is pending with only manual EOF input available. Phase 13 is partially implemented: complete structured bash diagnostics reach the desktop through isolated sidecar sessions, but desktop smoke evidence is absent. Phase 14 and all of Track B, Phases 15–26, have not started.
+- **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository or Rust IPC command exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
 
@@ -121,14 +122,15 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 **Completion evidence**
 
-- Green CI run: [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147).
+- Historical green CI run: [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147).
+- Current-head green CI run: [`30145553034`](https://github.com/creativeprofit22/gg-framework/actions/runs/30145553034).
 - Framework jobs: `windows-latest · node 22.x` passed; `macos-latest · node 22.x` passed; `ubuntu-latest · node 22.x` passed.
 - App jobs: `app · windows-latest` passed; `app · macos-latest` passed; `app · ubuntu-latest` passed.
-- Windows artifact: 3 runs; peak process-tree memory `[416923648, 406360064, 410021888]` bytes; growth `-6901760` bytes; 0 survivors.
-- macOS artifact: 3 runs; peak process-tree memory `[506019840, 525697024, 515801088]` bytes; growth `9781248` bytes; 0 survivors.
-- Linux artifact: 3 runs; peak process-tree memory `[518901760, 511025152, 511356928]` bytes; growth `-7544832` bytes; 0 survivors.
+- Windows artifact: 3 runs; peak process-tree memory `[405884928, 393076736, 407207936]` bytes; growth `1323008` bytes; 0 survivors.
+- macOS artifact: 3 runs; peak process-tree memory `[516456448, 508919808, 517488640]` bytes; growth `1032192` bytes; 0 survivors.
+- Linux artifact: 3 runs; peak process-tree memory `[510341120, 508952576, 513036288]` bytes; growth `2695168` bytes; 0 survivors.
 
-**Hard stop:** Satisfied — the three-OS run, exact memory sequences, and survivor evidence are recorded above; lint, typecheck, focused workspace tests, and all six CI jobs are green.
+**Hard stop:** Satisfied — current-head CI passed all six jobs; each platform completed all three supervised workspace repeats with bounded memory and zero survivors.
 
 ## Phase 01 — Add bounded foreground hang fixtures
 
@@ -577,6 +579,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 12 — Add EOF-first interactive shutdown
 
+**Status:** Pending — manual EOF input exists, but EOF-first `task_stop` shutdown and escalation are not implemented.
+
 **Outcome:** EOF-capable protocols exit cleanly before tree termination escalates.
 
 **Scope**
@@ -607,6 +611,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Hard stop:** Do not start Phase 13 until both graceful and escalation fixtures pass.
 
 ## Phase 13 — Verify desktop-sidecar timeout diagnostics
+
+**Status:** Partially implemented — structured diagnostics and session isolation are covered; desktop smoke evidence is missing.
 
 **Outcome:** The desktop receives complete timeout diagnostics without raw, missing, or cross-window output.
 
@@ -640,6 +646,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Hard stop:** Attach desktop smoke evidence. Do not start Phase 14 with missing diagnostics or isolation failures.
 
 ## Phase 14 — Complete the three-OS reliability gate
+
+**Status:** Not started.
 
 **Outcome:** Every carry-forward process-lifecycle scenario is deterministic on its owning platforms, and Track A is releasable.
 
@@ -680,6 +688,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 15 — Move Notes authority behind the sidecar
 
+**Status:** Not started.
+
 **Outcome:** Every window reads and writes one durable project-scoped Notes document.
 
 **Scope**
@@ -714,6 +724,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 16 — Add phase, reference, and lifecycle schemas
 
+**Status:** Not started.
+
 **Outcome:** The authoritative document can store ordered phases, structured references, session links, reminders, overrides, and audit events.
 
 **Scope**
@@ -746,6 +758,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Hard stop:** Publish the schema fixture and migration evidence. Do not build UI against an unstable document contract.
 
 ## Phase 17 — Build the compact Notes shell
+
+**Status:** Not started.
 
 **Outcome:** Notes uses a wide, nearly full-height tabbed workspace without changing existing content semantics.
 
@@ -780,6 +794,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 18 — Add ordered roadmap list and phase detail CRUD
 
+**Status:** Not started.
+
 **Outcome:** Users can create, inspect, edit, reorder, cancel, archive, and restore standalone roadmap phases.
 
 **Scope**
@@ -810,6 +826,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Hard stop:** Record list/detail interaction and density evidence. Do not connect agent sessions until CRUD and ordering survive restart.
 
 ## Phase 19 — Add the shared structured reference library
+
+**Status:** Not started.
 
 **Outcome:** References are stored once, grouped by source, linked to phases by ID, and inspected without eagerly loading bodies.
 
@@ -842,6 +860,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Hard stop:** Show exact attached references before any phase can start. Do not add prompt saving until reference and phase destinations are unambiguous.
 
 ## Phase 20 — Add Ken prompt Send, Fresh send, and Save actions
+
+**Status:** Not started.
 
 **Outcome:** A Ken prompt can be sent now, sent in one guarded fresh session, or saved to Notes without losing the prompt.
 
@@ -876,6 +896,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Hard stop:** Do not start phase-launch work until duplicate sends and stale-session sends are impossible in tests.
 
 ## Phase 21 — Launch one bound session with isolated phase context
+
+**Status:** Not started.
 
 **Outcome:** Start phase atomically creates one fresh bound Plan Mode session, sends only its compact phase package, and resumes that same session.
 
@@ -919,6 +941,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 22 — Derive lifecycle status from authoritative events
 
+**Status:** Not started.
+
 **Outcome:** Phase status follows explicit session/plan/tool events and carries a useful attention reason.
 
 **Scope**
@@ -951,6 +975,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 23 — Add the roadmap-status tool and protected reconciliation
 
+**Status:** Not started.
+
 **Outcome:** GG Coder/Ken can record progress, blockers, evidence, and discovered references without overwriting user changes.
 
 **Scope**
@@ -982,6 +1008,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Hard stop:** Demonstrate conflict and override recovery. Do not enable automatic Done until user control is proven.
 
 ## Phase 24 — Gate automatic completion through verification and review
+
+**Status:** Not started.
 
 **Outcome:** A phase becomes Done automatically only after implementation, verification, and final Ken/Autopilot review all succeed.
 
@@ -1016,6 +1044,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 25 — Add deduplicated reminders and notifications
 
+**Status:** Not started.
+
 **Outcome:** A phase can remind once per occurrence through the correct focused/background channel and recover overdue reminders after restart.
 
 **Scope**
@@ -1049,6 +1079,8 @@ All external references are evidence only. Copy behavior, not source text, unles
 **Hard stop:** Record focused, background, denied-permission, restart, and multi-window evidence. Resolve closed-app scheduling as startup-only or a separately approved design before release.
 
 ## Phase 26 — Run the Notes Roadmap release gate
+
+**Status:** Not started.
 
 **Outcome:** The complete Notes Roadmap is accessible, durable, context-efficient, race-safe, and releasable.
 

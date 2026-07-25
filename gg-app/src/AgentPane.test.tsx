@@ -44,15 +44,18 @@ vi.mock("./useKenMentor", () => ({
     handleKenEvent: vi.fn(),
   }),
 }));
-vi.mock("./useAutopilot", () => ({
-  useAutopilot: () => ({ autopilotReviewing: false, handleAutopilotEvent: vi.fn() }),
-}));
 vi.mock("./useProgress", () => ({
   useProgress: () => ({ snapshot: null, levelUp: null, levelUpNonce: null, levelUpOrigin: false }),
 }));
 vi.mock("./useAgentEvents", () => ({
   HOOK_PRESENTATION: {},
-  useAgentEvents: () => ({ handleEvent: vi.fn(), pushItem: vi.fn(), endStreamingText: vi.fn() }),
+  useAgentEvents: (deps: {
+    handleAutopilotEvent: (event: AgentModule.SidecarEvent) => boolean;
+  }) => ({
+    handleEvent: deps.handleAutopilotEvent,
+    pushItem: vi.fn(),
+    endStreamingText: vi.fn(),
+  }),
 }));
 vi.mock("./HomeScreen", () => ({
   HomeScreen: (props: {
@@ -111,7 +114,7 @@ vi.mock("./agent", async (importOriginal) => {
 });
 
 import { AgentPane } from "./AgentPane";
-import type { PaneInputActions } from "./AgentPane";
+import type { PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type { AgentState, PaneAgentClient, PaneSessionTarget } from "./agent";
 
 const target: PaneSessionTarget = { mode: "code", cwd: "/work", sessionPath: "/session" };
@@ -341,6 +344,43 @@ describe("AgentPane lifecycle", () => {
     view.unmount();
     await waitFor(() => expect(left.dispose).toHaveBeenCalledWith(1));
     expect(right.dispose).toHaveBeenCalledWith(2);
+  });
+
+  it("reports autopilot review as active work until a terminal autopilot event", async () => {
+    const pane = client("pane-1", 7);
+    const onSnapshot = vi.fn<(snapshot: PaneSnapshot) => void>();
+    render(
+      <AgentPane
+        client={pane}
+        paneId="pane-1"
+        target={target}
+        workspaceOwnsSessionLifecycle
+        onSnapshot={onSnapshot}
+      />,
+    );
+    await waitFor(() => {
+      expect(pane.subscribe).toHaveBeenCalled();
+      expect(onSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({ paneId: "pane-1", activeWork: false }),
+      );
+    });
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    expect(handleEvent).toBeDefined();
+
+    act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
+    await waitFor(() =>
+      expect(onSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({ paneId: "pane-1", activeWork: true }),
+      ),
+    );
+
+    act(() => handleEvent?.({ type: "autopilot_done", data: {} }));
+    await waitFor(() =>
+      expect(onSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({ paneId: "pane-1", activeWork: false }),
+      ),
+    );
   });
 
   it("managed panes restore an existing native session without owning its disposal", async () => {

@@ -64,6 +64,7 @@ export interface WorkspaceNodeProps {
   onSplitPane: (paneId: WorkspacePaneId, direction: SplitDirection) => void;
   onCopyPane: (paneId: WorkspacePaneId) => void;
   copyingPaneId: WorkspacePaneId | null;
+  closingPaneIds: ReadonlySet<WorkspacePaneId>;
   onClosePane: (paneId: WorkspacePaneId) => void;
   onPaneDragStart: (paneId: WorkspacePaneId, handle: HTMLButtonElement) => void;
   onPaneDragEnd: (paneId: WorkspacePaneId) => void;
@@ -287,6 +288,7 @@ function WorkspaceAgentLeaf({
   onSplitPane,
   onCopyPane,
   copyingPaneId,
+  closingPaneIds,
   onClosePane,
   onPaneDragStart,
   onPaneDragEnd,
@@ -413,8 +415,11 @@ function WorkspaceAgentLeaf({
         <button
           type="button"
           className="workspace-pane-close"
-          aria-label={`Close ${paneId} pane`}
-          title={`Close ${paneId} pane`}
+          aria-label={
+            closingPaneIds.has(paneId) ? `Closing ${paneId} pane` : `Close ${paneId} pane`
+          }
+          title={closingPaneIds.has(paneId) ? `Closing ${paneId} pane` : `Close ${paneId} pane`}
+          disabled={closingPaneIds.has(paneId)}
           onClick={() => onClosePane(paneId)}
         >
           <span aria-hidden="true">×</span>

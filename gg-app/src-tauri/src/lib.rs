@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -70,6 +70,7 @@ enum ChatAgent {
 const PRIMARY_PANE_ID: &str = "primary";
 const MAX_PANE_ID_LEN: usize = 64;
 const MAX_AGENT_PANES_PER_WINDOW: usize = 12;
+const DAEMON_SESSION_DISPOSAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One logical pane's session inside the shared daemon.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
@@ -265,8 +266,8 @@ fn take_pane_session(
     pane
 }
 
-fn dispose_pane_target(
-    registry: &mut PaneRegistry,
+fn pane_disposal_target(
+    registry: &PaneRegistry,
     owner_label: &str,
     pane_id: &str,
     allow_primary: bool,
@@ -281,8 +282,36 @@ fn dispose_pane_target(
     if expected_generation.is_some_and(|generation| pane.generation != generation) {
         return Err(format!("pane '{pane_id}' generation is stale"));
     }
+    Ok(pane.clone())
+}
+
+fn dispose_pane_target(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    allow_primary: bool,
+    expected_generation: Option<u64>,
+) -> Result<PaneSession, String> {
+    pane_disposal_target(
+        registry,
+        owner_label,
+        pane_id,
+        allow_primary,
+        expected_generation,
+    )?;
     take_pane_session(registry, owner_label, pane_id)
         .ok_or_else(|| format!("pane '{pane_id}' does not exist"))
+}
+
+fn complete_pane_disposal(
+    registry: &mut PaneRegistry,
+    owner_label: &str,
+    pane_id: &str,
+    generation: u64,
+    deletion_result: Result<(), String>,
+) -> Result<(), String> {
+    deletion_result?;
+    dispose_pane_target(registry, owner_label, pane_id, false, Some(generation)).map(|_| ())
 }
 
 fn bind_pane_session(
@@ -3632,7 +3661,7 @@ async fn rollback_pane_copy(app: &tauri::AppHandle, operation: PaneCopyOperation
     if let Some(port) = daemon_port {
         for pane in panes {
             if let Some(session_id) = pane.session_id {
-                daemon_delete_session(app, port, &session_id).await;
+                let _ = daemon_delete_session(app, port, &session_id).await;
             }
         }
     }
@@ -3950,7 +3979,7 @@ fn select_project(
     if let (Some(port), Some(id)) = (port_for(&webview), old.session_id) {
         let app2 = app.clone();
         tauri::async_runtime::spawn(async move {
-            daemon_delete_session(&app2, port, &id).await;
+            let _ = daemon_delete_session(&app2, port, &id).await;
         });
     }
     let generation = start_pane_session(
@@ -4045,7 +4074,7 @@ fn agent_pane_restore(
 }
 
 #[tauri::command]
-fn agent_pane_dispose(
+async fn agent_pane_dispose(
     webview: WebviewWindow,
     app: tauri::AppHandle,
     pane_id: String,
@@ -4053,15 +4082,23 @@ fn agent_pane_dispose(
 ) -> Result<(), String> {
     let pane = {
         let windows: State<Windows> = app.state();
-        let mut registry = windows.map.lock().unwrap();
-        dispose_pane_target(&mut registry, webview.label(), &pane_id, false, generation)?
+        let registry = windows.map.lock().unwrap();
+        pane_disposal_target(&registry, webview.label(), &pane_id, false, generation)?
     };
-    if let (Some(port), Some(id)) = (port_for(&webview), pane.session_id) {
-        tauri::async_runtime::spawn(async move {
-            daemon_delete_session(&app, port, &id).await;
-        });
-    }
-    Ok(())
+    let deletion_result = match (port_for(&webview), pane.session_id.as_deref()) {
+        (Some(port), Some(id)) => daemon_delete_session(&app, port, id).await,
+        (None, Some(_)) => Err("agent daemon is unavailable; pane session was not disposed".into()),
+        (_, None) => Ok(()),
+    };
+    let windows: State<Windows> = app.state();
+    let mut registry = windows.map.lock().unwrap();
+    complete_pane_disposal(
+        &mut registry,
+        webview.label(),
+        &pane_id,
+        pane.generation,
+        deletion_result,
+    )
 }
 
 /// Map a normalized gaze point to a window and (optionally) focus it.
@@ -4800,17 +4837,36 @@ async fn daemon_create_session(
         .map(|s| s.to_string())
 }
 
-/// DELETE /session/:id on the daemon (best-effort, fire-and-forget).
-async fn daemon_delete_session(app: &tauri::AppHandle, port: u16, id: &str) {
+/// DELETE /session/:id on the daemon and require an acknowledged success response.
+async fn daemon_delete_session(app: &tauri::AppHandle, port: u16, id: &str) -> Result<(), String> {
     let client = app.state::<reqwest::Client>().inner().clone();
-    let _ = client
+    let response = client
         .delete(format!(
             "{}/session/{}",
             sidecar_base(port),
             urlencoding(id)
         ))
+        .timeout(DAEMON_SESSION_DISPOSAL_TIMEOUT)
         .send()
-        .await;
+        .await
+        .map_err(|error| {
+            if error.is_timeout() {
+                "agent daemon timed out during session disposal; retry closing the pane".to_string()
+            } else {
+                format!("failed to reach agent daemon for session disposal: {error}")
+            }
+        })?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    let detail = body.trim();
+    Err(if detail.is_empty() {
+        format!("agent daemon rejected session disposal with HTTP {status}")
+    } else {
+        format!("agent daemon rejected session disposal with HTTP {status}: {detail}")
+    })
 }
 
 fn start_pane_session(
@@ -4895,7 +4951,7 @@ fn launch_pane_session(
                     bind_pane_session(&mut registry, &label, &pane_id, generation, id.clone())
                 };
                 if !bound {
-                    daemon_delete_session(&app, port, &id).await;
+                    let _ = daemon_delete_session(&app, port, &id).await;
                     return;
                 }
                 start_event_bridge(
@@ -5313,7 +5369,7 @@ pub fn run() {
                     tauri::async_runtime::spawn(async move {
                         for pane in panes {
                             if let Some(id) = pane.session_id {
-                                daemon_delete_session(&app2, port, &id).await;
+                                let _ = daemon_delete_session(&app2, port, &id).await;
                             }
                         }
                     });
@@ -6416,6 +6472,60 @@ mod tests {
                 .session_id
                 .as_deref(),
             Some("current")
+        );
+    }
+
+    #[test]
+    fn pane_disposal_success_removes_acknowledged_generation() {
+        let mut registry = PaneRegistry::default();
+        let generation = add_pane(&mut registry, "main", "chat", "/project");
+        let target =
+            pane_disposal_target(&registry, "main", "chat", false, Some(generation)).unwrap();
+
+        complete_pane_disposal(&mut registry, "main", "chat", target.generation, Ok(())).unwrap();
+
+        assert!(resolve_owned_pane(&registry, "main", "chat").is_none());
+    }
+
+    #[test]
+    fn pane_disposal_failure_preserves_registry_for_retry() {
+        let mut registry = PaneRegistry::default();
+        let generation = add_pane(&mut registry, "main", "chat", "/project");
+
+        let error = complete_pane_disposal(
+            &mut registry,
+            "main",
+            "chat",
+            generation,
+            Err("daemon rejected disposal".into()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "daemon rejected disposal");
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "chat")
+                .unwrap()
+                .generation,
+            generation
+        );
+    }
+
+    #[test]
+    fn pane_disposal_stale_generation_preserves_replacement() {
+        let mut registry = PaneRegistry::default();
+        let stale = add_pane(&mut registry, "main", "chat", "/old");
+        dispose_pane_target(&mut registry, "main", "chat", true, Some(stale)).unwrap();
+        let current = add_pane(&mut registry, "main", "chat", "/new");
+
+        let error =
+            complete_pane_disposal(&mut registry, "main", "chat", stale, Ok(())).unwrap_err();
+
+        assert!(error.contains("generation is stale"));
+        assert_eq!(
+            resolve_owned_pane(&registry, "main", "chat")
+                .unwrap()
+                .generation,
+            current
         );
     }
 

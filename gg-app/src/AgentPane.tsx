@@ -1807,9 +1807,10 @@ export function AgentPane({
       ),
       projectBound: !needsProject && Boolean(state?.cwd ?? target?.cwd),
       restoreChecked,
-      activeWork: running,
+      activeWork: running || autopilotReviewing,
     });
   }, [
+    autopilotReviewing,
     generation,
     needsProject,
     onSnapshot,

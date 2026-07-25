@@ -808,11 +808,21 @@ describe("WorkspaceShell", () => {
     await waitFor(() => expect(bridge.newWindow).toHaveBeenCalledOnce());
   });
 
-  it("confirms active-work closure, supports cancel, then disposes once and restores focus", async () => {
+  it("confirms autopilot-review active-work closure, awaits disposal once, then restores focus", async () => {
     activeWorkPanes.add("secondary");
+    let acknowledgeDisposal: (() => void) | undefined;
+    bridge.disposePaneSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          acknowledgeDisposal = resolve;
+        }),
+    );
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     await waitForInitialWorkspaceReady();
+    await act(async () => {
+      emitPaneSnapshot("secondary", { generation: 12, activeWork: true });
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
     expect(screen.getByText(/Pane secondary has active work/)).toBeTruthy();
@@ -821,10 +831,42 @@ describe("WorkspaceShell", () => {
     expect(screen.getByTestId("pane-secondary")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+    const confirmButton = screen.getByRole("button", { name: "Close Pane" });
+    fireEvent.click(confirmButton);
+    fireEvent.click(confirmButton);
+    expect(bridge.disposePaneSession).toHaveBeenCalledTimes(1);
+    expect(bridge.disposePaneSession).toHaveBeenCalledWith("secondary", 12);
+    expect(screen.getByTestId("pane-secondary")).toBeTruthy();
+
+    acknowledgeDisposal?.();
+    await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
+    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "primary input" }));
+  });
+
+  it("keeps the pane and retry surface when session disposal is rejected", async () => {
+    activeWorkPanes.add("secondary");
+    bridge.disposePaneSession.mockRejectedValueOnce(new Error("daemon unavailable"));
+    saveTwoPaneLayout();
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await waitForInitialWorkspaceReady();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
+
+    expect(
+      await screen.findByText(
+        "Pane secondary stayed open because its session could not be disposed. Try closing it again.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByTestId("pane-secondary")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Close Pane" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+    expect(bridge.disposePaneSession).toHaveBeenCalledTimes(1);
+
     fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
     await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
-    expect(bridge.disposePaneSession).toHaveBeenCalledTimes(1);
-    expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "primary input" }));
+    expect(bridge.disposePaneSession).toHaveBeenCalledTimes(2);
   });
 
   it("warns once for a stale pane restore target", async () => {

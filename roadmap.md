@@ -18,11 +18,12 @@ This file is an implementation plan, not a storage surface for user roadmap data
 - **2026-07-24 Phase 10 evidence:** The focused background/foreground matrix passed 116 tests with 1 expected failure and 3 platform skips across 120 tests. Bounded allocation, byte offsets, UTF-8 paging, flush-gated completion, record expiry, stale-log sweeping, and hard-deadline foreground cleanup are covered; the ggcoder typecheck and targeted ESLint/Prettier checks pass.
 - **2026-07-24 Phase 11 evidence:** The focused lifecycle and explicit command-mode matrix passed 112 tests with 1 expected failure and 3 platform skips across 116 tests. Its 11 owning rows cover six finite foreground classes and five long-lived/interactive background classes; the ggcoder typecheck, targeted ESLint/Prettier, roadmap coverage, and diff checks pass.
 - **2026-07-25 Phase 12 evidence:** The refreshed focused lifecycle matrix passed 137 tests with 3 platform skips across 140 tests and no expected failures. EOF-capable shutdown exits cleanly with code 0, EOF-ignoring shutdown escalates once after 2,000 ms, stop output waits for flush-settled metadata and final unread output, and text/newline/EOF controls are independent. The ggcoder typecheck, targeted ESLint/Prettier, roadmap coverage, and diff checks pass.
+- **2026-07-25 current-head audit:** Commit ancestry plus source, generated-bundle, test, and smoke inspection reconfirm Phases 00–12 as implemented. The expanded lifecycle/Phase 13 contract matrix passed 145 tests with 3 platform skips across 148 tests; all 336 gg-app tests, all 100 Rust tests, and the 42-test workspace suite passed. The ggcoder build, ggcoder and gg-app typechecks, gg-app lint, targeted Prettier, roadmap coverage, diff checks, sidecar bundle, and bundled-runtime `/state` smoke also passed.
 - **Current-head Phase 00 evidence:** Commit `40692c2f` waits for the snapshot-driven workspace readiness signal before closing a pane with active work and dismisses the preceding lifecycle-error toast. Local verification passed the 41-test suite, three supervised Windows repeats, gg-app typecheck, targeted lint/format, and diff checks. CI run [`30145553034`](https://github.com/creativeprofit22/gg-framework/actions/runs/30145553034) is green across all six Windows, macOS, and Linux jobs; every platform completed three supervised workspace repeats with zero survivors.
-- **Next phase:** Phase 13 — Verify desktop-sidecar timeout diagnostics.
-- **Current reliability gap:** Managed background shutdown is EOF-first and bounded; Phase 13 still lacks desktop smoke evidence for complete, isolated timeout diagnostics.
-- **Later-track audit:** Phase 13 is partially implemented: complete structured bash diagnostics reach the desktop through isolated sidecar sessions, but desktop smoke evidence is absent. Phase 14 and all of Track B, Phases 15–26, have not started.
-- **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository or Rust IPC command exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
+- **Next phase:** Phase 14 — Complete the three-OS reliability gate.
+- **Current reliability gap:** Phase 13 is complete with a real two-window Windows desktop timeout smoke; Track A still needs Phase 14's complete three-OS reliability matrix and release freeze.
+- **Later-track audit:** Phases 00–13 are complete. Phase 14 and all of Track B, Phases 15–26, have not started.
+- **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository, Rust IPC command, roadmap entity, reminder field, or lifecycle schema exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
 
@@ -625,7 +626,20 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 13 — Verify desktop-sidecar timeout diagnostics
 
-**Status:** Partially implemented — structured diagnostics and session isolation are covered; desktop smoke evidence is missing.
+**Status:** Complete — verified 2026-07-25.
+
+**Completion evidence**
+
+- `createBashTool()` returns typed `bashDiagnostics` for fresh-shell, Windows fallback, and supported POSIX `persist:true` foreground runs; `app-sidecar.ts` forwards complete `tool_call_end` details without creating a second execution path.
+- `PersistentShell.run()` preserves session state on normal completion while exposing per-invocation PID/outcome metadata, the shared bounded tail, and a distinct retained foreground log. Timeout and abort still reset the shell before the next call.
+- The shared backend/frontend fixture covers every diagnostic field; `useAgentEvents.ts` retains persistent timeout details through `run_end`; `LiveToolPanel.tsx` renders the complete untruncated metadata and authoritative tail and copies the same payload. A compact-layout defect found by the smoke was fixed so the disclosure owns a full row and wraps safely.
+- Sidecar session IDs, Rust's trusted `(window, pane, generation, session)` event envelope, and webview pane routing reject stale or mismatched traffic; the new successful-binding `INFO` record supplies an auditable native ownership correlation.
+- Initial focused verification passed: ggcoder sidecar/error/bash tests `80 passed, 2 skipped`; gg-app event/pane tests `39 passed`; Rust `100 passed`; both package typechecks, ggcoder build, targeted ESLint/Prettier, and Rust formatting passed.
+- Persistent parity regression verification passed: ggcoder sidecar/error/bash tests `95 passed, 2 skipped`; gg-app event/pane tests `40 passed`. Persistent completion, non-zero, timeout, abort, capped output, retained logs, spawn errors, state retention, reset behavior, and canonical 16-field details are covered.
+- Windows desktop command: `node -e "for(let i=1;i<=150;i++) console.log('phase13-'+String(i).padStart(3,'0')); setInterval(()=>{},1000)"` with timeout `1500` ms.
+- Owning route: `window_label=main`, `pane_id=primary`, generation `2`, session `8dc92c4f-63ef-4738-9f2a-d0922fd85a8c`. Idle peer: `window_label=project-1`, `pane_id=primary`, generation `3`, session `477d01b3-7738-40fc-ac97-00948f095bed`; its pinned tool panel remained empty before, during, and after the run.
+- The owning disclosure and clipboard showed the exact command, PID `25292`, reason `timedOut`, timeout `1500ms`, elapsed `1652ms`, normalized log `<HOME>/.gg/foreground/34d788ae-d9f8-40c8-bf1d-eecf9eaa63d5.log`, capped `yes`, total `1800` bytes, retained `1200` bytes, dropped `600` bytes, and final lines `phase13-051` through `phase13-150`.
+- The retained log contained all 150 lines (`phase13-001` through `phase13-150`), and the post-timeout process query reported survivor count `0`. Keyboard expansion/copy worked, clipboard text matched all visible fields, and the disclosure remained usable at compact width and 200% zoom.
 
 **Outcome:** The desktop receives complete timeout diagnostics without raw, missing, or cross-window output.
 
@@ -641,6 +655,9 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 **Affected seams**
 
+- `packages/ggcoder/src/core/persistent-shell.ts`
+- `packages/ggcoder/src/tools/bash.ts`
+- `packages/ggcoder/src/tools/bash-timeout.test.ts`
 - `packages/ggcoder/src/app-sidecar.ts`
 - `packages/ggcoder/src/app-sidecar-session-router.test.ts`
 - `gg-app/src/agent.ts`
@@ -651,12 +668,13 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 **Acceptance tests**
 
-- Sidecar and webview event-shape tests include all required diagnostic fields.
+- Sidecar and webview event-shape tests include all required diagnostic fields for fresh and POSIX persistent foreground calls.
+- Persistent completion and non-zero calls retain shell state; timeout and abort expose partial output, clean descendants, and reset that state.
 - Multiple windows receive only their own process events.
 - Provider errors still pass through the existing formatted error chokepoint.
 - `pnpm --filter @kenkaiiii/ggcoder build`, gg-app tests/check/lint, and a Windows `pnpm tauri dev` smoke pass.
 
-**Hard stop:** Attach desktop smoke evidence. Do not start Phase 14 with missing diagnostics or isolation failures.
+**Hard stop:** Satisfied — the Windows `tauri dev` smoke recorded the exact command, complete visible/copied diagnostics, owning and peer window/pane/generation/session identities, bounded elapsed time, normalized retained-log path, zero peer events, and survivor count `0`.
 
 ## Phase 14 — Complete the three-OS reliability gate
 

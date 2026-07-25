@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react";
 import type { BashDiagnostics, BashToolResultDetails, TaskOutputDetails } from "./agent";
 import { theme } from "./theme";
@@ -66,11 +66,19 @@ function diagnosticsText(diagnostics: BashDiagnostics): string {
   return [
     `ID: ${diagnostics.executionId}`,
     `PID: ${diagnostics.pid ?? "unavailable"}`,
+    `Command: ${diagnostics.command}`,
+    `CWD: ${diagnostics.cwd}`,
+    `Started at: ${new Date(diagnostics.startedAt).toISOString()}`,
+    `Timeout: ${diagnostics.timeoutMs}ms`,
     `Reason: ${diagnostics.reason}`,
     `Exit code: ${diagnostics.exitCode ?? "unavailable"}`,
     `Signal: ${diagnostics.signal ?? "none"}`,
     `Elapsed: ${diagnostics.elapsedMs}ms`,
     `Log: ${diagnostics.logPath}`,
+    `Output capped: ${diagnostics.outputCapped ? "yes" : "no"}`,
+    `Total output: ${diagnostics.totalOutputBytes} bytes`,
+    `Retained output: ${diagnostics.retainedOutputBytes} bytes`,
+    `Dropped output: ${diagnostics.droppedOutputBytes} bytes`,
     "",
     "Final output:",
     diagnostics.tail,
@@ -186,7 +194,17 @@ function BashDiagnosticsDetails({
 }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const panelId = `bash-diagnostics-${toolCallId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current !== null) {
+        clearTimeout(copyResetTimerRef.current);
+        copyResetTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const copyDiagnostics = (): void => {
     if (!navigator.clipboard) {
@@ -197,7 +215,13 @@ function BashDiagnosticsDetails({
       .writeText(diagnosticsText(diagnostics))
       .then(() => {
         setCopyState("copied");
-        setTimeout(() => setCopyState("idle"), 1_500);
+        if (copyResetTimerRef.current !== null) {
+          clearTimeout(copyResetTimerRef.current);
+        }
+        copyResetTimerRef.current = setTimeout(() => {
+          copyResetTimerRef.current = null;
+          setCopyState("idle");
+        }, 1_500);
       })
       .catch(() => setCopyState("failed"));
   };
@@ -230,6 +254,22 @@ function BashDiagnosticsDetails({
               <dd>{diagnostics.pid ?? "unavailable"}</dd>
             </div>
             <div>
+              <dt>Command</dt>
+              <dd>{diagnostics.command}</dd>
+            </div>
+            <div>
+              <dt>CWD</dt>
+              <dd>{diagnostics.cwd}</dd>
+            </div>
+            <div>
+              <dt>Started at</dt>
+              <dd>{new Date(diagnostics.startedAt).toISOString()}</dd>
+            </div>
+            <div>
+              <dt>Timeout</dt>
+              <dd>{diagnostics.timeoutMs}ms</dd>
+            </div>
+            <div>
               <dt>Reason</dt>
               <dd>{diagnostics.reason}</dd>
             </div>
@@ -248,6 +288,22 @@ function BashDiagnosticsDetails({
             <div>
               <dt>Log path</dt>
               <dd>{diagnostics.logPath}</dd>
+            </div>
+            <div>
+              <dt>Output capped</dt>
+              <dd>{diagnostics.outputCapped ? "yes" : "no"}</dd>
+            </div>
+            <div>
+              <dt>Total output</dt>
+              <dd>{diagnostics.totalOutputBytes} bytes</dd>
+            </div>
+            <div>
+              <dt>Retained output</dt>
+              <dd>{diagnostics.retainedOutputBytes} bytes</dd>
+            </div>
+            <div>
+              <dt>Dropped output</dt>
+              <dd>{diagnostics.droppedOutputBytes} bytes</dd>
             </div>
           </dl>
           <div className="bash-diagnostics-tail">

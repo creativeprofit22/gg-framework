@@ -4954,6 +4954,9 @@ fn launch_pane_session(
                     let _ = daemon_delete_session(&app, port, &id).await;
                     return;
                 }
+                log::info!(
+                    "pane session bound: window_label={label} pane_id={pane_id} generation={generation} session_id={id}"
+                );
                 start_event_bridge(
                     app.clone(),
                     label.clone(),

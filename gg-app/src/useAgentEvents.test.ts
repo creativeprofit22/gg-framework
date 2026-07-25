@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, renderHook, act } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, renderHook, act, within } from "@testing-library/react";
 import { createElement, createRef } from "react";
 import type { MutableRefObject } from "react";
 import { BASH_DIAGNOSTICS_FIXTURE } from "../../packages/ggcoder/src/test-fixtures/bash-diagnostics";
@@ -207,6 +207,7 @@ function setup(
 
 describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.useRealTimers());
 
   it("keeps the complete background-task snapshot from ready and tasks events", () => {
     expect(FRONTEND_BACKGROUND_TASK_CONTRACT_IS_COMPLETE).toBe(true);
@@ -563,14 +564,14 @@ describe("useAgentEvents", () => {
     expect(panel.container.textContent).toBe("⏺Read output background-1");
   });
 
-  it("streams bounded bash progress before replacing it with the final result", async () => {
+  it("retains and renders complete persistent-timeout diagnostics through run_end", async () => {
     const { hook, getLiveToolFeed } = setup();
     act(() => {
       hook.result.current.handleEvent(
         ev("tool_call_start", {
           toolCallId: "bash-1",
           name: "bash",
-          args: { command: "pnpm check" },
+          args: { command: BASH_DIAGNOSTICS_FIXTURE.command, persist: true },
         }),
       );
       hook.result.current.handleEvent(
@@ -648,27 +649,142 @@ describe("useAgentEvents", () => {
     });
     const completedPanel = render(createElement(LiveToolPanel, { entries: getLiveToolFeed() }));
     fireEvent.click(completedPanel.getByRole("button", { name: "Details" }));
-    expect(completedPanel.getByText(bashDiagnostics.logPath)).toBeTruthy();
-    expect(completedPanel.getByText("Exit code")).toBeTruthy();
+
+    for (const label of [
+      "ID",
+      "PID",
+      "Command",
+      "CWD",
+      "Started at",
+      "Timeout",
+      "Reason",
+      "Exit code",
+      "Signal",
+      "Elapsed",
+      "Log path",
+      "Output capped",
+      "Total output",
+      "Retained output",
+      "Dropped output",
+      "Final output",
+    ]) {
+      expect(completedPanel.getByText(label)).toBeTruthy();
+    }
+    expect(completedPanel.getByText(bashDiagnostics.executionId)).toBeTruthy();
+    expect(completedPanel.getByText(String(bashDiagnostics.pid))).toBeTruthy();
+    expect(completedPanel.getByText(bashDiagnostics.command)).toBeTruthy();
+    expect(completedPanel.getByText(bashDiagnostics.cwd)).toBeTruthy();
+    expect(completedPanel.getByText("2026-07-25T17:20:00.000Z")).toBeTruthy();
+    expect(completedPanel.getByText(`${bashDiagnostics.timeoutMs}ms`)).toBeTruthy();
+    expect(completedPanel.getByText(bashDiagnostics.reason)).toBeTruthy();
     expect(completedPanel.getByText("unavailable")).toBeTruthy();
-    expect(completedPanel.getByText(bashDiagnostics.signal)).toBeTruthy();
+    expect(completedPanel.getByText("none")).toBeTruthy();
+    expect(completedPanel.getByText(`${bashDiagnostics.elapsedMs}ms`)).toBeTruthy();
+    expect(completedPanel.getByText(bashDiagnostics.logPath)).toBeTruthy();
+    expect(completedPanel.getByText("yes")).toBeTruthy();
+    expect(completedPanel.getByText(`${bashDiagnostics.totalOutputBytes} bytes`)).toBeTruthy();
+    expect(completedPanel.getByText(`${bashDiagnostics.retainedOutputBytes} bytes`)).toBeTruthy();
+    expect(completedPanel.getByText(`${bashDiagnostics.droppedOutputBytes} bytes`)).toBeTruthy();
     expect(completedPanel.getByLabelText("Final command output").textContent).toBe(
       bashDiagnostics.tail,
     );
+
     await act(async () => {
       fireEvent.click(completedPanel.getByRole("button", { name: "Copy diagnostics" }));
       await Promise.resolve();
     });
     expect(writeText).toHaveBeenCalledWith(
-      expect.stringContaining(`Exit code: unavailable\nSignal: ${bashDiagnostics.signal}`),
-    );
-    expect(writeText).toHaveBeenCalledWith(
-      expect.stringContaining(`Final output:\n${bashDiagnostics.tail}`),
+      [
+        `ID: ${bashDiagnostics.executionId}`,
+        `PID: ${bashDiagnostics.pid}`,
+        `Command: ${bashDiagnostics.command}`,
+        `CWD: ${bashDiagnostics.cwd}`,
+        "Started at: 2026-07-25T17:20:00.000Z",
+        `Timeout: ${bashDiagnostics.timeoutMs}ms`,
+        `Reason: ${bashDiagnostics.reason}`,
+        "Exit code: unavailable",
+        "Signal: none",
+        `Elapsed: ${bashDiagnostics.elapsedMs}ms`,
+        `Log: ${bashDiagnostics.logPath}`,
+        "Output capped: yes",
+        `Total output: ${bashDiagnostics.totalOutputBytes} bytes`,
+        `Retained output: ${bashDiagnostics.retainedOutputBytes} bytes`,
+        `Dropped output: ${bashDiagnostics.droppedOutputBytes} bytes`,
+        "",
+        "Final output:",
+        bashDiagnostics.tail,
+      ].join("\n"),
     );
 
     act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: false })));
     expect(getLiveToolFeed()).toHaveLength(1);
     expect(getLiveToolFeed()[0]?.details).toEqual({ bashDiagnostics });
+    completedPanel.rerender(createElement(LiveToolPanel, { entries: getLiveToolFeed() }));
+    expect(completedPanel.getByText(bashDiagnostics.command)).toBeTruthy();
+    expect(completedPanel.getByLabelText("Final command output").textContent).toBe(
+      bashDiagnostics.tail,
+    );
+
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    const failedCopyPanel = render(createElement(LiveToolPanel, { entries: getLiveToolFeed() }));
+    const failedCopyPanelQueries = within(failedCopyPanel.container);
+    fireEvent.click(failedCopyPanelQueries.getByRole("button", { name: "Details" }));
+    fireEvent.click(failedCopyPanelQueries.getByRole("button", { name: "Copy diagnostics" }));
+    expect(failedCopyPanelQueries.getByRole("button", { name: "Copy failed" })).toBeTruthy();
+    expect(failedCopyPanelQueries.getByText("Could not copy bash diagnostics")).toBeTruthy();
+  });
+
+  it("resets copied diagnostics from the latest copy and clears the timer on unmount", async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const panel = render(
+      createElement(LiveToolPanel, {
+        entries: [
+          {
+            toolCallId: "bash-copy-timer",
+            name: "bash",
+            args: { command: BASH_DIAGNOSTICS_FIXTURE.command },
+            status: "done",
+            details: { bashDiagnostics: BASH_DIAGNOSTICS_FIXTURE },
+          },
+        ],
+      }),
+    );
+    fireEvent.click(panel.getByRole("button", { name: "Details" }));
+
+    await act(async () => {
+      fireEvent.click(panel.getByRole("button", { name: "Copy diagnostics" }));
+      await Promise.resolve();
+    });
+    expect(panel.getByRole("button", { name: "Copied" })).toBeTruthy();
+    expect(vi.getTimerCount()).toBe(1);
+
+    act(() => vi.advanceTimersByTime(1_000));
+    await act(async () => {
+      fireEvent.click(panel.getByRole("button", { name: "Copied" }));
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(1);
+
+    act(() => vi.advanceTimersByTime(500));
+    expect(panel.getByRole("button", { name: "Copied" })).toBeTruthy();
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(panel.getByRole("button", { name: "Copy diagnostics" })).toBeTruthy();
+    expect(vi.getTimerCount()).toBe(0);
+
+    await act(async () => {
+      fireEvent.click(panel.getByRole("button", { name: "Copy diagnostics" }));
+      await Promise.resolve();
+    });
+    expect(vi.getTimerCount()).toBe(1);
+    panel.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(() => vi.runOnlyPendingTimers()).not.toThrow();
   });
 
   it("turn_end accumulates output tokens across turns", () => {

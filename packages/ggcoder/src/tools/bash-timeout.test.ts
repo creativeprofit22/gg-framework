@@ -10,6 +10,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProcessManager } from "../core/process-manager.js";
 import { PersistentShell } from "../core/persistent-shell.js";
 import * as logger from "../core/logger.js";
+import { BASH_DIAGNOSTICS_FIXTURE } from "../test-fixtures/bash-diagnostics.js";
+import type { BashDiagnostics, BashToolResultDetails } from "../types.js";
 import { resolveShell } from "../core/shell.js";
 import { killProcessTree, type ProcessTarget } from "../utils/process.js";
 import { createBashTool, executeForegroundCommand } from "./bash.js";
@@ -103,6 +105,51 @@ function expectRenderedDiagnostics(result: string, reason: string): void {
   expect(result).toContain(`Final output (last ${BOUNDED_OUTPUT_MAX_LINES} lines):`);
   expect(result).toContain("--- begin final output ---");
   expect(result).toContain("--- end final output ---");
+}
+
+function structuredBashResult(result: unknown): {
+  content: string;
+  details: BashToolResultDetails;
+} {
+  if (
+    typeof result !== "object" ||
+    result === null ||
+    !("content" in result) ||
+    typeof result.content !== "string" ||
+    !("details" in result) ||
+    typeof result.details !== "object" ||
+    result.details === null ||
+    !("bashDiagnostics" in result.details)
+  ) {
+    throw new Error("Expected structured text bash output with diagnostics");
+  }
+  return result as { content: string; details: BashToolResultDetails };
+}
+
+function expectCompletePersistentDiagnostics(
+  diagnostics: BashDiagnostics,
+  expected: Partial<BashDiagnostics>,
+): void {
+  expect(Object.keys(diagnostics).sort()).toEqual(Object.keys(BASH_DIAGNOSTICS_FIXTURE).sort());
+  expect(diagnostics).toMatchObject({
+    executionId: expect.any(String),
+    pid: expect.any(Number),
+    command: expect.any(String),
+    cwd: process.cwd(),
+    startedAt: expect.any(Number),
+    timeoutMs: expect.any(Number),
+    reason: expect.any(String),
+    exitCode: null,
+    signal: null,
+    elapsedMs: expect.any(Number),
+    logPath: expect.stringContaining(FOREGROUND_TEST_LOG_ROOT),
+    tail: expect.any(String),
+    outputCapped: expect.any(Boolean),
+    totalOutputBytes: expect.any(Number),
+    retainedOutputBytes: expect.any(Number),
+    droppedOutputBytes: expect.any(Number),
+    ...expected,
+  });
 }
 function quotePathForShell(value: string, isCmdFallback: boolean): string {
   return isCmdFallback ? `"${value}"` : `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -1888,14 +1935,209 @@ if (selectedProbe !== undefined) {
     });
   });
 
-  it("renders persist:true aborts distinctly and preserves partial output", async () => {
+  it("returns complete persistent completion and non-zero diagnostics while preserving state", async () => {
+    const manager = testProcessManager();
+    const tool = createBashTool(process.cwd(), manager);
+
+    try {
+      const completedRaw = await tool.execute(
+        {
+          command: "export GG_PERSIST_VALUE=kept; printf 'persistent-set\\n'",
+          persist: true,
+        },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-completed" },
+      );
+      const completed = structuredBashResult(completedRaw);
+      const completedDiagnostics = completed.details.bashDiagnostics;
+      expectCompletePersistentDiagnostics(completedDiagnostics, {
+        command: "export GG_PERSIST_VALUE=kept; printf 'persistent-set\\n'",
+        reason: "completed",
+        exitCode: 0,
+        tail: "persistent-set\n",
+        outputCapped: false,
+        totalOutputBytes: Buffer.byteLength("persistent-set\n"),
+        retainedOutputBytes: Buffer.byteLength("persistent-set\n"),
+        droppedOutputBytes: 0,
+      });
+      expect(completed.content).toContain("Exit code: 0\npersistent-set\n");
+      expect(await fs.readFile(completedDiagnostics.logPath, "utf8")).toBe(
+        "[stdout] persistent-set\n",
+      );
+
+      const nonZeroRaw = await tool.execute(
+        { command: `printf 'STATE=%s\\n' "$GG_PERSIST_VALUE"; false`, persist: true },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-non-zero" },
+      );
+      const nonZero = structuredBashResult(nonZeroRaw);
+      expectCompletePersistentDiagnostics(nonZero.details.bashDiagnostics, {
+        command: `printf 'STATE=%s\\n' "$GG_PERSIST_VALUE"; false`,
+        pid: completedDiagnostics.pid,
+        reason: "nonZeroExit",
+        exitCode: 1,
+        tail: "STATE=kept\n",
+        outputCapped: false,
+        totalOutputBytes: Buffer.byteLength("STATE=kept\n"),
+        retainedOutputBytes: Buffer.byteLength("STATE=kept\n"),
+        droppedOutputBytes: 0,
+      });
+      expect(nonZero.content).toContain("Exit code: 1\nSTATE=kept\n");
+      expect(nonZero.details.bashDiagnostics.executionId).not.toBe(
+        completedDiagnostics.executionId,
+      );
+      expect(nonZero.details.bashDiagnostics.logPath).not.toBe(completedDiagnostics.logPath);
+    } finally {
+      await tool.execute(
+        { command: "exit 0", persist: true },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-complete-cleanup" },
+      );
+      manager.shutdownAll();
+    }
+  });
+
+  it("returns complete persistent timeout diagnostics and resets shell state", async () => {
+    const manager = testProcessManager();
+    const tool = createBashTool(process.cwd(), manager);
+
+    try {
+      const timedOutRaw = await tool.execute(
+        {
+          command: "export GG_PERSIST_TIMEOUT_STATE=lost; printf 'before-timeout\\n'; sleep 30",
+          timeout: 1_000,
+          persist: true,
+        },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-timeout" },
+      );
+      const timedOut = structuredBashResult(timedOutRaw);
+      const diagnostics = timedOut.details.bashDiagnostics;
+      expect(timedOut.content).toContain(
+        "Exit code: TIMEOUT (1000ms) — session shell was reset; cd/env state is gone",
+      );
+      expectCompletePersistentDiagnostics(diagnostics, {
+        command: "export GG_PERSIST_TIMEOUT_STATE=lost; printf 'before-timeout\\n'; sleep 30",
+        timeoutMs: 1_000,
+        reason: "timedOut",
+        exitCode: null,
+        tail: "before-timeout\n",
+        outputCapped: false,
+        totalOutputBytes: Buffer.byteLength("before-timeout\n"),
+        retainedOutputBytes: Buffer.byteLength("before-timeout\n"),
+        droppedOutputBytes: 0,
+      });
+      expect(diagnostics.elapsedMs).toBeGreaterThanOrEqual(900);
+      expect(await fs.readFile(diagnostics.logPath, "utf8")).toBe("[stdout] before-timeout\n");
+
+      const freshRaw = await tool.execute(
+        {
+          command: `printf 'STATE=%s\\n' "\${GG_PERSIST_TIMEOUT_STATE:-fresh}"`,
+          persist: true,
+        },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-after-timeout" },
+      );
+      const freshDiagnostics = structuredBashResult(freshRaw).details.bashDiagnostics;
+      expect(freshDiagnostics.tail).toBe("STATE=fresh\n");
+      expect(freshDiagnostics.pid).not.toBe(diagnostics.pid);
+    } finally {
+      await tool.execute(
+        { command: "exit 0", persist: true },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-timeout-cleanup" },
+      );
+      manager.shutdownAll();
+    }
+  });
+
+  it("caps persistent diagnostics to the authoritative tail and retains the full log", async () => {
+    const manager = testProcessManager();
+    const tool = createBashTool(process.cwd(), manager);
+    const lines = Array.from(
+      { length: 140 },
+      (_, index) => `persistent-line-${String(index + 1).padStart(3, "0")}\n`,
+    );
+
+    try {
+      const rawResult = await tool.execute(
+        {
+          command: "for ((i=1; i<=140; i++)); do printf 'persistent-line-%03d\\n' \"$i\"; done",
+          persist: true,
+        },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-capped" },
+      );
+      const result = structuredBashResult(rawResult);
+      const diagnostics = result.details.bashDiagnostics;
+      const completeOutput = lines.join("");
+      const retainedOutput = lines.slice(-BOUNDED_OUTPUT_MAX_LINES).join("");
+      expectCompletePersistentDiagnostics(diagnostics, {
+        reason: "completed",
+        exitCode: 0,
+        tail: retainedOutput,
+        outputCapped: true,
+        totalOutputBytes: Buffer.byteLength(completeOutput),
+        retainedOutputBytes: Buffer.byteLength(retainedOutput),
+        droppedOutputBytes: Buffer.byteLength(completeOutput) - Buffer.byteLength(retainedOutput),
+      });
+      expect(result.content).toContain(
+        `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / 10 MB.`,
+      );
+      const retainedLog = await fs.readFile(diagnostics.logPath, "utf8");
+      expect(retainedLog).toContain(lines[0]);
+      expect(retainedLog).toContain(lines.at(-1));
+      expect(retainedLog).not.toContain("__GG_PSH_");
+    } finally {
+      await tool.execute(
+        { command: "exit 0", persist: true },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-capped-cleanup" },
+      );
+      manager.shutdownAll();
+    }
+  });
+
+  it("returns complete persistent spawn-error diagnostics", async () => {
+    const manager = testProcessManager();
+    const tool = createBashTool(process.cwd(), manager, {
+      ...localOperations,
+      process: {
+        ...localOperations.process,
+        spawn: () => {
+          throw new Error("persistent bash unavailable");
+        },
+      },
+    });
+
+    const rawResult = await tool.execute(
+      { command: "printf 'never-ran\\n'", persist: true },
+      { signal: new AbortController().signal, toolCallId: "bash-persistent-spawn-error" },
+    );
+    const result = structuredBashResult(rawResult);
+    const diagnostics = result.details.bashDiagnostics;
+    expect(Object.keys(diagnostics).sort()).toEqual(Object.keys(BASH_DIAGNOSTICS_FIXTURE).sort());
+    expect(diagnostics).toMatchObject({
+      pid: null,
+      command: "printf 'never-ran\\n'",
+      cwd: process.cwd(),
+      reason: "spawnError",
+      exitCode: null,
+      signal: null,
+      tail: "",
+      outputCapped: false,
+      totalOutputBytes: 0,
+      retainedOutputBytes: 0,
+      droppedOutputBytes: 0,
+    });
+    expect(result.content).toContain("Exit code: 1\nFailed to spawn: persistent bash unavailable");
+    await expect(fs.readFile(diagnostics.logPath, "utf8")).resolves.toBe("");
+    manager.shutdownAll();
+  });
+
+  it("returns complete persistent abort diagnostics, retains partial output, and resets state", async () => {
     const manager = testProcessManager();
     const controller = new AbortController();
     const tool = createBashTool(process.cwd(), manager);
 
     try {
-      const result = await tool.execute(
-        { command: "printf 'partial-before-abort\\n'; sleep 30", persist: true },
+      const rawResult = await tool.execute(
+        {
+          command: "export GG_PERSIST_ABORT_STATE=lost; printf 'partial-before-abort\\n'; sleep 30",
+          persist: true,
+        },
         {
           signal: controller.signal,
           toolCallId: "bash-persistent-abort",
@@ -1911,11 +2153,76 @@ if (selectedProbe !== undefined) {
           },
         },
       );
+      const result = structuredBashResult(rawResult);
+      const diagnostics = result.details.bashDiagnostics;
 
-      expect(result).toBe("Exit code: ABORTED\npartial-before-abort\n");
+      expect(result.content).toContain("Exit code: ABORTED\npartial-before-abort\n");
+      expectCompletePersistentDiagnostics(diagnostics, {
+        command: "export GG_PERSIST_ABORT_STATE=lost; printf 'partial-before-abort\\n'; sleep 30",
+        reason: "aborted",
+        exitCode: null,
+        tail: "partial-before-abort\n",
+        outputCapped: false,
+        totalOutputBytes: Buffer.byteLength("partial-before-abort\n"),
+        retainedOutputBytes: Buffer.byteLength("partial-before-abort\n"),
+        droppedOutputBytes: 0,
+      });
+      expect(await fs.readFile(diagnostics.logPath, "utf8")).toBe(
+        "[stdout] partial-before-abort\n",
+      );
+
+      const freshRawResult = await tool.execute(
+        {
+          command: `printf 'STATE=%s\\n' "\${GG_PERSIST_ABORT_STATE:-fresh}"`,
+          persist: true,
+        },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-after-abort" },
+      );
+      const freshDiagnostics = structuredBashResult(freshRawResult).details.bashDiagnostics;
+      expect(freshDiagnostics.reason).toBe("completed");
+      expect(freshDiagnostics.tail).toBe("STATE=fresh\n");
+      expect(freshDiagnostics.pid).not.toBe(diagnostics.pid);
     } finally {
+      await tool.execute(
+        { command: "exit 0", persist: true },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-abort-cleanup" },
+      );
       manager.shutdownAll();
     }
+  });
+
+  it("excludes the private sentinel from persistent progress byte counts", async () => {
+    const fake = createPersistentFakeChild();
+    const stdin = fake.child.stdin as PassThrough;
+    const stdout = fake.child.stdout as PassThrough;
+    const updates: Array<{ text: string; totalBytes: number }> = [];
+
+    stdin.once("data", (data: Buffer) => {
+      const sentinel = /echo "(__GG_PSH_[^"]+__)\$\?"/.exec(data.toString("utf8"))?.[1];
+      if (!sentinel) throw new Error("Expected persistent-shell sentinel");
+      const splitAt = Math.floor(sentinel.length / 2);
+      stdout.write(Buffer.from(`visible\n${sentinel.slice(0, splitAt)}`));
+      stdout.write(Buffer.from(`${sentinel.slice(splitAt)}0\n`));
+    });
+
+    const shell = new PersistentShell(process.cwd(), process.env, 1024, {
+      ...localOperations.process,
+      spawn: () => fake.child,
+    });
+    const result = await shell.run(
+      "printf 'visible\\n'",
+      1_000,
+      new AbortController().signal,
+      (text, totalBytes) => updates.push({ text, totalBytes }),
+    );
+
+    expect(result).toMatchObject({
+      reason: "completed",
+      exitCode: 0,
+      output: "visible\n",
+      outputSnapshot: { totalInputBytes: Buffer.byteLength("visible\n") },
+    });
+    expect(updates).toEqual([{ text: "visible\n", totalBytes: Buffer.byteLength("visible\n") }]);
   });
 
   it("settles pre-aborted persistent runs as ABORTED without retaining listeners", async () => {
@@ -1927,8 +2234,10 @@ if (selectedProbe !== undefined) {
       cleanupProcessTree: cleanup,
     });
 
-    await expect(shell.run("sleep 30", 5_000, controller.signal)).resolves.toEqual({
-      exitCode: "ABORTED",
+    await expect(shell.run("sleep 30", 5_000, controller.signal)).resolves.toMatchObject({
+      reason: "aborted",
+      exitCode: null,
+      signal: null,
       output: "",
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1959,7 +2268,12 @@ if (selectedProbe !== undefined) {
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(1);
     controller.abort();
 
-    await expect(runPromise).resolves.toEqual({ exitCode: "ABORTED", output: "" });
+    await expect(runPromise).resolves.toMatchObject({
+      reason: "aborted",
+      exitCode: null,
+      signal: null,
+      output: "",
+    });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(child.listenerCount("exit")).toBe(0);
     expect(child.listenerCount("error")).toBe(0);
@@ -2052,7 +2366,7 @@ if (selectedProbe !== undefined) {
 
       expect(firstSession?.role).toBe("silent");
       expect(readinessElapsedMs).toBeLessThan(timeoutMs - 1_000);
-      expect(timedOut.exitCode).toBe("TIMEOUT");
+      expect(timedOut).toMatchObject({ reason: "timedOut", exitCode: null, signal: null });
       expect(elapsedMs).toBeGreaterThanOrEqual(timeoutMs - 100);
       expect(elapsedMs).toBeLessThan(timeoutMs + 3_000);
 

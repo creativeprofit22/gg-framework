@@ -421,6 +421,119 @@ export async function executeForegroundCommand({
   });
 }
 
+interface PersistentCommandOptions {
+  command: string;
+  cwd: string;
+  timeoutMs: number;
+  signal: AbortSignal;
+  processManager: ProcessManager;
+  shell: PersistentShell;
+  onUpdate?: (output: string, totalBytes: number) => void;
+}
+
+async function executePersistentCommand({
+  command,
+  cwd,
+  timeoutMs,
+  signal,
+  processManager,
+  shell,
+  onUpdate,
+}: PersistentCommandOptions): Promise<ForegroundCommandExecution> {
+  const startedAt = Date.now();
+  const foregroundLog = await processManager.allocateForegroundLog();
+  const result = await shell.run(command, timeoutMs, signal, onUpdate, foregroundLog);
+  await foregroundLog.close();
+  if (foregroundLog.error) {
+    log("WARN", "bash", "Persistent foreground log stream failed", {
+      executionId: foregroundLog.executionId,
+      logPath: foregroundLog.logPath,
+      error: foregroundLog.error.message,
+    });
+  }
+
+  return {
+    outcome: {
+      metadata: {
+        executionId: foregroundLog.executionId,
+        command,
+        cwd,
+        startedAt,
+        timeoutMs,
+        pid: result.pid,
+        logPath: foregroundLog.logPath,
+      },
+      reason: result.reason,
+      exitCode: result.exitCode,
+      signal: result.signal,
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+      error: result.error,
+    },
+    rawOutput: result.output,
+    outputCapped: result.outputSnapshot.capped,
+    outputSnapshot: result.outputSnapshot,
+    isCmdFallback: false,
+  };
+}
+
+async function renderStructuredForegroundResult(
+  execution: ForegroundCommandExecution,
+  persistent: boolean,
+): Promise<{ content: string; details: BashToolResultDetails }> {
+  const { outcome } = execution;
+  const diagnostics = formatForegroundDiagnostics(outcome, execution.rawOutput);
+  const details: BashToolResultDetails = {
+    bashDiagnostics: bashDiagnostics(outcome, execution.outputSnapshot),
+  };
+  if (outcome.reason === "spawnError") {
+    return {
+      content:
+        `Exit code: 1\nFailed to spawn: ${outcome.error?.message ?? "Unknown error"}\n\n` +
+        diagnostics,
+      details,
+    };
+  }
+
+  let output = await renderBashOutput(execution.rawOutput);
+  if (execution.outputCapped) {
+    output =
+      `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / ` +
+      `${MAX_OUTPUT_BYTES / 1024 / 1024} MB. Complete sanitized log: ` +
+      `${outcome.metadata.logPath}]\n` +
+      output;
+  }
+  // Windows without Git Bash: commands ran under cmd.exe, NOT bash. Tell
+  // the model so it uses cmd syntax (no `ls`/`grep`/pipes/single-quotes)
+  // and doesn't misread failures as a wrong directory / environment.
+  if (execution.isCmdFallback) {
+    output =
+      "[Ran under Windows cmd.exe — bash is unavailable. Use cmd syntax " +
+      "(dir, findstr, type); POSIX commands and quoting will fail. " +
+      "Install Git for Windows to get bash.]\n" +
+      output;
+  }
+
+  const exitCode =
+    outcome.reason === "completed"
+      ? "0"
+      : outcome.reason === "timedOut"
+        ? `TIMEOUT (${outcome.metadata.timeoutMs}ms)${
+            persistent ? " — session shell was reset; cd/env state is gone" : ""
+          }`
+        : outcome.reason === "aborted"
+          ? "ABORTED"
+          : outcome.exitCode !== null
+            ? String(outcome.exitCode)
+            : outcome.signal
+              ? `SIGNAL (${outcome.signal})`
+              : "FAILED (no exit code)";
+
+  return {
+    content: `Exit code: ${exitCode}\n${output}\n\n${diagnostics}`,
+    details,
+  };
+}
+
 const BashParams = z.object({
   command: z.string().describe("The bash command to execute"),
   timeout: z
@@ -511,22 +624,20 @@ export function createBashTool(
       // to the normal spawn path (cmd.exe fallback) below.
       if (persist && commandMode === "foreground" && !resolveShell(command).isCmdFallback) {
         sessionShell ??= new PersistentShell(cwd, getSafeToolEnv(), MAX_OUTPUT_BYTES, ops.process);
-        const res = await sessionShell.run(
+        const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
+        const execution = await executePersistentCommand({
           command,
-          timeoutMs ?? DEFAULT_TIMEOUT,
-          context.signal,
-          context.onUpdate
-            ? (text) => context.onUpdate?.({ type: "bash_progress", output: text, totalBytes: 0 })
+          cwd,
+          timeoutMs: effectiveTimeout,
+          signal: context.signal,
+          processManager,
+          shell: sessionShell,
+          onUpdate: context.onUpdate
+            ? (output, totalBytes) =>
+                context.onUpdate?.({ type: "bash_progress", output, totalBytes })
             : undefined,
-        );
-        const output = await renderBashOutput(res.output);
-        const exitCode =
-          res.exitCode === "TIMEOUT"
-            ? `TIMEOUT (${timeoutMs ?? DEFAULT_TIMEOUT}ms) — session shell was reset; cd/env state is gone`
-            : res.exitCode === "ABORTED"
-              ? "ABORTED"
-              : String(res.exitCode);
-        return `Exit code: ${exitCode}\n${output}`;
+        });
+        return renderStructuredForegroundResult(execution, true);
       }
       if (commandMode === "background") {
         const result = await processManager.start(command, cwd);
@@ -553,57 +664,7 @@ export function createBashTool(
               context.onUpdate?.({ type: "bash_progress", output, totalBytes })
           : undefined,
       });
-      const { outcome } = execution;
-
-      const diagnostics = formatForegroundDiagnostics(outcome, execution.rawOutput);
-      const details: BashToolResultDetails = {
-        bashDiagnostics: bashDiagnostics(outcome, execution.outputSnapshot),
-      };
-      if (outcome.reason === "spawnError") {
-        return {
-          content:
-            `Exit code: 1\nFailed to spawn: ${outcome.error?.message ?? "Unknown error"}\n\n` +
-            diagnostics,
-          details,
-        };
-      }
-
-      let output = await renderBashOutput(execution.rawOutput);
-      if (execution.outputCapped) {
-        output =
-          `[Foreground output tail capped at ${BOUNDED_OUTPUT_MAX_LINES} lines / ` +
-          `${MAX_OUTPUT_BYTES / 1024 / 1024} MB. Complete sanitized log: ` +
-          `${outcome.metadata.logPath}]\n` +
-          output;
-      }
-      // Windows without Git Bash: commands ran under cmd.exe, NOT bash. Tell
-      // the model so it uses cmd syntax (no `ls`/`grep`/pipes/single-quotes)
-      // and doesn't misread failures as a wrong directory / environment.
-      if (execution.isCmdFallback) {
-        output =
-          "[Ran under Windows cmd.exe — bash is unavailable. Use cmd syntax " +
-          "(dir, findstr, type); POSIX commands and quoting will fail. " +
-          "Install Git for Windows to get bash.]\n" +
-          output;
-      }
-
-      const exitCode =
-        outcome.reason === "completed"
-          ? "0"
-          : outcome.reason === "timedOut"
-            ? `TIMEOUT (${effectiveTimeout}ms)`
-            : outcome.reason === "aborted"
-              ? "ABORTED"
-              : outcome.exitCode !== null
-                ? String(outcome.exitCode)
-                : outcome.signal
-                  ? `SIGNAL (${outcome.signal})`
-                  : "FAILED (no exit code)";
-
-      return {
-        content: `Exit code: ${exitCode}\n${output}\n\n${diagnostics}`,
-        details,
-      };
+      return renderStructuredForegroundResult(execution, false);
     },
   };
 }

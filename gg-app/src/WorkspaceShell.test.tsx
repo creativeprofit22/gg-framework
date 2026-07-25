@@ -686,6 +686,7 @@ describe("WorkspaceShell", () => {
       await screen.findByText(/Pane secondary could not restore its saved session/),
     ).toBeTruthy();
     expect(screen.queryByText(/Pane primary could not restore its saved session/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
   });
 
   it("updates the native title from a changed focused-pane snapshot", async () => {
@@ -811,7 +812,7 @@ describe("WorkspaceShell", () => {
     activeWorkPanes.add("secondary");
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
-    await screen.findByTestId("pane-secondary");
+    await waitForInitialWorkspaceReady();
 
     fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
     expect(screen.getByText(/Pane secondary has active work/)).toBeTruthy();

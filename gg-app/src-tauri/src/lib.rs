@@ -1232,6 +1232,98 @@ async fn agent_state(
         .map_err(|e| e.to_string())
 }
 
+fn normalize_notes_response(
+    status: reqwest::StatusCode,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let typed_outcome = body
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| {
+            matches!(value, "ok" | "missing" | "corrupt" | "conflict" | "invalid")
+        });
+    if status.is_success() || typed_outcome {
+        return Ok(body);
+    }
+    Err(body
+        .get("message")
+        .or_else(|| body.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("notes request failed")
+        .to_string())
+}
+
+async fn notes_response(response: reqwest::Response) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| error.to_string())?;
+    normalize_notes_response(status, body)
+}
+
+/// Proxy: load the authenticated pane's project Notes snapshot.
+#[tauri::command]
+async fn agent_notes_get(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .get(format!("{}/notes", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
+/// Proxy: create the pane's project Notes repository only when absent.
+#[tauri::command]
+async fn agent_notes_migrate(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    document: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/notes/migrate", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "document": document }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
+/// Proxy: compare-and-swap the pane's project Notes document.
+#[tauri::command]
+async fn agent_notes_save(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    expected_revision: u64,
+    document: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .put(format!("{}/notes", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({
+            "expectedRevision": expected_revision,
+            "document": document,
+        }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
 /// Proxy: shared durable chat memories.
 #[tauri::command]
 async fn agent_memories(
@@ -5207,6 +5299,9 @@ pub fn run() {
             read_dropped_file_attachment,
             open_project_path,
             agent_state,
+            agent_notes_get,
+            agent_notes_migrate,
+            agent_notes_save,
             agent_memories,
             agent_delete_memory,
             agent_jiwa,
@@ -5521,6 +5616,38 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn notes_response_preserves_expected_non_success_outcomes() {
+        for (status, body) in [
+            (
+                reqwest::StatusCode::CONFLICT,
+                serde_json::json!({ "status": "conflict", "snapshot": { "revision": 2 } }),
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                serde_json::json!({ "status": "missing" }),
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                serde_json::json!({ "status": "invalid", "reason": "invalid-body" }),
+            ),
+        ] {
+            assert_eq!(
+                normalize_notes_response(status, body.clone()).unwrap(),
+                body
+            );
+        }
+    }
+
+    #[test]
+    fn notes_response_rejects_untyped_server_failures() {
+        let error = normalize_notes_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({ "status": "error", "message": "notes request failed" }),
+        )
+        .unwrap_err();
+        assert_eq!(error, "notes request failed");
+    }
     #[test]
     fn cancel_response_accepts_acknowledged_success() {
         let body = serde_json::json!({ "cancelled": true, "runState": "idle" });

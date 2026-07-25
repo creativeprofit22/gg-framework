@@ -13,6 +13,7 @@ interface Props {
   handoff: string;
   handoffUpdatedAt: string | null;
   handoffUnread: boolean;
+  persistenceStatus: React.ReactNode;
   onChangeCurrentFocus(value: string): void;
   onCreateTask(text: string): void;
   onEditTask(id: string, text: string): void;
@@ -33,6 +34,7 @@ export function NotesModal({
   handoff,
   handoffUpdatedAt,
   handoffUnread,
+  persistenceStatus,
   onChangeCurrentFocus,
   onCreateTask,
   onEditTask,
@@ -52,6 +54,7 @@ export function NotesModal({
   return (
     <Modal title="Your notes" onClose={onClose} className="notes-modal">
       <div className="notes-body">
+        {persistenceStatus}
         <section className="notes-section" aria-labelledby="notes-now-heading">
           <h2 id="notes-now-heading">Now</h2>
           <NotesCurrentFocus

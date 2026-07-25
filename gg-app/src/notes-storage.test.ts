@@ -13,6 +13,7 @@ const NOW = "2026-07-15T12:00:00.000Z";
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
   readonly failingWrites = new Set<string>();
+  failReads = false;
   get length(): number {
     return this.values.size;
   }
@@ -20,6 +21,7 @@ class MemoryStorage implements Storage {
     this.values.clear();
   }
   getItem(key: string): string | null {
+    if (this.failReads) throw new DOMException("Storage blocked", "SecurityError");
     return this.values.get(key) ?? null;
   }
   key(index: number): string | null {
@@ -98,6 +100,80 @@ describe("structured project notes storage", () => {
     expect(saved.v2.ok).toBe(true);
     expect(loaded.document.reference).toBe("new reference");
     expect(storage.getItem(legacyNotesKey(cwd))).toBe("old reference");
+  });
+
+  it("marks only safe browser states as eligible for sidecar migration", () => {
+    const cwd = "/work/project";
+
+    const empty = createNotesRepository(new MemoryStorage(), () => NOW).load(cwd);
+
+    const validV2Storage = new MemoryStorage();
+    validV2Storage.setItem(v2NotesKey(cwd), JSON.stringify(document("v2")));
+    const validV2 = createNotesRepository(validV2Storage, () => NOW).load(cwd);
+
+    const legacyStorage = new MemoryStorage();
+    legacyStorage.setItem(v2NotesKey(cwd), "{broken");
+    legacyStorage.setItem(legacyNotesKey(cwd), "  legacy\r\nbytes ");
+    const legacyFallback = createNotesRepository(legacyStorage, () => NOW).load(cwd);
+
+    expect(empty.migrationEligibility).toBe("empty");
+    expect(validV2.migrationEligibility).toBe("valid-v2");
+    expect(legacyFallback.migrationEligibility).toBe("valid-legacy");
+    expect(legacyFallback.document.reference).toBe("  legacy\r\nbytes ");
+  });
+
+  it("refuses sidecar initialization from malformed or unsupported v2-only records", () => {
+    const cwd = "/work/project";
+    for (const raw of ["{broken", JSON.stringify({ ...document("future"), version: 3 })]) {
+      const storage = new MemoryStorage();
+      storage.setItem(v2NotesKey(cwd), raw);
+
+      const loaded = createNotesRepository(storage, () => NOW).load(cwd);
+
+      expect(loaded.migrationEligibility).toBe("ineligible-invalid-v2");
+      expect(storage.getItem(v2NotesKey(cwd))).toBe(raw);
+    }
+  });
+
+  it.each([
+    ["document", { ...document("extra document field"), extra: true }],
+    [
+      "task",
+      {
+        ...document("extra task field"),
+        tasks: [{ ...document("extra task field").tasks[0], extra: true }],
+      },
+    ],
+    [
+      "handoff",
+      {
+        ...document("extra handoff field"),
+        handoff: { ...document("extra handoff field").handoff, extra: true },
+      },
+    ],
+  ])("preserves and refuses migration for v2 records with an extra %s key", (_level, value) => {
+    const cwd = "/work/project";
+    const storage = new MemoryStorage();
+    const raw = JSON.stringify(value);
+    storage.setItem(v2NotesKey(cwd), raw);
+
+    const parsed = parseNotesDocument(raw);
+    const loaded = createNotesRepository(storage, () => NOW).load(cwd);
+
+    expect(parsed).toEqual({ ok: false, reason: "invalid-shape" });
+    expect(loaded.migrationEligibility).toBe("ineligible-invalid-v2");
+    expect(loaded.diagnostics).toContainEqual({ kind: "v2-parse", reason: "invalid-shape" });
+    expect(storage.getItem(v2NotesKey(cwd))).toBe(raw);
+  });
+
+  it("refuses sidecar initialization when browser storage cannot be read", () => {
+    const storage = new MemoryStorage();
+    storage.failReads = true;
+
+    const loaded = createNotesRepository(storage, () => NOW).load("/work/project");
+
+    expect(loaded.migrationEligibility).toBe("ineligible-unreadable");
+    expect(loaded.diagnostics.some((diagnostic) => diagnostic.kind === "storage-read")).toBe(true);
   });
 
   it("converges Windows cwd aliases but preserves POSIX case", () => {

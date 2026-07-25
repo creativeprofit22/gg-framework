@@ -7,6 +7,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { routePaneEvent, type PaneEventEnvelope } from "./pane-routing";
+import {
+  isProjectNotesMigrationOutcome,
+  isProjectNotesReadOutcome,
+  isProjectNotesSaveOutcome,
+  type NotesClient,
+  type NotesDocumentV2,
+  type ProjectNotesMigrationOutcome,
+  type ProjectNotesReadOutcome,
+  type ProjectNotesSaveOutcome,
+} from "./notes-types";
 
 // Per-window event bus. The Rust side emits agent traffic with `emit_to` the
 // specific window label, so each window must listen on ITS OWN webview target —
@@ -1741,7 +1751,7 @@ export function disposePaneSession(paneId: string, generation?: number): Promise
   return invoke("agent_pane_dispose", { paneId, generation: generation ?? null });
 }
 
-export interface PaneAgentClient {
+export interface PaneAgentClient extends NotesClient {
   readonly paneId: string;
   status(): Promise<PaneStartupStatus>;
   waitForReady(): Promise<PaneStartupStatus>;
@@ -1751,6 +1761,9 @@ export interface PaneAgentClient {
   selectWorkspace(target: PaneSessionTarget, expectedGeneration: number): Promise<number>;
   subscribe(onEvent: (event: SidecarEvent) => void): () => void;
   getState(): Promise<AgentState>;
+  getNotes(): Promise<ProjectNotesReadOutcome>;
+  migrateNotes(document: NotesDocumentV2): Promise<ProjectNotesMigrationOutcome>;
+  saveNotes(expectedRevision: number, document: NotesDocumentV2): Promise<ProjectNotesSaveOutcome>;
   listMemories(): Promise<MemorySnapshot>;
   deleteMemory(id: string): Promise<MemorySnapshot>;
   listJiwa(): Promise<JiwaSnapshot>;
@@ -1899,6 +1912,23 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       };
     },
     getState: () => call("agent_state"),
+    async getNotes() {
+      const outcome = await call<unknown>("agent_notes_get");
+      if (!isProjectNotesReadOutcome(outcome)) throw new Error("invalid Notes read response");
+      return outcome;
+    },
+    async migrateNotes(document) {
+      const outcome = await call<unknown>("agent_notes_migrate", { document });
+      if (!isProjectNotesMigrationOutcome(outcome)) {
+        throw new Error("invalid Notes migration response");
+      }
+      return outcome;
+    },
+    async saveNotes(expectedRevision, document) {
+      const outcome = await call<unknown>("agent_notes_save", { expectedRevision, document });
+      if (!isProjectNotesSaveOutcome(outcome)) throw new Error("invalid Notes save response");
+      return outcome;
+    },
     listMemories: async () => {
       await ready();
       return call("agent_memories");

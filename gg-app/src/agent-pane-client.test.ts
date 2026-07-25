@@ -26,19 +26,51 @@ const target = {
   sessionPath: "/s",
 };
 
+const notesTask = {
+  id: "task-1",
+  text: "verify transport",
+  status: "todo" as const,
+  createdAt: "2026-07-25T12:00:00.000Z",
+  updatedAt: "2026-07-25T12:00:00.000Z",
+  completedAt: null,
+  archivedAt: null,
+};
+const notesDocument = {
+  version: 2 as const,
+  reference: "reference",
+  currentFocus: "focus",
+  tasks: [notesTask],
+  handoff: { text: "handoff", updatedAt: "2026-07-25T12:00:00.000Z", readAt: null },
+  updatedAt: "2026-07-25T12:00:00.000Z",
+  legacyImportedAt: null,
+};
+const notesSnapshot = { projectKey: "/work", revision: 1, document: notesDocument };
 describe("pane agent client", () => {
   beforeEach(() => {
     invoke.mockReset();
-    invoke.mockImplementation(async (command: string) =>
-      command === "agent_pane_status"
-        ? { ready: true, error: null, generation: 1, sessionId: "session" }
-        : {},
-    );
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_pane_status") {
+        return { ready: true, error: null, generation: 1, sessionId: "session" };
+      }
+      if (command === "agent_notes_get") {
+        return { status: "ok", snapshot: notesSnapshot, recoveredFromBackup: false };
+      }
+      if (command === "agent_notes_migrate") {
+        return { status: "ok", snapshot: notesSnapshot, migrated: true };
+      }
+      if (command === "agent_notes_save") {
+        return { status: "ok", snapshot: { ...notesSnapshot, revision: 2 } };
+      }
+      return {};
+    });
   });
 
   it("routes the current IPC surface with the complete pane argument matrix", async () => {
     const c = createPaneAgentClient("right");
     await c.getState();
+    await c.getNotes();
+    await c.migrateNotes(notesDocument);
+    await c.saveNotes(1, notesDocument);
     await c.listMemories();
     await c.deleteMemory("m");
     await c.listJiwa();
@@ -101,6 +133,69 @@ describe("pane agent client", () => {
       cwd: "/work",
       chatAgent: "all",
     });
+    expect(invoke).toHaveBeenCalledWith("agent_notes_get", { paneId: "right" });
+    expect(invoke).toHaveBeenCalledWith("agent_notes_migrate", {
+      paneId: "right",
+      document: notesDocument,
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_notes_save", {
+      paneId: "right",
+      expectedRevision: 1,
+      document: notesDocument,
+    });
+  });
+
+  it("passes validated typed Notes outcomes through unchanged", async () => {
+    const client = createPaneAgentClient("right");
+    const read = { status: "ok", snapshot: notesSnapshot, recoveredFromBackup: false } as const;
+    const migrated = { status: "ok", snapshot: notesSnapshot, migrated: false } as const;
+    const saved = { status: "conflict", snapshot: notesSnapshot } as const;
+    invoke.mockResolvedValueOnce(read).mockResolvedValueOnce(migrated).mockResolvedValueOnce(saved);
+
+    expect(await client.getNotes()).toBe(read);
+    expect(await client.migrateNotes(notesDocument)).toBe(migrated);
+    expect(await client.saveNotes(1, notesDocument)).toBe(saved);
+  });
+
+  it("rejects Notes response snapshots with unknown document, task, handoff, or snapshot keys", async () => {
+    const client = createPaneAgentClient("right");
+    const documentWithExtra = { ...notesDocument, extra: true };
+    const taskWithExtra = {
+      ...notesDocument,
+      tasks: [{ ...notesDocument.tasks[0], extra: true }],
+    };
+    const handoffWithExtra = {
+      ...notesDocument,
+      handoff: { ...notesDocument.handoff, extra: true },
+    };
+
+    invoke
+      .mockResolvedValueOnce({
+        status: "ok",
+        snapshot: { ...notesSnapshot, document: documentWithExtra },
+        recoveredFromBackup: false,
+      })
+      .mockResolvedValueOnce({
+        status: "ok",
+        snapshot: { ...notesSnapshot, document: taskWithExtra },
+        migrated: true,
+      })
+      .mockResolvedValueOnce({
+        status: "ok",
+        snapshot: { ...notesSnapshot, document: handoffWithExtra },
+      })
+      .mockResolvedValueOnce({
+        status: "ok",
+        snapshot: { ...notesSnapshot, extra: true },
+        recoveredFromBackup: false,
+      });
+
+    await expect(client.getNotes()).rejects.toThrow("invalid Notes read response");
+    await expect(client.migrateNotes(notesDocument)).rejects.toThrow(
+      "invalid Notes migration response",
+    );
+    await expect(client.saveNotes(1, notesDocument)).rejects.toThrow("invalid Notes save response");
+    await expect(client.getNotes()).rejects.toThrow("invalid Notes read response");
   });
 
   it("keeps compatibility wrappers explicitly on primary", async () => {

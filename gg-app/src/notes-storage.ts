@@ -1,15 +1,16 @@
+import { isNotesDocumentV2 } from "./notes-types";
 import type {
   NotesDocumentV2,
   NotesLoadDiagnostic,
   NotesLoadResult,
   NotesParseResult,
   NotesSaveResult,
-  NotesTask,
 } from "./notes-types";
 
 const LEGACY_PREFIX = "gg-notes:";
 const V2_PREFIX = "gg-notes-v2:";
 
+/** Browser Notes are retained only for one-time migration and run-local fallback recovery. */
 export interface NotesRepository {
   load(cwd: string): NotesLoadResult;
   save(cwd: string, document: NotesDocumentV2): NotesSaveResult;
@@ -83,59 +84,16 @@ export function parseNotesDocument(raw: string): NotesParseResult {
 
   if (!isRecord(value)) return { ok: false, reason: "invalid-shape" };
   if (value.version !== 2) return { ok: false, reason: "unsupported-version" };
-  if (
-    typeof value.reference !== "string" ||
-    typeof value.currentFocus !== "string" ||
-    !Array.isArray(value.tasks) ||
-    !value.tasks.every(isNotesTask) ||
-    !isHandoff(value.handoff) ||
-    !isTimestamp(value.updatedAt) ||
-    !isNullableTimestamp(value.legacyImportedAt)
-  ) {
-    return { ok: false, reason: "invalid-shape" };
-  }
+  if (!isNotesDocumentV2(value)) return { ok: false, reason: "invalid-shape" };
 
-  return { ok: true, document: value as unknown as NotesDocumentV2 };
+  return { ok: true, document: value };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isTimestamp(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
-    !Number.isNaN(Date.parse(value))
-  );
-}
-
-function isNullableTimestamp(value: unknown): value is string | null {
-  return value === null || isTimestamp(value);
-}
-
-function isNotesTask(value: unknown): value is NotesTask {
-  return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    typeof value.text === "string" &&
-    (value.status === "todo" || value.status === "done") &&
-    isTimestamp(value.createdAt) &&
-    isTimestamp(value.updatedAt) &&
-    isNullableTimestamp(value.completedAt) &&
-    isNullableTimestamp(value.archivedAt)
-  );
-}
-
-function isHandoff(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.text === "string" &&
-    isNullableTimestamp(value.updatedAt) &&
-    isNullableTimestamp(value.readAt)
-  );
-}
-
+/** Open the migration/fallback browser repository; the sidecar is normal authority. */
 export function createNotesRepository(
   storage: Storage,
   clock: () => string = () => new Date().toISOString(),
@@ -232,7 +190,22 @@ function loadResult(
     legacyRecoveryAttempted: false,
     legacyRecoverySucceeded: null,
     diagnostics,
+    migrationEligibility: migrationEligibility(source, diagnostics),
   };
+}
+
+function migrationEligibility(
+  source: NotesLoadResult["source"],
+  diagnostics: readonly NotesLoadDiagnostic[],
+): NotesLoadResult["migrationEligibility"] {
+  if (diagnostics.some((diagnostic) => diagnostic.kind === "storage-read")) {
+    return "ineligible-unreadable";
+  }
+  if (source === "empty") return "empty";
+  if (source === "legacy" || source === "legacy-fallback") return "valid-legacy";
+  return diagnostics.some((diagnostic) => diagnostic.kind === "v2-parse")
+    ? "ineligible-invalid-v2"
+    : "valid-v2";
 }
 
 function findLegacyRecord(

@@ -1,24 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isNotesHandoffUnread } from "./notes-status";
-import type { NotesDocumentV2, NotesLoadResult, NotesSaveResult } from "./notes-types";
+import {
+  isNotesChangeEvent,
+  isNotesReadyEvent,
+  type NotesAuthorityDiagnostic,
+  type NotesClient,
+  type NotesDocumentV2,
+  type NotesLoadResult,
+  type NotesSaveResult,
+  type ProjectNotesSnapshot,
+} from "./notes-types";
 import {
   canonicalProjectKey,
   createEmptyNotesDocument,
   createNotesRepository,
-  legacyNotesKey,
   type NotesRepository,
-  v2NotesKey,
 } from "./notes-storage";
 
-interface StorageEventTarget {
-  addEventListener(type: "storage", listener: (event: StorageEvent) => void): void;
-  removeEventListener(type: "storage", listener: (event: StorageEvent) => void): void;
-}
-
 export interface UseProjectNotesOptions {
+  client?: NotesClient;
   storage?: Storage;
   repository?: NotesRepository;
-  eventTarget?: StorageEventTarget;
   clock?: () => string;
   idFactory?: () => string;
 }
@@ -36,7 +38,20 @@ export interface UseProjectNotesResult {
   restoreTask(id: string): void;
   changeHandoff(text: string): void;
   markHandoffPresented(expectedText: string, expectedUpdatedAt: string | null): void;
-  diagnostics: { load: NotesLoadResult | null; save: NotesSaveResult | null };
+  diagnostics: {
+    load: NotesLoadResult | null;
+    save: NotesSaveResult | null;
+    authority: NotesAuthorityDiagnostic[];
+  };
+}
+
+type AuthorityMode = "opening" | "sidecar" | "fallback" | "none";
+type CoalesceKey = "reference" | "current-focus" | "handoff";
+
+interface NotesMutation {
+  id: number;
+  coalesceKey?: CoalesceKey;
+  apply(document: NotesDocumentV2): NotesDocumentV2 | null;
 }
 
 const systemClock = (): string => new Date().toISOString();
@@ -45,6 +60,7 @@ export function useProjectNotes(
   cwd: string | null,
   options: UseProjectNotesOptions = {},
 ): UseProjectNotesResult {
+  const client = options.client;
   const clock = options.clock ?? systemClock;
   const idFactory = useMemo(
     () => options.idFactory ?? (() => crypto.randomUUID()),
@@ -55,257 +71,594 @@ export function useProjectNotes(
     () => options.repository ?? createNotesRepository(storage, clock),
     [options.repository, storage, clock],
   );
-  const eventTarget: StorageEventTarget | undefined =
-    options.eventTarget ?? (typeof window === "undefined" ? undefined : window);
   const [document, setDocument] = useState<NotesDocumentV2>(() =>
     createEmptyNotesDocument(clock()),
   );
   const [loadDiagnostics, setLoadDiagnostics] = useState<NotesLoadResult | null>(null);
   const [saveDiagnostics, setSaveDiagnostics] = useState<NotesSaveResult | null>(null);
-  const activeCwdRef = useRef(cwd);
-  const documentRef = useRef(document);
+  const [authorityDiagnostics, setAuthorityDiagnostics] = useState<NotesAuthorityDiagnostic[]>([]);
 
-  const applyLoad = useCallback(
-    (projectCwd: string) => {
-      if (activeCwdRef.current !== projectCwd) return;
-      const loaded = repository.load(projectCwd);
-      if (activeCwdRef.current !== projectCwd) return;
-      documentRef.current = loaded.document;
-      setDocument(loaded.document);
-      setLoadDiagnostics(loaded);
+  const documentRef = useRef(document);
+  const activeCwdRef = useRef(cwd);
+  const epochRef = useRef(0);
+  const modeRef = useRef<AuthorityMode>(cwd === null ? "none" : "opening");
+  const authoritativeRef = useRef<ProjectNotesSnapshot | null>(null);
+  const queueRef = useRef<NotesMutation[]>([]);
+  const inFlightMutationIdRef = useRef<number | null>(null);
+  const nextMutationIdRef = useRef(0);
+  const processQueueRef = useRef<() => void>(() => undefined);
+
+  const showDocument = useCallback((next: NotesDocumentV2) => {
+    documentRef.current = next;
+    setDocument(next);
+  }, []);
+
+  const addAuthorityDiagnostic = useCallback((diagnostic: NotesAuthorityDiagnostic) => {
+    setAuthorityDiagnostics((current) => [...current, diagnostic]);
+  }, []);
+
+  const renderSidecarState = useCallback(() => {
+    const authoritative = authoritativeRef.current;
+    if (!authoritative) return;
+    showDocument(replayMutations(authoritative.document, queueRef.current));
+  }, [showDocument]);
+
+  const adoptSnapshot = useCallback(
+    (
+      snapshot: ProjectNotesSnapshot,
+      expectedProjectKey: string,
+      epoch: number,
+      authoritativeResponse = false,
+    ): boolean => {
+      if (
+        epoch !== epochRef.current ||
+        activeCwdRef.current === null ||
+        snapshot.projectKey !== expectedProjectKey
+      ) {
+        return false;
+      }
+      const current = authoritativeRef.current;
+      if (!authoritativeResponse && current && snapshot.revision <= current.revision) return false;
+      authoritativeRef.current = snapshot;
+      modeRef.current = "sidecar";
+      setLoadDiagnostics(null);
       setSaveDiagnostics(null);
+      renderSidecarState();
+      return true;
     },
-    [repository],
+    [renderSidecarState],
+  );
+
+  const enterFallback = useCallback(
+    (
+      projectCwd: string,
+      loaded: NotesLoadResult,
+      diagnostic: NotesAuthorityDiagnostic | null,
+      epoch: number,
+    ) => {
+      if (epoch !== epochRef.current || activeCwdRef.current !== projectCwd) return;
+      modeRef.current = "fallback";
+      authoritativeRef.current = null;
+      const pending = queueRef.current;
+      const fallbackDocument = replayMutations(loaded.document, pending);
+      queueRef.current = [];
+      inFlightMutationIdRef.current = null;
+      showDocument(fallbackDocument);
+      setLoadDiagnostics(loaded);
+      let save: NotesSaveResult | null = null;
+      if (pending.length > 0) save = repository.save(projectCwd, fallbackDocument);
+      setSaveDiagnostics(save);
+      if (diagnostic) addAuthorityDiagnostic(diagnostic);
+      addAuthorityDiagnostic({ kind: "fallback-storage", load: loaded, save });
+    },
+    [addAuthorityDiagnostic, repository, showDocument],
   );
 
   useEffect(() => {
+    const epoch = epochRef.current + 1;
+    epochRef.current = epoch;
     activeCwdRef.current = cwd;
+    queueRef.current = [];
+    inFlightMutationIdRef.current = null;
+    authoritativeRef.current = null;
+    setAuthorityDiagnostics([]);
+    setLoadDiagnostics(null);
+    setSaveDiagnostics(null);
+
     if (cwd === null) {
-      const empty = createEmptyNotesDocument(clock());
-      documentRef.current = empty;
-      setDocument(empty);
-      setLoadDiagnostics(null);
-      setSaveDiagnostics(null);
+      modeRef.current = "none";
+      showDocument(createEmptyNotesDocument(clock()));
       return;
     }
-    applyLoad(cwd);
-  }, [applyLoad, clock, cwd]);
 
-  useEffect(() => {
-    if (cwd === null || !eventTarget) return;
-    const canonicalCwd = canonicalProjectKey(cwd);
-    const canonicalV2Key = v2NotesKey(cwd);
-    const exactLegacyKey = legacyNotesKey(cwd);
+    const projectCwd = cwd;
+    const projectKey = canonicalProjectKey(projectCwd);
+    modeRef.current = client ? "opening" : "fallback";
+    showDocument(createEmptyNotesDocument(clock()));
 
-    const onStorage = (event: StorageEvent): void => {
-      if (activeCwdRef.current !== cwd || event.key === null) return;
-      const isV2Key = event.key === canonicalV2Key;
-      const isLegacyKey =
-        event.key === exactLegacyKey ||
-        (event.key.startsWith("gg-notes:") &&
-          canonicalProjectKey(event.key.slice("gg-notes:".length)) === canonicalCwd);
-      if (!isV2Key && !isLegacyKey) return;
+    if (!client) {
+      const loaded = repository.load(projectCwd);
+      enterFallback(projectCwd, loaded, null, epoch);
+      return;
+    }
 
-      // Storage is the source of truth. event.newValue can be stale when
-      // several cross-tab writes are delivered out of order, so reload the
-      // latest persisted pair instead of applying the event payload directly.
-      applyLoad(cwd);
+    let readGeneration = 0;
+    const readAuthoritativeNotes = async (): Promise<void> => {
+      const requestGeneration = ++readGeneration;
+      try {
+        const opened = await client.getNotes();
+        if (
+          epoch !== epochRef.current ||
+          activeCwdRef.current !== projectCwd ||
+          modeRef.current === "fallback" ||
+          requestGeneration !== readGeneration
+        ) {
+          return;
+        }
+
+        if (opened.status === "ok") {
+          if (opened.snapshot.projectKey !== projectKey) {
+            const diagnostic: NotesAuthorityDiagnostic = {
+              kind: "sidecar-open",
+              error: new Error("sidecar returned Notes for a different project"),
+            };
+            if (authoritativeRef.current && modeRef.current === "sidecar") {
+              addAuthorityDiagnostic(diagnostic);
+            } else {
+              enterFallback(projectCwd, repository.load(projectCwd), diagnostic, epoch);
+            }
+            return;
+          }
+
+          if (
+            opened.recoveredFromBackup ||
+            !authoritativeRef.current ||
+            opened.snapshot.revision > authoritativeRef.current.revision
+          ) {
+            adoptSnapshot(opened.snapshot, projectKey, epoch, opened.recoveredFromBackup);
+          }
+          processQueueRef.current();
+          return;
+        }
+
+        if (authoritativeRef.current && modeRef.current === "sidecar") {
+          addAuthorityDiagnostic(
+            opened.status === "corrupt"
+              ? { kind: "sidecar-corrupt", corruption: opened }
+              : {
+                  kind: "sidecar-open",
+                  error: new Error("authoritative Notes snapshot is missing"),
+                },
+          );
+          processQueueRef.current();
+          return;
+        }
+
+        const loaded = repository.load(projectCwd);
+        if (opened.status === "corrupt") {
+          enterFallback(projectCwd, loaded, { kind: "sidecar-corrupt", corruption: opened }, epoch);
+          return;
+        }
+        if (
+          loaded.migrationEligibility === "ineligible-unreadable" ||
+          loaded.migrationEligibility === "ineligible-invalid-v2"
+        ) {
+          enterFallback(projectCwd, loaded, { kind: "migration-refused", load: loaded }, epoch);
+          return;
+        }
+
+        try {
+          const migrated = await client.migrateNotes(loaded.document);
+          if (
+            epoch !== epochRef.current ||
+            activeCwdRef.current !== projectCwd ||
+            requestGeneration !== readGeneration
+          ) {
+            return;
+          }
+          if (migrated.status === "ok") {
+            if (
+              migrated.snapshot.projectKey === projectKey &&
+              (!authoritativeRef.current ||
+                migrated.snapshot.revision > authoritativeRef.current.revision)
+            ) {
+              adoptSnapshot(migrated.snapshot, projectKey, epoch);
+            }
+            processQueueRef.current();
+            return;
+          }
+          if (migrated.status === "corrupt") {
+            enterFallback(
+              projectCwd,
+              loaded,
+              { kind: "sidecar-corrupt", corruption: migrated },
+              epoch,
+            );
+            return;
+          }
+          enterFallback(
+            projectCwd,
+            loaded,
+            { kind: "migration-failed", error: new Error("sidecar rejected Notes migration") },
+            epoch,
+          );
+        } catch (error) {
+          if (authoritativeRef.current && modeRef.current === "sidecar") {
+            addAuthorityDiagnostic({ kind: "migration-failed", error });
+            processQueueRef.current();
+          } else {
+            enterFallback(projectCwd, loaded, { kind: "migration-failed", error }, epoch);
+          }
+        }
+      } catch (error) {
+        if (
+          epoch !== epochRef.current ||
+          activeCwdRef.current !== projectCwd ||
+          modeRef.current === "fallback" ||
+          requestGeneration !== readGeneration
+        ) {
+          return;
+        }
+        if (authoritativeRef.current && modeRef.current === "sidecar") {
+          addAuthorityDiagnostic({ kind: "sidecar-open", error });
+          processQueueRef.current();
+        } else {
+          enterFallback(
+            projectCwd,
+            repository.load(projectCwd),
+            { kind: "sidecar-open", error },
+            epoch,
+          );
+        }
+      }
     };
 
-    eventTarget.addEventListener("storage", onStorage);
-    return () => eventTarget.removeEventListener("storage", onStorage);
-  }, [applyLoad, cwd, eventTarget]);
+    const unsubscribe = client.subscribe((event) => {
+      if (epoch !== epochRef.current || modeRef.current === "fallback") return;
+      if (isNotesReadyEvent(event)) {
+        void readAuthoritativeNotes();
+        return;
+      }
+      if (!isNotesChangeEvent(event)) return;
+      if (adoptSnapshot(event.data, projectKey, epoch)) processQueueRef.current();
+    });
 
-  const commitDocument = useCallback(
-    (projectCwd: string, update: (current: NotesDocumentV2) => NotesDocumentV2 | null) => {
-      if (activeCwdRef.current !== projectCwd) return;
-      const nextDocument = update(documentRef.current);
-      if (nextDocument === null || activeCwdRef.current !== projectCwd) return;
-      documentRef.current = nextDocument;
-      setDocument(nextDocument);
-      setSaveDiagnostics(repository.save(projectCwd, nextDocument));
+    void readAuthoritativeNotes();
+
+    return () => {
+      unsubscribe();
+      if (epochRef.current === epoch) epochRef.current += 1;
+    };
+  }, [
+    addAuthorityDiagnostic,
+    adoptSnapshot,
+    client,
+    clock,
+    cwd,
+    enterFallback,
+    repository,
+    showDocument,
+  ]);
+
+  const processQueue = useCallback(() => {
+    const projectCwd = activeCwdRef.current;
+    const authoritative = authoritativeRef.current;
+    const mutation = queueRef.current[0];
+    if (
+      !client ||
+      projectCwd === null ||
+      modeRef.current !== "sidecar" ||
+      inFlightMutationIdRef.current !== null ||
+      !authoritative ||
+      !mutation
+    ) {
+      return;
+    }
+
+    const epoch = epochRef.current;
+    const nextDocument = mutation.apply(authoritative.document);
+    if (nextDocument === null) {
+      queueRef.current.shift();
+      renderSidecarState();
+      queueMicrotask(() => processQueueRef.current());
+      return;
+    }
+
+    inFlightMutationIdRef.current = mutation.id;
+    void client
+      .saveNotes(authoritative.revision, nextDocument)
+      .then((outcome) => {
+        if (
+          epoch !== epochRef.current ||
+          activeCwdRef.current !== projectCwd ||
+          modeRef.current !== "sidecar" ||
+          inFlightMutationIdRef.current !== mutation.id
+        ) {
+          return;
+        }
+        inFlightMutationIdRef.current = null;
+        if (outcome.status === "ok") {
+          queueRef.current = queueRef.current.filter((queued) => queued.id !== mutation.id);
+          if (
+            !authoritativeRef.current ||
+            outcome.snapshot.revision > authoritativeRef.current.revision
+          ) {
+            authoritativeRef.current = outcome.snapshot;
+          }
+          setSaveDiagnostics(null);
+          setAuthorityDiagnostics((current) =>
+            current.filter((diagnostic) => diagnostic.kind !== "save-failed"),
+          );
+          renderSidecarState();
+          queueMicrotask(() => processQueueRef.current());
+          return;
+        }
+        if (outcome.status === "conflict") {
+          adoptSnapshot(outcome.snapshot, canonicalProjectKey(projectCwd), epoch, true);
+          queueMicrotask(() => processQueueRef.current());
+          return;
+        }
+        addAuthorityDiagnostic({
+          kind: "save-failed",
+          error: new Error(`sidecar Notes save failed: ${outcome.status}`),
+        });
+      })
+      .catch((error) => {
+        if (
+          epoch !== epochRef.current ||
+          activeCwdRef.current !== projectCwd ||
+          inFlightMutationIdRef.current !== mutation.id
+        ) {
+          return;
+        }
+        inFlightMutationIdRef.current = null;
+        addAuthorityDiagnostic({ kind: "save-failed", error });
+      });
+  }, [addAuthorityDiagnostic, adoptSnapshot, client, renderSidecarState]);
+  useEffect(() => {
+    processQueueRef.current = processQueue;
+  }, [processQueue]);
+
+  const enqueueMutation = useCallback(
+    (mutation: Omit<NotesMutation, "id">) => {
+      const projectCwd = activeCwdRef.current;
+      if (projectCwd === null || modeRef.current === "none") return;
+      const queued: NotesMutation = { ...mutation, id: ++nextMutationIdRef.current };
+
+      if (modeRef.current === "fallback") {
+        const next = queued.apply(documentRef.current);
+        if (next === null) return;
+        showDocument(next);
+        setSaveDiagnostics(repository.save(projectCwd, next));
+        return;
+      }
+
+      const queue = queueRef.current;
+      const tail = queue[queue.length - 1];
+      if (
+        queued.coalesceKey &&
+        tail?.coalesceKey === queued.coalesceKey &&
+        tail.id !== inFlightMutationIdRef.current
+      ) {
+        queue[queue.length - 1] = queued;
+      } else {
+        queue.push(queued);
+      }
+
+      if (authoritativeRef.current) renderSidecarState();
+      else {
+        const next = queued.apply(documentRef.current);
+        if (next !== null) showDocument(next);
+      }
+      processQueueRef.current();
     },
-    [repository],
+    [renderSidecarState, repository, showDocument],
   );
 
   const onChange = useCallback(
     (value: string) => {
-      if (cwd === null) return;
-      commitDocument(cwd, (current) => ({ ...current, reference: value, updatedAt: clock() }));
+      const now = clock();
+      enqueueMutation({
+        coalesceKey: "reference",
+        apply: (current) =>
+          current.reference === value ? null : { ...current, reference: value, updatedAt: now },
+      });
     },
-    [clock, commitDocument, cwd],
+    [clock, enqueueMutation],
   );
 
   const changeCurrentFocus = useCallback(
     (value: string) => {
-      if (cwd === null) return;
-      commitDocument(cwd, (current) =>
-        current.currentFocus === value
-          ? null
-          : { ...current, currentFocus: value, updatedAt: clock() },
-      );
+      const now = clock();
+      enqueueMutation({
+        coalesceKey: "current-focus",
+        apply: (current) =>
+          current.currentFocus === value
+            ? null
+            : { ...current, currentFocus: value, updatedAt: now },
+      });
     },
-    [clock, commitDocument, cwd],
+    [clock, enqueueMutation],
   );
 
   const createTask = useCallback(
     (text: string) => {
-      if (cwd === null) return;
       const trimmed = text.trim();
       if (!trimmed) return;
-      commitDocument(cwd, (current) => {
-        const now = clock();
-        return {
-          ...current,
-          tasks: [
-            ...current.tasks,
-            {
-              id: idFactory(),
-              text: trimmed,
-              status: "todo",
-              createdAt: now,
-              updatedAt: now,
-              completedAt: null,
-              archivedAt: null,
-            },
-          ],
-          updatedAt: now,
-        };
+      const now = clock();
+      const id = idFactory();
+      enqueueMutation({
+        apply: (current) =>
+          current.tasks.some((task) => task.id === id)
+            ? null
+            : {
+                ...current,
+                tasks: [
+                  ...current.tasks,
+                  {
+                    id,
+                    text: trimmed,
+                    status: "todo",
+                    createdAt: now,
+                    updatedAt: now,
+                    completedAt: null,
+                    archivedAt: null,
+                  },
+                ],
+                updatedAt: now,
+              },
       });
     },
-    [clock, commitDocument, cwd, idFactory],
+    [clock, enqueueMutation, idFactory],
   );
 
   const editTask = useCallback(
     (id: string, text: string) => {
-      if (cwd === null) return;
       const trimmed = text.trim();
       if (!trimmed) return;
-      commitDocument(cwd, (current) => {
-        const index = current.tasks.findIndex((task) => task.id === id);
-        const task = current.tasks[index];
-        if (!task || task.archivedAt !== null || task.text === trimmed) return null;
-        const now = clock();
-        const tasks = [...current.tasks];
-        tasks[index] = { ...task, text: trimmed, updatedAt: now };
-        return { ...current, tasks, updatedAt: now };
+      const now = clock();
+      enqueueMutation({
+        apply: (current) => {
+          const index = current.tasks.findIndex((task) => task.id === id);
+          const task = current.tasks[index];
+          if (!task || task.archivedAt !== null || task.text === trimmed) return null;
+          const tasks = [...current.tasks];
+          tasks[index] = { ...task, text: trimmed, updatedAt: now };
+          return { ...current, tasks, updatedAt: now };
+        },
       });
     },
-    [clock, commitDocument, cwd],
+    [clock, enqueueMutation],
   );
 
   const toggleTask = useCallback(
     (id: string) => {
-      if (cwd === null) return;
-      commitDocument(cwd, (current) => {
-        const index = current.tasks.findIndex((task) => task.id === id);
-        const task = current.tasks[index];
-        if (!task) return null;
-        const now = clock();
-        const done = task.status === "todo";
-        const tasks = [...current.tasks];
-        tasks[index] = {
-          ...task,
-          status: done ? "done" : "todo",
-          completedAt: done ? now : null,
-          updatedAt: now,
-        };
-        return { ...current, tasks, updatedAt: now };
+      const selectedTask = documentRef.current.tasks.find((task) => task.id === id);
+      if (!selectedTask || selectedTask.archivedAt !== null) return;
+      const now = clock();
+      const targetStatus = selectedTask.status === "todo" ? "done" : "todo";
+      enqueueMutation({
+        apply: (current) => {
+          const index = current.tasks.findIndex((task) => task.id === id);
+          const task = current.tasks[index];
+          if (!task || task.archivedAt !== null || task.status === targetStatus) return null;
+          const tasks = [...current.tasks];
+          tasks[index] = {
+            ...task,
+            status: targetStatus,
+            completedAt: targetStatus === "done" ? now : null,
+            updatedAt: now,
+          };
+          return { ...current, tasks, updatedAt: now };
+        },
       });
     },
-    [clock, commitDocument, cwd],
+    [clock, enqueueMutation],
   );
 
   const moveTask = useCallback(
     (id: string, direction: "up" | "down") => {
-      if (cwd === null) return;
-      commitDocument(cwd, (current) => {
-        const activeIndexes = current.tasks
-          .map((task, index) => (task.archivedAt === null ? index : -1))
-          .filter((index) => index !== -1);
-        const activePosition = activeIndexes.findIndex((index) => current.tasks[index]?.id === id);
-        const targetPosition = activePosition + (direction === "up" ? -1 : 1);
-        if (activePosition === -1 || targetPosition < 0 || targetPosition >= activeIndexes.length) {
-          return null;
-        }
-        const sourceIndex = activeIndexes[activePosition]!;
-        const targetIndex = activeIndexes[targetPosition]!;
-        const tasks = [...current.tasks];
-        [tasks[sourceIndex], tasks[targetIndex]] = [tasks[targetIndex]!, tasks[sourceIndex]!];
-        return { ...current, tasks, updatedAt: clock() };
+      const activeTasks = documentRef.current.tasks.filter((task) => task.archivedAt === null);
+      const activePosition = activeTasks.findIndex((task) => task.id === id);
+      const targetPosition = activePosition + (direction === "up" ? -1 : 1);
+      const targetId = activeTasks[targetPosition]?.id;
+      if (activePosition === -1 || !targetId) return;
+      const now = clock();
+      const placeBeforeTarget = direction === "up";
+      enqueueMutation({
+        apply: (current) => {
+          const activeIds = current.tasks
+            .filter((task) => task.archivedAt === null)
+            .map((task) => task.id);
+          const sourcePosition = activeIds.indexOf(id);
+          const anchorPosition = activeIds.indexOf(targetId);
+          if (sourcePosition === -1 || anchorPosition === -1) return null;
+          if (
+            (placeBeforeTarget && sourcePosition < anchorPosition) ||
+            (!placeBeforeTarget && sourcePosition > anchorPosition)
+          ) {
+            return null;
+          }
+
+          const tasks = [...current.tasks];
+          const sourceIndex = tasks.findIndex((task) => task.id === id);
+          const [movedTask] = tasks.splice(sourceIndex, 1);
+          if (!movedTask) return null;
+          const targetIndex = tasks.findIndex((task) => task.id === targetId);
+          tasks.splice(placeBeforeTarget ? targetIndex : targetIndex + 1, 0, movedTask);
+          return { ...current, tasks, updatedAt: now };
+        },
       });
     },
-    [clock, commitDocument, cwd],
+    [clock, enqueueMutation],
   );
 
   const archiveTask = useCallback(
     (id: string) => {
-      if (cwd === null) return;
-      commitDocument(cwd, (current) => {
-        const index = current.tasks.findIndex((task) => task.id === id);
-        const task = current.tasks[index];
-        if (!task || task.archivedAt !== null) return null;
-        const now = clock();
-        const tasks = [...current.tasks];
-        tasks[index] = { ...task, archivedAt: now, updatedAt: now };
-        return { ...current, tasks, updatedAt: now };
+      const now = clock();
+      enqueueMutation({
+        apply: (current) =>
+          updateTask(current, id, now, (task) =>
+            task.archivedAt === null ? { ...task, archivedAt: now, updatedAt: now } : null,
+          ),
       });
     },
-    [clock, commitDocument, cwd],
+    [clock, enqueueMutation],
   );
 
   const restoreTask = useCallback(
     (id: string) => {
-      if (cwd === null) return;
-      commitDocument(cwd, (current) => {
-        const index = current.tasks.findIndex((task) => task.id === id);
-        const task = current.tasks[index];
-        if (!task || task.archivedAt === null) return null;
-        const now = clock();
-        const tasks = [...current.tasks];
-        tasks[index] = { ...task, archivedAt: null, updatedAt: now };
-        return { ...current, tasks, updatedAt: now };
+      const now = clock();
+      enqueueMutation({
+        apply: (current) =>
+          updateTask(current, id, now, (task) =>
+            task.archivedAt !== null ? { ...task, archivedAt: null, updatedAt: now } : null,
+          ),
       });
     },
-    [clock, commitDocument, cwd],
+    [clock, enqueueMutation],
   );
 
   const changeHandoff = useCallback(
     (text: string) => {
-      if (cwd === null) return;
-      commitDocument(cwd, (current) => {
-        if (current.handoff.text === text) return null;
-        const now = clock();
-        return {
-          ...current,
-          handoff: { text, updatedAt: now, readAt: null },
-          updatedAt: now,
-        };
+      const now = clock();
+      enqueueMutation({
+        coalesceKey: "handoff",
+        apply: (current) =>
+          current.handoff.text === text
+            ? null
+            : {
+                ...current,
+                handoff: { text, updatedAt: now, readAt: null },
+                updatedAt: now,
+              },
       });
     },
-    [clock, commitDocument, cwd],
+    [clock, enqueueMutation],
   );
 
   const markHandoffPresented = useCallback(
     (expectedText: string, expectedUpdatedAt: string | null) => {
-      if (cwd === null || expectedUpdatedAt === null) return;
-      commitDocument(cwd, (current) => {
-        if (
-          current.handoff.text !== expectedText ||
-          current.handoff.updatedAt !== expectedUpdatedAt ||
-          !isNotesHandoffUnread(current)
-        ) {
-          return null;
-        }
-        const now = clock();
-        return {
-          ...current,
-          handoff: { ...current.handoff, readAt: now },
-          updatedAt: now,
-        };
+      if (expectedUpdatedAt === null) return;
+      const now = clock();
+      enqueueMutation({
+        apply: (current) => {
+          if (
+            current.handoff.text !== expectedText ||
+            current.handoff.updatedAt !== expectedUpdatedAt ||
+            !isNotesHandoffUnread(current)
+          ) {
+            return null;
+          }
+          return {
+            ...current,
+            handoff: { ...current.handoff, readAt: now },
+            updatedAt: now,
+          };
+        },
       });
     },
-    [clock, commitDocument, cwd],
+    [clock, enqueueMutation],
   );
 
   return {
@@ -321,8 +674,37 @@ export function useProjectNotes(
     restoreTask,
     changeHandoff,
     markHandoffPresented,
-    diagnostics: { load: loadDiagnostics, save: saveDiagnostics },
+    diagnostics: {
+      load: loadDiagnostics,
+      save: saveDiagnostics,
+      authority: authorityDiagnostics,
+    },
   };
+}
+
+function replayMutations(
+  base: NotesDocumentV2,
+  mutations: readonly NotesMutation[],
+): NotesDocumentV2 {
+  let current = base;
+  for (const mutation of mutations) current = mutation.apply(current) ?? current;
+  return current;
+}
+
+function updateTask(
+  current: NotesDocumentV2,
+  id: string,
+  updatedAt: string,
+  update: (task: NotesDocumentV2["tasks"][number]) => NotesDocumentV2["tasks"][number] | null,
+): NotesDocumentV2 | null {
+  const index = current.tasks.findIndex((task) => task.id === id);
+  const task = current.tasks[index];
+  if (!task) return null;
+  const nextTask = update(task);
+  if (!nextTask) return null;
+  const tasks = [...current.tasks];
+  tasks[index] = nextTask;
+  return { ...current, tasks, updatedAt };
 }
 
 function browserStorage(): Storage {

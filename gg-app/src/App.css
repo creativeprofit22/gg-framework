@@ -1481,6 +1481,48 @@ body {
   gap: 14px;
   padding-right: 6px;
 }
+.notes-persistence {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  border: 1px solid var(--border-strong);
+  border-inline-start: 3px solid var(--success);
+  border-radius: var(--radius-card);
+  background: var(--surface-1);
+  padding: 10px 12px;
+}
+.notes-persistence-local,
+.notes-persistence-warning {
+  border-inline-start-color: var(--warning);
+}
+.notes-persistence-error {
+  border-inline-start-color: var(--error);
+}
+.notes-persistence-icon {
+  margin-top: 1px;
+  color: var(--success);
+}
+.notes-persistence-local .notes-persistence-icon,
+.notes-persistence-warning .notes-persistence-icon {
+  color: var(--warning);
+}
+.notes-persistence-error .notes-persistence-icon {
+  color: var(--error);
+}
+.notes-persistence strong {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+.notes-persistence p {
+  margin: 2px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
 .notes-section {
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
@@ -1654,6 +1696,14 @@ body {
 }
 .notes-modal input[type="checkbox"]:focus-visible {
   outline-offset: 3px;
+}
+@media (forced-colors: active) {
+  .notes-persistence {
+    border-color: CanvasText;
+  }
+  .notes-persistence-icon {
+    color: CanvasText;
+  }
 }
 @media (max-width: 560px) {
   .notes-modal {

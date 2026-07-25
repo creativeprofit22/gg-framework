@@ -11,7 +11,7 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Implementation status:** Phases 00–14 are complete and landed.
+- **Implementation status:** Phases 00–15 are complete and verified.
 - **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
@@ -21,10 +21,12 @@ This file is an implementation plan, not a storage surface for user roadmap data
 - **2026-07-25 current-head audit:** Commit ancestry plus source, generated-bundle, test, and smoke inspection reconfirm Phases 00–12 as implemented. The expanded lifecycle/Phase 13 contract matrix passed 145 tests with 3 platform skips across 148 tests; all 336 gg-app tests, all 100 Rust tests, and the 42-test workspace suite passed. The ggcoder build, ggcoder and gg-app typechecks, gg-app lint, targeted Prettier, roadmap coverage, diff checks, sidecar bundle, and bundled-runtime `/state` smoke also passed.
 - **Current-head Phase 00 evidence:** Commit `40692c2f` waits for the snapshot-driven workspace readiness signal before closing a pane with active work and dismisses the preceding lifecycle-error toast. Local verification passed the 41-test suite, three supervised Windows repeats, gg-app typecheck, targeted lint/format, and diff checks. CI run [`30145553034`](https://github.com/creativeprofit22/gg-framework/actions/runs/30145553034) is green across all six Windows, macOS, and Linux jobs; every platform completed three supervised workspace repeats with zero survivors.
 - **2026-07-25 Phase 14 evidence:** Track A is frozen at verification commit `7c1d4a13`. CI run [`30161379020`](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020) passed all six framework/app jobs on Windows, macOS, and Linux on its first attempt. The owning Linux lifecycle suites passed 112 tests with 2 explicit Windows-only skips, the Windows matrix passed 103 tests with 11 explicit platform skips, and the cooperative POSIX timeout probe passed 20/20 stress repeats. Repository check/lint/format/build passed; 25 warm persistent commands measured `0.757 ms` p95 on Windows. All three workspace evidence artifacts passed three supervised runs with bounded gross memory and zero survivors.
-- **Next phase:** Phase 15 — Move Notes authority behind the sidecar.
-- **Track A freeze:** Complete at `7c1d4a13`; the three-OS matrix, workspace memory evidence, and two-window Windows desktop timeout smoke are green.
-- **Later-track audit:** Phases 00–14 are complete. Track B, Phases 15–26, has not started.
-- **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository, Rust IPC command, roadmap entity, reminder field, or lifecycle schema exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
+- **2026-07-25 roadmap implementation audit (`0c6fe66b`):** Commit ancestry, source, generated-sidecar, IPC, schema, UI, and test inspection confirm Phases 00–14 are implemented and Phase 15 is the first unimplemented phase. The focused ggcoder lifecycle matrix passed 142 tests with 12 explicit platform skips across 154 tests; 20 focused sidecar tests, all 337 gg-app tests, and all 100 Rust tests passed. The ggcoder and gg-app typechecks, gg-app lint, roadmap coverage check, and diff checks also passed.
+- **2026-07-25 Phase 15 evidence:** Notes authority now lives in the shared sidecar's revisioned project repository with create-if-absent migration, strict v1 envelope/v2 document validation, backup recovery, disk CAS, operation replay, and same-project `notes_change` fan-out. The focused sidecar matrix passed 24 tests, the focused app matrix passed 42 tests, all 1,954 ggcoder tests passed with 15 platform skips under a disposable test home, all 352 gg-app tests passed, and all 102 Rust tests passed. Typechecks, app lint/format, builds, sidecar bundling, and generated-output audits are green.
+- **Next phase:** Phase 16 — Add phase, reference, and lifecycle schemas.
+- **Track A freeze:** Complete at `7c1d4a13`; the three-OS matrix, workspace memory evidence, and two-window Windows desktop timeout smoke are green. The two later commits contain roadmap text and test synchronization only, so production behavior remains frozen; `0c6fe66b` has no separate Actions run because CI triggers only for `main` pushes and pull requests.
+- **Later-track audit:** Phase 15 is complete; Phases 16–26 have not started. Phase 20 has only prerequisites already present—Ken prompt blocks can Send to GG Coder and `PaneAgentClient.newSession()` can create a fresh session—not its guarded fresh-send/save workflow.
+- **Notes baseline:** Notes retains Now, Next, Handoff, Reference, and Done / Archive unchanged, while the sidecar now owns durable authority. Roadmap entities, reminder fields, agent-authored transitions, and lifecycle schemas remain intentionally absent until Phase 16 and later phases.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
 
@@ -729,9 +731,15 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 15 — Move Notes authority behind the sidecar
 
-**Status:** Not started.
+**Status:** Complete — verified 2026-07-25.
 
 **Outcome:** Every window reads and writes one durable project-scoped Notes document.
+
+**Delivered**
+
+- The sidecar stores one strict `StoredProjectNotesV1` envelope per canonical project and exposes pane-authenticated GET, create-if-absent migration, and compare-and-swap save routes through Rust IPC.
+- `useProjectNotes.ts` subscribes before opening, migrates only safe browser states, keeps browser data untouched as fallback evidence, and serializes optimistic replayable operations with text-tail coalescing, conflict rebasing, monotonic events, and project epochs.
+- Same-project sessions receive complete revisioned `notes_change` snapshots; project aliases converge on one SHA-256 file, while different projects remain isolated. The existing Notes document shape, modal, status badge, keyboard behavior, and neighboring Tasks control are unchanged.
 
 **Scope**
 
@@ -761,11 +769,20 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Two windows converge on one revision and reject/merge stale writes deterministically.
 - Migration failure leaves the old document recoverable; sidecar, app, and type tests pass.
 
-**Hard stop:** Document the exact storage path, schema version, migration, backup, and conflict policy. Do not add roadmap entities before migration/recovery tests pass.
+**Completion evidence**
+
+- **Storage contract:** Primary `~/.gg/project-notes/<sha256(canonical-project-key)>.json`; backup `~/.gg/project-notes/<sha256(canonical-project-key)>.backup.json`; lock `<primary>.lock`. The envelope is store version 1 with the unhashed canonical key, non-negative integer revision, and unchanged document version 2.
+- **Migration guard:** Valid v2, valid legacy fallback, and genuinely empty browser stores may create revision 1 exactly once under the file lock. Unreadable or malformed/unsupported v2-only stores are refused and preserved. Browser keys remain untouched and stop receiving writes after sidecar authority is acquired; transport/migration failure keeps run-local fallback edits recoverable.
+- **Durability and recovery:** Writes use restrictive modes where supported, unique sibling temp files, atomic rename, and cleanup. Migration installs the imported backup before the primary. Saves refresh the backup from the valid old primary before publishing the next revision. A missing/corrupt primary is restored only from a fully validated matching backup; dual corruption is reported without zeroing either file.
+- **Concurrency:** Disk compare-and-swap accepts one writer for an expected revision and returns the winner to stale writers. The client replays deterministic captured operations over that winner, drops newly invalid task operations, coalesces only unsent Reference/Current Focus/Handoff replacements, and ignores stale events or old-project callbacks.
+- **Automated results:** 24 focused sidecar repository/route tests, 42 focused Notes/client/pane tests, 1,954 full ggcoder tests with 15 platform skips under a disposable test home, 352 full gg-app tests, and 102 locked Rust tests passed. Both TypeScript checks, gg-app lint, Prettier checks, production builds, sidecar bundling, sidecar dependency audit, and generated-output audit passed.
+- **Desktop evidence:** Windows `tauri dev` launched against a disposable profile and bound the native pane to the shared daemon. The real daemon persisted CRLF, leading whitespace, UTF-8 emoji bytes (`f09f9880`), version 1/version 2 schema data, and a trailing newline at the hashed path; a native-shell restart reloaded revision 2. Two live same-project desktop daemon sessions produced one stale conflict, rebased unrelated Reference/Handoff edits, converged at revision 4, and received same-project revision 5 fan-out while a different-project session received no event. Corrupting the disposable primary restored revision 4 from its valid backup without webview storage.
+
+**Hard stop:** Satisfied — the exact path, schema, guarded migration, recovery chain, CAS/rebase policy, automated gates, native-shell restart, same-project convergence, project isolation, and disposable-profile backup restore are recorded. Phase 16 may add schema fields; Phase 15 adds none.
 
 ## Phase 16 — Add phase, reference, and lifecycle schemas
 
-**Status:** Not started.
+**Status:** Next — not started.
 
 **Outcome:** The authoritative document can store ordered phases, structured references, session links, reminders, overrides, and audit events.
 

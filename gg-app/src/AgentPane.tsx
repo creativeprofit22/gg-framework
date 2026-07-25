@@ -2031,7 +2031,7 @@ export function AgentPane({
               >
                 {"+ New"}
               </button>
-              <ProjectNotes cwd={state?.cwd ?? null} />
+              <ProjectNotes cwd={state?.cwd ?? null} client={client} />
               <button
                 className="btn btn-sm btn-ghost"
                 title="View and run this project's tasks"

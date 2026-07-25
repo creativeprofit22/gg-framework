@@ -136,6 +136,8 @@ import { detectNewCommits, repoKey } from "./core/progress/git-xp.js";
 import { rebuildFromSessions } from "./core/progress/rebuild.js";
 import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
 import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
+import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
+import { ProjectNotesRepository, type ProjectNotesSnapshot } from "./project-notes-repository.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import {
   captureSidecarError,
@@ -777,6 +779,17 @@ async function main(): Promise<void> {
   // `?session=` query for the SSE /events stream).
   const sessions = new AppSidecarSessionRouter<SessionContext>();
   const reloadCoordinator = new AppSidecarReloadCoordinator();
+  const notesRepository = new ProjectNotesRepository(paths.agentDir);
+  const notes = createAppSidecarNotesHandler({
+    repository: notesRepository,
+    sessions,
+    onError: (error) => {
+      captureSidecarError(error, "app-sidecar.notes.request");
+      log("ERROR", "app-sidecar", "notes request failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
   const memoryStore = new MemoryStore({
     onChange: ({ memories }) => {
       for (const ctx of sessions.values()) {
@@ -909,7 +922,7 @@ async function main(): Promise<void> {
       if (method === "OPTIONS") {
         res.writeHead(204, {
           "access-control-allow-origin": "*",
-          "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+          "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS",
           "access-control-allow-headers": "content-type, x-gg-session",
         });
         res.end();
@@ -974,7 +987,7 @@ async function main(): Promise<void> {
           const id = randomUUID();
           try {
             const ctx = await createSession(
-              { auth, paths, progress, memoryStore, jiwaStore, reloadCoordinator },
+              { auth, paths, progress, memoryStore, jiwaStore, reloadCoordinator, notes },
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
             );
             sessions.add(id, ctx);
@@ -1279,6 +1292,7 @@ interface SessionContext {
   session: AgentSession;
   clients: Set<SseClient>;
   broadcast: (type: string, data: unknown) => void;
+  broadcastNotesChange: (snapshot: ProjectNotesSnapshot) => void;
   /** Handle one HTTP request for this session. Owns its own 404 fallthrough. */
   handle: (
     req: http.IncomingMessage,
@@ -1305,6 +1319,7 @@ async function createSession(
     memoryStore: MemoryStore;
     jiwaStore: JiwaStore;
     reloadCoordinator: AppSidecarReloadCoordinator;
+    notes: AppSidecarNotesHandler;
   },
   opts: {
     id: string;
@@ -1314,7 +1329,7 @@ async function createSession(
     sessionPath?: string;
   },
 ): Promise<SessionContext> {
-  const { auth, progress, memoryStore, jiwaStore, reloadCoordinator } = deps;
+  const { auth, progress, memoryStore, jiwaStore, reloadCoordinator, notes } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
   let chatAgent = opts.chatAgent;
@@ -1383,8 +1398,7 @@ async function createSession(
     return `data: ${JSON.stringify(safePayload)}\n\n`;
   }
 
-  function broadcast(type: string, data: unknown): void {
-    const frame = sseFrame(type, data);
+  function broadcastFrame(frame: string): void {
     for (const client of clients) {
       try {
         if (client.res.destroyed) clients.delete(client);
@@ -1393,6 +1407,15 @@ async function createSession(
         clients.delete(client);
       }
     }
+  }
+
+  function broadcast(type: string, data: unknown): void {
+    broadcastFrame(sseFrame(type, data));
+  }
+
+  function broadcastNotesChange(snapshot: ProjectNotesSnapshot): void {
+    const payload = sessionEventFrame(opts.id, "notes_change", snapshot);
+    broadcastFrame(`data: ${JSON.stringify(payload)}\n\n`);
   }
 
   // Replace CLI-specific guidance (slash commands, CLI tool names) with
@@ -2491,6 +2514,8 @@ async function createSession(
     url: string,
     method: string,
   ): void {
+    if (notes.handle(req, res, { cwd, broadcastNotesChange }, url, method)) return;
+
     if (method === "GET" && url === "/state") {
       const st = session.getState();
       json(res, 200, {
@@ -4275,6 +4300,7 @@ async function createSession(
     session,
     clients,
     broadcast,
+    broadcastNotesChange,
     handle,
     dispose,
     isRunning: () => running || autopilotActive || runLifecycle.running,

@@ -802,7 +802,7 @@ describe("WorkspaceShell", () => {
   it("registers one global window shortcut action with multiple panes", async () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
-    await screen.findByTestId("pane-secondary");
+    await waitForInitialWorkspaceReady();
 
     fireEvent.keyDown(window, { key: "n", ctrlKey: true });
     await waitFor(() => expect(bridge.newWindow).toHaveBeenCalledOnce());

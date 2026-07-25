@@ -33,6 +33,15 @@ async function waitForProcessExit(pid: number): Promise<void> {
   throw new Error(`Process ${pid} was still alive after shutdown.`);
 }
 
+async function waitForManagedExit(manager: ProcessManager, id: string) {
+  for (let i = 0; i < 50; i += 1) {
+    const result = await manager.readOutput(id, true);
+    if (!result.isRunning) return result;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Process ${id} was still tracked as running after shutdown.`);
+}
+
 /**
  * Terminate a real spawned process group with the *unmocked* process.kill.
  * Used by tests that stub the manager's kill machinery and would otherwise
@@ -260,8 +269,8 @@ describe("ProcessManager dev-server lifecycle repro", () => {
 
       manager.shutdownAll();
 
-      await waitForProcessExit(grandchildPid);
-      const final = await manager.readOutput(started.id, true);
+      await Promise.all([waitForProcessExit(started.pid), waitForProcessExit(grandchildPid)]);
+      const final = await waitForManagedExit(manager, started.id);
       expect(final.isRunning).toBe(false);
       expect(final.output).toContain("PARENT_READY");
       expect(final.output).toContain("GRANDCHILD_READY");

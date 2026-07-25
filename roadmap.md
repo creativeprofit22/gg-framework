@@ -11,7 +11,7 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Implementation status:** Phases 00–12 are complete and landed.
+- **Implementation status:** Phases 00–14 are complete and landed.
 - **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
@@ -20,9 +20,10 @@ This file is an implementation plan, not a storage surface for user roadmap data
 - **2026-07-25 Phase 12 evidence:** The refreshed focused lifecycle matrix passed 137 tests with 3 platform skips across 140 tests and no expected failures. EOF-capable shutdown exits cleanly with code 0, EOF-ignoring shutdown escalates once after 2,000 ms, stop output waits for flush-settled metadata and final unread output, and text/newline/EOF controls are independent. The ggcoder typecheck, targeted ESLint/Prettier, roadmap coverage, and diff checks pass.
 - **2026-07-25 current-head audit:** Commit ancestry plus source, generated-bundle, test, and smoke inspection reconfirm Phases 00–12 as implemented. The expanded lifecycle/Phase 13 contract matrix passed 145 tests with 3 platform skips across 148 tests; all 336 gg-app tests, all 100 Rust tests, and the 42-test workspace suite passed. The ggcoder build, ggcoder and gg-app typechecks, gg-app lint, targeted Prettier, roadmap coverage, diff checks, sidecar bundle, and bundled-runtime `/state` smoke also passed.
 - **Current-head Phase 00 evidence:** Commit `40692c2f` waits for the snapshot-driven workspace readiness signal before closing a pane with active work and dismisses the preceding lifecycle-error toast. Local verification passed the 41-test suite, three supervised Windows repeats, gg-app typecheck, targeted lint/format, and diff checks. CI run [`30145553034`](https://github.com/creativeprofit22/gg-framework/actions/runs/30145553034) is green across all six Windows, macOS, and Linux jobs; every platform completed three supervised workspace repeats with zero survivors.
-- **Next phase:** Phase 14 — Complete the three-OS reliability gate.
-- **Current reliability gap:** Phase 13 is complete with a real two-window Windows desktop timeout smoke; Track A still needs Phase 14's complete three-OS reliability matrix and release freeze.
-- **Later-track audit:** Phases 00–13 are complete. Phase 14 and all of Track B, Phases 15–26, have not started.
+- **2026-07-25 Phase 14 evidence:** Track A is frozen at verification commit `7c1d4a13`. CI run [`30161379020`](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020) passed all six framework/app jobs on Windows, macOS, and Linux on its first attempt. The owning Linux lifecycle suites passed 112 tests with 2 explicit Windows-only skips, the Windows matrix passed 103 tests with 11 explicit platform skips, and the cooperative POSIX timeout probe passed 20/20 stress repeats. Repository check/lint/format/build passed; 25 warm persistent commands measured `0.757 ms` p95 on Windows. All three workspace evidence artifacts passed three supervised runs with bounded gross memory and zero survivors.
+- **Next phase:** Phase 15 — Move Notes authority behind the sidecar.
+- **Track A freeze:** Complete at `7c1d4a13`; the three-OS matrix, workspace memory evidence, and two-window Windows desktop timeout smoke are green.
+- **Later-track audit:** Phases 00–14 are complete. Track B, Phases 15–26, has not started.
 - **Notes baseline:** Notes has Now, Next, Handoff, Reference, and Done / Archive, but authority still resides in webview `localStorage` through `useProjectNotes.ts` and `notes-storage.ts`; no sidecar Notes repository, Rust IPC command, roadmap entity, reminder field, or lifecycle schema exists. Ken prompt blocks already support Send to GG Coder, and `PaneAgentClient.newSession()` already supports a fresh session.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -678,7 +679,7 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 14 — Complete the three-OS reliability gate
 
-**Status:** Not started.
+**Status:** Complete (`7c1d4a13`).
 
 **Outcome:** Every carry-forward process-lifecycle scenario is deterministic on its owning platforms, and Track A is releasable.
 
@@ -711,7 +712,16 @@ All external references are evidence only. Copy behavior, not source text, unles
 - `pnpm check && pnpm lint && pnpm format:check && pnpm build` passes.
 - Three-OS CI links and desktop timeout smoke evidence are attached.
 
-**Hard stop:** Freeze Track A behavior and record the verification commit SHA. Do not begin Notes Roadmap storage work while Track A is red.
+**Completion evidence**
+
+- Frozen Track A verification commit: `7c1d4a13`.
+- Green three-OS CI run: [`30161379020`](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020). Framework jobs: [Windows](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020/job/89687140560), [macOS](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020/job/89687140512), and [Linux](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020/job/89687140532). App jobs: [Windows](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020/job/89687140551), [macOS](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020/job/89687140569), and [Linux](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020/job/89687140562).
+- Linux/WSL owning suites: PersistentShell `9/9`, ProcessManager `26/26`, bash-timeout `77/79` with the 2 Windows-only rows explicitly skipped; the cooperative POSIX timeout probe passed `20/20` supervised stress repeats. Windows owning matrix: `103/114` with 11 POSIX-only/PersistentShell rows explicitly skipped.
+- The repository-wide `pnpm check && pnpm lint && pnpm format:check && pnpm build` chain passed. Twenty-five warm PersistentShell `true` commands measured `0.389 ms` p50, `0.757 ms` p95, and `0.795 ms` max on Windows.
+- Current CI workspace artifacts passed three runs per OS with zero survivors. Peak tree RSS bytes were Windows `[392835072, 406347776, 403853312]`, Linux `[517533696, 518803456, 517189632]`, and macOS `[511508480, 510099456, 515325952]`.
+- The Phase 13 two-window Windows `tauri dev` timeout smoke remains the desktop gate evidence: exact visible/copied diagnostics, owning and peer identities, bounded elapsed time, normalized retained-log path, zero peer events, and survivor count `0`.
+
+**Hard stop:** Satisfied — Track A behavior is frozen at verification commit `7c1d4a13`; all six three-OS CI jobs, repository verification, focused lifecycle stress, workspace memory evidence, and desktop timeout smoke are green. Track B may begin at Phase 15.
 
 ---
 

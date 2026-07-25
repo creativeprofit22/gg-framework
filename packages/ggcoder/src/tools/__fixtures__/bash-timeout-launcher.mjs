@@ -6,9 +6,21 @@ if (!evidenceFile || !workerFixture) {
   throw new Error("Evidence file and worker fixture are required");
 }
 
-const evidence = { role: "launcher", pid: process.pid, ppid: process.ppid };
-fs.appendFileSync(evidenceFile, `${JSON.stringify(evidence)}\n`);
+const posixMode = process.env.GG_BASH_TIMEOUT_POSIX_MODE;
+function record(role) {
+  const evidence = { role, pid: process.pid, ppid: process.ppid };
+  fs.appendFileSync(evidenceFile, `${JSON.stringify(evidence)}\n`);
+}
+
+record("launcher");
 console.log(`FIXTURE_ROLE=launcher PID=${process.pid} PPID=${process.ppid}`);
+
+if (posixMode === "cooperative" || posixMode === "ignore") {
+  process.on("SIGTERM", () => {
+    record("launcher-term");
+    console.log(`FIXTURE_SIGNAL=SIGTERM PID=${process.pid} MODE=${posixMode}`);
+  });
+}
 
 const worker = spawn(process.execPath, [workerFixture, evidenceFile], {
   stdio: ["ignore", "inherit", "inherit"],

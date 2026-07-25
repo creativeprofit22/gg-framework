@@ -369,13 +369,14 @@ async function runPosixSignalProbe(
 
     const result = await execution;
     expect(result.outcome.reason).toBe(reason === "timeout" ? "timedOut" : "aborted");
-    const roles = await waitForFixtureRoles(evidenceFile, ["worker-term"]);
+    const roles = await waitForFixtureRoles(evidenceFile, ["launcher-term", "worker-term"]);
     const byRole = new Map(initialRoles.map((role) => [role.role, role]));
     const wrapperPid = result.outcome.metadata.pid;
     const launcher = byRole.get("launcher");
     expect(wrapperPid).toBeGreaterThan(0);
     expect(launcher?.pid === wrapperPid || launcher?.ppid === wrapperPid).toBe(true);
     expect(byRole.get("worker")?.ppid).toBe(launcher?.pid);
+    expect(roles.find(({ role }) => role === "launcher-term")?.pid).toBe(launcher?.pid);
     expect(roles.find(({ role }) => role === "worker-term")?.pid).toBe(byRole.get("worker")?.pid);
     await waitForRecordedPidsToExit(roles);
     expect(wrapperPid === null || isAlive(wrapperPid)).toBe(false);
@@ -393,7 +394,10 @@ async function assertSupervisedPosixProbe(mode: "cooperative" | "ignore"): Promi
     expect(result.outerDeadlineFired).toBe(false);
     expect(result.supervisorOutcome).toBe("child_closed");
     expect(result.exitCode).toBe(0);
-    expect(result.roles.map(({ role }) => role)).toContain("worker-term");
+    expect(result.signal).toBeNull();
+    expect(result.roles.map(({ role }) => role)).toEqual(
+      expect.arrayContaining(["launcher-term", "worker-term"]),
+    );
     await waitForRecordedPidsToExit(result.roles);
   } finally {
     await cleanupRecordedPids(evidenceFile);

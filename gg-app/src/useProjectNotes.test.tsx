@@ -2,10 +2,12 @@
 
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
+import type { NotesReferenceInput } from "./notes-reference";
 import { createEmptyNotesDocument, createNotesRepository, v3NotesKey } from "./notes-storage";
 import type {
   NotesClient,
   NotesDocumentV3,
+  NotesReferenceOperationResult,
   NotesSidecarEvent,
   ProjectNotesMigrationOutcome,
   ProjectNotesReadOutcome,
@@ -40,6 +42,33 @@ function task(id = "task-1"): NotesDocumentV3["tasks"][number] {
     completedAt: null,
     archivedAt: null,
   };
+}
+
+function referenceInput(
+  canonicalUrl = "https://github.com/owner/repo/blob/main/src/file.ts#L1-L2",
+): NotesReferenceInput {
+  return {
+    provider: "github",
+    tool: "search",
+    canonicalUrl,
+    owner: "owner",
+    repo: "repo",
+    revision: "main",
+    path: "src/file.ts",
+    range: { startLine: 1, endLine: 2 },
+    issue: null,
+    pullRequest: null,
+    query: null,
+    anchor: "L1-L2",
+    relevance: "Reference evidence",
+  };
+}
+
+function savedReference(
+  id = "ref-1",
+  canonicalUrl = "https://github.com/owner/repo/blob/main/src/file.ts#L1-L2",
+): NotesDocumentV3["references"][number] {
+  return { ...referenceInput(canonicalUrl), id, capturedAt: NOW };
 }
 
 function phase(id: string, order: number): NotesDocumentV3["phases"][number] {
@@ -493,6 +522,280 @@ describe("useProjectNotes sidecar authority", () => {
     await waitFor(() => expect(first.result.current.document.currentFocus).toBe("second focus"));
     expect(first.result.current.document.reference).toBe("first reference");
     expect(second.result.current.document).toEqual(first.result.current.document);
+  });
+
+  it("creates, edits, links, unlinks, and safely deletes a stable shared reference", async () => {
+    const cwd = "/work/project";
+    const storage = new MemoryStorage();
+    const repository = createNotesRepository(storage, testClock);
+    const initial = notes("free-form");
+    initial.phases = [phase("active", 0), { ...phase("archived", 1), archivedAt: NOW }];
+    seed(storage, cwd, initial);
+    const hook = renderHook(() =>
+      useProjectNotes(cwd, {
+        storage,
+        repository,
+        clock: testClock,
+        idFactory: () => "ref-created",
+      }),
+    );
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(2));
+
+    act(() => {
+      void hook.result.current.createReference(referenceInput(), ["active", "archived"]);
+    });
+    expect(hook.result.current.document.references).toEqual([
+      { ...referenceInput(), id: "ref-created", capturedAt: LATER },
+    ]);
+    expect(hook.result.current.document.phases.map((item) => item.referenceIds)).toEqual([
+      ["ref-created"],
+      ["ref-created"],
+    ]);
+    expect(hook.result.current.document.phases[1]?.overrides.referenceIds).toEqual({
+      value: ["ref-created"],
+      source: "user",
+      updatedAt: LATER,
+    });
+
+    act(() => {
+      void hook.result.current.editReference("ref-created", {
+        ...referenceInput(),
+        relevance: "Updated evidence",
+      });
+    });
+    expect(hook.result.current.document.references[0]).toMatchObject({
+      id: "ref-created",
+      capturedAt: LATER,
+      relevance: "Updated evidence",
+    });
+
+    act(() => {
+      void hook.result.current.deleteReference("ref-created");
+    });
+    expect(hook.result.current.document.references).toHaveLength(1);
+    act(() => {
+      void hook.result.current.unlinkReferenceFromPhase("ref-created", "active");
+    });
+    act(() => {
+      void hook.result.current.unlinkReferenceFromPhase("ref-created", "archived");
+    });
+    expect(hook.result.current.document.phases.map((item) => item.referenceIds)).toEqual([[], []]);
+    act(() => {
+      void hook.result.current.deleteReference("ref-created");
+    });
+    expect(hook.result.current.document.references).toEqual([]);
+  });
+
+  it("converges concurrent identical creates on one reference and merges requested phase links", async () => {
+    const cwd = "/work/project";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    initial.phases = [phase("one", 0), phase("two", 1)];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const firstClient = server.connect(cwd);
+    const secondClient = server.connect(cwd);
+    const firstStorage = new MemoryStorage();
+    const secondStorage = new MemoryStorage();
+    const firstOptions = {
+      ...hookOptions(firstClient, firstStorage),
+      idFactory: () => "ref-first",
+    };
+    const secondOptions = {
+      ...hookOptions(secondClient, secondStorage),
+      idFactory: () => "ref-second",
+    };
+    const first = renderHook(() => useProjectNotes(cwd, firstOptions));
+    const second = renderHook(() => useProjectNotes(cwd, secondOptions));
+    await waitFor(() => expect(first.result.current.document.phases).toHaveLength(2));
+    await waitFor(() => expect(second.result.current.document.phases).toHaveLength(2));
+    firstClient.deferSaves = true;
+    secondClient.deferSaves = true;
+
+    act(() => {
+      void first.result.current.createReference(referenceInput(), ["one"]);
+    });
+    act(() => {
+      void second.result.current.createReference(referenceInput(), ["two"]);
+    });
+    await waitFor(() => expect(firstClient.pendingSaves).toHaveLength(1));
+    await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
+    act(() => firstClient.flushNextSave());
+    act(() => secondClient.flushNextSave());
+    await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
+    act(() => secondClient.flushNextSave());
+
+    await waitFor(() => expect(server.snapshots.get(cwd)?.revision).toBe(3));
+    const persisted = server.snapshots.get(cwd)!.document;
+    expect(persisted.references.map(({ id }) => id)).toEqual(["ref-first"]);
+    expect(persisted.phases.map((item) => item.referenceIds)).toEqual([
+      ["ref-first"],
+      ["ref-first"],
+    ]);
+  });
+
+  it("merges unrelated concurrent reference links and makes delete lose to a new link", async () => {
+    const cwd = "/work/project";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    initial.references = [savedReference()];
+    initial.phases = [phase("one", 0), phase("two", 1)];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const deleteClient = server.connect(cwd);
+    const linkClient = server.connect(cwd);
+    const deleteOptions = hookOptions(deleteClient, new MemoryStorage());
+    const linkOptions = hookOptions(linkClient, new MemoryStorage());
+    const deleting = renderHook(() => useProjectNotes(cwd, deleteOptions));
+    const linking = renderHook(() => useProjectNotes(cwd, linkOptions));
+    await waitFor(() => expect(deleting.result.current.document.references).toHaveLength(1));
+    await waitFor(() => expect(linking.result.current.document.references).toHaveLength(1));
+    deleteClient.deferSaves = true;
+    linkClient.deferSaves = true;
+
+    let deleteResult!: Promise<NotesReferenceOperationResult>;
+    act(() => {
+      deleteResult = deleting.result.current.deleteReference("ref-1");
+    });
+    act(() => {
+      void linking.result.current.linkReferenceToPhase("ref-1", "one");
+    });
+    await waitFor(() => expect(deleteClient.pendingSaves).toHaveLength(1));
+    await waitFor(() => expect(linkClient.pendingSaves).toHaveLength(1));
+    act(() => linkClient.flushNextSave());
+    act(() => deleteClient.flushNextSave());
+
+    await waitFor(() => expect(deleteClient.pendingSaves).toHaveLength(0));
+    let deleteOutcome: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      deleteOutcome = await deleteResult;
+    });
+    expect(deleteOutcome).toEqual({ status: "linked-blocked", phaseIds: ["one"] });
+    expect(server.snapshots.get(cwd)).toMatchObject({
+      revision: 2,
+      document: {
+        references: [{ id: "ref-1" }],
+        phases: [{ id: "one", referenceIds: ["ref-1"] }, { id: "two" }],
+      },
+    });
+  });
+
+  it("merges unrelated concurrent links without replacing either phase reference set", async () => {
+    const cwd = "/work/project";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    initial.references = [savedReference()];
+    initial.phases = [phase("one", 0), phase("two", 1)];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const firstClient = server.connect(cwd);
+    const secondClient = server.connect(cwd);
+    const firstOptions = hookOptions(firstClient, new MemoryStorage());
+    const secondOptions = hookOptions(secondClient, new MemoryStorage());
+    const first = renderHook(() => useProjectNotes(cwd, firstOptions));
+    const second = renderHook(() => useProjectNotes(cwd, secondOptions));
+    await waitFor(() => expect(first.result.current.document.references).toHaveLength(1));
+    await waitFor(() => expect(second.result.current.document.references).toHaveLength(1));
+    firstClient.deferSaves = true;
+    secondClient.deferSaves = true;
+
+    act(() => {
+      void first.result.current.linkReferenceToPhase("ref-1", "one");
+    });
+    act(() => {
+      void second.result.current.linkReferenceToPhase("ref-1", "two");
+    });
+    await waitFor(() => expect(firstClient.pendingSaves).toHaveLength(1));
+    await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
+    act(() => firstClient.flushNextSave());
+    act(() => secondClient.flushNextSave());
+    await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
+    act(() => secondClient.flushNextSave());
+
+    await waitFor(() => expect(server.snapshots.get(cwd)?.revision).toBe(3));
+    expect(server.snapshots.get(cwd)?.document.phases.map((item) => item.referenceIds)).toEqual([
+      ["ref-1"],
+      ["ref-1"],
+    ]);
+  });
+
+  it("drops a stale edit when its canonical identity collides after conflict replay", async () => {
+    const cwd = "/work/project";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    initial.references = [savedReference()];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const createClient = server.connect(cwd);
+    const editClient = server.connect(cwd);
+    const createOptions = {
+      ...hookOptions(createClient, new MemoryStorage()),
+      idFactory: () => "ref-winner",
+    };
+    const editOptions = hookOptions(editClient, new MemoryStorage());
+    const creating = renderHook(() => useProjectNotes(cwd, createOptions));
+    const editing = renderHook(() => useProjectNotes(cwd, editOptions));
+    await waitFor(() => expect(creating.result.current.document.references).toHaveLength(1));
+    await waitFor(() => expect(editing.result.current.document.references).toHaveLength(1));
+    createClient.deferSaves = true;
+    editClient.deferSaves = true;
+    const collisionInput = referenceInput(
+      "https://github.com/owner/repo/blob/main/src/other.ts#L1-L2",
+    );
+
+    act(() => {
+      void creating.result.current.createReference(collisionInput, []);
+    });
+    let editResult!: Promise<NotesReferenceOperationResult>;
+    act(() => {
+      editResult = editing.result.current.editReference("ref-1", collisionInput);
+    });
+    await waitFor(() => expect(createClient.pendingSaves).toHaveLength(1));
+    await waitFor(() => expect(editClient.pendingSaves).toHaveLength(1));
+    act(() => createClient.flushNextSave());
+    act(() => editClient.flushNextSave());
+
+    await waitFor(() => expect(editClient.pendingSaves).toHaveLength(0));
+    let editOutcome: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      editOutcome = await editResult;
+    });
+    expect(editOutcome).toEqual({ status: "collision", referenceId: "ref-winner" });
+    const persisted = server.snapshots.get(cwd)!.document;
+    expect(persisted.references).toHaveLength(2);
+    expect(persisted.references.find((item) => item.id === "ref-1")?.canonicalUrl).toBe(
+      savedReference().canonicalUrl,
+    );
+    expect(persisted.references.find((item) => item.id === "ref-winner")?.canonicalUrl).toBe(
+      collisionInput.canonicalUrl,
+    );
+  });
+
+  it("settles a rejected reference save and restores the authoritative document", async () => {
+    const cwd = "/work/project";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    initial.references = [savedReference()];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const client = server.connect(cwd);
+    client.saveOutcome = {
+      status: "invalid",
+      error: { path: "references[0]", message: "invalid fixture" },
+    };
+    const storage = new MemoryStorage();
+    const options = hookOptions(client, storage);
+    const hook = renderHook(() => useProjectNotes(cwd, options));
+    await waitFor(() => expect(hook.result.current.document.references).toHaveLength(1));
+
+    let outcome: NotesReferenceOperationResult | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.editReference("ref-1", {
+        ...referenceInput(),
+        relevance: "Rejected edit",
+      });
+    });
+
+    expect(outcome).toEqual({ status: "failed", reason: "invalid" });
+    await waitFor(() =>
+      expect(hook.result.current.document.references[0]?.relevance).toBe("Reference evidence"),
+    );
+    expect(hook.result.current.diagnostics.authority[0]?.kind).toBe("save-failed");
   });
 
   it("rebases concurrent phase reorder and edit operations across windows", async () => {

@@ -1,5 +1,10 @@
 import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import {
+  NOTES_REFERENCE_METADATA_FIELDS,
+  NOTES_REFERENCE_METADATA_MAX_LENGTH,
+  NOTES_REFERENCE_URL_MAX_LENGTH,
+} from "./notes-reference";
 import { validateNotesDocumentV3 } from "./notes-types";
 import type { NotesDocumentV2, NotesDocumentV3 } from "./notes-types";
 import {
@@ -129,6 +134,102 @@ describe("structured project notes storage", () => {
 
     expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!)).toEqual(fixture);
     expect(repository.load(cwd).document).toEqual(fixture);
+  });
+
+  it("enforces canonical reference identity and GitHub coordinate parity", () => {
+    const valid = document("identity");
+    const first = valid.references[0]!;
+    const duplicate = {
+      ...first,
+      id: "ref-duplicate",
+      provider: " GitHub ",
+      canonicalUrl: "HTTPS://GITHUB.COM:443/owner/repo/blob/abc/src/file.ts/#L1-L2",
+    };
+
+    expect(validateNotesDocumentV3({ ...valid, references: [first, duplicate] })).toMatchObject({
+      ok: false,
+      error: { path: "references[1].canonicalUrl", message: expect.stringContaining("duplicate") },
+    });
+    expect(
+      validateNotesDocumentV3({
+        ...valid,
+        references: [{ ...first, canonicalUrl: "https://gitlab.com/owner/repo" }],
+      }),
+    ).toMatchObject({ ok: false, error: { path: "references[0].canonicalUrl" } });
+    expect(
+      validateNotesDocumentV3({
+        ...valid,
+        references: [
+          {
+            ...first,
+            canonicalUrl: "https://github.com/owner/repo/issues/12",
+            revision: null,
+            path: null,
+            range: null,
+            issue: 11,
+          },
+        ],
+      }),
+    ).toMatchObject({ ok: false, error: { path: "references[0].issue" } });
+  });
+
+  it.each([
+    ["username", "https://user@github.com/owner/repo/blob/abc/src/file.ts#L1-L2"],
+    ["password", "https://:secret@github.com/owner/repo/blob/abc/src/file.ts#L1-L2"],
+  ])("rejects a reference URL containing a %s", (_credential, canonicalUrl) => {
+    const invalid = document("credentials");
+    invalid.references[0] = { ...invalid.references[0]!, canonicalUrl };
+
+    expect(validateNotesDocumentV3(invalid)).toEqual({
+      ok: false,
+      error: {
+        path: "references[0].canonicalUrl",
+        message: "expected an absolute http(s) URL without username or password",
+      },
+    });
+  });
+
+  it.each(NOTES_REFERENCE_METADATA_FIELDS)(
+    "matches form validation at the shared metadata limit for %s",
+    (field) => {
+      const exact = document("metadata limit");
+      exact.references[0] = {
+        ...exact.references[0]!,
+        provider: "example",
+        [field]: "x".repeat(NOTES_REFERENCE_METADATA_MAX_LENGTH),
+      };
+      const oversized = document("metadata limit");
+      oversized.references[0] = {
+        ...oversized.references[0]!,
+        provider: "example",
+        [field]: "x".repeat(NOTES_REFERENCE_METADATA_MAX_LENGTH + 1),
+      };
+
+      expect(validateNotesDocumentV3(exact).ok).toBe(true);
+      expect(validateNotesDocumentV3(oversized)).toMatchObject({
+        ok: false,
+        error: { path: `references[0].${field}`, message: expect.stringContaining("4,096") },
+      });
+    },
+  );
+
+  it("matches form validation at the shared canonical URL limit", () => {
+    const prefix = "https://example.com/";
+    const canonicalUrl = `${prefix}${"x".repeat(NOTES_REFERENCE_URL_MAX_LENGTH - prefix.length)}`;
+    const exact = document("URL limit");
+    exact.references[0] = { ...exact.references[0]!, provider: "example", canonicalUrl };
+    const oversized = document("URL limit");
+    oversized.references[0] = {
+      ...oversized.references[0]!,
+      provider: "example",
+      canonicalUrl: `${canonicalUrl}x`,
+    };
+
+    expect(validateNotesDocumentV3(exact).ok).toBe(true);
+    expect(validateNotesDocumentV3(oversized)).toMatchObject({
+      ok: false,
+      error: { path: "references[0].canonicalUrl", message: expect.stringContaining("2,048") },
+    });
   });
 
   it("imports legacy free-form notes byte-for-byte into the project-scoped v3 document", () => {

@@ -1,3 +1,10 @@
+import {
+  canonicalReferenceIdentity,
+  normalizeCanonicalUrl,
+  NOTES_REFERENCE_METADATA_MAX_LENGTH,
+  NOTES_REFERENCE_URL_MAX_LENGTH,
+} from "./notes-reference";
+
 export type NotesTaskStatus = "todo" | "done";
 
 export interface NotesTask {
@@ -225,6 +232,18 @@ export type ProjectNotesSaveOutcome =
   | ({ status: "corrupt" } & ProjectNotesCorruption)
   | { status: "invalid"; error: NotesValidationError };
 
+export type NotesReferenceOperationResult =
+  | { status: "committed"; referenceId: string }
+  | { status: "reused"; referenceId: string }
+  | { status: "collision"; referenceId: string }
+  | { status: "linked-blocked"; phaseIds: string[] }
+  | { status: "missing-reference" }
+  | { status: "missing-phase"; phaseId: string }
+  | {
+      status: "failed";
+      reason: "invalid" | "missing" | "corrupt" | "unavailable" | "storage";
+    };
+
 export interface NotesSidecarEvent {
   type: string;
   data: unknown;
@@ -443,12 +462,23 @@ export function validateNotesDocumentV3(value: unknown): NotesValidationResult {
   if (!Array.isArray(value.phases)) return invalid("phases", "expected an array");
 
   const referenceIds = new Set<string>();
+  const referenceIdentities = new Map<string, number>();
   for (let index = 0; index < value.references.length; index += 1) {
     const error = validateReference(value.references[index], `references[${index}]`);
     if (error) return { ok: false, error };
-    const id = (value.references[index] as NotesReference).id;
+    const reference = value.references[index] as NotesReference;
+    const id = reference.id;
     if (referenceIds.has(id)) return invalid(`references[${index}].id`, `duplicate ID: ${id}`);
     referenceIds.add(id);
+    const identity = canonicalReferenceIdentity(reference)!;
+    const duplicateIndex = referenceIdentities.get(identity);
+    if (duplicateIndex !== undefined) {
+      return invalid(
+        `references[${index}].canonicalUrl`,
+        `duplicate canonical source; already saved at references[${duplicateIndex}]`,
+      );
+    }
+    referenceIdentities.set(identity, index);
   }
 
   const phaseIds = new Set<string>();
@@ -531,18 +561,42 @@ function validateReference(value: unknown, path: string): NotesValidationError |
   if (!isNonEmptyString(value.id)) return validationError(`${path}.id`, "expected a stable ID");
   if (!isNonEmptyString(value.provider))
     return validationError(`${path}.provider`, "expected a provider name");
+  if (isReferenceMetadataTooLong(value.provider)) {
+    return referenceMetadataLengthError(`${path}.provider`);
+  }
   for (const field of ["tool", "revision", "path", "query", "anchor"] as const) {
     if (!isNullableNonEmptyString(value[field])) {
       return validationError(`${path}.${field}`, "expected a non-empty string or null");
     }
+    if (isReferenceMetadataTooLong(value[field])) {
+      return referenceMetadataLengthError(`${path}.${field}`);
+    }
+  }
+  if (
+    typeof value.canonicalUrl === "string" &&
+    value.canonicalUrl.length > NOTES_REFERENCE_URL_MAX_LENGTH
+  ) {
+    return validationError(
+      `${path}.canonicalUrl`,
+      `expected ${NOTES_REFERENCE_URL_MAX_LENGTH.toLocaleString("en-US")} characters or fewer`,
+    );
   }
   if (!isCanonicalHttpUrl(value.canonicalUrl)) {
-    return validationError(`${path}.canonicalUrl`, "expected an absolute http(s) URL");
+    return validationError(
+      `${path}.canonicalUrl`,
+      "expected an absolute http(s) URL without username or password",
+    );
   }
   if (!isNonEmptyString(value.owner))
     return validationError(`${path}.owner`, "repository owner is required");
+  if (isReferenceMetadataTooLong(value.owner)) {
+    return referenceMetadataLengthError(`${path}.owner`);
+  }
   if (!isNonEmptyString(value.repo))
     return validationError(`${path}.repo`, "repository name is required");
+  if (isReferenceMetadataTooLong(value.repo)) {
+    return referenceMetadataLengthError(`${path}.repo`);
+  }
   if (value.range !== null) {
     if (!isRecord(value.range) || !hasExactKeys(value.range, ["startLine", "endLine"])) {
       return validationError(`${path}.range`, "expected startLine and endLine or null");
@@ -563,12 +617,58 @@ function validateReference(value: unknown, path: string): NotesValidationError |
     return validationError(`${path}.pullRequest`, "expected a positive integer or null");
   }
   if (value.issue !== null && value.pullRequest !== null) {
-    return validationError(path, "a reference cannot target both an issue and a pull request");
+    return validationError(
+      `${path}.pullRequest`,
+      "a reference cannot target both an issue and a pull request",
+    );
   }
+  const semanticError = validateReferenceCoordinates(value as unknown as NotesReference, path);
+  if (semanticError) return semanticError;
   if (typeof value.relevance !== "string")
     return validationError(`${path}.relevance`, "expected a string");
+  if (isReferenceMetadataTooLong(value.relevance)) {
+    return referenceMetadataLengthError(`${path}.relevance`);
+  }
   if (!isTimestamp(value.capturedAt))
     return validationError(`${path}.capturedAt`, "expected an ISO timestamp");
+  return null;
+}
+
+function validateReferenceCoordinates(
+  reference: NotesReference,
+  path: string,
+): NotesValidationError | null {
+  if (reference.provider.trim().toLowerCase() !== "github") return null;
+  const normalized = normalizeCanonicalUrl(reference.canonicalUrl)!;
+  const url = new URL(normalized);
+  if (url.hostname !== "github.com") {
+    return validationError(`${path}.canonicalUrl`, "GitHub references must use a github.com URL");
+  }
+  const segments = url.pathname.split("/").filter(Boolean);
+  if (
+    segments.length < 2 ||
+    segments[0]!.toLowerCase() !== reference.owner.trim().toLowerCase() ||
+    segments[1]!.replace(/\.git$/i, "").toLowerCase() !==
+      reference.repo
+        .trim()
+        .replace(/\.git$/i, "")
+        .toLowerCase()
+  ) {
+    return validationError(
+      `${path}.canonicalUrl`,
+      "URL owner and repository must match the stored repository",
+    );
+  }
+  const directNumber = segments[3] && /^\d+$/.test(segments[3]) ? Number(segments[3]) : null;
+  if (segments[2] === "issues" && directNumber !== null && reference.issue !== directNumber) {
+    return validationError(`${path}.issue`, `expected ${directNumber} to match the issue URL`);
+  }
+  if (segments[2] === "pull" && directNumber !== null && reference.pullRequest !== directNumber) {
+    return validationError(
+      `${path}.pullRequest`,
+      `expected ${directNumber} to match the pull request URL`,
+    );
+  }
   return null;
 }
 
@@ -798,6 +898,17 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function isReferenceMetadataTooLong(value: unknown): boolean {
+  return typeof value === "string" && value.length > NOTES_REFERENCE_METADATA_MAX_LENGTH;
+}
+
+function referenceMetadataLengthError(path: string): NotesValidationError {
+  return validationError(
+    path,
+    `expected ${NOTES_REFERENCE_METADATA_MAX_LENGTH.toLocaleString("en-US")} characters or fewer`,
+  );
+}
+
 function isNullableNonEmptyString(value: unknown): value is string | null {
   return value === null || isNonEmptyString(value);
 }
@@ -821,13 +932,7 @@ function isLifecycleEventSource(value: unknown): value is NotesLifecycleEventSou
 }
 
 function isCanonicalHttpUrl(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  try {
-    const url = new URL(value);
-    return (url.protocol === "http:" || url.protocol === "https:") && url.hostname.length > 0;
-  } catch {
-    return false;
-  }
+  return typeof value === "string" && normalizeCanonicalUrl(value) !== null;
 }
 
 function isInvalidOutcome(value: Record<string, unknown>): boolean {

@@ -1873,26 +1873,44 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     subscribe(onEvent) {
       let activeSessionId: string | null = null;
       let generation: number | null = null;
+      let identityResolved = false;
       let disposed = false;
       let refreshEpoch = 0;
-      const refresh = async (): Promise<void> => {
-        const epoch = ++refreshEpoch;
-        try {
-          const status = await call<PaneStartupStatus>("agent_pane_status");
-          if (disposed || epoch !== refreshEpoch) return;
-          activeSessionId = status.sessionId;
-          generation = status.generation;
-        } catch {
-          if (disposed || epoch !== refreshEpoch) return;
-          activeSessionId = null;
-          generation = null;
+      const pendingEnvelopes: PaneEventEnvelope[] = [];
+      const deliverPending = (): void => {
+        if (disposed || !identityResolved) return;
+        const envelopes = pendingEnvelopes.splice(0);
+        for (const event of envelopes) {
+          if (disposed) return;
+          if (event.sessionId === activeSessionId) {
+            onEvent({ type: event.type, data: event.data });
+          }
         }
       };
-      void refresh();
+      const refresh = async (): Promise<void> => {
+        const epoch = ++refreshEpoch;
+        identityResolved = false;
+        let nextSessionId: string | null = null;
+        let nextGeneration: number | null = null;
+        try {
+          const status = await call<PaneStartupStatus>("agent_pane_status");
+          nextSessionId = status.sessionId;
+          nextGeneration = status.generation;
+        } catch {
+          // Retry a failed lookup when the next tagged envelope arrives.
+        }
+        if (disposed || epoch !== refreshEpoch) return;
+        activeSessionId = nextSessionId;
+        generation = nextGeneration;
+        identityResolved = true;
+        deliverPending();
+      };
       const unlisten = subscribePaneEnvelope((event) => {
         if (disposed || event.paneId !== paneId) return;
+        pendingEnvelopes.push(event);
+        if (!identityResolved) return;
         if (event.sessionId === activeSessionId) {
-          onEvent({ type: event.type, data: event.data });
+          deliverPending();
         } else {
           void refresh();
         }
@@ -1904,9 +1922,11 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
             void refresh();
         },
       );
+      void refresh();
       return () => {
         disposed = true;
         refreshEpoch += 1;
+        pendingEnvelopes.length = 0;
         unlisten();
         void unlistenReadyPromise.then((unlistenReady) => unlistenReady());
       };

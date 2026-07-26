@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectNotes } from "./ProjectNotes";
+import {
+  NOTES_REFERENCE_METADATA_MAX_LENGTH,
+  NOTES_REFERENCE_URL_MAX_LENGTH,
+} from "./notes-reference";
 import {
   canonicalProjectKey,
   createEmptyNotesDocument,
@@ -14,12 +19,16 @@ import type {
   NotesDocumentV3,
   NotesPhase,
   NotesPhaseStatus,
+  NotesReference,
   NotesSidecarEvent,
   ProjectNotesMigrationOutcome,
   ProjectNotesReadOutcome,
   ProjectNotesSaveOutcome,
   ProjectNotesSnapshot,
 } from "./notes-types";
+
+vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
+
 const NOW = "2026-07-15T12:00:00.000Z";
 
 function notes(reference: string, taskCount = 0): NotesDocumentV3 {
@@ -63,6 +72,31 @@ function phase(id: string, status: NotesPhaseStatus, withReminder = false): Note
   };
 }
 
+function reference(
+  id: string,
+  owner = "owner",
+  repo = "repo",
+  path = "src/file.ts",
+): NotesReference {
+  return {
+    id,
+    provider: "github",
+    tool: "search",
+    canonicalUrl: `https://github.com/${owner}/${repo}/blob/main/${path}#L1-L2`,
+    owner,
+    repo,
+    revision: "main",
+    path,
+    range: { startLine: 1, endLine: 2 },
+    issue: null,
+    pullRequest: null,
+    query: "reference query",
+    anchor: "L1-L2",
+    relevance: `Evidence from ${owner}/${repo}`,
+    capturedAt: NOW,
+  };
+}
+
 function store(cwd: string, document: NotesDocumentV3): void {
   localStorage.setItem(v3NotesKey(cwd), JSON.stringify(document));
   localStorage.setItem(legacyNotesKey(cwd), document.reference);
@@ -80,6 +114,7 @@ class FakeProjectNotesClient implements NotesClient {
   getOutcome: ProjectNotesReadOutcome | null = null;
   migrationError: unknown = null;
   saveOutcome: ProjectNotesSaveOutcome | null = null;
+  beforeNextSave: (() => void) | null = null;
   constructor(cwd: string) {
     this.cwd = cwd;
   }
@@ -113,6 +148,9 @@ class FakeProjectNotesClient implements NotesClient {
     expectedRevision: number,
     document: NotesDocumentV3,
   ): Promise<ProjectNotesSaveOutcome> {
+    const beforeSave = this.beforeNextSave;
+    this.beforeNextSave = null;
+    beforeSave?.();
     if (this.saveOutcome) return this.saveOutcome;
     const projectKey = canonicalProjectKey(this.cwd);
     const current = this.snapshots.get(projectKey);
@@ -146,6 +184,7 @@ class FakeProjectNotesClient implements NotesClient {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  vi.clearAllMocks();
 });
 
 describe("ProjectNotes", () => {
@@ -393,6 +432,458 @@ describe("ProjectNotes", () => {
     expect(screen.queryByText("Selected phase")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Beta" }));
     expect(screen.getByText("Selected phase")).toBeTruthy();
+  });
+
+  it("creates, validates, inspects, opens, edits, unlinks, and deletes one shared reference", async () => {
+    const cwd = "/work/reference-crud";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("Free-form reference stays here");
+    populated.phases = [{ ...phase("alpha", "in-progress"), title: "Phase alpha" }];
+    client.seed(cwd, populated);
+    const openSource = vi.fn<(url: string) => Promise<void>>().mockResolvedValue(undefined);
+    render(<ProjectNotes cwd={cwd} client={client} openSource={openSource} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Reference");
+    expect((screen.getByLabelText("Reference notes") as HTMLTextAreaElement).value).toBe(
+      "Free-form reference stays here",
+    );
+    expect(screen.getByText("No structured references yet")).toBeTruthy();
+    expect(openSource).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "New reference" }));
+    expect((screen.getByLabelText("Canonical URL (required)") as HTMLInputElement).maxLength).toBe(
+      NOTES_REFERENCE_URL_MAX_LENGTH,
+    );
+    for (const label of [
+      "Provider (required)",
+      "Tool",
+      "Repository owner (required)",
+      "Repository name (required)",
+      "Relevance note",
+      "Revision",
+      "Path",
+      "Query",
+      "Anchor",
+    ]) {
+      expect((screen.getByLabelText(label) as HTMLInputElement).maxLength).toBe(
+        NOTES_REFERENCE_METADATA_MAX_LENGTH,
+      );
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Create reference" }));
+    expect(await screen.findByText(/Fix 3 fields/)).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByLabelText("Canonical URL (required)"));
+
+    fireEvent.change(screen.getByLabelText("Tool"), { target: { value: " github-search " } });
+    fireEvent.change(screen.getByLabelText("Canonical URL (required)"), {
+      target: { value: "HTTPS://GITHUB.COM:443/Owner/Repo/pull/44/" },
+    });
+    fireEvent.change(screen.getByLabelText("Repository owner (required)"), {
+      target: { value: " Owner " },
+    });
+    fireEvent.change(screen.getByLabelText("Repository name (required)"), {
+      target: { value: " Repo " },
+    });
+    fireEvent.change(screen.getByLabelText("Relevance note"), {
+      target: { value: " Reviews the structured reference boundary " },
+    });
+    fireEvent.change(screen.getByLabelText("Revision"), { target: { value: " main " } });
+    fireEvent.change(screen.getByLabelText("Path"), { target: { value: " src/file.ts " } });
+    fireEvent.change(screen.getByLabelText("Start line"), { target: { value: "10" } });
+    fireEvent.change(screen.getByLabelText("End line"), { target: { value: "20" } });
+    fireEvent.change(screen.getByLabelText("Pull request number"), { target: { value: "44" } });
+    fireEvent.change(screen.getByLabelText("Query"), { target: { value: " schema " } });
+    fireEvent.change(screen.getByLabelText("Anchor"), { target: { value: " discussion_r44 " } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Phase alpha" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create reference" }));
+
+    const inspect = await screen.findByRole("button", {
+      name: "Inspect reference: Pull request #44 in Owner/Repo",
+    });
+    expect(openSource).not.toHaveBeenCalled();
+    fireEvent.click(inspect);
+    expect(screen.getByText("https://github.com/Owner/Repo/pull/44")).toBeTruthy();
+    expect(screen.getAllByText("Reviews the structured reference boundary")).toHaveLength(2);
+    expect(screen.getByText("10 to 20")).toBeTruthy();
+    expect(openSource).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open source" }));
+    await waitFor(() =>
+      expect(openSource).toHaveBeenCalledExactlyOnceWith("https://github.com/Owner/Repo/pull/44"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Relevance note"), {
+      target: { value: "Updated relevance" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findAllByText("Updated relevance")).toHaveLength(2);
+    const storedAfterEdit = client.snapshots.get(canonicalProjectKey(cwd))!.document;
+    expect(storedAfterEdit.references[0]).toMatchObject({
+      id: expect.any(String),
+      capturedAt: expect.any(String),
+      owner: "Owner",
+      repo: "Repo",
+      revision: "main",
+      path: "src/file.ts",
+      range: { startLine: 10, endLine: 20 },
+      pullRequest: 44,
+      query: "schema",
+      anchor: "discussion_r44",
+      relevance: "Updated relevance",
+    });
+    expect(storedAfterEdit.phases[0]?.overrides.referenceIds).toMatchObject({ source: "user" });
+    expect(
+      screen.getByText(/Unlink this reference from Phase alpha before deleting it/),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /Phase alpha/ }));
+    await waitFor(() =>
+      expect(
+        client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.referenceIds,
+      ).toEqual([]),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete reference" }));
+    expect(screen.getByRole("group", { name: "Confirm delete reference" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.references).toEqual([]),
+    );
+    expect(screen.getByText("No structured references yet")).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "New reference" }));
+  });
+
+  it.each([
+    ["username", "https://user@github.com/owner/repo"],
+    ["password", "https://:secret@github.com/owner/repo"],
+  ])(
+    "rejects a reference URL containing a %s before component persistence",
+    async (_credential, url) => {
+      const cwd = "/work/reference-credentials";
+      const client = new FakeProjectNotesClient(cwd);
+      client.seed(cwd, notes("reference"));
+      render(<ProjectNotes cwd={cwd} client={client} />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+      selectNotesTab("Reference");
+      fireEvent.click(screen.getByRole("button", { name: "New reference" }));
+      fireEvent.change(screen.getByLabelText("Canonical URL (required)"), {
+        target: { value: url },
+      });
+      fireEvent.change(screen.getByLabelText("Repository owner (required)"), {
+        target: { value: "owner" },
+      });
+      fireEvent.change(screen.getByLabelText("Repository name (required)"), {
+        target: { value: "repo" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Create reference" }));
+
+      expect(
+        await screen.findByText(
+          "Enter an absolute HTTP or HTTPS URL without a username or password.",
+        ),
+      ).toBeTruthy();
+      expect(document.activeElement).toBe(screen.getByLabelText("Canonical URL (required)"));
+      expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.references).toEqual([]);
+    },
+  );
+
+  it("blocks a credential-bearing stored reference before invoking the system opener", async () => {
+    const cwd = "/work/reference-open-credentials";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.references = [
+      {
+        ...reference("ref-credential"),
+        canonicalUrl: "https://user:secret@github.com/owner/repo/blob/main/src/file.ts#L1-L2",
+      },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Reference");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open source" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Couldn’t open this source in the system browser. Try again.",
+    );
+    expect(openUrl).not.toHaveBeenCalled();
+  });
+
+  it("reuses a duplicate, preserves selection snapshots, and surfaces opener failure", async () => {
+    const cwd = "/work/reference-duplicate";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.references = [reference("ref-existing")];
+    client.seed(cwd, populated);
+    const openSource = vi
+      .fn<(url: string) => Promise<void>>()
+      .mockRejectedValue(new Error("blocked"));
+    render(<ProjectNotes cwd={cwd} client={client} openSource={openSource} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Reference");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
+    );
+    expect(openSource).not.toHaveBeenCalled();
+
+    const refreshed = {
+      ...populated,
+      references: [{ ...populated.references[0]!, relevance: "Refreshed stored metadata" }],
+    };
+    act(() => client.publish(cwd, refreshed, 2));
+    expect(await screen.findAllByText("Refreshed stored metadata")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Open source" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open source" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Couldn’t open this source in the system browser. Try again.",
+    );
+    expect(openSource).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to references" }));
+    fireEvent.click(screen.getByRole("button", { name: "New reference" }));
+    fireEvent.change(screen.getByLabelText("Canonical URL (required)"), {
+      target: { value: "https://github.com/owner/repo/blob/main/src/file.ts#L1-L2" },
+    });
+    fireEvent.change(screen.getByLabelText("Repository owner (required)"), {
+      target: { value: "owner" },
+    });
+    fireEvent.change(screen.getByLabelText("Repository name (required)"), {
+      target: { value: "repo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create reference" }));
+
+    expect(await screen.findByText(/Already saved: src\/file.ts:L1-L2/)).toBeTruthy();
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.references).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Open source" })).toBeTruthy();
+
+    const removed = {
+      ...client.snapshots.get(canonicalProjectKey(cwd))!.document,
+      references: [],
+    };
+    act(() => client.publish(cwd, removed, 3));
+    expect(await screen.findByText("No structured references yet")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Open source" })).toBeNull();
+  });
+
+  it("keeps a stale edit open and reports a canonical collision after conflict replay", async () => {
+    const cwd = "/work/reference-edit-collision";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("reference");
+    initial.references = [reference("ref-edited")];
+    client.seed(cwd, initial);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Reference");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const winner = reference("ref-winner", "owner", "repo", "src/winner.ts");
+    fireEvent.change(screen.getByLabelText("Canonical URL (required)"), {
+      target: { value: winner.canonicalUrl },
+    });
+    client.beforeNextSave = () => {
+      const authoritative = { ...initial, references: [initial.references[0]!, winner] };
+      client.seed(cwd, authoritative, 2);
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(
+      await screen.findByText(/Couldn’t save: another reference now uses these source coordinates/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Updated reference:/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeTruthy();
+    expect((screen.getByLabelText("Canonical URL (required)") as HTMLInputElement).value).toBe(
+      winner.canonicalUrl,
+    );
+    expect(
+      client.snapshots
+        .get(canonicalProjectKey(cwd))!
+        .document.references.find((item) => item.id === "ref-edited")?.canonicalUrl,
+    ).toBe(initial.references[0]!.canonicalUrl);
+  });
+
+  it("restores a delete selection when a concurrent phase link blocks replay", async () => {
+    const cwd = "/work/reference-delete-linked";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("reference");
+    initial.references = [reference("ref-delete")];
+    initial.phases = [{ ...phase("alpha", "in-progress"), title: "Phase alpha" }];
+    client.seed(cwd, initial);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Reference");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete reference" }));
+    client.beforeNextSave = () => {
+      const authoritative = {
+        ...initial,
+        phases: [{ ...initial.phases[0]!, referenceIds: ["ref-delete"] }],
+      };
+      client.seed(cwd, authoritative, 2);
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+
+    expect(
+      await screen.findByText(/Couldn’t delete: this reference was attached to a phase/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Deleted reference:/)).toBeNull();
+    expect(screen.getByRole("heading", { name: "src/file.ts:L1-L2" })).toBeTruthy();
+    expect(
+      screen.getByText(/Unlink this reference from Phase alpha before deleting it/),
+    ).toBeTruthy();
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.references).toHaveLength(1);
+  });
+
+  it("reports a phase that disappears while a roadmap attachment rebases", async () => {
+    const cwd = "/work/reference-link-missing-phase";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("reference");
+    initial.references = [reference("ref-link")];
+    initial.phases = [{ ...phase("alpha", "in-progress"), title: "Phase alpha" }];
+    client.seed(cwd, initial);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Phase alpha" }));
+    client.beforeNextSave = () => client.seed(cwd, { ...initial, phases: [] }, 2);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Evidence from owner\/repo/ }));
+
+    expect(
+      await screen.findByText("Couldn’t attach: the phase was removed in another window."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Attached src\/file.ts:L1-L2 to Phase alpha/)).toBeNull();
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases).toEqual([]);
+  });
+
+  it("reports a reference that disappears while an unlink rebases", async () => {
+    const cwd = "/work/reference-unlink-missing-reference";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("reference");
+    initial.references = [reference("ref-unlink")];
+    initial.phases = [
+      { ...phase("alpha", "in-progress"), title: "Phase alpha", referenceIds: ["ref-unlink"] },
+    ];
+    client.seed(cwd, initial);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Reference");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
+    );
+    client.beforeNextSave = () => {
+      client.seed(
+        cwd,
+        {
+          ...initial,
+          references: [],
+          phases: [{ ...initial.phases[0]!, referenceIds: [] }],
+        },
+        2,
+      );
+    };
+    fireEvent.click(screen.getByRole("checkbox", { name: /Phase alpha/ }));
+
+    expect(
+      await screen.findByText("Couldn’t detach: the reference was removed in another window."),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Detached reference from Phase alpha/)).toBeNull();
+    expect(await screen.findByText("No structured references yet")).toBeTruthy();
+  });
+
+  it("keeps a reference edit open when the backend rejects the save", async () => {
+    const cwd = "/work/reference-invalid-save";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("reference");
+    initial.references = [reference("ref-invalid")];
+    client.seed(cwd, initial);
+    client.saveOutcome = {
+      status: "invalid",
+      error: { path: "references[0].canonicalUrl", message: "invalid fixture" },
+    };
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Reference");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Inspect reference: src/file.ts:L1-L2 in owner/repo" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Relevance note"), {
+      target: { value: "Unsaved invalid edit" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    expect(
+      await screen.findByText(/Couldn’t save: Project Notes rejected the change/),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Updated reference:/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeTruthy();
+    expect((screen.getByLabelText("Relevance note") as HTMLTextAreaElement).value).toBe(
+      "Unsaved invalid edit",
+    );
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.references[0]!.relevance).toBe(
+      "Evidence from owner/repo",
+    );
+    expect((await screen.findByLabelText("Notes storage status")).textContent).toContain(
+      "Changes aren’t saved",
+    );
+  });
+
+  it("opens reference creation from empty phase detail and renders fifty grouped rows", async () => {
+    const cwd = "/work/reference-density";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [{ ...phase("empty", "not-started"), title: "Empty context phase" }];
+    populated.references = Array.from({ length: 50 }, (_, index) =>
+      reference(
+        `ref-${index}`,
+        index % 2 === 0 ? "alpha" : "beta",
+        index % 2 === 0 ? "frontend" : "sidecar",
+        `src/long/path/reference-${String(index).padStart(2, "0")}.ts`,
+      ),
+    );
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Empty context phase" }));
+    expect(screen.getByRole("heading", { name: "Attached references" })).toBeTruthy();
+    expect(screen.getAllByRole("checkbox", { name: /Evidence from/ })).toHaveLength(50);
+
+    selectNotesTab("Reference");
+    expect(screen.getByText("50 references")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /alpha\/frontend/ })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /beta\/sidecar/ })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: /Inspect reference:/ })).toHaveLength(50);
+    expect(document.querySelectorAll(".notes-reference-row button button")).toHaveLength(0);
+
+    const empty = { ...populated, references: [] };
+    act(() => client.publish(cwd, empty, 2));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Empty context phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create a reference" }));
+    expect(screen.getByRole("tab", { name: "Reference" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(await screen.findByRole("heading", { name: "New structured reference" })).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByLabelText("Provider (required)")),
+    );
   });
 
   it("renders a stable accessible list for fifty phases", async () => {

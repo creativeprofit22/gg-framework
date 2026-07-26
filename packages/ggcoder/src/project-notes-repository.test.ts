@@ -7,6 +7,9 @@ import {
   ProjectNotesRepository,
   canonicalProjectKey,
   isNotesDocumentV3,
+  NOTES_REFERENCE_METADATA_FIELDS,
+  NOTES_REFERENCE_METADATA_MAX_LENGTH,
+  NOTES_REFERENCE_URL_MAX_LENGTH,
   migrateNotesDocumentV2,
   projectNotesHash,
   projectNotesPaths,
@@ -166,6 +169,120 @@ describe("project Notes identity and validation", () => {
       snapshot: { document: fixture },
     });
     expect((await readEnvelope(repository.paths(cwd).primary)).document).toEqual(fixture);
+  });
+
+  it("enforces canonical reference identity and GitHub coordinate parity", () => {
+    const valid = notes();
+    const first = valid.references[0]!;
+    const duplicate = {
+      ...first,
+      id: "ref-duplicate",
+      provider: " GitHub ",
+      canonicalUrl: "HTTPS://GITHUB.COM:443/owner/repo/blob/abc123/src/file.ts/#L10-L20",
+    };
+
+    expect(validateNotesDocumentV3({ ...valid, references: [first, duplicate] })).toMatchObject({
+      ok: false,
+      error: { path: "references[1].canonicalUrl", message: expect.stringContaining("duplicate") },
+    });
+    expect(
+      validateNotesDocumentV3({
+        ...valid,
+        references: [{ ...first, canonicalUrl: "https://gitlab.com/owner/repo" }],
+      }),
+    ).toMatchObject({ ok: false, error: { path: "references[0].canonicalUrl" } });
+    expect(
+      validateNotesDocumentV3({
+        ...valid,
+        references: [
+          {
+            ...first,
+            canonicalUrl: "https://github.com/owner/repo/pull/12",
+            pullRequest: 11,
+          },
+        ],
+      }),
+    ).toMatchObject({ ok: false, error: { path: "references[0].pullRequest" } });
+  });
+
+  it.each([
+    ["username", "https://user@github.com/owner/repo/blob/abc123/src/file.ts#L10-L20"],
+    ["password", "https://:secret@github.com/owner/repo/blob/abc123/src/file.ts#L10-L20"],
+  ])(
+    "rejects a reference URL containing a %s before persistence",
+    async (_credential, canonicalUrl) => {
+      const agentDir = await tempAgentDir();
+      const cwd = "/work/credential-url";
+      const repository = new ProjectNotesRepository(agentDir);
+      const invalid = notes("invalid credentials");
+      invalid.references[0] = { ...invalid.references[0]!, canonicalUrl };
+
+      await expect(repository.migrate(cwd, invalid)).resolves.toEqual({
+        status: "invalid",
+        error: {
+          path: "references[0].canonicalUrl",
+          message: "expected an absolute http(s) URL without username or password",
+        },
+      });
+      await expect(repository.load(cwd)).resolves.toEqual({ status: "missing" });
+
+      const valid = notes("valid baseline");
+      await expect(repository.migrate(cwd, valid)).resolves.toMatchObject({ status: "ok" });
+      await expect(repository.save(cwd, 1, invalid)).resolves.toMatchObject({
+        status: "invalid",
+        error: { path: "references[0].canonicalUrl" },
+      });
+      expect(await readEnvelope(repository.paths(cwd).primary)).toMatchObject({
+        revision: 1,
+        document: {
+          reference: "valid baseline",
+          references: [{ canonicalUrl: valid.references[0]!.canonicalUrl }],
+        },
+      });
+    },
+  );
+
+  it.each(NOTES_REFERENCE_METADATA_FIELDS)(
+    "matches app validation at the shared metadata limit for %s",
+    (field) => {
+      const exact = notes("metadata limit");
+      exact.references[0] = {
+        ...exact.references[0]!,
+        provider: "example",
+        [field]: "x".repeat(NOTES_REFERENCE_METADATA_MAX_LENGTH),
+      };
+      const oversized = notes("metadata limit");
+      oversized.references[0] = {
+        ...oversized.references[0]!,
+        provider: "example",
+        [field]: "x".repeat(NOTES_REFERENCE_METADATA_MAX_LENGTH + 1),
+      };
+
+      expect(validateNotesDocumentV3(exact).ok).toBe(true);
+      expect(validateNotesDocumentV3(oversized)).toMatchObject({
+        ok: false,
+        error: { path: `references[0].${field}`, message: expect.stringContaining("4,096") },
+      });
+    },
+  );
+
+  it("matches app validation at the shared canonical URL limit", () => {
+    const prefix = "https://example.com/";
+    const canonicalUrl = `${prefix}${"x".repeat(NOTES_REFERENCE_URL_MAX_LENGTH - prefix.length)}`;
+    const exact = notes("URL limit");
+    exact.references[0] = { ...exact.references[0]!, provider: "example", canonicalUrl };
+    const oversized = notes("URL limit");
+    oversized.references[0] = {
+      ...oversized.references[0]!,
+      provider: "example",
+      canonicalUrl: `${canonicalUrl}x`,
+    };
+
+    expect(validateNotesDocumentV3(exact).ok).toBe(true);
+    expect(validateNotesDocumentV3(oversized)).toMatchObject({
+      ok: false,
+      error: { path: "references[0].canonicalUrl", message: expect.stringContaining("2,048") },
+    });
   });
 
   it("rewrites the original v3 phase shape with a null archive marker", async () => {
@@ -591,6 +708,62 @@ describe("ProjectNotesRepository durability", () => {
     });
   });
 
+  it("keeps reference capture times immutable while allowing create, edit, and delete", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/reference-transitions";
+    const repository = new ProjectNotesRepository(agentDir);
+    const initial = notes("reference transitions");
+    initial.references = [];
+    initial.phases[0] = {
+      ...initial.phases[0]!,
+      referenceIds: [],
+      overrides: { ...initial.phases[0]!.overrides, referenceIds: null },
+    };
+    await repository.migrate(cwd, initial);
+
+    const reference = notes().references[0]!;
+    const created = { ...initial, references: [reference] };
+    await expect(repository.save(cwd, 1, created)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2, document: created },
+    });
+
+    const editedReference = { ...reference, relevance: "Edited provenance note" };
+    const edited = { ...created, references: [editedReference] };
+    await expect(repository.save(cwd, 2, edited)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 3, document: edited },
+    });
+
+    const paths = repository.paths(cwd);
+    const primaryBeforeRejectedSave = await fs.readFile(paths.primary, "utf8");
+    const backupBeforeRejectedSave = await fs.readFile(paths.backup, "utf8");
+    const changedCapturedAt = {
+      ...edited,
+      references: [{ ...editedReference, capturedAt: "2026-07-26T12:34:56.000Z" }],
+    };
+
+    await expect(repository.save(cwd, 3, changedCapturedAt)).resolves.toEqual({
+      status: "invalid",
+      error: {
+        path: "references[0].capturedAt",
+        message: "existing reference capture time cannot be changed",
+      },
+    });
+    expect(await fs.readFile(paths.primary, "utf8")).toBe(primaryBeforeRejectedSave);
+    expect(await fs.readFile(paths.backup, "utf8")).toBe(backupBeforeRejectedSave);
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 3, document: edited },
+    });
+
+    const deleted = { ...edited, references: [] };
+    await expect(repository.save(cwd, 3, deleted)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 4, document: deleted },
+    });
+  });
+
   it("keeps phase and reference IDs stable through reorder, edit, and restart", async () => {
     const agentDir = await tempAgentDir();
     const repository = new ProjectNotesRepository(agentDir);
@@ -646,6 +819,95 @@ describe("ProjectNotesRepository durability", () => {
         },
       },
     });
+  });
+
+  it("round-trips many-to-many links and rejects deletion until every link and override is removed", async () => {
+    const agentDir = await tempAgentDir();
+    const repository = new ProjectNotesRepository(agentDir);
+    const initial = notes("many to many");
+    const archivedPhase = {
+      ...initial.phases[0]!,
+      id: "phase-archived",
+      title: "Archived evidence",
+      order: 1,
+      archivedAt: NOW,
+      session: null,
+      reminder: null,
+      referenceIds: ["ref-1"],
+      overrides: {
+        status: null,
+        referenceIds: { value: ["ref-1"], source: "user" as const, updatedAt: NOW },
+      },
+      lifecycleEvents: [],
+      status: "not-started" as const,
+    };
+    const linked = {
+      ...initial,
+      phases: [
+        {
+          ...initial.phases[0]!,
+          overrides: {
+            ...initial.phases[0]!.overrides,
+            referenceIds: { value: ["ref-1"], source: "user" as const, updatedAt: NOW },
+          },
+        },
+        archivedPhase,
+      ],
+    };
+
+    await expect(repository.migrate("/work/project", linked)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { document: linked },
+    });
+    const oneUnlinked = {
+      ...linked,
+      phases: [
+        {
+          ...linked.phases[0]!,
+          referenceIds: [],
+          overrides: {
+            ...linked.phases[0]!.overrides,
+            referenceIds: { value: [], source: "user" as const, updatedAt: NOW },
+          },
+        },
+        archivedPhase,
+      ],
+    };
+    await expect(repository.save("/work/project", 1, oneUnlinked)).resolves.toMatchObject({
+      status: "ok",
+    });
+
+    const brokenDelete = { ...oneUnlinked, references: [] };
+    await expect(repository.save("/work/project", 2, brokenDelete)).resolves.toMatchObject({
+      status: "invalid",
+      error: { path: "phases[1].referenceIds[0]" },
+    });
+
+    const fullyUnlinked = {
+      ...oneUnlinked,
+      phases: [
+        oneUnlinked.phases[0]!,
+        {
+          ...archivedPhase,
+          referenceIds: [],
+          overrides: {
+            ...archivedPhase.overrides,
+            referenceIds: { value: [], source: "user" as const, updatedAt: NOW },
+          },
+        },
+      ],
+      references: [],
+    };
+    await expect(repository.save("/work/project", 2, fullyUnlinked)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 3, document: fullyUnlinked },
+    });
+    await expect(new ProjectNotesRepository(agentDir).load("/work/project")).resolves.toMatchObject(
+      {
+        status: "ok",
+        snapshot: { revision: 3, document: fullyUnlinked },
+      },
+    );
   });
 
   it("accepts unchanged lifecycle events rebuilt with a different property order", async () => {

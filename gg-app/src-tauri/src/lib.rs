@@ -5641,6 +5641,16 @@ mod tests {
                     "error": { "path": "$", "message": "malformed JSON request body" }
                 }),
             ),
+            (
+                reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+                serde_json::json!({
+                    "status": "invalid",
+                    "error": {
+                        "path": "$",
+                        "message": "notes request body exceeds 1048576 bytes"
+                    }
+                }),
+            ),
         ] {
             assert_eq!(
                 normalize_notes_response(status, body.clone()).unwrap(),

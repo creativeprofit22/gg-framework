@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, AlertTriangle, Database, HardDrive } from "lucide-react";
 import { NotesModal } from "./NotesModal";
+import type { OpenReferenceUrl } from "./notes-open-source";
 import { NotesStatusBadge, notesStatusLabel } from "./NotesStatusBadge";
 import {
   getActiveNotesPhaseCount,
@@ -16,6 +17,7 @@ import type { NotesClient } from "./notes-types";
 interface Props {
   cwd: string | null;
   client: NotesClient;
+  openSource?: OpenReferenceUrl;
 }
 
 interface NotesPersistenceStatus {
@@ -24,7 +26,7 @@ interface NotesPersistenceStatus {
   detail: string;
 }
 
-export function ProjectNotes({ cwd, client }: Props): React.ReactElement {
+export function ProjectNotes({ cwd, client, openSource }: Props): React.ReactElement {
   const [showNotes, setShowNotes] = useState(false);
   const [modalProjectIdentity, setModalProjectIdentity] = useState<string | null>(null);
   const activeProjectIdentity = cwd ? canonicalProjectKey(cwd) : null;
@@ -45,6 +47,11 @@ export function ProjectNotes({ cwd, client }: Props): React.ReactElement {
     changePhaseStatus,
     archivePhase,
     restorePhase,
+    createReference,
+    editReference,
+    deleteReference,
+    linkReferenceToPhase,
+    unlinkReferenceFromPhase,
     changeHandoff,
     markHandoffPresented,
     diagnostics,
@@ -83,6 +90,7 @@ export function ProjectNotes({ cwd, client }: Props): React.ReactElement {
             currentFocus={notesDocument.currentFocus}
             tasks={notesDocument.tasks}
             phases={notesDocument.phases}
+            references={notesDocument.references}
             handoff={notesDocument.handoff.text}
             handoffUpdatedAt={notesDocument.handoff.updatedAt}
             handoffUnread={status.handoffUnread}
@@ -102,6 +110,12 @@ export function ProjectNotes({ cwd, client }: Props): React.ReactElement {
             onChangePhaseStatus={changePhaseStatus}
             onArchivePhase={archivePhase}
             onRestorePhase={restorePhase}
+            onCreateReference={createReference}
+            onEditReference={editReference}
+            onDeleteReference={deleteReference}
+            onLinkReferenceToPhase={linkReferenceToPhase}
+            onUnlinkReferenceFromPhase={unlinkReferenceFromPhase}
+            openSource={openSource}
             onChangeHandoff={changeHandoff}
             onHandoffPresented={markHandoffPresented}
             onClose={() => setShowNotes(false)}

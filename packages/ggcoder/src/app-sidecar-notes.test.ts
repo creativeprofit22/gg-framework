@@ -4,8 +4,17 @@ import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createAppSidecarNotesHandler, type AppSidecarNotesSession } from "./app-sidecar-notes.js";
-import { ProjectNotesRepository, type NotesDocumentV3 } from "./project-notes-repository.js";
+import {
+  createAppSidecarNotesHandler,
+  NOTES_REQUEST_BODY_MAX_BYTES,
+  type AppSidecarNotesSession,
+} from "./app-sidecar-notes.js";
+import {
+  NOTES_REFERENCE_METADATA_MAX_LENGTH,
+  NOTES_REFERENCE_URL_MAX_LENGTH,
+  ProjectNotesRepository,
+  type NotesDocumentV3,
+} from "./project-notes-repository.js";
 
 const NOW = "2026-07-25T12:00:00.000Z";
 
@@ -146,6 +155,53 @@ async function request(
   return { response, body: (await response.json()) as unknown };
 }
 
+async function chunkedRequest(
+  sessionId: string,
+  route: string,
+  method: "POST" | "PUT",
+  chunks: readonly Buffer[],
+): Promise<{ status: number; body: unknown }> {
+  return new Promise((resolve, reject) => {
+    const clientRequest = http.request(
+      `${baseUrl}${route}`,
+      {
+        method,
+        headers: {
+          "x-gg-session": sessionId,
+          "content-type": "application/json",
+          "transfer-encoding": "chunked",
+        },
+      },
+      (response) => {
+        const responseChunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => responseChunks.push(chunk));
+        response.on("end", () => {
+          try {
+            resolve({
+              status: response.statusCode ?? 0,
+              body: JSON.parse(Buffer.concat(responseChunks).toString("utf8")) as unknown,
+            });
+          } catch (error) {
+            reject(error);
+          }
+        });
+      },
+    );
+    clientRequest.on("error", reject);
+    for (const chunk of chunks) clientRequest.write(chunk);
+    clientRequest.end();
+  });
+}
+
+async function readOptionalFile(filePath: string): Promise<string | null> {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 describe("app sidecar Notes routes", () => {
   it("returns a typed missing result for a project with no repository", async () => {
     const result = await request("a", "/notes");
@@ -171,6 +227,176 @@ describe("app sidecar Notes routes", () => {
     expect(loaded.body).toMatchObject({
       status: "ok",
       snapshot: { projectKey: "c:/work/project", revision: 1, document },
+    });
+  });
+
+  it("round-trips exact reference metadata and many-to-many links through save, fan-out, and restart", async () => {
+    const initial = notes("structured references");
+    await request("a", "/notes/migrate", {
+      method: "POST",
+      body: JSON.stringify({ document: initial }),
+    });
+    const secondReference = {
+      ...initial.references[0]!,
+      id: "ref-2",
+      tool: "github-search",
+      canonicalUrl: "https://github.com/other/tools/issues/17?view=all#discussion",
+      owner: "other",
+      repo: "tools",
+      revision: null,
+      path: null,
+      range: null,
+      issue: 17,
+      query: "view=all",
+      anchor: "discussion",
+      relevance: "Second repository evidence",
+    };
+    const archivedPhase = {
+      ...initial.phases[0]!,
+      id: "phase-archived",
+      title: "Archived evidence",
+      order: 1,
+      status: "done" as const,
+      referenceIds: ["ref-1", "ref-2"],
+      session: null,
+      archivedAt: NOW,
+      completedAt: NOW,
+      overrides: {
+        status: null,
+        referenceIds: {
+          value: ["ref-1", "ref-2"],
+          source: "user" as const,
+          updatedAt: NOW,
+        },
+      },
+      lifecycleEvents: [],
+    };
+    const updated = {
+      ...initial,
+      references: [initial.references[0]!, secondReference],
+      phases: [
+        {
+          ...initial.phases[0]!,
+          referenceIds: ["ref-1", "ref-2"],
+          overrides: {
+            status: null,
+            referenceIds: {
+              value: ["ref-1", "ref-2"],
+              source: "user" as const,
+              updatedAt: NOW,
+            },
+          },
+        },
+        archivedPhase,
+      ],
+    };
+
+    const saved = await request("alias", "/notes", {
+      method: "PUT",
+      body: JSON.stringify({ expectedRevision: 1, document: updated }),
+    });
+    const loaded = await request("a", "/notes");
+    const restarted = await new ProjectNotesRepository(path.join(root, ".gg")).load(
+      "C:\\Work\\Project",
+    );
+
+    expect(saved).toMatchObject({
+      response: { status: 200 },
+      body: { status: "ok", snapshot: { revision: 2, document: updated } },
+    });
+    expect(loaded).toMatchObject({
+      response: { status: 200 },
+      body: { status: "ok", snapshot: { revision: 2, document: updated } },
+    });
+    expect(restarted).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2, document: updated },
+    });
+    expect(sessions.get("a")?.events.at(-1)).toEqual({
+      type: "notes_change",
+      data: expect.objectContaining({ revision: 2, document: updated }),
+    });
+    expect(sessions.get("other")?.events).toEqual([]);
+  });
+
+  it("enforces immutable capture times without blocking reference create, edit, or delete", async () => {
+    const initial = notes("reference transitions");
+    initial.references = [];
+    initial.phases[0] = {
+      ...initial.phases[0]!,
+      referenceIds: [],
+      overrides: { ...initial.phases[0]!.overrides, referenceIds: null },
+    };
+    await request("a", "/notes/migrate", {
+      method: "POST",
+      body: JSON.stringify({ document: initial }),
+    });
+
+    const reference = notes("reference fixture").references[0]!;
+    const created = { ...initial, references: [reference] };
+    const createdResult = await request("a", "/notes", {
+      method: "PUT",
+      body: JSON.stringify({ expectedRevision: 1, document: created }),
+    });
+    expect(createdResult).toMatchObject({
+      response: { status: 200 },
+      body: { status: "ok", snapshot: { revision: 2, document: created } },
+    });
+
+    const editedReference = { ...reference, relevance: "Edited provenance note" };
+    const edited = { ...created, references: [editedReference] };
+    const editedResult = await request("alias", "/notes", {
+      method: "PUT",
+      body: JSON.stringify({ expectedRevision: 2, document: edited }),
+    });
+    expect(editedResult).toMatchObject({
+      response: { status: 200 },
+      body: { status: "ok", snapshot: { revision: 3, document: edited } },
+    });
+
+    const paths = repository.paths("C:\\Work\\Project");
+    const primaryBeforeRejectedSave = await fs.readFile(paths.primary, "utf8");
+    const backupBeforeRejectedSave = await fs.readFile(paths.backup, "utf8");
+    const eventCountsBeforeRejectedSave = {
+      a: sessions.get("a")!.events.length,
+      alias: sessions.get("alias")!.events.length,
+    };
+    const changedCapturedAt = {
+      ...edited,
+      references: [{ ...editedReference, capturedAt: "2026-07-26T12:00:00.000Z" }],
+    };
+    const rejected = await request("a", "/notes", {
+      method: "PUT",
+      body: JSON.stringify({ expectedRevision: 3, document: changedCapturedAt }),
+    });
+
+    expect(rejected).toMatchObject({
+      response: { status: 400 },
+      body: {
+        status: "invalid",
+        error: {
+          path: "references[0].capturedAt",
+          message: "existing reference capture time cannot be changed",
+        },
+      },
+    });
+    expect(await fs.readFile(paths.primary, "utf8")).toBe(primaryBeforeRejectedSave);
+    expect(await fs.readFile(paths.backup, "utf8")).toBe(backupBeforeRejectedSave);
+    expect(sessions.get("a")!.events).toHaveLength(eventCountsBeforeRejectedSave.a);
+    expect(sessions.get("alias")!.events).toHaveLength(eventCountsBeforeRejectedSave.alias);
+    expect((await request("a", "/notes")).body).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 3, document: edited },
+    });
+
+    const deleted = { ...edited, references: [] };
+    const deletedResult = await request("a", "/notes", {
+      method: "PUT",
+      body: JSON.stringify({ expectedRevision: 3, document: deleted }),
+    });
+    expect(deletedResult).toMatchObject({
+      response: { status: 200 },
+      body: { status: "ok", snapshot: { revision: 4, document: deleted } },
     });
   });
 
@@ -211,6 +437,173 @@ describe("app sidecar Notes routes", () => {
       status: "invalid",
       error: { path: "version", message: "expected 3" },
     });
+  });
+
+  it("accepts 50 references at their maximum schema field lengths", async () => {
+    const base = notes("maximum reference payload");
+    const metadata = "x".repeat(NOTES_REFERENCE_METADATA_MAX_LENGTH);
+    const document: NotesDocumentV3 = {
+      ...base,
+      references: Array.from({ length: 50 }, (_, index) => {
+        const prefix = `https://example.com/reference/${index}?payload=`;
+        return {
+          ...base.references[0]!,
+          id: `ref-${index + 1}`,
+          provider: `source-${metadata.slice(7)}`,
+          tool: metadata,
+          canonicalUrl: `${prefix}${"x".repeat(NOTES_REFERENCE_URL_MAX_LENGTH - prefix.length)}`,
+          owner: metadata,
+          repo: metadata,
+          revision: metadata,
+          path: metadata,
+          range: null,
+          query: metadata,
+          anchor: metadata,
+          relevance: metadata,
+        };
+      }),
+    };
+    const body = JSON.stringify({ document });
+
+    expect(Buffer.byteLength(body)).toBeGreaterThan(1024 * 1024);
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(NOTES_REQUEST_BODY_MAX_BYTES);
+
+    const migrated = await request("a", "/notes/migrate", { method: "POST", body });
+
+    expect(migrated).toMatchObject({
+      response: { status: 200 },
+      body: { status: "ok", snapshot: { document: { references: { length: 50 } } } },
+    });
+  });
+
+  it("rejects declared and chunked oversized migration bodies without mutation or fan-out", async () => {
+    const expectedError = {
+      status: "invalid",
+      error: {
+        path: "$",
+        message: `notes request body exceeds ${NOTES_REQUEST_BODY_MAX_BYTES} bytes`,
+      },
+    };
+    const declared = await request("a", "/notes/migrate", {
+      method: "POST",
+      headers: { "content-length": String(NOTES_REQUEST_BODY_MAX_BYTES + 1) },
+      body: " ".repeat(NOTES_REQUEST_BODY_MAX_BYTES + 1),
+    });
+    const chunk = Buffer.alloc(Math.floor(NOTES_REQUEST_BODY_MAX_BYTES / 2) + 1, " ");
+    const chunked = await chunkedRequest("a", "/notes/migrate", "POST", [chunk, chunk]);
+    const paths = repository.paths("C:\\Work\\Project");
+
+    expect(declared).toMatchObject({ response: { status: 413 }, body: expectedError });
+    expect(chunked).toEqual({ status: 413, body: expectedError });
+    expect((await request("a", "/notes")).body).toEqual({ status: "missing" });
+    expect(await readOptionalFile(paths.primary)).toBeNull();
+    expect(await readOptionalFile(paths.backup)).toBeNull();
+    expect([...sessions.values()].flatMap((session) => session.events)).toEqual([]);
+
+    const recovered = await request("a", "/notes/migrate", {
+      method: "POST",
+      body: JSON.stringify({ document: notes("after oversized migration") }),
+    });
+    expect(recovered).toMatchObject({ response: { status: 200 }, body: { status: "ok" } });
+  });
+
+  it("rejects declared and chunked oversized save bodies without mutation or fan-out", async () => {
+    await request("a", "/notes/migrate", {
+      method: "POST",
+      body: JSON.stringify({ document: notes("before oversized save") }),
+    });
+    const paths = repository.paths("C:\\Work\\Project");
+    const filesBefore = {
+      primary: await readOptionalFile(paths.primary),
+      backup: await readOptionalFile(paths.backup),
+    };
+    const eventCountsBefore = [...sessions.values()].map((session) => session.events.length);
+    const expectedError = {
+      status: "invalid",
+      error: {
+        path: "$",
+        message: `notes request body exceeds ${NOTES_REQUEST_BODY_MAX_BYTES} bytes`,
+      },
+    };
+
+    const declared = await request("a", "/notes", {
+      method: "PUT",
+      headers: { "content-length": String(NOTES_REQUEST_BODY_MAX_BYTES + 1) },
+      body: " ".repeat(NOTES_REQUEST_BODY_MAX_BYTES + 1),
+    });
+    const chunk = Buffer.alloc(Math.floor(NOTES_REQUEST_BODY_MAX_BYTES / 2) + 1, " ");
+    const chunked = await chunkedRequest("a", "/notes", "PUT", [chunk, chunk]);
+
+    expect(declared).toMatchObject({ response: { status: 413 }, body: expectedError });
+    expect(chunked).toEqual({ status: 413, body: expectedError });
+    expect((await request("a", "/notes")).body).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1, document: { reference: "before oversized save" } },
+    });
+    expect(await readOptionalFile(paths.primary)).toBe(filesBefore.primary);
+    expect(await readOptionalFile(paths.backup)).toBe(filesBefore.backup);
+    expect([...sessions.values()].map((session) => session.events.length)).toEqual(
+      eventCountsBefore,
+    );
+
+    const recovered = await request("a", "/notes", {
+      method: "PUT",
+      body: JSON.stringify({ expectedRevision: 1, document: notes("after oversized save") }),
+    });
+    expect(recovered).toMatchObject({
+      response: { status: 200 },
+      body: { status: "ok", snapshot: { revision: 2 } },
+    });
+  });
+
+  it("rejects credential-bearing reference URLs at the sidecar boundary", async () => {
+    const withUsername = notes("username");
+    withUsername.references[0] = {
+      ...withUsername.references[0]!,
+      canonicalUrl: "https://user@github.com/owner/repo/blob/abc/src/file.ts#L1",
+    };
+    const rejectedMigration = await request("a", "/notes/migrate", {
+      method: "POST",
+      body: JSON.stringify({ document: withUsername }),
+    });
+
+    expect(rejectedMigration).toMatchObject({
+      response: { status: 400 },
+      body: {
+        status: "invalid",
+        error: {
+          path: "references[0].canonicalUrl",
+          message: "expected an absolute http(s) URL without username or password",
+        },
+      },
+    });
+    expect((await request("a", "/notes")).body).toEqual({ status: "missing" });
+    expect(sessions.get("a")?.events).toEqual([]);
+
+    const valid = notes("valid");
+    await request("a", "/notes/migrate", {
+      method: "POST",
+      body: JSON.stringify({ document: valid }),
+    });
+    const withPassword = notes("password");
+    withPassword.references[0] = {
+      ...withPassword.references[0]!,
+      canonicalUrl: "https://:secret@github.com/owner/repo/blob/abc/src/file.ts#L1",
+    };
+    const rejectedSave = await request("a", "/notes", {
+      method: "PUT",
+      body: JSON.stringify({ expectedRevision: 1, document: withPassword }),
+    });
+
+    expect(rejectedSave).toMatchObject({
+      response: { status: 400 },
+      body: { status: "invalid", error: { path: "references[0].canonicalUrl" } },
+    });
+    expect((await request("a", "/notes")).body).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1, document: { reference: "valid" } },
+    });
+    expect(sessions.get("a")?.events).toHaveLength(1);
   });
 
   it("returns the winning snapshot in a typed stale-write conflict", async () => {

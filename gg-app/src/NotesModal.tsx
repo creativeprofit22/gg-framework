@@ -2,10 +2,19 @@ import { useCallback, useRef, useState, type KeyboardEvent } from "react";
 import { Modal } from "./Modal";
 import { NotesCurrentFocus } from "./NotesCurrentFocus";
 import { NotesHandoff } from "./NotesHandoff";
+import { NotesReferences } from "./NotesReferences";
 import { NotesRoadmap, NotesRoadmapArchive } from "./NotesRoadmap";
 import { NotesTaskList } from "./NotesTaskList";
+import type { NotesReferenceInput } from "./notes-reference";
+import type { OpenReferenceUrl } from "./notes-open-source";
 import type { NotesPhaseInput } from "./useProjectNotes";
-import type { NotesPhase, NotesPhaseStatus, NotesTask } from "./notes-types";
+import type {
+  NotesPhase,
+  NotesPhaseStatus,
+  NotesReference,
+  NotesReferenceOperationResult,
+  NotesTask,
+} from "./notes-types";
 
 type NotesTab = "overview" | "roadmap" | "reference" | "archive";
 
@@ -22,6 +31,7 @@ interface Props {
   currentFocus: string;
   tasks: NotesTask[];
   phases: NotesPhase[];
+  references: NotesReference[];
   handoff: string;
   handoffUpdatedAt: string | null;
   handoffUnread: boolean;
@@ -41,6 +51,21 @@ interface Props {
   onChangePhaseStatus(id: string, status: NotesPhaseStatus): void;
   onArchivePhase(id: string): void;
   onRestorePhase(id: string): void;
+  onCreateReference(
+    input: NotesReferenceInput,
+    phaseIds: readonly string[],
+  ): Promise<NotesReferenceOperationResult>;
+  onEditReference(id: string, input: NotesReferenceInput): Promise<NotesReferenceOperationResult>;
+  onDeleteReference(id: string): Promise<NotesReferenceOperationResult>;
+  onLinkReferenceToPhase(
+    referenceId: string,
+    phaseId: string,
+  ): Promise<NotesReferenceOperationResult>;
+  onUnlinkReferenceFromPhase(
+    referenceId: string,
+    phaseId: string,
+  ): Promise<NotesReferenceOperationResult>;
+  openSource?: OpenReferenceUrl;
   onChangeHandoff(text: string): void;
   onHandoffPresented(text: string, updatedAt: string): void;
   onClose(): void;
@@ -60,6 +85,7 @@ export function NotesModal({
   currentFocus,
   tasks,
   phases,
+  references,
   handoff,
   handoffUpdatedAt,
   handoffUnread,
@@ -79,6 +105,12 @@ export function NotesModal({
   onChangePhaseStatus,
   onArchivePhase,
   onRestorePhase,
+  onCreateReference,
+  onEditReference,
+  onDeleteReference,
+  onLinkReferenceToPhase,
+  onUnlinkReferenceFromPhase,
+  openSource,
   onChangeHandoff,
   onHandoffPresented,
   onClose,
@@ -93,6 +125,7 @@ export function NotesModal({
   });
   const [activeTab, setActiveTab] = useState<NotesTab>("overview");
   const [showArchived, setShowArchived] = useState(false);
+  const [referenceCreateRequest, setReferenceCreateRequest] = useState(0);
   const archivedTasks = tasks.filter((task) => task.archivedAt !== null);
   const hasRoadmapSummary = activePhaseCount > 0 || activeReminderCount > 0;
 
@@ -230,11 +263,18 @@ export function NotesModal({
               >
                 <NotesRoadmap
                   phases={phases}
+                  references={references}
                   onCreatePhase={onCreatePhase}
                   onEditPhase={onEditPhase}
                   onMovePhase={onMovePhase}
                   onChangePhaseStatus={onChangePhaseStatus}
                   onArchivePhase={onArchivePhase}
+                  onLinkReferenceToPhase={onLinkReferenceToPhase}
+                  onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
+                  onCreateReference={() => {
+                    selectTab("reference");
+                    setReferenceCreateRequest((request) => request + 1);
+                  }}
                 />
               </section>
             </div>
@@ -262,6 +302,17 @@ export function NotesModal({
                     spellCheck={true}
                   />
                 </div>
+                <NotesReferences
+                  references={references}
+                  phases={phases}
+                  onCreateReference={onCreateReference}
+                  onEditReference={onEditReference}
+                  onDeleteReference={onDeleteReference}
+                  onLinkReferenceToPhase={onLinkReferenceToPhase}
+                  onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
+                  openSource={openSource}
+                  createRequest={referenceCreateRequest}
+                />
               </section>
             </div>
           </div>

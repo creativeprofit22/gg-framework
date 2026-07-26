@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { canonicalReferenceIdentity, type NotesReferenceInput } from "./notes-reference";
 import { isNotesHandoffUnread } from "./notes-status";
 import {
   isNotesChangeEvent,
@@ -9,7 +10,9 @@ import {
   type NotesLoadResult,
   type NotesPhase,
   type NotesPhaseStatus,
+  type NotesReferenceOperationResult,
   type NotesSaveResult,
+  type ProjectNotesSaveOutcome,
   type ProjectNotesSnapshot,
 } from "./notes-types";
 import {
@@ -50,6 +53,20 @@ export interface UseProjectNotesResult {
   changePhaseStatus(id: string, status: NotesPhaseStatus): void;
   archivePhase(id: string): void;
   restorePhase(id: string): void;
+  createReference(
+    input: NotesReferenceInput,
+    phaseIds: readonly string[],
+  ): Promise<NotesReferenceOperationResult>;
+  editReference(id: string, input: NotesReferenceInput): Promise<NotesReferenceOperationResult>;
+  deleteReference(id: string): Promise<NotesReferenceOperationResult>;
+  linkReferenceToPhase(
+    referenceId: string,
+    phaseId: string,
+  ): Promise<NotesReferenceOperationResult>;
+  unlinkReferenceFromPhase(
+    referenceId: string,
+    phaseId: string,
+  ): Promise<NotesReferenceOperationResult>;
   changeHandoff(text: string): void;
   markHandoffPresented(expectedText: string, expectedUpdatedAt: string | null): void;
   diagnostics: {
@@ -66,6 +83,13 @@ interface NotesMutation {
   id: number;
   coalesceKey?: CoalesceKey;
   apply(document: NotesDocumentV3): NotesDocumentV3 | null;
+  operationResult?(document: NotesDocumentV3): NotesReferenceOperationResult;
+  settle?(result: NotesReferenceOperationResult): void;
+}
+
+interface ReferenceMutationApplication {
+  document: NotesDocumentV3 | null;
+  result: NotesReferenceOperationResult;
 }
 
 const systemClock = (): string => new Date().toISOString();
@@ -154,13 +178,33 @@ export function useProjectNotes(
       modeRef.current = "fallback";
       authoritativeRef.current = null;
       const pending = queueRef.current;
-      const fallbackDocument = replayMutations(loaded.document, pending);
+      const appliedReferenceResults: Array<{
+        mutation: NotesMutation;
+        result: NotesReferenceOperationResult;
+      }> = [];
+      let fallbackDocument = loaded.document;
+      let changed = false;
+      for (const mutation of pending) {
+        const result = mutation.operationResult?.(fallbackDocument);
+        const next = mutation.apply(fallbackDocument);
+        if (next === null) {
+          if (result) mutation.settle?.(result);
+          continue;
+        }
+        fallbackDocument = next;
+        changed = true;
+        if (result) appliedReferenceResults.push({ mutation, result });
+      }
       queueRef.current = [];
       inFlightMutationIdRef.current = null;
       showDocument(fallbackDocument);
       setLoadDiagnostics(loaded);
-      let save: NotesSaveResult | null = null;
-      if (pending.length > 0) save = repository.save(projectCwd, fallbackDocument);
+      const save = changed ? repository.save(projectCwd, fallbackDocument) : null;
+      for (const applied of appliedReferenceResults) {
+        applied.mutation.settle?.(
+          save?.v3.ok === true ? applied.result : { status: "failed", reason: "storage" },
+        );
+      }
       setSaveDiagnostics(save);
       if (diagnostic) addAuthorityDiagnostic(diagnostic);
       addAuthorityDiagnostic({ kind: "fallback-storage", load: loaded, save });
@@ -172,6 +216,10 @@ export function useProjectNotes(
     const epoch = epochRef.current + 1;
     epochRef.current = epoch;
     activeCwdRef.current = cwd;
+    settlePendingReferenceMutations(queueRef.current, {
+      status: "failed",
+      reason: "unavailable",
+    });
     queueRef.current = [];
     inFlightMutationIdRef.current = null;
     authoritativeRef.current = null;
@@ -343,7 +391,13 @@ export function useProjectNotes(
 
     return () => {
       unsubscribe();
-      if (epochRef.current === epoch) epochRef.current += 1;
+      if (epochRef.current === epoch) {
+        epochRef.current += 1;
+        settlePendingReferenceMutations(queueRef.current, {
+          status: "failed",
+          reason: "unavailable",
+        });
+      }
     };
   }, [
     addAuthorityDiagnostic,
@@ -372,9 +426,11 @@ export function useProjectNotes(
     }
 
     const epoch = epochRef.current;
+    const operationResult = mutation.operationResult?.(authoritative.document);
     const nextDocument = mutation.apply(authoritative.document);
     if (nextDocument === null) {
       queueRef.current.shift();
+      if (operationResult) mutation.settle?.(operationResult);
       renderSidecarState();
       queueMicrotask(() => processQueueRef.current());
       return;
@@ -405,6 +461,7 @@ export function useProjectNotes(
           setAuthorityDiagnostics((current) =>
             current.filter((diagnostic) => diagnostic.kind !== "save-failed"),
           );
+          if (operationResult) mutation.settle?.(operationResult);
           renderSidecarState();
           queueMicrotask(() => processQueueRef.current());
           return;
@@ -414,14 +471,22 @@ export function useProjectNotes(
           queueMicrotask(() => processQueueRef.current());
           return;
         }
+        if (mutation.settle) {
+          queueRef.current = queueRef.current.filter((queued) => queued.id !== mutation.id);
+          mutation.settle(referenceSaveFailure(outcome));
+        }
         if (outcome.status === "invalid") {
           addAuthorityDiagnostic({ kind: "save-failed", error: outcome.error });
-          return;
+        } else {
+          addAuthorityDiagnostic({
+            kind: "save-failed",
+            error: new Error(`sidecar Notes save failed: ${outcome.status}`),
+          });
         }
-        addAuthorityDiagnostic({
-          kind: "save-failed",
-          error: new Error(`sidecar Notes save failed: ${outcome.status}`),
-        });
+        if (mutation.settle) {
+          renderSidecarState();
+          queueMicrotask(() => processQueueRef.current());
+        }
       })
       .catch((error) => {
         if (
@@ -432,7 +497,15 @@ export function useProjectNotes(
           return;
         }
         inFlightMutationIdRef.current = null;
+        if (mutation.settle) {
+          queueRef.current = queueRef.current.filter((queued) => queued.id !== mutation.id);
+          mutation.settle({ status: "failed", reason: "unavailable" });
+        }
         addAuthorityDiagnostic({ kind: "save-failed", error });
+        if (mutation.settle) {
+          renderSidecarState();
+          queueMicrotask(() => processQueueRef.current());
+        }
       });
   }, [addAuthorityDiagnostic, adoptSnapshot, client, renderSidecarState]);
   useEffect(() => {
@@ -442,14 +515,25 @@ export function useProjectNotes(
   const enqueueMutation = useCallback(
     (mutation: Omit<NotesMutation, "id">) => {
       const projectCwd = activeCwdRef.current;
-      if (projectCwd === null || modeRef.current === "none") return;
+      if (projectCwd === null || modeRef.current === "none") {
+        mutation.settle?.({ status: "failed", reason: "unavailable" });
+        return;
+      }
       const queued: NotesMutation = { ...mutation, id: ++nextMutationIdRef.current };
 
       if (modeRef.current === "fallback") {
+        const operationResult = queued.operationResult?.(documentRef.current);
         const next = queued.apply(documentRef.current);
-        if (next === null) return;
+        if (next === null) {
+          if (operationResult) queued.settle?.(operationResult);
+          return;
+        }
         showDocument(next);
-        setSaveDiagnostics(repository.save(projectCwd, next));
+        const save = repository.save(projectCwd, next);
+        setSaveDiagnostics(save);
+        if (operationResult) {
+          queued.settle?.(save.v3.ok ? operationResult : { status: "failed", reason: "storage" });
+        }
         return;
       }
 
@@ -473,6 +557,20 @@ export function useProjectNotes(
       processQueueRef.current();
     },
     [renderSidecarState, repository, showDocument],
+  );
+
+  const enqueueReferenceMutation = useCallback(
+    (
+      evaluate: (document: NotesDocumentV3) => ReferenceMutationApplication,
+    ): Promise<NotesReferenceOperationResult> =>
+      new Promise((resolve) => {
+        enqueueMutation({
+          apply: (current) => evaluate(current).document,
+          operationResult: (current) => evaluate(current).result,
+          settle: resolve,
+        });
+      }),
+    [enqueueMutation],
   );
 
   const onChange = useCallback(
@@ -808,6 +906,177 @@ export function useProjectNotes(
     [clock, enqueueMutation],
   );
 
+  const createReference = useCallback(
+    (
+      input: NotesReferenceInput,
+      phaseIds: readonly string[],
+    ): Promise<NotesReferenceOperationResult> => {
+      const id = idFactory();
+      const capturedAt = clock();
+      const requestedPhaseIds = [...new Set(phaseIds)];
+      const proposedIdentity = canonicalReferenceIdentity(input);
+      if (!proposedIdentity) {
+        return Promise.resolve({ status: "failed", reason: "invalid" });
+      }
+      return enqueueReferenceMutation((current) => {
+        const missingPhaseId = requestedPhaseIds.find(
+          (phaseId) => !current.phases.some((phase) => phase.id === phaseId),
+        );
+        if (missingPhaseId) {
+          return {
+            document: null,
+            result: { status: "missing-phase", phaseId: missingPhaseId },
+          };
+        }
+        const idCollision = current.references.find((reference) => reference.id === id);
+        if (idCollision) {
+          return {
+            document: null,
+            result: { status: "collision", referenceId: idCollision.id },
+          };
+        }
+        const winner = current.references.find(
+          (reference) => canonicalReferenceIdentity(reference) === proposedIdentity,
+        );
+        const referenceId = winner?.id ?? id;
+        const references = winner
+          ? current.references
+          : [...current.references, { ...input, id, capturedAt }];
+        const timestamp = mutationTimestamp(capturedAt, current.updatedAt);
+        const phases = linkReferenceToPhases(
+          current.phases,
+          referenceId,
+          requestedPhaseIds,
+          timestamp,
+        );
+        return {
+          document:
+            winner && phases === current.phases
+              ? null
+              : { ...current, references, phases, updatedAt: timestamp },
+          result: winner
+            ? { status: "reused", referenceId: winner.id }
+            : { status: "committed", referenceId: id },
+        };
+      });
+    },
+    [clock, enqueueReferenceMutation, idFactory],
+  );
+
+  const editReference = useCallback(
+    (id: string, input: NotesReferenceInput): Promise<NotesReferenceOperationResult> => {
+      const now = clock();
+      const proposedIdentity = canonicalReferenceIdentity(input);
+      if (!proposedIdentity) {
+        return Promise.resolve({ status: "failed", reason: "invalid" });
+      }
+      return enqueueReferenceMutation((current) => {
+        const index = current.references.findIndex((reference) => reference.id === id);
+        const reference = current.references[index];
+        if (!reference) return { document: null, result: { status: "missing-reference" } };
+        const collision = current.references.find(
+          (candidate) =>
+            candidate.id !== id && canonicalReferenceIdentity(candidate) === proposedIdentity,
+        );
+        if (collision) {
+          return {
+            document: null,
+            result: { status: "collision", referenceId: collision.id },
+          };
+        }
+        const nextReference = { ...input, id: reference.id, capturedAt: reference.capturedAt };
+        if (referenceFieldsEqual(reference, nextReference)) {
+          return {
+            document: null,
+            result: { status: "committed", referenceId: id },
+          };
+        }
+        const references = [...current.references];
+        references[index] = nextReference;
+        return {
+          document: {
+            ...current,
+            references,
+            updatedAt: mutationTimestamp(now, current.updatedAt),
+          },
+          result: { status: "committed", referenceId: id },
+        };
+      });
+    },
+    [clock, enqueueReferenceMutation],
+  );
+
+  const deleteReference = useCallback(
+    (id: string): Promise<NotesReferenceOperationResult> => {
+      const now = clock();
+      return enqueueReferenceMutation((current) => {
+        if (!current.references.some((reference) => reference.id === id)) {
+          return { document: null, result: { status: "missing-reference" } };
+        }
+        const phaseIds = current.phases
+          .filter(
+            (phase) =>
+              phase.referenceIds.includes(id) || phase.overrides.referenceIds?.value.includes(id),
+          )
+          .map((phase) => phase.id);
+        if (phaseIds.length > 0) {
+          return { document: null, result: { status: "linked-blocked", phaseIds } };
+        }
+        return {
+          document: {
+            ...current,
+            references: current.references.filter((reference) => reference.id !== id),
+            updatedAt: mutationTimestamp(now, current.updatedAt),
+          },
+          result: { status: "committed", referenceId: id },
+        };
+      });
+    },
+    [clock, enqueueReferenceMutation],
+  );
+
+  const linkReferenceToPhase = useCallback(
+    (referenceId: string, phaseId: string): Promise<NotesReferenceOperationResult> => {
+      const now = clock();
+      return enqueueReferenceMutation((current) => {
+        if (!current.references.some((reference) => reference.id === referenceId)) {
+          return { document: null, result: { status: "missing-reference" } };
+        }
+        if (!current.phases.some((phase) => phase.id === phaseId)) {
+          return { document: null, result: { status: "missing-phase", phaseId } };
+        }
+        const timestamp = mutationTimestamp(now, current.updatedAt);
+        const phases = updateReferenceLink(current.phases, referenceId, phaseId, true, timestamp);
+        return {
+          document: phases === current.phases ? null : { ...current, phases, updatedAt: timestamp },
+          result: { status: "committed", referenceId },
+        };
+      });
+    },
+    [clock, enqueueReferenceMutation],
+  );
+
+  const unlinkReferenceFromPhase = useCallback(
+    (referenceId: string, phaseId: string): Promise<NotesReferenceOperationResult> => {
+      const now = clock();
+      return enqueueReferenceMutation((current) => {
+        if (!current.references.some((reference) => reference.id === referenceId)) {
+          return { document: null, result: { status: "missing-reference" } };
+        }
+        if (!current.phases.some((phase) => phase.id === phaseId)) {
+          return { document: null, result: { status: "missing-phase", phaseId } };
+        }
+        const timestamp = mutationTimestamp(now, current.updatedAt);
+        const phases = updateReferenceLink(current.phases, referenceId, phaseId, false, timestamp);
+        return {
+          document: phases === current.phases ? null : { ...current, phases, updatedAt: timestamp },
+          result: { status: "committed", referenceId },
+        };
+      });
+    },
+    [clock, enqueueReferenceMutation],
+  );
+
   const changeHandoff = useCallback(
     (text: string) => {
       const now = clock();
@@ -867,6 +1136,11 @@ export function useProjectNotes(
     changePhaseStatus,
     archivePhase,
     restorePhase,
+    createReference,
+    editReference,
+    deleteReference,
+    linkReferenceToPhase,
+    unlinkReferenceFromPhase,
     changeHandoff,
     markHandoffPresented,
     diagnostics: {
@@ -884,6 +1158,20 @@ function replayMutations(
   let current = base;
   for (const mutation of mutations) current = mutation.apply(current) ?? current;
   return current;
+}
+
+function settlePendingReferenceMutations(
+  mutations: readonly NotesMutation[],
+  result: NotesReferenceOperationResult,
+): void {
+  for (const mutation of mutations) mutation.settle?.(result);
+}
+
+function referenceSaveFailure(outcome: ProjectNotesSaveOutcome): NotesReferenceOperationResult {
+  if (outcome.status === "invalid") return { status: "failed", reason: "invalid" };
+  if (outcome.status === "missing") return { status: "failed", reason: "missing" };
+  if (outcome.status === "corrupt") return { status: "failed", reason: "corrupt" };
+  return { status: "failed", reason: "unavailable" };
 }
 
 function updateTask(
@@ -916,6 +1204,74 @@ function updatePhase(
   const phases = [...current.phases];
   phases[index] = nextPhase;
   return { ...current, phases, updatedAt };
+}
+
+function linkReferenceToPhases(
+  phases: readonly NotesPhase[],
+  referenceId: string,
+  phaseIds: readonly string[],
+  updatedAt: string,
+): NotesPhase[] {
+  if (phaseIds.length === 0) return phases as NotesPhase[];
+  const requested = new Set(phaseIds);
+  let changed = false;
+  const next = phases.map((phase) => {
+    if (!requested.has(phase.id) || phase.referenceIds.includes(referenceId)) return phase;
+    changed = true;
+    const referenceIds = [...phase.referenceIds, referenceId];
+    return withReferenceIds(phase, referenceIds, updatedAt);
+  });
+  return changed ? next : (phases as NotesPhase[]);
+}
+
+function updateReferenceLink(
+  phases: readonly NotesPhase[],
+  referenceId: string,
+  phaseId: string,
+  linked: boolean,
+  updatedAt: string,
+): NotesPhase[] {
+  const index = phases.findIndex((phase) => phase.id === phaseId);
+  const phase = phases[index];
+  if (!phase) return phases as NotesPhase[];
+  const currentlyLinked = phase.referenceIds.includes(referenceId);
+  const overrideLinked = phase.overrides.referenceIds?.value.includes(referenceId) ?? false;
+  if ((linked && currentlyLinked) || (!linked && !currentlyLinked && !overrideLinked)) {
+    return phases as NotesPhase[];
+  }
+  const referenceIds = linked
+    ? [...phase.referenceIds, referenceId]
+    : phase.referenceIds.filter((id) => id !== referenceId);
+  const next = [...phases];
+  next[index] = withReferenceIds(phase, referenceIds, updatedAt);
+  return next;
+}
+
+function withReferenceIds(
+  phase: NotesPhase,
+  referenceIds: string[],
+  updatedAt: string,
+): NotesPhase {
+  return {
+    ...phase,
+    referenceIds,
+    updatedAt,
+    overrides: {
+      ...phase.overrides,
+      referenceIds: { value: referenceIds, source: "user", updatedAt },
+    },
+  };
+}
+
+function referenceFieldsEqual(
+  left: NotesDocumentV3["references"][number],
+  right: NotesDocumentV3["references"][number],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function mutationTimestamp(proposed: string, current: string): string {
+  return Date.parse(current) > Date.parse(proposed) ? current : proposed;
 }
 
 function normalizeDoneWhen(values: readonly string[]): string[] {

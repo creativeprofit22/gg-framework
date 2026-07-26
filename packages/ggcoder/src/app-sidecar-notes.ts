@@ -9,6 +9,8 @@ import {
   type ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
 
+export const NOTES_REQUEST_BODY_MAX_BYTES = 4 * 1024 * 1024;
+
 export interface AppSidecarNotesSession {
   cwd: string;
   broadcastNotesChange(snapshot: ProjectNotesSnapshot): void;
@@ -69,13 +71,7 @@ export function createAppSidecarNotesHandler(
             }
             sendMigrationOutcome(res, outcome);
           })
-          .catch((error) => {
-            if (error instanceof MalformedJsonError) {
-              sendJson(res, 400, malformedJson());
-            } else {
-              sendUnexpectedError(res, error, onError);
-            }
-          });
+          .catch((error) => sendBodyReadError(res, error, onError));
         return true;
       }
 
@@ -94,13 +90,7 @@ export function createAppSidecarNotesHandler(
             if (outcome.status === "ok") broadcastSnapshot(sessions, outcome.snapshot);
             sendSaveOutcome(res, outcome);
           })
-          .catch((error) => {
-            if (error instanceof MalformedJsonError) {
-              sendJson(res, 400, malformedJson());
-            } else {
-              sendUnexpectedError(res, error, onError);
-            }
-          });
+          .catch((error) => sendBodyReadError(res, error, onError));
         return true;
       }
 
@@ -154,14 +144,79 @@ function requestPathname(requestUrl: string): string {
 }
 
 async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(Buffer.from(chunk));
+  if (exceedsDeclaredContentLength(req.headers["content-length"])) {
+    drainRequest(req);
+    throw new NotesRequestBodyTooLargeError();
+  }
+
+  const chunks = await readRequestChunks(req);
   const raw = Buffer.concat(chunks).toString("utf8");
   try {
     return JSON.parse(raw) as unknown;
   } catch {
     throw new MalformedJsonError();
   }
+}
+
+function exceedsDeclaredContentLength(value: string | undefined): boolean {
+  return typeof value === "string" && /^\d+$/.test(value)
+    ? BigInt(value) > BigInt(NOTES_REQUEST_BODY_MAX_BYTES)
+    : false;
+}
+
+function readRequestChunks(req: http.IncomingMessage): Promise<Buffer[]> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let byteCount = 0;
+    let settled = false;
+
+    const cleanup = (): void => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      req.off("aborted", onAborted);
+    };
+    const rejectOnce = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk: Buffer | string): void => {
+      if (settled) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      byteCount += buffer.byteLength;
+      if (byteCount > NOTES_REQUEST_BODY_MAX_BYTES) {
+        chunks.length = 0;
+        cleanup();
+        settled = true;
+        drainRequest(req);
+        reject(new NotesRequestBodyTooLargeError());
+        return;
+      }
+      chunks.push(buffer);
+    };
+    const onEnd = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(chunks);
+    };
+    const onError = (error: Error): void => rejectOnce(error);
+    const onAborted = (): void => rejectOnce(new Error("notes request aborted"));
+
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("aborted", onAborted);
+  });
+}
+
+function drainRequest(req: http.IncomingMessage): void {
+  const ignoreDrainError = (): void => {};
+  req.on("error", ignoreDrainError);
+  req.once("close", () => req.off("error", ignoreDrainError));
+  req.resume();
 }
 
 function isMigrationBody(value: unknown): value is { document: unknown } {
@@ -193,6 +248,30 @@ function malformedJson(): InvalidResponse {
   return { status: "invalid", error: { path: "$", message: "malformed JSON request body" } };
 }
 
+function requestBodyTooLarge(): InvalidResponse {
+  return {
+    status: "invalid",
+    error: {
+      path: "$",
+      message: `notes request body exceeds ${NOTES_REQUEST_BODY_MAX_BYTES} bytes`,
+    },
+  };
+}
+
+function sendBodyReadError(
+  res: http.ServerResponse,
+  error: unknown,
+  onError: ((error: unknown) => void) | undefined,
+): void {
+  if (error instanceof MalformedJsonError) {
+    sendJson(res, 400, malformedJson());
+  } else if (error instanceof NotesRequestBodyTooLargeError) {
+    sendJson(res, 413, requestBodyTooLarge());
+  } else {
+    sendUnexpectedError(res, error, onError);
+  }
+}
+
 function sendUnexpectedError(
   res: http.ServerResponse,
   error: unknown,
@@ -212,3 +291,4 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
 }
 
 class MalformedJsonError extends Error {}
+class NotesRequestBodyTooLargeError extends Error {}

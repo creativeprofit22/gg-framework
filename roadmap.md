@@ -11,7 +11,7 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Implementation status:** Phases 00–18 are complete and verified; Phase 19 is next.
+- **Implementation status:** Phases 00–19 are complete and verified; Phase 20 is next.
 - **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
@@ -26,10 +26,10 @@ This file is an implementation plan, not a storage surface for user roadmap data
 - **2026-07-25 Phase 17 evidence:** Commit `d924aadf` records the Phase 16 schema and Phase 17 Notes workspace. Notes now uses a four-tab, viewport-relative workspace with fixed storage status/navigation and one scrolling active panel. Focused Notes/modal/storage checks passed 55 tests; all 384 gg-app tests, typecheck, lint, format check, and production build passed. Controlled browser and Tauri captures cover empty, typical, long, 320–420 px narrow, localized/200% reflow, reduced motion, forced colors, keyboard focus/return, and fixed-shell scrolling.
 - **2026-07-25 committed-baseline audit (`d924aadf`):** Commit ancestry and source inspection confirm Phases 00–17 at the committed baseline that preceded the uncommitted Phase 18 implementation. The focused sidecar Notes matrix passed 37 tests, all 384 gg-app tests, and all 102 Rust tests passed. The ggcoder and gg-app typechecks, gg-app lint/format, production build, roadmap coverage check, and diff checks also passed.
 - **2026-07-25 Phase 18 evidence:** Commit `6e9569b3` adds strict original-v3 archive-shape compatibility plus ordered create, inspect, edit, move, status override, cancel, archive, and position-preserving restore flows. The focused release reruns passed 67 gg-app tests across 5 files and 35 sidecar repository/route tests across 2 files; the broader recorded gate passed app and ggcoder typechecks/builds, app tests, lint, format, generated audits, Rust tests, and diff checks.
-- **Next phase:** Phase 19 — Add the shared structured reference library.
+- **Next phase:** Phase 20 — Add Ken prompt Send, Fresh send, and Save actions.
 - **Track A freeze:** Complete at `7c1d4a13`; the three-OS matrix, workspace memory evidence, and two-window Windows desktop timeout smoke are green. Subsequent commits add Track B Notes behavior without changing the frozen Track A lifecycle implementation; `0c6fe66b` has no separate Actions run because CI triggers only for `main` pushes and pull requests.
-- **Later-track audit:** Phases 15–18 are complete; Phases 19–26 have not started. Phase 20 has only prerequisites already present—Ken prompt blocks can Send to GG Coder and `PaneAgentClient.newSession()` can create a fresh session—not its guarded fresh-send/save workflow.
-- **Notes baseline:** Notes retains Now, Next, Handoff, free-form Reference, and Done / Archive semantics inside a four-tab shell. Roadmap now provides ordered phase CRUD, list/detail inspection, lifecycle overrides, cancellation, archival, position-preserving restoration, strict schema compatibility, and conflict-replayed persistence; Phase 19 owns structured-reference CRUD and phase linking.
+- **Later-track audit:** Phases 15–19 are complete; Phases 20–26 have not started. Phase 20 has only prerequisites already present—Ken prompt blocks can Send to GG Coder and `PaneAgentClient.newSession()` can create a fresh session—not its guarded fresh-send/save workflow.
+- **Notes baseline:** Notes retains Now, Next, Handoff, free-form Reference, and Done / Archive semantics inside a four-tab shell. Roadmap provides ordered phase CRUD and lifecycle controls; the shared structured-reference library now provides canonical deduplication, repository grouping, exact source opening, conflict-replayed CRUD, and many-to-many phase links.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
 
@@ -927,7 +927,7 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 19 — Add the shared structured reference library
 
-**Status:** Not started.
+**Status:** Complete (2026-07-26).
 
 **Outcome:** References are stored once, grouped by source, linked to phases by ID, and inspected without eagerly loading bodies.
 
@@ -935,29 +935,38 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 - Add structured-reference CRUD, validation, deduplication, open/inspect, and phase linking.
 - Preserve repository ownership and canonical source identity across multi-repository phases.
-- Show compact chips/rows and relevance notes; fetch current content only on demand.
+- Show compact rows and relevance notes; open current content only on explicit demand.
 
 **Non-goals**
 
-- No full MCP transcript as the durable record, eager body injection, or automatic agent additions.
+- No full MCP transcript as the durable record, eager body injection, session behavior, or automatic agent additions.
 
 **Affected seams**
 
-- Reference tab and new reference components
+- Reference tab and `gg-app/src/NotesReferences.tsx`
 - phase detail components
-- sidecar Notes repository/validators
-- URL/file opening through existing Tauri seams
+- app and sidecar Notes repository/validators
+- URL opening through the existing Tauri opener plugin
 
 **References:** [NOTE-04](#reference-register), [NOTE-05](#reference-register), [NOTE-06](#reference-register), [NOTE-07](#reference-register), [NOTE-08](#reference-register)
 
 **Acceptance tests**
 
-- One reference links to multiple phases without duplication.
+- One reference links to multiple active, settled, and archived phases without duplication.
 - GitHub owner/repo/revision/path/range/issue/PR/query metadata round-trips and malformed entries are rejected.
-- Empty groups disappear; links open exact canonical sources; no body fetch occurs until inspect/start.
-- Multi-repository grouping and unlink-without-delete behavior pass.
+- Empty groups disappear; explicit open uses the exact canonical URL; rendering, selection, CRUD, and linking make no opener or body request.
+- Multi-repository grouping, duplicate reuse, unlink-without-delete, linked-delete refusal, and conflict replay pass.
 
-**Hard stop:** Show exact attached references before any phase can start. Do not add prompt saving until reference and phase destinations are unambiguous.
+**Completion evidence**
+
+- **Focused app matrix:** 85 tests across helper, storage, optimistic replay, full ProjectNotes UI, and agent pane files passed; full gg-app passed 419 tests across 47 files.
+- **Focused sidecar matrix:** 38 repository/route tests passed, including canonical identity parity, exact restart round-trip, many-to-many links, deletion integrity, CAS conflict, and fan-out.
+- **Isolated-home ggcoder suite:** a Windows-native `HOME`/`USERPROFILE` rerun passed 1,968 tests with 15 explicit skips across 183 files. Earlier POSIX-style isolated-home attempts were invalid on Windows and are not counted.
+- **Release gates:** app and ggcoder typechecks/builds, lint, format, Rust 102-test suite, sidecar bundle, generated-output audits, and diff checks passed.
+- **Rendered review:** `.gg/evidence/phase19-review.md` records desktop empty/detail/50-reference states, 320–420 px detail/form states, 200% text, forced colors, reduced motion, keyboard validation, and a critique/revision cycle at 22/24.
+- **Honest limits:** Native Tauri debug launch and responsiveness passed, but the debug profile had no configured project, so native Notes interaction remains unverified. Screen-reader speech output, automated accessibility scanning, RTL manual review, and field-performance telemetry remain unverified.
+
+**Hard stop:** Satisfied — exact attached references are visible before lifecycle controls, canonical sources open only on explicit action, concurrent reference mutations converge safely, and no session, prompt-saving, body-fetch, or automatic-agent behavior was added.
 
 ## Phase 20 — Add Ken prompt Send, Fresh send, and Save actions
 

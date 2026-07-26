@@ -26,6 +26,14 @@ const target = {
   sessionPath: "/s",
 };
 
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
 const notesTask = {
   id: "task-1",
   text: "verify transport",
@@ -238,6 +246,112 @@ describe("pane agent client", () => {
     });
   });
 
+  it("buffers pane events until session identity resolves and drops stale sessions", async () => {
+    const status = deferred<{
+      ready: boolean;
+      error: null;
+      generation: number;
+      sessionId: string;
+    }>();
+    invoke.mockImplementation((command: string) =>
+      command === "agent_pane_status" ? status.promise : Promise.resolve({}),
+    );
+    const onEvent = vi.fn();
+    const unsubscribe = createPaneAgentClient("right").subscribe(onEvent);
+    await vi.waitFor(() => expect(listeners.has("agent-event")).toBe(true));
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("agent_pane_status", { paneId: "right" }),
+    );
+
+    listeners.get("agent-event")!({
+      payload: {
+        paneId: "right",
+        sessionId: "session",
+        type: "notes_change",
+        data: notesSnapshot,
+      },
+    });
+    listeners.get("agent-event")!({
+      payload: { paneId: "right", sessionId: "stale", type: "delta", data: "stale" },
+    });
+    expect(onEvent).not.toHaveBeenCalled();
+
+    status.resolve({ ready: true, error: null, generation: 1, sessionId: "session" });
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
+    expect(onEvent).toHaveBeenCalledWith({ type: "notes_change", data: notesSnapshot });
+    unsubscribe();
+  });
+
+  it("refreshes identity and re-evaluates mismatched envelopes once in arrival order", async () => {
+    const refreshedStatus = deferred<{
+      ready: boolean;
+      error: null;
+      generation: number;
+      sessionId: string;
+    }>();
+    let statusCalls = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command !== "agent_pane_status") return Promise.resolve({});
+      statusCalls += 1;
+      return statusCalls === 1
+        ? Promise.resolve({ ready: true, error: null, generation: 1, sessionId: "old" })
+        : refreshedStatus.promise;
+    });
+    const onEvent = vi.fn();
+    const unsubscribe = createPaneAgentClient("right").subscribe(onEvent);
+    await vi.waitFor(() => expect(listeners.has("agent-event")).toBe(true));
+
+    listeners.get("agent-event")!({
+      payload: { paneId: "right", sessionId: "old", type: "delta", data: "initialized" },
+    });
+    await vi.waitFor(() =>
+      expect(onEvent).toHaveBeenCalledWith({ type: "delta", data: "initialized" }),
+    );
+    onEvent.mockClear();
+
+    listeners.get("agent-event")!({
+      payload: { paneId: "right", sessionId: "new", type: "delta", data: 1 },
+    });
+    listeners.get("agent-event")!({
+      payload: { paneId: "right", sessionId: "new", type: "delta", data: 2 },
+    });
+    await vi.waitFor(() => expect(statusCalls).toBe(2));
+    expect(onEvent).not.toHaveBeenCalled();
+
+    refreshedStatus.resolve({ ready: true, error: null, generation: 2, sessionId: "new" });
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(2));
+    expect(onEvent.mock.calls).toEqual([
+      [{ type: "delta", data: 1 }],
+      [{ type: "delta", data: 2 }],
+    ]);
+    unsubscribe();
+  });
+
+  it("does not deliver buffered envelopes after disposal", async () => {
+    const status = deferred<{
+      ready: boolean;
+      error: null;
+      generation: number;
+      sessionId: string;
+    }>();
+    invoke.mockImplementation((command: string) =>
+      command === "agent_pane_status" ? status.promise : Promise.resolve({}),
+    );
+    const onEvent = vi.fn();
+    const unsubscribe = createPaneAgentClient("right").subscribe(onEvent);
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("agent_pane_status", { paneId: "right" }),
+    );
+    listeners.get("agent-event")!({
+      payload: { paneId: "right", sessionId: "session", type: "delta", data: 1 },
+    });
+
+    unsubscribe();
+    status.resolve({ ready: true, error: null, generation: 1, sessionId: "session" });
+    await Promise.resolve();
+    expect(onEvent).not.toHaveBeenCalled();
+  });
+
   it("preserves lifecycle generations and rejects stale pane events", async () => {
     const c = createPaneAgentClient("right");
     invoke.mockImplementation(async (command: string) =>
@@ -255,7 +369,7 @@ describe("pane agent client", () => {
     expect(invoke).toHaveBeenCalledWith("agent_pane_dispose", { paneId: "right", generation: 8 });
 
     const onEvent = vi.fn();
-    c.subscribe(onEvent);
+    const unsubscribe = c.subscribe(onEvent);
     await vi.waitFor(() => expect(listeners.has("agent-event")).toBe(true));
     await vi.waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("agent_pane_status", { paneId: "right" }),
@@ -266,7 +380,8 @@ describe("pane agent client", () => {
     listeners.get("agent-event")!({
       payload: { paneId: "right", sessionId: "active", type: "delta", data: 2 },
     });
-    expect(onEvent).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
     expect(onEvent).toHaveBeenCalledWith({ type: "delta", data: 2 });
+    unsubscribe();
   });
 });

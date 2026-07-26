@@ -1,14 +1,30 @@
 import { useEffect, useRef, useState } from "react";
+import { referenceRepositoryLabel, referenceSourceLabel } from "./notes-reference";
 import type { NotesPhaseInput } from "./useProjectNotes";
-import type { NotesPhase, NotesPhaseStatus } from "./notes-types";
+import type {
+  NotesPhase,
+  NotesPhaseStatus,
+  NotesReference,
+  NotesReferenceOperationResult,
+} from "./notes-types";
 
 interface RoadmapProps {
   phases: NotesPhase[];
+  references: NotesReference[];
   onCreatePhase(input: NotesPhaseInput): void;
   onEditPhase(id: string, input: NotesPhaseInput): void;
   onMovePhase(id: string, direction: "up" | "down"): void;
   onChangePhaseStatus(id: string, status: NotesPhaseStatus): void;
   onArchivePhase(id: string): void;
+  onLinkReferenceToPhase(
+    referenceId: string,
+    phaseId: string,
+  ): Promise<NotesReferenceOperationResult>;
+  onUnlinkReferenceFromPhase(
+    referenceId: string,
+    phaseId: string,
+  ): Promise<NotesReferenceOperationResult>;
+  onCreateReference(): void;
 }
 
 interface ArchiveProps {
@@ -35,11 +51,15 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 
 export function NotesRoadmap({
   phases,
+  references,
   onCreatePhase,
   onEditPhase,
   onMovePhase,
   onChangePhaseStatus,
   onArchivePhase,
+  onLinkReferenceToPhase,
+  onUnlinkReferenceFromPhase,
+  onCreateReference,
 }: RoadmapProps): React.ReactElement {
   const visiblePhases = phases.filter((phase) => phase.archivedAt === null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -226,6 +246,7 @@ export function NotesRoadmap({
           <PhaseDetail
             key={selectedPhase.id}
             phase={selectedPhase}
+            references={references}
             position={visiblePhases.findIndex((phase) => phase.id === selectedPhase.id)}
             phaseCount={visiblePhases.length}
             onClose={closeDetail}
@@ -258,6 +279,27 @@ export function NotesRoadmap({
               onChangePhaseStatus(selectedPhase.id, "cancelled");
               setAnnouncement(`Cancelled phase: ${selectedPhase.title}`);
             }}
+            onLinkReference={(referenceId) => {
+              const reference = references.find((item) => item.id === referenceId);
+              const referenceLabel = reference ? referenceSourceLabel(reference) : "reference";
+              const phaseTitle = selectedPhase.title;
+              void onLinkReferenceToPhase(referenceId, selectedPhase.id).then((result) => {
+                setAnnouncement(
+                  referenceLinkAnnouncement(result, "attach", referenceLabel, phaseTitle),
+                );
+              });
+            }}
+            onUnlinkReference={(referenceId) => {
+              const reference = references.find((item) => item.id === referenceId);
+              const referenceLabel = reference ? referenceSourceLabel(reference) : "reference";
+              const phaseTitle = selectedPhase.title;
+              void onUnlinkReferenceFromPhase(referenceId, selectedPhase.id).then((result) => {
+                setAnnouncement(
+                  referenceLinkAnnouncement(result, "detach", referenceLabel, phaseTitle),
+                );
+              });
+            }}
+            onCreateReference={onCreateReference}
           />
         )}
       </div>
@@ -271,6 +313,7 @@ export function NotesRoadmap({
 
 function PhaseDetail({
   phase,
+  references,
   position,
   phaseCount,
   onClose,
@@ -279,8 +322,12 @@ function PhaseDetail({
   onChangePhaseStatus,
   onArchivePhase,
   onCancelPhase,
+  onLinkReference,
+  onUnlinkReference,
+  onCreateReference,
 }: {
   phase: NotesPhase;
+  references: NotesReference[];
   position: number;
   phaseCount: number;
   onClose(): void;
@@ -289,6 +336,9 @@ function PhaseDetail({
   onChangePhaseStatus(status: NotesPhaseStatus): void;
   onArchivePhase(): void;
   onCancelPhase(): void;
+  onLinkReference(referenceId: string): void;
+  onUnlinkReference(referenceId: string): void;
+  onCreateReference(): void;
 }): React.ReactElement {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(phase.title);
@@ -432,6 +482,55 @@ function PhaseDetail({
         </>
       )}
 
+      <section
+        className="notes-phase-references"
+        aria-labelledby={`notes-phase-references-${phase.id}`}
+      >
+        <div className="notes-phase-references-heading">
+          <div>
+            <h4 id={`notes-phase-references-${phase.id}`}>Attached references</h4>
+            <p>
+              {phase.referenceIds.length === 1
+                ? "1 source attached"
+                : `${phase.referenceIds.length} sources attached`}
+            </p>
+          </div>
+        </div>
+        {references.length === 0 ? (
+          <div className="notes-phase-references-empty">
+            <p>Create a structured reference before attaching source context.</p>
+            <button type="button" onClick={onCreateReference}>
+              Create a reference
+            </button>
+          </div>
+        ) : (
+          <ul className="notes-phase-reference-options">
+            {references.map((reference) => {
+              const checked = phase.referenceIds.includes(reference.id);
+              return (
+                <li key={reference.id} className={checked ? "is-attached" : undefined}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(event) => {
+                        if (event.target.checked) onLinkReference(reference.id);
+                        else onUnlinkReference(reference.id);
+                      }}
+                    />
+                    <span>
+                      <strong>{referenceSourceLabel(reference)}</strong>
+                      <small>{referenceRepositoryLabel(reference)}</small>
+                      <span>{reference.relevance || "No relevance note."}</span>
+                    </span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
       <div className="notes-phase-controls">
         <div className="notes-field notes-phase-status-control">
           <label htmlFor={`notes-phase-status-${phase.id}`}>Status override</label>
@@ -515,6 +614,35 @@ export function NotesRoadmapArchive({ phases, onRestorePhase }: ArchiveProps): R
 
 function statusLabel(status: NotesPhaseStatus): string {
   return STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status;
+}
+
+function referenceLinkAnnouncement(
+  result: NotesReferenceOperationResult,
+  action: "attach" | "detach",
+  referenceLabel: string,
+  phaseTitle: string,
+): string {
+  if (result.status === "committed" || result.status === "reused") {
+    return action === "attach"
+      ? `Attached ${referenceLabel} to ${phaseTitle}`
+      : `Detached ${referenceLabel} from ${phaseTitle}`;
+  }
+  if (result.status === "missing-reference") {
+    return `Couldn’t ${action}: the reference was removed in another window.`;
+  }
+  if (result.status === "missing-phase") {
+    return `Couldn’t ${action}: the phase was removed in another window.`;
+  }
+  if (result.status === "failed" && result.reason === "invalid") {
+    return `Couldn’t ${action}: Project Notes rejected the change. Review the reference and try again.`;
+  }
+  if (result.status === "failed" && result.reason === "corrupt") {
+    return `Couldn’t ${action}: Project Notes are unreadable. Repair or restore project storage first.`;
+  }
+  if (result.status === "failed" && result.reason === "missing") {
+    return `Couldn’t ${action}: project Notes storage is missing. Reopen the project and try again.`;
+  }
+  return `Couldn’t ${action} the reference. Check Notes storage and try again.`;
 }
 
 function primaryAction(phase: NotesPhase): "Start" | "Resume" | "Review" {

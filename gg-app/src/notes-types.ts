@@ -262,7 +262,11 @@ export type NotesPromptSaveResult =
   | { status: "replacement-conflict"; phaseId: string; title: string }
   | { status: "missing-phase"; phaseId: string }
   | { status: "archived-phase"; phaseId: string; title: string }
-  | { status: "failed"; reason: NotesOperationFailureReason };
+  | { status: "failed"; reason: "invalid"; error?: NotesValidationError }
+  | {
+      status: "failed";
+      reason: Exclude<NotesOperationFailureReason, "invalid">;
+    };
 
 export interface NotesSidecarEvent {
   type: string;

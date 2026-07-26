@@ -15,6 +15,7 @@ import {
   type NotesPromptSaveResult,
   type NotesReferenceOperationResult,
   type NotesSaveResult,
+  type NotesValidationError,
   type ProjectNotesSaveOutcome,
   type ProjectNotesSnapshot,
 } from "./notes-types";
@@ -89,7 +90,7 @@ interface NotesMutation {
   apply(document: NotesDocumentV3): NotesDocumentV3 | null;
   operationResult?(document: NotesDocumentV3): unknown;
   settle?(result: unknown): void;
-  failure?(reason: NotesOperationFailureReason): unknown;
+  failure?(reason: NotesOperationFailureReason, error?: NotesValidationError): unknown;
 }
 
 interface ReferenceMutationApplication {
@@ -482,8 +483,10 @@ export function useProjectNotes(
         }
         if (mutation.settle) {
           queueRef.current = queueRef.current.filter((queued) => queued.id !== mutation.id);
+          const reason = saveOutcomeFailureReason(outcome);
+          const validationError = outcome.status === "invalid" ? outcome.error : undefined;
           mutation.settle(
-            mutation.failure?.(saveOutcomeFailureReason(outcome)) ?? referenceSaveFailure(outcome),
+            mutation.failure?.(reason, validationError) ?? referenceSaveFailure(outcome),
           );
         }
         if (outcome.status === "invalid") {
@@ -942,7 +945,11 @@ export function useProjectNotes(
           operationResult: (current) =>
             evaluatePromptSave(current, input, phaseId, title, prompt, requestedAt).result,
           settle: (result) => resolve(result as NotesPromptSaveResult),
-          failure: (reason) => ({ status: "failed", reason }),
+          failure: (reason, error) => ({
+            status: "failed",
+            reason,
+            ...(error ? { error } : {}),
+          }),
         });
       });
     },

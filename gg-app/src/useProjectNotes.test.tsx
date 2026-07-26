@@ -1220,7 +1220,27 @@ describe("useProjectNotes sidecar authority", () => {
   });
 
   it.each([
-    ["invalid", { status: "invalid", error: { path: "phases", message: "invalid" } }],
+    { path: "phases", message: "invalid" },
+    { path: "$", message: "notes request body exceeds 4194304 bytes" },
+  ])("preserves an invalid sidecar save error through prompt settlement", async (error) => {
+    const cwd = `/work/invalid-${error.path}`;
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("base") });
+    const client = server.connect(cwd);
+    client.saveOutcome = { status: "invalid", error };
+    const options = hookOptions(client, new MemoryStorage());
+    const hook = renderHook(() => useProjectNotes(cwd, options));
+    await waitFor(() => expect(hook.result.current.document.reference).toBe("base"));
+
+    await act(async () => {
+      await expect(
+        hook.result.current.savePrompt({ kind: "new-draft", title: "Draft", prompt: "prompt" }),
+      ).resolves.toEqual({ status: "failed", reason: "invalid", error });
+    });
+    expect(hook.result.current.document.phases).toHaveLength(0);
+  });
+
+  it.each([
     ["missing", { status: "missing" }],
     ["corrupt", { status: "corrupt", primary: "malformed-json", backup: null }],
   ] as const)("maps a %s sidecar save failure", async (reason, outcome) => {

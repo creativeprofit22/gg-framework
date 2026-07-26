@@ -102,7 +102,7 @@ import {
   type KenPromptActionDispatcher,
   type KenPromptActionResult,
 } from "./ken-prompt-actions";
-import type { NotesPromptSaveResult } from "./notes-types";
+import type { NotesPromptSaveResult, NotesValidationError } from "./notes-types";
 import "./App.css";
 
 const DEFAULT_INPUT_PLACEHOLDER = `Type a message, / commands, @ files, ${MENTOR_HANDLE} for help`;
@@ -130,6 +130,8 @@ const BUILD_IDENTITY = formatBuildIdentity();
 const SESSION_RESET_TIMEOUT_MS = 8_000;
 const SESSION_RESET_RECOVERY_MESSAGE =
   "The new session opened, but live confirmation was delayed. This pane was recovered from the successful response.";
+const AUTOPILOT_NEW_SESSION_RETRY_MESSAGE =
+  "Ken is reviewing this session. Wait for the review to finish or cancel it, then try again.";
 
 class SessionResetConfirmationTimeoutError extends Error {
   constructor(readonly operationId: string) {
@@ -157,6 +159,10 @@ function newSessionFailureMessage(error: unknown): string {
 const VIDEO_CAPABILITY_WARNING =
   "This model can't watch video directly. The agent can still extract frames or audio with ffmpeg if needed — switch to a video-capable model (Gemini, Kimi, MiniMax) for native video analysis.";
 
+function isNotesRequestBodyTooLarge(error: NotesValidationError | undefined): boolean {
+  return error?.path === "$" && /^notes request body exceeds \d+ bytes$/.test(error.message.trim());
+}
+
 function notesPromptActionResult(result: NotesPromptSaveResult): KenPromptActionResult {
   if (result.status === "committed") {
     return { status: "saved", phaseId: result.phaseId, title: result.title };
@@ -182,8 +188,15 @@ function notesPromptActionResult(result: NotesPromptSaveResult): KenPromptAction
       message: `${result.title} was archived in another window. Restore it or choose another destination.`,
     };
   }
+  if (result.reason === "invalid") {
+    const message = isNotesRequestBodyTooLarge(result.error)
+      ? "Project Notes is too large to save. Shorten the saved prompt or Notes document, then try again."
+      : result.error
+        ? `Project Notes rejected this save (${result.error.path}: ${result.error.message}). Review the Notes content and try again.`
+        : "Project Notes rejected this prompt. Review the title and try again.";
+    return { status: "failed", action: "commit-save", message };
+  }
   const messages = {
-    invalid: "Project Notes rejected this prompt. Review the title and try again.",
     missing: "Project Notes storage is missing. Reopen the project and try again.",
     corrupt: "Project Notes are unreadable. Repair or restore project storage first.",
     unavailable: "Project Notes are unavailable. Check the sidecar and try again.",
@@ -1681,9 +1694,16 @@ export function AgentPane({
         }
         kenPromptActionLockRef.current = true;
         try {
-          await client.sendPrompt(prompt, [], { kenSent: true });
+          const submission = await client.sendPrompt(prompt, [], { kenSent: true });
           stickToBottomRef.current = true;
-          pushItem({ kind: "user", id: nextId(), text: prompt, kenSent: true });
+          setQueuedCount(submission.count);
+          pushItem({
+            kind: "user",
+            id: nextId(),
+            text: prompt,
+            kenSent: true,
+            queued: submission.queued,
+          });
           endStreamingText();
           return { status: "sent", session: "current" };
         } catch {
@@ -1698,6 +1718,13 @@ export function AgentPane({
       }
 
       if (action.type === "send-fresh") {
+        if (autopilotReviewing) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: AUTOPILOT_NEW_SESSION_RETRY_MESSAGE,
+          };
+        }
         if (running) {
           return {
             status: "failed",
@@ -1729,9 +1756,16 @@ export function AgentPane({
           };
         }
         try {
-          await client.sendPrompt(prompt, [], { kenSent: true });
+          const submission = await client.sendPrompt(prompt, [], { kenSent: true });
           stickToBottomRef.current = true;
-          pushItem({ kind: "user", id: nextId(), text: prompt, kenSent: true });
+          setQueuedCount(submission.count);
+          pushItem({
+            kind: "user",
+            id: nextId(),
+            text: prompt,
+            kenSent: true,
+            queued: submission.queued,
+          });
           endStreamingText();
           return { status: "sent", session: "fresh" };
         } catch {
@@ -1790,12 +1824,23 @@ export function AgentPane({
       );
       return notesPromptActionResult(saveResult);
     },
-    [client, createAuthoritativeNewSession, endStreamingText, pushItem, running],
+    [
+      autopilotReviewing,
+      client,
+      createAuthoritativeNewSession,
+      endStreamingText,
+      pushItem,
+      running,
+    ],
   );
 
   const kenPromptDispatcher = useMemo<KenPromptActionDispatcher>(
-    () => ({ dispatch: dispatchKenPromptAction }),
-    [dispatchKenPromptAction],
+    () => ({
+      dispatch: dispatchKenPromptAction,
+      blockedReason: (action) =>
+        action === "send-fresh" && autopilotReviewing ? AUTOPILOT_NEW_SESSION_RETRY_MESSAGE : null,
+    }),
+    [autopilotReviewing, dispatchKenPromptAction],
   );
 
   // Record a sent prompt for ↑/↓ recall (skips consecutive duplicates, capped).
@@ -2171,6 +2216,10 @@ export function AgentPane({
   // after the sidecar confirms (it emits `session_reset`, handled below).
   async function startNewSession(): Promise<void> {
     if (sessionMutationLockRef.current || running) return;
+    if (autopilotReviewing) {
+      toast(AUTOPILOT_NEW_SESSION_RETRY_MESSAGE, "warning");
+      return;
+    }
     try {
       await createAuthoritativeNewSession();
       setConfirmNewSession(false);
@@ -2387,8 +2436,10 @@ export function AgentPane({
             <span className="picker-head-actions">
               <button
                 className="btn btn-primary btn-sm"
-                disabled={running || newSessionBusy}
-                title="Start a new chat"
+                disabled={running || autopilotReviewing || newSessionBusy}
+                title={
+                  autopilotReviewing ? AUTOPILOT_NEW_SESSION_RETRY_MESSAGE : "Start a new chat"
+                }
                 onClick={() => setConfirmNewSession(true)}
               >
                 {"+ New"}
@@ -2420,8 +2471,12 @@ export function AgentPane({
                 />
                 <button
                   className="btn btn-primary btn-sm"
-                  disabled={running || newSessionBusy}
-                  title="Start a new session for this project"
+                  disabled={running || autopilotReviewing || newSessionBusy}
+                  title={
+                    autopilotReviewing
+                      ? AUTOPILOT_NEW_SESSION_RETRY_MESSAGE
+                      : "Start a new session for this project"
+                  }
                   onClick={() => setConfirmNewSession(true)}
                 >
                   {"+ New"}
@@ -2997,9 +3052,11 @@ const TranscriptRow = memo(function TranscriptRow({
       if (item.kenSent) {
         // Sent from a Ken "Send to GG Coder" button: show a shimmering "Sent to GG
         // Coder" in Ken's color (like a slash command shows `/name`), not the
-        // full prompt body. The full body still went to GG Coder.
+        // full prompt body. Queued sends keep the same label plus the standard
+        // queue pill until run_end confirms the agent consumed them.
         return (
-          <div className="user-msg command labelled user-ken-sent">
+          <div className={`user-msg command labelled user-ken-sent${item.queued ? " queued" : ""}`}>
+            {item.queued && <span className="queued-pill">queued</span>}
             <span className="command-shimmer" style={{ color: theme.ken }}>
               Sent to {PRODUCT_DISPLAY_NAME}
             </span>

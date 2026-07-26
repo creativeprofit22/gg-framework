@@ -20,6 +20,33 @@ export interface SessionMutationConflictBody {
   owner: SessionMutationOwner;
 }
 
+export interface AppSidecarSessionBusyState {
+  running: boolean;
+  autopilotActive: boolean;
+  runLifecycleRunning: boolean;
+}
+
+export interface AppSidecarSessionBusyConflictBody {
+  error: "session_busy";
+  message: string;
+  state: AppSidecarSessionBusyState;
+}
+
+/** Authoritative gate for reset-style routes that require an idle logical session. */
+export function isAppSidecarSessionBusy(state: AppSidecarSessionBusyState): boolean {
+  return state.running || state.autopilotActive || state.runLifecycleRunning;
+}
+
+export function appSidecarSessionBusyConflictBody(
+  state: AppSidecarSessionBusyState,
+): AppSidecarSessionBusyConflictBody {
+  return {
+    error: "session_busy",
+    message: "Cannot start a new session while the current session is active.",
+    state,
+  };
+}
+
 /**
  * Fail-fast lifecycle gate owned by one logical sidecar session.
  *

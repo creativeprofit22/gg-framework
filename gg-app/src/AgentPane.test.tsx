@@ -187,7 +187,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     deleteJiwa: vi.fn(),
     getSubscriptionUsage: vi.fn(),
     enhancePrompt: vi.fn(),
-    sendPrompt: vi.fn(),
+    sendPrompt: vi.fn(async () => ({ queued: false, count: 0 })),
     cancel: vi.fn(),
     sendKenPrompt: vi.fn(),
     cancelKen: vi.fn(),
@@ -223,8 +223,15 @@ function client(paneId: string, generation: number): PaneAgentClient {
   } as unknown as PaneAgentClient;
 }
 
-async function renderKenPromptPane(pane: PaneAgentClient): Promise<HTMLButtonElement> {
-  vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+async function renderKenPromptPane(
+  pane: PaneAgentClient,
+  running = false,
+): Promise<HTMLButtonElement> {
+  vi.mocked(pane.getState).mockResolvedValue({
+    ...agentState("azure:gpt-test"),
+    running,
+    runState: running ? "running" : "idle",
+  });
   vi.mocked(pane.listHistory).mockResolvedValue([
     {
       role: "assistant",
@@ -604,6 +611,63 @@ describe("AgentPane lifecycle", () => {
     expect(document.querySelector(".user-ken-sent")?.textContent).toContain("Sent to");
   });
 
+  it("renders an active-run Ken current-send as queued with the authoritative count", async () => {
+    const pane = client("pane-ken-queued", 1);
+    vi.mocked(pane.sendPrompt).mockResolvedValueOnce({ queued: true, count: 2 });
+    const send = await renderKenPromptPane(pane, true);
+
+    fireEvent.click(send);
+
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith(KEN_PROMPT, [], { kenSent: true }),
+    );
+    const sentRow = document.querySelector(".user-ken-sent.queued");
+    expect(sentRow?.querySelector(".queued-pill")?.textContent).toBe("queued");
+    expect(sentRow?.textContent).toContain("Sent to");
+    expect(document.querySelector(".queued-bar")?.textContent).toContain("2 messages queued");
+  });
+
+  it("restores the Ken-sent presentation from hydrated history metadata", async () => {
+    const pane = client("pane-ken-history", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "user", text: KEN_PROMPT, kenSent: true },
+    ]);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+
+    await waitFor(() => expect(document.querySelector(".user-ken-sent")).not.toBeNull());
+    expect(document.querySelector(".user-ken-sent")?.textContent).toContain("Sent to");
+    expect(document.querySelector(".user-ken-sent")?.textContent).not.toContain(KEN_PROMPT);
+  });
+
+  it("keeps an oversized sidecar Notes rejection retryable with shortening guidance", async () => {
+    const pane = client("pane-ken-notes-too-large", 1);
+    vi.mocked(pane.saveNotes).mockResolvedValue({
+      status: "invalid",
+      error: { path: "$", message: "notes request body exceeds 4194304 bytes" },
+    });
+    await renderKenPromptPane(pane);
+
+    fireEvent.click(screen.getByRole("button", { name: "More prompt actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save to Notes" }));
+    const save = await screen.findByRole("button", { name: "Save prompt" });
+    fireEvent.click(save);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(
+      "Shorten the saved prompt or Notes document, then try again.",
+    );
+    expect(alert.textContent).not.toContain("Review the title");
+    expect(screen.getByText("Prompt preview")).toBeTruthy();
+    expect((save as HTMLButtonElement).disabled).toBe(false);
+    expect(pane.saveNotes).toHaveBeenCalledOnce();
+
+    fireEvent.click(save);
+    await waitFor(() => expect(pane.saveNotes).toHaveBeenCalledTimes(2));
+  });
+
   it("keeps current-send retryable without a false Sent row after rejection", async () => {
     const pane = client("pane-ken-reject", 1);
     vi.mocked(pane.sendPrompt).mockRejectedValueOnce(new Error("empty prompt"));
@@ -619,6 +683,60 @@ describe("AgentPane lifecycle", () => {
     fireEvent.click(send);
     await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(document.querySelector(".user-ken-sent")).not.toBeNull());
+  });
+
+  it("blocks Ken fresh-send during Autopilot review and allows retry after it finishes", async () => {
+    const pane = client("pane-ken-autopilot", 1);
+    await renderKenPromptPane(pane);
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    expect(handleEvent).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "More prompt actions" }));
+    const fresh = screen.getByRole("button", { name: "New session + send" });
+
+    act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
+
+    await waitFor(() => expect((fresh as HTMLButtonElement).disabled).toBe(true));
+    expect(fresh.title).toContain("Wait for the review to finish or cancel it");
+    fireEvent.click(fresh);
+    expect(pane.newSession).not.toHaveBeenCalled();
+
+    act(() => handleEvent?.({ type: "autopilot_done", data: {} }));
+
+    await waitFor(() => expect((fresh as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(fresh);
+    await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
+    act(() => nativeMocks.onSessionReset?.("operation-1"));
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+  });
+
+  it("blocks top-bar New Session during Autopilot review and allows retry afterward", async () => {
+    const pane = client("pane-topbar-autopilot", 1);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    expect(handleEvent).toBeDefined();
+    const newSessionButton = screen.getByTitle("Start a new session for this project");
+
+    act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
+
+    await waitFor(() => expect((newSessionButton as HTMLButtonElement).disabled).toBe(true));
+    expect(newSessionButton.title).toContain("Wait for the review to finish or cancel it");
+    fireEvent.click(newSessionButton);
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull();
+
+    act(() => handleEvent?.({ type: "autopilot_ignored", data: {} }));
+
+    await waitFor(() => expect((newSessionButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(newSessionButton);
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
+    act(() => nativeMocks.onSessionReset?.("operation-1"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull());
   });
 
   it("matches the reset broadcast that arrives before the successful response", async () => {

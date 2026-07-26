@@ -144,7 +144,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === "POST" && url.pathname === "/prompt") {
     session.promptCount += 1;
     audit({ route: "/prompt", status: 202, count: session.promptCount });
-    json(response, 202, { accepted: true, count: session.promptCount });
+    json(response, 202, { queued: false, count: 0 });
     return;
   }
   json(response, 200, {});

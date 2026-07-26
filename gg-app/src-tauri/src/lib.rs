@@ -1505,6 +1505,28 @@ async fn agent_usage(
     Ok(body)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptSubmissionResult {
+    queued: bool,
+    count: usize,
+}
+
+fn parse_prompt_submission_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<PromptSubmissionResult, String> {
+    if !status.is_success() {
+        return Err(sidecar_error_text(status, body));
+    }
+    let result: PromptSubmissionResult =
+        serde_json::from_str(body).map_err(|_| "invalid prompt submission response".to_string())?;
+    if (result.queued && result.count == 0) || (!result.queued && result.count != 0) {
+        return Err("invalid prompt submission response".into());
+    }
+    Ok(result)
+}
+
 async fn post_sidecar_prompt(
     client: &reqwest::Client,
     endpoint: &str,
@@ -1512,7 +1534,7 @@ async fn post_sidecar_prompt(
     text: String,
     attachments: Option<serde_json::Value>,
     meta: Option<serde_json::Value>,
-) -> Result<(), String> {
+) -> Result<PromptSubmissionResult, String> {
     let response = client
         .post(endpoint)
         .header("x-gg-session", gg_sid)
@@ -1525,11 +1547,8 @@ async fn post_sidecar_prompt(
         .await
         .map_err(|e| e.to_string())?;
     let status = response.status();
-    if status.is_success() {
-        return Ok(());
-    }
     let body = response.text().await.unwrap_or_default();
-    Err(sidecar_error_text(status, &body))
+    parse_prompt_submission_response(status, &body)
 }
 
 /// Proxy: submit a prompt (optionally with attachments). The reply streams back
@@ -1542,7 +1561,7 @@ async fn agent_prompt(
     text: String,
     attachments: Option<serde_json::Value>,
     meta: Option<serde_json::Value>,
-) -> Result<(), String> {
+) -> Result<PromptSubmissionResult, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     post_sidecar_prompt(
@@ -5707,7 +5726,10 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 mod tests {
     use super::*;
 
-    fn prompt_proxy_result(status: reqwest::StatusCode, body: &str) -> Result<(), String> {
+    fn prompt_proxy_result(
+        status: reqwest::StatusCode,
+        body: &str,
+    ) -> Result<PromptSubmissionResult, String> {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5802,11 +5824,41 @@ mod tests {
     }
 
     #[test]
-    fn prompt_proxy_accepts_sidecar_202() {
+    fn prompt_proxy_preserves_direct_and_queued_sidecar_202_results() {
         assert_eq!(
-            prompt_proxy_result(reqwest::StatusCode::ACCEPTED, r#"{"accepted":true}"#,),
-            Ok(())
+            prompt_proxy_result(
+                reqwest::StatusCode::ACCEPTED,
+                r#"{"queued":false,"count":0}"#,
+            ),
+            Ok(PromptSubmissionResult {
+                queued: false,
+                count: 0,
+            })
         );
+        assert_eq!(
+            prompt_proxy_result(
+                reqwest::StatusCode::ACCEPTED,
+                r#"{"queued":true,"count":2}"#,
+            ),
+            Ok(PromptSubmissionResult {
+                queued: true,
+                count: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn prompt_proxy_rejects_malformed_success_shapes() {
+        for body in [
+            r#"{"accepted":true}"#,
+            r#"{"queued":true,"count":0}"#,
+            r#"{"queued":false,"count":1}"#,
+        ] {
+            assert_eq!(
+                prompt_proxy_result(reqwest::StatusCode::ACCEPTED, body),
+                Err("invalid prompt submission response".to_string())
+            );
+        }
     }
 
     #[test]

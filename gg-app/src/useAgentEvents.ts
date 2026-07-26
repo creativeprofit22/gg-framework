@@ -785,8 +785,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           );
           endStreamingText();
           finalizeThinking();
-          // The queue drained into this run — un-dim any messages that were
-          // waiting, since the agent has now consumed them.
+          // The queue drained into this run — clear its count and un-dim any
+          // messages that were waiting, since the agent has now consumed them.
+          setQueuedCount(0);
           setItems((prev) =>
             prev.map((it) => (it.kind === "user" && it.queued ? { ...it, queued: false } : it)),
           );

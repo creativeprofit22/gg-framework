@@ -72,6 +72,7 @@ describe("pane agent client", () => {
         return { status: "ok", snapshot: { ...notesSnapshot, revision: 2 } };
       }
       if (command === "agent_new_session") return { operationId: "operation-1" };
+      if (command === "agent_prompt") return { queued: false, count: 0 };
       return {};
     });
   });
@@ -89,7 +90,10 @@ describe("pane agent client", () => {
     await c.getProgress();
     await c.getSubscriptionUsage("openai");
     await c.enhancePrompt("e");
-    await c.sendPrompt("p", [], { kenSent: true });
+    await expect(c.sendPrompt("p", [], { kenSent: true })).resolves.toEqual({
+      queued: false,
+      count: 0,
+    });
     await c.cancel();
     await c.sendKenPrompt("k");
     await c.cancelKen();
@@ -154,6 +158,26 @@ describe("pane agent client", () => {
       expectedRevision: 1,
       document: notesDocument,
     });
+  });
+
+  it("validates and preserves the authoritative prompt queue result", async () => {
+    const client = createPaneAgentClient("right");
+    invoke.mockResolvedValueOnce({ queued: true, count: 2 });
+    await expect(client.sendPrompt("queued Ken prompt", [], { kenSent: true })).resolves.toEqual({
+      queued: true,
+      count: 2,
+    });
+
+    for (const invalid of [
+      { accepted: true },
+      { queued: true, count: 0 },
+      { queued: false, count: 1 },
+    ]) {
+      invoke.mockResolvedValueOnce(invalid);
+      await expect(client.sendPrompt("bad shape")).rejects.toThrow(
+        "invalid prompt submission response",
+      );
+    }
   });
 
   it("types new-session HTTP rejection separately from an unknown transport outcome", async () => {

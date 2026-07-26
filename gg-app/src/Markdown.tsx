@@ -259,6 +259,7 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
   }, [prompt, runAction, saveDraft]);
 
   const disabled = sent || pending !== null;
+  const freshSessionBlockedReason = dispatcher?.blockedReason?.("send-fresh") ?? null;
   const selectedPhase = saveDraft?.preview.destinations.find(
     (destination) => destination.phaseId === saveDraft.phaseId,
   );
@@ -316,7 +317,12 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
             >
               {!saveDraft && (
                 <div className="ken-prompt-secondary-actions">
-                  <button type="button" onClick={() => void sendFresh()} disabled={disabled}>
+                  <button
+                    type="button"
+                    onClick={() => void sendFresh()}
+                    disabled={disabled || freshSessionBlockedReason !== null}
+                    title={freshSessionBlockedReason ?? undefined}
+                  >
                     <Plus size={14} aria-hidden="true" />
                     New session + send
                   </button>

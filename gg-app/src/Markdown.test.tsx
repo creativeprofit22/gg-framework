@@ -133,6 +133,44 @@ describe("Ken prompt actions", () => {
     ).toBe(false);
   });
 
+  it("keeps an oversized Notes save preview retryable with shortening guidance", async () => {
+    const guidance =
+      "Project Notes is too large to save. Shorten the saved prompt or Notes document, then try again.";
+    const dispatch = vi.fn(async (action: KenPromptAction): Promise<KenPromptActionResult> => {
+      if (action.type === "prepare-save") {
+        return {
+          status: "preview",
+          preview: {
+            prompt: action.prompt,
+            suggestedTitle: "Implement the exact prompt",
+            destinations: [],
+          },
+        };
+      }
+      if (action.type === "commit-save") {
+        return { status: "failed", action: "commit-save", message: guidance };
+      }
+      return { status: "sent", session: "current" };
+    });
+    renderPrompt(dispatch);
+
+    fireEvent.click(screen.getByRole("button", { name: "More prompt actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save to Notes" }));
+    const save = await screen.findByRole("button", { name: "Save prompt" });
+    fireEvent.click(save);
+
+    expect((await screen.findByRole("alert")).textContent).toContain(guidance);
+    expect(screen.getByText("Prompt preview")).toBeTruthy();
+    expect((save as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.click(save);
+    await waitFor(() =>
+      expect(dispatch.mock.calls.filter(([action]) => action.type === "commit-save")).toHaveLength(
+        2,
+      ),
+    );
+  });
+
   it("announces Autopilot auto-accept save without opening the manual form", async () => {
     const dispatch = vi.fn(
       async (action: KenPromptAction): Promise<KenPromptActionResult> =>

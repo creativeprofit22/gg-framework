@@ -41,6 +41,7 @@ export type KenPromptActionResult =
 
 export interface KenPromptActionDispatcher {
   dispatch(action: KenPromptAction): Promise<KenPromptActionResult>;
+  blockedReason?(action: KenPromptAction["type"]): string | null;
 }
 
 /** Normalize a fenced prompt exactly once before it crosses an action boundary. */

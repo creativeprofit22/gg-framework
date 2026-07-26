@@ -6,6 +6,8 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AppSidecarSessionMutationCoordinator,
+  appSidecarSessionBusyConflictBody,
+  isAppSidecarSessionBusy,
   type SessionMutationKind,
 } from "./app-sidecar-session-mutation.js";
 
@@ -24,6 +26,9 @@ interface Harness {
   sessionDir: string;
   resetEvents: Array<{ operationId: string; kind: SessionMutationKind }>;
   startupEvents: Array<{ operationId: string; kind: SessionMutationKind }>;
+  setAutopilotActive(active: boolean): void;
+  mutationAcquisitions(): number;
+  newSessionCalls(): number;
   maxConcurrentResets(): number;
   close(): Promise<void>;
 }
@@ -42,6 +47,9 @@ async function startHarness(): Promise<Harness> {
   const continueReset = deferred();
   const resetEvents: Harness["resetEvents"] = [];
   const startupEvents: Harness["startupEvents"] = [];
+  let autopilotActive = false;
+  let mutationAcquisitions = 0;
+  let newSessionCalls = 0;
   let activeResets = 0;
   let maxConcurrentResets = 0;
 
@@ -59,12 +67,23 @@ async function startHarness(): Promise<Harness> {
       return;
     }
 
+    if (kind === "new-session") {
+      const busyState = { running: false, autopilotActive, runLifecycleRunning: false };
+      if (isAppSidecarSessionBusy(busyState)) {
+        res.writeHead(409, { "content-type": "application/json" });
+        res.end(JSON.stringify(appSidecarSessionBusyConflictBody(busyState)));
+        return;
+      }
+    }
+
     const mutation = mutations.tryAcquire(kind);
     if (!mutation) {
       res.writeHead(409, { "content-type": "application/json" });
       res.end(JSON.stringify(mutations.conflictBody()));
       return;
     }
+    mutationAcquisitions += 1;
+    if (kind === "new-session") newSessionCalls += 1;
 
     started.resolve();
     void (async () => {
@@ -97,6 +116,11 @@ async function startHarness(): Promise<Harness> {
     sessionDir,
     resetEvents,
     startupEvents,
+    setAutopilotActive: (active) => {
+      autopilotActive = active;
+    },
+    mutationAcquisitions: () => mutationAcquisitions,
+    newSessionCalls: () => newSessionCalls,
     maxConcurrentResets: () => maxConcurrentResets,
     async close() {
       continueReset.resolve();
@@ -149,6 +173,35 @@ async function overlapNewSessionWith(competingPath: "/tasks/run" | "/plan/accept
 }
 
 describe("app-sidecar session mutation routes", () => {
+  it("rejects /new-session before reset or lease acquisition while Autopilot is active", async () => {
+    const harness = await startHarness();
+    harness.setAutopilotActive(true);
+
+    const blocked = await fetch(`${harness.baseUrl}/new-session`, { method: "POST" });
+
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toEqual({
+      error: "session_busy",
+      message: "Cannot start a new session while the current session is active.",
+      state: { running: false, autopilotActive: true, runLifecycleRunning: false },
+    });
+    expect(harness.mutationAcquisitions()).toBe(0);
+    expect(harness.newSessionCalls()).toBe(0);
+    expect(harness.resetEvents).toEqual([]);
+
+    harness.setAutopilotActive(false);
+    const retry = fetch(`${harness.baseUrl}/new-session`, { method: "POST" });
+    await harness.started.promise;
+    expect(harness.mutationAcquisitions()).toBe(1);
+    expect(harness.newSessionCalls()).toBe(1);
+    harness.continueReset.resolve();
+    await expect(retry.then((response) => response.json())).resolves.toEqual({
+      ok: true,
+      operationId: "operation-1",
+    });
+    expect(harness.resetEvents).toEqual([{ operationId: "operation-1", kind: "new-session" }]);
+  });
+
   it("rejects /tasks/run while /new-session owns the logical session", async () => {
     await overlapNewSessionWith("/tasks/run");
   });

@@ -5,7 +5,7 @@
  * Transport:
  *   GET  /state    → { provider, model, cwd, ready }
  *   GET  /events   → text/event-stream of forwarded agent + session events
- *   POST /prompt   → { text } ; runs AgentSession.prompt(text)
+ *   POST /prompt   → { queued, count } ; runs or queues AgentSession.prompt(text)
  *   POST /cancel   → aborts the in-flight run
  *
  * The agent spine (gg-ai → gg-agent → gg-core) and every tool are reused
@@ -24,7 +24,7 @@ import { runJsonMode } from "./modes/json-mode.js";
 import { formatSidecarError, sidecarSensitiveValues } from "./app-sidecar-error.js";
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
-import { AgentSession } from "./core/agent-session.js";
+import { AgentSession, type SessionPromptMeta } from "./core/agent-session.js";
 import { RunLifecycle } from "./core/run-lifecycle.js";
 import {
   CHAT_AGENT_IDS,
@@ -139,7 +139,11 @@ import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-sessio
 import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
 import { ProjectNotesRepository, type ProjectNotesSnapshot } from "./project-notes-repository.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
-import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
+import {
+  AppSidecarSessionMutationCoordinator,
+  appSidecarSessionBusyConflictBody,
+  isAppSidecarSessionBusy,
+} from "./app-sidecar-session-mutation.js";
 import {
   captureSidecarError,
   flushSidecarErrors,
@@ -327,6 +331,11 @@ function isValidProjectName(name: string): boolean {
 }
 
 // ── History reconstruction types ──────────────────────────
+interface PromptSubmissionResult {
+  queued: boolean;
+  count: number;
+}
+
 // Mirrors HistoryEntry in gg-app/src/agent.ts — the wire shape the webview
 // receives from GET /history. Fields beyond role/text carry the transcript
 // item kinds that are reconstructed from persisted session data.
@@ -1771,6 +1780,12 @@ async function createSession(
   // of starting a run that would collide with an injected one on the same
   // session (AgentSession.prompt has no concurrency guard).
   let autopilotActive = false;
+  const sessionBusyState = () => ({
+    running,
+    autopilotActive,
+    runLifecycleRunning: runLifecycle.running,
+  });
+  const isSessionBusy = (): boolean => isAppSidecarSessionBusy(sessionBusyState());
   // Set by /cancel to break out of an in-flight autopilot cycle between steps.
   let autopilotCancelled = false;
   // Hard cap on review→prompt→review rounds per user turn (loop safety).
@@ -2328,6 +2343,9 @@ async function createSession(
         if (!next) return;
         broadcast("queued", { count: session.getQueuedCount() });
         if (!next.text.trim() && next.attachments.length === 0) continue;
+        // This drain becomes a normal user turn, so anchor its display hint to
+        // the imminent prompt message rather than the earlier queue request.
+        await session.persistPromptMeta(next.meta).catch(() => {});
         // A queued message draining as a fresh turn supersedes any pending
         // plan, exactly like a direct POST /prompt turn.
         clearPendingPlan();
@@ -3167,12 +3185,12 @@ async function createSession(
       void readBody(req).then(async (raw) => {
         let text: string;
         let attachments: AppAttachment[];
-        let meta: { kenSent?: boolean; enhancements?: unknown[] } | undefined;
+        let meta: SessionPromptMeta | undefined;
         try {
           const body = JSON.parse(raw) as {
             text?: string;
             attachments?: AppAttachment[];
-            meta?: { kenSent?: boolean; enhancements?: unknown[] };
+            meta?: SessionPromptMeta;
           };
           text = body.text ?? "";
           attachments = Array.isArray(body.attachments) ? body.attachments : [];
@@ -3200,14 +3218,15 @@ async function createSession(
           // .gg/uploads first so the queued media rides the same native-block
           // path as a non-queued attachment prompt when it drains.
           const prepared = attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
-          const count = session.queueMessage(text, prepared);
+          const count = session.queueMessage(text, prepared, meta);
           broadcast("queued", { count });
           log("INFO", "app-sidecar", "prompt accepted", {
             logicalSessionId: opts.id,
             queued: true,
             kenSent: meta?.kenSent === true,
           });
-          json(res, 202, { queued: true, count });
+          const result: PromptSubmissionResult = { queued: true, count };
+          json(res, 202, result);
           return;
         }
         // Keep an operation lease beyond the early 202 while preprocessing and
@@ -3222,24 +3241,14 @@ async function createSession(
           queued: false,
           kenSent: meta?.kenSent === true,
         });
-        json(res, 202, { accepted: true });
+        const result: PromptSubmissionResult = { queued: false, count: 0 };
+        json(res, 202, result);
         try {
           // Webview display hint for this prompt's user bubble (kenSent shimmer
           // label / enhancer highlight segments). Anchored +1 so it attaches to
           // the user message the prompt below is about to push. Queued prompts
-          // skip this (their position in the run is unpredictable).
-          if (meta && (meta.kenSent === true || Array.isArray(meta.enhancements))) {
-            await session
-              .persistAppMarker(
-                "user_hint",
-                {
-                  ...(meta.kenSent === true ? { kenSent: true } : {}),
-                  ...(Array.isArray(meta.enhancements) ? { enhancements: meta.enhancements } : {}),
-                },
-                1,
-              )
-              .catch(() => {});
-          }
+          // persist the same hint only when their actual drain position is known.
+          await session.persistPromptMeta(meta).catch(() => {});
           // Fresh user turn: clear any cancel flag left from a prior cycle so this
           // turn's autopilot review can run.
           autopilotCancelled = false;
@@ -3811,8 +3820,9 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/new-session") {
-      if (running) {
-        json(res, 409, { error: "cannot start a new session while running" });
+      const busyState = sessionBusyState();
+      if (isAppSidecarSessionBusy(busyState)) {
+        json(res, 409, appSidecarSessionBusyConflictBody(busyState));
         return;
       }
       const mutation = sessionMutations.tryAcquire("new-session");
@@ -4361,7 +4371,7 @@ async function createSession(
     broadcastNotesChange,
     handle,
     dispose,
-    isRunning: () => running || autopilotActive || runLifecycle.running,
+    isRunning: isSessionBusy,
   };
 }
 

@@ -114,6 +114,19 @@ export interface SessionAttachment {
   path?: string;
 }
 
+/** Display-only metadata that must follow a queued prompt to its eventual
+ * injection position so resumed app history matches the live transcript. */
+export interface SessionPromptMeta {
+  kenSent?: boolean;
+  enhancements?: unknown[];
+}
+
+interface QueuedUserMessage {
+  text: string;
+  attachments: SessionAttachment[];
+  meta?: SessionPromptMeta;
+}
+
 export interface AgentSessionOptions {
   provider: Provider;
   model: string;
@@ -363,7 +376,9 @@ export class AgentSession {
   // mid-loop steering boundary (user steering wins over the hooks), mirroring
   // the TUI's getSteeringMessages. Each entry carries its own attachments so a
   // user can queue media (images/video/files) mid-run, not just plain text.
-  private userQueue: Array<{ text: string; attachments: SessionAttachment[] }> = [];
+  // Display metadata follows each entry so its persisted history hint is anchored
+  // where that specific queued message is eventually injected.
+  private userQueue: QueuedUserMessage[] = [];
   private processManager?: ProcessManager;
   private lspManager?: LspManager;
   private subAgentManager?: SubAgentManager;
@@ -1019,6 +1034,11 @@ export class AgentSession {
           text: (await this.resolvePromptCommandText(message.text)) ?? message.text,
         })),
       );
+      // The loop appends these user messages in returned order. Anchor each hint
+      // to that exact future slot before handing the batch back to the loop.
+      for (const [index, message] of queued.entries()) {
+        await this.persistPromptMeta(message.meta, index + 1).catch(() => {});
+      }
       // Frame each queued item as concurrent steering — without this wrapper
       // the model treats a mid-run message as a fresh request that supersedes
       // the original task and silently drops it. ONE message per queued item
@@ -1806,11 +1826,14 @@ export class AgentSession {
     }
   }
 
-  /** Queue a user message (optionally with attachments) to be injected mid-run
-   *  as steering. Returns the new queue length. No-op semantics are the caller's
-   *  concern. */
-  queueMessage(text: string, attachments: SessionAttachment[] = []): number {
-    this.userQueue.push({ text, attachments });
+  /** Queue a user message (optionally with attachments and display metadata) to
+   *  be injected mid-run as steering. Returns the new queue length. */
+  queueMessage(
+    text: string,
+    attachments: SessionAttachment[] = [],
+    meta?: SessionPromptMeta,
+  ): number {
+    this.userQueue.push({ text, attachments, ...(meta ? { meta } : {}) });
     return this.userQueue.length;
   }
 
@@ -1819,11 +1842,10 @@ export class AgentSession {
     return this.userQueue.length;
   }
 
-  /** Remove and return the oldest queued message (text + attachments), or null.
-   *  Used by the sidecar to run a message that queued while autopilot was
-   *  reviewing (no run in flight to steer it into) — unlike {@link drainQueue},
-   *  attachments survive so queued media isn't silently dropped. */
-  takeNextQueuedMessage(): { text: string; attachments: SessionAttachment[] } | null {
+  /** Remove and return the oldest queued message, including attachments and
+   *  display metadata, or null. Used by the sidecar to run a message that queued
+   *  while autopilot was reviewing; all prompt state survives exactly once. */
+  takeNextQueuedMessage(): QueuedUserMessage | null {
     return this.userQueue.shift() ?? null;
   }
 
@@ -2077,6 +2099,20 @@ export class AgentSession {
    *  header, errors, user-bubble hints) back into the transcript on resume. */
   getAppMarkers(): AppMarkerPayload[] {
     return this.appMarkers;
+  }
+
+  /** Persist the display metadata for a prompt at its imminent user-message
+   *  position. Direct and queued drains share this so hints cannot drift. */
+  async persistPromptMeta(meta: SessionPromptMeta | undefined, anchorOffset = 1): Promise<void> {
+    if (!meta || (meta.kenSent !== true && !Array.isArray(meta.enhancements))) return;
+    await this.persistAppMarker(
+      "user_hint",
+      {
+        ...(meta.kenSent === true ? { kenSent: true } : {}),
+        ...(Array.isArray(meta.enhancements) ? { enhancements: meta.enhancements } : {}),
+      },
+      anchorOffset,
+    );
   }
 
   /**

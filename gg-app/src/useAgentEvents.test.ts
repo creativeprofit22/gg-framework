@@ -123,6 +123,7 @@ function setup(
   let liveToolFeed: LiveToolEntry[] = [];
   let tasks: BackgroundTask[] = [];
   let planReview: string | null = null;
+  let queuedCount = 0;
   let commands: SlashCommand[] = [
     { name: "stale", aliases: [], description: "Stale command", source: "custom" },
   ];
@@ -175,7 +176,9 @@ function setup(
     setPlanReview: ((u: string | null | ((p: string | null) => string | null)) => {
       planReview = typeof u === "function" ? u(planReview) : u;
     }) as AgentEventsDeps["setPlanReview"],
-    setQueuedCount: noop as unknown as AgentEventsDeps["setQueuedCount"],
+    setQueuedCount: ((update: number | ((previous: number) => number)) => {
+      queuedCount = typeof update === "function" ? update(queuedCount) : update;
+    }) as AgentEventsDeps["setQueuedCount"],
     setAttachments: noop as unknown as AgentEventsDeps["setAttachments"],
     setCommands: ((update: SlashCommand[] | ((previous: SlashCommand[]) => SlashCommand[])) => {
       commands = typeof update === "function" ? update(commands) : update;
@@ -200,6 +203,7 @@ function setup(
     getLiveToolFeed: () => liveToolFeed,
     getTasks: () => tasks,
     getPlanReview: () => planReview,
+    getQueuedCount: () => queuedCount,
     getCommands: () => commands,
     getState: () => agentState,
     setRunning,
@@ -210,6 +214,40 @@ function setup(
 describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
   afterEach(() => vi.useRealTimers());
+
+  it("tracks authoritative queue counts and clears only the queued state at run end", () => {
+    const { hook, getItems, getQueuedCount } = setup();
+    act(() => {
+      hook.result.current.pushItem({
+        kind: "user",
+        id: 1,
+        text: "queued Ken prompt",
+        kenSent: true,
+        queued: true,
+      });
+      hook.result.current.handleEvent(ev("queued", { count: 2 }));
+    });
+    expect(getQueuedCount()).toBe(2);
+    expect(getItems()).toEqual([
+      {
+        kind: "user",
+        id: 1,
+        text: "queued Ken prompt",
+        kenSent: true,
+        queued: true,
+      },
+    ]);
+
+    act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: false })));
+    expect(getQueuedCount()).toBe(0);
+    expect(getItems()).toContainEqual({
+      kind: "user",
+      id: 1,
+      text: "queued Ken prompt",
+      kenSent: true,
+      queued: false,
+    });
+  });
 
   it("keeps the complete background-task snapshot from ready and tasks events", () => {
     expect(FRONTEND_BACKGROUND_TASK_CONTRACT_IS_COMPLETE).toBe(true);

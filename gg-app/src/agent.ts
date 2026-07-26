@@ -556,16 +556,45 @@ export interface PromptMeta {
   enhancements?: PromptSegment[];
 }
 
+/** Authoritative outcome of submitting one prompt to the sidecar. */
+export interface PromptSubmissionResult {
+  queued: boolean;
+  count: number;
+}
+
+export function requirePromptSubmissionResult(value: unknown): PromptSubmissionResult {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("invalid prompt submission response");
+  }
+  const result = value as Record<string, unknown>;
+  if (
+    typeof result.queued !== "boolean" ||
+    typeof result.count !== "number" ||
+    !Number.isSafeInteger(result.count) ||
+    result.count < 0 ||
+    (result.queued ? result.count < 1 : result.count !== 0)
+  ) {
+    throw new Error("invalid prompt submission response");
+  }
+  return { queued: result.queued, count: result.count };
+}
+
 export async function sendPrompt(
   text: string,
   attachments: Attachment[] = [],
   meta?: PromptMeta,
-): Promise<void> {
+): Promise<PromptSubmissionResult> {
   await logInfo(
     `prompt: ${text.slice(0, 80)}${attachments.length ? ` (+${attachments.length} att)` : ""}`,
   );
   try {
-    await invoke("agent_prompt", { paneId: "primary", text, attachments, meta: meta ?? null });
+    const result = await invoke<unknown>("agent_prompt", {
+      paneId: "primary",
+      text,
+      attachments,
+      meta: meta ?? null,
+    });
+    return requirePromptSubmissionResult(result);
   } catch (e) {
     await logError(`agent_prompt failed: ${String(e)}`);
     throw e;
@@ -1832,7 +1861,11 @@ export interface PaneAgentClient extends NotesClient {
     provider: SubscriptionUsageProvider,
   ): Promise<SubscriptionUsageProviderSnapshot>;
   enhancePrompt(text: string): Promise<EnhanceResult>;
-  sendPrompt(text: string, attachments?: Attachment[], meta?: PromptMeta): Promise<void>;
+  sendPrompt(
+    text: string,
+    attachments?: Attachment[],
+    meta?: PromptMeta,
+  ): Promise<PromptSubmissionResult>;
   cancel(): Promise<CancelResult>;
   sendKenPrompt(text: string): Promise<void>;
   cancelKen(): Promise<void>;
@@ -2036,8 +2069,10 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       await ready();
       return call("agent_enhance_prompt", { text });
     },
-    sendPrompt: (text, attachments = [], meta) =>
-      call("agent_prompt", { text, attachments, meta: meta ?? null }),
+    sendPrompt: async (text, attachments = [], meta) =>
+      requirePromptSubmissionResult(
+        await call<unknown>("agent_prompt", { text, attachments, meta: meta ?? null }),
+      ),
     async cancel() {
       try {
         return await call<CancelResult>("agent_cancel");

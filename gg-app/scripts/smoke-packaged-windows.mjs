@@ -1,7 +1,8 @@
 // Release-only Windows smoke: build an MSI, administratively extract it into
 // temporary directories, launch the extracted app, and prove the packaged
-// WebView shell and bundled Node sidecar start together. No live installation,
-// debug build, existing user profile, screenshot, or UI interaction is used.
+// WebView shell, bundled Node sidecar, pane-scoped IPC, SSE reset, and Phase 20
+// fresh-session transcript ordering together. Fault scenarios use a deterministic
+// sidecar fixture through the shell's supported GG_SIDECAR_PATH override.
 import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
@@ -11,11 +12,17 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  preparePhase20Scenario,
+  reserveTcpPort,
+  runPhase20Scenario,
+} from "./phase-20-native-smoke.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appDir = resolve(here, "..");
@@ -28,6 +35,8 @@ const PACKAGED_BUILD_ARGS = [
   "--ci",
   "--bundles",
   "msi",
+  "--features",
+  "native-smoke",
   "--config",
   JSON.stringify({ bundle: { createUpdaterArtifacts: false } }),
 ];
@@ -313,92 +322,148 @@ function extractMsi(msi, extractRoot, logPath) {
 
 async function main() {
   if (process.platform !== "win32") fail("packaged launch smoke only supports Windows");
-  const smokeRoot = mkdtempSync(join(tmpdir(), "gg-app-packaged-smoke-"));
+  const smokeRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "gg-app-packaged-smoke-")));
   const extractRoot = join(smokeRoot, "package");
-  const projectDir = join(smokeRoot, "project");
   const msiLog = join(smokeRoot, "msi-extract.log");
-  let appPid;
-  let packagedNode;
+  const fixtureSidecar = join(here, "phase-20-sidecar-fixture.mjs");
+  const evidenceArgument = process.argv.indexOf("--evidence-dir");
+  const evidenceDir =
+    evidenceArgument >= 0
+      ? resolve(process.argv[evidenceArgument + 1] || fail("--evidence-dir requires a path"))
+      : join(appDir, "src-tauri", "target", "smoke-evidence", "phase-20-native");
+  const scenarioEvidence = [];
 
   try {
+    const packageArgument = process.argv.indexOf("--package-dir");
     const artifactArgument = process.argv.indexOf("--artifact");
-    let msi;
-    if (artifactArgument >= 0) {
-      const artifactPath = process.argv[artifactArgument + 1];
-      if (!artifactPath) fail("--artifact requires an MSI path");
-      msi = resolve(artifactPath);
-      if (!existsSync(msi) || extname(msi).toLowerCase() !== ".msi") {
-        fail(`packaged smoke MSI does not exist: ${msi}`);
-      }
+    let msi = null;
+    let layout;
+    if (packageArgument >= 0) {
+      const packagePath = process.argv[packageArgument + 1];
+      if (!packagePath) fail("--package-dir requires an extracted package path");
+      layout = discoverPackagedLayout(resolve(packagePath));
+      console.log(`PACKAGE: existing extraction -> ${layout.installDir}`);
     } else {
-      const before = snapshotMsiArtifacts(bundleDir);
-      console.log(`BUILD: ${process.execPath} ${PACKAGED_BUILD_ARGS.join(" ")}`);
-      execFileSync(process.execPath, PACKAGED_BUILD_ARGS, {
-        cwd: appDir,
-        env: process.env,
-        stdio: "inherit",
-        windowsHide: false,
-      });
-      msi = discoverChangedMsi(before, snapshotMsiArtifacts(bundleDir));
-    }
-    extractMsi(msi, extractRoot, msiLog);
-    const layout = discoverPackagedLayout(extractRoot);
-    console.log(`PACKAGE: ${relative(appDir, msi)} -> ${layout.installDir}`);
-
-    const child = spawn(layout.executable, [], {
-      cwd: projectDir,
-      env: isolatedEnvironment(smokeRoot, projectDir),
-      // Inherited pipe handles can be retained by WebView2 descendants and keep
-      // this runner alive after the owned process tree has been terminated.
-      stdio: "ignore",
-      windowsHide: false,
-    });
-    appPid = child.pid;
-
-    packagedNode = layout.node;
-    await waitFor("packaged app window and bundled sidecar", () => {
-      if (!processExists(appPid)) {
-        throw new StopWaitingError("packaged app exited early");
+      if (artifactArgument >= 0) {
+        const artifactPath = process.argv[artifactArgument + 1];
+        if (!artifactPath) fail("--artifact requires an MSI path");
+        msi = resolve(artifactPath);
+        if (!existsSync(msi) || extname(msi).toLowerCase() !== ".msi") {
+          fail(`packaged smoke MSI does not exist: ${msi}`);
+        }
+      } else {
+        const before = snapshotMsiArtifacts(bundleDir);
+        console.log(`BUILD: ${process.execPath} ${PACKAGED_BUILD_ARGS.join(" ")}`);
+        execFileSync(process.execPath, PACKAGED_BUILD_ARGS, {
+          cwd: appDir,
+          env: process.env,
+          stdio: "inherit",
+          windowsHide: false,
+        });
+        msi = discoverChangedMsi(before, snapshotMsiArtifacts(bundleDir));
       }
-      const processes = processSnapshot();
-      const app = processes.find(
-        (process) =>
-          process.ProcessId === appPid &&
-          process.ExecutablePath &&
-          normalizePath(process.ExecutablePath) === normalizePath(layout.executable),
-      );
-      const node = processes.find(
-        (process) =>
-          process.ParentProcessId === appPid &&
-          process.ExecutablePath &&
-          normalizePath(process.ExecutablePath) === normalizePath(layout.node) &&
-          normalizeEvidence(process.CommandLine ?? "").includes(normalizeEvidence(layout.sidecar)),
-      );
-      return app && node && visibleWindowPids().has(appPid);
-    });
-  } finally {
-    let processCleanupError;
-    try {
-      if (appPid) {
-        await cleanupOwnedProcesses({ rootPid: appPid, ownedRoots: [smokeRoot, extractRoot] });
-      }
-    } catch (error) {
-      processCleanupError = error;
+      extractMsi(msi, extractRoot, msiLog);
+      layout = discoverPackagedLayout(extractRoot);
+      console.log(`PACKAGE: ${relative(appDir, msi)} -> ${layout.installDir}`);
     }
-    try {
-      await removeTemporaryDirectory(smokeRoot);
-    } catch (directoryCleanupError) {
-      if (processCleanupError) {
-        throw new AggregateError(
-          [processCleanupError, directoryCleanupError],
-          "packaged smoke process and directory cleanup failed",
+
+    for (const scenario of ["success", "reject-409", "drop-reset"]) {
+      const scenarioRoot = join(smokeRoot, scenario);
+      const projectDir = join(scenarioRoot, "project");
+      const env = isolatedEnvironment(scenarioRoot, projectDir);
+      const { sessionPath } = preparePhase20Scenario({ home: env.HOME, projectDir, scenario });
+      const cdpPort = await reserveTcpPort();
+      const sidecarAuditPath =
+        scenario === "success"
+          ? join(env.HOME, ".gg", "gg-app-sidecar.log")
+          : join(scenarioRoot, "sidecar-audit.jsonl");
+      env.GG_APP_NATIVE_SMOKE_CDP_PORT = String(cdpPort);
+      if (scenario !== "success") {
+        env.GG_SIDECAR_PATH = fixtureSidecar;
+        env.GG_PHASE20_SMOKE_SCENARIO = scenario;
+        env.GG_PHASE20_SMOKE_AUDIT_FILE = sidecarAuditPath;
+      }
+      const expectedSidecar = scenario === "success" ? layout.sidecar : fixtureSidecar;
+      let appPid;
+      let scenarioError;
+      try {
+        const child = spawn(layout.executable, [], {
+          cwd: projectDir,
+          env,
+          // Inherited pipe handles can be retained by WebView2 descendants and keep
+          // this runner alive after the owned process tree has been terminated.
+          stdio: "ignore",
+          windowsHide: false,
+        });
+        appPid = child.pid;
+        await waitFor(`${scenario} packaged app window and sidecar`, () => {
+          if (!processExists(appPid)) throw new StopWaitingError("packaged app exited early");
+          const processes = processSnapshot();
+          const app = processes.find(
+            (process) =>
+              process.ProcessId === appPid &&
+              process.ExecutablePath &&
+              normalizePath(process.ExecutablePath) === normalizePath(layout.executable),
+          );
+          const node = processes.find(
+            (process) =>
+              process.ParentProcessId === appPid &&
+              process.ExecutablePath &&
+              normalizePath(process.ExecutablePath) === normalizePath(layout.node) &&
+              normalizeEvidence(process.CommandLine ?? "").includes(
+                normalizeEvidence(expectedSidecar),
+              ),
+          );
+          return app && node && visibleWindowPids().has(appPid);
+        });
+        const evidence = await runPhase20Scenario({
+          scenario,
+          cdpPort,
+          waitFor,
+          evidenceDir,
+          projectDir,
+          sessionPath,
+          sidecarAuditPath,
+        });
+        scenarioEvidence.push({
+          scenario,
+          appPid,
+          eventOrder: evidence.sequence.map((entry) => `${entry.sequence}:${entry.type}`),
+        });
+        console.log(
+          `PHASE20 ${scenario.toUpperCase()} PASS: ${JSON.stringify(scenarioEvidence.at(-1))}`,
         );
+      } catch (error) {
+        scenarioError = error;
+      } finally {
+        try {
+          if (appPid) {
+            await cleanupOwnedProcesses({
+              rootPid: appPid,
+              ownedRoots: [scenarioRoot, layout.installDir],
+            });
+          }
+        } catch (cleanupError) {
+          scenarioError = scenarioError
+            ? new AggregateError(
+                [scenarioError, cleanupError],
+                `${scenario} smoke and process cleanup failed`,
+              )
+            : cleanupError;
+        }
       }
-      throw directoryCleanupError;
+      if (scenarioError) throw scenarioError;
     }
-    if (processCleanupError) throw processCleanupError;
+
+    mkdirSync(evidenceDir, { recursive: true });
+    writeFileSync(
+      join(evidenceDir, "summary.json"),
+      `${JSON.stringify({ msi, packagedNode: layout.node, scenarios: scenarioEvidence }, null, 2)}\n`,
+    );
+  } finally {
+    await removeTemporaryDirectory(smokeRoot);
   }
-  console.log(`SMOKE PASS: pid=${appPid} packagedNode=${packagedNode}`);
+  console.log(`SMOKE PASS: packagedNode scenarios=3 evidence=${evidenceDir}`);
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";

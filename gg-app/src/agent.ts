@@ -698,6 +698,7 @@ export async function acceptPlan(planPath: string | null): Promise<void> {
     await invoke("agent_accept_plan", { paneId: "primary", planPath });
   } catch (e) {
     await logError(`agent_accept_plan failed: ${String(e)}`);
+    throw e;
   }
 }
 
@@ -976,13 +977,71 @@ export async function removeAzureConnection(): Promise<AzureConnectionStatus> {
   }
 }
 
+/** Successful fresh-session creation, correlated with its reset event. */
+export interface NewSessionResult {
+  operationId: string;
+}
+
+export type NewSessionFailureKind = "creation-rejected" | "outcome-unknown";
+
+/** Typed distinction between an HTTP rejection and an indeterminate transport outcome. */
+export class NewSessionError extends Error {
+  constructor(
+    readonly kind: NewSessionFailureKind,
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = "NewSessionError";
+  }
+}
+
+function asNewSessionError(error: unknown): NewSessionError {
+  let candidate: unknown = error;
+  if (typeof error === "string") {
+    try {
+      candidate = JSON.parse(error);
+    } catch {
+      candidate = null;
+    }
+  }
+  if (typeof candidate === "object" && candidate !== null) {
+    const value = candidate as { kind?: unknown; message?: unknown; status?: unknown };
+    if (
+      (value.kind === "creation-rejected" || value.kind === "outcome-unknown") &&
+      typeof value.message === "string"
+    ) {
+      return new NewSessionError(
+        value.kind,
+        value.message,
+        typeof value.status === "number" ? value.status : undefined,
+      );
+    }
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return new NewSessionError("outcome-unknown", message);
+}
+
+function requireNewSessionResult(value: unknown): NewSessionResult {
+  const operationId =
+    typeof value === "object" && value !== null
+      ? (value as { operationId?: unknown }).operationId
+      : undefined;
+  if (typeof operationId !== "string" || operationId.length === 0) {
+    throw new Error("invalid new-session response: missing operationId");
+  }
+  return { operationId };
+}
+
 /** Start a fresh session (clears history) for this window's current project. */
-export async function newSession(): Promise<void> {
+export async function newSession(): Promise<NewSessionResult> {
   try {
-    await invoke("agent_new_session", { paneId: "primary" });
+    return requireNewSessionResult(
+      await invoke<NewSessionResult>("agent_new_session", { paneId: "primary" }),
+    );
   } catch (e) {
     await logError(`agent_new_session failed: ${String(e)}`);
-    throw e;
+    throw asNewSessionError(e);
   }
 }
 
@@ -1782,7 +1841,7 @@ export interface PaneAgentClient extends NotesClient {
   listHistory(): Promise<HistoryEntry[]>;
   authOAuthStart(provider: string): Promise<void>;
   authOAuthCode(code: string): Promise<void>;
-  newSession(): Promise<void>;
+  newSession(): Promise<NewSessionResult>;
   getRadioState(): Promise<RadioState>;
   setRadio(station: string): Promise<string | null>;
   setRadioVolume(volume: number): Promise<number>;
@@ -2015,7 +2074,13 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       await ready();
       await call("agent_auth_oauth_code", { code });
     },
-    newSession: () => call("agent_new_session"),
+    async newSession() {
+      try {
+        return requireNewSessionResult(await call("agent_new_session"));
+      } catch (error) {
+        throw asNewSessionError(error);
+      }
+    },
     async getRadioState() {
       try {
         const r = await call<RadioState>("agent_radio_state");

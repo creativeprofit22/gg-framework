@@ -1505,6 +1505,33 @@ async fn agent_usage(
     Ok(body)
 }
 
+async fn post_sidecar_prompt(
+    client: &reqwest::Client,
+    endpoint: &str,
+    gg_sid: &str,
+    text: String,
+    attachments: Option<serde_json::Value>,
+    meta: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let response = client
+        .post(endpoint)
+        .header("x-gg-session", gg_sid)
+        .json(&serde_json::json!({
+            "text": text,
+            "attachments": attachments.unwrap_or(serde_json::Value::Array(vec![])),
+            "meta": meta.unwrap_or(serde_json::Value::Null),
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    Err(sidecar_error_text(status, &body))
+}
+
 /// Proxy: submit a prompt (optionally with attachments). The reply streams back
 /// via the `agent-event` event. `attachments` is passed through opaquely.
 #[tauri::command]
@@ -1518,18 +1545,15 @@ async fn agent_prompt(
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    client
-        .post(format!("{}/prompt", sidecar_base(port)))
-        .header("x-gg-session", &gg_sid)
-        .json(&serde_json::json!({
-            "text": text,
-            "attachments": attachments.unwrap_or(serde_json::Value::Array(vec![])),
-            "meta": meta.unwrap_or(serde_json::Value::Null),
-        }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    post_sidecar_prompt(
+        &client,
+        &format!("{}/prompt", sidecar_base(port)),
+        &gg_sid,
+        text,
+        attachments,
+        meta,
+    )
+    .await
 }
 
 async fn sidecar_get_json(
@@ -1576,22 +1600,79 @@ async fn agent_history(
     sidecar_get_json(&webview, &pane_id, &client, "/history").await
 }
 
+fn sidecar_error_text(status: reqwest::StatusCode, body: &str) -> String {
+    let trimmed = body.trim();
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(message) = json
+            .get("message")
+            .or_else(|| json.get("error"))
+            .and_then(|value| value.as_str())
+        {
+            return message.to_string();
+        }
+        return json.to_string();
+    }
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    format!("sidecar request failed with HTTP {status}")
+}
+
+fn parse_sidecar_json_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    if !status.is_success() {
+        return Err(sidecar_error_text(status, body));
+    }
+    serde_json::from_str(body).map_err(|error| error.to_string())
+}
+
+fn parse_new_session_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    if !status.is_success() {
+        let kind = if status.is_client_error() {
+            "creation-rejected"
+        } else {
+            "outcome-unknown"
+        };
+        return Err(serde_json::json!({
+            "kind": kind,
+            "status": status.as_u16(),
+            "message": sidecar_error_text(status, body),
+        })
+        .to_string());
+    }
+    let value = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid new-session response".to_string())?;
+    let operation_id = value
+        .get("operationId")
+        .and_then(|candidate| candidate.as_str())
+        .filter(|candidate| !candidate.is_empty())
+        .ok_or_else(|| "invalid new-session response: missing operationId".to_string())?;
+    Ok(serde_json::json!({ "operationId": operation_id }))
+}
+
 /// Proxy: start a fresh session (clears history) for this window's project.
 #[tauri::command]
 async fn agent_new_session(
     webview: WebviewWindow,
     pane_id: String,
     client: tauri::State<'_, reqwest::Client>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    client
+    let response = client
         .post(format!("{}/new-session", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_new_session_response(status, &body)
 }
 
 /// Proxy: store an API key for a provider.
@@ -1826,16 +1907,16 @@ async fn agent_run_tasks(
 ) -> Result<serde_json::Value, String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    let res = client
+    let response = client
         .post(format!("{}/tasks/run", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "id": id, "all": all }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: delete a task by id. Returns the remaining `{ tasks }`.
@@ -1872,14 +1953,16 @@ async fn agent_accept_plan(
 ) -> Result<(), String> {
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
-    client
+    let response = client
         .post(format!("{}/plan/accept", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "planPath": plan_path }))
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    Ok(())
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_sidecar_json_response(status, &body).map(|_| ())
 }
 
 fn parse_cancel_response(
@@ -3515,6 +3598,14 @@ fn build_app_window_with_visibility(
         .min_inner_size(480.0, 360.0)
         .background_color(APP_BG)
         .visible(visible);
+    #[cfg(all(target_os = "windows", feature = "native-smoke"))]
+    {
+        let cdp_port = std::env::var("GG_APP_NATIVE_SMOKE_CDP_PORT")
+            .map_err(|_| "GG_APP_NATIVE_SMOKE_CDP_PORT is required".to_string())?
+            .parse::<u16>()
+            .map_err(|_| "GG_APP_NATIVE_SMOKE_CDP_PORT must be a TCP port".to_string())?;
+        builder = builder.additional_browser_args(&format!("--remote-debugging-port={cdp_port}"));
+    }
     // Windows needs HTML5 drop enabled for the existing browser attachment path.
     // macOS keeps Tauri's native handler so folder drops include absolute paths.
     #[cfg(target_os = "windows")]
@@ -5616,6 +5707,47 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 mod tests {
     use super::*;
 
+    fn prompt_proxy_result(status: reqwest::StatusCode, body: &str) -> Result<(), String> {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = body.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("POST /prompt HTTP/1.1"));
+            assert!(request.contains("x-gg-session: test-session"));
+
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                response_body.len(),
+                response_body,
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let endpoint = format!("http://{address}/prompt");
+        let result = tauri::async_runtime::block_on(post_sidecar_prompt(
+            &client,
+            &endpoint,
+            "test-session",
+            "Ship the fix".to_string(),
+            Some(serde_json::json!([])),
+            Some(serde_json::json!({ "kenSent": true })),
+        ));
+        server.join().unwrap();
+        result
+    }
+
     #[test]
     fn normalize_notes_response_preserves_expected_non_success_outcomes() {
         for (status, body) in [
@@ -5668,6 +5800,120 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, "notes request failed");
     }
+
+    #[test]
+    fn prompt_proxy_accepts_sidecar_202() {
+        assert_eq!(
+            prompt_proxy_result(reqwest::StatusCode::ACCEPTED, r#"{"accepted":true}"#,),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn prompt_proxy_rejects_sidecar_400_409_and_500_with_backend_text() {
+        for (status, body, expected) in [
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"error":"empty prompt"}"#,
+                "empty prompt",
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"error":"configuration refresh in progress"}"#,
+                "configuration refresh in progress",
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"provider exploded"}"#,
+                "provider exploded",
+            ),
+        ] {
+            assert_eq!(prompt_proxy_result(status, body), Err(expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn sidecar_json_response_rejects_non_success_statuses() {
+        assert_eq!(
+            parse_sidecar_json_response(
+                reqwest::StatusCode::CONFLICT,
+                r#"{"error":"session mutation in progress"}"#,
+            ),
+            Err("session mutation in progress".to_string())
+        );
+        assert_eq!(
+            parse_sidecar_json_response(
+                reqwest::StatusCode::ACCEPTED,
+                r#"{"accepted":true,"operationId":"operation-1"}"#,
+            ),
+            Ok(serde_json::json!({
+                "accepted": true,
+                "operationId": "operation-1"
+            }))
+        );
+    }
+
+    #[test]
+    fn new_session_response_forwards_operation_identity() {
+        assert_eq!(
+            parse_new_session_response(
+                reqwest::StatusCode::OK,
+                r#"{"ok":true,"operationId":"operation-42"}"#,
+            ),
+            Ok(serde_json::json!({ "operationId": "operation-42" }))
+        );
+        assert_eq!(
+            parse_new_session_response(reqwest::StatusCode::OK, r#"{"ok":true}"#),
+            Err("invalid new-session response: missing operationId".to_string())
+        );
+        let rejected = parse_new_session_response(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"error":"session is already resetting"}"#,
+        )
+        .unwrap_err();
+        let rejected: serde_json::Value = serde_json::from_str(&rejected).unwrap();
+        assert_eq!(
+            rejected,
+            serde_json::json!({
+                "kind": "creation-rejected",
+                "status": 409,
+                "message": "session is already resetting",
+            })
+        );
+        let unknown = parse_new_session_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":"storage failed after reset"}"#,
+        )
+        .unwrap_err();
+        let unknown: serde_json::Value = serde_json::from_str(&unknown).unwrap();
+        assert_eq!(
+            unknown,
+            serde_json::json!({
+                "kind": "outcome-unknown",
+                "status": 500,
+                "message": "storage failed after reset",
+            })
+        );
+    }
+
+    #[test]
+    fn new_session_error_preserves_json_error_text() {
+        assert_eq!(
+            sidecar_error_text(
+                reqwest::StatusCode::CONFLICT,
+                r#"{"message":"session is already resetting"}"#,
+            ),
+            "session is already resetting"
+        );
+        assert_eq!(
+            sidecar_error_text(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":{"code":"reset_failed","retryable":true}}"#,
+            ),
+            r#"{"error":{"code":"reset_failed","retryable":true}}"#
+        );
+    }
+
     #[test]
     fn cancel_response_accepts_acknowledged_success() {
         let body = serde_json::json!({ "cancelled": true, "runState": "idle" });

@@ -179,6 +179,7 @@ class FakeNotesClient implements NotesClient {
   migrationError: unknown = null;
   migrationOutcome: ProjectNotesMigrationOutcome | null = null;
   saveOutcome: ProjectNotesSaveOutcome | null = null;
+  saveError: unknown = null;
   getOverride: (() => Promise<ProjectNotesReadOutcome>) | null = null;
 
   constructor(
@@ -203,6 +204,7 @@ class FakeNotesClient implements NotesClient {
     document: NotesDocumentV3,
   ): Promise<ProjectNotesSaveOutcome> {
     this.saveCalls.push({ expectedRevision, document });
+    if (this.saveError) throw this.saveError;
     if (this.saveOutcome) return this.saveOutcome;
     if (!this.deferSaves) return this.server.save(this.projectKey, expectedRevision, document);
     return new Promise((resolve) => {
@@ -1042,6 +1044,249 @@ describe("useProjectNotes sidecar authority", () => {
       }),
     );
     expect(hook.result.current.document.reference).toBe("newer");
+  });
+
+  it("creates one durable draft with exact prompt content and normalized order", async () => {
+    const cwd = "/work/project";
+    const initial = notes("base");
+    initial.phases = [phase("existing", 4)];
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const client = server.connect(cwd);
+    const options = {
+      ...hookOptions(client, new MemoryStorage()),
+      idFactory: () => "saved-prompt",
+    };
+    const hook = renderHook(() => useProjectNotes(cwd, options));
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(1));
+
+    let result!: Awaited<ReturnType<typeof hook.result.current.savePrompt>>;
+    await act(async () => {
+      result = await hook.result.current.savePrompt({
+        kind: "new-draft",
+        title: "Prompt draft",
+        prompt: "Exact prompt\n  with indentation",
+      });
+    });
+
+    expect(result).toEqual({ status: "committed", phaseId: "saved-prompt", title: "Prompt draft" });
+    const saved = server.snapshots.get(cwd)!.document.phases;
+    expect(saved.map((item) => item.order)).toEqual([0, 1]);
+    expect(saved[1]).toMatchObject({
+      id: "saved-prompt",
+      status: "not-started",
+      sourcePrompt: "Exact prompt\n  with indentation",
+      goal: "",
+      doneWhen: [],
+      referenceIds: [],
+      session: null,
+      reminder: null,
+    });
+  });
+
+  it("updates only an existing phase prompt and refuses a concurrent replacement", async () => {
+    const cwd = "/work/project";
+    const initial = notes("base");
+    initial.phases = [
+      {
+        ...phase("target", 0),
+        status: "in-progress",
+        sourcePrompt: "old prompt",
+        referenceIds: ["ref-1"],
+        session: { sessionId: "session-1", sessionPath: "/session" },
+      },
+    ];
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const firstClient = server.connect(cwd);
+    const secondClient = server.connect(cwd);
+    const firstOptions = hookOptions(firstClient, new MemoryStorage());
+    const secondOptions = hookOptions(secondClient, new MemoryStorage());
+    const first = renderHook(() => useProjectNotes(cwd, firstOptions));
+    const second = renderHook(() => useProjectNotes(cwd, secondOptions));
+    await waitFor(() => expect(first.result.current.document.phases).toHaveLength(1));
+    await waitFor(() => expect(second.result.current.document.phases).toHaveLength(1));
+    firstClient.deferSaves = true;
+    secondClient.deferSaves = true;
+
+    const firstSave = first.result.current.savePrompt({
+      kind: "existing-phase",
+      phaseId: "target",
+      prompt: "first replacement",
+      expectedSourcePrompt: "old prompt",
+    });
+    const staleSave = second.result.current.savePrompt({
+      kind: "existing-phase",
+      phaseId: "target",
+      prompt: "stale replacement",
+      expectedSourcePrompt: "old prompt",
+    });
+    await waitFor(() => expect(firstClient.pendingSaves).toHaveLength(1));
+    await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
+    act(() => firstClient.flushNextSave());
+    act(() => secondClient.flushNextSave());
+
+    await expect(firstSave).resolves.toMatchObject({ status: "committed", phaseId: "target" });
+    await expect(staleSave).resolves.toEqual({
+      status: "replacement-conflict",
+      phaseId: "target",
+      title: "Phase target",
+    });
+    expect(server.snapshots.get(cwd)!.document.phases[0]).toMatchObject({
+      status: "in-progress",
+      sourcePrompt: "first replacement",
+      referenceIds: ["ref-1"],
+      session: { sessionId: "session-1" },
+    });
+  });
+
+  it("replays a stable new-draft ID without creating a duplicate", async () => {
+    const cwd = "/work/project";
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("base") });
+    const firstClient = server.connect(cwd);
+    const secondClient = server.connect(cwd);
+    const firstOptions = {
+      ...hookOptions(firstClient, new MemoryStorage()),
+      idFactory: () => "same-draft",
+    };
+    const secondOptions = {
+      ...hookOptions(secondClient, new MemoryStorage()),
+      idFactory: () => "same-draft",
+    };
+    const first = renderHook(() => useProjectNotes(cwd, firstOptions));
+    const second = renderHook(() => useProjectNotes(cwd, secondOptions));
+    await waitFor(() => expect(first.result.current.document.reference).toBe("base"));
+    await waitFor(() => expect(second.result.current.document.reference).toBe("base"));
+    firstClient.deferSaves = true;
+    secondClient.deferSaves = true;
+
+    const firstSave = first.result.current.savePrompt({
+      kind: "new-draft",
+      title: "Winner",
+      prompt: "first",
+    });
+    const secondSave = second.result.current.savePrompt({
+      kind: "new-draft",
+      title: "Duplicate",
+      prompt: "second",
+    });
+    await waitFor(() => expect(firstClient.pendingSaves).toHaveLength(1));
+    await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
+    act(() => firstClient.flushNextSave());
+    act(() => secondClient.flushNextSave());
+
+    await expect(firstSave).resolves.toMatchObject({ status: "committed" });
+    await expect(secondSave).resolves.toEqual({
+      status: "committed",
+      phaseId: "same-draft",
+      title: "Winner",
+    });
+    expect(server.snapshots.get(cwd)!.document.phases).toHaveLength(1);
+  });
+
+  it("reports missing and archived destinations without redirecting", async () => {
+    const cwd = "/work/project";
+    const initial = notes("base");
+    initial.phases = [{ ...phase("archived", 0), archivedAt: NOW }];
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const client = server.connect(cwd);
+    const options = hookOptions(client, new MemoryStorage());
+    const hook = renderHook(() => useProjectNotes(cwd, options));
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(1));
+
+    await expect(
+      hook.result.current.savePrompt({
+        kind: "existing-phase",
+        phaseId: "missing",
+        prompt: "prompt",
+        expectedSourcePrompt: "",
+      }),
+    ).resolves.toEqual({ status: "missing-phase", phaseId: "missing" });
+    await expect(
+      hook.result.current.savePrompt({
+        kind: "existing-phase",
+        phaseId: "archived",
+        prompt: "prompt",
+        expectedSourcePrompt: "",
+      }),
+    ).resolves.toEqual({
+      status: "archived-phase",
+      phaseId: "archived",
+      title: "Phase archived",
+    });
+    expect(client.saveCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ["invalid", { status: "invalid", error: { path: "phases", message: "invalid" } }],
+    ["missing", { status: "missing" }],
+    ["corrupt", { status: "corrupt", primary: "malformed-json", backup: null }],
+  ] as const)("maps a %s sidecar save failure", async (reason, outcome) => {
+    const cwd = `/work/${reason}`;
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("base") });
+    const client = server.connect(cwd);
+    client.saveOutcome = outcome;
+    const options = hookOptions(client, new MemoryStorage());
+    const hook = renderHook(() => useProjectNotes(cwd, options));
+    await waitFor(() => expect(hook.result.current.document.reference).toBe("base"));
+
+    await expect(
+      hook.result.current.savePrompt({ kind: "new-draft", title: "Draft", prompt: "prompt" }),
+    ).resolves.toEqual({ status: "failed", reason });
+  });
+
+  it("maps unavailable and fallback storage failures", async () => {
+    const cwd = "/work/unavailable";
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("base") });
+    const client = server.connect(cwd);
+    client.saveError = new Error("offline");
+    const sidecarOptions = hookOptions(client, new MemoryStorage());
+    const sidecarHook = renderHook(() => useProjectNotes(cwd, sidecarOptions));
+    await waitFor(() => expect(sidecarHook.result.current.document.reference).toBe("base"));
+    await expect(
+      sidecarHook.result.current.savePrompt({
+        kind: "new-draft",
+        title: "Draft",
+        prompt: "prompt",
+      }),
+    ).resolves.toEqual({ status: "failed", reason: "unavailable" });
+
+    const fallbackOptions: Parameters<typeof useProjectNotes>[1] = {
+      repository: {
+        load: () => ({
+          document: notes("fallback"),
+          value: "fallback",
+          source: "empty",
+          legacyKey: null,
+          v2ImportAttempted: false,
+          v2ImportSucceeded: null,
+          legacyRecoveryAttempted: false,
+          legacyRecoverySucceeded: null,
+          diagnostics: [],
+          migrationEligibility: "empty",
+        }),
+        save: () => ({
+          v3: { key: "v3", ok: false, error: new Error("disk full") },
+          legacy: { key: "legacy", ok: true },
+        }),
+      },
+      storage: new MemoryStorage(),
+      clock: testClock,
+      idFactory: testIdFactory,
+    };
+    const fallbackHook = renderHook(() => useProjectNotes("/work/storage", fallbackOptions));
+    await waitFor(() => expect(fallbackHook.result.current.document.reference).toBe("fallback"));
+    await expect(
+      fallbackHook.result.current.savePrompt({
+        kind: "new-draft",
+        title: "Draft",
+        prompt: "prompt",
+      }),
+    ).resolves.toEqual({ status: "failed", reason: "storage" });
   });
 
   it("ignores late responses and callbacks from the previous project", async () => {

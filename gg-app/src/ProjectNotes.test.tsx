@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ProjectNotes } from "./ProjectNotes";
+import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
 import {
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
@@ -305,6 +306,43 @@ describe("ProjectNotes", () => {
       expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(1),
     );
     expect(screen.getByRole("tab", { name: "Roadmap" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("saves an exact prompt through the imperative handle and renders it in phase detail", async () => {
+    const cwd = "/work/saved-prompt";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [{ ...phase("target", "in-progress"), sourcePrompt: "" }];
+    client.seed(cwd, populated);
+    const actions = createRef<ProjectNotesPromptActions>();
+    render(<ProjectNotes ref={actions} cwd={cwd} client={client} />);
+
+    await waitFor(() => expect(actions.current?.listDestinations()).toHaveLength(1));
+    expect(actions.current?.listDestinations()).toEqual([
+      { phaseId: "target", title: "Phase target", sourcePrompt: "" },
+    ]);
+
+    const prompt = "Exact saved prompt\n  with indentation and symbols <>&";
+    await act(async () => {
+      await expect(
+        actions.current!.savePrompt({
+          kind: "existing-phase",
+          phaseId: "target",
+          prompt,
+          expectedSourcePrompt: "",
+        }),
+      ).resolves.toEqual({ status: "committed", phaseId: "target", title: "Phase target" });
+    });
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.sourcePrompt).toBe(
+      prompt,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Phase target" }));
+    const heading = screen.getByRole("heading", { name: "Saved prompt" });
+    expect(heading).toBeTruthy();
+    expect(heading.nextElementSibling?.textContent).toBe(prompt);
   });
 
   it("keeps one selected phase open across authoritative snapshots", async () => {

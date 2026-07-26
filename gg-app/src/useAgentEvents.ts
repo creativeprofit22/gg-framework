@@ -164,6 +164,8 @@ export interface AgentEventsDeps {
   planReviewPathRef: MutableRefObject<string | null>;
   pendingPlanTotalRef: MutableRefObject<number | null>;
   stickToBottomRef: MutableRefObject<boolean>;
+  /** Runs after an authoritative session reset has been fully applied. */
+  onSessionReset: (operationId: string | null) => void;
 }
 
 export interface AgentEvents {
@@ -206,6 +208,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
+    onSessionReset,
   } = deps;
 
   // ── Event-machine private refs (used nowhere outside this hook) ──
@@ -235,6 +238,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // canonical live-file count on session_reset; this content supplies the fallback
   // count when connected to an older sidecar.
   const planReviewContentRef = useRef<string | null>(null);
+  // A timeout recovery may apply a reset from the successful HTTP response before
+  // a delayed copy of the same SSE event arrives. Operation ids make that replay
+  // idempotent so it cannot clear a prompt sent after recovery.
+  const appliedSessionResetOperationsRef = useRef<Set<string>>(new Set());
 
   // Streaming deltas arrive faster than React can usefully render each one.
   // We buffer chunks in a ref and flush every 100ms — imperceptible for prose
@@ -965,7 +972,16 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           break;
         }
-        case "session_reset":
+        case "session_reset": {
+          const operationId = typeof d.operationId === "string" ? d.operationId : null;
+          if (operationId && appliedSessionResetOperationsRef.current.has(operationId)) break;
+          if (operationId) {
+            appliedSessionResetOperationsRef.current.add(operationId);
+            if (appliedSessionResetOperationsRef.current.size > 32) {
+              const oldest = appliedSessionResetOperationsRef.current.values().next().value;
+              if (oldest) appliedSessionResetOperationsRef.current.delete(oldest);
+            }
+          }
           // Sidecar started a fresh session — clear the transcript + counters.
           stickToBottomRef.current = true;
           setItems([]);
@@ -994,7 +1010,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           endStreamingText();
           subagentGroupIdRef.current = null;
           subagentGroupByAgentRef.current.clear();
+          onSessionReset(operationId);
           break;
+        }
         case "extras":
           // Context window / git status refresh (model switch, run end).
           setState((s) =>
@@ -1051,6 +1069,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       planReviewPathRef,
       pendingPlanTotalRef,
       stickToBottomRef,
+      onSessionReset,
     ],
   );
 

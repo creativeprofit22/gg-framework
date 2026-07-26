@@ -449,6 +449,16 @@ function PhaseDetail({
             </div>
           </div>
 
+          {phase.sourcePrompt && (
+            <section
+              className="notes-phase-saved-prompt"
+              aria-labelledby={`notes-phase-saved-prompt-${phase.id}`}
+            >
+              <h4 id={`notes-phase-saved-prompt-${phase.id}`}>Saved prompt</h4>
+              <pre>{phase.sourcePrompt}</pre>
+            </section>
+          )}
+
           <dl className="notes-phase-metadata">
             <div>
               <dt>Status</dt>

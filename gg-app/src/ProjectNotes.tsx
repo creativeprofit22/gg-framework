@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, AlertTriangle, Database, HardDrive } from "lucide-react";
 import { NotesModal } from "./NotesModal";
@@ -12,7 +12,8 @@ import {
 } from "./notes-status";
 import { canonicalProjectKey } from "./notes-storage";
 import { useProjectNotes, type UseProjectNotesResult } from "./useProjectNotes";
-import type { NotesClient } from "./notes-types";
+import type { NotesClient, NotesPromptSaveInput, NotesPromptSaveResult } from "./notes-types";
+import type { KenPromptSaveDestination } from "./ken-prompt-actions";
 
 interface Props {
   cwd: string | null;
@@ -26,7 +27,15 @@ interface NotesPersistenceStatus {
   detail: string;
 }
 
-export function ProjectNotes({ cwd, client, openSource }: Props): React.ReactElement {
+export interface ProjectNotesPromptActions {
+  listDestinations(): KenPromptSaveDestination[];
+  savePrompt(input: NotesPromptSaveInput): Promise<NotesPromptSaveResult>;
+}
+
+export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(function ProjectNotes(
+  { cwd, client, openSource },
+  ref,
+): React.ReactElement {
   const [showNotes, setShowNotes] = useState(false);
   const [modalProjectIdentity, setModalProjectIdentity] = useState<string | null>(null);
   const activeProjectIdentity = cwd ? canonicalProjectKey(cwd) : null;
@@ -47,6 +56,7 @@ export function ProjectNotes({ cwd, client, openSource }: Props): React.ReactEle
     changePhaseStatus,
     archivePhase,
     restorePhase,
+    savePrompt,
     createReference,
     editReference,
     deleteReference,
@@ -66,6 +76,23 @@ export function ProjectNotes({ cwd, client, openSource }: Props): React.ReactEle
   useEffect(() => {
     setShowNotes(false);
   }, [activeProjectIdentity]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      listDestinations: () =>
+        notesDocument.phases
+          .filter((phase) => phase.archivedAt === null)
+          .sort((left, right) => left.order - right.order)
+          .map((phase) => ({
+            phaseId: phase.id,
+            title: phase.title,
+            sourcePrompt: phase.sourcePrompt,
+          })),
+      savePrompt,
+    }),
+    [notesDocument.phases, savePrompt],
+  );
 
   return (
     <>
@@ -124,7 +151,7 @@ export function ProjectNotes({ cwd, client, openSource }: Props): React.ReactEle
         )}
     </>
   );
-}
+});
 
 function notesPersistenceStatus(
   diagnostics: UseProjectNotesResult["diagnostics"],

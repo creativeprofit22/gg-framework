@@ -111,9 +111,18 @@ jobs:
       - name: Test Rust backend
         run: cargo test --manifest-path gg-app/src-tauri/Cargo.toml --locked
 
-      - name: Windows packaged launch smoke
+      - name: Windows packaged Phase 20 native smoke
         if: runner.os == 'Windows'
-        run: node gg-app/scripts/smoke-packaged-windows.mjs
+        run: pnpm --filter gg-app smoke:packaged-windows
+
+      - name: Retain Windows native smoke evidence
+        if: ${{ runner.os == 'Windows' && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-20-native-smoke-${{ github.run_id }}
+          path: gg-app/src-tauri/target/smoke-evidence/phase-20-native/
+          if-no-files-found: warn
+          retention-days: 14
 
       # Import the Developer ID Application cert into a throwaway CI keychain so
       # codesign can find it. macOS only, and only when the secret is present —

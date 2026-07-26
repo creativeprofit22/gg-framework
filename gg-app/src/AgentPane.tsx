@@ -12,6 +12,7 @@ import {
   onModelsChanged,
   restoreTarget,
   createPaneAgentClient,
+  NewSessionError,
   type PaneAgentClient,
   type PaneSessionTarget,
   isSecondaryWindow,
@@ -48,7 +49,7 @@ import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./
 import { ContextMeter, getContextPercent } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { TasksModal } from "./TasksModal";
-import { ProjectNotes } from "./ProjectNotes";
+import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
 import { MemoryModal } from "./MemoryModal";
 import { ShimmerText } from "./ShimmerText";
 import { WakeScreen } from "./WakeScreen";
@@ -74,7 +75,7 @@ import { TitleUsageMeter } from "./TitleUsageMeter";
 import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
 import { useProgress } from "./useProgress";
 import { LoginScreen } from "./LoginScreen";
-import { Markdown, PromptSendProvider } from "./Markdown";
+import { Markdown, KenPromptActionProvider } from "./Markdown";
 import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { formatBuildIdentity } from "./build-info";
@@ -94,6 +95,14 @@ import { EnhanceDissolve } from "./EnhanceDissolve";
 import { toast } from "./toast";
 import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
 import type { Item } from "./transcript-types";
+import {
+  deriveKenPromptTitle,
+  normalizeKenPrompt,
+  type KenPromptAction,
+  type KenPromptActionDispatcher,
+  type KenPromptActionResult,
+} from "./ken-prompt-actions";
+import type { NotesPromptSaveResult } from "./notes-types";
 import "./App.css";
 
 const DEFAULT_INPUT_PLACEHOLDER = `Type a message, / commands, @ files, ${MENTOR_HANDLE} for help`;
@@ -118,6 +127,27 @@ const PLACEHOLDER_SHUFFLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs
 const PLACEHOLDER_SHUFFLE_FRAMES = 18;
 const PLACEHOLDER_SHUFFLE_FRAME_MS = 24;
 const BUILD_IDENTITY = formatBuildIdentity();
+const SESSION_RESET_TIMEOUT_MS = 8_000;
+const SESSION_RESET_RECOVERY_MESSAGE =
+  "The new session opened, but live confirmation was delayed. This pane was recovered from the successful response.";
+
+class SessionResetConfirmationTimeoutError extends Error {
+  constructor(readonly operationId: string) {
+    super("Timed out waiting for the matching new-session confirmation.");
+    this.name = "SessionResetConfirmationTimeoutError";
+  }
+}
+
+type NewSessionCreationResult =
+  | { status: "confirmed"; operationId: string }
+  | { status: "reconciled"; operationId: string };
+
+function newSessionFailureMessage(error: unknown): string {
+  if (error instanceof NewSessionError && error.kind === "creation-rejected") {
+    return "Couldn’t create a new session. The current session is unchanged; try again.";
+  }
+  return "Couldn’t determine whether a new session opened. Reopen this project before trying again.";
+}
 
 // Autopilot Ken's "all clear" line, rotated so the auto-review loop doesn't
 // repeat the exact same sentence every time GG Coder's work checks out.
@@ -126,6 +156,41 @@ const BUILD_IDENTITY = formatBuildIdentity();
 // resumed transcript matches the live one exactly.
 const VIDEO_CAPABILITY_WARNING =
   "This model can't watch video directly. The agent can still extract frames or audio with ffmpeg if needed — switch to a video-capable model (Gemini, Kimi, MiniMax) for native video analysis.";
+
+function notesPromptActionResult(result: NotesPromptSaveResult): KenPromptActionResult {
+  if (result.status === "committed") {
+    return { status: "saved", phaseId: result.phaseId, title: result.title };
+  }
+  if (result.status === "replacement-conflict") {
+    return {
+      status: "failed",
+      action: "commit-save",
+      message: `${result.title} changed in another window. Reopen Save to Notes and review the latest prompt before replacing it.`,
+    };
+  }
+  if (result.status === "missing-phase") {
+    return {
+      status: "failed",
+      action: "commit-save",
+      message: "That phase was removed in another window. Choose another destination.",
+    };
+  }
+  if (result.status === "archived-phase") {
+    return {
+      status: "failed",
+      action: "commit-save",
+      message: `${result.title} was archived in another window. Restore it or choose another destination.`,
+    };
+  }
+  const messages = {
+    invalid: "Project Notes rejected this prompt. Review the title and try again.",
+    missing: "Project Notes storage is missing. Reopen the project and try again.",
+    corrupt: "Project Notes are unreadable. Repair or restore project storage first.",
+    unavailable: "Project Notes are unavailable. Check the sidecar and try again.",
+    storage: "Local Notes storage failed. Free space and try again.",
+  } as const;
+  return { status: "failed", action: "commit-save", message: messages[result.reason] };
+}
 
 const ALL_CLEAR_VARIATIONS = [
   "All clear. Looks good to me.",
@@ -315,6 +380,8 @@ export function AgentPane({
         if (mountedRef.current && lifecycleEpochRef.current === epoch) {
           generationRef.current = next;
           onGenerationChangeRef.current?.(next);
+          setNeedsProject(false);
+          setHydrateNonce((nonce) => nonce + 1);
         } else if (ownedGeneration !== null) {
           void client.dispose(ownedGeneration).catch(() => {});
         }
@@ -517,6 +584,8 @@ export function AgentPane({
     [toolsHidden, setToolsHiddenPersisted],
   );
   const [newSessionBusy, setNewSessionBusy] = useState(false);
+  const sessionMutationLockRef = useRef(false);
+  const kenPromptActionLockRef = useRef(false);
   // App self-update (GitHub releases). Drives the footer update banner.
   const appUpdate = useAppUpdate();
   const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
@@ -535,6 +604,27 @@ export function AgentPane({
   const stateRef = useRef<AgentState | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const projectNotesActionsRef = useRef<ProjectNotesPromptActions>(null);
+  const sessionResetGenerationRef = useRef(0);
+  const sessionResetWaitersRef = useRef(
+    new Set<{
+      targetGeneration: number;
+      resolve(): void;
+      reject(error: Error): void;
+      timeout: ReturnType<typeof setTimeout>;
+    }>(),
+  );
+  const observedSessionResetOperationsRef = useRef<Set<string>>(new Set());
+  const sessionResetOperationWaitersRef = useRef(
+    new Map<
+      string,
+      {
+        resolve(): void;
+        reject(error: Error): void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    >(),
+  );
   // NOTE: the build-session event machine's private refs (streaming bubble id,
   // rAF buffer, per-run accumulators, sub-agent / compaction group ids) now live
   // inside the useAgentEvents hook. Only the cross-cutting refs that App's render
@@ -832,6 +922,90 @@ export function AgentPane({
     return () => document.removeEventListener("click", onClick, true);
   }, [focused]);
 
+  const registerSessionResetWaiter = useCallback(() => {
+    let waiter:
+      | {
+          targetGeneration: number;
+          resolve(): void;
+          reject(error: Error): void;
+          timeout: ReturnType<typeof setTimeout>;
+        }
+      | undefined;
+    const promise = new Promise<void>((resolve, reject) => {
+      waiter = {
+        targetGeneration: sessionResetGenerationRef.current + 1,
+        resolve,
+        reject,
+        timeout: setTimeout(() => {
+          if (!waiter || !sessionResetWaitersRef.current.delete(waiter)) return;
+          reject(new Error("Timed out waiting for the new session confirmation."));
+        }, SESSION_RESET_TIMEOUT_MS),
+      };
+      sessionResetWaitersRef.current.add(waiter);
+    });
+    return {
+      promise,
+      cancel: () => {
+        if (!waiter || !sessionResetWaitersRef.current.delete(waiter)) return;
+        clearTimeout(waiter.timeout);
+        waiter.resolve();
+      },
+    };
+  }, []);
+
+  const registerSessionResetOperationWaiter = useCallback((operationId: string) => {
+    if (observedSessionResetOperationsRef.current.delete(operationId)) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!sessionResetOperationWaitersRef.current.delete(operationId)) return;
+        reject(new SessionResetConfirmationTimeoutError(operationId));
+      }, SESSION_RESET_TIMEOUT_MS);
+      sessionResetOperationWaitersRef.current.set(operationId, { resolve, reject, timeout });
+    });
+  }, []);
+
+  const onAuthoritativeSessionReset = useCallback((operationId: string | null) => {
+    const generation = ++sessionResetGenerationRef.current;
+    for (const waiter of sessionResetWaitersRef.current) {
+      if (waiter.targetGeneration > generation) continue;
+      sessionResetWaitersRef.current.delete(waiter);
+      clearTimeout(waiter.timeout);
+      waiter.resolve();
+    }
+    if (!operationId) return;
+    const operationWaiter = sessionResetOperationWaitersRef.current.get(operationId);
+    if (operationWaiter) {
+      sessionResetOperationWaitersRef.current.delete(operationId);
+      clearTimeout(operationWaiter.timeout);
+      operationWaiter.resolve();
+      return;
+    }
+    observedSessionResetOperationsRef.current.add(operationId);
+    if (observedSessionResetOperationsRef.current.size > 32) {
+      const oldest = observedSessionResetOperationsRef.current.values().next().value;
+      if (oldest) observedSessionResetOperationsRef.current.delete(oldest);
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      for (const waiter of sessionResetWaitersRef.current) {
+        clearTimeout(waiter.timeout);
+        waiter.reject(new Error("The pane closed before the new session was confirmed."));
+      }
+      sessionResetWaitersRef.current.clear();
+      for (const waiter of sessionResetOperationWaitersRef.current.values()) {
+        clearTimeout(waiter.timeout);
+        waiter.reject(new Error("The pane closed before the new session was confirmed."));
+      }
+      sessionResetOperationWaitersRef.current.clear();
+      observedSessionResetOperationsRef.current.clear();
+    },
+    [],
+  );
+
   // Build-session SSE handling + assistant-streaming helpers live in the
   // useAgentEvents hook (mirrors useKenMentor). It owns the event machine's
   // private refs + the streaming helpers; App keeps owning the build-session
@@ -868,6 +1042,7 @@ export function AgentPane({
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
+    onSessionReset: onAuthoritativeSessionReset,
   });
 
   // Run the connect/ready flow against the current sidecar and hydrate state,
@@ -1177,26 +1352,65 @@ export function AgentPane({
   // Open the Tasks modal, refreshing the list from the sidecar first so it
   // reflects any tasks the agent just added.
   const openTasks = useCallback(() => {
+    if (sessionMutationLockRef.current || newSessionBusy) return;
     setShowTasks(true);
     void client.listTasks().then(setProjectTasks);
-  }, [client]);
+  }, [client, newSessionBusy]);
 
   // Run a single task: the sidecar opens a fresh session and streams progress
   // back (session_reset → task_start → run_start/…/run_end). Close the modal so
   // the transcript is visible while it runs.
   const handleRunTask = useCallback(
     (id: string) => {
+      if (sessionMutationLockRef.current || running) return;
+      sessionMutationLockRef.current = true;
+      setNewSessionBusy(true);
       setShowTasks(false);
-      void client.runTask(id);
+      const waiter = registerSessionResetWaiter();
+      void (async () => {
+        try {
+          try {
+            await client.runTask(id);
+          } catch (error) {
+            waiter.cancel();
+            throw error;
+          }
+          await waiter.promise;
+        } catch {
+          // Backend ownership is authoritative; leave the current session intact.
+        } finally {
+          sessionMutationLockRef.current = false;
+          setNewSessionBusy(false);
+        }
+      })();
     },
-    [client],
+    [client, registerSessionResetWaiter, running],
   );
 
   // Run every pending task sequentially (a fresh session each), in order.
   const handleRunAllTasks = useCallback(() => {
+    if (sessionMutationLockRef.current || running) return;
+    sessionMutationLockRef.current = true;
+    setNewSessionBusy(true);
     setShowTasks(false);
-    void client.runAllTasks();
-  }, [client]);
+    const waiter = registerSessionResetWaiter();
+    void (async () => {
+      try {
+        try {
+          await client.runAllTasks();
+        } catch (error) {
+          waiter.cancel();
+          throw error;
+        }
+        await waiter.promise;
+      } catch {
+        // Backend ownership is authoritative; leave the current session intact.
+      } finally {
+        sessionMutationLockRef.current = false;
+        setNewSessionBusy(false);
+      }
+    })();
+  }, [client, registerSessionResetWaiter, running]);
 
   const handleDeleteTask = useCallback(
     (id: string) => {
@@ -1393,7 +1607,7 @@ export function AgentPane({
   // transcript while the full `text` is still sent to the agent.
   function submitText(text: string, label?: string): void {
     const trimmed = text.trim();
-    if (!trimmed || !readyRef.current || running) return;
+    if (!trimmed || !readyRef.current || running || sessionMutationLockRef.current) return;
     // A user send always re-pins to the bottom — they want to see their message.
     stickToBottomRef.current = true;
     pushItem({
@@ -1409,20 +1623,179 @@ export function AgentPane({
     void client.sendPrompt(trimmed);
   }
 
-  // Click handler for the "Send to GG Coder" button on Ken's recommended prompts.
-  // Pushes a shimmering "Sent to GG Coder" user bubble (the full prompt body went
-  // to GG Coder, but the transcript shows the short Ken-colored label, like a
-  // slash command shows `/name`), then sends the prompt to the build session.
-  const sendKenRecommendedPrompt = useCallback(
-    (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed || !readyRef.current) return;
-      stickToBottomRef.current = true;
-      pushItem({ kind: "user", id: nextId(), text: trimmed, kenSent: true });
-      endStreamingText();
-      void client.sendPrompt(trimmed, [], { kenSent: true }).catch(() => {});
+  const createAuthoritativeNewSession = useCallback(async (): Promise<NewSessionCreationResult> => {
+    if (sessionMutationLockRef.current) {
+      throw new Error("A session change is already in progress.");
+    }
+    sessionMutationLockRef.current = true;
+    setNewSessionBusy(true);
+    try {
+      const { operationId } = await client.newSession();
+      try {
+        await registerSessionResetOperationWaiter(operationId);
+        return { status: "confirmed", operationId };
+      } catch (error) {
+        if (!(error instanceof SessionResetConfirmationTimeoutError)) throw error;
+        // HTTP 200 is emitted only after the sidecar has completed newSession(). If
+        // the matching SSE frame was lost, apply that successful operation locally
+        // and dedupe any delayed replay by operation id.
+        handleEvent({ type: "session_reset", data: { operationId } });
+        observedSessionResetOperationsRef.current.delete(operationId);
+        toast(SESSION_RESET_RECOVERY_MESSAGE, "warning", 7_000);
+        return { status: "reconciled", operationId };
+      }
+    } finally {
+      sessionMutationLockRef.current = false;
+      setNewSessionBusy(false);
+    }
+  }, [client, handleEvent, registerSessionResetOperationWaiter]);
+
+  const dispatchKenPromptAction = useCallback(
+    async (action: KenPromptAction): Promise<KenPromptActionResult> => {
+      const prompt = normalizeKenPrompt(action.prompt);
+      if (!prompt) {
+        return { status: "failed", action: action.type, message: "This prompt is empty." };
+      }
+
+      if (action.type === "send-current") {
+        if (sessionMutationLockRef.current) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "A session change is already in progress.",
+          };
+        }
+        if (kenPromptActionLockRef.current) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "This prompt is already being sent.",
+          };
+        }
+        if (!readyRef.current) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: `${PRODUCT_DISPLAY_NAME} is still connecting. Try again in a moment.`,
+          };
+        }
+        kenPromptActionLockRef.current = true;
+        try {
+          await client.sendPrompt(prompt, [], { kenSent: true });
+          stickToBottomRef.current = true;
+          pushItem({ kind: "user", id: nextId(), text: prompt, kenSent: true });
+          endStreamingText();
+          return { status: "sent", session: "current" };
+        } catch {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "Couldn’t send the prompt. Try again.",
+          };
+        } finally {
+          kenPromptActionLockRef.current = false;
+        }
+      }
+
+      if (action.type === "send-fresh") {
+        if (running) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "Wait for the current build to finish before starting a new session.",
+          };
+        }
+        let creation: NewSessionCreationResult;
+        try {
+          creation = await createAuthoritativeNewSession();
+        } catch (error) {
+          return {
+            status: "failed",
+            action: action.type,
+            message:
+              error instanceof Error && error.message.includes("already")
+                ? "A session change is already in progress."
+                : newSessionFailureMessage(error),
+          };
+        }
+        if (creation.status === "reconciled") {
+          setInput(prompt);
+          requestAnimationFrame(() => inputRef.current?.focus());
+          return {
+            status: "failed",
+            action: action.type,
+            message: `${SESSION_RESET_RECOVERY_MESSAGE} The exact prompt is in the composer.`,
+            recoverPrompt: prompt,
+          };
+        }
+        try {
+          await client.sendPrompt(prompt, [], { kenSent: true });
+          stickToBottomRef.current = true;
+          pushItem({ kind: "user", id: nextId(), text: prompt, kenSent: true });
+          endStreamingText();
+          return { status: "sent", session: "fresh" };
+        } catch {
+          setInput(prompt);
+          requestAnimationFrame(() => inputRef.current?.focus());
+          return {
+            status: "failed",
+            action: action.type,
+            message:
+              "The new session opened, but sending failed. The exact prompt is back in the composer.",
+            recoverPrompt: prompt,
+          };
+        }
+      }
+
+      const notesActions = projectNotesActionsRef.current;
+      if (!notesActions) {
+        return {
+          status: "failed",
+          action: action.type,
+          message: "Project Notes are unavailable for this workspace.",
+        };
+      }
+
+      if (action.type === "prepare-save") {
+        const suggestedTitle = deriveKenPromptTitle(prompt);
+        if (stateRef.current?.autopilot) {
+          const result = notesPromptActionResult(
+            await notesActions.savePrompt({
+              kind: "new-draft",
+              title: suggestedTitle,
+              prompt,
+            }),
+          );
+          return result.status === "failed" ? { ...result, action: action.type } : result;
+        }
+        return {
+          status: "preview",
+          preview: {
+            prompt,
+            suggestedTitle,
+            destinations: notesActions.listDestinations(),
+          },
+        };
+      }
+
+      const saveResult = await notesActions.savePrompt(
+        action.target.kind === "new-draft"
+          ? { kind: "new-draft", title: action.target.title, prompt }
+          : {
+              kind: "existing-phase",
+              phaseId: action.target.phaseId,
+              prompt,
+              expectedSourcePrompt: action.target.expectedSourcePrompt,
+            },
+      );
+      return notesPromptActionResult(saveResult);
     },
-    [client, pushItem, endStreamingText],
+    [client, createAuthoritativeNewSession, endStreamingText, pushItem, running],
+  );
+
+  const kenPromptDispatcher = useMemo<KenPromptActionDispatcher>(
+    () => ({ dispatch: dispatchKenPromptAction }),
+    [dispatchKenPromptAction],
   );
 
   // Record a sent prompt for ↑/↓ recall (skips consecutive duplicates, capped).
@@ -1599,6 +1972,7 @@ export function AgentPane({
       return;
     }
 
+    if (sessionMutationLockRef.current) return;
     recordHistory(trimmed);
     // A user send always re-pins to the bottom — they want to see their message.
     stickToBottomRef.current = true;
@@ -1742,23 +2116,40 @@ export function AgentPane({
   }
 
   async function acceptPlan(): Promise<void> {
-    // Capture the approved plan's step count BEFORE the IPC — accepting starts a
-    // fresh session on the sidecar, whose session_reset broadcast nulls
-    // planReview (and clears the transcript + counters) here.
-    const nextPlanTotal = planReview ? countPlanSteps(planReview) : 0;
-    // Stash a fallback for older sidecars. The current sidecar puts its canonical
-    // live-file count directly on session_reset, which wins over this snapshot.
-    pendingPlanTotalRef.current = nextPlanTotal;
-    // Accept the plan: the sidecar wipes the planning conversation into a FRESH
-    // session (so the build doesn't carry all the plan-mode research), bakes the
-    // approved plan into the new system prompt, and broadcasts authoritative
-    // progress before this request resolves. Do not re-seed from stale modal
-    // content after the await: the plan file may already have changed.
-    await client.acceptPlan(planReviewPathRef.current);
-    runPlanPrompt(
-      "The plan has been approved. Implement it now, following each step in order.",
-      "\u2713 Plan accepted. Implementing.",
-    );
+    if (sessionMutationLockRef.current || running) return;
+    sessionMutationLockRef.current = true;
+    setNewSessionBusy(true);
+    const waiter = registerSessionResetWaiter();
+    try {
+      // Capture the approved plan's step count BEFORE the IPC — accepting starts a
+      // fresh session on the sidecar, whose session_reset broadcast nulls
+      // planReview (and clears the transcript + counters) here.
+      const nextPlanTotal = planReview ? countPlanSteps(planReview) : 0;
+      // Stash a fallback for older sidecars. The current sidecar puts its canonical
+      // live-file count directly on session_reset, which wins over this snapshot.
+      pendingPlanTotalRef.current = nextPlanTotal;
+      // Accept the plan: the sidecar wipes the planning conversation into a FRESH
+      // session (so the build doesn't carry all the plan-mode research), bakes the
+      // approved plan into the new system prompt, and broadcasts authoritative
+      // progress before this request resolves. Do not re-seed from stale modal
+      // content after the await: the plan file may already have changed.
+      try {
+        await client.acceptPlan(planReviewPathRef.current);
+      } catch (error) {
+        waiter.cancel();
+        throw error;
+      }
+      await waiter.promise;
+      runPlanPrompt(
+        "The plan has been approved. Implement it now, following each step in order.",
+        "\u2713 Plan accepted. Implementing.",
+      );
+    } catch {
+      // Keep the review open and current transcript intact so Accept can be retried.
+    } finally {
+      sessionMutationLockRef.current = false;
+      setNewSessionBusy(false);
+    }
   }
 
   function sendPlanFeedback(feedback: string): void {
@@ -1779,15 +2170,18 @@ export function AgentPane({
   // Start a fresh session on this window's project. Clears the transcript only
   // after the sidecar confirms (it emits `session_reset`, handled below).
   async function startNewSession(): Promise<void> {
-    if (newSessionBusy || running) return;
-    setNewSessionBusy(true);
+    if (sessionMutationLockRef.current || running) return;
     try {
-      await client.newSession();
+      await createAuthoritativeNewSession();
       setConfirmNewSession(false);
-    } catch {
-      // Surface nothing extra — agent.ts logged it; keep the modal open.
-    } finally {
-      setNewSessionBusy(false);
+    } catch (error) {
+      // HTTP rejection preserves the session; transport ambiguity asks for a
+      // project reopen instead of offering a potentially destructive blind retry.
+      const message = newSessionFailureMessage(error);
+      if (!(error instanceof NewSessionError && error.kind === "creation-rejected")) {
+        setConfirmNewSession(false);
+      }
+      toast(message, "error");
     }
   }
 
@@ -1937,640 +2331,650 @@ export function AgentPane({
   }
 
   return (
-    <div
-      className={`app agent-pane${focused ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && workspaceWindowFocused ? " window-focused" : ""}`}
-      onPointerDown={() => onFocus?.(paneId)}
-      style={{ background: theme.background }}
-      onDragEnter={handleWindowDragEnter}
-      onDragOver={handleWindowDragOver}
-      onDragLeave={handleWindowDragLeave}
-      onDrop={handleWindowDrop}
-    >
-      {confettiNonce && <Confetti key={confettiNonce} />}
-
-      <WorkspaceHeader
-        workspaceMode={workspaceMode}
-        cwd={state?.cwd}
-        gitBranch={state?.gitBranch}
-        gitDirtyFileCount={state?.gitDirtyFileCount}
-        navHidden={navHidden}
-        onToggleNav={toggleNav}
-        stripExtras={
-          <>
-            <TitleUsageMeter currentProvider={state?.provider ?? ""} />
-            {windowTotal > 1 && windowIndex !== null && (
-              <span
-                className={`window-index${isThisFocused ? "" : " dim"}`}
-                data-tauri-drag-region
-                title={`Window ${windowIndex} of ${windowTotal} · ⌘\` to cycle`}
-              >
-                {windowIndex}/{windowTotal}
-              </span>
-            )}
-          </>
-        }
+    <KenPromptActionProvider value={kenPromptDispatcher}>
+      <div
+        className={`app agent-pane${focused ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && workspaceWindowFocused ? " window-focused" : ""}`}
+        onPointerDown={() => onFocus?.(paneId)}
+        style={{ background: theme.background }}
+        onDragEnter={handleWindowDragEnter}
+        onDragOver={handleWindowDragOver}
+        onDragLeave={handleWindowDragLeave}
+        onDrop={handleWindowDrop}
       >
-        <BackButton
-          label={workspaceMode === "chat" ? "Back to chats" : "Back to this project's sessions"}
-          onClick={() => setShowPicker(true)}
-        />
-        <div className="rank-badge-wrap">
-          <RankBadge
-            snapshot={progress}
-            celebrateNonce={rankCelebrateNonce}
-            onClick={() => setShowScorecard(true)}
+        {confettiNonce && <Confetti key={confettiNonce} />}
+
+        <WorkspaceHeader
+          workspaceMode={workspaceMode}
+          cwd={state?.cwd}
+          gitBranch={state?.gitBranch}
+          gitDirtyFileCount={state?.gitDirtyFileCount}
+          navHidden={navHidden}
+          onToggleNav={toggleNav}
+          stripExtras={
+            <>
+              <TitleUsageMeter currentProvider={state?.provider ?? ""} />
+              {windowTotal > 1 && windowIndex !== null && (
+                <span
+                  className={`window-index${isThisFocused ? "" : " dim"}`}
+                  data-tauri-drag-region
+                  title={`Window ${windowIndex} of ${windowTotal} · ⌘\` to cycle`}
+                >
+                  {windowIndex}/{windowTotal}
+                </span>
+              )}
+            </>
+          }
+        >
+          <BackButton
+            label={workspaceMode === "chat" ? "Back to chats" : "Back to this project's sessions"}
+            onClick={() => setShowPicker(true)}
           />
-          <div className="rank-xp-chip-layer" aria-hidden="true">
-            {xpChips.map((chip) => (
-              <span className="rank-xp-chip" key={chip.id}>
-                {chip.label}
-              </span>
-            ))}
+          <div className="rank-badge-wrap">
+            <RankBadge
+              snapshot={progress}
+              celebrateNonce={rankCelebrateNonce}
+              onClick={() => setShowScorecard(true)}
+            />
+            <div className="rank-xp-chip-layer" aria-hidden="true">
+              {xpChips.map((chip) => (
+                <span className="rank-xp-chip" key={chip.id}>
+                  {chip.label}
+                </span>
+              ))}
+            </div>
           </div>
-        </div>
-        {workspaceMode === "chat" ? (
-          <span className="picker-head-actions">
-            <button
-              className="btn btn-primary btn-sm"
-              disabled={running}
-              title="Start a new chat"
-              onClick={() => setConfirmNewSession(true)}
-            >
-              {"+ New"}
-            </button>
-            <button
-              className="btn btn-sm btn-ghost"
-              title="View and curate chat memories and Jiwa"
-              onClick={() => setShowMemories(true)}
-            >
-              Brain
-            </button>
-            <RadioButton />
-            <WindowLayoutButton />
-          </span>
-        ) : (
-          <>
+          {workspaceMode === "chat" ? (
             <span className="picker-head-actions">
-              <AutopilotToggle
-                checked={state?.autopilot ?? false}
-                disabled={running || autopilotReviewing}
-                onChange={(next) => {
-                  setState((s) => (s ? { ...s, autopilot: next } : s));
-                  void client.setAutopilot(next);
-                  setKenPowerBanner(next ? "on" : "off");
-                  // Dedicated cues for turning autopilot on/off (not the generic
-                  // click, suppressed via data-suppress-click-sound).
-                  playSound(next ? "autopilotOn" : "autopilotOff");
-                }}
-              />
               <button
                 className="btn btn-primary btn-sm"
-                disabled={running}
-                title="Start a new session for this project"
+                disabled={running || newSessionBusy}
+                title="Start a new chat"
                 onClick={() => setConfirmNewSession(true)}
               >
                 {"+ New"}
               </button>
-              <ProjectNotes cwd={state?.cwd ?? null} client={client} />
               <button
                 className="btn btn-sm btn-ghost"
-                title="View and run this project's tasks"
-                onClick={openTasks}
+                title="View and curate chat memories and Jiwa"
+                onClick={() => setShowMemories(true)}
               >
-                {projectTasks.some((t) => t.status !== "done")
-                  ? `Tasks (${projectTasks.filter((t) => t.status !== "done").length})`
-                  : "Tasks"}
+                Brain
               </button>
               <RadioButton />
-              {/* <GazeButton /> */}
-              <WindowLayoutButton
-                onArrange={() => {
-                  setNavHiddenPersisted(true);
-                  setToolsHiddenPersisted(true);
-                }}
-              />
-              {needsGitInit ? (
+              <WindowLayoutButton />
+            </span>
+          ) : (
+            <>
+              <span className="picker-head-actions">
+                <AutopilotToggle
+                  checked={state?.autopilot ?? false}
+                  disabled={running || autopilotReviewing}
+                  onChange={(next) => {
+                    setState((s) => (s ? { ...s, autopilot: next } : s));
+                    void client.setAutopilot(next);
+                    setKenPowerBanner(next ? "on" : "off");
+                    // Dedicated cues for turning autopilot on/off (not the generic
+                    // click, suppressed via data-suppress-click-sound).
+                    playSound(next ? "autopilotOn" : "autopilotOff");
+                  }}
+                />
+                <button
+                  className="btn btn-primary btn-sm"
+                  disabled={running || newSessionBusy}
+                  title="Start a new session for this project"
+                  onClick={() => setConfirmNewSession(true)}
+                >
+                  {"+ New"}
+                </button>
+                <ProjectNotes
+                  ref={projectNotesActionsRef}
+                  cwd={state?.cwd ?? null}
+                  client={client}
+                />
                 <button
                   className="btn btn-sm btn-ghost"
-                  disabled={running}
-                  title="Initialize git + create a GitHub repository"
-                  onClick={() => setShowInitGit(true)}
+                  disabled={running || newSessionBusy}
+                  title="View and run this project's tasks"
+                  onClick={openTasks}
                 >
-                  {"Initialize Git"}
+                  {projectTasks.some((t) => t.status !== "done")
+                    ? `Tasks (${projectTasks.filter((t) => t.status !== "done").length})`
+                    : "Tasks"}
                 </button>
-              ) : (
-                commitCommand && (
+                <RadioButton />
+                {/* <GazeButton /> */}
+                <WindowLayoutButton
+                  onArrange={() => {
+                    setNavHiddenPersisted(true);
+                    setToolsHiddenPersisted(true);
+                  }}
+                />
+                {needsGitInit ? (
                   <button
-                    className={`btn btn-sm ${hasCommit ? "btn-success" : "btn-ghost"}`}
+                    className="btn btn-sm btn-ghost"
                     disabled={running}
-                    title={hasCommit ? "Run /commit" : "Generate a /commit command"}
-                    onClick={() =>
-                      submitText(
-                        `/${commitCommand}`,
-                        hasCommit ? "Committing\u2026" : "Setting up commits\u2026",
-                      )
-                    }
+                    title="Initialize git + create a GitHub repository"
+                    onClick={() => setShowInitGit(true)}
                   >
-                    {`/${commitCommand}`}
+                    {"Initialize Git"}
                   </button>
-                )
-              )}
-            </span>
-          </>
-        )}
-      </WorkspaceHeader>
+                ) : (
+                  commitCommand && (
+                    <button
+                      className={`btn btn-sm ${hasCommit ? "btn-success" : "btn-ghost"}`}
+                      disabled={running}
+                      title={hasCommit ? "Run /commit" : "Generate a /commit command"}
+                      onClick={() =>
+                        submitText(
+                          `/${commitCommand}`,
+                          hasCommit ? "Committing\u2026" : "Setting up commits\u2026",
+                        )
+                      }
+                    >
+                      {`/${commitCommand}`}
+                    </button>
+                  )
+                )}
+              </span>
+            </>
+          )}
+        </WorkspaceHeader>
 
-      {/* Non-scrolling frame the same size as the chat viewport. The banner
+        {/* Non-scrolling frame the same size as the chat viewport. The banner
           lives HERE, not inside `.transcript` — `.transcript` scrolls, and an
           absolutely positioned child of a scrolling container is pinned to the
           top of the scrolled CONTENT, not the visible viewport, so in an
           existing session scrolled down it rendered far above what's on
           screen. Anchoring to this non-scrolling sibling keeps it pinned to
           what the user is actually looking at, at any scroll position. */}
-      <div className="transcript-frame">
-        {focused && workspaceMode === "code" && kenPowerBanner && (
-          <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
-        )}
-        <div className="transcript" ref={scrollRef} onScroll={onTranscriptScroll}>
-          {!hydrated && items.length === 0 ? (
-            <TranscriptSkeleton />
-          ) : (
-            <>
-              {items.length === 0 &&
-                (status === "ready" ? (
-                  <WakeScreen chat={workspaceMode === "chat"} />
-                ) : (
-                  <div className="line transcript-reveal" style={{ color: theme.textDim }}>
-                    {`\u273b ${status}`}
-                  </div>
-                ))}
-              <PromptSendProvider value={sendKenRecommendedPrompt}>
+        <div className="transcript-frame">
+          {focused && workspaceMode === "code" && kenPowerBanner && (
+            <KenPowerBanner mode={kenPowerBanner} onDone={() => setKenPowerBanner(null)} />
+          )}
+          <div className="transcript" ref={scrollRef} onScroll={onTranscriptScroll}>
+            {!hydrated && items.length === 0 ? (
+              <TranscriptSkeleton />
+            ) : (
+              <>
+                {items.length === 0 &&
+                  (status === "ready" ? (
+                    <WakeScreen chat={workspaceMode === "chat"} />
+                  ) : (
+                    <div className="line transcript-reveal" style={{ color: theme.textDim }}>
+                      {`\u273b ${status}`}
+                    </div>
+                  ))}
                 {items.map((it) => (
                   <TranscriptRow key={it.id} item={it} onImageLoad={maybeScrollToBottom} />
                 ))}
-              </PromptSendProvider>
-            </>
-          )}
+              </>
+            )}
+          </div>
         </div>
-      </div>
 
-      <div className="liveregion">
-        {focused && workspaceMode === "code" && autopilotReviewing && (
-          <AutopilotReviewBar onCancel={requestCancel} />
-        )}
-        {focused && workspaceMode === "code" && kenRunning && (
-          <KenActivityBar
-            runStartTs={kenRunStartTs}
-            tokens={kenTokens}
-            isThinking={kenIsThinking}
-            thinkingStartTs={kenThinkingStartTs}
-            thinkingAccumMs={kenThinkingAccumMs}
-            onCancel={() => void client.cancelKen()}
-          />
-        )}
-        {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
-        {/* Ken's bar (chat OR autopilot review) REPLACES the main bar while the
+        <div className="liveregion">
+          {focused && workspaceMode === "code" && autopilotReviewing && (
+            <AutopilotReviewBar onCancel={requestCancel} />
+          )}
+          {focused && workspaceMode === "code" && kenRunning && (
+            <KenActivityBar
+              runStartTs={kenRunStartTs}
+              tokens={kenTokens}
+              isThinking={kenIsThinking}
+              thinkingStartTs={kenThinkingStartTs}
+              thinkingAccumMs={kenThinkingAccumMs}
+              onCancel={() => void client.cancelKen()}
+            />
+          )}
+          {!toolsHidden && <LiveToolPanel entries={liveToolFeed} />}
+          {/* Ken's bar (chat OR autopilot review) REPLACES the main bar while the
             build is idle — otherwise the idle "Ready for work" line stacks under
             Ken's spinner. When the build is also running, both bars show. */}
-        {(workspaceMode === "chat" || running || (!kenRunning && !autopilotReviewing)) && (
-          <ActivityBar
-            running={running}
-            cancelling={cancelling}
-            tokens={tokens}
-            doneStatus={doneStatus}
-            isThinking={isThinking}
-            thinkingStartTs={thinkingStartTs}
-            thinkingAccumMs={thinkingAccumMs}
-            planTotal={workspaceMode === "chat" ? 0 : planTotal}
-            planDone={workspaceMode === "chat" ? 0 : Math.min(planDone.size, planTotal)}
-            onCancel={requestCancel}
-            toolsHidden={toolsHidden}
-            hasToolFeed={liveToolFeed.length > 0}
-            onToggleTools={toggleTools}
-          />
-        )}
-      </div>
+          {(workspaceMode === "chat" || running || (!kenRunning && !autopilotReviewing)) && (
+            <ActivityBar
+              running={running}
+              cancelling={cancelling}
+              tokens={tokens}
+              doneStatus={doneStatus}
+              isThinking={isThinking}
+              thinkingStartTs={thinkingStartTs}
+              thinkingAccumMs={thinkingAccumMs}
+              planTotal={workspaceMode === "chat" ? 0 : planTotal}
+              planDone={workspaceMode === "chat" ? 0 : Math.min(planDone.size, planTotal)}
+              onCancel={requestCancel}
+              toolsHidden={toolsHidden}
+              hasToolFeed={liveToolFeed.length > 0}
+              onToggleTools={toggleTools}
+            />
+          )}
+        </div>
 
-      <div className={`inputwrap${isFileDragOver ? " dragover" : ""}`}>
-        {slashOpen && (
-          <SlashMenu
-            commands={slashMatches}
-            activeIndex={clampedSlashIndex}
-            onSelect={pickSlashCommand}
-            onHover={setSlashIndex}
-          />
-        )}
-        {mentionOpen && (
-          <FileMentionMenu
-            files={fileMatches}
-            activeIndex={clampedFileIndex}
-            isRecent={mention?.query === ""}
-            onSelect={pickMentionFile}
-            onHover={setFileIndex}
-          />
-        )}
-        <AttachmentBar attachments={attachments} onRemove={removeAttachment} />
-        <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
-        {queuedCount > 0 && (
-          <div className="queued-bar">
-            <span className="queued-dot" />
-            {`${queuedCount} message${queuedCount === 1 ? "" : "s"} queued · will send after this run`}
-          </div>
-        )}
-        <div className="inputrow">
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            accept="image/*,video/*"
-            style={{ display: "none" }}
-            onChange={(e) => {
-              if (e.target.files) void addFiles(e.target.files);
-              e.target.value = "";
-            }}
-          />
-          <button
-            className="attach-btn"
-            title="Attach files"
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <Paperclip size={16} />
-          </button>
-          <span className="prompt" style={{ color: theme.primary }}>
-            {">"}
-          </span>
-          <div className="input-stack">
-            {enhanceAnim && (
-              <EnhanceDissolve
-                oldText={enhanceAnim.oldText}
-                newText={enhanceAnim.newText}
-                onDone={onEnhanceAnimDone}
-              />
-            )}
-            {/* `@Ken` active: a textarea can't color just one token, so we mirror
+        <div className={`inputwrap${isFileDragOver ? " dragover" : ""}`}>
+          {slashOpen && (
+            <SlashMenu
+              commands={slashMatches}
+              activeIndex={clampedSlashIndex}
+              onSelect={pickSlashCommand}
+              onHover={setSlashIndex}
+            />
+          )}
+          {mentionOpen && (
+            <FileMentionMenu
+              files={fileMatches}
+              activeIndex={clampedFileIndex}
+              isRecent={mention?.query === ""}
+              onSelect={pickMentionFile}
+              onHover={setFileIndex}
+            />
+          )}
+          <AttachmentBar attachments={attachments} onRemove={removeAttachment} />
+          <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
+          {queuedCount > 0 && (
+            <div className="queued-bar">
+              <span className="queued-dot" />
+              {`${queuedCount} message${queuedCount === 1 ? "" : "s"} queued · will send after this run`}
+            </div>
+          )}
+          <div className="inputrow">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept="image/*,video/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files) void addFiles(e.target.files);
+                e.target.value = "";
+              }}
+            />
+            <button
+              className="attach-btn"
+              title="Attach files"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Paperclip size={16} />
+            </button>
+            <span className="prompt" style={{ color: theme.primary }}>
+              {">"}
+            </span>
+            <div className="input-stack">
+              {enhanceAnim && (
+                <EnhanceDissolve
+                  oldText={enhanceAnim.oldText}
+                  newText={enhanceAnim.newText}
+                  onDone={onEnhanceAnimDone}
+                />
+              )}
+              {/* `@Ken` active: a textarea can't color just one token, so we mirror
                 the input in an aligned overlay where the leading `@Ken` shimmers
                 in Ken's color. The textarea text below is made transparent (caret
                 stays visible) so only this styled copy shows. Metrics match
                 `.input` 1:1 so wrapping/caret line up. */}
-            {kenActive && kenInputParts && (
-              <div className="ken-input-highlight" aria-hidden="true">
-                {kenInputParts.lead}
-                <ShimmerText base={theme.ken} bright="#ffffff">
-                  {kenInputParts.token}
-                </ShimmerText>
-                {kenInputParts.rest}
-              </div>
-            )}
-            <textarea
-              ref={inputRef}
-              className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
-              rows={1}
-              // Lock the input while the dissolve→decode animation plays: the caret
-              // is invisible, so typing would be silently discarded and Enter would
-              // submit the un-enhanced draft mid-animation.
-              readOnly={enhanceAnim !== null}
-              value={input}
-              placeholder={workspaceMode === "chat" ? "Ask anything\u2026" : displayPlaceholder}
-              onPaste={(e) => {
-                const files = Array.from(e.clipboardData.files);
-                if (files.length > 0) {
-                  e.preventDefault();
-                  void addFiles(files);
-                }
-              }}
-              onChange={(e) => {
-                setInput(e.target.value);
-                setSlashIndex(0);
-                // Typing exits history-recall mode so ↑/↓ start fresh next time.
-                if (historyIndex !== null) setHistoryIndex(null);
-                // Drop the enhancement the instant the text diverges from it, so
-                // the highlighted preview/bubble never misalign with edited text.
-                if (enhancement && e.target.value !== enhancement.plain) setEnhancement(null);
-                updateMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
-              }}
-              onClick={(e) => {
-                const el = e.currentTarget;
-                updateMention(el.value, el.selectionStart ?? el.value.length);
-              }}
-              onKeyUp={(e) => {
-                if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+              {kenActive && kenInputParts && (
+                <div className="ken-input-highlight" aria-hidden="true">
+                  {kenInputParts.lead}
+                  <ShimmerText base={theme.ken} bright="#ffffff">
+                    {kenInputParts.token}
+                  </ShimmerText>
+                  {kenInputParts.rest}
+                </div>
+              )}
+              <textarea
+                ref={inputRef}
+                className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
+                rows={1}
+                // Lock the input while the dissolve→decode animation plays: the caret
+                // is invisible, so typing would be silently discarded and Enter would
+                // submit the un-enhanced draft mid-animation.
+                readOnly={enhanceAnim !== null}
+                value={input}
+                placeholder={workspaceMode === "chat" ? "Ask anything\u2026" : displayPlaceholder}
+                onPaste={(e) => {
+                  const files = Array.from(e.clipboardData.files);
+                  if (files.length > 0) {
+                    e.preventDefault();
+                    void addFiles(files);
+                  }
+                }}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  setSlashIndex(0);
+                  // Typing exits history-recall mode so ↑/↓ start fresh next time.
+                  if (historyIndex !== null) setHistoryIndex(null);
+                  // Drop the enhancement the instant the text diverges from it, so
+                  // the highlighted preview/bubble never misalign with edited text.
+                  if (enhancement && e.target.value !== enhancement.plain) setEnhancement(null);
+                  updateMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+                }}
+                onClick={(e) => {
                   const el = e.currentTarget;
                   updateMention(el.value, el.selectionStart ?? el.value.length);
-                }
-              }}
-              onKeyDown={(e) => {
-                // While the dissolve→decode animation plays the input is locked;
-                // swallow keys so Enter can't submit the un-enhanced draft.
-                if (enhanceAnim) {
-                  e.preventDefault();
-                  return;
-                }
-                if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-                  e.preventDefault();
-                  const delta = e.key === "ArrowDown" ? 1 : -1;
-                  setFileIndex((i) => (i + delta + fileMatches.length) % fileMatches.length);
-                } else if (mentionOpen && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
-                  e.preventDefault();
-                  const file = fileMatches[clampedFileIndex];
-                  if (file) pickMentionFile(file);
-                } else if (mentionOpen && e.key === "Escape") {
-                  e.preventDefault();
-                  setMention(null);
-                } else if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-                  e.preventDefault();
-                  const delta = e.key === "ArrowDown" ? 1 : -1;
-                  setSlashIndex((i) => (i + delta + slashMatches.length) % slashMatches.length);
-                } else if (slashOpen && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
-                  e.preventDefault();
-                  const cmd = slashMatches[clampedSlashIndex];
-                  if (cmd) pickSlashCommand(cmd);
-                } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-                  // Menus are closed here (handled above), so arrows recall sent
-                  // prompts shell-style — unless the caret is mid-text in a
-                  // multi-line draft, where navigateHistory declines and the
-                  // cursor moves normally.
-                  if (navigateHistory(e.key === "ArrowUp" ? -1 : 1, e.currentTarget)) {
-                    e.preventDefault();
+                }}
+                onKeyUp={(e) => {
+                  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                    const el = e.currentTarget;
+                    updateMention(el.value, el.selectionStart ?? el.value.length);
                   }
-                } else if (e.key === "Enter" && !e.shiftKey) {
-                  // Enter sends; Shift+Enter inserts a newline (textarea default).
-                  e.preventDefault();
-                  submit();
-                } else if (e.key === "Escape") {
-                  // Cancel the build if it's running; otherwise cancel Ken so the
-                  // "esc to cancel" on his bar actually works.
-                  if (slashOpen) setInput("");
-                  else if (running && !cancelling) requestCancel();
-                  else if (kenRunning) void client.cancelKen();
-                }
-              }}
-              autoFocus
-            />
+                }}
+                onKeyDown={(e) => {
+                  // While the dissolve→decode animation plays the input is locked;
+                  // swallow keys so Enter can't submit the un-enhanced draft.
+                  if (enhanceAnim) {
+                    e.preventDefault();
+                    return;
+                  }
+                  if (mentionOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                    e.preventDefault();
+                    const delta = e.key === "ArrowDown" ? 1 : -1;
+                    setFileIndex((i) => (i + delta + fileMatches.length) % fileMatches.length);
+                  } else if (
+                    mentionOpen &&
+                    (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))
+                  ) {
+                    e.preventDefault();
+                    const file = fileMatches[clampedFileIndex];
+                    if (file) pickMentionFile(file);
+                  } else if (mentionOpen && e.key === "Escape") {
+                    e.preventDefault();
+                    setMention(null);
+                  } else if (slashOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                    e.preventDefault();
+                    const delta = e.key === "ArrowDown" ? 1 : -1;
+                    setSlashIndex((i) => (i + delta + slashMatches.length) % slashMatches.length);
+                  } else if (slashOpen && (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey))) {
+                    e.preventDefault();
+                    const cmd = slashMatches[clampedSlashIndex];
+                    if (cmd) pickSlashCommand(cmd);
+                  } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                    // Menus are closed here (handled above), so arrows recall sent
+                    // prompts shell-style — unless the caret is mid-text in a
+                    // multi-line draft, where navigateHistory declines and the
+                    // cursor moves normally.
+                    if (navigateHistory(e.key === "ArrowUp" ? -1 : 1, e.currentTarget)) {
+                      e.preventDefault();
+                    }
+                  } else if (e.key === "Enter" && !e.shiftKey) {
+                    // Enter sends; Shift+Enter inserts a newline (textarea default).
+                    e.preventDefault();
+                    submit();
+                  } else if (e.key === "Escape") {
+                    // Cancel the build if it's running; otherwise cancel Ken so the
+                    // "esc to cancel" on his bar actually works.
+                    if (slashOpen) setInput("");
+                    else if (running && !cancelling) requestCancel();
+                    else if (kenRunning) void client.cancelKen();
+                  }
+                }}
+                autoFocus
+              />
+            </div>
           </div>
+          {!enhanceAnim && (
+            // Pill pinned to the center of the input box (.inputwrap) top border,
+            // overlapping it. Decoupled from text flow, so it never overlaps text,
+            // drifts, or shifts the caret/height; centered (not in a corner) to
+            // stay clear of the status row's "esc to cancel". Always mounted (so it
+            // can transition both ways); the `visible` class fades/slides it in
+            // when there's text and out when there isn't.
+            <button
+              className={`enhance-pill${enhanceHintVisible ? " visible" : ""}${enhancing ? " enhancing" : ""}`}
+              title="Enhance prompt — clearer wording + correct terms"
+              disabled={enhancing || !enhanceHintVisible}
+              aria-hidden={!enhanceHintVisible}
+              onClick={() => void runEnhance()}
+            >
+              {enhancing ? "Enhancing…" : "Enhance?"}
+            </button>
+          )}
         </div>
-        {!enhanceAnim && (
-          // Pill pinned to the center of the input box (.inputwrap) top border,
-          // overlapping it. Decoupled from text flow, so it never overlaps text,
-          // drifts, or shifts the caret/height; centered (not in a corner) to
-          // stay clear of the status row's "esc to cancel". Always mounted (so it
-          // can transition both ways); the `visible` class fades/slides it in
-          // when there's text and out when there isn't.
+
+        <div
+          className={`footer${workspaceMode === "chat" ? " footer-chat" : ""}`}
+          style={{ color: theme.footerText }}
+        >
+          {!hydrated ? (
+            <FooterSkeleton />
+          ) : (
+            <>
+              {workspaceMode === "chat" ? (
+                <span
+                  className="footer-left footer-reveal"
+                  style={{ color: theme.textDim, fontFamily: "var(--mono)" }}
+                >
+                  {state?.chatAgent === "therapist"
+                    ? "Therapist Agent"
+                    : state?.chatAgent === "research"
+                      ? "Research Agent"
+                      : "General Agent"}
+                </span>
+              ) : (
+                <span className="footer-left footer-reveal" style={{ fontFamily: "var(--mono)" }}>
+                  {BUILD_IDENTITY && (
+                    <span className="footer-custom-build">{`◆ ${BUILD_IDENTITY}`}</span>
+                  )}
+                  {tasks.length > 0 && (
+                    <>
+                      {BUILD_IDENTITY && <FooterSep />}
+                      <BackgroundTasksButton tasks={tasks} killTask={client.killTask} />
+                    </>
+                  )}
+                  {state?.planMode && (
+                    <>
+                      {(BUILD_IDENTITY || tasks.length > 0) && <FooterSep />}
+                      <span className="footer-plan">
+                        <ShimmerText base={theme.secondary} bright="#ddd6fe">
+                          {"\u25C6 plan mode"}
+                        </ShimmerText>
+                      </span>
+                    </>
+                  )}
+                </span>
+              )}
+              <span className="footer-right footer-reveal">
+                {contextPct > 0 && (
+                  <>
+                    <ContextMeter pct={contextPct} />
+                    <FooterSep />
+                  </>
+                )}
+                {(state?.supportedThinkingLevels?.length ?? 0) > 0 &&
+                  (() => {
+                    const level = state?.thinkingLevel ?? null;
+                    const label = level ? `Thinking ${level}` : "Thinking off";
+                    const maxPower = level === "xhigh" || level === "max";
+                    return (
+                      <>
+                        <button
+                          className="thinking-toggle"
+                          style={{
+                            color: thinkingColor(level),
+                            fontWeight: level === "high" ? 600 : 400,
+                          }}
+                          title="Cycle reasoning level"
+                          onClick={() => void client.cycleThinking()}
+                        >
+                          {maxPower ? (
+                            <ShimmerText base={MAX_POWER_COLOR} bright={MAX_POWER_SHIMMER}>
+                              {label}
+                            </ShimmerText>
+                          ) : (
+                            label
+                          )}
+                        </button>
+                        <FooterSep />
+                      </>
+                    );
+                  })()}
+                <span className="model-anchor">
+                  {modelMenuOpen && models.length > 0 && (
+                    <ModelMenu
+                      models={models}
+                      currentModel={state?.model ?? ""}
+                      onSelect={onSelectModel}
+                      onClose={() => setModelMenuOpen(false)}
+                      title={
+                        workspaceMode === "chat" ? "GG model" : `${PRODUCT_DISPLAY_NAME} model`
+                      }
+                    />
+                  )}
+                  <span className="model-label" style={{ color: theme.text }}>
+                    {PRODUCT_SHORT_NAME}
+                  </span>
+                  <button
+                    className="model-button"
+                    style={{ color: theme.text }}
+                    disabled={running || models.length === 0}
+                    title={
+                      workspaceMode === "chat"
+                        ? "Switch GG's model"
+                        : `Switch ${PRODUCT_DISPLAY_NAME}'s model`
+                    }
+                    onClick={() => {
+                      setKenModelMenuOpen(false);
+                      setModelMenuOpen((o) => !o);
+                    }}
+                  >
+                    {modelName(state?.model)}
+                  </button>
+                </span>
+                {workspaceMode === "code" && (
+                  <>
+                    <FooterSep />
+                    <span className="model-anchor">
+                      {kenModelMenuOpen && models.length > 0 && (
+                        <ModelMenu
+                          models={models}
+                          currentModel={state?.kenModel ?? state?.model ?? ""}
+                          onSelect={(id) => onSelectKenModel(id)}
+                          onClose={() => setKenModelMenuOpen(false)}
+                          title={`${MENTOR_DISPLAY_NAME}'s model`}
+                          onSelectFollow={() => onSelectKenModel(null)}
+                          followActive={!state?.kenModelOverride}
+                        />
+                      )}
+                      <span className="model-label" style={{ color: theme.ken }}>
+                        {MENTOR_DISPLAY_NAME}
+                      </span>
+                      <button
+                        className="model-button"
+                        style={{ color: theme.ken }}
+                        disabled={models.length === 0}
+                        title={
+                          state?.kenModelOverride
+                            ? `${MENTOR_DISPLAY_NAME} is pinned to a model — click to change`
+                            : `${MENTOR_DISPLAY_NAME} follows ${PRODUCT_DISPLAY_NAME}'s model — click to pin one`
+                        }
+                        onClick={() => {
+                          setModelMenuOpen(false);
+                          setKenModelMenuOpen((o) => !o);
+                        }}
+                      >
+                        {modelName(state?.kenModel ?? state?.model)}
+                      </button>
+                    </span>
+                  </>
+                )}
+              </span>
+            </>
+          )}
+        </div>
+
+        {appUpdate.phase === "available" && (
           <button
-            className={`enhance-pill${enhanceHintVisible ? " visible" : ""}${enhancing ? " enhancing" : ""}`}
-            title="Enhance prompt — clearer wording + correct terms"
-            disabled={enhancing || !enhanceHintVisible}
-            aria-hidden={!enhanceHintVisible}
-            onClick={() => void runEnhance()}
+            className="update-banner"
+            title={appUpdate.installTitle}
+            onClick={() => {
+              if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+                setShowLocalUpdateConfirm(true);
+              } else {
+                void appUpdate.install();
+              }
+            }}
           >
-            {enhancing ? "Enhancing…" : "Enhance?"}
+            <span className="update-banner-dot" />
+            {appUpdate.localPatched
+              ? `${appUpdate.installLabel} — click to review the protected source update`
+              : `${MENTOR_DISPLAY_NAME} just pushed a new update (${appUpdate.version}) — click here to install`}
           </button>
         )}
-      </div>
+        {["installing", "completed", "error"].includes(appUpdate.phase) && (
+          <div className="update-banner update-banner-busy" title={appUpdate.installTitle}>
+            <span className="update-banner-dot" />
+            {appUpdate.statusMessage ?? appUpdate.installLabel}
+          </div>
+        )}
 
-      <div
-        className={`footer${workspaceMode === "chat" ? " footer-chat" : ""}`}
-        style={{ color: theme.footerText }}
-      >
-        {!hydrated ? (
-          <FooterSkeleton />
-        ) : (
-          <>
-            {workspaceMode === "chat" ? (
-              <span
-                className="footer-left footer-reveal"
-                style={{ color: theme.textDim, fontFamily: "var(--mono)" }}
-              >
-                {state?.chatAgent === "therapist"
-                  ? "Therapist Agent"
-                  : state?.chatAgent === "research"
-                    ? "Research Agent"
-                    : "General Agent"}
-              </span>
-            ) : (
-              <span className="footer-left footer-reveal" style={{ fontFamily: "var(--mono)" }}>
-                {BUILD_IDENTITY && (
-                  <span className="footer-custom-build">{`◆ ${BUILD_IDENTITY}`}</span>
-                )}
-                {tasks.length > 0 && (
-                  <>
-                    {BUILD_IDENTITY && <FooterSep />}
-                    <BackgroundTasksButton tasks={tasks} killTask={client.killTask} />
-                  </>
-                )}
-                {state?.planMode && (
-                  <>
-                    {(BUILD_IDENTITY || tasks.length > 0) && <FooterSep />}
-                    <span className="footer-plan">
-                      <ShimmerText base={theme.secondary} bright="#ddd6fe">
-                        {"\u25C6 plan mode"}
-                      </ShimmerText>
-                    </span>
-                  </>
-                )}
-              </span>
-            )}
-            <span className="footer-right footer-reveal">
-              {contextPct > 0 && (
-                <>
-                  <ContextMeter pct={contextPct} />
-                  <FooterSep />
-                </>
-              )}
-              {(state?.supportedThinkingLevels?.length ?? 0) > 0 &&
-                (() => {
-                  const level = state?.thinkingLevel ?? null;
-                  const label = level ? `Thinking ${level}` : "Thinking off";
-                  const maxPower = level === "xhigh" || level === "max";
-                  return (
-                    <>
-                      <button
-                        className="thinking-toggle"
-                        style={{
-                          color: thinkingColor(level),
-                          fontWeight: level === "high" ? 600 : 400,
-                        }}
-                        title="Cycle reasoning level"
-                        onClick={() => void client.cycleThinking()}
-                      >
-                        {maxPower ? (
-                          <ShimmerText base={MAX_POWER_COLOR} bright={MAX_POWER_SHIMMER}>
-                            {label}
-                          </ShimmerText>
-                        ) : (
-                          label
-                        )}
-                      </button>
-                      <FooterSep />
-                    </>
-                  );
-                })()}
-              <span className="model-anchor">
-                {modelMenuOpen && models.length > 0 && (
-                  <ModelMenu
-                    models={models}
-                    currentModel={state?.model ?? ""}
-                    onSelect={onSelectModel}
-                    onClose={() => setModelMenuOpen(false)}
-                    title={workspaceMode === "chat" ? "GG model" : `${PRODUCT_DISPLAY_NAME} model`}
-                  />
-                )}
-                <span className="model-label" style={{ color: theme.text }}>
-                  {PRODUCT_SHORT_NAME}
-                </span>
-                <button
-                  className="model-button"
-                  style={{ color: theme.text }}
-                  disabled={running || models.length === 0}
-                  title={
-                    workspaceMode === "chat"
-                      ? "Switch GG's model"
-                      : `Switch ${PRODUCT_DISPLAY_NAME}'s model`
-                  }
-                  onClick={() => {
-                    setKenModelMenuOpen(false);
-                    setModelMenuOpen((o) => !o);
-                  }}
-                >
-                  {modelName(state?.model)}
-                </button>
-              </span>
-              {workspaceMode === "code" && (
-                <>
-                  <FooterSep />
-                  <span className="model-anchor">
-                    {kenModelMenuOpen && models.length > 0 && (
-                      <ModelMenu
-                        models={models}
-                        currentModel={state?.kenModel ?? state?.model ?? ""}
-                        onSelect={(id) => onSelectKenModel(id)}
-                        onClose={() => setKenModelMenuOpen(false)}
-                        title={`${MENTOR_DISPLAY_NAME}'s model`}
-                        onSelectFollow={() => onSelectKenModel(null)}
-                        followActive={!state?.kenModelOverride}
-                      />
-                    )}
-                    <span className="model-label" style={{ color: theme.ken }}>
-                      {MENTOR_DISPLAY_NAME}
-                    </span>
-                    <button
-                      className="model-button"
-                      style={{ color: theme.ken }}
-                      disabled={models.length === 0}
-                      title={
-                        state?.kenModelOverride
-                          ? `${MENTOR_DISPLAY_NAME} is pinned to a model — click to change`
-                          : `${MENTOR_DISPLAY_NAME} follows ${PRODUCT_DISPLAY_NAME}'s model — click to pin one`
-                      }
-                      onClick={() => {
-                        setModelMenuOpen(false);
-                        setKenModelMenuOpen((o) => !o);
-                      }}
-                    >
-                      {modelName(state?.kenModel ?? state?.model)}
-                    </button>
-                  </span>
-                </>
-              )}
-            </span>
-          </>
+        {focused && workspaceMode === "code" && showInitGit && (
+          <InitGitModal
+            defaultName={defaultRepoName}
+            onClose={() => setShowInitGit(false)}
+            onInitialize={(prompt) => {
+              setShowInitGit(false);
+              submitText(prompt, "Initializing Git\u2026");
+            }}
+          />
+        )}
+
+        {focused && showLocalUpdateConfirm && (
+          <ConfirmModal
+            title={LOCAL_UPDATE_CONFIRMATION_TITLE}
+            message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
+            confirmLabel={LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL}
+            onConfirm={() => {
+              setShowLocalUpdateConfirm(false);
+              void appUpdate.install();
+            }}
+            onClose={() => setShowLocalUpdateConfirm(false)}
+          />
+        )}
+
+        {focused && confirmNewSession && (
+          <ConfirmModal
+            title={workspaceMode === "chat" ? "New Chat" : "New Session"}
+            message={
+              workspaceMode === "chat"
+                ? "This will create a new chat. The current conversation will be cleared. Are you sure?"
+                : "This will create a new session for this project. The current conversation will be cleared. Are you sure?"
+            }
+            confirmLabel={workspaceMode === "chat" ? "New Chat" : "New Session"}
+            busy={newSessionBusy}
+            onConfirm={() => void startNewSession()}
+            onClose={() => setConfirmNewSession(false)}
+          />
+        )}
+
+        {focused && workspaceMode === "code" && planReview !== null && (
+          <PlanReviewModal
+            content={planReview}
+            // Autopilot Ken reviews submitted plans himself; the indicator tells
+            // the user, but manual Accept/Reject stays live and always wins.
+            kenReviewing={autopilotReviewing}
+            onAccept={acceptPlan}
+            onFeedback={sendPlanFeedback}
+            onReject={rejectPlan}
+          />
+        )}
+
+        {focused && workspaceMode === "chat" && showMemories && (
+          <MemoryModal onClose={() => setShowMemories(false)} />
+        )}
+
+        {focused && showScorecard && progress && (
+          <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
+        )}
+
+        {focused && workspaceMode === "code" && showTasks && (
+          <TasksModal
+            tasks={projectTasks}
+            running={running || newSessionBusy}
+            onRun={handleRunTask}
+            onRunAll={handleRunAllTasks}
+            onDelete={handleDeleteTask}
+            onClose={() => setShowTasks(false)}
+          />
         )}
       </div>
-
-      {appUpdate.phase === "available" && (
-        <button
-          className="update-banner"
-          title={appUpdate.installTitle}
-          onClick={() => {
-            if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
-              setShowLocalUpdateConfirm(true);
-            } else {
-              void appUpdate.install();
-            }
-          }}
-        >
-          <span className="update-banner-dot" />
-          {appUpdate.localPatched
-            ? `${appUpdate.installLabel} — click to review the protected source update`
-            : `${MENTOR_DISPLAY_NAME} just pushed a new update (${appUpdate.version}) — click here to install`}
-        </button>
-      )}
-      {["installing", "completed", "error"].includes(appUpdate.phase) && (
-        <div className="update-banner update-banner-busy" title={appUpdate.installTitle}>
-          <span className="update-banner-dot" />
-          {appUpdate.statusMessage ?? appUpdate.installLabel}
-        </div>
-      )}
-
-      {focused && workspaceMode === "code" && showInitGit && (
-        <InitGitModal
-          defaultName={defaultRepoName}
-          onClose={() => setShowInitGit(false)}
-          onInitialize={(prompt) => {
-            setShowInitGit(false);
-            submitText(prompt, "Initializing Git\u2026");
-          }}
-        />
-      )}
-
-      {focused && showLocalUpdateConfirm && (
-        <ConfirmModal
-          title={LOCAL_UPDATE_CONFIRMATION_TITLE}
-          message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
-          confirmLabel={LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL}
-          onConfirm={() => {
-            setShowLocalUpdateConfirm(false);
-            void appUpdate.install();
-          }}
-          onClose={() => setShowLocalUpdateConfirm(false)}
-        />
-      )}
-
-      {focused && confirmNewSession && (
-        <ConfirmModal
-          title={workspaceMode === "chat" ? "New Chat" : "New Session"}
-          message={
-            workspaceMode === "chat"
-              ? "This will create a new chat. The current conversation will be cleared. Are you sure?"
-              : "This will create a new session for this project. The current conversation will be cleared. Are you sure?"
-          }
-          confirmLabel={workspaceMode === "chat" ? "New Chat" : "New Session"}
-          busy={newSessionBusy}
-          onConfirm={() => void startNewSession()}
-          onClose={() => setConfirmNewSession(false)}
-        />
-      )}
-
-      {focused && workspaceMode === "code" && planReview !== null && (
-        <PlanReviewModal
-          content={planReview}
-          // Autopilot Ken reviews submitted plans himself; the indicator tells
-          // the user, but manual Accept/Reject stays live and always wins.
-          kenReviewing={autopilotReviewing}
-          onAccept={acceptPlan}
-          onFeedback={sendPlanFeedback}
-          onReject={rejectPlan}
-        />
-      )}
-
-      {focused && workspaceMode === "chat" && showMemories && (
-        <MemoryModal onClose={() => setShowMemories(false)} />
-      )}
-
-      {focused && showScorecard && progress && (
-        <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
-      )}
-
-      {focused && workspaceMode === "code" && showTasks && (
-        <TasksModal
-          tasks={projectTasks}
-          running={running}
-          onRun={handleRunTask}
-          onRunAll={handleRunAllTasks}
-          onDelete={handleDeleteTask}
-          onClose={() => setShowTasks(false)}
-        />
-      )}
-    </div>
+    </KenPromptActionProvider>
   );
 }
 

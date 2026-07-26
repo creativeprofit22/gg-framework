@@ -232,6 +232,13 @@ export type ProjectNotesSaveOutcome =
   | ({ status: "corrupt" } & ProjectNotesCorruption)
   | { status: "invalid"; error: NotesValidationError };
 
+export type NotesOperationFailureReason =
+  | "invalid"
+  | "missing"
+  | "corrupt"
+  | "unavailable"
+  | "storage";
+
 export type NotesReferenceOperationResult =
   | { status: "committed"; referenceId: string }
   | { status: "reused"; referenceId: string }
@@ -239,10 +246,23 @@ export type NotesReferenceOperationResult =
   | { status: "linked-blocked"; phaseIds: string[] }
   | { status: "missing-reference" }
   | { status: "missing-phase"; phaseId: string }
+  | { status: "failed"; reason: NotesOperationFailureReason };
+
+export type NotesPromptSaveInput =
+  | { kind: "new-draft"; title: string; prompt: string }
   | {
-      status: "failed";
-      reason: "invalid" | "missing" | "corrupt" | "unavailable" | "storage";
+      kind: "existing-phase";
+      phaseId: string;
+      prompt: string;
+      expectedSourcePrompt: string;
     };
+
+export type NotesPromptSaveResult =
+  | { status: "committed"; phaseId: string; title: string }
+  | { status: "replacement-conflict"; phaseId: string; title: string }
+  | { status: "missing-phase"; phaseId: string }
+  | { status: "archived-phase"; phaseId: string; title: string }
+  | { status: "failed"; reason: NotesOperationFailureReason };
 
 export interface NotesSidecarEvent {
   type: string;

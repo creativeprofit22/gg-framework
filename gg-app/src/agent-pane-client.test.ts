@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
-import { createPaneAgentClient, getState, sendPrompt } from "./agent";
+import { createPaneAgentClient, getState, NewSessionError, sendPrompt } from "./agent";
 
 const target = {
   mode: "chat" as const,
@@ -71,6 +71,7 @@ describe("pane agent client", () => {
       if (command === "agent_notes_save") {
         return { status: "ok", snapshot: { ...notesSnapshot, revision: 2 } };
       }
+      if (command === "agent_new_session") return { operationId: "operation-1" };
       return {};
     });
   });
@@ -97,7 +98,7 @@ describe("pane agent client", () => {
     await c.listHistory();
     await c.authOAuthStart("openai");
     await c.authOAuthCode("code");
-    await c.newSession();
+    expect(await c.newSession()).toEqual({ operationId: "operation-1" });
     await c.getRadioState();
     await c.setRadio("lofi");
     await c.setRadioVolume(50);
@@ -153,6 +154,36 @@ describe("pane agent client", () => {
       expectedRevision: 1,
       document: notesDocument,
     });
+  });
+
+  it("types new-session HTTP rejection separately from an unknown transport outcome", async () => {
+    const client = createPaneAgentClient("right");
+    invoke
+      .mockRejectedValueOnce(
+        JSON.stringify({
+          kind: "creation-rejected",
+          status: 409,
+          message: "cannot start a new session while running",
+        }),
+      )
+      .mockRejectedValueOnce(
+        JSON.stringify({
+          kind: "outcome-unknown",
+          status: 500,
+          message: "session storage failed after reset",
+        }),
+      )
+      .mockRejectedValueOnce(new Error("connection closed"));
+
+    await expect(client.newSession()).rejects.toEqual(
+      new NewSessionError("creation-rejected", "cannot start a new session while running", 409),
+    );
+    await expect(client.newSession()).rejects.toEqual(
+      new NewSessionError("outcome-unknown", "session storage failed after reset", 500),
+    );
+    await expect(client.newSession()).rejects.toEqual(
+      new NewSessionError("outcome-unknown", "connection closed"),
+    );
   });
 
   it("passes validated typed Notes outcomes through unchanged", async () => {

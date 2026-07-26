@@ -1876,6 +1876,7 @@ body {
   gap: 18px;
 }
 .notes-phase-content h4,
+.notes-phase-saved-prompt h4,
 .notes-phase-archive h3,
 .notes-archive-task-heading {
   margin: 0 0 7px;
@@ -1895,6 +1896,15 @@ body {
 }
 .notes-phase-content ul {
   padding-inline-start: 18px;
+}
+.notes-phase-saved-prompt {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0 14px 14px;
+}
+.notes-phase-saved-prompt h4 {
+  margin: 0;
 }
 .notes-phase-metadata {
   display: grid;
@@ -3842,7 +3852,8 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin: 0 14px 12px;
+  min-height: 28px;
+  margin: 0;
   padding: 5px 11px;
   font-family: var(--sans);
   font-size: 12px;
@@ -3868,6 +3879,240 @@ body {
   color: var(--success);
   cursor: default;
   opacity: 0.85;
+}
+.markdown .ken-prompt-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin: 0 14px 12px;
+}
+.markdown .ken-prompt-more,
+.markdown .ken-prompt-secondary-actions button,
+.markdown .ken-prompt-save-actions button {
+  display: inline-flex;
+  min-width: 28px;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 9px;
+  color: var(--text-secondary);
+  font: 600 12px/1 var(--sans);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  cursor: pointer;
+  transition:
+    color var(--t-fast),
+    border-color var(--t-fast),
+    background-color var(--t-fast);
+}
+.markdown .ken-prompt-more:hover:not(:disabled),
+.markdown .ken-prompt-secondary-actions button:hover:not(:disabled),
+.markdown .ken-prompt-save-actions button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--surface-1);
+}
+.markdown .ken-prompt-send:focus-visible,
+.markdown .ken-prompt-more:focus-visible,
+.markdown .ken-prompt-action-panel button:focus-visible,
+.markdown .ken-prompt-action-panel input:focus-visible,
+.markdown .ken-prompt-action-panel select:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.markdown .ken-prompt-actions button:disabled,
+.markdown .ken-prompt-action-panel button:disabled,
+.markdown .ken-prompt-action-panel input:disabled,
+.markdown .ken-prompt-action-panel select:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+.markdown .ken-prompt-action-panel {
+  margin: 0 14px 12px;
+  padding: 10px;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+}
+.markdown .ken-prompt-secondary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.markdown .ken-prompt-save-form,
+.markdown .ken-prompt-save-form fieldset {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.markdown .ken-prompt-save-form legend {
+  margin-block-end: 2px;
+  padding: 0;
+  color: var(--text);
+  font: 650 12px/1.35 var(--sans);
+}
+.markdown .ken-prompt-radio {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.markdown .ken-prompt-radio input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+.markdown .ken-prompt-save-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding-inline-start: 22px;
+}
+.markdown .ken-prompt-save-field label,
+.markdown .ken-prompt-preview strong {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.markdown .ken-prompt-save-field input,
+.markdown .ken-prompt-save-field select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 9px;
+  color: var(--text);
+  font: 12px/1.35 var(--sans);
+  background-color: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-input);
+}
+.markdown .ken-prompt-save-field select {
+  padding-inline-end: 32px;
+  background-position: right 10px center;
+}
+.markdown .ken-prompt-preview {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  margin-block-start: 2px;
+}
+.markdown .ken-prompt-preview pre,
+.notes-phase-saved-prompt pre {
+  max-width: 100%;
+  margin: 0;
+  padding: 9px 10px;
+  overflow-x: auto;
+  color: var(--text);
+  font: 12px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  user-select: text;
+}
+.markdown .ken-prompt-replacement,
+.markdown .ken-prompt-pending,
+.markdown .ken-prompt-success,
+.markdown .ken-prompt-error {
+  margin: 8px 14px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.markdown .ken-prompt-replacement {
+  margin: 0;
+  color: var(--warning);
+}
+.markdown .ken-prompt-pending {
+  color: var(--text-muted);
+}
+.markdown .ken-prompt-success {
+  color: var(--success);
+}
+.markdown .ken-prompt-error {
+  color: var(--error);
+}
+.markdown .ken-prompt-save-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.markdown .ken-prompt-save-actions button:first-child {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+@media (max-width: 420px) {
+  .markdown .ken-prompt-actions,
+  .markdown .ken-prompt-action-panel,
+  .markdown .ken-prompt-pending,
+  .markdown .ken-prompt-success,
+  .markdown .ken-prompt-error {
+    margin-inline: 10px;
+  }
+  .markdown .ken-prompt-actions {
+    flex-wrap: wrap;
+  }
+  .markdown .ken-prompt-send {
+    min-width: 0;
+    max-width: calc(100% - 34px);
+    white-space: normal;
+  }
+  .markdown .ken-prompt-secondary-actions,
+  .markdown .ken-prompt-save-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .markdown .ken-prompt-secondary-actions button,
+  .markdown .ken-prompt-save-actions button {
+    justify-content: flex-start;
+    white-space: normal;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .markdown .ken-prompt-send,
+  .markdown .ken-prompt-more,
+  .markdown .ken-prompt-secondary-actions button,
+  .markdown .ken-prompt-save-actions button {
+    transition: none;
+  }
+}
+@media (forced-colors: active) {
+  .markdown .ken-prompt-block,
+  .markdown .ken-prompt-action-panel,
+  .markdown .ken-prompt-actions button,
+  .markdown .ken-prompt-action-panel button,
+  .markdown .ken-prompt-action-panel input,
+  .markdown .ken-prompt-action-panel select,
+  .markdown .ken-prompt-preview pre,
+  .notes-phase-saved-prompt pre {
+    border-color: CanvasText;
+  }
+  .markdown .ken-prompt-send:focus-visible,
+  .markdown .ken-prompt-more:focus-visible,
+  .markdown .ken-prompt-action-panel button:focus-visible,
+  .markdown .ken-prompt-action-panel input:focus-visible,
+  .markdown .ken-prompt-action-panel select:focus-visible {
+    outline-color: Highlight;
+  }
+  .markdown .ken-prompt-success {
+    color: Highlight;
+  }
+  .markdown .ken-prompt-error,
+  .markdown .ken-prompt-replacement {
+    color: MarkText;
+  }
 }
 .markdown table {
   border-collapse: collapse;

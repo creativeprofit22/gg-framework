@@ -1,12 +1,30 @@
-import { memo, useCallback, useContext, useMemo, useRef, useState, createContext } from "react";
+import {
+  createElement,
+  memo,
+  useCallback,
+  useContext,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  createContext,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { Check, Copy, CornerDownLeft } from "lucide-react";
+import { Check, Copy, CornerDownLeft, FilePlus2, MoreHorizontal, Plus } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { openProjectPath, sendPrompt } from "./agent";
+import { openProjectPath } from "./agent";
 import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
+import {
+  KEN_PROMPT_TITLE_MAX_LENGTH,
+  normalizeKenPrompt,
+  type KenPromptAction,
+  type KenPromptActionDispatcher,
+  type KenPromptActionResult,
+  type KenPromptSavePreview,
+} from "./ken-prompt-actions";
 import { marked } from "marked";
 import "highlight.js/styles/github-dark.css";
 
@@ -113,51 +131,323 @@ function selectWordAtPoint(x: number, y: number): boolean {
  */
 const PromptReadyContext = createContext(true);
 
-/**
- * Handler the "Send to GG Coder" button calls when clicked. App provides one
- * that pushes a shimmering "Sent to GG Coder" user bubble into the transcript
- * (like a slash command renders) and then sends the prompt. Defaults to null, in
- * which case the button falls back to sending directly with no transcript row
- * (safe for any render outside App). */
-const PromptSendContext = createContext<((text: string) => void) | null>(null);
+const KenPromptActionContext = createContext<KenPromptActionDispatcher | null>(null);
 
-/**
- * A Ken-recommended GG Coder prompt. Ken wraps every runnable prompt in a
- * ```prompt fence; we render the body in a styled block with a "Send to GG
- * Coder" button that fires it into the build session exactly as if the user
- * typed it. The button only appears once Ken's reply has finished streaming
- * (PromptReadyContext), and once sent it stays "Sent" so it's clear it landed.
- */
+type PendingPromptAction = "send-current" | "send-fresh" | "prepare-save" | "commit-save";
+type SaveDestinationKind = "new-draft" | "existing-phase";
+
+interface SaveDraftState {
+  preview: KenPromptSavePreview;
+  destination: SaveDestinationKind;
+  phaseId: string;
+  title: string;
+}
+
+function pendingPromptLabel(action: PendingPromptAction): string {
+  if (action === "send-fresh") return "Creating session…";
+  if (action === "prepare-save" || action === "commit-save") return "Saving…";
+  return "Sending…";
+}
+
+/** A complete Ken prompt with one primary send and guarded secondary actions. */
 function PromptBlock({ body }: { body: string }): React.ReactElement {
   const ready = useContext(PromptReadyContext);
-  const onSend = useContext(PromptSendContext);
+  const dispatcher = useContext(KenPromptActionContext);
+  const panelId = useId();
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
+  const actionLockRef = useRef(false);
   const [sent, setSent] = useState(false);
-  const send = useCallback(() => {
-    const text = body.replace(/\n$/, "").trim();
-    if (!text) return;
-    // Route through App so it can render the shimmering "Sent to GG Coder" user
-    // bubble; fall back to a direct send if no handler is provided. Stays "Sent"
-    // (disabled) afterward so the user can see it landed and can't double-fire.
-    if (onSend) onSend(text);
-    else void sendPrompt(text).catch(() => {});
-    setSent(true);
-  }, [body, onSend]);
+  const [expanded, setExpanded] = useState(false);
+  const [pending, setPending] = useState<PendingPromptAction | null>(null);
+  const [saveDraft, setSaveDraft] = useState<SaveDraftState | null>(null);
+  const [error, setError] = useState("");
+  const [announcement, setAnnouncement] = useState("");
+  const prompt = normalizeKenPrompt(body);
+
+  const closeActions = useCallback((returnFocus: boolean) => {
+    setExpanded(false);
+    setSaveDraft(null);
+    setError("");
+    if (returnFocus) queueMicrotask(() => moreButtonRef.current?.focus());
+  }, []);
+
+  const runAction = useCallback(
+    async (action: KenPromptAction): Promise<KenPromptActionResult | null> => {
+      if (!dispatcher || !prompt || sent || actionLockRef.current) return null;
+      actionLockRef.current = true;
+      setPending(action.type);
+      setError("");
+      setAnnouncement("");
+      try {
+        const result = await dispatcher.dispatch(action);
+        if (result.status === "failed") setError(result.message);
+        return result;
+      } catch {
+        setError("The prompt action failed. Your prompt is still available. Try again.");
+        return null;
+      } finally {
+        actionLockRef.current = false;
+        setPending(null);
+      }
+    },
+    [dispatcher, prompt, sent],
+  );
+
+  const sendCurrent = useCallback(async () => {
+    const result = await runAction({ type: "send-current", prompt });
+    if (result?.status === "sent") setSent(true);
+  }, [prompt, runAction]);
+
+  const sendFresh = useCallback(async () => {
+    const result = await runAction({ type: "send-fresh", prompt });
+    if (result?.status === "sent") {
+      setSent(true);
+      setExpanded(false);
+      setSaveDraft(null);
+      setAnnouncement("Sent in a new session.");
+    }
+  }, [prompt, runAction]);
+
+  const prepareSave = useCallback(async () => {
+    const result = await runAction({ type: "prepare-save", prompt });
+    if (result?.status === "saved") {
+      setExpanded(false);
+      setAnnouncement(`Saved to Notes: ${result.title}`);
+      return;
+    }
+    if (result?.status !== "preview") return;
+    setSaveDraft({
+      preview: result.preview,
+      destination: "new-draft",
+      phaseId: result.preview.destinations[0]?.phaseId ?? "",
+      title: result.preview.suggestedTitle,
+    });
+  }, [prompt, runAction]);
+
+  const commitSave = useCallback(async () => {
+    if (!saveDraft) return;
+    const title = saveDraft.title.trim();
+    if (saveDraft.destination === "new-draft" && !title) {
+      setError("Enter a title for the new roadmap draft.");
+      return;
+    }
+    const selected = saveDraft.preview.destinations.find(
+      (destination) => destination.phaseId === saveDraft.phaseId,
+    );
+    if (saveDraft.destination === "existing-phase" && !selected) {
+      setError("Choose an existing phase.");
+      return;
+    }
+    const result = await runAction({
+      type: "commit-save",
+      prompt,
+      target:
+        saveDraft.destination === "new-draft"
+          ? { kind: "new-draft", title }
+          : {
+              kind: "existing-phase",
+              phaseId: selected!.phaseId,
+              title: selected!.title,
+              expectedSourcePrompt: selected!.sourcePrompt,
+            },
+    });
+    if (result?.status === "saved") {
+      setSaveDraft(null);
+      setExpanded(false);
+      setAnnouncement(`Saved to Notes: ${result.title}`);
+    }
+  }, [prompt, runAction, saveDraft]);
+
+  const disabled = sent || pending !== null;
+  const selectedPhase = saveDraft?.preview.destinations.find(
+    (destination) => destination.phaseId === saveDraft.phaseId,
+  );
+  const replacement =
+    saveDraft?.destination === "existing-phase" && Boolean(selectedPhase?.sourcePrompt);
+
   return (
     <div className="ken-prompt-block">
       <pre className="ken-prompt-body">{body.replace(/\n$/, "")}</pre>
-      {ready && (
-        <button
-          type="button"
-          className={`ken-prompt-send${sent ? " sent" : ""}`}
-          onClick={send}
-          disabled={sent}
-          title={
-            sent ? `Sent to ${PRODUCT_DISPLAY_NAME}` : `Send this prompt to ${PRODUCT_DISPLAY_NAME}`
-          }
-        >
-          {sent ? <Check size={12} /> : <CornerDownLeft size={12} />}
-          {sent ? "Sent" : `Send to ${PRODUCT_DISPLAY_NAME}`}
-        </button>
+      {ready && dispatcher && (
+        <>
+          <div className="ken-prompt-actions">
+            <button
+              type="button"
+              className={`ken-prompt-send${sent ? " sent" : ""}`}
+              onClick={() => void sendCurrent()}
+              disabled={disabled}
+              title={
+                sent
+                  ? `Sent to ${PRODUCT_DISPLAY_NAME}`
+                  : `Send this prompt to ${PRODUCT_DISPLAY_NAME}`
+              }
+            >
+              {sent ? <Check size={12} /> : <CornerDownLeft size={12} />}
+              {sent ? "Sent" : `Send to ${PRODUCT_DISPLAY_NAME}`}
+            </button>
+            <button
+              ref={moreButtonRef}
+              type="button"
+              className="ken-prompt-more"
+              aria-label="More prompt actions"
+              aria-expanded={expanded}
+              aria-controls={panelId}
+              disabled={disabled}
+              onClick={() => {
+                setExpanded((current) => !current);
+                setSaveDraft(null);
+                setError("");
+              }}
+            >
+              <MoreHorizontal size={14} aria-hidden="true" />
+            </button>
+          </div>
+
+          {expanded && (
+            <div
+              id={panelId}
+              className="ken-prompt-action-panel"
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                event.stopPropagation();
+                closeActions(true);
+              }}
+            >
+              {!saveDraft && (
+                <div className="ken-prompt-secondary-actions">
+                  <button type="button" onClick={() => void sendFresh()} disabled={disabled}>
+                    <Plus size={14} aria-hidden="true" />
+                    New session + send
+                  </button>
+                  <button type="button" onClick={() => void prepareSave()} disabled={disabled}>
+                    <FilePlus2 size={14} aria-hidden="true" />
+                    Save to Notes
+                  </button>
+                </div>
+              )}
+
+              {saveDraft && (
+                <form
+                  className="ken-prompt-save-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void commitSave();
+                  }}
+                >
+                  <fieldset disabled={pending !== null}>
+                    <legend>Save prompt to Project Notes</legend>
+                    <label className="ken-prompt-radio">
+                      <input
+                        type="radio"
+                        name={`${panelId}-destination`}
+                        checked={saveDraft.destination === "new-draft"}
+                        onChange={() =>
+                          setSaveDraft((current) =>
+                            current ? { ...current, destination: "new-draft" } : current,
+                          )
+                        }
+                      />
+                      New roadmap draft
+                    </label>
+                    <div className="ken-prompt-save-field">
+                      <label htmlFor={`${panelId}-title`}>Draft title</label>
+                      <input
+                        id={`${panelId}-title`}
+                        value={saveDraft.title}
+                        maxLength={KEN_PROMPT_TITLE_MAX_LENGTH}
+                        required={saveDraft.destination === "new-draft"}
+                        disabled={saveDraft.destination !== "new-draft" || pending !== null}
+                        onChange={(event) =>
+                          setSaveDraft((current) =>
+                            current ? { ...current, title: event.target.value } : current,
+                          )
+                        }
+                      />
+                    </div>
+                    <label className="ken-prompt-radio">
+                      <input
+                        type="radio"
+                        name={`${panelId}-destination`}
+                        checked={saveDraft.destination === "existing-phase"}
+                        disabled={saveDraft.preview.destinations.length === 0}
+                        onChange={() =>
+                          setSaveDraft((current) =>
+                            current ? { ...current, destination: "existing-phase" } : current,
+                          )
+                        }
+                      />
+                      Existing phase
+                    </label>
+                    <div className="ken-prompt-save-field">
+                      <label htmlFor={`${panelId}-phase`}>Phase destination</label>
+                      <select
+                        id={`${panelId}-phase`}
+                        value={saveDraft.phaseId}
+                        disabled={
+                          saveDraft.destination !== "existing-phase" ||
+                          saveDraft.preview.destinations.length === 0 ||
+                          pending !== null
+                        }
+                        onChange={(event) =>
+                          setSaveDraft((current) =>
+                            current ? { ...current, phaseId: event.target.value } : current,
+                          )
+                        }
+                      >
+                        {saveDraft.preview.destinations.map((destination) =>
+                          createElement(
+                            "option",
+                            { key: destination.phaseId, value: destination.phaseId },
+                            destination.title,
+                          ),
+                        )}
+                      </select>
+                    </div>
+                  </fieldset>
+
+                  {replacement && (
+                    <p className="ken-prompt-replacement">
+                      This replaces the prompt currently saved in {selectedPhase?.title}.
+                    </p>
+                  )}
+                  <div className="ken-prompt-preview">
+                    <strong>Prompt preview</strong>
+                    <pre>{saveDraft.preview.prompt}</pre>
+                  </div>
+                  <div className="ken-prompt-save-actions">
+                    <button type="submit" disabled={pending !== null}>
+                      {replacement ? "Replace saved prompt" : "Save prompt"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSaveDraft(null)}
+                      disabled={pending !== null}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
+
+          {pending && (
+            <p className="ken-prompt-pending" role="status">
+              {pendingPromptLabel(pending)}
+            </p>
+          )}
+          {announcement && (
+            <p className="ken-prompt-success" role="status">
+              {announcement}
+            </p>
+          )}
+          {error && (
+            <p className="ken-prompt-error" role="alert">
+              {error}
+            </p>
+          )}
+        </>
       )}
     </div>
   );
@@ -307,6 +597,5 @@ export const Markdown = memo(function Markdown({ children }: Props): React.React
   );
 });
 
-/** Provider for the "Send to GG Coder" click handler. App wraps the transcript
- *  with this so prompt-block buttons push a transcript row + send. */
-export const PromptSendProvider = PromptSendContext.Provider;
+/** Typed action boundary for every completed Ken prompt fence. */
+export const KenPromptActionProvider = KenPromptActionContext.Provider;

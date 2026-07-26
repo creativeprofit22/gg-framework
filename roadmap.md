@@ -11,7 +11,7 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Implementation status:** Phases 00–19 are complete and verified; Phase 20 is next.
+- **Implementation status:** Phases 00–20 are complete and verified; Phase 21 is next.
 - **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
@@ -26,9 +26,10 @@ This file is an implementation plan, not a storage surface for user roadmap data
 - **2026-07-25 Phase 17 evidence:** Commit `d924aadf` records the Phase 16 schema and Phase 17 Notes workspace. Notes now uses a four-tab, viewport-relative workspace with fixed storage status/navigation and one scrolling active panel. Focused Notes/modal/storage checks passed 55 tests; all 384 gg-app tests, typecheck, lint, format check, and production build passed. Controlled browser and Tauri captures cover empty, typical, long, 320–420 px narrow, localized/200% reflow, reduced motion, forced colors, keyboard focus/return, and fixed-shell scrolling.
 - **2026-07-25 committed-baseline audit (`d924aadf`):** Commit ancestry and source inspection confirm Phases 00–17 at the committed baseline that preceded the uncommitted Phase 18 implementation. The focused sidecar Notes matrix passed 37 tests, all 384 gg-app tests, and all 102 Rust tests passed. The ggcoder and gg-app typechecks, gg-app lint/format, production build, roadmap coverage check, and diff checks also passed.
 - **2026-07-25 Phase 18 evidence:** Commit `6e9569b3` adds strict original-v3 archive-shape compatibility plus ordered create, inspect, edit, move, status override, cancel, archive, and position-preserving restore flows. The focused release reruns passed 67 gg-app tests across 5 files and 35 sidecar repository/route tests across 2 files; the broader recorded gate passed app and ggcoder typechecks/builds, app tests, lint, format, generated audits, Rust tests, and diff checks.
-- **Next phase:** Phase 20 — Add Ken prompt Send, Fresh send, and Save actions.
+- **2026-07-26 Phase 20 evidence:** Ken prompt fences now dispatch typed current-send, authoritative fresh-send, manual/Autopilot Notes save-preview, and save-commit actions. The full gg-app suite passed 481 tests across 49 files; all 103 Rust tests passed. App check/lint/format/build, ggcoder build, sidecar bundle, all generated-output audits, and diff checks passed. Desktop and 320 px rendered evidence covers default, expanded, manual preview, replacement, pending, success, and failure states; performance telemetry and a native Tauri interaction smoke remain unverified.
+- **Next phase:** Phase 21 — Launch one bound session with isolated phase context.
 - **Track A freeze:** Complete at `7c1d4a13`; the three-OS matrix, workspace memory evidence, and two-window Windows desktop timeout smoke are green. Subsequent commits add Track B Notes behavior without changing the frozen Track A lifecycle implementation; `0c6fe66b` has no separate Actions run because CI triggers only for `main` pushes and pull requests.
-- **Later-track audit:** Phases 15–19 are complete; Phases 20–26 have not started. Phase 20 has only prerequisites already present—Ken prompt blocks can Send to GG Coder and `PaneAgentClient.newSession()` can create a fresh session—not its guarded fresh-send/save workflow.
+- **Later-track audit:** Phases 15–20 are complete; Phases 21–26 have not started. Phase 20's duplicate-send and stale-session hard stop is satisfied by exact-call-count, reset-ordering, timeout, rejection, and prompt-recovery tests.
 - **Notes baseline:** Notes retains Now, Next, Handoff, free-form Reference, and Done / Archive semantics inside a four-tab shell. Roadmap provides ordered phase CRUD and lifecycle controls; the shared structured-reference library now provides canonical deduplication, repository grouping, exact source opening, conflict-replayed CRUD, and many-to-many phase links.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -970,7 +971,7 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 20 — Add Ken prompt Send, Fresh send, and Save actions
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Outcome:** A Ken prompt can be sent now, sent in one guarded fresh session, or saved to Notes without losing the prompt.
 
@@ -1002,7 +1003,14 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Creation failure retains the prompt and current session.
 - Save confirms destination/title, remains in place, and obeys manual-preview versus explicit auto-accept policy.
 
-**Hard stop:** Do not start phase-launch work until duplicate sends and stale-session sends are impossible in tests.
+**Completion evidence**
+
+- **Focused behavior matrix:** 132 tests across Ken action helpers, Markdown, AgentPane, reset ordering, Notes replay, and Project Notes passed. Current send preserves `kenSent`; overlapping fresh sends create one session and send once only after authoritative reset; rejection and timeout never send; post-reset transport failure restores the exact composer text.
+- **Full app and native gates:** All 481 gg-app tests across 49 files and all 103 locked Rust tests passed. App check, lint, format, and production build passed; ggcoder built; sidecar bundling and every generated-output audit passed.
+- **Rendered review:** `.gg/screenshots/phase20-desktop-final.png` and `.gg/screenshots/phase20-320-final.png` cover default, expanded, manual save, replacement, pending, success, failure, long-title, and unbroken-content states. The local-system critique scored 24/24 after confirming the 320 px flow and removing decorative motion; native semantics, keyboard/Escape focus return, pending locks, live status/error roles, reduced-motion CSS, and forced-colors CSS have automated/source evidence.
+- **Honest limits:** Native Tauri fresh-send interaction, screen-reader speech output, rendered forced-colors/RTL/200% browser modes, automated accessibility scanning, and field-performance telemetry remain unverified. The app build itself was captured only through a static evidence harness because the browser-hosted Tauri entry keeps its body hidden without native startup.
+
+**Hard stop:** Satisfied — duplicate/overlapping activation creates one new session and one send, and no prompt can send until the processed authoritative reset event advances the waiter generation.
 
 ## Phase 21 — Launch one bound session with isolated phase context
 

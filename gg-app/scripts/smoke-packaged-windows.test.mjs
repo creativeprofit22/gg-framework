@@ -11,6 +11,7 @@ import {
   snapshotMsiArtifacts,
   waitFor,
 } from "./smoke-packaged-windows.mjs";
+import { PHASE20_PROMPT, validatePhase20Evidence } from "./phase-20-native-smoke.mjs";
 
 const temporaryDirectories = [];
 
@@ -80,6 +81,132 @@ describe("packaged Windows smoke timeout", () => {
         },
       ),
     ).rejects.toThrow("runtime evidence timed out after 20ms: not ready");
+  });
+});
+
+describe("Phase 20 native smoke evidence", () => {
+  function baseEvidence() {
+    return {
+      initial: {
+        oldPromptCount: 1,
+        sentRowCount: 0,
+        transcriptText: `Ken ${PHASE20_PROMPT}`,
+      },
+      final: {
+        oldPromptCount: 0,
+        sentRowCount: 1,
+        transcriptText: "Sent to GG Coder",
+        composerValue: "",
+        alertText: "",
+      },
+      invokes: [
+        { sequence: 1, type: "invoke:start", command: "agent_new_session" },
+        {
+          sequence: 3,
+          type: "invoke:resolved",
+          command: "agent_new_session",
+          result: { operationId: "operation-1" },
+        },
+        { sequence: 4, type: "invoke:start", command: "agent_prompt" },
+        { sequence: 5, type: "invoke:resolved", command: "agent_prompt", result: null },
+      ],
+      events: [
+        {
+          sequence: 2,
+          type: "event:session_reset",
+          paneId: "primary",
+          operationId: "operation-1",
+        },
+      ],
+      mutations: [
+        { sequence: 6, type: "dom:old-transcript-removed" },
+        { sequence: 7, type: "dom:ken-sent-added" },
+      ],
+      sequence: [],
+      backend: {
+        newSessions: [{ route: "/new-session", status: 200, operationId: "operation-1" }],
+        prompts: [{ route: "/prompt", status: 202, kenSent: true }],
+      },
+    };
+  }
+
+  it("accepts one matching authoritative reset before one send and sent row", () => {
+    const evidence = baseEvidence();
+    evidence.sequence = [...evidence.invokes, ...evidence.events, ...evidence.mutations].sort(
+      (left, right) => left.sequence - right.sequence,
+    );
+
+    expect(validatePhase20Evidence(evidence, "success")).toBe(evidence);
+  });
+
+  it("rejects a sent row that appears before old transcript removal", () => {
+    const evidence = baseEvidence();
+    evidence.mutations[0].sequence = 8;
+    evidence.sequence = [...evidence.invokes, ...evidence.events, ...evidence.mutations].sort(
+      (left, right) => left.sequence - right.sequence,
+    );
+
+    expect(() => validatePhase20Evidence(evidence, "success")).toThrow(
+      "sent row appeared before old transcript removal",
+    );
+  });
+
+  it("accepts typed native 409 rejection without a prompt send", () => {
+    const evidence = baseEvidence();
+    evidence.invokes = [
+      { sequence: 1, type: "invoke:start", command: "agent_new_session" },
+      {
+        sequence: 2,
+        type: "invoke:rejected",
+        command: "agent_new_session",
+        error: 'command failed: {"kind":"creation-rejected","status":409,"message":"conflict"}',
+      },
+    ];
+    evidence.events = [];
+    evidence.mutations = [];
+    evidence.sequence = evidence.invokes;
+    evidence.backend = {
+      newSessions: [{ route: "/new-session", status: 409 }],
+      prompts: [],
+    };
+    evidence.final = {
+      oldPromptCount: 1,
+      sentRowCount: 0,
+      transcriptText: `Ken ${PHASE20_PROMPT}`,
+      composerValue: "",
+      alertText: "The current session is unchanged; try again.",
+    };
+
+    expect(validatePhase20Evidence(evidence, "reject-409")).toBe(evidence);
+  });
+
+  it("accepts lost-reset recovery only when the exact prompt is restored without sending", () => {
+    const evidence = baseEvidence();
+    evidence.invokes = [
+      { sequence: 1, type: "invoke:start", command: "agent_new_session" },
+      {
+        sequence: 2,
+        type: "invoke:resolved",
+        command: "agent_new_session",
+        result: { operationId: "operation-lost" },
+      },
+    ];
+    evidence.events = [];
+    evidence.mutations = [{ sequence: 3, type: "dom:old-transcript-removed" }];
+    evidence.sequence = [...evidence.invokes, ...evidence.mutations];
+    evidence.backend = {
+      newSessions: [{ route: "/new-session", status: 200, operationId: "operation-lost" }],
+      prompts: [],
+    };
+    evidence.final = {
+      oldPromptCount: 0,
+      sentRowCount: 0,
+      transcriptText: "Ready for work",
+      composerValue: PHASE20_PROMPT,
+      alertText: "",
+    };
+
+    expect(validatePhase20Evidence(evidence, "drop-reset")).toBe(evidence);
   });
 });
 

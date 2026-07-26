@@ -110,6 +110,7 @@ const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
 function setup(
   handleKenEvent: (e: SidecarEvent) => boolean = () => false,
   initialState: Partial<AgentState> = {},
+  onSessionReset: (operationId: string | null) => void = () => {},
 ) {
   let items: Item[] = [];
   let id = 0;
@@ -185,6 +186,7 @@ function setup(
     planReviewPathRef: { current: null },
     pendingPlanTotalRef: { current: null },
     stickToBottomRef: { current: true },
+    onSessionReset,
   };
 
   const hook = renderHook(
@@ -908,6 +910,65 @@ describe("useAgentEvents", () => {
 
     expect(deps.planTotalRef.current).toBe(4);
     expect([...deps.planDoneRef.current]).toEqual([1, 2, 4]);
+  });
+
+  it("runs the reset callback only after reset state and counters are applied", () => {
+    let snapshot: {
+      items: Item[];
+      tokenReset: boolean;
+      total: number;
+      done: number;
+      operationId: string | null;
+    } | null = null;
+    let getItems = (): Item[] => [];
+    let setTokens: AgentEventsDeps["setTokens"] = () => undefined;
+    const depsRef: { current: AgentEventsDeps | null } = { current: null };
+    const onSessionReset = vi.fn((operationId: string | null) => {
+      snapshot = {
+        items: getItems(),
+        tokenReset: (setTokens as unknown as { mock: { calls: Array<[unknown]> } }).mock.calls.some(
+          (call) => call[0] === 0,
+        ),
+        total: depsRef.current!.planTotalRef.current,
+        done: depsRef.current!.planDoneRef.current.size,
+        operationId,
+      };
+    });
+    const harness = setup(() => false, {}, onSessionReset);
+    depsRef.current = harness.deps;
+    ({ getItems, setTokens } = harness);
+    harness.deps.pendingPlanTotalRef.current = 2;
+
+    act(() => {
+      harness.hook.result.current.handleEvent(ev("text_delta", { text: "stale transcript" }));
+      harness.hook.result.current.handleEvent(
+        ev("session_reset", { planTotal: 5, operationId: "operation-7" }),
+      );
+    });
+
+    expect(onSessionReset).toHaveBeenCalledOnce();
+    expect(snapshot).toEqual({
+      items: [],
+      tokenReset: true,
+      total: 5,
+      done: 0,
+      operationId: "operation-7",
+    });
+  });
+
+  it("ignores a delayed duplicate reset with the same operation id", () => {
+    const onSessionReset = vi.fn();
+    const { hook, getItems } = setup(() => false, {}, onSessionReset);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "old transcript" }));
+      hook.result.current.handleEvent(ev("session_reset", { operationId: "operation-8" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "new transcript" }));
+      hook.result.current.handleEvent(ev("session_reset", { operationId: "operation-8" }));
+    });
+
+    expect(onSessionReset).toHaveBeenCalledOnce();
+    expect(getItems()).toEqual([expect.objectContaining({ text: "new transcript" })]);
   });
 
   it("seeds an accepted plan from the canonical total on session reset", () => {

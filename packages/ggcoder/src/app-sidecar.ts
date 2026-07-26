@@ -139,6 +139,7 @@ import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-sessio
 import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
 import { ProjectNotesRepository, type ProjectNotesSnapshot } from "./project-notes-repository.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
+import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
 import {
   captureSidecarError,
   flushSidecarErrors,
@@ -1337,6 +1338,9 @@ async function createSession(
   // Base host for parsing request-URL query params (value is irrelevant to
   // parsing); the daemon owns the real listen host.
   const host = "127.0.0.1";
+  // One fail-fast lifecycle gate per logical session. Reload coordination counts
+  // daemon mutations, but it intentionally does not serialize reset producers.
+  const sessionMutations = new AppSidecarSessionMutationCoordinator();
 
   const saved = loadSavedSettings(paths.settingsFile);
   // Per-project model/thinking prefs win over the shared global settings.json:
@@ -2204,25 +2208,34 @@ async function createSession(
         // exits silently and the user's action stands.
         acceptPlan: async () => {
           if (pendingPlanPath === null || planGeneration !== planGenAtReview) return false;
+          const mutation = sessionMutations.tryAcquire("autopilot-plan-accept");
+          if (!mutation) {
+            log("INFO", "app-sidecar", "autopilot plan accept lost session mutation race", {
+              owner: sessionMutations.owner,
+            });
+            return false;
+          }
           const planPath = pendingPlanPath;
           let planTotal: number;
           try {
             await session.newSession(true);
             injectedAutopilotPrompts = [];
             planTotal = await activateApprovedPlan(planPath);
+            clearPendingPlan();
+            // Keep the approval marker ahead of the reset, then seed the reset
+            // with the sidecar's canonical count from the actual plan file.
+            broadcast("autopilot_plan_accepted", { operationId: mutation.operationId });
+            broadcast("session_reset", { planTotal, operationId: mutation.operationId });
+            broadcast("plan_progress", planProgressPayload());
+            // Persisted into the NEW session so a resume shows the marker.
+            void session.persistAutopilotMarker("plan_approved");
+            return true;
           } catch (err) {
             broadcastError("autopilot_error", "autopilot plan accept failed", err);
             return false;
+          } finally {
+            mutation.release();
           }
-          clearPendingPlan();
-          // Keep the approval marker ahead of the reset, then seed the reset
-          // with the sidecar's canonical count from the actual plan file.
-          broadcast("autopilot_plan_accepted", {});
-          broadcast("session_reset", { planTotal });
-          broadcast("plan_progress", planProgressPayload());
-          // Persisted into the NEW session so a resume shows the marker.
-          void session.persistAutopilotMarker("plan_approved");
-          return true;
         },
         runImplement: () => {
           // Autopilot-injected run: frame it so GG Coder knows no human is
@@ -2369,7 +2382,7 @@ async function createSession(
   // tool. Run-all advances to the next pending task after each run finishes.
   let taskRunAll = false;
 
-  async function runTaskById(taskId: string): Promise<boolean> {
+  async function runTaskById(taskId: string, operationId: string): Promise<boolean> {
     const task = loadTasksSync(cwd).find((t) => t.id === taskId || t.id.startsWith(taskId));
     if (!task) return false;
     // Fresh session per task so one task's context never bleeds into the next.
@@ -2377,7 +2390,7 @@ async function createSession(
     deactivateApprovedPlan();
     injectedAutopilotPrompts = [];
     clearPendingPlan();
-    broadcast("session_reset", {});
+    broadcast("session_reset", { operationId });
     markTaskInProgress(cwd, task.id);
     broadcast("tasks_list", { tasks: loadTasksSync(cwd) });
     broadcast("task_start", { id: task.id, title: task.title });
@@ -2394,16 +2407,25 @@ async function createSession(
     return true;
   }
 
-  async function runTasks(startId: string | null, all: boolean): Promise<void> {
+  async function runTasks(
+    startId: string | null,
+    all: boolean,
+    operationId: string,
+  ): Promise<void> {
     taskRunAll = all;
     let currentId: string | null = startId ?? getNextPendingTask(cwd)?.id ?? null;
+    let taskOperationId = operationId;
     while (currentId) {
-      const ran = await runTaskById(currentId);
+      const ran = await runTaskById(currentId, taskOperationId);
       if (!ran || !taskRunAll) break;
       const next = getNextPendingTask(cwd);
       currentId = next ? next.id : null;
-      // Brief pause between tasks (mirrors the CLI cadence).
-      if (currentId) await new Promise((resolve) => setTimeout(resolve, 500));
+      // Every task opens a fresh session, so every reset needs a unique identity.
+      // The accepted request id belongs to the first task; later tasks get child ids.
+      if (currentId) {
+        taskOperationId = randomUUID();
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
     }
     taskRunAll = false;
     broadcast("tasks_run_done", {});
@@ -3180,6 +3202,11 @@ async function createSession(
           const prepared = attachments.length > 0 ? await prepareAttachments(cwd, attachments) : [];
           const count = session.queueMessage(text, prepared);
           broadcast("queued", { count });
+          log("INFO", "app-sidecar", "prompt accepted", {
+            logicalSessionId: opts.id,
+            queued: true,
+            kenSent: meta?.kenSent === true,
+          });
           json(res, 202, { queued: true, count });
           return;
         }
@@ -3190,6 +3217,11 @@ async function createSession(
           json(res, 409, { error: "configuration refresh in progress" });
           return;
         }
+        log("INFO", "app-sidecar", "prompt accepted", {
+          logicalSessionId: opts.id,
+          queued: false,
+          kenSent: meta?.kenSent === true,
+        });
         json(res, 202, { accepted: true });
         try {
           // Webview display hint for this prompt's user bubble (kenSent shimmer
@@ -3491,19 +3523,28 @@ async function createSession(
           json(res, 409, { error: "cannot run a task while the agent is running" });
           return;
         }
+        const mutation = sessionMutations.tryAcquire("task-run");
+        if (!mutation) {
+          json(res, 409, sessionMutations.conflictBody());
+          return;
+        }
         const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
         if (!releaseOperation) {
+          mutation.release();
           json(res, 409, { error: "configuration refresh in progress" });
           return;
         }
-        json(res, 202, { accepted: true });
-        void runTasks(id, all)
+        json(res, 202, { accepted: true, operationId: mutation.operationId });
+        void runTasks(id, all, mutation.operationId)
           .catch((error) => {
             log("ERROR", "app-sidecar", "accepted task continuation failed", {
               message: error instanceof Error ? error.message : String(error),
             });
           })
-          .finally(releaseOperation);
+          .finally(() => {
+            mutation.release();
+            releaseOperation();
+          });
       });
       return;
     }
@@ -3774,6 +3815,11 @@ async function createSession(
         json(res, 409, { error: "cannot start a new session while running" });
         return;
       }
+      const mutation = sessionMutations.tryAcquire("new-session");
+      if (!mutation) {
+        json(res, 409, sessionMutations.conflictBody());
+        return;
+      }
       void session
         .newSession()
         .then(async () => {
@@ -3783,13 +3829,18 @@ async function createSession(
           deactivateApprovedPlan();
           injectedAutopilotPrompts = [];
           clearPendingPlan();
-          broadcast("session_reset", {});
-          json(res, 200, { ok: true });
+          log("INFO", "app-sidecar", "new session accepted", {
+            logicalSessionId: opts.id,
+            operationId: mutation.operationId,
+          });
+          broadcast("session_reset", { operationId: mutation.operationId });
+          json(res, 200, { ok: true, operationId: mutation.operationId });
         })
         .catch((err) => {
           captureSidecarError(err, "app-sidecar.session.new");
           json(res, 500, { error: err instanceof Error ? err.message : String(err) });
-        });
+        })
+        .finally(() => mutation.release());
       return;
     }
 
@@ -3815,6 +3866,11 @@ async function createSession(
           json(res, 409, { error: "cannot accept a plan while the agent is running" });
           return;
         }
+        const mutation = sessionMutations.tryAcquire("manual-plan-accept");
+        if (!mutation) {
+          json(res, 409, sessionMutations.conflictBody());
+          return;
+        }
         // Manual accept, possibly racing Ken's autopilot plan review: the user
         // always wins. Bump the plan generation (invalidates any in-flight
         // review's verdict), stop the cycle, abort a mid-prompt review on the
@@ -3837,12 +3893,14 @@ async function createSession(
           await session.newSession(true);
           injectedAutopilotPrompts = [];
           const planTotal = await activateApprovedPlan(planPath);
-          broadcast("session_reset", { planTotal });
+          broadcast("session_reset", { planTotal, operationId: mutation.operationId });
           broadcast("plan_progress", planProgressPayload());
-          json(res, 200, { ok: true, planTotal });
+          json(res, 200, { ok: true, planTotal, operationId: mutation.operationId });
         } catch (err) {
           captureSidecarError(err, "app-sidecar.plan.accept");
           json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        } finally {
+          mutation.release();
         }
       });
       return;

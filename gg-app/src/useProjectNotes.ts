@@ -7,6 +7,8 @@ import {
   type NotesClient,
   type NotesDocumentV3,
   type NotesLoadResult,
+  type NotesPhase,
+  type NotesPhaseStatus,
   type NotesSaveResult,
   type ProjectNotesSnapshot,
 } from "./notes-types";
@@ -25,6 +27,12 @@ export interface UseProjectNotesOptions {
   idFactory?: () => string;
 }
 
+export interface NotesPhaseInput {
+  title: string;
+  goal: string;
+  doneWhen: string[];
+}
+
 export interface UseProjectNotesResult {
   value: string;
   onChange(value: string): void;
@@ -36,6 +44,12 @@ export interface UseProjectNotesResult {
   moveTask(id: string, direction: "up" | "down"): void;
   archiveTask(id: string): void;
   restoreTask(id: string): void;
+  createPhase(input: NotesPhaseInput): void;
+  editPhase(id: string, input: NotesPhaseInput): void;
+  movePhase(id: string, direction: "up" | "down"): void;
+  changePhaseStatus(id: string, status: NotesPhaseStatus): void;
+  archivePhase(id: string): void;
+  restorePhase(id: string): void;
   changeHandoff(text: string): void;
   markHandoffPresented(expectedText: string, expectedUpdatedAt: string | null): void;
   diagnostics: {
@@ -625,6 +639,175 @@ export function useProjectNotes(
     [clock, enqueueMutation],
   );
 
+  const createPhase = useCallback(
+    (input: NotesPhaseInput) => {
+      const title = input.title.trim();
+      if (!title) return;
+      const goal = input.goal.trim();
+      const doneWhen = normalizeDoneWhen(input.doneWhen);
+      const now = clock();
+      const id = idFactory();
+      enqueueMutation({
+        apply: (current) => {
+          if (current.phases.some((phase) => phase.id === id)) return null;
+          const phase: NotesPhase = {
+            id,
+            title,
+            goal,
+            doneWhen,
+            order: current.phases.length,
+            status: "not-started",
+            sourcePrompt: "",
+            referenceIds: [],
+            session: null,
+            reminder: null,
+            attentionReason: null,
+            createdAt: now,
+            updatedAt: now,
+            completedAt: null,
+            archivedAt: null,
+            overrides: { status: null, referenceIds: null },
+            lifecycleEvents: [],
+          };
+          return { ...current, phases: [...current.phases, phase], updatedAt: now };
+        },
+      });
+    },
+    [clock, enqueueMutation, idFactory],
+  );
+
+  const editPhase = useCallback(
+    (id: string, input: NotesPhaseInput) => {
+      const title = input.title.trim();
+      if (!title) return;
+      const goal = input.goal.trim();
+      const doneWhen = normalizeDoneWhen(input.doneWhen);
+      const now = clock();
+      enqueueMutation({
+        apply: (current) =>
+          updatePhase(current, id, now, (phase) => {
+            if (phase.archivedAt !== null) return null;
+            if (
+              phase.title === title &&
+              phase.goal === goal &&
+              arraysEqual(phase.doneWhen, doneWhen)
+            ) {
+              return null;
+            }
+            return { ...phase, title, goal, doneWhen, updatedAt: now };
+          }),
+      });
+    },
+    [clock, enqueueMutation],
+  );
+
+  const movePhase = useCallback(
+    (id: string, direction: "up" | "down") => {
+      const visiblePhases = documentRef.current.phases.filter((phase) => phase.archivedAt === null);
+      const visiblePosition = visiblePhases.findIndex((phase) => phase.id === id);
+      const targetId = visiblePhases[visiblePosition + (direction === "up" ? -1 : 1)]?.id;
+      if (visiblePosition === -1 || !targetId) return;
+      const now = clock();
+      const placeBeforeTarget = direction === "up";
+      enqueueMutation({
+        apply: (current) => {
+          const visiblePhases = current.phases.filter((phase) => phase.archivedAt === null);
+          const sourcePosition = visiblePhases.findIndex((phase) => phase.id === id);
+          const anchorPosition = visiblePhases.findIndex((phase) => phase.id === targetId);
+          if (sourcePosition === -1 || anchorPosition === -1) return null;
+          if (
+            (placeBeforeTarget && sourcePosition < anchorPosition) ||
+            (!placeBeforeTarget && sourcePosition > anchorPosition)
+          ) {
+            return null;
+          }
+
+          const reorderedVisiblePhases = [...visiblePhases];
+          const [movedPhase] = reorderedVisiblePhases.splice(sourcePosition, 1);
+          if (!movedPhase) return null;
+          const targetPosition = reorderedVisiblePhases.findIndex((phase) => phase.id === targetId);
+          if (targetPosition === -1) return null;
+          reorderedVisiblePhases.splice(
+            placeBeforeTarget ? targetPosition : targetPosition + 1,
+            0,
+            movedPhase,
+          );
+
+          let visibleIndex = 0;
+          const phases = current.phases.map((phase) =>
+            phase.archivedAt === null ? reorderedVisiblePhases[visibleIndex++]! : phase,
+          );
+          return { ...current, phases: normalizePhaseOrder(phases), updatedAt: now };
+        },
+      });
+    },
+    [clock, enqueueMutation],
+  );
+
+  const changePhaseStatus = useCallback(
+    (id: string, status: NotesPhaseStatus) => {
+      const now = clock();
+      const eventId = idFactory();
+      enqueueMutation({
+        apply: (current) =>
+          updatePhase(current, id, now, (phase) => {
+            if (phase.archivedAt !== null || phase.status === status) return null;
+            const timestamp = chronologicalTimestamp(now, phase);
+            return {
+              ...phase,
+              status,
+              attentionReason: status === "needs-attention" ? phase.attentionReason : null,
+              updatedAt: timestamp,
+              completedAt: status === "done" || status === "cancelled" ? timestamp : null,
+              overrides: {
+                ...phase.overrides,
+                status: { value: status, source: "user", updatedAt: timestamp },
+              },
+              lifecycleEvents: [
+                ...phase.lifecycleEvents,
+                {
+                  id: eventId,
+                  fromStatus: phase.status,
+                  toStatus: status,
+                  source: "user",
+                  timestamp,
+                  reason:
+                    status === "cancelled" ? "Phase cancelled by user" : "Status changed by user",
+                },
+              ],
+            };
+          }),
+      });
+    },
+    [clock, enqueueMutation, idFactory],
+  );
+
+  const archivePhase = useCallback(
+    (id: string) => {
+      const now = clock();
+      enqueueMutation({
+        apply: (current) =>
+          updatePhase(current, id, now, (phase) =>
+            phase.archivedAt === null ? { ...phase, archivedAt: now, updatedAt: now } : null,
+          ),
+      });
+    },
+    [clock, enqueueMutation],
+  );
+
+  const restorePhase = useCallback(
+    (id: string) => {
+      const now = clock();
+      enqueueMutation({
+        apply: (current) =>
+          updatePhase(current, id, now, (phase) =>
+            phase.archivedAt !== null ? { ...phase, archivedAt: null, updatedAt: now } : null,
+          ),
+      });
+    },
+    [clock, enqueueMutation],
+  );
+
   const changeHandoff = useCallback(
     (text: string) => {
       const now = clock();
@@ -678,6 +861,12 @@ export function useProjectNotes(
     moveTask,
     archiveTask,
     restoreTask,
+    createPhase,
+    editPhase,
+    movePhase,
+    changePhaseStatus,
+    archivePhase,
+    restorePhase,
     changeHandoff,
     markHandoffPresented,
     diagnostics: {
@@ -711,6 +900,39 @@ function updateTask(
   const tasks = [...current.tasks];
   tasks[index] = nextTask;
   return { ...current, tasks, updatedAt };
+}
+
+function updatePhase(
+  current: NotesDocumentV3,
+  id: string,
+  updatedAt: string,
+  update: (phase: NotesPhase) => NotesPhase | null,
+): NotesDocumentV3 | null {
+  const index = current.phases.findIndex((phase) => phase.id === id);
+  const phase = current.phases[index];
+  if (!phase) return null;
+  const nextPhase = update(phase);
+  if (!nextPhase) return null;
+  const phases = [...current.phases];
+  phases[index] = nextPhase;
+  return { ...current, phases, updatedAt };
+}
+
+function normalizeDoneWhen(values: readonly string[]): string[] {
+  return values.map((value) => value.trim()).filter(Boolean);
+}
+
+function normalizePhaseOrder(phases: readonly NotesPhase[]): NotesPhase[] {
+  return phases.map((phase, order) => (phase.order === order ? phase : { ...phase, order }));
+}
+
+function chronologicalTimestamp(now: string, phase: NotesPhase): string {
+  const previous = phase.lifecycleEvents[phase.lifecycleEvents.length - 1]?.timestamp;
+  return previous && Date.parse(previous) > Date.parse(now) ? previous : now;
+}
+
+function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function browserStorage(): Storage {

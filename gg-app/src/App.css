@@ -1613,6 +1613,360 @@ body {
   font-size: 18px;
   font-weight: 650;
 }
+.notes-roadmap-rail {
+  --notes-content-width: 1040px;
+}
+.notes-roadmap-section {
+  padding: 0;
+  overflow: hidden;
+}
+.notes-roadmap-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.notes-roadmap-toolbar h2 {
+  margin-bottom: 2px;
+}
+.notes-roadmap-toolbar p,
+.notes-phase-detail-heading p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.notes-roadmap-new,
+.notes-roadmap-primary,
+.notes-phase-detail-heading button,
+.notes-phase-form-actions button,
+.notes-phase-secondary-actions button,
+.notes-phase-archive button {
+  flex: 0 0 auto;
+  min-height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-button);
+  background: var(--gloss-neutral);
+  color: var(--text-secondary);
+  box-shadow: var(--gloss-shadow-neutral);
+  padding: 6px 10px;
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+}
+.notes-roadmap-new:hover,
+.notes-roadmap-primary:hover,
+.notes-phase-detail-heading button:hover,
+.notes-phase-form-actions button:hover:not(:disabled),
+.notes-phase-secondary-actions button:hover:not(:disabled),
+.notes-phase-archive button:hover {
+  filter: brightness(1.18);
+  color: var(--text);
+}
+.notes-phase-form-actions button:disabled,
+.notes-phase-secondary-actions button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+.notes-phase-form {
+  display: grid;
+  gap: 12px;
+}
+.notes-phase-create {
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.notes-phase-form[hidden] {
+  display: none;
+}
+.notes-phase-form input,
+.notes-phase-form textarea,
+.notes-phase-status-control select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+.notes-phase-form input,
+.notes-phase-status-control select {
+  min-height: 36px;
+  padding-block: 7px;
+  padding-inline: 10px;
+}
+.notes-phase-status-control select {
+  padding-inline-end: 34px;
+}
+.notes-phase-form textarea {
+  display: block;
+  min-height: 76px;
+  max-height: 180px;
+  resize: vertical;
+  padding: 9px 10px;
+}
+.notes-field-help {
+  margin: 5px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.notes-phase-form-actions,
+.notes-phase-secondary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.notes-roadmap-empty {
+  padding: 28px 14px;
+  text-align: center;
+}
+.notes-roadmap-empty strong {
+  display: block;
+  color: var(--text);
+  font-size: 13px;
+}
+.notes-roadmap-empty p {
+  margin: 5px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.notes-roadmap-workspace {
+  min-width: 0;
+}
+.notes-roadmap-workspace.has-detail {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.82fr) minmax(0, 1.18fr);
+  align-items: start;
+}
+.notes-roadmap-workspace.has-detail .notes-roadmap-list {
+  min-width: 0;
+  border-inline-end: 1px solid var(--border);
+}
+.notes-roadmap-workspace.has-detail .notes-roadmap-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title action"
+    "status status"
+    "count reminder";
+  gap: 5px 9px;
+  padding-block: 9px;
+}
+.notes-roadmap-workspace.has-detail .notes-phase-count,
+.notes-roadmap-workspace.has-detail .notes-phase-reminder {
+  align-self: start;
+}
+.notes-roadmap-workspace.has-detail .notes-phase-reminder {
+  justify-self: end;
+  text-align: end;
+}
+.notes-roadmap-list {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.notes-roadmap-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(104px, auto) 52px 146px 70px;
+  grid-template-areas: "title status count reminder action";
+  align-items: center;
+  min-width: 0;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--border);
+  border-inline-start: 3px solid transparent;
+}
+.notes-roadmap-row.is-selected {
+  border-inline-start-color: var(--primary);
+  background: var(--surface-2);
+}
+.notes-roadmap-title {
+  grid-area: title;
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 4px 0;
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notes-roadmap-title:hover {
+  color: var(--primary);
+}
+.notes-phase-status,
+.notes-phase-count,
+.notes-phase-reminder {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notes-phase-status {
+  grid-area: status;
+  justify-self: start;
+  border-inline-start: 2px solid var(--border-strong);
+  padding-inline-start: 7px;
+  font-weight: 600;
+}
+.notes-phase-count {
+  grid-area: count;
+  font-variant-numeric: tabular-nums;
+}
+.notes-phase-reminder {
+  grid-area: reminder;
+}
+.notes-roadmap-primary {
+  grid-area: action;
+  min-width: 64px;
+}
+.notes-phase-detail {
+  position: sticky;
+  top: 12px;
+  min-width: 0;
+  margin: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface-2);
+}
+.notes-phase-detail-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.notes-phase-detail-heading h3 {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.notes-phase-edit,
+.notes-phase-content,
+.notes-phase-metadata,
+.notes-phase-controls {
+  margin: 0;
+  padding: 14px;
+}
+.notes-phase-content {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+.notes-phase-content h4,
+.notes-phase-archive h3,
+.notes-archive-task-heading {
+  margin: 0 0 7px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.notes-phase-content p,
+.notes-phase-content ul {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.notes-phase-content ul {
+  padding-inline-start: 18px;
+}
+.notes-phase-metadata {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 16px;
+  border-top: 1px solid var(--border);
+}
+.notes-phase-metadata div {
+  min-width: 0;
+}
+.notes-phase-metadata dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.notes-phase-metadata dd {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notes-phase-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  align-items: end;
+  gap: 14px;
+  border-top: 1px solid var(--border);
+}
+.notes-phase-secondary-actions {
+  justify-content: flex-end;
+}
+.notes-phase-archive {
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.notes-phase-archive ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.notes-phase-archive li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.notes-phase-archive li > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+.notes-phase-archive strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notes-phase-archive small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.notes-archive-task-heading {
+  margin-top: 14px;
+}
 .notes-persistence {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1824,6 +2178,7 @@ body {
 }
 .notes-modal button:focus-visible,
 .notes-modal input:focus-visible,
+.notes-modal select:focus-visible,
 .notes-modal textarea:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
@@ -1840,7 +2195,12 @@ body {
   .notes-persistence,
   .notes-roadmap-summary,
   .notes-section,
+  .notes-phase-detail,
+  .notes-roadmap-row,
   .notes-add-controls input,
+  .notes-phase-form input,
+  .notes-phase-form textarea,
+  .notes-phase-status-control select,
   .notes-edit-form input,
   .notes-current-focus input,
   .notes-field textarea {
@@ -1855,8 +2215,53 @@ body {
   }
   .notes-modal button:focus-visible,
   .notes-modal input:focus-visible,
+  .notes-modal select:focus-visible,
   .notes-modal textarea:focus-visible {
     outline-color: Highlight;
+  }
+}
+@media (max-width: 760px) {
+  .notes-roadmap-workspace.has-detail {
+    display: block;
+  }
+  .notes-roadmap.has-detail .notes-roadmap-new,
+  .notes-roadmap-workspace.has-detail .notes-roadmap-list {
+    display: none;
+  }
+  .notes-roadmap-workspace.has-detail .notes-phase-detail {
+    position: static;
+    margin: 12px;
+  }
+  .notes-roadmap-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "title action"
+      "status status"
+      "count reminder";
+    gap: 6px 10px;
+    padding-block: 10px;
+  }
+  .notes-roadmap-title,
+  .notes-phase-status,
+  .notes-phase-reminder {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+  .notes-phase-count,
+  .notes-phase-reminder {
+    align-self: start;
+  }
+  .notes-phase-reminder {
+    justify-self: end;
+    text-align: end;
+  }
+  .notes-phase-content,
+  .notes-phase-controls {
+    grid-template-columns: 1fr;
+  }
+  .notes-phase-secondary-actions {
+    justify-content: flex-start;
   }
 }
 @media (max-width: 560px) {
@@ -1880,6 +2285,15 @@ body {
   .notes-add-controls,
   .notes-task-row {
     flex-wrap: wrap;
+  }
+  .notes-phase-metadata {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .notes-phase-secondary-actions {
+    justify-content: flex-start;
+  }
+  .notes-phase-secondary-actions button {
+    min-height: 36px;
   }
   .notes-add-controls button {
     flex: 1 1 auto;

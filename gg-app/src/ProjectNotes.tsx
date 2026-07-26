@@ -39,6 +39,12 @@ export function ProjectNotes({ cwd, client }: Props): React.ReactElement {
     moveTask,
     archiveTask,
     restoreTask,
+    createPhase,
+    editPhase,
+    movePhase,
+    changePhaseStatus,
+    archivePhase,
+    restorePhase,
     changeHandoff,
     markHandoffPresented,
     diagnostics,
@@ -76,6 +82,7 @@ export function ProjectNotes({ cwd, client }: Props): React.ReactElement {
             onChange={onChange}
             currentFocus={notesDocument.currentFocus}
             tasks={notesDocument.tasks}
+            phases={notesDocument.phases}
             handoff={notesDocument.handoff.text}
             handoffUpdatedAt={notesDocument.handoff.updatedAt}
             handoffUnread={status.handoffUnread}
@@ -89,6 +96,12 @@ export function ProjectNotes({ cwd, client }: Props): React.ReactElement {
             onMoveTask={moveTask}
             onArchiveTask={archiveTask}
             onRestoreTask={restoreTask}
+            onCreatePhase={createPhase}
+            onEditPhase={editPhase}
+            onMovePhase={movePhase}
+            onChangePhaseStatus={changePhaseStatus}
+            onArchivePhase={archivePhase}
+            onRestorePhase={restorePhase}
             onChangeHandoff={changeHandoff}
             onHandoffPresented={markHandoffPresented}
             onClose={() => setShowNotes(false)}

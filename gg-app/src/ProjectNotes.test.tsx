@@ -57,6 +57,7 @@ function phase(id: string, status: NotesPhaseStatus, withReminder = false): Note
     createdAt: NOW,
     updatedAt: NOW,
     completedAt: status === "done" || status === "cancelled" ? NOW : null,
+    archivedAt: null,
     overrides: { status: null, referenceIds: null },
     lifecycleEvents: [],
   };
@@ -191,7 +192,16 @@ describe("ProjectNotes", () => {
     expect(reference.getAttribute("aria-selected")).toBe("true");
     expect(screen.getAllByRole("tabpanel")).toHaveLength(1);
     fireEvent.click(roadmap);
-    expect(screen.getByText("No active roadmap work.")).toBeTruthy();
+    expect(screen.getByText("No roadmap phases yet")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "New phase" }));
+    fireEvent.change(screen.getByLabelText("Phase title"), { target: { value: "First phase" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create phase" }));
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.phases).toHaveLength(1),
+    );
+    expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(1);
+    expect(screen.queryByText("Selected phase")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "New phase" }));
   });
 
   it("keeps an incoming Handoff unread until Overview is visible", async () => {
@@ -222,7 +232,7 @@ describe("ProjectNotes", () => {
     expect(screen.getByRole("button", { name: "Notes" })).toBeTruthy();
   });
 
-  it("shows only active phase and reminder counts without Roadmap controls", async () => {
+  it("keeps active counts while exposing compact actions for active and settled phases", async () => {
     const cwd = "/work/roadmap-counts";
     const client = new FakeProjectNotesClient(cwd);
     const populated = notes("reference");
@@ -231,7 +241,7 @@ describe("ProjectNotes", () => {
       phase("review", "review"),
       phase("done", "done", true),
       phase("cancelled", "cancelled", true),
-    ];
+    ].map((item, order) => ({ ...item, order }));
     client.seed(cwd, populated);
     render(<ProjectNotes cwd={cwd} client={client} />);
 
@@ -243,22 +253,167 @@ describe("ProjectNotes", () => {
     expect(screen.getByRole("tab", { name: "Roadmap" }).textContent).toBe("Roadmap2");
 
     selectNotesTab("Roadmap");
-    const totals = screen.getByLabelText("Active roadmap totals");
-    expect(totals.textContent).toContain("2 active phases");
-    expect(totals.textContent).toContain("1 active reminder");
-    expect(
-      screen.queryByRole("button", {
-        name: /create|edit|reorder|start|resume|review|approve/i,
-      }),
-    ).toBeNull();
+    expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(4);
+    expect(screen.getByRole("button", { name: "Resume phase: Phase planning" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Review phase: Phase review" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Review phase: Phase done" })).toBeTruthy();
+    expect(screen.queryByText("Selected phase")).toBeNull();
 
     const singular = notes("updated reference");
     singular.phases = [phase("attention", "needs-attention")];
     act(() => client.publish(cwd, singular, 2));
-    await waitFor(() => expect(totals.textContent).toContain("1 active phase"));
-    expect(totals.textContent).not.toContain("active phases");
-    expect(totals.textContent).not.toContain("active reminder");
+    await waitFor(() =>
+      expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(1),
+    );
     expect(screen.getByRole("tab", { name: "Roadmap" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("keeps one selected phase open across authoritative snapshots", async () => {
+    const cwd = "/work/roadmap-selection";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [{ ...phase("only", "done"), title: "Only phase" }];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    expect(screen.queryByText("Selected phase")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Review phase: Only phase" }));
+    expect(screen.getByRole("heading", { name: "Only phase" })).toBeTruthy();
+
+    const refreshed = {
+      ...populated,
+      phases: [{ ...populated.phases[0]!, title: "Only phase refreshed", updatedAt: NOW }],
+    };
+    act(() => client.publish(cwd, refreshed, 2));
+
+    expect(await screen.findByRole("heading", { name: "Only phase refreshed" })).toBeTruthy();
+    expect(screen.getByText("Selected phase")).toBeTruthy();
+  });
+
+  it("creates, edits, reorders, overrides, cancels, archives, and restores phases", async () => {
+    const cwd = "/work/roadmap-crud";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [
+      { ...phase("alpha", "not-started"), title: "Alpha", order: 0 },
+      { ...phase("beta", "in-progress"), title: "Beta", order: 1 },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    expect(screen.getByRole("button", { name: "Start phase: Alpha" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Resume phase: Beta" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "New phase" }));
+    fireEvent.change(screen.getByLabelText("Phase title"), { target: { value: "Gamma" } });
+    fireEvent.change(screen.getByLabelText("Goal"), { target: { value: "Ship phase CRUD" } });
+    fireEvent.change(screen.getByLabelText("Done when"), {
+      target: { value: "Create persists\nArchive restores" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create phase" }));
+
+    await waitFor(() => {
+      const stored = client.snapshots.get(canonicalProjectKey(cwd))!.document.phases;
+      expect(stored.map((item) => item.title)).toEqual(["Alpha", "Beta", "Gamma"]);
+      expect(stored.map((item) => item.order)).toEqual([0, 1, 2]);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Alpha" }));
+    expect(screen.getByText("Verify the Notes shell")).toBeTruthy();
+    expect(screen.getByText("Shell evidence passes")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByLabelText("Edit phase title"), {
+      target: { value: "Alpha edited" },
+    });
+    fireEvent.change(screen.getByLabelText("Edit goal"), { target: { value: "Edited goal" } });
+    fireEvent.change(screen.getByLabelText("Edit Done when"), {
+      target: { value: "First check\nSecond check" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]).toMatchObject({
+        title: "Alpha edited",
+        goal: "Edited goal",
+        doneWhen: ["First check", "Second check"],
+      }),
+    );
+
+    fireEvent.change(screen.getByLabelText("Status override"), { target: { value: "done" } });
+    await waitFor(() => {
+      const stored = client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!;
+      expect(stored.status).toBe("done");
+      expect(stored.completedAt).not.toBeNull();
+      expect(stored.overrides.status).toMatchObject({ value: "done", source: "user" });
+      expect(stored.lifecycleEvents[stored.lifecycleEvents.length - 1]).toMatchObject({
+        fromStatus: "not-started",
+        toStatus: "done",
+        source: "user",
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Beta" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move up" }));
+    await waitFor(() =>
+      expect(
+        client.snapshots.get(canonicalProjectKey(cwd))!.document.phases.map((item) => item.title),
+      ).toEqual(["Beta", "Alpha edited", "Gamma"]),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel phase" }));
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.status).toBe(
+        "cancelled",
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Archive phase" }));
+    await waitFor(() =>
+      expect(
+        client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.archivedAt,
+      ).not.toBe(null),
+    );
+    expect(screen.queryByText("Selected phase")).toBeNull();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Inspect phase: Alpha edited" }),
+      ),
+    );
+
+    selectNotesTab("Archive");
+    fireEvent.click(screen.getByRole("button", { name: "Restore phase: Beta" }));
+    await waitFor(() =>
+      expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.archivedAt).toBe(
+        null,
+      ),
+    );
+    selectNotesTab("Roadmap");
+    expect(screen.queryByText("Selected phase")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Beta" }));
+    expect(screen.getByText("Selected phase")).toBeTruthy();
+  });
+
+  it("renders a stable accessible list for fifty phases", async () => {
+    const cwd = "/work/roadmap-density";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = Array.from({ length: 50 }, (_, order) => ({
+      ...phase(`density-${order}`, order % 3 === 0 ? "review" : "not-started"),
+      title: `Phase ${String(order + 1).padStart(2, "0")} with a deliberately long title`,
+      order,
+    }));
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+
+    const list = screen.getByRole("list", { name: "Roadmap phases" });
+    expect(list.children).toHaveLength(50);
+    expect(list.querySelectorAll(".notes-roadmap-row")).toHaveLength(50);
+    expect(screen.getAllByRole("button", { name: /phase: Phase/ })).toHaveLength(100);
   });
 
   it("preserves tab, task draft, edit mode, and Archive disclosure through rerenders", async () => {

@@ -106,6 +106,7 @@ function document(reference: string): NotesDocumentV3 {
         createdAt: NOW,
         updatedAt: NOW,
         completedAt: null,
+        archivedAt: null,
         overrides: { status: null, referenceIds: null },
         lifecycleEvents: [],
       },
@@ -164,6 +165,7 @@ describe("structured project notes storage", () => {
       ok: true,
       document: notes,
       migratedFromV2: false,
+      migratedArchiveShape: false,
     });
   });
 
@@ -187,6 +189,36 @@ describe("structured project notes storage", () => {
     expect(restarted).toMatchObject({ source: "v3", document: expected });
     expect(JSON.parse(storage.getItem(v2NotesKey(cwd))!)).toEqual(legacy);
     expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!)).toEqual(expected);
+  });
+
+  it("adds a null archive marker when loading the original v3 phase shape", () => {
+    const cwd = "/work/original-v3";
+    const storage = new MemoryStorage();
+    const original = document("original v3") as unknown as {
+      phases: Array<Record<string, unknown>>;
+    };
+    delete original.phases[0]!.archivedAt;
+    storage.setItem(v3NotesKey(cwd), JSON.stringify(original));
+
+    const loaded = createNotesRepository(storage, () => NOW).load(cwd);
+
+    expect(loaded.document.phases[0]!.archivedAt).toBeNull();
+    expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!).phases[0].archivedAt).toBeNull();
+    expect(loaded.migrationEligibility).toBe("valid-v3");
+  });
+
+  it("rejects archive-shape lookalikes with unknown phase keys", () => {
+    const original = document("invalid original v3") as unknown as {
+      phases: Array<Record<string, unknown>>;
+    };
+    delete original.phases[0]!.archivedAt;
+    original.phases[0]!.unexpected = true;
+
+    expect(parseNotesDocument(JSON.stringify(original))).toMatchObject({
+      ok: false,
+      reason: "invalid-shape",
+      error: { path: "phases[0]" },
+    });
   });
 
   it("repairs empty and duplicate task IDs while migrating legacy v2 Notes", () => {
@@ -340,6 +372,14 @@ describe("structured project notes storage", () => {
       "unknown status",
       { ...document("invalid"), phases: [{ ...document("invalid").phases[0], status: "blocked" }] },
       "phases[0].status",
+    ],
+    [
+      "invalid archive timestamp",
+      {
+        ...document("invalid"),
+        phases: [{ ...document("invalid").phases[0], archivedAt: "next week" }],
+      },
+      "phases[0].archivedAt",
     ],
     [
       "invalid transition",

@@ -73,6 +73,7 @@ function notes(reference: string): NotesDocumentV3 {
         createdAt: NOW,
         updatedAt: NOW,
         completedAt: null,
+        archivedAt: null,
         overrides: { status: null, referenceIds: null },
         lifecycleEvents: [],
       },

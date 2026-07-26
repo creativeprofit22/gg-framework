@@ -1,4 +1,8 @@
-import { migrateNotesDocumentV2, validateNotesDocumentV3 } from "./notes-types";
+import {
+  migrateNotesDocumentV2,
+  migrateNotesDocumentV3PhaseArchive,
+  validateNotesDocumentV3,
+} from "./notes-types";
 import type {
   NotesDocumentV3,
   NotesLoadDiagnostic,
@@ -93,13 +97,32 @@ export function parseNotesDocument(raw: string): NotesParseResult {
   if (value.version === 2) {
     const migrated = migrateNotesDocumentV2(value);
     return migrated.ok
-      ? { ok: true, document: migrated.document, migratedFromV2: true }
+      ? {
+          ok: true,
+          document: migrated.document,
+          migratedFromV2: true,
+          migratedArchiveShape: false,
+        }
       : { ok: false, reason: "invalid-shape", error: migrated.error };
   }
   if (value.version !== 3) return { ok: false, reason: "unsupported-version" };
   const validated = validateNotesDocumentV3(value);
-  return validated.ok
-    ? { ok: true, document: validated.document, migratedFromV2: false }
+  if (validated.ok) {
+    return {
+      ok: true,
+      document: validated.document,
+      migratedFromV2: false,
+      migratedArchiveShape: false,
+    };
+  }
+  const migrated = migrateNotesDocumentV3PhaseArchive(value);
+  return migrated.ok
+    ? {
+        ok: true,
+        document: migrated.document,
+        migratedFromV2: false,
+        migratedArchiveShape: true,
+      }
     : { ok: false, reason: "invalid-shape", error: validated.error };
 }
 
@@ -160,7 +183,7 @@ export function createNotesRepository(
         return loadResult(document, v3Raw === null ? "v2-migrated" : "v3", null, diagnostics);
       }
 
-      if (parsed.migratedFromV2) {
+      if (parsed.migratedFromV2 || parsed.migratedArchiveShape) {
         const persisted = writeStorage(
           storage,
           canonicalV3Key,
@@ -168,9 +191,14 @@ export function createNotesRepository(
           diagnostics,
         );
         return {
-          ...loadResult(parsed.document, "v2-migrated", legacyRecord?.key ?? null, diagnostics),
-          v2ImportAttempted: true,
-          v2ImportSucceeded: persisted,
+          ...loadResult(
+            parsed.document,
+            parsed.migratedFromV2 ? "v2-migrated" : "v3",
+            legacyRecord?.key ?? null,
+            diagnostics,
+          ),
+          v2ImportAttempted: parsed.migratedFromV2,
+          v2ImportSucceeded: parsed.migratedFromV2 ? persisted : null,
         };
       }
 

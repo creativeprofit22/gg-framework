@@ -115,6 +115,7 @@ export interface NotesPhase {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  archivedAt: string | null;
   overrides: NotesPhaseOverrides;
   lifecycleEvents: NotesLifecycleEvent[];
 }
@@ -143,7 +144,12 @@ export type NotesValidationResult =
 export type NotesParseFailureReason = "malformed-json" | "unsupported-version" | "invalid-shape";
 
 export type NotesParseResult =
-  | { ok: true; document: NotesDocumentV3; migratedFromV2: boolean }
+  | {
+      ok: true;
+      document: NotesDocumentV3;
+      migratedFromV2: boolean;
+      migratedArchiveShape: boolean;
+    }
   | { ok: false; reason: NotesParseFailureReason; error?: NotesValidationError };
 
 export type NotesLoadSource = "v3" | "v2-migrated" | "legacy" | "empty" | "legacy-fallback";
@@ -347,6 +353,25 @@ const PHASE_KEYS = [
   "createdAt",
   "updatedAt",
   "completedAt",
+  "archivedAt",
+  "overrides",
+  "lifecycleEvents",
+];
+const ORIGINAL_V3_PHASE_KEYS = [
+  "id",
+  "title",
+  "goal",
+  "doneWhen",
+  "order",
+  "status",
+  "sourcePrompt",
+  "referenceIds",
+  "session",
+  "reminder",
+  "attentionReason",
+  "createdAt",
+  "updatedAt",
+  "completedAt",
   "overrides",
   "lifecycleEvents",
 ];
@@ -389,6 +414,22 @@ export function migrateNotesDocumentV2(value: unknown): NotesValidationResult {
 
 export function isNotesDocumentV3(value: unknown): value is NotesDocumentV3 {
   return validateNotesDocumentV3(value).ok;
+}
+
+/** Adds the Phase 18 archive marker to the original v3 phase shape. */
+export function migrateNotesDocumentV3PhaseArchive(value: unknown): NotesValidationResult {
+  if (!isRecord(value) || !hasExactKeys(value, DOCUMENT_V3_KEYS) || value.version !== 3) {
+    return validateNotesDocumentV3(value);
+  }
+  if (!Array.isArray(value.phases)) return validateNotesDocumentV3(value);
+
+  let migrated = false;
+  const phases = value.phases.map((phase) => {
+    if (!isRecord(phase) || !hasExactKeys(phase, ORIGINAL_V3_PHASE_KEYS)) return phase;
+    migrated = true;
+    return { ...phase, archivedAt: null };
+  });
+  return validateNotesDocumentV3(migrated ? { ...value, phases } : value);
 }
 
 export function validateNotesDocumentV3(value: unknown): NotesValidationResult {
@@ -571,6 +612,9 @@ function validatePhase(
     return validationError(`${path}.updatedAt`, "expected an ISO timestamp");
   if (!isNullableTimestamp(value.completedAt)) {
     return validationError(`${path}.completedAt`, "expected an ISO timestamp or null");
+  }
+  if (!isNullableTimestamp(value.archivedAt)) {
+    return validationError(`${path}.archivedAt`, "expected an ISO timestamp or null");
   }
   const overridesError = validateOverrides(value.overrides, `${path}.overrides`, knownReferenceIds);
   if (overridesError) return overridesError;

@@ -27,6 +27,7 @@ function phase(status: NotesPhaseStatus, withReminder = false): NotesPhase {
     createdAt: NOW,
     updatedAt: NOW,
     completedAt: status === "done" || status === "cancelled" ? NOW : null,
+    archivedAt: null,
     overrides: { status: null, referenceIds: null },
     lifecycleEvents: [],
   };
@@ -107,6 +108,12 @@ describe("Notes status selectors", () => {
     ]);
 
     expect(getActiveNotesReminderCount(notes)).toBe(2);
+  });
+
+  it("excludes archived active phases and their reminders", () => {
+    const archived = { ...phase("in-progress", true), archivedAt: NOW };
+    expect(getActiveNotesPhaseCount(document([archived]))).toBe(0);
+    expect(getActiveNotesReminderCount(document([archived]))).toBe(0);
   });
 
   it("returns zero counts for an empty roadmap", () => {

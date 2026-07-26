@@ -100,6 +100,7 @@ function notes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV3 {
         createdAt: "2026-07-24T10:00:00.000Z",
         updatedAt: NOW,
         completedAt: null,
+        archivedAt: null,
         overrides: {
           status: { value: "in-progress", source: "user", updatedAt: NOW },
           referenceIds: { value: ["ref-1"], source: "user", updatedAt: NOW },
@@ -165,6 +166,46 @@ describe("project Notes identity and validation", () => {
       snapshot: { document: fixture },
     });
     expect((await readEnvelope(repository.paths(cwd).primary)).document).toEqual(fixture);
+  });
+
+  it("rewrites the original v3 phase shape with a null archive marker", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/original-v3";
+    const repository = new ProjectNotesRepository(agentDir);
+    const paths = repository.paths(cwd);
+    const original = notes() as unknown as { phases: Array<Record<string, unknown>> };
+    delete original.phases[0]!.archivedAt;
+    const envelope = {
+      storeVersion: 1,
+      projectKey: canonicalProjectKey(cwd),
+      revision: 3,
+      document: original,
+    };
+    await fs.mkdir(paths.directory, { recursive: true });
+    await fs.writeFile(paths.primary, JSON.stringify(envelope), "utf8");
+
+    const loaded = await repository.load(cwd);
+
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 3, document: { phases: [{ archivedAt: null }] } },
+    });
+    expect((await readEnvelope(paths.primary)).document.phases[0]!.archivedAt).toBeNull();
+    expect((await readEnvelope(paths.backup)).document.phases[0]!.archivedAt).toBeNull();
+  });
+
+  it("rejects original-v3 archive lookalikes with unknown phase keys", async () => {
+    const agentDir = await tempAgentDir();
+    const original = notes() as unknown as { phases: Array<Record<string, unknown>> };
+    delete original.phases[0]!.archivedAt;
+    original.phases[0]!.unexpected = true;
+
+    await expect(
+      new ProjectNotesRepository(agentDir).migrate("/work/lookalike", original),
+    ).resolves.toMatchObject({
+      status: "invalid",
+      error: { path: "phases[0]" },
+    });
   });
 
   it("uses the full SHA-256 canonical key under the GG data directory", () => {
@@ -236,6 +277,10 @@ describe("project Notes identity and validation", () => {
       {
         value: { ...valid, phases: [{ ...valid.phases[0], status: "blocked" }] },
         path: "phases[0].status",
+      },
+      {
+        value: { ...valid, phases: [{ ...valid.phases[0], archivedAt: "next week" }] },
+        path: "phases[0].archivedAt",
       },
       {
         value: {

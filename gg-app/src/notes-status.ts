@@ -16,10 +16,12 @@ function isActivePhase(status: NotesDocumentV3["phases"][number]["status"]): boo
 }
 
 export function getActiveNotesPhaseCount(document: NotesDocumentV3): number {
-  return document.phases.filter((phase) => isActivePhase(phase.status)).length;
+  return document.phases.filter((phase) => phase.archivedAt === null && isActivePhase(phase.status))
+    .length;
 }
 
 export function getActiveNotesReminderCount(document: NotesDocumentV3): number {
-  return document.phases.filter((phase) => isActivePhase(phase.status) && phase.reminder !== null)
-    .length;
+  return document.phases.filter(
+    (phase) => phase.archivedAt === null && isActivePhase(phase.status) && phase.reminder !== null,
+  ).length;
 }

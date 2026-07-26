@@ -42,6 +42,28 @@ function task(id = "task-1"): NotesDocumentV3["tasks"][number] {
   };
 }
 
+function phase(id: string, order: number): NotesDocumentV3["phases"][number] {
+  return {
+    id,
+    title: `Phase ${id}`,
+    goal: `Goal ${id}`,
+    doneWhen: [`Done ${id}`],
+    order,
+    status: "not-started",
+    sourcePrompt: "",
+    referenceIds: [],
+    session: null,
+    reminder: null,
+    attentionReason: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    completedAt: null,
+    archivedAt: null,
+    overrides: { status: null, referenceIds: null },
+    lifecycleEvents: [],
+  };
+}
+
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
   get length(): number {
@@ -471,6 +493,81 @@ describe("useProjectNotes sidecar authority", () => {
     await waitFor(() => expect(first.result.current.document.currentFocus).toBe("second focus"));
     expect(first.result.current.document.reference).toBe("first reference");
     expect(second.result.current.document).toEqual(first.result.current.document);
+  });
+
+  it("rebases concurrent phase reorder and edit operations across windows", async () => {
+    const cwd = "/work/project";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    initial.phases = [phase("one", 0), phase("two", 1)];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const firstClient = server.connect(cwd);
+    const secondClient = server.connect(cwd);
+    const firstStorage = new MemoryStorage();
+    const secondStorage = new MemoryStorage();
+    const first = renderHook(() => useProjectNotes(cwd, hookOptions(firstClient, firstStorage)));
+    const second = renderHook(() => useProjectNotes(cwd, hookOptions(secondClient, secondStorage)));
+    await waitFor(() => expect(first.result.current.document.phases).toHaveLength(2));
+    await waitFor(() => expect(second.result.current.document.phases).toHaveLength(2));
+    firstClient.deferSaves = true;
+    secondClient.deferSaves = true;
+
+    act(() => first.result.current.movePhase("two", "up"));
+    act(() =>
+      second.result.current.editPhase("one", {
+        title: "Phase one edited",
+        goal: "Concurrent goal",
+        doneWhen: ["Still ordered"],
+      }),
+    );
+    await waitFor(() => expect(firstClient.pendingSaves).toHaveLength(1));
+    await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
+    act(() => firstClient.flushNextSave());
+    act(() => secondClient.flushNextSave());
+    await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
+    act(() => secondClient.flushNextSave());
+
+    await waitFor(() => expect(server.snapshots.get(cwd)?.revision).toBe(3));
+    await waitFor(() =>
+      expect(first.result.current.document).toEqual(second.result.current.document),
+    );
+    expect(first.result.current.document.phases.map((item) => item.id)).toEqual(["two", "one"]);
+    expect(first.result.current.document.phases[1]).toMatchObject({
+      title: "Phase one edited",
+      goal: "Concurrent goal",
+      order: 1,
+    });
+  });
+
+  it("keeps an archived phase in its ordered slot while visible phases move and restore", async () => {
+    const cwd = "/work/project";
+    const server = new FakeNotesServer();
+    const initial = notes("base");
+    const archivedPhase = phase("B", 1);
+    archivedPhase.archivedAt = NOW;
+    initial.phases = [phase("A", 0), archivedPhase, phase("C", 2)];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const client = server.connect(cwd);
+    const storage = new MemoryStorage();
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(3));
+    client.deferSaves = true;
+
+    act(() => hook.result.current.movePhase("C", "up"));
+    await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+    expect(client.pendingSaves[0]?.document.phases.map((item) => item.id)).toEqual(["C", "B", "A"]);
+
+    act(() => hook.result.current.restorePhase("B"));
+    act(() => client.flushNextSave());
+    await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+    act(() => client.flushNextSave());
+
+    await waitFor(() => expect(server.snapshots.get(cwd)?.revision).toBe(3));
+    const persisted = server.snapshots.get(cwd)!.document;
+    await waitFor(() => expect(hook.result.current.document).toEqual(persisted));
+    expect(persisted.phases.map((item) => item.id)).toEqual(["C", "B", "A"]);
+    expect(persisted.phases.map((item) => item.order)).toEqual([0, 1, 2]);
+    expect(persisted.phases[1]?.archivedAt).toBeNull();
   });
 
   it("drops a stale task operation that became invalid instead of resurrecting it", async () => {

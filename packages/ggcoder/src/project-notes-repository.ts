@@ -121,6 +121,7 @@ export interface NotesPhase {
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
+  archivedAt: string | null;
   overrides: NotesPhaseOverrides;
   lifecycleEvents: NotesLifecycleEvent[];
 }
@@ -273,6 +274,25 @@ const REFERENCE_KEYS = [
 ];
 const REFERENCE_RANGE_KEYS = ["startLine", "endLine"];
 const PHASE_KEYS = [
+  "id",
+  "title",
+  "goal",
+  "doneWhen",
+  "order",
+  "status",
+  "sourcePrompt",
+  "referenceIds",
+  "session",
+  "reminder",
+  "attentionReason",
+  "createdAt",
+  "updatedAt",
+  "completedAt",
+  "archivedAt",
+  "overrides",
+  "lifecycleEvents",
+];
+const ORIGINAL_V3_PHASE_KEYS = [
   "id",
   "title",
   "goal",
@@ -581,6 +601,9 @@ function validatePhase(
   if (!isNullableTimestamp(value.completedAt)) {
     return validationError(`${pathPrefix}.completedAt`, "expected an ISO timestamp or null");
   }
+  if (!isNullableTimestamp(value.archivedAt)) {
+    return validationError(`${pathPrefix}.archivedAt`, "expected an ISO timestamp or null");
+  }
   const overridesError = validateOverrides(
     value.overrides,
     `${pathPrefix}.overrides`,
@@ -785,13 +808,27 @@ function isCanonicalHttpUrl(value: unknown): value is string {
   }
 }
 
-function coerceNotesDocumentV3(value: unknown): NotesValidationResult {
+function coerceNotesDocumentV3(value: unknown): NotesValidationResult & {
+  migratedLegacyShape?: boolean;
+} {
   const current = validateNotesDocumentV3(value);
-  if (current.ok) return current;
+  if (current.ok) return { ...current, migratedLegacyShape: false };
   if (typeof value === "object" && value !== null && "version" in value && value.version === 2) {
-    return migrateNotesDocumentV2(value);
+    const migrated = migrateNotesDocumentV2(value);
+    return { ...migrated, migratedLegacyShape: migrated.ok };
   }
-  return current;
+  if (!isRecordWithKeys(value, DOCUMENT_V3_KEYS) || value.version !== 3) return current;
+  if (!Array.isArray(value.phases)) return current;
+
+  let migratedLegacyShape = false;
+  const phases = value.phases.map((phase) => {
+    if (!isRecordWithKeys(phase, ORIGINAL_V3_PHASE_KEYS)) return phase;
+    migratedLegacyShape = true;
+    return { ...phase, archivedAt: null };
+  });
+  if (!migratedLegacyShape) return current;
+  const migrated = validateNotesDocumentV3({ ...value, phases });
+  return { ...migrated, migratedLegacyShape: migrated.ok };
 }
 
 function validateAppendOnlyLifecycleEvents(
@@ -1090,7 +1127,7 @@ function parseStoredEnvelope(
       revision: value.revision as number,
       document: document.document,
     },
-    migratedFromV2: isNotesDocumentV2(value.document),
+    migratedFromV2: document.migratedLegacyShape === true,
   };
 }
 

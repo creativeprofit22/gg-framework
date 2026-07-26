@@ -2,8 +2,10 @@ import { useCallback, useRef, useState, type KeyboardEvent } from "react";
 import { Modal } from "./Modal";
 import { NotesCurrentFocus } from "./NotesCurrentFocus";
 import { NotesHandoff } from "./NotesHandoff";
+import { NotesRoadmap, NotesRoadmapArchive } from "./NotesRoadmap";
 import { NotesTaskList } from "./NotesTaskList";
-import type { NotesTask } from "./notes-types";
+import type { NotesPhaseInput } from "./useProjectNotes";
+import type { NotesPhase, NotesPhaseStatus, NotesTask } from "./notes-types";
 
 type NotesTab = "overview" | "roadmap" | "reference" | "archive";
 
@@ -19,6 +21,7 @@ interface Props {
   onChange(value: string): void;
   currentFocus: string;
   tasks: NotesTask[];
+  phases: NotesPhase[];
   handoff: string;
   handoffUpdatedAt: string | null;
   handoffUnread: boolean;
@@ -32,6 +35,12 @@ interface Props {
   onMoveTask(id: string, direction: "up" | "down"): void;
   onArchiveTask(id: string): void;
   onRestoreTask(id: string): void;
+  onCreatePhase(input: NotesPhaseInput): void;
+  onEditPhase(id: string, input: NotesPhaseInput): void;
+  onMovePhase(id: string, direction: "up" | "down"): void;
+  onChangePhaseStatus(id: string, status: NotesPhaseStatus): void;
+  onArchivePhase(id: string): void;
+  onRestorePhase(id: string): void;
   onChangeHandoff(text: string): void;
   onHandoffPresented(text: string, updatedAt: string): void;
   onClose(): void;
@@ -50,6 +59,7 @@ export function NotesModal({
   onChange,
   currentFocus,
   tasks,
+  phases,
   handoff,
   handoffUpdatedAt,
   handoffUnread,
@@ -63,6 +73,12 @@ export function NotesModal({
   onMoveTask,
   onArchiveTask,
   onRestoreTask,
+  onCreatePhase,
+  onEditPhase,
+  onMovePhase,
+  onChangePhaseStatus,
+  onArchivePhase,
+  onRestorePhase,
   onChangeHandoff,
   onHandoffPresented,
   onClose,
@@ -207,27 +223,19 @@ export function NotesModal({
             aria-labelledby="notes-tab-roadmap"
             hidden={activeTab !== "roadmap"}
           >
-            <div className="notes-panel-rail">
-              <section className="notes-section" aria-labelledby="notes-roadmap-heading">
-                <h2 id="notes-roadmap-heading">Roadmap</h2>
-                {hasRoadmapSummary ? (
-                  <div className="notes-roadmap-counts" aria-label="Active roadmap totals">
-                    {activePhaseCount > 0 && (
-                      <p>
-                        <strong>{activePhaseCount}</strong>{" "}
-                        {activeCountLabel(activePhaseCount, "phase")}
-                      </p>
-                    )}
-                    {activeReminderCount > 0 && (
-                      <p>
-                        <strong>{activeReminderCount}</strong>{" "}
-                        {activeCountLabel(activeReminderCount, "reminder")}
-                      </p>
-                    )}
-                  </div>
-                ) : (
-                  <p className="notes-empty">No active roadmap work.</p>
-                )}
+            <div className="notes-panel-rail notes-roadmap-rail">
+              <section
+                className="notes-section notes-roadmap-section"
+                aria-labelledby="notes-roadmap-heading"
+              >
+                <NotesRoadmap
+                  phases={phases}
+                  onCreatePhase={onCreatePhase}
+                  onEditPhase={onEditPhase}
+                  onMovePhase={onMovePhase}
+                  onChangePhaseStatus={onChangePhaseStatus}
+                  onArchivePhase={onArchivePhase}
+                />
               </section>
             </div>
           </div>
@@ -271,6 +279,8 @@ export function NotesModal({
                 aria-labelledby="notes-archive-heading"
               >
                 <h2 id="notes-archive-heading">Done / Archive</h2>
+                <NotesRoadmapArchive phases={phases} onRestorePhase={onRestorePhase} />
+                <h3 className="notes-archive-task-heading">Notes tasks</h3>
                 <button
                   type="button"
                   className="notes-archive-toggle"

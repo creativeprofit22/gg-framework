@@ -1,6 +1,6 @@
-import { isNotesDocumentV2 } from "./notes-types";
+import { migrateNotesDocumentV2, validateNotesDocumentV3 } from "./notes-types";
 import type {
-  NotesDocumentV2,
+  NotesDocumentV3,
   NotesLoadDiagnostic,
   NotesLoadResult,
   NotesParseResult,
@@ -9,11 +9,12 @@ import type {
 
 const LEGACY_PREFIX = "gg-notes:";
 const V2_PREFIX = "gg-notes-v2:";
+const V3_PREFIX = "gg-notes-v3:";
 
 /** Browser Notes are retained only for one-time migration and run-local fallback recovery. */
 export interface NotesRepository {
   load(cwd: string): NotesLoadResult;
-  save(cwd: string, document: NotesDocumentV2): NotesSaveResult;
+  save(cwd: string, document: NotesDocumentV3): NotesSaveResult;
 }
 
 export function canonicalProjectKey(cwd: string): string {
@@ -62,15 +63,21 @@ export function v2NotesKey(cwd: string): string {
   return `${V2_PREFIX}${canonicalProjectKey(cwd)}`;
 }
 
-export function createEmptyNotesDocument(now: string): NotesDocumentV2 {
+export function v3NotesKey(cwd: string): string {
+  return `${V3_PREFIX}${canonicalProjectKey(cwd)}`;
+}
+
+export function createEmptyNotesDocument(now: string): NotesDocumentV3 {
   return {
-    version: 2,
+    version: 3,
     reference: "",
     currentFocus: "",
     tasks: [],
     handoff: { text: "", updatedAt: null, readAt: null },
     updatedAt: now,
     legacyImportedAt: null,
+    phases: [],
+    references: [],
   };
 }
 
@@ -83,10 +90,17 @@ export function parseNotesDocument(raw: string): NotesParseResult {
   }
 
   if (!isRecord(value)) return { ok: false, reason: "invalid-shape" };
-  if (value.version !== 2) return { ok: false, reason: "unsupported-version" };
-  if (!isNotesDocumentV2(value)) return { ok: false, reason: "invalid-shape" };
-
-  return { ok: true, document: value };
+  if (value.version === 2) {
+    const migrated = migrateNotesDocumentV2(value);
+    return migrated.ok
+      ? { ok: true, document: migrated.document, migratedFromV2: true }
+      : { ok: false, reason: "invalid-shape", error: migrated.error };
+  }
+  if (value.version !== 3) return { ok: false, reason: "unsupported-version" };
+  const validated = validateNotesDocumentV3(value);
+  return validated.ok
+    ? { ok: true, document: validated.document, migratedFromV2: false }
+    : { ok: false, reason: "invalid-shape", error: validated.error };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -103,17 +117,20 @@ export function createNotesRepository(
       const diagnostics: NotesLoadDiagnostic[] = [];
       const exactLegacyKey = legacyNotesKey(cwd);
       const canonicalV2Key = v2NotesKey(cwd);
+      const canonicalV3Key = v3NotesKey(cwd);
       const legacyRecord = findLegacyRecord(storage, cwd, diagnostics);
-      const v2Raw = readStorage(storage, canonicalV2Key, diagnostics);
+      const v3Raw = readStorage(storage, canonicalV3Key, diagnostics);
+      const v2Raw = v3Raw === null ? readStorage(storage, canonicalV2Key, diagnostics) : null;
+      const structuredRaw = v3Raw ?? v2Raw;
       const now = clock();
 
-      if (v2Raw === null && legacyRecord === null) {
+      if (structuredRaw === null && legacyRecord === null) {
         const document = createEmptyNotesDocument(now);
-        writeStorage(storage, canonicalV2Key, JSON.stringify(document), diagnostics);
+        writeStorage(storage, canonicalV3Key, JSON.stringify(document), diagnostics);
         return loadResult(document, "empty", null, diagnostics);
       }
 
-      if (v2Raw === null && legacyRecord !== null) {
+      if (structuredRaw === null && legacyRecord !== null) {
         const document = {
           ...createEmptyNotesDocument(now),
           reference: legacyRecord.value,
@@ -121,7 +138,7 @@ export function createNotesRepository(
         };
         const imported = writeStorage(
           storage,
-          canonicalV2Key,
+          canonicalV3Key,
           JSON.stringify(document),
           diagnostics,
         );
@@ -132,22 +149,35 @@ export function createNotesRepository(
         };
       }
 
-      const parsed = parseNotesDocument(v2Raw as string);
+      const parsed = parseNotesDocument(structuredRaw as string);
       if (!parsed.ok) {
-        diagnostics.push({ kind: "v2-parse", reason: parsed.reason });
+        diagnostics.push({ kind: "document-parse", reason: parsed.reason, error: parsed.error });
         const document = createEmptyNotesDocument(now);
         if (legacyRecord !== null) {
           document.reference = legacyRecord.value;
           return loadResult(document, "legacy-fallback", legacyRecord.key, diagnostics);
         }
-        return loadResult(document, "v2", null, diagnostics);
+        return loadResult(document, v3Raw === null ? "v2-migrated" : "v3", null, diagnostics);
       }
 
-      // Once a valid v2 document exists it is authoritative. The legacy key is
-      // a rollback mirror only: treating it as newer could undo a successful v2
-      // save after a quota/error prevented the matching legacy write.
+      if (parsed.migratedFromV2) {
+        const persisted = writeStorage(
+          storage,
+          canonicalV3Key,
+          JSON.stringify(parsed.document),
+          diagnostics,
+        );
+        return {
+          ...loadResult(parsed.document, "v2-migrated", legacyRecord?.key ?? null, diagnostics),
+          v2ImportAttempted: true,
+          v2ImportSucceeded: persisted,
+        };
+      }
+
+      // Once a valid v3 document exists it is authoritative. The legacy key is
+      // a rollback mirror only and cannot overwrite a newer structured save.
       if (legacyRecord !== null) {
-        return loadResult(parsed.document, "v2", legacyRecord.key, diagnostics);
+        return loadResult(parsed.document, "v3", legacyRecord.key, diagnostics);
       }
 
       const recovered = writeStorage(
@@ -157,7 +187,7 @@ export function createNotesRepository(
         diagnostics,
       );
       return {
-        ...loadResult(parsed.document, "v2", exactLegacyKey, diagnostics),
+        ...loadResult(parsed.document, "v3", exactLegacyKey, diagnostics),
         legacyRecoveryAttempted: true,
         legacyRecoverySucceeded: recovered,
       };
@@ -165,17 +195,17 @@ export function createNotesRepository(
 
     save(cwd, document) {
       const legacyKey = legacyNotesKey(cwd);
-      const v2Key = v2NotesKey(cwd);
+      const v3Key = v3NotesKey(cwd);
       return {
         legacy: writeResult(storage, legacyKey, document.reference),
-        v2: writeResult(storage, v2Key, JSON.stringify(document)),
+        v3: writeResult(storage, v3Key, JSON.stringify(document)),
       };
     },
   };
 }
 
 function loadResult(
-  document: NotesDocumentV2,
+  document: NotesDocumentV3,
   source: NotesLoadResult["source"],
   legacyKey: string | null,
   diagnostics: NotesLoadDiagnostic[],
@@ -203,9 +233,10 @@ function migrationEligibility(
   }
   if (source === "empty") return "empty";
   if (source === "legacy" || source === "legacy-fallback") return "valid-legacy";
-  return diagnostics.some((diagnostic) => diagnostic.kind === "v2-parse")
-    ? "ineligible-invalid-v2"
-    : "valid-v2";
+  if (diagnostics.some((diagnostic) => diagnostic.kind === "document-parse")) {
+    return "ineligible-invalid-document";
+  }
+  return source === "v2-migrated" ? "valid-v2-migrated" : "valid-v3";
 }
 
 function findLegacyRecord(

@@ -2,10 +2,10 @@
 
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { createEmptyNotesDocument, createNotesRepository, v2NotesKey } from "./notes-storage";
+import { createEmptyNotesDocument, createNotesRepository, v3NotesKey } from "./notes-storage";
 import type {
   NotesClient,
-  NotesDocumentV2,
+  NotesDocumentV3,
   NotesSidecarEvent,
   ProjectNotesMigrationOutcome,
   ProjectNotesReadOutcome,
@@ -20,8 +20,8 @@ const LATER = "2026-07-25T12:01:00.000Z";
 function notes(
   reference: string,
   currentFocus = "",
-  tasks: NotesDocumentV2["tasks"] = [],
-): NotesDocumentV2 {
+  tasks: NotesDocumentV3["tasks"] = [],
+): NotesDocumentV3 {
   return {
     ...createEmptyNotesDocument(NOW),
     reference,
@@ -30,7 +30,7 @@ function notes(
   };
 }
 
-function task(id = "task-1"): NotesDocumentV2["tasks"][number] {
+function task(id = "task-1"): NotesDocumentV3["tasks"][number] {
   return {
     id,
     text: `Task ${id}`,
@@ -66,7 +66,7 @@ class MemoryStorage implements Storage {
 
 interface PendingSave {
   expectedRevision: number;
-  document: NotesDocumentV2;
+  document: NotesDocumentV3;
   resolve(outcome: ProjectNotesSaveOutcome): void;
 }
 
@@ -88,7 +88,7 @@ class FakeNotesServer {
       : { status: "missing" };
   }
 
-  migrate(projectKey: string, document: NotesDocumentV2): ProjectNotesMigrationOutcome {
+  migrate(projectKey: string, document: NotesDocumentV3): ProjectNotesMigrationOutcome {
     const existing = this.snapshots.get(projectKey);
     if (existing) return { status: "ok", snapshot: existing, migrated: false };
     const snapshot = { projectKey, revision: 1, document };
@@ -101,7 +101,7 @@ class FakeNotesServer {
   save(
     projectKey: string,
     expectedRevision: number,
-    document: NotesDocumentV2,
+    document: NotesDocumentV3,
   ): ProjectNotesSaveOutcome {
     const current = this.snapshots.get(projectKey);
     if (!current) return { status: "missing" };
@@ -121,11 +121,13 @@ class FakeNotesServer {
 
 class FakeNotesClient implements NotesClient {
   readonly listeners = new Set<(event: NotesSidecarEvent) => void>();
-  readonly saveCalls: Array<{ expectedRevision: number; document: NotesDocumentV2 }> = [];
+  readonly saveCalls: Array<{ expectedRevision: number; document: NotesDocumentV3 }> = [];
   readonly pendingSaves: PendingSave[] = [];
   getCalls = 0;
   deferSaves = false;
   migrationError: unknown = null;
+  migrationOutcome: ProjectNotesMigrationOutcome | null = null;
+  saveOutcome: ProjectNotesSaveOutcome | null = null;
   getOverride: (() => Promise<ProjectNotesReadOutcome>) | null = null;
 
   constructor(
@@ -139,16 +141,18 @@ class FakeNotesClient implements NotesClient {
     return this.server.read(this.projectKey);
   }
 
-  async migrateNotes(document: NotesDocumentV2): Promise<ProjectNotesMigrationOutcome> {
+  async migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome> {
     if (this.migrationError) throw this.migrationError;
+    if (this.migrationOutcome) return this.migrationOutcome;
     return this.server.migrate(this.projectKey, document);
   }
 
   async saveNotes(
     expectedRevision: number,
-    document: NotesDocumentV2,
+    document: NotesDocumentV3,
   ): Promise<ProjectNotesSaveOutcome> {
     this.saveCalls.push({ expectedRevision, document });
+    if (this.saveOutcome) return this.saveOutcome;
     if (!this.deferSaves) return this.server.save(this.projectKey, expectedRevision, document);
     return new Promise((resolve) => {
       this.pendingSaves.push({ expectedRevision, document, resolve });
@@ -171,8 +175,8 @@ class FakeNotesClient implements NotesClient {
   }
 }
 
-function seed(storage: Storage, cwd: string, document: NotesDocumentV2): void {
-  storage.setItem(v2NotesKey(cwd), JSON.stringify(document));
+function seed(storage: Storage, cwd: string, document: NotesDocumentV3): void {
+  storage.setItem(v3NotesKey(cwd), JSON.stringify(document));
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
@@ -246,7 +250,7 @@ describe("useProjectNotes sidecar authority", () => {
     const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
 
     await waitFor(() => expect(hook.result.current.document.reference).toBe("server wins"));
-    expect(storage.getItem(v2NotesKey(cwd))).toContain("stale local");
+    expect(storage.getItem(v3NotesKey(cwd))).toContain("stale local");
   });
 
   it("refetches the authoritative snapshot when a reconnect ready event follows a missed change", async () => {
@@ -337,6 +341,52 @@ describe("useProjectNotes sidecar authority", () => {
       "migration-failed",
     );
     expect(server.snapshots.has(cwd)).toBe(false);
+  });
+
+  it("retains the validation path and message when migration is invalid", async () => {
+    const cwd = "/work/project";
+    const storage = new MemoryStorage();
+    seed(storage, cwd, notes("migration input"));
+    const server = new FakeNotesServer();
+    const client = server.connect(cwd);
+    const validationError = {
+      path: "references[0].canonicalUrl",
+      message: "expected an absolute http(s) URL",
+    };
+    client.migrationOutcome = { status: "invalid", error: validationError };
+
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+
+    await waitFor(() =>
+      expect(hook.result.current.diagnostics.authority).toContainEqual({
+        kind: "migration-failed",
+        error: validationError,
+      }),
+    );
+  });
+
+  it("retains the validation path and message when a save is invalid", async () => {
+    const cwd = "/work/project";
+    const storage = new MemoryStorage();
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("base") });
+    const client = server.connect(cwd);
+    const validationError = {
+      path: "phases[0].lifecycleEvents[1].fromStatus",
+      message: "expected in-progress",
+    };
+    client.saveOutcome = { status: "invalid", error: validationError };
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+    await waitFor(() => expect(hook.result.current.document.reference).toBe("base"));
+
+    act(() => hook.result.current.onChange("invalid save"));
+
+    await waitFor(() =>
+      expect(hook.result.current.diagnostics.authority).toContainEqual({
+        kind: "save-failed",
+        error: validationError,
+      }),
+    );
   });
 
   it("serializes rapid text writes and coalesces only the unsent tail", async () => {

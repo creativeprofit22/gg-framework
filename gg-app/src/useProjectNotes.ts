@@ -5,7 +5,7 @@ import {
   isNotesReadyEvent,
   type NotesAuthorityDiagnostic,
   type NotesClient,
-  type NotesDocumentV2,
+  type NotesDocumentV3,
   type NotesLoadResult,
   type NotesSaveResult,
   type ProjectNotesSnapshot,
@@ -28,7 +28,7 @@ export interface UseProjectNotesOptions {
 export interface UseProjectNotesResult {
   value: string;
   onChange(value: string): void;
-  document: NotesDocumentV2;
+  document: NotesDocumentV3;
   changeCurrentFocus(value: string): void;
   createTask(text: string): void;
   editTask(id: string, text: string): void;
@@ -51,7 +51,7 @@ type CoalesceKey = "reference" | "current-focus" | "handoff";
 interface NotesMutation {
   id: number;
   coalesceKey?: CoalesceKey;
-  apply(document: NotesDocumentV2): NotesDocumentV2 | null;
+  apply(document: NotesDocumentV3): NotesDocumentV3 | null;
 }
 
 const systemClock = (): string => new Date().toISOString();
@@ -71,7 +71,7 @@ export function useProjectNotes(
     () => options.repository ?? createNotesRepository(storage, clock),
     [options.repository, storage, clock],
   );
-  const [document, setDocument] = useState<NotesDocumentV2>(() =>
+  const [document, setDocument] = useState<NotesDocumentV3>(() =>
     createEmptyNotesDocument(clock()),
   );
   const [loadDiagnostics, setLoadDiagnostics] = useState<NotesLoadResult | null>(null);
@@ -88,7 +88,7 @@ export function useProjectNotes(
   const nextMutationIdRef = useRef(0);
   const processQueueRef = useRef<() => void>(() => undefined);
 
-  const showDocument = useCallback((next: NotesDocumentV2) => {
+  const showDocument = useCallback((next: NotesDocumentV3) => {
     documentRef.current = next;
     setDocument(next);
   }, []);
@@ -241,7 +241,7 @@ export function useProjectNotes(
         }
         if (
           loaded.migrationEligibility === "ineligible-unreadable" ||
-          loaded.migrationEligibility === "ineligible-invalid-v2"
+          loaded.migrationEligibility === "ineligible-invalid-document"
         ) {
           enterFallback(projectCwd, loaded, { kind: "migration-refused", load: loaded }, epoch);
           return;
@@ -276,12 +276,14 @@ export function useProjectNotes(
             );
             return;
           }
-          enterFallback(
-            projectCwd,
-            loaded,
-            { kind: "migration-failed", error: new Error("sidecar rejected Notes migration") },
-            epoch,
-          );
+          if (migrated.status === "invalid") {
+            enterFallback(
+              projectCwd,
+              loaded,
+              { kind: "migration-failed", error: migrated.error },
+              epoch,
+            );
+          }
         } catch (error) {
           if (authoritativeRef.current && modeRef.current === "sidecar") {
             addAuthorityDiagnostic({ kind: "migration-failed", error });
@@ -396,6 +398,10 @@ export function useProjectNotes(
         if (outcome.status === "conflict") {
           adoptSnapshot(outcome.snapshot, canonicalProjectKey(projectCwd), epoch, true);
           queueMicrotask(() => processQueueRef.current());
+          return;
+        }
+        if (outcome.status === "invalid") {
+          addAuthorityDiagnostic({ kind: "save-failed", error: outcome.error });
           return;
         }
         addAuthorityDiagnostic({
@@ -683,20 +689,20 @@ export function useProjectNotes(
 }
 
 function replayMutations(
-  base: NotesDocumentV2,
+  base: NotesDocumentV3,
   mutations: readonly NotesMutation[],
-): NotesDocumentV2 {
+): NotesDocumentV3 {
   let current = base;
   for (const mutation of mutations) current = mutation.apply(current) ?? current;
   return current;
 }
 
 function updateTask(
-  current: NotesDocumentV2,
+  current: NotesDocumentV3,
   id: string,
   updatedAt: string,
-  update: (task: NotesDocumentV2["tasks"][number]) => NotesDocumentV2["tasks"][number] | null,
-): NotesDocumentV2 | null {
+  update: (task: NotesDocumentV3["tasks"][number]) => NotesDocumentV3["tasks"][number] | null,
+): NotesDocumentV3 | null {
   const index = current.tasks.findIndex((task) => task.id === id);
   const task = current.tasks[index];
   if (!task) return null;

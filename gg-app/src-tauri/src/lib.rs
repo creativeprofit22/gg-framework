@@ -5617,7 +5617,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notes_response_preserves_expected_non_success_outcomes() {
+    fn normalize_notes_response_preserves_expected_non_success_outcomes() {
         for (status, body) in [
             (
                 reqwest::StatusCode::CONFLICT,
@@ -5629,7 +5629,17 @@ mod tests {
             ),
             (
                 reqwest::StatusCode::BAD_REQUEST,
-                serde_json::json!({ "status": "invalid", "reason": "invalid-body" }),
+                serde_json::json!({
+                    "status": "invalid",
+                    "error": { "path": "$", "message": "invalid request body" }
+                }),
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "status": "invalid",
+                    "error": { "path": "$", "message": "malformed JSON request body" }
+                }),
             ),
         ] {
             assert_eq!(
@@ -5640,7 +5650,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_response_rejects_untyped_server_failures() {
+    fn normalize_notes_response_rejects_untyped_server_failures() {
         let error = normalize_notes_response(
             reqwest::StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({ "status": "error", "message": "notes request failed" }),

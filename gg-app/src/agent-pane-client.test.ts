@@ -36,13 +36,15 @@ const notesTask = {
   archivedAt: null,
 };
 const notesDocument = {
-  version: 2 as const,
+  version: 3 as const,
   reference: "reference",
   currentFocus: "focus",
   tasks: [notesTask],
   handoff: { text: "handoff", updatedAt: "2026-07-25T12:00:00.000Z", readAt: null },
   updatedAt: "2026-07-25T12:00:00.000Z",
   legacyImportedAt: null,
+  phases: [],
+  references: [],
 };
 const notesSnapshot = { projectKey: "/work", revision: 1, document: notesDocument };
 describe("pane agent client", () => {
@@ -155,6 +157,32 @@ describe("pane agent client", () => {
     expect(await client.getNotes()).toBe(read);
     expect(await client.migrateNotes(notesDocument)).toBe(migrated);
     expect(await client.saveNotes(1, notesDocument)).toBe(saved);
+  });
+
+  it("passes schema and route validation errors unchanged and rejects legacy bare outcomes", async () => {
+    const client = createPaneAgentClient("right");
+    const schemaError = {
+      status: "invalid",
+      error: { path: "references[0].canonicalUrl", message: "expected an absolute http(s) URL" },
+    } as const;
+    const malformedJson = {
+      status: "invalid",
+      error: { path: "$", message: "malformed JSON request body" },
+    } as const;
+    const invalidBody = {
+      status: "invalid",
+      error: { path: "$", message: "invalid request body" },
+    } as const;
+    invoke
+      .mockResolvedValueOnce(schemaError)
+      .mockResolvedValueOnce(malformedJson)
+      .mockResolvedValueOnce(invalidBody)
+      .mockResolvedValueOnce({ status: "invalid" });
+
+    expect(await client.migrateNotes(notesDocument)).toBe(schemaError);
+    expect(await client.migrateNotes(notesDocument)).toBe(malformedJson);
+    expect(await client.saveNotes(1, notesDocument)).toBe(invalidBody);
+    await expect(client.saveNotes(1, notesDocument)).rejects.toThrow("invalid Notes save response");
   });
 
   it("rejects Notes response snapshots with unknown document, task, handoff, or snapshot keys", async () => {

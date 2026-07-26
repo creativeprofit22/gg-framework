@@ -3,7 +3,12 @@ import { createPortal } from "react-dom";
 import { AlertCircle, AlertTriangle, Database, HardDrive } from "lucide-react";
 import { NotesModal } from "./NotesModal";
 import { NotesStatusBadge, notesStatusLabel } from "./NotesStatusBadge";
-import { getUnfinishedNotesTaskCount, isNotesHandoffUnread } from "./notes-status";
+import {
+  getActiveNotesPhaseCount,
+  getActiveNotesReminderCount,
+  getUnfinishedNotesTaskCount,
+  isNotesHandoffUnread,
+} from "./notes-status";
 import { canonicalProjectKey } from "./notes-storage";
 import { useProjectNotes, type UseProjectNotesResult } from "./useProjectNotes";
 import type { NotesClient } from "./notes-types";
@@ -42,6 +47,8 @@ export function ProjectNotes({ cwd, client }: Props): React.ReactElement {
     unfinishedCount: getUnfinishedNotesTaskCount(notesDocument),
     handoffUnread: isNotesHandoffUnread(notesDocument),
   };
+  const activePhaseCount = getActiveNotesPhaseCount(notesDocument);
+  const activeReminderCount = getActiveNotesReminderCount(notesDocument);
 
   useEffect(() => {
     setShowNotes(false);
@@ -72,6 +79,8 @@ export function ProjectNotes({ cwd, client }: Props): React.ReactElement {
             handoff={notesDocument.handoff.text}
             handoffUpdatedAt={notesDocument.handoff.updatedAt}
             handoffUnread={status.handoffUnread}
+            activePhaseCount={activePhaseCount}
+            activeReminderCount={activeReminderCount}
             persistenceStatus={<NotesPersistenceStatus {...notesPersistenceStatus(diagnostics)} />}
             onChangeCurrentFocus={changeCurrentFocus}
             onCreateTask={createTask}
@@ -96,7 +105,7 @@ function notesPersistenceStatus(
   const authority = diagnostics.authority;
   const fallback = authority.some((item) => item.kind === "fallback-storage");
   const browserWriteFailed =
-    diagnostics.save?.v2.ok === false ||
+    diagnostics.save?.v3.ok === false ||
     diagnostics.load?.diagnostics.some((item) => item.kind === "storage-write") === true;
   const browserMirrorFailed = diagnostics.save?.legacy.ok === false;
 

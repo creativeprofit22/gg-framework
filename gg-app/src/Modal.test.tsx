@@ -81,4 +81,63 @@ describe("Modal", () => {
     expect(firstClose).not.toHaveBeenCalled();
     expect(latestClose).toHaveBeenCalledOnce();
   });
+
+  it("skips hidden initial-focus controls and negative-tab-index tabs", () => {
+    render(
+      <Modal title="Notes" onClose={vi.fn()}>
+        <div hidden>
+          <button type="button" data-modal-initial-focus>
+            Hidden initial action
+          </button>
+        </div>
+        <div role="tablist" aria-label="Notes sections">
+          <button type="button" role="tab" aria-selected="true">
+            Overview
+          </button>
+          <button type="button" role="tab" aria-selected="false" tabIndex={-1}>
+            Roadmap
+          </button>
+        </div>
+      </Modal>,
+    );
+
+    expect(screen.getByRole("tab", { name: "Overview" })).toBe(document.activeElement);
+  });
+
+  it("contains focus without entering hidden, aria-hidden, or inert panel descendants", () => {
+    render(
+      <Modal title="Notes" onClose={vi.fn()}>
+        <div role="tablist" aria-label="Notes sections">
+          <button type="button" role="tab" aria-selected="true">
+            Overview
+          </button>
+          <button type="button" role="tab" aria-selected="false" tabIndex={-1}>
+            Reference
+          </button>
+        </div>
+        <div role="tabpanel">
+          <button type="button">Visible panel action</button>
+        </div>
+        <div hidden>
+          <button type="button">Hidden panel action</button>
+        </div>
+        <div aria-hidden="true">
+          <button type="button">Aria-hidden panel action</button>
+        </div>
+        <div inert>
+          <button type="button">Inert panel action</button>
+        </div>
+      </Modal>,
+    );
+    const visibleAction = screen.getByRole("button", { name: "Visible panel action" });
+    const close = screen.getByRole("button", { name: "Close" });
+
+    visibleAction.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
+
+    close.focus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(visibleAction);
+  });
 });

@@ -4,6 +4,7 @@ interface Props {
   value: string;
   updatedAt: string | null;
   unread: boolean;
+  visible: boolean;
   onChange(value: string): void;
   onPresented(text: string, updatedAt: string): void;
 }
@@ -12,6 +13,7 @@ export function NotesHandoff({
   value,
   updatedAt,
   unread,
+  visible,
   onChange,
   onPresented,
 }: Props): React.ReactElement {
@@ -23,6 +25,7 @@ export function NotesHandoff({
       presentedGenerationRef.current?.text === value &&
       presentedGenerationRef.current.updatedAt === updatedAt;
     if (
+      visible &&
       unread &&
       updatedAt !== null &&
       value.trim().length > 0 &&
@@ -32,7 +35,7 @@ export function NotesHandoff({
       onPresented(value, updatedAt);
       presentedGenerationRef.current = { text: value, updatedAt };
     }
-  }, [onPresented, unread, updatedAt, value]);
+  }, [onPresented, unread, updatedAt, value, visible]);
 
   return (
     <div className="notes-field">

@@ -6,10 +6,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ProjectNotesRepository,
   canonicalProjectKey,
-  isNotesDocumentV2,
+  isNotesDocumentV3,
+  migrateNotesDocumentV2,
   projectNotesHash,
   projectNotesPaths,
+  validateNotesDocumentV3,
   type NotesDocumentV2,
+  type NotesDocumentV3,
   type ProjectNotesFileSystem,
   type StoredProjectNotesV1,
 } from "./project-notes-repository.js";
@@ -17,7 +20,13 @@ import {
 const NOW = "2026-07-25T12:34:56.000Z";
 const roots: string[] = [];
 
-function notes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV2 {
+async function canonicalNotesFixture(): Promise<unknown> {
+  return JSON.parse(
+    await fs.readFile(new URL("../../../fixtures/project-notes-v3.json", import.meta.url), "utf8"),
+  ) as unknown;
+}
+
+function legacyNotes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV2 {
   return {
     version: 2,
     reference,
@@ -52,6 +61,72 @@ function notes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV2 {
   };
 }
 
+function notes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV3 {
+  return {
+    ...legacyNotes(reference),
+    version: 3,
+    references: [
+      {
+        id: "ref-1",
+        provider: "github",
+        tool: "kencode-search",
+        canonicalUrl: "https://github.com/owner/repo/blob/abc123/src/file.ts#L10-L20",
+        owner: "owner",
+        repo: "repo",
+        revision: "abc123",
+        path: "src/file.ts",
+        range: { startLine: 10, endLine: 20 },
+        issue: null,
+        pullRequest: null,
+        query: "NotesDocumentV3",
+        anchor: "L10-L20",
+        relevance: "Authoritative schema source",
+        capturedAt: NOW,
+      },
+    ],
+    phases: [
+      {
+        id: "phase-1",
+        title: "Add authoritative schema",
+        goal: "Persist structured roadmap data",
+        doneWhen: ["Round-trip passes", "Malformed data is rejected"],
+        order: 0,
+        status: "in-progress",
+        sourcePrompt: "Implement Phase 16",
+        referenceIds: ["ref-1"],
+        session: { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" },
+        reminder: { id: "reminder-1", dueAt: NOW, note: "Review schema", createdAt: NOW },
+        attentionReason: null,
+        createdAt: "2026-07-24T10:00:00.000Z",
+        updatedAt: NOW,
+        completedAt: null,
+        overrides: {
+          status: { value: "in-progress", source: "user", updatedAt: NOW },
+          referenceIds: { value: ["ref-1"], source: "user", updatedAt: NOW },
+        },
+        lifecycleEvents: [
+          {
+            id: "event-1",
+            fromStatus: "not-started",
+            toStatus: "planning",
+            source: "user",
+            timestamp: "2026-07-25T12:30:00.000Z",
+            reason: "Started planning",
+          },
+          {
+            id: "event-2",
+            fromStatus: "planning",
+            toStatus: "in-progress",
+            source: "session",
+            timestamp: NOW,
+            reason: null,
+          },
+        ],
+      },
+    ],
+  };
+}
+
 async function tempAgentDir(): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-project-notes-"));
   roots.push(root);
@@ -67,6 +142,31 @@ afterEach(async () => {
 });
 
 describe("project Notes identity and validation", () => {
+  it("accepts and exactly round-trips the canonical v3 contract fixture", async () => {
+    const fixture = await canonicalNotesFixture();
+    const validated = validateNotesDocumentV3(fixture);
+
+    expect(validated).toEqual({ ok: true, document: fixture });
+    if (!validated.ok) throw new Error(validated.error.message);
+
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/canonical-fixture";
+    const repository = new ProjectNotesRepository(agentDir);
+    const migrated = await repository.migrate(cwd, validated.document);
+    const restarted = await new ProjectNotesRepository(agentDir).load(cwd);
+
+    expect(migrated).toMatchObject({
+      status: "ok",
+      snapshot: { document: fixture },
+    });
+    expect(restarted).toMatchObject({
+      status: "ok",
+      recoveredFromBackup: false,
+      snapshot: { document: fixture },
+    });
+    expect((await readEnvelope(repository.paths(cwd).primary)).document).toEqual(fixture);
+  });
+
   it("uses the full SHA-256 canonical key under the GG data directory", () => {
     const paths = projectNotesPaths("/home/ken/.gg", "/work/project");
 
@@ -113,25 +213,61 @@ describe("project Notes identity and validation", () => {
     expect(canonicalProjectKey("/Work/Project")).not.toBe(canonicalProjectKey("/work/project"));
   });
 
-  it("strictly rejects unknown versions, fields, timestamps, task shapes, and statuses", () => {
+  it("strictly rejects malformed references, links, statuses, and transition records", () => {
     const valid = notes();
-    const invalidDocuments: unknown[] = [
-      { ...valid, version: 3 },
-      { ...valid, extra: true },
-      { ...valid, updatedAt: "yesterday" },
-      { ...valid, handoff: { ...valid.handoff, readAt: "soon" } },
-      { ...valid, tasks: [{ ...valid.tasks[0], status: "blocked" }] },
-      { ...valid, tasks: [{ ...valid.tasks[0], completedAt: 42 }] },
-      { ...valid, tasks: [{ ...valid.tasks[0], surprise: true }] },
+    const invalidDocuments: Array<{ value: unknown; path: string }> = [
+      { value: { ...valid, version: 2 }, path: "version" },
+      { value: { ...valid, extra: true }, path: "$" },
+      {
+        value: {
+          ...valid,
+          references: [{ ...valid.references[0], canonicalUrl: "not a URL" }],
+        },
+        path: "references[0].canonicalUrl",
+      },
+      {
+        value: { ...valid, references: [{ ...valid.references[0], owner: "" }] },
+        path: "references[0].owner",
+      },
+      {
+        value: { ...valid, phases: [{ ...valid.phases[0], referenceIds: ["missing"] }] },
+        path: "phases[0].referenceIds[0]",
+      },
+      {
+        value: { ...valid, phases: [{ ...valid.phases[0], status: "blocked" }] },
+        path: "phases[0].status",
+      },
+      {
+        value: {
+          ...valid,
+          phases: [
+            {
+              ...valid.phases[0],
+              lifecycleEvents: [
+                valid.phases[0]!.lifecycleEvents[0],
+                { ...valid.phases[0]!.lifecycleEvents[1], fromStatus: "not-started" },
+              ],
+            },
+          ],
+        },
+        path: "phases[0].lifecycleEvents[1].fromStatus",
+      },
     ];
 
-    expect(isNotesDocumentV2(valid)).toBe(true);
-    for (const invalid of invalidDocuments) expect(isNotesDocumentV2(invalid)).toBe(false);
+    expect(isNotesDocumentV3(valid)).toBe(true);
+    for (const invalidDocument of invalidDocuments) {
+      const result = validateNotesDocumentV3(invalidDocument.value);
+      expect(result).toEqual({
+        ok: false,
+        error: { path: invalidDocument.path, message: expect.any(String) },
+      });
+      expect(isNotesDocumentV3(invalidDocument.value)).toBe(false);
+    }
   });
 });
 
 describe("ProjectNotesRepository durability", () => {
-  it("migrates once at revision 1 and round-trips every v2 field and byte after restart", async () => {
+  it("migrates once at revision 1 and round-trips every v3 field and byte after restart", async () => {
     const agentDir = await tempAgentDir();
     const cwd = "C:\\Work\\Project";
     const document = notes();
@@ -159,6 +295,89 @@ describe("ProjectNotesRepository durability", () => {
     });
     expect(await readEnvelope(paths.backup)).toEqual(await readEnvelope(paths.primary));
     expect((await fs.readFile(paths.primary, "utf8")).endsWith("\n")).toBe(true);
+  });
+
+  it("migrates v2 to v3 without changing any existing Notes field and persists it across restart", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/v2-project";
+    const legacy = legacyNotes("  legacy\r\nbytes 😀\n");
+    const expected = { ...legacy, version: 3 as const, phases: [], references: [] };
+
+    expect(migrateNotesDocumentV2(legacy)).toEqual({ ok: true, document: expected });
+
+    const repository = new ProjectNotesRepository(agentDir);
+    const migrated = await repository.migrate(cwd, legacy);
+    const restarted = await new ProjectNotesRepository(agentDir).load(cwd);
+
+    expect(migrated).toMatchObject({
+      status: "ok",
+      migrated: true,
+      snapshot: { revision: 1, document: expected },
+    });
+    expect(restarted).toMatchObject({
+      status: "ok",
+      recoveredFromBackup: false,
+      snapshot: { revision: 1, document: expected },
+    });
+    expect((await readEnvelope(repository.paths(cwd).primary)).document).toEqual(expected);
+  });
+
+  it("repairs empty and duplicate task IDs while migrating legacy v2 Notes", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/v2-task-ids";
+    const legacy = legacyNotes("legacy IDs");
+    const task = legacy.tasks[0]!;
+    legacy.tasks = [
+      { ...task, id: "", text: "empty" },
+      { ...task, id: "duplicate", text: "first duplicate" },
+      { ...task, id: "duplicate", text: "second duplicate" },
+    ];
+
+    const repository = new ProjectNotesRepository(agentDir);
+    const migrated = await repository.migrate(cwd, legacy);
+    const restarted = await new ProjectNotesRepository(agentDir).load(cwd);
+    const expectedIds = ["legacy-task-1", "duplicate", "legacy-task-3"];
+
+    expect(migrated.status).toBe("ok");
+    if (migrated.status !== "ok") throw new Error("migration failed");
+    expect(migrated.snapshot.document.tasks.map(({ id }) => id)).toEqual(expectedIds);
+    expect(isNotesDocumentV3(migrated.snapshot.document)).toBe(true);
+    expect(restarted.status).toBe("ok");
+    if (restarted.status !== "ok") throw new Error("restart load failed");
+    expect(restarted.snapshot.document.tasks.map(({ id }) => id)).toEqual(expectedIds);
+  });
+
+  it("upgrades a v2 disk envelope in place before the next restart", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/disk-v2";
+    const repository = new ProjectNotesRepository(agentDir);
+    const paths = repository.paths(cwd);
+    const legacy = legacyNotes("disk v2");
+    await fs.mkdir(paths.directory, { recursive: true });
+    await fs.writeFile(
+      paths.primary,
+      `${JSON.stringify({
+        storeVersion: 1,
+        projectKey: cwd,
+        revision: 4,
+        document: legacy,
+      })}\n`,
+      "utf8",
+    );
+
+    const loaded = await repository.load(cwd);
+    const restarted = await new ProjectNotesRepository(agentDir).load(cwd);
+
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 4, document: { version: 3, reference: "disk v2" } },
+    });
+    expect(restarted).toEqual(loaded);
+    expect((await readEnvelope(paths.primary)).document).toMatchObject({
+      version: 3,
+      phases: [],
+      references: [],
+    });
   });
 
   it("allows exactly one of two simultaneous migrations to create the store", async () => {
@@ -324,6 +543,150 @@ describe("ProjectNotesRepository durability", () => {
       status: "ok",
       recoveredFromBackup: true,
       snapshot: { revision: 1, document: { reference: "imported" } },
+    });
+  });
+
+  it("keeps phase and reference IDs stable through reorder, edit, and restart", async () => {
+    const agentDir = await tempAgentDir();
+    const repository = new ProjectNotesRepository(agentDir);
+    const initial = notes("stable IDs");
+    const secondReference = {
+      ...initial.references[0]!,
+      id: "ref-2",
+      canonicalUrl: "https://github.com/owner/repo/issues/22",
+      revision: null,
+      path: null,
+      range: null,
+      issue: 22,
+      query: null,
+      anchor: null,
+    };
+    const secondPhase = {
+      ...initial.phases[0]!,
+      id: "phase-2",
+      title: "Second phase",
+      order: 1,
+      status: "not-started" as const,
+      referenceIds: ["ref-2"],
+      session: null,
+      reminder: null,
+      overrides: { status: null, referenceIds: null },
+      lifecycleEvents: [],
+    };
+    const withTwo = {
+      ...initial,
+      references: [...initial.references, secondReference],
+      phases: [...initial.phases, secondPhase],
+    };
+    await repository.migrate("/work/project", withTwo);
+    const reordered = {
+      ...withTwo,
+      references: [secondReference, initial.references[0]!],
+      phases: [
+        { ...secondPhase, title: "Second phase edited", order: 0 },
+        { ...initial.phases[0]!, goal: "Edited without replacing identity", order: 1 },
+      ],
+    };
+
+    expect(await repository.save("/work/project", 1, reordered)).toMatchObject({ status: "ok" });
+    const restarted = await new ProjectNotesRepository(agentDir).load("/work/project");
+
+    expect(restarted).toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [{ id: "phase-2" }, { id: "phase-1" }],
+          references: [{ id: "ref-2" }, { id: "ref-1" }],
+        },
+      },
+    });
+  });
+
+  it("accepts unchanged lifecycle events rebuilt with a different property order", async () => {
+    const agentDir = await tempAgentDir();
+    const repository = new ProjectNotesRepository(agentDir);
+    const initial = notes("property order");
+    await repository.migrate("/work/project", initial);
+    const firstEvent = initial.phases[0]!.lifecycleEvents[0]!;
+    const reversedFirstEvent = {
+      reason: firstEvent.reason,
+      timestamp: firstEvent.timestamp,
+      source: firstEvent.source,
+      toStatus: firstEvent.toStatus,
+      fromStatus: firstEvent.fromStatus,
+      id: firstEvent.id,
+    };
+    const rebuilt = {
+      ...initial,
+      phases: [
+        {
+          ...initial.phases[0]!,
+          lifecycleEvents: [reversedFirstEvent, initial.phases[0]!.lifecycleEvents[1]!],
+        },
+      ],
+    };
+
+    expect(await repository.save("/work/project", 1, rebuilt)).toMatchObject({ status: "ok" });
+    expect(await new ProjectNotesRepository(agentDir).load("/work/project")).toMatchObject({
+      status: "ok",
+      snapshot: { document: rebuilt },
+    });
+  });
+
+  it("enforces append-only events and preserves manual override markers on shaped writes", async () => {
+    const agentDir = await tempAgentDir();
+    const repository = new ProjectNotesRepository(agentDir);
+    const initial = notes("append only");
+    await repository.migrate("/work/project", initial);
+    const changedHistory = {
+      ...initial,
+      phases: [
+        {
+          ...initial.phases[0]!,
+          lifecycleEvents: [
+            { ...initial.phases[0]!.lifecycleEvents[0]!, reason: "rewritten" },
+            initial.phases[0]!.lifecycleEvents[1]!,
+          ],
+        },
+      ],
+    };
+
+    expect(await repository.save("/work/project", 1, changedHistory)).toEqual({
+      status: "invalid",
+      error: {
+        path: "phases[0].lifecycleEvents[0]",
+        message: "existing lifecycle events cannot be changed",
+      },
+    });
+
+    const originalOverrides = initial.phases[0]!.overrides;
+    const reconciled = {
+      ...initial,
+      phases: [
+        {
+          ...initial.phases[0]!,
+          status: "review" as const,
+          overrides: originalOverrides,
+          lifecycleEvents: [
+            ...initial.phases[0]!.lifecycleEvents,
+            {
+              id: "event-3",
+              fromStatus: "in-progress" as const,
+              toStatus: "review" as const,
+              source: "agent" as const,
+              timestamp: "2026-07-25T12:35:00.000Z",
+              reason: "Implementation complete",
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(await repository.save("/work/project", 1, reconciled)).toMatchObject({ status: "ok" });
+    expect(await new ProjectNotesRepository(agentDir).load("/work/project")).toMatchObject({
+      status: "ok",
+      snapshot: { document: { phases: [{ overrides: originalOverrides }] } },
     });
   });
 

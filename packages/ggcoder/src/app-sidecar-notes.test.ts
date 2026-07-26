@@ -5,7 +5,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAppSidecarNotesHandler, type AppSidecarNotesSession } from "./app-sidecar-notes.js";
-import { ProjectNotesRepository, type NotesDocumentV2 } from "./project-notes-repository.js";
+import { ProjectNotesRepository, type NotesDocumentV3 } from "./project-notes-repository.js";
 
 const NOW = "2026-07-25T12:00:00.000Z";
 
@@ -19,9 +19,9 @@ let baseUrl: string;
 let sessions: Map<string, FakeSession>;
 let repository: ProjectNotesRepository;
 
-function notes(reference: string): NotesDocumentV2 {
+function notes(reference: string): NotesDocumentV3 {
   return {
-    version: 2,
+    version: 3,
     reference,
     currentFocus: "Sidecar authority",
     tasks: [
@@ -38,6 +38,45 @@ function notes(reference: string): NotesDocumentV2 {
     handoff: { text: "Exact handoff", updatedAt: NOW, readAt: null },
     updatedAt: NOW,
     legacyImportedAt: null,
+    references: [
+      {
+        id: "ref-1",
+        provider: "github",
+        tool: null,
+        canonicalUrl: "https://github.com/owner/repo/blob/abc/src/file.ts#L1",
+        owner: "owner",
+        repo: "repo",
+        revision: "abc",
+        path: "src/file.ts",
+        range: { startLine: 1, endLine: 1 },
+        issue: null,
+        pullRequest: null,
+        query: null,
+        anchor: "L1",
+        relevance: "Route fixture",
+        capturedAt: NOW,
+      },
+    ],
+    phases: [
+      {
+        id: "phase-1",
+        title: "Route Notes",
+        goal: "Keep the schema typed",
+        doneWhen: ["Routes pass"],
+        order: 0,
+        status: "not-started",
+        sourcePrompt: "Implement schema",
+        referenceIds: ["ref-1"],
+        session: { sessionId: "session-1", sessionPath: "/session" },
+        reminder: null,
+        attentionReason: null,
+        createdAt: NOW,
+        updatedAt: NOW,
+        completedAt: null,
+        overrides: { status: null, referenceIds: null },
+        lifecycleEvents: [],
+      },
+    ],
   };
 }
 
@@ -154,11 +193,23 @@ describe("app sidecar Notes routes", () => {
 
     expect(malformed).toMatchObject({
       response: { status: 400 },
-      body: { status: "invalid", reason: "malformed-json" },
+      body: {
+        status: "invalid",
+        error: { path: "$", message: "malformed JSON request body" },
+      },
     });
-    expect(extra.body).toEqual({ status: "invalid", reason: "invalid-body" });
-    expect(revision.body).toEqual({ status: "invalid", reason: "invalid-body" });
-    expect(document.body).toEqual({ status: "invalid" });
+    expect(extra.body).toEqual({
+      status: "invalid",
+      error: { path: "$", message: "invalid request body" },
+    });
+    expect(revision.body).toEqual({
+      status: "invalid",
+      error: { path: "$", message: "invalid request body" },
+    });
+    expect(document.body).toEqual({
+      status: "invalid",
+      error: { path: "version", message: "expected 3" },
+    });
   });
 
   it("returns the winning snapshot in a typed stale-write conflict", async () => {

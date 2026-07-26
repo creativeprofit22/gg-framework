@@ -1,6 +1,7 @@
 import type http from "node:http";
 import {
   canonicalProjectKey,
+  type NotesValidationError,
   type ProjectNotesLoadOutcome,
   type ProjectNotesMigrationOutcome,
   type ProjectNotesRepository,
@@ -33,7 +34,7 @@ export interface AppSidecarNotesHandler {
   ): boolean;
 }
 
-type InvalidResponse = { status: "invalid"; reason: "malformed-json" | "invalid-body" };
+type InvalidResponse = { status: "invalid"; error: NotesValidationError };
 type ErrorResponse = { status: "error"; message: "notes request failed" };
 
 export function createAppSidecarNotesHandler(
@@ -185,11 +186,11 @@ function isRecordWithExactKeys(
 }
 
 function invalidBody(): InvalidResponse {
-  return { status: "invalid", reason: "invalid-body" };
+  return { status: "invalid", error: { path: "$", message: "invalid request body" } };
 }
 
 function malformedJson(): InvalidResponse {
-  return { status: "invalid", reason: "malformed-json" };
+  return { status: "invalid", error: { path: "$", message: "malformed JSON request body" } };
 }
 
 function sendUnexpectedError(

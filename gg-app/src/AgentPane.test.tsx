@@ -116,7 +116,7 @@ vi.mock("./agent", async (importOriginal) => {
 import { AgentPane } from "./AgentPane";
 import type { PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type { AgentState, PaneAgentClient, PaneSessionTarget } from "./agent";
-import type { NotesDocumentV2 } from "./notes-types";
+import type { NotesDocumentV3 } from "./notes-types";
 
 const target: PaneSessionTarget = { mode: "code", cwd: "/work", sessionPath: "/session" };
 const agentState = (model: string): AgentState => ({
@@ -139,12 +139,12 @@ function client(paneId: string, generation: number): PaneAgentClient {
     selectWorkspace: vi.fn(),
     getState: vi.fn(async () => ({ running: false })),
     getNotes: vi.fn(async () => ({ status: "missing" as const })),
-    migrateNotes: vi.fn(async (document: NotesDocumentV2) => ({
+    migrateNotes: vi.fn(async (document: NotesDocumentV3) => ({
       status: "ok" as const,
       migrated: true,
       snapshot: { projectKey: "/work", revision: 1, document },
     })),
-    saveNotes: vi.fn(async (expectedRevision: number, document: NotesDocumentV2) => ({
+    saveNotes: vi.fn(async (expectedRevision: number, document: NotesDocumentV3) => ({
       status: "ok" as const,
       snapshot: { projectKey: "/work", revision: expectedRevision + 1, document },
     })),

@@ -11,7 +11,7 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Implementation status:** Phases 00–15 are complete and verified.
+- **Implementation status:** Phases 00–17 are complete and verified.
 - **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
@@ -23,10 +23,11 @@ This file is an implementation plan, not a storage surface for user roadmap data
 - **2026-07-25 Phase 14 evidence:** Track A is frozen at verification commit `7c1d4a13`. CI run [`30161379020`](https://github.com/creativeprofit22/gg-framework/actions/runs/30161379020) passed all six framework/app jobs on Windows, macOS, and Linux on its first attempt. The owning Linux lifecycle suites passed 112 tests with 2 explicit Windows-only skips, the Windows matrix passed 103 tests with 11 explicit platform skips, and the cooperative POSIX timeout probe passed 20/20 stress repeats. Repository check/lint/format/build passed; 25 warm persistent commands measured `0.757 ms` p95 on Windows. All three workspace evidence artifacts passed three supervised runs with bounded gross memory and zero survivors.
 - **2026-07-25 roadmap implementation audit (`0c6fe66b`):** Commit ancestry, source, generated-sidecar, IPC, schema, UI, and test inspection confirm Phases 00–14 are implemented and Phase 15 is the first unimplemented phase. The focused ggcoder lifecycle matrix passed 142 tests with 12 explicit platform skips across 154 tests; 20 focused sidecar tests, all 337 gg-app tests, and all 100 Rust tests passed. The ggcoder and gg-app typechecks, gg-app lint, roadmap coverage check, and diff checks also passed.
 - **2026-07-25 Phase 15 evidence:** Notes authority now lives in the shared sidecar's revisioned project repository with create-if-absent migration, strict v1 envelope/v2 document validation, backup recovery, disk CAS, operation replay, and same-project `notes_change` fan-out. The focused sidecar matrix passed 24 tests, the focused app matrix passed 42 tests, all 1,954 ggcoder tests passed with 15 platform skips under a disposable test home, all 352 gg-app tests passed, and all 102 Rust tests passed. Typechecks, app lint/format, builds, sidecar bundling, and generated-output audits are green.
-- **Next phase:** Phase 16 — Add phase, reference, and lifecycle schemas.
+- **2026-07-25 Phase 17 evidence:** Notes now uses a four-tab, viewport-relative workspace with fixed storage status/navigation and one scrolling active panel. Focused Notes/modal/storage checks passed 55 tests; all 384 gg-app tests, typecheck, lint, format check, and production build passed. Controlled browser and Tauri captures cover empty, typical, long, 320–420 px narrow, localized/200% reflow, reduced motion, forced colors, keyboard focus/return, and fixed-shell scrolling.
+- **Next phase:** Phase 18 — Add ordered roadmap list and phase detail CRUD.
 - **Track A freeze:** Complete at `7c1d4a13`; the three-OS matrix, workspace memory evidence, and two-window Windows desktop timeout smoke are green. The two later commits contain roadmap text and test synchronization only, so production behavior remains frozen; `0c6fe66b` has no separate Actions run because CI triggers only for `main` pushes and pull requests.
-- **Later-track audit:** Phase 15 is complete; Phases 16–26 have not started. Phase 20 has only prerequisites already present—Ken prompt blocks can Send to GG Coder and `PaneAgentClient.newSession()` can create a fresh session—not its guarded fresh-send/save workflow.
-- **Notes baseline:** Notes retains Now, Next, Handoff, Reference, and Done / Archive unchanged, while the sidecar now owns durable authority. Roadmap entities, reminder fields, agent-authored transitions, and lifecycle schemas remain intentionally absent until Phase 16 and later phases.
+- **Later-track audit:** Phases 15–17 are complete; Phases 18–26 have not started. Phase 20 has only prerequisites already present—Ken prompt blocks can Send to GG Coder and `PaneAgentClient.newSession()` can create a fresh session—not its guarded fresh-send/save workflow.
+- **Notes baseline:** Notes retains Now, Next, Handoff, free-form Reference, and Done / Archive semantics inside a four-tab shell. Roadmap currently exposes passive active-phase/reminder counts only; Phase 18 owns phase CRUD and lifecycle controls.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
 
@@ -782,9 +783,15 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 16 — Add phase, reference, and lifecycle schemas
 
-**Status:** Next — not started.
+**Status:** Complete — verified 2026-07-25.
 
 **Outcome:** The authoritative document can store ordered phases, structured references, session links, reminders, overrides, and audit events.
+
+**Delivered**
+
+- `NotesDocumentV3` preserves every v2 Notes field and adds strict ordered phase and structured-reference collections at both the sidecar and app IPC/storage boundaries.
+- Phase records carry stable identity, Done-when criteria, status, source prompt, reference links, typed session ID/path, reminders, attention, timestamps, manual override markers, and source/timestamp lifecycle events. Reference records carry canonical repository/source metadata and exact optional revision/path/range/issue/PR/query/anchor coordinates.
+- Sidecar disk loads and browser fallback loads migrate valid v2 documents to v3 without regenerating IDs or changing existing bytes. Repository saves reject lifecycle-history rewrites and return path-specific validation errors.
 
 **Scope**
 
@@ -813,11 +820,18 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Invalid URLs, missing repository identity, broken links, unknown status, and invalid transition records fail with actionable errors.
 - Append-only events have source and timestamp; manual override markers survive reconciliation-shaped writes.
 
-**Hard stop:** Publish the schema fixture and migration evidence. Do not build UI against an unstable document contract.
+**Completion evidence**
+
+- **Schema fixture:** `fixtures/project-notes-v3.json` is the canonical complete v3 contract loaded by `packages/ggcoder/src/project-notes-repository.test.ts` and `gg-app/src/notes-storage.test.ts`; both validators accept it and both persistence boundaries round-trip it exactly.
+- **Migration/restart:** Sidecar tests cover direct v2 import plus in-place v2 disk-envelope upgrade/restart; app tests cover `gg-notes-v2` to `gg-notes-v3` migration/restart while preserving the untouched v2 source.
+- **Validation and identity:** Focused tests cover exact round-trip, malformed URL/repository/link/status/transition errors, stable IDs through reorder/edit/restart, append-only history, and override preservation.
+- **Automated results:** 32 focused sidecar repository/route/session tests and 44 focused app storage/hook/render/IPC tests passed. Recursive TypeScript checks, lint, and formatting checks passed.
+
+**Hard stop:** Satisfied — the canonical `fixtures/project-notes-v3.json` contract and v2-to-v3 migration/restart evidence are checked in; no Phase 17 UI or lifecycle automation was added.
 
 ## Phase 17 — Build the compact Notes shell
 
-**Status:** Not started.
+**Status:** Complete — verified 2026-07-25.
 
 **Outcome:** Notes uses a wide, nearly full-height tabbed workspace without changing existing content semantics.
 
@@ -848,7 +862,16 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Only active-tab content scrolls; tab state survives ordinary rerenders.
 - Visual evidence covers empty, typical, long-content, and narrow-window states.
 
-**Hard stop:** Approve desktop screenshots and accessibility checks. Do not add Roadmap controls until existing Notes regression tests pass.
+**Completion evidence**
+
+- **Automated results:** `pnpm --filter gg-app exec vitest run src/notes-status.test.ts src/Modal.test.tsx src/ProjectNotes.test.tsx src/useProjectNotes.test.tsx src/notes-storage.test.ts` passed 55 tests. `pnpm --filter gg-app check`, `lint`, and `format:check` passed. `pnpm --filter gg-app test` passed all 384 tests across 46 files, and `pnpm --filter gg-app build` completed the production Vite build.
+- **Behavior and accessibility:** Integration tests cover four stable ARIA tabs, click/Arrow/Home/End automatic activation and wrapping, one visible panel, singular/plural/zero count boundaries, no Roadmap controls, sidecar persistence for every existing editor/task/archive flow, mounted draft/edit/disclosure state, authoritative rerenders, project isolation, Escape, focus return, and focus containment excluding roving or hidden/ARIA-hidden/inert controls.
+- **Rendered browser evidence:** Ignored synthetic v3 harness captures under `.gg/evidence/phase-17/` cover empty desktop, typical Overview, long Overview/Reference scrolling, revised 360 px narrow layout, 320 px localized stress, and Playwright keyboard/focus checks. At 200% zoom on 640 px, document width remained 640/640 while only the tab rail overflowed (352/318); scrolling the active panel left title/tab Y positions unchanged.
+- **Native evidence:** `.gg/capture-native.ps1` captured the same synthetic Notes fixture in a Tauri WebView at 1200×820 and 420×760 (`native-notes-typical.png`, `native-notes-narrow.png`), confirming adaptive WebView sizing and wrapped narrow actions.
+- **Preferences and review:** Emulated reduced motion matched with `0s` tab transitions. Forced colors preserved a selected border and solid focus outline. Pointer-selected tabs did not match `:focus-visible`; keyboard ArrowRight focused and selected Roadmap; Escape returned focus to the Notes trigger. The rendered critique revised narrow action-row width and finished at 23/24 in `.gg/evidence/phase-17/review.md`.
+- **Honest limits:** No project axe/Accessibility Insights command or field Core Web Vitals telemetry is configured. Semantic tests, browser inspection, and local Tauri evidence are recorded without claiming a complete accessibility audit or field-performance measurement.
+
+**Hard stop:** Satisfied — desktop/narrow browser and native screenshots, keyboard/focus, 200%/320 px reflow, long/localized content, reduced motion, forced colors, every existing Notes regression, app gates, and the critique/revision cycle passed. Phase 18 is next; Phase 17 adds no Roadmap controls.
 
 ## Phase 18 — Add ordered roadmap list and phase detail CRUD
 

@@ -7,8 +7,33 @@ const FOCUSABLE_SELECTOR = [
   "input:not([disabled])",
   "select:not([disabled])",
   "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])",
+  "[tabindex]",
 ].join(",");
+
+function isFocusableElement(element: HTMLElement): boolean {
+  return (
+    element.tabIndex >= 0 && element.closest("[hidden], [aria-hidden='true'], [inert]") === null
+  );
+}
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    isFocusableElement,
+  );
+}
+
+function getInitialFocus(dialog: HTMLElement): HTMLElement {
+  const focusable = getFocusableElements(dialog);
+  return (
+    focusable.find(
+      (element) =>
+        element.getAttribute("role") === "tab" && element.getAttribute("aria-selected") === "true",
+    ) ??
+    focusable.find((element) => element.hasAttribute("data-modal-initial-focus")) ??
+    focusable[0] ??
+    dialog
+  );
+}
 
 /** Reusable centered modal with Escape, focus containment, and focus return. */
 export function Modal({
@@ -35,11 +60,7 @@ export function Modal({
     const returnFocus =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
-    const initialFocus =
-      dialog?.querySelector<HTMLElement>("[data-modal-initial-focus]") ??
-      dialog?.querySelector<HTMLElement>("[role='tab'][aria-selected='true']") ??
-      dialog?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ??
-      dialog;
+    const initialFocus = dialog ? getInitialFocus(dialog) : null;
     initialFocus?.focus();
 
     const onKey = (event: KeyboardEvent): void => {
@@ -49,9 +70,7 @@ export function Modal({
         return;
       }
       if (event.key !== "Tab" || !dialog) return;
-      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-        (element) => !element.hidden && element.getAttribute("aria-hidden") !== "true",
-      );
+      const focusable = getFocusableElements(dialog);
       if (focusable.length === 0) {
         event.preventDefault();
         dialog.focus();

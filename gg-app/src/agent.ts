@@ -12,7 +12,7 @@ import {
   isProjectNotesReadOutcome,
   isProjectNotesSaveOutcome,
   type NotesClient,
-  type NotesDocumentV2,
+  type NotesDocumentV3,
   type ProjectNotesMigrationOutcome,
   type ProjectNotesReadOutcome,
   type ProjectNotesSaveOutcome,
@@ -1762,8 +1762,8 @@ export interface PaneAgentClient extends NotesClient {
   subscribe(onEvent: (event: SidecarEvent) => void): () => void;
   getState(): Promise<AgentState>;
   getNotes(): Promise<ProjectNotesReadOutcome>;
-  migrateNotes(document: NotesDocumentV2): Promise<ProjectNotesMigrationOutcome>;
-  saveNotes(expectedRevision: number, document: NotesDocumentV2): Promise<ProjectNotesSaveOutcome>;
+  migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome>;
+  saveNotes(expectedRevision: number, document: NotesDocumentV3): Promise<ProjectNotesSaveOutcome>;
   listMemories(): Promise<MemorySnapshot>;
   deleteMemory(id: string): Promise<MemorySnapshot>;
   listJiwa(): Promise<JiwaSnapshot>;

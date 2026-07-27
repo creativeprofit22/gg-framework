@@ -83,10 +83,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build framework packages
-        run: |
-          pnpm --filter @kenkaiiii/gg-ai build
-          pnpm --filter @kenkaiiii/gg-agent build
-          pnpm --filter @kenkaiiii/ggcoder build
+        run: pnpm --filter @kenkaiiii/ggcoder... build
 
       - name: Check release packages
         run: |

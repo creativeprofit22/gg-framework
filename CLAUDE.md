@@ -53,7 +53,7 @@ pnpm format:check             # package sources, Matey, and gg-app
 Desktop development requires the sidecar build first:
 
 ```bash
-pnpm --filter @kenkaiiii/ggcoder build
+pnpm --filter @kenkaiiii/ggcoder... build
 pnpm --filter gg-app tauri dev
 ```
 

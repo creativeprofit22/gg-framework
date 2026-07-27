@@ -14,7 +14,6 @@
     "bench": "pnpm build && npx tsx benchmarks/run-comparison.ts",
     "app:update:local-fixes": "pnpm --filter gg-app update:local-fixes",
     "app:build:local-patched": "pnpm --filter gg-app build:local-patched",
-    "prepare": "pnpm build",
     "audit:generated:web": "node scripts/audit-generated.mjs web",
     "audit:generated:tauri": "node scripts/audit-generated.mjs tauri",
     "audit:generated:sidecar-deps": "node scripts/audit-generated.mjs sidecar-deps",

@@ -36,9 +36,11 @@ export type Item =
   | {
       kind: "compaction";
       id: number;
-      status: "running" | "done";
+      status: "running" | "done" | "sync-failed";
       originalCount?: number;
       newCount?: number;
+      message?: string;
+      guidance?: string;
     }
   | {
       kind: "autopilot";

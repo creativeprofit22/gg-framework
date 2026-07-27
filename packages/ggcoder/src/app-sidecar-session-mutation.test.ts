@@ -173,6 +173,47 @@ async function overlapNewSessionWith(competingPath: "/tasks/run" | "/plan/accept
 }
 
 describe("app-sidecar session mutation routes", () => {
+  it("phase-start conflicts with every reset producer until its lease releases", () => {
+    let sequence = 0;
+    const coordinator = new AppSidecarSessionMutationCoordinator(() => `phase-${++sequence}`);
+    const phaseStart = coordinator.tryAcquire("phase-start");
+    expect(phaseStart).toMatchObject({ operationId: "phase-1", kind: "phase-start" });
+    for (const kind of [
+      "new-session",
+      "task-run",
+      "prompt-start",
+      "manual-plan-accept",
+      "autopilot-plan-accept",
+    ] as const) {
+      expect(coordinator.tryAcquire(kind)).toBeNull();
+      expect(coordinator.conflictBody()).toEqual({
+        error: "session_mutation_in_progress",
+        owner: { operationId: "phase-1", kind: "phase-start" },
+      });
+    }
+    phaseStart?.release();
+    expect(coordinator.tryAcquire("autopilot-plan-accept")).toMatchObject({
+      operationId: "phase-2",
+      kind: "autopilot-plan-accept",
+    });
+  });
+
+  it("phase-start loses without acquiring when another reset producer owns the session", () => {
+    const kinds: SessionMutationKind[] = [
+      "new-session",
+      "task-run",
+      "prompt-start",
+      "manual-plan-accept",
+      "autopilot-plan-accept",
+    ];
+    for (const kind of kinds) {
+      const coordinator = new AppSidecarSessionMutationCoordinator(() => kind);
+      const owner = coordinator.tryAcquire(kind);
+      expect(coordinator.tryAcquire("phase-start")).toBeNull();
+      owner?.release();
+    }
+  });
+
   it("rejects /new-session before reset or lease acquisition while Autopilot is active", async () => {
     const harness = await startHarness();
     harness.setAutopilotActive(true);

@@ -10,6 +10,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
 import type * as McpModule from "./mcp/index.js";
+import type { ActivePhaseContextV1 } from "../phase-context.js";
+import { canonicalProjectKey } from "../project-notes-repository.js";
+import { SessionManager } from "./session-manager.js";
 
 const agentLoopMock = vi.hoisted(() => vi.fn());
 
@@ -71,6 +74,29 @@ afterEach(async () => {
   vi.clearAllMocks();
 });
 
+function activePhaseContext(
+  sessionId: string,
+  sessionPath: string,
+  projectKey = canonicalProjectKey(tmpProject),
+): ActivePhaseContextV1 {
+  return {
+    version: 1,
+    projectKey,
+    phase: {
+      id: "phase-21",
+      title: "Bound phase",
+      goal: "Keep only this phase in context.",
+      doneWhen: ["Resume restores planning state."],
+      sourcePrompt: null,
+      status: "not-started",
+      archivedAt: null,
+    },
+    session: { sessionId, sessionPath },
+    references: [],
+    executionStage: "planning",
+  };
+}
+
 async function makeSession(transient = true) {
   const { AgentSession } = await import("./agent-session.js");
   const session = new AgentSession({
@@ -83,6 +109,162 @@ async function makeSession(transient = true) {
   await session.initialize();
   return session;
 }
+
+async function rewriteSessionFile(
+  sessionPath: string,
+  rewrite: (line: Record<string, unknown>) => Record<string, unknown>,
+): Promise<void> {
+  const lines = (await fs.readFile(sessionPath, "utf-8")).trimEnd().split("\n");
+  const rewritten = lines.map((line) => JSON.stringify(rewrite(JSON.parse(line))));
+  await fs.writeFile(sessionPath, `${rewritten.join("\n")}\n`, "utf-8");
+}
+
+describe("AgentSession active phase context", () => {
+  it("rejects activation and keeps context inactive when required persistence fails", async () => {
+    const session = await makeSession(false);
+    const state = session.getState();
+    const append = vi
+      .spyOn(SessionManager.prototype, "appendRequiredEntry")
+      .mockRejectedValueOnce(new Error("Failed to persist required active phase context."));
+    try {
+      await expect(
+        session.setActivePhaseContext(activePhaseContext(state.sessionId, state.sessionPath)),
+      ).rejects.toThrow("Failed to persist required active phase context.");
+      expect(session.getActivePhaseContext()).toBeUndefined();
+      expect(String(session.getMessages()[0]?.content)).not.toContain("Active Roadmap phase");
+    } finally {
+      append.mockRestore();
+      await session.dispose();
+    }
+  });
+
+  it("persists, restores, and rebuilds Plan Mode before resume", async () => {
+    const original = await makeSession(false);
+    const originalState = original.getState();
+    await original.setActivePhaseContext(
+      activePhaseContext(originalState.sessionId, originalState.sessionPath),
+    );
+    await original.updateActivePhaseStage("awaiting-approval", ".gg/plans/phase-21.md");
+    await original.dispose();
+    await rewriteSessionFile(originalState.sessionPath, (line) =>
+      line.type === "session"
+        ? { ...line, cwd: `${tmpProject}${path.sep}same-project${path.sep}..` }
+        : line,
+    );
+
+    const { AgentSession } = await import("./agent-session.js");
+    const resumed = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "test system prompt",
+      sessionId: originalState.sessionPath,
+    });
+    await resumed.initialize();
+    try {
+      expect(resumed.getPlanMode()).toBe(true);
+      expect(resumed.getActivePhaseContext()).toMatchObject({
+        projectKey: canonicalProjectKey(tmpProject),
+        phase: { id: "phase-21" },
+        executionStage: "awaiting-approval",
+        approvedPlanPath: ".gg/plans/phase-21.md",
+      });
+      expect(String(resumed.getMessages()[0]?.content)).toContain("Active Roadmap phase");
+      expect(String(resumed.getMessages()[0]?.content)).toContain('"id": "phase-21"');
+    } finally {
+      await resumed.dispose();
+    }
+  }, 15_000);
+
+  it("rejects Resume when the session header belongs to another project", async () => {
+    const original = await makeSession(false);
+    const originalState = original.getState();
+    await original.setActivePhaseContext(
+      activePhaseContext(originalState.sessionId, originalState.sessionPath),
+    );
+    await original.dispose();
+
+    const foreignProject = path.join(tmpProject, "foreign-project");
+    await rewriteSessionFile(originalState.sessionPath, (line) =>
+      line.type === "session" ? { ...line, cwd: foreignProject } : line,
+    );
+
+    const { AgentSession } = await import("./agent-session.js");
+    const resumed = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "test system prompt",
+      sessionId: originalState.sessionPath,
+    });
+    try {
+      await expect(resumed.initialize()).rejects.toThrow(
+        "Cannot resume a session from another project",
+      );
+      expect(resumed.getActivePhaseContext()).toBeUndefined();
+      expect(String(resumed.getMessages()[0]?.content)).not.toContain("Active Roadmap phase");
+      expect(String(resumed.getMessages()[0]?.content)).not.toContain('"id": "phase-21"');
+    } finally {
+      await resumed.dispose();
+    }
+  }, 15_000);
+
+  it("rejects Resume when durable phase context belongs to another project", async () => {
+    const original = await makeSession(false);
+    const originalState = original.getState();
+    await original.setActivePhaseContext(
+      activePhaseContext(originalState.sessionId, originalState.sessionPath),
+    );
+    await original.dispose();
+
+    const foreignProjectKey = canonicalProjectKey(path.join(tmpProject, "foreign-project"));
+    await rewriteSessionFile(originalState.sessionPath, (line) => {
+      if (line.type !== "custom" || line.kind !== "active_phase_context") return line;
+      return {
+        ...line,
+        data: { ...(line.data as Record<string, unknown>), projectKey: foreignProjectKey },
+      };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const resumed = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "test system prompt",
+      sessionId: originalState.sessionPath,
+    });
+    try {
+      await expect(resumed.initialize()).rejects.toThrow(
+        "Cannot resume phase context from another project",
+      );
+      expect(resumed.getActivePhaseContext()).toBeUndefined();
+      expect(String(resumed.getMessages()[0]?.content)).not.toContain("Active Roadmap phase");
+      expect(String(resumed.getMessages()[0]?.content)).not.toContain('"id": "phase-21"');
+    } finally {
+      await resumed.dispose();
+    }
+  }, 15_000);
+
+  it("preserves metadata across a conversation checkpoint and clears it for explicit New Session", async () => {
+    const session = await makeSession(false);
+    const initial = session.getState();
+    await session.setActivePhaseContext(activePhaseContext(initial.sessionId, initial.sessionPath));
+
+    await session.newSession(true);
+    const checkpoint = session.getState();
+    expect(checkpoint.sessionId).not.toBe(initial.sessionId);
+    expect(session.getActivePhaseContext()?.session).toEqual({
+      sessionId: checkpoint.sessionId,
+      sessionPath: checkpoint.sessionPath,
+    });
+
+    await session.newSession();
+    expect(session.getActivePhaseContext()).toBeUndefined();
+    expect(String(session.getMessages()[0]?.content)).not.toContain("Active Roadmap phase");
+    await session.dispose();
+  }, 15_000);
+});
 
 describe("AgentSession queue — takeNextQueuedMessage", () => {
   it("returns queued messages FIFO with attachments preserved, then null", async () => {

@@ -8,6 +8,9 @@ import type * as CompactorModule from "./compaction/compactor.js";
 import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import { MODELS } from "./model-registry.js";
 import { estimateConversationTokens } from "./compaction/token-estimator.js";
+import { canonicalProjectKey } from "../project-notes-repository.js";
+import type { ActivePhaseContextV1 } from "../phase-context.js";
+import { RequiredSessionPersistenceError, SessionManager } from "./session-manager.js";
 import type * as McpModule from "./mcp/index.js";
 
 const shouldCompactMock = vi.hoisted(() => vi.fn());
@@ -184,6 +187,71 @@ describe("AgentSession worker auto-compaction", () => {
       ]),
       expect.objectContaining({ provider: "anthropic", model: "claude-test" }),
     );
+  }, 15_000);
+});
+
+describe("AgentSession required phase metadata during compaction", () => {
+  it("blocks the provider on persistence failure and re-establishes durability before retry", async () => {
+    const compactedMessages: Message[] = [
+      { role: "system", content: "system prompt" },
+      { role: "user", content: "[compacted phase context]" },
+    ];
+    shouldCompactMock.mockReturnValue(true);
+    compactMock.mockResolvedValue(compactionResult(compactedMessages));
+    agentLoopMock.mockImplementation(async function* () {
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "system prompt",
+    });
+    await session.initialize();
+    const initial = session.getState();
+    const context: ActivePhaseContextV1 = {
+      version: 1,
+      projectKey: canonicalProjectKey(tmpProject),
+      phase: {
+        id: "phase-21",
+        title: "Durable compaction",
+        goal: "Keep the phase bound across continuation files.",
+        doneWhen: ["The provider cannot run without durable phase metadata."],
+        sourcePrompt: null,
+        status: "in-progress",
+        archivedAt: null,
+      },
+      session: { sessionId: initial.sessionId, sessionPath: initial.sessionPath },
+      references: [],
+      executionStage: "planning",
+    };
+    await session.setActivePhaseContext(context);
+
+    const append = vi
+      .spyOn(SessionManager.prototype, "appendRequiredEntry")
+      .mockRejectedValueOnce(
+        new RequiredSessionPersistenceError("Failed to persist required active phase context."),
+      );
+    try {
+      await expect(session.prompt("continue the phase")).rejects.toBeInstanceOf(
+        RequiredSessionPersistenceError,
+      );
+      expect(agentLoopMock).not.toHaveBeenCalled();
+      expect(session.getActivePhaseContext()?.session).toEqual(context.session);
+      expect(session.getState().sessionId).not.toBe(initial.sessionId);
+
+      await expect(session.prompt("retry the phase")).resolves.toBeUndefined();
+      expect(agentLoopMock).toHaveBeenCalledOnce();
+      expect(session.getActivePhaseContext()?.session).toEqual({
+        sessionId: session.getState().sessionId,
+        sessionPath: session.getState().sessionPath,
+      });
+    } finally {
+      append.mockRestore();
+      await session.dispose();
+    }
   }, 15_000);
 });
 

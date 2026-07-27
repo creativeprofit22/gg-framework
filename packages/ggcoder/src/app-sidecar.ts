@@ -137,13 +137,27 @@ import { rebuildFromSessions } from "./core/progress/rebuild.js";
 import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
 import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
 import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
-import { ProjectNotesRepository, type ProjectNotesSnapshot } from "./project-notes-repository.js";
+import {
+  ProjectNotesRepository,
+  canonicalProjectKey,
+  type ProjectNotesSnapshot,
+} from "./project-notes-repository.js";
+import { launchBoundPhase, type BoundPhaseCandidate } from "./app-sidecar-phase-launch.js";
+import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import {
   AppSidecarSessionMutationCoordinator,
   appSidecarSessionBusyConflictBody,
   isAppSidecarSessionBusy,
 } from "./app-sidecar-session-mutation.js";
+import {
+  PhaseCheckpointError,
+  commitPlanApprovalCheckpoint,
+  completeCompactionCheckpoint,
+  persistActivePhaseStage,
+  phaseCheckpointFailurePayload,
+  syncActivePhaseSessionLink as synchronizeActivePhaseSessionLink,
+} from "./app-sidecar-phase-checkpoint.js";
 import {
   captureSidecarError,
   flushSidecarErrors,
@@ -790,6 +804,13 @@ async function main(): Promise<void> {
   const sessions = new AppSidecarSessionRouter<SessionContext>();
   const reloadCoordinator = new AppSidecarReloadCoordinator();
   const notesRepository = new ProjectNotesRepository(paths.agentDir);
+  const broadcastNotesSnapshot = (snapshot: ProjectNotesSnapshot): void => {
+    for (const context of sessions.values()) {
+      if (canonicalProjectKey(context.cwd) === snapshot.projectKey) {
+        context.broadcastNotesChange(snapshot);
+      }
+    }
+  };
   const notes = createAppSidecarNotesHandler({
     repository: notesRepository,
     sessions,
@@ -997,7 +1018,17 @@ async function main(): Promise<void> {
           const id = randomUUID();
           try {
             const ctx = await createSession(
-              { auth, paths, progress, memoryStore, jiwaStore, reloadCoordinator, notes },
+              {
+                auth,
+                paths,
+                progress,
+                memoryStore,
+                jiwaStore,
+                reloadCoordinator,
+                notes,
+                notesRepository,
+                broadcastNotesSnapshot,
+              },
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
             );
             sessions.add(id, ctx);
@@ -1330,6 +1361,8 @@ async function createSession(
     jiwaStore: JiwaStore;
     reloadCoordinator: AppSidecarReloadCoordinator;
     notes: AppSidecarNotesHandler;
+    notesRepository: ProjectNotesRepository;
+    broadcastNotesSnapshot: (snapshot: ProjectNotesSnapshot) => void;
   },
   opts: {
     id: string;
@@ -1339,7 +1372,16 @@ async function createSession(
     sessionPath?: string;
   },
 ): Promise<SessionContext> {
-  const { auth, progress, memoryStore, jiwaStore, reloadCoordinator, notes } = deps;
+  const {
+    auth,
+    progress,
+    memoryStore,
+    jiwaStore,
+    reloadCoordinator,
+    notes,
+    notesRepository,
+    broadcastNotesSnapshot,
+  } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
   let chatAgent = opts.chatAgent;
@@ -1510,7 +1552,6 @@ async function createSession(
     model,
     cwd,
     thinkingLevel,
-    sessionId: resumeSessionPath,
     signal: abort.signal,
     // Keep MCP startup off the readiness path in both modes.
     backgroundMcpConnect: true,
@@ -1521,9 +1562,62 @@ async function createSession(
     deferLoadCompaction: true,
   };
   let session!: AgentSession;
+
+  async function enterCodingPlanMode(reason?: string): Promise<void> {
+    deactivateApprovedPlan();
+    await session.setPlanMode(true);
+    broadcast("plan_progress", { total: 0, completed: [] });
+    broadcast("plan_enter", { reason: reason ?? "" });
+    await session.persistAppMarker("plan", { reason: reason ?? "" }).catch(() => {});
+  }
+
+  const createCodingSession = (
+    sessionPath?: string,
+    active?: { provider: Provider; model: string; thinkingLevel?: ThinkingLevel },
+  ): AgentSession =>
+    new AgentSession({
+      ...baseSessionOptions,
+      ...(active ?? {}),
+      signal: abort.signal,
+      ...(sessionPath ? { sessionId: sessionPath } : {}),
+      // Plan mode belongs only to the coding agent.
+      onEnterPlan: enterCodingPlanMode,
+      onExitPlan: async (planPath: string) => {
+        await session.setPlanMode(false);
+        let content: string;
+        try {
+          content = await fs.readFile(planPath, "utf-8");
+        } catch {
+          content = "";
+        }
+        try {
+          await persistActivePhaseStage({
+            session,
+            executionStage: "awaiting-approval",
+            approvedPlanPath: planPath,
+          });
+        } catch (error) {
+          try {
+            await session.setPlanMode(true);
+          } catch (restoreError) {
+            throw new AggregateError(
+              [error, restoreError],
+              "Phase checkpoint failed and Plan Mode could not be restored",
+              { cause: restoreError },
+            );
+          }
+          throw error;
+        }
+        setPendingPlan(planPath, content);
+        broadcast("plan_exit", { planPath, content });
+        return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
+      },
+    });
+
   if (mode === "chat") {
     session = createChatAgent(chatAgent, {
       ...baseSessionOptions,
+      ...(resumeSessionPath ? { sessionId: resumeSessionPath } : {}),
       sessionsDir: paths.sessionsDir,
       additionalTools: [...buildMemoryTools(memoryStore), ...buildJiwaTools(jiwaStore)],
       getSystemPromptTail: () =>
@@ -1540,31 +1634,10 @@ async function createSession(
       },
     });
   } else {
-    session = new AgentSession({
-      ...baseSessionOptions,
-      // Plan mode belongs only to the coding agent.
-      onEnterPlan: async (reason) => {
-        deactivateApprovedPlan();
-        await session.setPlanMode(true);
-        broadcast("plan_progress", { total: 0, completed: [] });
-        broadcast("plan_enter", { reason: reason ?? "" });
-        void session.persistAppMarker("plan", { reason: reason ?? "" }).catch(() => {});
-      },
-      onExitPlan: async (planPath: string) => {
-        await session.setPlanMode(false);
-        let content: string;
-        try {
-          content = await fs.readFile(planPath, "utf-8");
-        } catch {
-          content = "";
-        }
-        setPendingPlan(planPath, content);
-        broadcast("plan_exit", { planPath, content });
-        return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
-      },
-    });
+    session = createCodingSession(resumeSessionPath);
   }
   await session.initialize();
+  const phaseCandidates = new AppSidecarPhaseCandidateStore<BoundPhaseCandidate<AgentSession>>();
   if (mode === "chat") {
     const restoredAgent = [...session.getAppMarkers()]
       .reverse()
@@ -1704,55 +1777,69 @@ async function createSession(
     if (changed) void queueApprovedPlanProgressSync();
   }
 
-  // Forward every relevant bus event to the webview.
-  session.eventBus.on("text_delta", (d) => {
-    broadcast("text_delta", d);
-    recordApprovedPlanMarkers(d.text);
-  });
-  session.eventBus.on("thinking_delta", (d) => broadcast("thinking_delta", d));
-  session.eventBus.on("tool_call_start", (d) => {
-    toolCallNames.set(d.toolCallId, d.name);
-    broadcast("tool_call_start", d);
-  });
-  session.eventBus.on("tool_call_update", (d) => broadcast("tool_call_update", d));
-  session.eventBus.on("tool_call_end", (d) => {
-    const name = toolCallNames.get(d.toolCallId) ?? "unknown";
-    toolCallNames.delete(d.toolCallId);
-    if (d.isError && shouldCaptureToolFailure(name, d.result)) {
-      // Expected model-correctable validation failures stay in the local log and
-      // conversation. Unexpected failures are reported without private result data.
-      captureSidecarError(new Error(`Tool ${name} failed`), `tool.${name}`, { tool: name });
-    }
-    log(d.isError ? "ERROR" : "INFO", "tool", `Tool call ended: ${name}`, {
-      id: d.toolCallId,
-      durationMs: String(d.durationMs),
-      isError: String(d.isError),
-      ...(d.isError ? { result: d.result.slice(0, 500) } : {}),
+  async function syncActivePhaseSessionLink(target: AgentSession = session) {
+    return synchronizeActivePhaseSessionLink({
+      session: target,
+      repository: notesRepository,
+      cwd,
+      onSnapshot: broadcastNotesSnapshot,
     });
-    broadcast("tool_call_end", d);
-    // Any tool can mutate the approved plan (including bash), so refresh after
-    // every completed call while tracking is active. The file is tiny and this
-    // keeps the displayed total aligned before the next completion marker.
-    if (approvedPlanPath !== null) void queueApprovedPlanProgressSync();
-  });
-  // Native server tools (e.g. Anthropic web_search) do NOT end the turn — text
-  // streams before and after them in the SAME turn. The webview must reset its
-  // streaming bubble here, or the two text blocks concatenate with no separator
-  // ("…command.Let me pull…"). Mirrors the TUI's server_tool_call handling.
-  session.eventBus.on("server_tool_call", (d) => broadcast("server_tool_call", d));
-  session.eventBus.on("turn_end", (d) => broadcast("turn_end", d));
-  session.eventBus.on("agent_done", (d) => broadcast("agent_done", d));
-  // Non-clean stop (max_tokens/refusal/provider error) — info-style frame so
-  // the webview can warn instead of presenting truncated output as complete.
-  session.eventBus.on("truncated", (d) => broadcast("truncated", d));
-  session.eventBus.on("error", (d) => {
-    broadcastError("error", "agent error", d.error);
-  });
-  session.eventBus.on("model_change", (d) => broadcast("model_change", d));
-  session.eventBus.on("hook", (d) => broadcast("hook", d));
-  session.eventBus.on("subagent_state", (d) => broadcast("subagent_state", d));
-  session.eventBus.on("compaction_start", (d) => broadcast("compaction_start", d));
-  session.eventBus.on("compaction_end", (d) => broadcast("compaction_end", d));
+  }
+
+  // Forward every relevant bus event to the webview. Phase launch replaces the
+  // underlying AgentSession, so binding is an explicit reusable seam.
+  function bindSessionEvents(target: AgentSession): void {
+    target.eventBus.on("text_delta", (d) => {
+      broadcast("text_delta", d);
+      recordApprovedPlanMarkers(d.text);
+    });
+    target.eventBus.on("thinking_delta", (d) => broadcast("thinking_delta", d));
+    target.eventBus.on("tool_call_start", (d) => {
+      toolCallNames.set(d.toolCallId, d.name);
+      broadcast("tool_call_start", d);
+    });
+    target.eventBus.on("tool_call_update", (d) => broadcast("tool_call_update", d));
+    target.eventBus.on("tool_call_end", (d) => {
+      const name = toolCallNames.get(d.toolCallId) ?? "unknown";
+      toolCallNames.delete(d.toolCallId);
+      if (d.isError && shouldCaptureToolFailure(name, d.result)) {
+        captureSidecarError(new Error(`Tool ${name} failed`), `tool.${name}`, { tool: name });
+      }
+      log(d.isError ? "ERROR" : "INFO", "tool", `Tool call ended: ${name}`, {
+        id: d.toolCallId,
+        durationMs: String(d.durationMs),
+        isError: String(d.isError),
+        ...(d.isError ? { result: d.result.slice(0, 500) } : {}),
+      });
+      broadcast("tool_call_end", d);
+      if (approvedPlanPath !== null) void queueApprovedPlanProgressSync();
+    });
+    target.eventBus.on("server_tool_call", (d) => broadcast("server_tool_call", d));
+    target.eventBus.on("turn_end", (d) => broadcast("turn_end", d));
+    target.eventBus.on("agent_done", (d) => broadcast("agent_done", d));
+    target.eventBus.on("truncated", (d) => broadcast("truncated", d));
+    target.eventBus.on("error", (d) => broadcastError("error", "agent error", d.error));
+    target.eventBus.on("model_change", (d) => broadcast("model_change", d));
+    target.eventBus.on("hook", (d) => broadcast("hook", d));
+    target.eventBus.on("subagent_state", (d) => broadcast("subagent_state", d));
+    target.eventBus.on("compaction_start", (d) => broadcast("compaction_start", d));
+    target.eventBus.on("compaction_end", (d) => {
+      void completeCompactionCheckpoint({
+        synchronize: () => syncActivePhaseSessionLink(target),
+        onComplete: () => broadcast("compaction_end", d),
+        onFailure: (error) => {
+          captureSidecarError(error, "app-sidecar.phase.compaction-link");
+          const state = target.getState();
+          broadcast("compaction_sync_failed", {
+            ...d,
+            ...phaseCheckpointFailurePayload(error),
+            session: { sessionId: state.sessionId, sessionPath: state.sessionPath },
+          });
+        },
+      });
+    });
+  }
+  bindSessionEvents(session);
 
   let running = false;
   const runLifecycle = new RunLifecycle((runState) => {
@@ -1819,6 +1906,18 @@ async function createSession(
     pendingPlanPath = null;
     pendingPlanContent = "";
     planGeneration++;
+  }
+
+  const restoredPhaseContext = session.getActivePhaseContext();
+  if (restoredPhaseContext?.approvedPlanPath) {
+    if (restoredPhaseContext.executionStage === "awaiting-approval") {
+      const restoredContent = await fs
+        .readFile(restoredPhaseContext.approvedPlanPath, "utf-8")
+        .catch(() => "");
+      setPendingPlan(restoredPhaseContext.approvedPlanPath, restoredContent);
+    } else if (restoredPhaseContext.executionStage === "implementing") {
+      await activateApprovedPlan(restoredPhaseContext.approvedPlanPath);
+    }
   }
 
   // Workflow (prompt-template) commands: built-in + the project's custom
@@ -2022,8 +2121,14 @@ async function createSession(
   }
 
   // Core provider-run bracket. Standalone runs own a lifecycle generation;
-  // injected autopilot runs share the cycle's outer generation.
-  async function runAgent(label: string, run: () => Promise<void>): Promise<void> {
+  // injected autopilot runs share the cycle's outer generation. Specialized
+  // callers can own failure reporting so one failure never produces two UI rows.
+  async function runAgent(
+    label: string,
+    run: () => Promise<void>,
+    onFailure?: (error: unknown) => void | Promise<void>,
+    errorMode: "generic" | "callback-only" = "generic",
+  ): Promise<void> {
     const ownsGeneration = !runLifecycle.running;
     const generation = ownsGeneration
       ? runLifecycle.begin(abortOwnedWork).generation
@@ -2041,7 +2146,8 @@ async function createSession(
       runSucceeded = true;
     } catch (err) {
       if (!runLifecycle.isCancellationRequested(generation)) {
-        broadcastError("error", "run failed", err);
+        if (errorMode === "generic") broadcastError("error", "run failed", err);
+        await onFailure?.(err);
       }
     } finally {
       const cancelled = runLifecycle.isCancellationRequested(generation);
@@ -2231,11 +2337,19 @@ async function createSession(
             return false;
           }
           const planPath = pendingPlanPath;
-          let planTotal: number;
           try {
-            await session.newSession(true);
-            injectedAutopilotPrompts = [];
-            planTotal = await activateApprovedPlan(planPath);
+            const { planTotal } = await commitPlanApprovalCheckpoint({
+              session,
+              repository: notesRepository,
+              cwd,
+              planPath,
+              prepareFreshSession: async () => {
+                await session.newSession(true);
+                injectedAutopilotPrompts = [];
+                return activateApprovedPlan(planPath);
+              },
+              onSnapshot: broadcastNotesSnapshot,
+            });
             clearPendingPlan();
             // Keep the approval marker ahead of the reset, then seed the reset
             // with the sidecar's canonical count from the actual plan file.
@@ -2246,7 +2360,30 @@ async function createSession(
             void session.persistAutopilotMarker("plan_approved");
             return true;
           } catch (err) {
-            broadcastError("autopilot_error", "autopilot plan accept failed", err);
+            if (err instanceof PhaseCheckpointError) {
+              const payload = phaseCheckpointFailurePayload(err);
+              captureSidecarError(
+                err,
+                "app-sidecar.phase.autopilot-plan-accept",
+                { code: payload.code, phaseId: payload.phaseId },
+                { ...payload },
+              );
+              broadcast("autopilot_error", {
+                headline: "Plan approval checkpoint failed",
+                ...payload,
+              });
+              // Autopilot normally keeps the human review hidden. A durable
+              // checkpoint failure needs an explicit retry path, so restore the
+              // submitted plan without clearing its server-side pending state.
+              broadcast("autopilot_plan_checkpoint_failed", {
+                operationId: mutation.operationId,
+                planPath,
+                content: pendingPlanContent,
+                ...payload,
+              });
+            } else {
+              broadcastError("autopilot_error", "autopilot plan accept failed", err);
+            }
             return false;
           } finally {
             mutation.release();
@@ -2404,6 +2541,7 @@ async function createSession(
     const task = loadTasksSync(cwd).find((t) => t.id === taskId || t.id.startsWith(taskId));
     if (!task) return false;
     // Fresh session per task so one task's context never bleeds into the next.
+    await phaseCandidates.clear();
     await session.newSession();
     deactivateApprovedPlan();
     injectedAutopilotPrompts = [];
@@ -3229,10 +3367,18 @@ async function createSession(
           json(res, 202, result);
           return;
         }
+        // Serialize prompt acceptance with reset-style session mutations. The lease
+        // closes the gap between the early 202 and runLifecycle becoming authoritative.
+        const promptMutation = sessionMutations.tryAcquire("prompt-start");
+        if (!promptMutation) {
+          json(res, 409, sessionMutations.conflictBody());
+          return;
+        }
         // Keep an operation lease beyond the early 202 while preprocessing and
         // the accepted turn run. The request lease alone ends with the response.
         const releaseOperation = reloadCoordinator.tryAcquireOperationMutation();
         if (!releaseOperation) {
+          promptMutation.release();
           json(res, 409, { error: "configuration refresh in progress" });
           return;
         }
@@ -3266,7 +3412,7 @@ async function createSession(
             isWorkflowCommandText(text, await loadWorkflowCommandSpecs());
           const assistantsBefore = countAssistantMessages(session.getMessages());
           const messagesBefore = session.getMessages().length;
-          await runAgent(text, async () => {
+          const runPromise = runAgent(text, async () => {
             if (attachments.length > 0) {
               // Persist each attachment under .gg/uploads so files are inspectable
               // by the agent's tools, then prompt with the media as native blocks.
@@ -3280,6 +3426,10 @@ async function createSession(
               await session.prompt(text);
             }
           });
+          // runAgent synchronously starts runLifecycle before its first await, so the
+          // busy gate owns the session from this point onward.
+          promptMutation.release();
+          await runPromise;
           // After the user's run settles, kick off Ken's auto-review loop — but
           // only when the turn is actually reviewable (shouldStartAutopilotCycle):
           // workflow commands (/compare, /bullet-proof, …) end with reports or
@@ -3321,6 +3471,7 @@ async function createSession(
             message: error instanceof Error ? error.message : String(error),
           });
         } finally {
+          promptMutation.release();
           releaseOperation();
         }
       });
@@ -3819,6 +3970,68 @@ async function createSession(
       return;
     }
 
+    const phaseStartMatch = new URL(url, `http://${host}`).pathname.match(
+      /^\/phases\/([^/]+)\/start$/,
+    );
+    if (method === "POST" && phaseStartMatch) {
+      let phaseId: string;
+      try {
+        phaseId = decodeURIComponent(phaseStartMatch[1]!);
+      } catch {
+        json(res, 400, {
+          status: "failed",
+          code: "invalid-phase-id",
+          operationId: null,
+          message: "The phase identifier is malformed.",
+        });
+        return;
+      }
+      void launchBoundPhase({
+        phaseId,
+        mode,
+        busyState: sessionBusyState(),
+        mutations: sessionMutations,
+        repository: notesRepository,
+        cwd,
+        candidates: phaseCandidates,
+        getSession: () => session,
+        getThinkingLevel: () => session.getThinkingLevel(),
+        createSession: (active) => createCodingSession(undefined, active),
+        replaceSession: (replacement) => {
+          session = replacement;
+        },
+        bindSessionEvents,
+        autopilotEnabled: autopilot,
+        broadcastNotesSnapshot,
+        broadcast,
+        resetSessionState: () => {
+          clearPendingPlan();
+          deactivateApprovedPlan();
+          injectedAutopilotPrompts = [];
+        },
+        enterPlanMode: enterCodingPlanMode,
+        startPrompt: (label, run, onFailure) => {
+          void runAgent(label, run, onFailure, "callback-only");
+        },
+        respond: (status, body) => json(res, status, body),
+        onLaunchFailure: (error, metadata) => {
+          captureSidecarError(error, "app-sidecar.phase.launch", metadata);
+          log("ERROR", "app-sidecar", "phase launch failed", {
+            ...metadata,
+            detail: error instanceof Error ? error.message : String(error),
+          });
+        },
+        onAttentionFailure: (error, metadata) => {
+          captureSidecarError(error, "app-sidecar.phase.launch-attention", metadata);
+          log("ERROR", "app-sidecar", "phase launch attention persistence failed", {
+            ...metadata,
+            detail: error instanceof Error ? error.message : String(error),
+          });
+        },
+      });
+      return;
+    }
+
     if (method === "POST" && url === "/new-session") {
       const busyState = sessionBusyState();
       if (isAppSidecarSessionBusy(busyState)) {
@@ -3830,8 +4043,9 @@ async function createSession(
         json(res, 409, sessionMutations.conflictBody());
         return;
       }
-      void session
-        .newSession()
+      void phaseCandidates
+        .clear()
+        .then(() => session.newSession())
         .then(async () => {
           if (mode === "chat") {
             await session.persistAppMarker("agent_handoff", { chatAgent });
@@ -3890,7 +4104,9 @@ async function createSession(
         // (resetting autopilotCancelled), so the implementation still gets its
         // normal post-run review; if it lands while the cycle is winding down
         // it queues and runStrandedQueue drains it as a fresh turn.
-        clearPendingPlan();
+        // Invalidate Ken's in-flight verdict without discarding the submitted plan.
+        // The pending review is cleared only after its durable checkpoint commits.
+        planGeneration++;
         autopilotCancelled = true;
         kenAutoAbort.abort();
         kenAutoAbort = new AbortController();
@@ -3900,15 +4116,33 @@ async function createSession(
           broadcast("autopilot_ignored", {});
         }
         try {
-          await session.newSession(true);
-          injectedAutopilotPrompts = [];
-          const planTotal = await activateApprovedPlan(planPath);
+          const { planTotal } = await commitPlanApprovalCheckpoint({
+            session,
+            repository: notesRepository,
+            cwd,
+            planPath,
+            prepareFreshSession: async () => {
+              await session.newSession(true);
+              injectedAutopilotPrompts = [];
+              return activateApprovedPlan(planPath);
+            },
+            onSnapshot: broadcastNotesSnapshot,
+          });
+          clearPendingPlan();
           broadcast("session_reset", { planTotal, operationId: mutation.operationId });
           broadcast("plan_progress", planProgressPayload());
           json(res, 200, { ok: true, planTotal, operationId: mutation.operationId });
         } catch (err) {
           captureSidecarError(err, "app-sidecar.plan.accept");
-          json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+          if (err instanceof PhaseCheckpointError) {
+            json(res, 409, {
+              status: "failed",
+              operationId: mutation.operationId,
+              ...phaseCheckpointFailurePayload(err),
+            });
+          } else {
+            json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+          }
         } finally {
           mutation.release();
         }
@@ -4352,9 +4586,12 @@ async function createSession(
     for (const c of clients) c.res.end();
     kenAbort.abort();
     kenAutoAbort.abort();
-    await kenSession?.dispose().catch(() => {});
-    await kenAutoSession?.dispose().catch(() => {});
-    await session.dispose().catch(() => {});
+    await Promise.allSettled([
+      phaseCandidates.dispose(),
+      Promise.resolve().then(() => kenSession?.dispose()),
+      Promise.resolve().then(() => kenAutoSession?.dispose()),
+      Promise.resolve().then(() => session.dispose()),
+    ]);
   }
 
   return {
@@ -4365,7 +4602,9 @@ async function createSession(
     },
     cwd,
     sessionPath: opts.sessionPath,
-    session,
+    get session() {
+      return session;
+    },
     clients,
     broadcast,
     broadcastNotesChange,

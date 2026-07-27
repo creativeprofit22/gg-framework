@@ -72,6 +72,14 @@ describe("pane agent client", () => {
         return { status: "ok", snapshot: { ...notesSnapshot, revision: 2 } };
       }
       if (command === "agent_new_session") return { operationId: "operation-1" };
+      if (command === "agent_phase_start") {
+        return {
+          status: "accepted",
+          operationId: "phase-operation-1",
+          session: { sessionId: "bound-session", sessionPath: "/bound.jsonl" },
+          packageTokenCount: 321,
+        };
+      }
       if (command === "agent_prompt") return { queued: false, count: 0 };
       return {};
     });
@@ -83,6 +91,7 @@ describe("pane agent client", () => {
     await c.getNotes();
     await c.migrateNotes(notesDocument);
     await c.saveNotes(1, notesDocument);
+    await c.startPhase("phase/21");
     await c.listMemories();
     await c.deleteMemory("m");
     await c.listJiwa();
@@ -158,6 +167,32 @@ describe("pane agent client", () => {
       expectedRevision: 1,
       document: notesDocument,
     });
+    expect(invoke).toHaveBeenCalledWith("agent_phase_start", {
+      paneId: "right",
+      phaseId: "phase/21",
+    });
+  });
+
+  it("strictly validates phase-start outcomes", async () => {
+    const client = createPaneAgentClient("right");
+    const accepted = {
+      status: "accepted",
+      operationId: "operation-1",
+      session: { sessionId: "session-1", sessionPath: "/session.jsonl" },
+      packageTokenCount: 42,
+    } as const;
+    invoke.mockResolvedValueOnce(accepted);
+    await expect(client.startPhase("phase-21")).resolves.toBe(accepted);
+
+    for (const invalid of [
+      { ...accepted, extra: true },
+      { ...accepted, packageTokenCount: -1 },
+      { ...accepted, session: { sessionId: "session-1" } },
+      { status: "failed", code: "busy", operationId: null },
+    ]) {
+      invoke.mockResolvedValueOnce(invalid);
+      await expect(client.startPhase("phase-21")).rejects.toThrow("invalid phase start response");
+    }
   });
 
   it("validates and preserves the authoritative prompt queue result", async () => {

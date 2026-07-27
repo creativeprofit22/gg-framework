@@ -74,6 +74,59 @@ export interface NotesSessionLink {
   sessionPath: string | null;
 }
 
+export type PhaseStartResult =
+  | {
+      status: "accepted";
+      operationId: string;
+      session: NotesSessionLink;
+      packageTokenCount: number;
+    }
+  | {
+      status: "already-bound";
+      operationId: string;
+      session: NotesSessionLink;
+      packageTokenCount: number;
+    }
+  | {
+      status: "failed";
+      code: string;
+      operationId: string | null;
+      message: string;
+    };
+
+export type PhaseLaunchErrorCode = "prompt-failed" | "launch-failed";
+
+export interface PhaseLaunchErrorEvent {
+  type: "phase_launch_error";
+  data: {
+    operationId: string;
+    phaseId: string;
+    code: PhaseLaunchErrorCode;
+    message: string;
+    detail?: string;
+  };
+}
+
+export function isPhaseLaunchErrorEvent(event: {
+  type: string;
+  data: unknown;
+}): event is PhaseLaunchErrorEvent {
+  if (event.type !== "phase_launch_error" || typeof event.data !== "object" || !event.data) {
+    return false;
+  }
+  const data = event.data as Record<string, unknown>;
+  return (
+    typeof data.operationId === "string" &&
+    data.operationId.length > 0 &&
+    typeof data.phaseId === "string" &&
+    data.phaseId.length > 0 &&
+    (data.code === "prompt-failed" || data.code === "launch-failed") &&
+    typeof data.message === "string" &&
+    data.message.length > 0 &&
+    (data.detail === undefined || typeof data.detail === "string")
+  );
+}
+
 export interface NotesReminder {
   id: string;
   dueAt: string;
@@ -297,6 +350,39 @@ export type NotesAuthorityDiagnostic =
   | { kind: "migration-failed"; error: unknown }
   | { kind: "save-failed"; error: unknown }
   | { kind: "fallback-storage"; load: NotesLoadResult; save: NotesSaveResult | null };
+
+export function isPhaseStartResult(value: unknown): value is PhaseStartResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.status === "accepted" || record.status === "already-bound") {
+    return (
+      hasExactKeys(record, ["status", "operationId", "session", "packageTokenCount"]) &&
+      typeof record.operationId === "string" &&
+      isNotesSessionLink(record.session) &&
+      Number.isInteger(record.packageTokenCount) &&
+      (record.packageTokenCount as number) >= 0
+    );
+  }
+  return (
+    record.status === "failed" &&
+    hasExactKeys(record, ["status", "code", "operationId", "message"]) &&
+    typeof record.code === "string" &&
+    (record.operationId === null || typeof record.operationId === "string") &&
+    typeof record.message === "string"
+  );
+}
+
+function isNotesSessionLink(value: unknown): value is NotesSessionLink {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    hasExactKeys(value as Record<string, unknown>, ["sessionId", "sessionPath"]) &&
+    typeof (value as NotesSessionLink).sessionId === "string" &&
+    ((value as NotesSessionLink).sessionPath === null ||
+      typeof (value as NotesSessionLink).sessionPath === "string")
+  );
+}
 
 export function isProjectNotesSnapshot(value: unknown): value is ProjectNotesSnapshot {
   return (

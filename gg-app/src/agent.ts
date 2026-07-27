@@ -8,15 +8,19 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { routePaneEvent, type PaneEventEnvelope } from "./pane-routing";
 import {
+  isPhaseStartResult,
   isProjectNotesMigrationOutcome,
   isProjectNotesReadOutcome,
   isProjectNotesSaveOutcome,
   type NotesClient,
   type NotesDocumentV3,
+  type PhaseStartResult,
   type ProjectNotesMigrationOutcome,
   type ProjectNotesReadOutcome,
   type ProjectNotesSaveOutcome,
 } from "./notes-types";
+export { isPhaseLaunchErrorEvent } from "./notes-types";
+export type { PhaseLaunchErrorEvent, PhaseLaunchErrorCode } from "./notes-types";
 
 // Per-window event bus. The Rust side emits agent traffic with `emit_to` the
 // specific window label, so each window must listen on ITS OWN webview target —
@@ -235,6 +239,7 @@ export interface AgentState {
   provider: string;
   model: string;
   cwd: string;
+  sessionId?: string;
   sessionPath?: string | null;
   mode: WorkspaceMode;
   chatAgent?: ChatAgentId;
@@ -1852,6 +1857,7 @@ export interface PaneAgentClient extends NotesClient {
   getNotes(): Promise<ProjectNotesReadOutcome>;
   migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome>;
   saveNotes(expectedRevision: number, document: NotesDocumentV3): Promise<ProjectNotesSaveOutcome>;
+  startPhase(phaseId: string): Promise<PhaseStartResult>;
   listMemories(): Promise<MemorySnapshot>;
   deleteMemory(id: string): Promise<MemorySnapshot>;
   listJiwa(): Promise<JiwaSnapshot>;
@@ -2039,6 +2045,11 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async saveNotes(expectedRevision, document) {
       const outcome = await call<unknown>("agent_notes_save", { expectedRevision, document });
       if (!isProjectNotesSaveOutcome(outcome)) throw new Error("invalid Notes save response");
+      return outcome;
+    },
+    async startPhase(phaseId) {
+      const outcome = await call<unknown>("agent_phase_start", { phaseId });
+      if (!isPhaseStartResult(outcome)) throw new Error("invalid phase start response");
       return outcome;
     },
     listMemories: async () => {

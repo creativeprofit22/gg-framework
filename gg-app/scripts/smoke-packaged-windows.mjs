@@ -1,8 +1,9 @@
 // Release-only Windows smoke: build an MSI, administratively extract it into
 // temporary directories, launch the extracted app, and prove the packaged
-// WebView shell, bundled Node sidecar, pane-scoped IPC, SSE reset, and Phase 20
-// fresh-session transcript ordering together. Fault scenarios use a deterministic
-// sidecar fixture through the shell's supported GG_SIDECAR_PATH override.
+// WebView shell, bundled Node sidecar, pane-scoped IPC, SSE reset, Phase 20
+// fresh-session ordering, and Phase 21 Start/Resume restoration together.
+// Fault scenarios use deterministic sidecar fixtures through the shell's
+// supported GG_SIDECAR_PATH override.
 import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
@@ -23,6 +24,7 @@ import {
   reserveTcpPort,
   runPhase20Scenario,
 } from "./phase-20-native-smoke.mjs";
+import { preparePhase21Scenario, runPhase21Scenario } from "./phase-21-native-smoke.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appDir = resolve(here, "..");
@@ -326,12 +328,22 @@ async function main() {
   const extractRoot = join(smokeRoot, "package");
   const msiLog = join(smokeRoot, "msi-extract.log");
   const fixtureSidecar = join(here, "phase-20-sidecar-fixture.mjs");
+  const phase21FixtureSidecar = join(here, "phase-21-sidecar-fixture.mjs");
   const evidenceArgument = process.argv.indexOf("--evidence-dir");
   const evidenceDir =
     evidenceArgument >= 0
       ? resolve(process.argv[evidenceArgument + 1] || fail("--evidence-dir requires a path"))
       : join(appDir, "src-tauri", "target", "smoke-evidence", "phase-20-native");
+  const phase21EvidenceArgument = process.argv.indexOf("--phase21-evidence-dir");
+  const phase21EvidenceDir =
+    phase21EvidenceArgument >= 0
+      ? resolve(
+          process.argv[phase21EvidenceArgument + 1] ||
+            fail("--phase21-evidence-dir requires a path"),
+        )
+      : join(appDir, "src-tauri", "target", "smoke-evidence", "phase-21-native");
   const scenarioEvidence = [];
+  let phase21Evidence = null;
 
   try {
     const packageArgument = process.argv.indexOf("--package-dir");
@@ -455,15 +467,106 @@ async function main() {
       if (scenarioError) throw scenarioError;
     }
 
+    const phase21Root = join(smokeRoot, "phase-21-start-resume");
+    const phase21ProjectDir = join(phase21Root, "project");
+    const phase21Env = isolatedEnvironment(phase21Root, phase21ProjectDir);
+    const { initialSessionPath, boundSessionPath } = preparePhase21Scenario({
+      home: phase21Env.HOME,
+      projectDir: phase21ProjectDir,
+    });
+    const phase21AuditPath = join(phase21Root, "sidecar-audit.jsonl");
+    const phase21NativeAuditPath = join(phase21Root, "native-audit.jsonl");
+    const phase21CdpPort = await reserveTcpPort();
+    phase21Env.GG_APP_NATIVE_SMOKE_CDP_PORT = String(phase21CdpPort);
+    phase21Env.GG_SIDECAR_PATH = phase21FixtureSidecar;
+    phase21Env.GG_PHASE21_SMOKE_AUDIT_FILE = phase21AuditPath;
+    phase21Env.GG_PHASE21_NATIVE_SMOKE_AUDIT_FILE = phase21NativeAuditPath;
+    let phase21AppPid;
+    let phase21Error;
+    try {
+      const child = spawn(layout.executable, [], {
+        cwd: phase21ProjectDir,
+        env: phase21Env,
+        stdio: "ignore",
+        windowsHide: false,
+      });
+      phase21AppPid = child.pid;
+      await waitFor("Phase 21 packaged app window and fixture sidecar", () => {
+        if (!processExists(phase21AppPid)) {
+          throw new StopWaitingError("packaged app exited early");
+        }
+        const processes = processSnapshot();
+        const app = processes.find(
+          (candidate) =>
+            candidate.ProcessId === phase21AppPid &&
+            candidate.ExecutablePath &&
+            normalizePath(candidate.ExecutablePath) === normalizePath(layout.executable),
+        );
+        const node = processes.find(
+          (candidate) =>
+            candidate.ParentProcessId === phase21AppPid &&
+            candidate.ExecutablePath &&
+            normalizePath(candidate.ExecutablePath) === normalizePath(layout.node) &&
+            normalizeEvidence(candidate.CommandLine ?? "").includes(
+              normalizeEvidence(phase21FixtureSidecar),
+            ),
+        );
+        return app && node && visibleWindowPids().has(phase21AppPid);
+      });
+      const evidence = await runPhase21Scenario({
+        cdpPort: phase21CdpPort,
+        waitFor,
+        evidenceDir: phase21EvidenceDir,
+        projectDir: phase21ProjectDir,
+        initialSessionPath,
+        boundSessionPath,
+        sidecarAuditPath: phase21AuditPath,
+        nativeAuditPath: phase21NativeAuditPath,
+      });
+      phase21Evidence = {
+        appPid: phase21AppPid,
+        operationId: evidence.backend.prompts[0].operationId,
+        boundSessionPath,
+        eventOrder: evidence.sequence.map((entry) => `${entry.sequence}:${entry.type}`),
+      };
+      console.log(`PHASE21 START/RESUME PASS: ${JSON.stringify(phase21Evidence)}`);
+    } catch (error) {
+      phase21Error = error;
+    } finally {
+      try {
+        if (phase21AppPid) {
+          await cleanupOwnedProcesses({
+            rootPid: phase21AppPid,
+            ownedRoots: [phase21Root, layout.installDir],
+          });
+        }
+      } catch (cleanupError) {
+        phase21Error = phase21Error
+          ? new AggregateError(
+              [phase21Error, cleanupError],
+              "Phase 21 smoke and process cleanup failed",
+            )
+          : cleanupError;
+      }
+    }
+    if (phase21Error) throw phase21Error;
+
     mkdirSync(evidenceDir, { recursive: true });
     writeFileSync(
       join(evidenceDir, "summary.json"),
       `${JSON.stringify({ msi, packagedNode: layout.node, scenarios: scenarioEvidence }, null, 2)}\n`,
     );
+    mkdirSync(phase21EvidenceDir, { recursive: true });
+    writeFileSync(
+      join(phase21EvidenceDir, "summary.json"),
+      `${JSON.stringify({ msi, packagedNode: layout.node, scenario: phase21Evidence }, null, 2)}\n`,
+    );
   } finally {
     await removeTemporaryDirectory(smokeRoot);
   }
-  console.log(`SMOKE PASS: packagedNode scenarios=3 evidence=${evidenceDir}`);
+  console.log(
+    `SMOKE PASS: packagedNode phase20=3 phase21=1 evidence=${evidenceDir},${phase21EvidenceDir}`,
+  );
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";

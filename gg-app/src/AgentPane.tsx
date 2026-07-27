@@ -102,7 +102,12 @@ import {
   type KenPromptActionDispatcher,
   type KenPromptActionResult,
 } from "./ken-prompt-actions";
-import type { NotesPromptSaveResult, NotesValidationError } from "./notes-types";
+import type {
+  NotesPromptSaveResult,
+  NotesSessionLink,
+  NotesValidationError,
+  PhaseStartResult,
+} from "./notes-types";
 import "./App.css";
 
 const DEFAULT_INPUT_PLACEHOLDER = `Type a message, / commands, @ files, ${MENTOR_HANDLE} for help`;
@@ -1663,6 +1668,60 @@ export function AgentPane({
     }
   }, [client, handleEvent, registerSessionResetOperationWaiter]);
 
+  const startRoadmapPhase = useCallback(
+    async (phaseId: string): Promise<PhaseStartResult> => {
+      if (sessionMutationLockRef.current || running || autopilotReviewing) {
+        return {
+          status: "failed",
+          code: "session-busy",
+          operationId: null,
+          message: "Wait for the current run or Autopilot review to finish.",
+        };
+      }
+      sessionMutationLockRef.current = true;
+      setNewSessionBusy(true);
+      try {
+        const result = await client.startPhase(phaseId);
+        if (result.status === "accepted") {
+          await registerSessionResetOperationWaiter(result.operationId);
+        }
+        return result;
+      } finally {
+        sessionMutationLockRef.current = false;
+        setNewSessionBusy(false);
+      }
+    },
+    [client, running, autopilotReviewing, registerSessionResetOperationWaiter],
+  );
+
+  const resumeRoadmapPhase = useCallback(
+    async (link: NotesSessionLink): Promise<void> => {
+      if (sessionMutationLockRef.current || running || autopilotReviewing) {
+        throw new Error("Wait for the current run or Autopilot review to finish.");
+      }
+      const current = stateRef.current;
+      if (!current?.cwd) throw new Error("The project session is not ready.");
+      if (!link.sessionPath) throw new Error("This phase has no resumable session file.");
+      if (current.sessionId === link.sessionId && current.sessionPath === link.sessionPath) return;
+      sessionMutationLockRef.current = true;
+      setNewSessionBusy(true);
+      try {
+        await client.selectWorkspace(
+          { mode: "code", cwd: current.cwd, sessionPath: link.sessionPath },
+          generationRef.current ?? 0,
+        );
+        // Resume is not complete until the replacement session passes its startup
+        // gate. A rejected foreign-project session stays in Notes' existing error path.
+        await client.waitForReady();
+        onProjectChosen();
+      } finally {
+        sessionMutationLockRef.current = false;
+        setNewSessionBusy(false);
+      }
+    },
+    [client, running, autopilotReviewing, onProjectChosen],
+  );
+
   const dispatchKenPromptAction = useCallback(
     async (action: KenPromptAction): Promise<KenPromptActionResult> => {
       const prompt = normalizeKenPrompt(action.prompt);
@@ -2191,6 +2250,9 @@ export function AgentPane({
       );
     } catch {
       // Keep the review open and current transcript intact so Accept can be retried.
+      // The failed attempt never earned a reset, so drop its legacy step-count carryover.
+      pendingPlanTotalRef.current = null;
+      toast("Plan approval was not saved. Fix Project Notes, then retry Accept.", "error");
     } finally {
       sessionMutationLockRef.current = false;
       setNewSessionBusy(false);
@@ -2485,6 +2547,9 @@ export function AgentPane({
                   ref={projectNotesActionsRef}
                   cwd={state?.cwd ?? null}
                   client={client}
+                  onStartPhase={startRoadmapPhase}
+                  onResumePhase={resumeRoadmapPhase}
+                  phaseActionDisabled={running || autopilotReviewing || newSessionBusy}
                 />
                 <button
                   className="btn btn-sm btn-ghost"
@@ -3281,6 +3346,8 @@ const TranscriptRow = memo(function TranscriptRow({
           status={item.status}
           originalCount={item.originalCount}
           newCount={item.newCount}
+          message={item.message}
+          guidance={item.guidance}
         />
       );
     default:

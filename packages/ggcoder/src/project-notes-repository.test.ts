@@ -145,6 +145,126 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
+describe("ProjectNotesRepository phase launch transaction", () => {
+  it("creates one binding under a two-caller race and returns the winner to both", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = path.join(agentDir, "race-project");
+    const document = notes();
+    document.phases[0]!.session = null;
+    document.phases[0]!.status = "not-started";
+    document.phases[0]!.lifecycleEvents = [];
+    await new ProjectNotesRepository(agentDir).migrate(cwd, document);
+
+    let createCalls = 0;
+    const createBinding = async () => {
+      createCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return { sessionId: "winner", sessionPath: "/sessions/winner.jsonl" };
+    };
+    const firstRepository = new ProjectNotesRepository(agentDir);
+    const secondRepository = new ProjectNotesRepository(agentDir);
+    const [first, second] = await Promise.all([
+      firstRepository.launchPhase(cwd, "phase-1", createBinding),
+      secondRepository.launchPhase(cwd, "phase-1", createBinding),
+    ]);
+
+    expect(createCalls).toBe(1);
+    expect(new Set([first.status, second.status])).toEqual(new Set(["accepted", "already-bound"]));
+    if (!("session" in first) || !("session" in second)) throw new Error("Expected bindings");
+    expect(first.session).toEqual(second.session);
+    expect(first.session.sessionId).toBe("winner");
+    expect(Math.max(first.snapshot.revision, second.snapshot.revision)).toBe(2);
+    expect(first.phase.status).toBe("not-started");
+    expect(first.phase.lifecycleEvents).toEqual([]);
+    expect(first.references.map((reference) => reference.id)).toEqual(["ref-1"]);
+  });
+
+  it("rejects stale and archived phases before creating a candidate", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = path.join(agentDir, "stale-project");
+    const document = notes();
+    document.phases[0]!.session = null;
+    document.phases[0]!.archivedAt = NOW;
+    await new ProjectNotesRepository(agentDir).migrate(cwd, document);
+    let createCalls = 0;
+    const repository = new ProjectNotesRepository(agentDir);
+
+    expect(
+      await repository.launchPhase(cwd, "missing", async () => {
+        createCalls += 1;
+        return { sessionId: "x", sessionPath: null };
+      }),
+    ).toEqual({ status: "phase-not-found" });
+    expect(
+      await repository.launchPhase(cwd, "phase-1", async () => {
+        createCalls += 1;
+        return { sessionId: "x", sessionPath: null };
+      }),
+    ).toEqual({ status: "phase-archived" });
+    expect(createCalls).toBe(0);
+  });
+
+  it("keeps the phase unbound when creation fails and allows one retry", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = path.join(agentDir, "retry-project");
+    const document = notes();
+    document.phases[0]!.session = null;
+    await new ProjectNotesRepository(agentDir).migrate(cwd, document);
+    const repository = new ProjectNotesRepository(agentDir);
+
+    await expect(
+      repository.launchPhase(cwd, "phase-1", async () => {
+        throw new Error("candidate failed");
+      }),
+    ).rejects.toThrow("candidate failed");
+    expect(await repository.load(cwd)).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1, document: { phases: [{ session: null }] } },
+    });
+    await expect(
+      repository.launchPhase(cwd, "phase-1", async () => ({
+        sessionId: "retry",
+        sessionPath: "/sessions/retry.jsonl",
+      })),
+    ).resolves.toMatchObject({ status: "accepted", session: { sessionId: "retry" } });
+  });
+
+  it("updates only checkpoint link or launch attention fields", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = path.join(agentDir, "checkpoint-project");
+    const document = notes();
+    await new ProjectNotesRepository(agentDir).migrate(cwd, document);
+    const repository = new ProjectNotesRepository(agentDir);
+    const originalStatus = document.phases[0]!.status;
+    const originalEvents = document.phases[0]!.lifecycleEvents;
+
+    const linked = await repository.updatePhaseSessionLink(cwd, "phase-1", {
+      sessionId: "checkpoint",
+      sessionPath: "/sessions/checkpoint.jsonl",
+    });
+    expect(linked).toMatchObject({
+      status: "ok",
+      phase: {
+        status: originalStatus,
+        lifecycleEvents: originalEvents,
+        session: { sessionId: "checkpoint" },
+      },
+    });
+    const attention = await repository.recordPhaseLaunchAttention(
+      cwd,
+      "phase-1",
+      `  Prompt   failed ${"x".repeat(600)}  `,
+    );
+    expect(attention).toMatchObject({
+      status: "ok",
+      phase: { status: originalStatus, lifecycleEvents: originalEvents },
+    });
+    if (attention.status !== "ok") throw new Error("Expected attention update");
+    expect(attention.phase.attentionReason?.length).toBe(500);
+    expect(attention.phase.attentionReason).toMatch(/^Prompt failed/);
+  });
+});
+
 describe("project Notes identity and validation", () => {
   it("accepts and exactly round-trips the canonical v3 contract fixture", async () => {
     const fixture = await canonicalNotesFixture();

@@ -405,6 +405,75 @@ describe("useAgentEvents", () => {
     ]);
   });
 
+  it("shows one actionable prompt-failed phase error and deduplicates its operation", () => {
+    const { hook, getItems } = setup();
+    const failure = ev("phase_launch_error", {
+      operationId: "phase-operation-1",
+      phaseId: "phase-21",
+      code: "prompt-failed",
+      message:
+        "The phase session was created, but its first planning prompt failed. Resume the phase to retry.",
+      detail: "provider unavailable",
+    });
+
+    act(() => {
+      hook.result.current.handleEvent(failure);
+      hook.result.current.handleEvent(failure);
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "Roadmap phase phase-21 needs attention.",
+        message:
+          "The phase session was created, but its first planning prompt failed. Resume the phase to retry.",
+        guidance: "Open Notes, choose Roadmap, then Resume the phase.",
+      }),
+    ]);
+    expect(JSON.stringify(getItems())).not.toContain("provider unavailable");
+  });
+
+  it("shows one actionable launch-failed phase error", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_launch_error", {
+          operationId: "phase-operation-2",
+          phaseId: "phase-22",
+          code: "launch-failed",
+          message: "Phase launch failed. Retry Start phase.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "Roadmap phase phase-22 could not start.",
+        message: "Phase launch failed. Retry Start phase.",
+        guidance: "Open Notes, choose Roadmap, then retry Start phase.",
+      }),
+    ]);
+  });
+
+  it("ignores malformed phase-launch error frames", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_launch_error", {
+          operationId: "phase-operation-3",
+          phaseId: "phase-23",
+          code: "unexpected-code",
+          message: "Untrusted payload",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([]);
+  });
+
   it("error with a structured payload (headline/message/guidance) pushes a structured error item", () => {
     const { hook, getItems } = setup();
     act(() => {
@@ -919,6 +988,27 @@ describe("useAgentEvents", () => {
     expect(deps.planReviewPathRef.current).toBe("/tmp/p.md");
   });
 
+  it("restores an unchanged Autopilot plan after its durable checkpoint fails", () => {
+    const { hook, getPlanReview, deps } = setup(() => false, { autopilot: true });
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", { planPath: "/tmp/original.md", content: "# Original plan" }),
+      );
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_checkpoint_failed", {
+          planPath: "/tmp/retry.md",
+          content: "# Retry this plan",
+          code: "notes-missing",
+          retryable: true,
+        }),
+      );
+    });
+
+    expect(getPlanReview()).toBe("# Retry this plan");
+    expect(deps.planReviewPathRef.current).toBe("/tmp/retry.md");
+    expect(deps.pendingPlanTotalRef.current).toBeNull();
+  });
+
   it("autopilot_plan_accepted seeds the plan step count and pushes the marker", () => {
     const { hook, deps, getItems } = setup();
     const plan =
@@ -957,6 +1047,7 @@ describe("useAgentEvents", () => {
       total: number;
       done: number;
       operationId: string | null;
+      sessionPath: string | null | undefined;
     } | null = null;
     let getItems = (): Item[] => [];
     let setTokens: AgentEventsDeps["setTokens"] = () => undefined;
@@ -970,6 +1061,7 @@ describe("useAgentEvents", () => {
         total: depsRef.current!.planTotalRef.current,
         done: depsRef.current!.planDoneRef.current.size,
         operationId,
+        sessionPath: depsRef.current!.stateRef.current?.sessionPath,
       };
     });
     const harness = setup(() => false, {}, onSessionReset);
@@ -980,7 +1072,11 @@ describe("useAgentEvents", () => {
     act(() => {
       harness.hook.result.current.handleEvent(ev("text_delta", { text: "stale transcript" }));
       harness.hook.result.current.handleEvent(
-        ev("session_reset", { planTotal: 5, operationId: "operation-7" }),
+        ev("session_reset", {
+          planTotal: 5,
+          operationId: "operation-7",
+          sessionPath: "/sessions/phase-21.jsonl",
+        }),
       );
     });
 
@@ -991,6 +1087,7 @@ describe("useAgentEvents", () => {
       total: 5,
       done: 0,
       operationId: "operation-7",
+      sessionPath: "/sessions/phase-21.jsonl",
     });
   });
 
@@ -1036,6 +1133,33 @@ describe("useAgentEvents", () => {
     // Autopilot-only: a revision prompt means Ken took over the plan review;
     // the human modal should disappear. Non-autopilot never emits this frame.
     expect(getPlanReview()).toBeNull();
+  });
+
+  it("renders a distinct recoverable state when compaction checkpoint sync fails", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("compaction_start", { messageCount: 30 }));
+      hook.result.current.handleEvent(
+        ev("compaction_sync_failed", {
+          originalCount: 30,
+          newCount: 8,
+          message: "Project Notes are missing, so the latest phase checkpoint was not saved.",
+          guidance: "Restore or recreate Project Notes, then retry the action.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "compaction",
+        status: "sync-failed",
+        originalCount: 30,
+        newCount: 8,
+        message: "Project Notes are missing, so the latest phase checkpoint was not saved.",
+        guidance: "Restore or recreate Project Notes, then retry the action.",
+      }),
+    ]);
   });
 
   it("run_end clears completed plan progress and running state", () => {

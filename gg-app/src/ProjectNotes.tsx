@@ -12,13 +12,22 @@ import {
 } from "./notes-status";
 import { canonicalProjectKey } from "./notes-storage";
 import { useProjectNotes, type UseProjectNotesResult } from "./useProjectNotes";
-import type { NotesClient, NotesPromptSaveInput, NotesPromptSaveResult } from "./notes-types";
+import type {
+  NotesClient,
+  NotesPromptSaveInput,
+  NotesPromptSaveResult,
+  NotesSessionLink,
+  PhaseStartResult,
+} from "./notes-types";
 import type { KenPromptSaveDestination } from "./ken-prompt-actions";
 
 interface Props {
   cwd: string | null;
   client: NotesClient;
   openSource?: OpenReferenceUrl;
+  onStartPhase?(phaseId: string): Promise<PhaseStartResult>;
+  onResumePhase?(link: NotesSessionLink): Promise<void>;
+  phaseActionDisabled?: boolean;
 }
 
 interface NotesPersistenceStatus {
@@ -33,7 +42,21 @@ export interface ProjectNotesPromptActions {
 }
 
 export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(function ProjectNotes(
-  { cwd, client, openSource },
+  {
+    cwd,
+    client,
+    openSource,
+    onStartPhase = async () => ({
+      status: "failed",
+      code: "unavailable",
+      operationId: null,
+      message: "Phase actions are unavailable in this view.",
+    }),
+    onResumePhase = async () => {
+      throw new Error("Phase actions are unavailable in this view.");
+    },
+    phaseActionDisabled = false,
+  },
   ref,
 ): React.ReactElement {
   const [showNotes, setShowNotes] = useState(false);
@@ -143,6 +166,10 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onLinkReferenceToPhase={linkReferenceToPhase}
             onUnlinkReferenceFromPhase={unlinkReferenceFromPhase}
             openSource={openSource}
+            onStartPhase={onStartPhase}
+            onResumePhase={onResumePhase}
+            phaseActionDisabled={phaseActionDisabled}
+            onPhaseActionSuccess={() => setShowNotes(false)}
             onChangeHandoff={changeHandoff}
             onHandoffPresented={markHandoffPresented}
             onClose={() => setShowNotes(false)}

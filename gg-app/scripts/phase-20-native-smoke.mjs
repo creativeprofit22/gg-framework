@@ -157,7 +157,7 @@ class CdpClient {
   }
 }
 
-async function connectToPackagedWebview(cdpPort, waitFor) {
+export async function connectToPackagedWebview(cdpPort, waitFor) {
   const target = await waitFor("packaged WebView2 debugging target", async () => {
     const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
     if (!response.ok) return null;
@@ -269,7 +269,7 @@ const INSTALL_PROBE = `
 })()
 `;
 
-function clickExpression(label) {
+export function clickExpression(label) {
   return `(() => {
     const button = [...document.querySelectorAll("button")].find(
       (candidate) => candidate.textContent?.trim() === ${JSON.stringify(label)},

@@ -1280,6 +1280,101 @@ async fn agent_notes_get(
     notes_response(response).await
 }
 
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn phase_start_path(phase_id: &str) -> String {
+    format!("/phases/{}/start", encode_path_segment(phase_id))
+}
+
+fn normalize_phase_start_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<serde_json::Value, String> {
+    let value = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid phase-start response".to_string())?;
+    let typed = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| matches!(candidate, "accepted" | "already-bound" | "failed"));
+    if status.is_success() || typed {
+        Ok(value)
+    } else {
+        Err(sidecar_error_text(status, body))
+    }
+}
+
+#[cfg(feature = "native-smoke")]
+fn audit_native_phase_start(
+    pane_id: &str,
+    phase_id: &str,
+    status: reqwest::StatusCode,
+    result: &Result<serde_json::Value, String>,
+) {
+    use std::io::Write as _;
+
+    let Ok(path) = std::env::var("GG_PHASE21_NATIVE_SMOKE_AUDIT_FILE") else {
+        return;
+    };
+    let outcome = match result {
+        Ok(value) => serde_json::json!({ "response": value }),
+        Err(error) => serde_json::json!({ "error": error }),
+    };
+    let entry = serde_json::json!({
+        "route": "agent_phase_start",
+        "paneId": pane_id,
+        "phaseId": phase_id,
+        "httpStatus": status.as_u16(),
+        "authenticated": true,
+        "outcome": outcome,
+    });
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "{entry}");
+    }
+}
+
+/// Proxy: atomically bind and start one Roadmap phase for the authenticated pane.
+#[tauri::command]
+async fn agent_phase_start(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    phase_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}{}",
+            sidecar_base(port),
+            phase_start_path(&phase_id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let result = normalize_phase_start_response(status, &body);
+    #[cfg(feature = "native-smoke")]
+    audit_native_phase_start(&pane_id, &phase_id, status, &result);
+    result
+}
+
 /// Proxy: create the pane's project Notes repository only when absent.
 #[tauri::command]
 async fn agent_notes_migrate(
@@ -5009,8 +5104,26 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     }
 }
 
+fn parse_daemon_create_session_response(
+    status: reqwest::StatusCode,
+    value: &serde_json::Value,
+) -> Result<String, String> {
+    if !status.is_success() {
+        return Err(value
+            .get("error")
+            .and_then(|error| error.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("agent daemon rejected session with HTTP {status}")));
+    }
+    value
+        .get("sessionId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "agent daemon response did not include a session id".to_string())
+}
+
 /// POST /session to the daemon for `cwd` (+ optional resume `session_path`);
-/// returns the new session id, or `None` on failure.
+/// returns the new session id or the daemon's rejection reason.
 async fn daemon_create_session(
     app: &tauri::AppHandle,
     port: u16,
@@ -5018,7 +5131,7 @@ async fn daemon_create_session(
     chat_agent: ChatAgent,
     cwd: &Path,
     session_path: Option<&str>,
-) -> Option<String> {
+) -> Result<String, String> {
     let client = app.state::<reqwest::Client>().inner().clone();
     let body = serde_json::json!({
         "mode": mode,
@@ -5026,17 +5139,18 @@ async fn daemon_create_session(
         "cwd": cwd.to_string_lossy(),
         "sessionPath": session_path,
     });
-    let res = client
+    let response = client
         .post(format!("{}/session", sidecar_base(port)))
         .json(&body)
         .send()
         .await
-        .ok()?;
-    let value = res.json::<serde_json::Value>().await.ok()?;
-    value
-        .get("sessionId")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map_err(|error| format!("failed to reach agent daemon: {error}"))?;
+    let status = response.status();
+    let value = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("agent daemon returned an invalid response: {error}"))?;
+    parse_daemon_create_session_response(status, &value)
 }
 
 /// DELETE /session/:id on the daemon and require an acknowledged success response.
@@ -5146,7 +5260,7 @@ fn launch_pane_session(
         match daemon_create_session(&app, port, mode, chat_agent, &cwd, session_path.as_deref())
             .await
         {
-            Some(id) => {
+            Ok(id) => {
                 let bound = {
                     let windows: State<Windows> = app.state();
                     let mut registry = windows.map.lock().unwrap();
@@ -5184,8 +5298,7 @@ fn launch_pane_session(
                     );
                 }
             }
-            None => {
-                let message = "failed to create agent session".to_string();
+            Err(message) => {
                 let recorded = {
                     let windows: State<Windows> = app.state();
                     let mut registry = windows.map.lock().unwrap();
@@ -5410,6 +5523,7 @@ pub fn run() {
             open_project_path,
             agent_state,
             agent_notes_get,
+            agent_phase_start,
             agent_notes_migrate,
             agent_notes_save,
             agent_memories,
@@ -5768,6 +5882,68 @@ mod tests {
         ));
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn daemon_session_response_preserves_resume_identity_rejections() {
+        for message in [
+            "Cannot resume a session from another project",
+            "Cannot resume phase context from another project",
+        ] {
+            assert_eq!(
+                parse_daemon_create_session_response(
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": message }),
+                ),
+                Err(message.to_string())
+            );
+        }
+        assert_eq!(
+            parse_daemon_create_session_response(
+                reqwest::StatusCode::OK,
+                &serde_json::json!({ "sessionId": "same-project-session" }),
+            ),
+            Ok("same-project-session".to_string())
+        );
+    }
+
+    #[test]
+    fn phase_start_proxy_encodes_ids_and_preserves_typed_outcomes() {
+        assert_eq!(
+            phase_start_path("phase/21 review"),
+            "/phases/phase%2F21%20review/start"
+        );
+        for (status, body) in [
+            (
+                reqwest::StatusCode::ACCEPTED,
+                r#"{"status":"accepted","operationId":"op-1","session":{"sessionId":"s","sessionPath":"/s"},"packageTokenCount":42}"#,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"status":"failed","code":"session-busy","operationId":null,"message":"Wait"}"#,
+            ),
+        ] {
+            let parsed = normalize_phase_start_response(status, body).unwrap();
+            assert!(matches!(
+                parsed.get("status").and_then(serde_json::Value::as_str),
+                Some("accepted" | "failed")
+            ));
+        }
+    }
+
+    #[test]
+    fn phase_start_proxy_rejects_transport_ambiguity() {
+        assert_eq!(
+            normalize_phase_start_response(reqwest::StatusCode::BAD_GATEWAY, "not json"),
+            Err("invalid phase-start response".to_string())
+        );
+        assert_eq!(
+            normalize_phase_start_response(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"error":"unknown"}"#,
+            ),
+            Err("unknown".to_string())
+        );
     }
 
     #[test]

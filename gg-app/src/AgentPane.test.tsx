@@ -146,6 +146,41 @@ const agentState = (model: string): AgentState => ({
 });
 const KEN_PROMPT = "Implement the guarded session action\n  Preserve this indentation";
 
+function roadmapDocument(sessionPath: string | null = null): NotesDocumentV3 {
+  const now = "2026-07-26T00:00:00.000Z";
+  return {
+    version: 3,
+    reference: "",
+    currentFocus: "",
+    tasks: [],
+    handoff: { text: "", updatedAt: null, readAt: null },
+    updatedAt: now,
+    legacyImportedAt: null,
+    references: [],
+    phases: [
+      {
+        id: "phase-21",
+        title: "Bound phase",
+        goal: "Create one session",
+        doneWhen: ["Reset matches"],
+        order: 0,
+        status: sessionPath ? "planning" : "not-started",
+        sourcePrompt: "",
+        referenceIds: [],
+        session: sessionPath ? { sessionId: "bound-session", sessionPath } : null,
+        reminder: null,
+        attentionReason: null,
+        createdAt: now,
+        updatedAt: now,
+        completedAt: null,
+        archivedAt: null,
+        overrides: { status: null, referenceIds: null },
+        lifecycleEvents: [],
+      },
+    ],
+  };
+}
+
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((settle) => {
@@ -176,6 +211,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
       status: "ok" as const,
       snapshot: { projectKey: "/work", revision: expectedRevision + 1, document },
     })),
+    startPhase: vi.fn(),
     listModels: empty,
     listCommands: empty,
     listTasks: empty,
@@ -270,6 +306,147 @@ describe("AgentPane lifecycle", () => {
     expect(home?.getAttribute("data-has-pane-progress")).toBe("true");
     expect(pane.create).not.toHaveBeenCalled();
   });
+
+  it("starts a Roadmap phase with one typed command, waits for its reset, and never sends separately", async () => {
+    const pane = client("primary", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      sessionPath: "/current.jsonl",
+    });
+    vi.mocked(pane.getNotes).mockResolvedValue({
+      status: "ok",
+      recoveredFromBackup: false,
+      snapshot: { projectKey: "/work", revision: 1, document: roadmapDocument() },
+    });
+    vi.mocked(pane.startPhase).mockImplementation(async () => {
+      queueMicrotask(() => nativeMocks.onSessionReset?.("phase-operation-1"));
+      return {
+        status: "accepted",
+        operationId: "phase-operation-1",
+        session: { sessionId: "phase-session", sessionPath: "/phase.jsonl" },
+        packageTokenCount: 120,
+      };
+    });
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const notesButton = await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(notesButton);
+    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start phase: Bound phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start phase" }));
+
+    await waitFor(() => expect(pane.startPhase).toHaveBeenCalledExactlyOnceWith("phase-21"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("resumes a bound Roadmap phase through workspace selection and hydration", async () => {
+    const pane = client("primary", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      sessionPath: "/current.jsonl",
+    });
+    vi.mocked(pane.getNotes).mockResolvedValue({
+      status: "ok",
+      recoveredFromBackup: false,
+      snapshot: {
+        projectKey: "/work",
+        revision: 1,
+        document: roadmapDocument("/bound.jsonl"),
+      },
+    });
+    vi.mocked(pane.selectWorkspace).mockResolvedValue(2);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const notesButton = await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(notesButton);
+    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume phase" }));
+
+    await waitFor(() =>
+      expect(pane.selectWorkspace).toHaveBeenLastCalledWith(
+        { mode: "code", cwd: "/work", sessionPath: "/bound.jsonl" },
+        0,
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(vi.mocked(pane.waitForReady).mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("rejects a bound phase without a resumable path even when the current path is null", async () => {
+    const pane = client("primary", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      sessionId: "current-session",
+      sessionPath: null,
+    });
+    const document = roadmapDocument("/placeholder.jsonl");
+    document.phases[0]!.session = { sessionId: "bound-session", sessionPath: null };
+    vi.mocked(pane.getNotes).mockResolvedValue({
+      status: "ok",
+      recoveredFromBackup: false,
+      snapshot: { projectKey: "/work", revision: 1, document },
+    });
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const notesButton = await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(notesButton);
+    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
+    const selectCallsBeforeResume = vi.mocked(pane.selectWorkspace).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Resume phase" }));
+
+    expect(await screen.findByText("This phase has no resumable session file.")).toBeTruthy();
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(pane.selectWorkspace).toHaveBeenCalledTimes(selectCallsBeforeResume);
+  });
+
+  it.each([
+    ["foreign header", "Cannot resume a session from another project"],
+    ["foreign phase context", "Cannot resume phase context from another project"],
+  ])(
+    "keeps Notes open and shows the daemon rejection for a %s",
+    async (_source, rejectionMessage) => {
+      const pane = client("primary", 1);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        sessionPath: "/current.jsonl",
+      });
+      vi.mocked(pane.getNotes).mockResolvedValue({
+        status: "ok",
+        recoveredFromBackup: false,
+        snapshot: {
+          projectKey: "/work",
+          revision: 1,
+          document: roadmapDocument("/foreign.jsonl"),
+        },
+      });
+      vi.mocked(pane.selectWorkspace).mockResolvedValue(2);
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      const notesButton = await screen.findByRole("button", { name: "Notes" });
+      await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(notesButton);
+      fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+      vi.mocked(pane.waitForReady).mockRejectedValueOnce(new Error(rejectionMessage));
+      fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
+      fireEvent.click(screen.getByRole("button", { name: "Resume phase" }));
+
+      expect(await screen.findByText(rejectionMessage)).toBeTruthy();
+      expect(screen.getByRole("dialog")).toBeTruthy();
+    },
+  );
 
   it("renders the local-build identity in the agent footer", async () => {
     const pane = client("pane-1", 1);
@@ -596,6 +773,50 @@ describe("AgentPane lifecycle", () => {
       expect(pane.sendPrompt).toHaveBeenCalledWith(KEN_PROMPT, [], { kenSent: true }),
     );
     expect(pane.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it("keeps manual plan review pending when its durable checkpoint is rejected", async () => {
+    const pane = client("pane-plan-checkpoint", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(pane.acceptPlan).mockRejectedValue(new Error("Project Notes are missing"));
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+
+    act(() => nativeMocks.showPlanReview?.("# Pending plan"));
+    fireEvent.click(await screen.findByRole("button", { name: "Accept" }));
+
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith(null));
+    expect(screen.getByRole("button", { name: "Accept" })).toBeTruthy();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      "Plan approval was not saved. Fix Project Notes, then retry Accept.",
+      "error",
+    );
+  });
+
+  it("releases the manual plan mutation lock after a successful approval", async () => {
+    const pane = client("pane-plan-success", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+
+    act(() => nativeMocks.showPlanReview?.("# First plan"));
+    fireEvent.click(await screen.findByRole("button", { name: "Accept" }));
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledTimes(1));
+    act(() => nativeMocks.onSessionReset?.(null));
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledTimes(1));
+
+    act(() => nativeMocks.showPlanReview?.("# Second plan"));
+    const secondAccept = await screen.findByRole("button", { name: "Accept" });
+    await waitFor(() => expect((secondAccept as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(secondAccept);
+
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledTimes(2));
+    act(() => nativeMocks.onSessionReset?.(null));
   });
 
   it("sends a hydrated Ken prompt once with kenSent metadata", async () => {

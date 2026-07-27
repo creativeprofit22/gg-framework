@@ -13,6 +13,19 @@ interface ReviewInternals {
 }
 
 describe("AgentSession Ideal review coverage gate", () => {
+  it("preserves the filesystem cwd instead of replacing it with its identity key", () => {
+    const cwd = "C:\\Work\\CaseSensitive";
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      cwd,
+      transient: true,
+      systemPrompt: "test",
+    });
+
+    expect(session.getState().cwd).toBe(cwd);
+  });
+
   it("repeats fail-closed follow-ups until every post-injection changed file is read", () => {
     const session = new AgentSession({
       provider: "anthropic",

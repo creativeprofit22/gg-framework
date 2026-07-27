@@ -308,6 +308,137 @@ describe("ProjectNotes", () => {
     expect(screen.getByRole("tab", { name: "Roadmap" }).getAttribute("aria-selected")).toBe("true");
   });
 
+  it("shows attached scope before Start, locks competing controls while pending, and closes on success", async () => {
+    const cwd = "/work/phase-start";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("free-form notes must stay out of the phase package");
+    const attached = reference("ref-start");
+    populated.references = [attached];
+    populated.phases = [
+      {
+        ...phase("start", "not-started"),
+        title: "Start contract",
+        referenceIds: [attached.id],
+        sourcePrompt: "Saved phase-only prompt",
+      },
+    ];
+    client.seed(cwd, populated);
+    let resolveStart!: (result: {
+      status: "accepted";
+      operationId: string;
+      session: { sessionId: string; sessionPath: string };
+      packageTokenCount: number;
+    }) => void;
+    const onStartPhase = vi.fn(
+      () =>
+        new Promise<{
+          status: "accepted";
+          operationId: string;
+          session: { sessionId: string; sessionPath: string };
+          packageTokenCount: number;
+        }>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    render(
+      <ProjectNotes
+        cwd={cwd}
+        client={client}
+        onStartPhase={onStartPhase}
+        onResumePhase={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Start phase: Start contract" }));
+    expect(onStartPhase).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "Attached references" })).toBeTruthy();
+    expect(screen.getAllByText("Evidence from owner/repo").length).toBeGreaterThan(0);
+    expect(screen.getByText("Saved phase-only prompt")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start phase" }));
+    expect(onStartPhase).toHaveBeenCalledExactlyOnceWith("start");
+    expect((screen.getByRole("button", { name: "Starting…" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect((screen.getByRole("button", { name: "Edit" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Status override") as HTMLSelectElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Archive phase" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect((screen.getByRole("checkbox") as HTMLInputElement).disabled).toBe(true);
+
+    await act(async () => {
+      resolveStart({
+        status: "accepted",
+        operationId: "operation-1",
+        session: { sessionId: "session-1", sessionPath: "/session-1.jsonl" },
+        packageTokenCount: 120,
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("announces retryable failure, returns focus, and turns an already-bound race into Resume", async () => {
+    const cwd = "/work/phase-recovery";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [
+      {
+        ...phase("recover", "not-started"),
+        title: "Recover phase",
+        attentionReason: "Previous prompt failed.",
+      },
+    ];
+    client.seed(cwd, populated);
+    const bound = { sessionId: "winner", sessionPath: "/winner.jsonl" };
+    const onStartPhase = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: "failed",
+        code: "launch-failed",
+        operationId: "operation-1",
+        message: "Could not create the phase session. Retry.",
+      })
+      .mockResolvedValueOnce({
+        status: "already-bound",
+        operationId: "operation-2",
+        session: bound,
+        packageTokenCount: 0,
+      });
+    const onResumePhase = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProjectNotes
+        cwd={cwd}
+        client={client}
+        onStartPhase={onStartPhase}
+        onResumePhase={onResumePhase}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Start phase: Recover phase" }));
+    expect(screen.getByText("Needs attention: Previous prompt failed.")).toBeTruthy();
+    const start = screen.getByRole("button", { name: "Start phase" });
+    fireEvent.click(start);
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Could not create the phase session. Retry.",
+    );
+    expect(screen.queryByText("Starting phase…")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(start));
+
+    fireEvent.click(start);
+    expect((await screen.findByRole("alert")).textContent).toContain("started in another window");
+    expect(screen.queryByText("Starting phase…")).toBeNull();
+    const resume = screen.getByRole("button", { name: "Resume phase" });
+    fireEvent.click(resume);
+    await waitFor(() => expect(onResumePhase).toHaveBeenCalledExactlyOnceWith(bound));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
   it("saves an exact prompt through the imperative handle and renders it in phase detail", async () => {
     const cwd = "/work/saved-prompt";
     const client = new FakeProjectNotesClient(cwd);

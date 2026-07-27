@@ -185,6 +185,39 @@ export type ProjectNotesSaveOutcome =
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption)
   | { status: "invalid"; error: NotesValidationError };
+export interface FrozenPhaseLaunchContext {
+  projectKey: string;
+  phase: NotesPhase;
+  references: NotesReference[];
+}
+
+export type ProjectNotesPhaseLaunchOutcome =
+  | {
+      status: "accepted";
+      snapshot: ProjectNotesSnapshot;
+      phase: NotesPhase;
+      references: NotesReference[];
+      session: NotesSessionLink;
+    }
+  | {
+      status: "already-bound";
+      snapshot: ProjectNotesSnapshot;
+      phase: NotesPhase;
+      references: NotesReference[];
+      session: NotesSessionLink;
+    }
+  | { status: "phase-not-found" }
+  | { status: "phase-archived" }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
+export type ProjectNotesPhaseLinkOutcome =
+  | { status: "ok"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
+  | { status: "phase-not-found" }
+  | { status: "phase-archived" }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
 export interface ProjectNotesPaths {
   directory: string;
   primary: string;
@@ -1140,6 +1173,132 @@ export class ProjectNotesRepository {
       await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
       await this.atomicWrite(paths.primary, serializeEnvelope(next));
       return { status: "ok", snapshot: toSnapshot(next) };
+    });
+  }
+
+  async launchPhase(
+    cwd: string,
+    phaseId: string,
+    createBinding: (context: FrozenPhaseLaunchContext) => Promise<NotesSessionLink>,
+  ): Promise<ProjectNotesPhaseLaunchOutcome> {
+    const projectKey = canonicalProjectKey(cwd);
+    const paths = this.paths(cwd);
+    await this.ensureDirectory(paths.directory);
+    return this.lock(paths.primary, async () => {
+      const current = await this.readCurrent(paths, projectKey);
+      if (current.status === "missing" || current.status === "corrupt") return current;
+      const phaseIndex = current.envelope.document.phases.findIndex(
+        (phase) => phase.id === phaseId,
+      );
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      const referencesById = new Map(
+        current.envelope.document.references.map((reference) => [reference.id, reference]),
+      );
+      const references = currentPhase.referenceIds.map((id) => referencesById.get(id)!);
+      if (currentPhase.session) {
+        return {
+          status: "already-bound",
+          snapshot: toSnapshot(current.envelope),
+          phase: structuredClone(currentPhase),
+          references: structuredClone(references),
+          session: { ...currentPhase.session },
+        };
+      }
+
+      const frozen: FrozenPhaseLaunchContext = {
+        projectKey,
+        phase: structuredClone(currentPhase),
+        references: structuredClone(references),
+      };
+      const session = await createBinding(frozen);
+      if (
+        !session.sessionId.trim() ||
+        (session.sessionPath !== null && !session.sessionPath.trim())
+      ) {
+        throw new Error("Phase binding callback returned an invalid session link.");
+      }
+      const document = structuredClone(current.envelope.document);
+      const boundPhase = document.phases[phaseIndex]!;
+      boundPhase.session = { ...session };
+      boundPhase.attentionReason = null;
+      document.updatedAt = new Date().toISOString();
+      const next: StoredProjectNotesV1 = {
+        storeVersion: 1,
+        projectKey,
+        revision: current.envelope.revision + 1,
+        document,
+      };
+      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
+      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      return {
+        status: "accepted",
+        snapshot: toSnapshot(next),
+        phase: structuredClone(boundPhase),
+        references: structuredClone(references),
+        session: { ...session },
+      };
+    });
+  }
+
+  async updatePhaseSessionLink(
+    cwd: string,
+    phaseId: string,
+    session: NotesSessionLink,
+  ): Promise<ProjectNotesPhaseLinkOutcome> {
+    if (
+      !session.sessionId.trim() ||
+      (session.sessionPath !== null && !session.sessionPath.trim())
+    ) {
+      throw new Error("Cannot store an invalid phase session link.");
+    }
+    return this.mutatePhaseLinkFields(cwd, phaseId, (phase) => {
+      phase.session = { ...session };
+    });
+  }
+
+  async recordPhaseLaunchAttention(
+    cwd: string,
+    phaseId: string,
+    reason: string,
+  ): Promise<ProjectNotesPhaseLinkOutcome> {
+    const boundedReason = reason.replace(/\s+/g, " ").trim().slice(0, 500);
+    return this.mutatePhaseLinkFields(cwd, phaseId, (phase) => {
+      phase.attentionReason = boundedReason || "Phase launch failed. Retry the phase action.";
+    });
+  }
+
+  private async mutatePhaseLinkFields(
+    cwd: string,
+    phaseId: string,
+    mutate: (phase: NotesPhase) => void,
+  ): Promise<ProjectNotesPhaseLinkOutcome> {
+    const projectKey = canonicalProjectKey(cwd);
+    const paths = this.paths(cwd);
+    await this.ensureDirectory(paths.directory);
+    return this.lock(paths.primary, async () => {
+      const current = await this.readCurrent(paths, projectKey);
+      if (current.status === "missing" || current.status === "corrupt") return current;
+      const phaseIndex = current.envelope.document.phases.findIndex(
+        (phase) => phase.id === phaseId,
+      );
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      const document = structuredClone(current.envelope.document);
+      const phase = document.phases[phaseIndex]!;
+      mutate(phase);
+      document.updatedAt = new Date().toISOString();
+      const next: StoredProjectNotesV1 = {
+        storeVersion: 1,
+        projectKey,
+        revision: current.envelope.revision + 1,
+        document,
+      };
+      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
+      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      return { status: "ok", snapshot: toSnapshot(next), phase: structuredClone(phase) };
     });
   }
 

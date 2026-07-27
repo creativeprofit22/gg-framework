@@ -11,7 +11,7 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Implementation status:** Phases 00–20 are complete and verified; Phase 21 is next.
+- **Implementation status:** Phases 00–21 are complete and verified; Phase 22 is next.
 - **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
@@ -27,9 +27,10 @@ This file is an implementation plan, not a storage surface for user roadmap data
 - **2026-07-25 committed-baseline audit (`d924aadf`):** Commit ancestry and source inspection confirm Phases 00–17 at the committed baseline that preceded the uncommitted Phase 18 implementation. The focused sidecar Notes matrix passed 37 tests, all 384 gg-app tests, and all 102 Rust tests passed. The ggcoder and gg-app typechecks, gg-app lint/format, production build, roadmap coverage check, and diff checks also passed.
 - **2026-07-25 Phase 18 evidence:** Commit `6e9569b3` adds strict original-v3 archive-shape compatibility plus ordered create, inspect, edit, move, status override, cancel, archive, and position-preserving restore flows. The focused release reruns passed 67 gg-app tests across 5 files and 35 sidecar repository/route tests across 2 files; the broader recorded gate passed app and ggcoder typechecks/builds, app tests, lint, format, generated audits, Rust tests, and diff checks.
 - **2026-07-26 Phase 20 evidence:** Ken prompt fences now dispatch typed current-send, authoritative fresh-send, manual/Autopilot Notes save-preview, and save-commit actions. The full gg-app suite passed 481 tests across 49 files; all 103 Rust tests passed. App check/lint/format/build, ggcoder build, sidecar bundle, all generated-output audits, and diff checks passed. Desktop and 320 px rendered evidence covers default, expanded, manual preview, replacement, pending, success, and failure states; performance telemetry and a native Tauri interaction smoke remain unverified.
-- **Next phase:** Phase 21 — Launch one bound session with isolated phase context.
+- **2026-07-27 Phase 21 evidence:** Phase Start now locks the project/phase transaction, persists one versioned phase-only context before binding, broadcasts the committed link before reset/Plan Mode/first prompt, and resumes the same conversation across restart, compaction, and approval checkpoints. The current audit passed all 2,046 ggcoder tests with 15 explicit platform skips, all 521 gg-app tests, and all 111 Rust tests. Both package typechecks, root lint, targeted formatting, roadmap coverage, diff checks, and generated-output audits pass; the audit's one caught-error lint finding was fixed by preserving the failed Plan Mode restoration as the `AggregateError` cause.
+- **Next phase:** Phase 22 — Derive lifecycle status from authoritative events.
 - **Track A freeze:** Complete at `7c1d4a13`; the three-OS matrix, workspace memory evidence, and two-window Windows desktop timeout smoke are green. Subsequent commits add Track B Notes behavior without changing the frozen Track A lifecycle implementation; `0c6fe66b` has no separate Actions run because CI triggers only for `main` pushes and pull requests.
-- **Later-track audit:** Phases 15–20 are complete; Phases 21–26 have not started. Phase 20's duplicate-send and stale-session hard stop is satisfied by exact-call-count, reset-ordering, timeout, rejection, and prompt-recovery tests.
+- **Later-track audit:** Phases 15–21 are complete; Phases 22–26 have not started. Phase 21's atomic launch/context hard stop is satisfied by repository race, exact reset/prompt ordering, durable metadata, compaction/restart, typed IPC, and Start/Resume UI tests.
 - **Notes baseline:** Notes retains Now, Next, Handoff, free-form Reference, and Done / Archive semantics inside a four-tab shell. Roadmap provides ordered phase CRUD and lifecycle controls; the shared structured-reference library now provides canonical deduplication, repository grouping, exact source opening, conflict-replayed CRUD, and many-to-many phase links.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -1014,7 +1015,7 @@ All external references are evidence only. Copy behavior, not source text, unles
 
 ## Phase 21 — Launch one bound session with isolated phase context
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Outcome:** Start phase atomically creates one fresh bound Plan Mode session, sends only its compact phase package, and resumes that same session.
 
@@ -1054,7 +1055,15 @@ All external references are evidence only. Copy behavior, not source text, unles
 - Reference IDs and retrieval metadata survive compaction; restart/Resume reconstructs the same package without unrelated or full MCP content.
 - A token-counted snapshot and captured session/phase IDs prove context isolation through start, approval, implementation, restart, and resume.
 
-**Hard stop:** Do not add automatic status until launch atomicity, context isolation, compaction, and resume pass as one end-to-end contract.
+**Completion evidence**
+
+- **Atomicity and context:** The focused ggcoder matrix passed 123 tests across the strict phase renderer, repository race, mutation conflicts, route harness, session metadata, restart, and compaction. Golden/injection tests preserve every linked identity and coordinate, reject malformed/cross-project metadata, and enforce a 16,000-token package ceiling.
+- **App and native boundary:** The focused app matrix passed 109 tests, including one typed Start call with no separate New Session/send, matching reset wait, bound-path Resume, attachment preflight, pending locks, failure focus return, and already-bound recovery. All 110 locked Rust tests passed, including encoded IDs and typed conflict/transport handling.
+- **Full release gates:** Under an isolated Windows-native home, the current suite passes all 2,046 ggcoder tests with 15 explicit platform skips, all 521 gg-app tests, and all 111 locked Rust tests. Both package typechecks, root lint, targeted formatting, roadmap coverage, diff checks, and all generated-output audits pass. The recorded production builds and sidecar bundle also pass.
+- **Rendered/accessibility evidence:** Browser-hosted desktop and 360 px captures are recorded at `.gg/evidence/phase21-browser-desktop.png` and `.gg/evidence/phase21-browser-narrow.png`; the Tauri-gated entry intentionally remains blank outside native startup. Automated/source evidence covers native semantics, keyboard focus return, live status/alert roles, disabled duplicate actions, 320 px reflow CSS, reduced motion, forced-colors borders, long content, and 50-reference density.
+- **Honest limits:** Native Tauri Start/Resume interaction, screen-reader speech, automated accessibility scanning, rendered forced-colors/200% modes, and field-performance telemetry remain unverified; the browser captures prove only the Tauri startup gate, not the native Notes state.
+
+**Hard stop:** Satisfied — launch atomicity, context isolation, durable compaction/restart metadata, checkpoint link synchronization, and bound Resume pass together; Phase 22 may add automatic status without changing the Phase 21 transaction.
 
 ## Phase 22 — Derive lifecycle status from authoritative events
 

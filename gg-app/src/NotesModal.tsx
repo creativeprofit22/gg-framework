@@ -13,7 +13,9 @@ import type {
   NotesPhaseStatus,
   NotesReference,
   NotesReferenceOperationResult,
+  NotesSessionLink,
   NotesTask,
+  PhaseStartResult,
 } from "./notes-types";
 
 type NotesTab = "overview" | "roadmap" | "reference" | "archive";
@@ -66,6 +68,10 @@ interface Props {
     phaseId: string,
   ): Promise<NotesReferenceOperationResult>;
   openSource?: OpenReferenceUrl;
+  onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onResumePhase(link: NotesSessionLink): Promise<void>;
+  phaseActionDisabled: boolean;
+  onPhaseActionSuccess(): void;
   onChangeHandoff(text: string): void;
   onHandoffPresented(text: string, updatedAt: string): void;
   onClose(): void;
@@ -111,6 +117,10 @@ export function NotesModal({
   onLinkReferenceToPhase,
   onUnlinkReferenceFromPhase,
   openSource,
+  onStartPhase,
+  onResumePhase,
+  phaseActionDisabled,
+  onPhaseActionSuccess,
   onChangeHandoff,
   onHandoffPresented,
   onClose,
@@ -271,6 +281,10 @@ export function NotesModal({
                   onArchivePhase={onArchivePhase}
                   onLinkReferenceToPhase={onLinkReferenceToPhase}
                   onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
+                  onStartPhase={onStartPhase}
+                  onResumePhase={onResumePhase}
+                  actionDisabled={phaseActionDisabled}
+                  onActionSuccess={onPhaseActionSuccess}
                   onCreateReference={() => {
                     selectTab("reference");
                     setReferenceCreateRequest((request) => request + 1);

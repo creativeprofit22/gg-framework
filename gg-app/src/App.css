@@ -2528,6 +2528,53 @@ body {
   font-size: 11px;
   line-height: 1.45;
 }
+.notes-phase-execution {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.notes-phase-execution h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+.notes-phase-execution p {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.notes-phase-execution .notes-phase-attention {
+  border-inline-start: 3px solid var(--warning);
+  padding-inline-start: 8px;
+  color: var(--text);
+}
+.notes-phase-action-status,
+.notes-phase-action-error {
+  grid-column: 1 / -1;
+  min-height: 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.notes-phase-action-status:empty {
+  display: none;
+}
+.notes-phase-action-error {
+  border-inline-start: 3px solid var(--error);
+  padding-inline-start: 8px;
+  color: var(--error);
+}
+.notes-roadmap button:disabled,
+.notes-phase-reference-options input:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
 .notes-add-controls button,
 .notes-task-actions button,
 .notes-archive-toggle {
@@ -2653,6 +2700,7 @@ body {
   .notes-roadmap-summary,
   .notes-section,
   .notes-phase-detail,
+  .notes-phase-execution,
   .notes-reference-form,
   .notes-reference-detail,
   .notes-reference-row,
@@ -2684,6 +2732,7 @@ body {
     border-inline-start-color: Highlight;
   }
   .notes-reference-form [aria-invalid="true"],
+  .notes-phase-action-error,
   .notes-reference-error,
   .notes-reference-error-summary {
     border-color: Mark;
@@ -2737,6 +2786,7 @@ body {
   }
   .notes-phase-content,
   .notes-phase-controls,
+  .notes-phase-execution,
   .notes-reference-metadata {
     grid-template-columns: 1fr;
   }
@@ -2775,7 +2825,11 @@ body {
   .notes-phase-secondary-actions {
     justify-content: flex-start;
   }
+  .notes-phase-execution .notes-roadmap-primary {
+    width: 100%;
+  }
   .notes-phase-secondary-actions button,
+  .notes-phase-execution .notes-roadmap-primary,
   .notes-reference-new,
   .notes-reference-form-actions button,
   .notes-reference-detail-actions button,

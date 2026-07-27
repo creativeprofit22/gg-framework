@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 export type SessionMutationKind =
   | "new-session"
   | "task-run"
+  | "phase-start"
+  | "prompt-start"
   | "manual-plan-accept"
   | "autopilot-plan-accept";
 
@@ -50,9 +52,9 @@ export function appSidecarSessionBusyConflictBody(
 /**
  * Fail-fast lifecycle gate owned by one logical sidecar session.
  *
- * Reset producers must never queue: a delayed reset could silently retarget a
- * prompt after its caller has moved on. The current owner completes atomically;
- * competitors receive a typed 409 and may be retried explicitly by the caller.
+ * Session transitions and prompt acceptance must never queue behind each other:
+ * a delayed reset could silently retarget a prompt after its caller has moved on.
+ * The current owner completes atomically; competitors receive a typed 409.
  */
 export class AppSidecarSessionMutationCoordinator {
   #owner: SessionMutationOwner | null = null;

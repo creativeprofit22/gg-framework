@@ -31,6 +31,7 @@ import { getClaudeCliUserAgent } from "./claude-code-version.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./oauth/kimi.js";
 import {
   SessionManager,
+  RequiredSessionPersistenceError,
   KEN_TURN_CUSTOM_KIND,
   AUTOPILOT_MARKER_CUSTOM_KIND,
   APP_MARKER_CUSTOM_KIND,
@@ -64,6 +65,7 @@ import {
   type ProcessManager,
 } from "../tools/index.js";
 import type { BackgroundTaskSnapshot } from "./process-manager.js";
+import { canonicalProjectKey } from "../project-notes-repository.js";
 import { buildSubAgentCompletionFollowUp, type SubAgentManager } from "./subagent-manager.js";
 import { applyAsyncSubagentPolicy } from "./subagent-policy.js";
 import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
@@ -97,6 +99,13 @@ import { buildRegroundingMessage } from "./regrounding.js";
 import { wrapSteeringText, STEERING_PREFIX } from "./steering.js";
 import { findUserSessionPrompt, getUserSessionPrompt } from "./session-preview.js";
 import { normalizeMessageImages } from "./message-images.js";
+import {
+  ACTIVE_PHASE_CONTEXT_KIND,
+  parseActivePhaseContext,
+  renderActivePhasePackage,
+  type ActivePhaseContextV1,
+  type ActivePhaseExecutionStage,
+} from "../phase-context.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -409,6 +418,9 @@ export class AgentSession {
    *  set, the system prompt carries the `[DONE:n]` progress contract so the
    *  model emits step-completion markers the UI's plan-progress widget reads. */
   private approvedPlanPath?: string;
+  /** Durable selected Roadmap phase. Kept outside transcript markers so it can
+   * rebuild the uncached prompt tail and approval state before the next turn. */
+  private activePhaseContext?: ActivePhaseContextV1;
 
   private sessionId = "";
   /** Stable identity shared by compaction and approved-plan checkpoint files. */
@@ -822,6 +834,7 @@ export class AgentSession {
       const fullPrompt = await this.resolvePromptCommandText(content);
 
       if (fullPrompt) {
+        await this.ensureActivePhaseSessionMetadata();
         // Inject the prompt-template command as a user message to the agent
         const userMessage: Message = { role: "user", content: fullPrompt };
         this.messages.push(userMessage);
@@ -839,6 +852,7 @@ export class AgentSession {
       return;
     }
 
+    await this.ensureActivePhaseSessionMetadata();
     // Push user message
     const userMessage: Message = { role: "user", content };
     this.messages.push(userMessage);
@@ -861,6 +875,7 @@ export class AgentSession {
       return;
     }
 
+    await this.ensureActivePhaseSessionMetadata();
     const resolvedText = (await this.resolvePromptCommandText(text)) ?? text;
     const parts = this.buildAttachmentParts(resolvedText, attachments);
     if (parts.length === 0) return;
@@ -1254,6 +1269,7 @@ export class AgentSession {
             this.compactionRetryAfter = Date.now() + 30_000;
           }
         } catch (error) {
+          if (error instanceof RequiredSessionPersistenceError) throw error;
           this.compactionRetryAfter = Date.now() + 30_000;
           if (isAbortError(error) || this.opts.signal?.aborted) throw error;
           log(
@@ -1387,6 +1403,7 @@ export class AgentSession {
             });
           } catch (error) {
             this.messages = messages;
+            if (error instanceof RequiredSessionPersistenceError) throw error;
             this.compactionRetryAfter = Date.now() + 30_000;
             if (force || isAbortError(error) || this.opts.signal?.aborted) throw error;
             log(
@@ -1672,6 +1689,7 @@ export class AgentSession {
       await this.rePersistKenTurns();
       await this.rePersistAutopilotMarkers();
       await this.rePersistAppMarkers();
+      await this.rePersistActivePhaseContext();
       // Persist the compaction counts so a resumed session's quiet notice can
       // show the same "N → M messages" summary the live run did.
       await this.persistAppMarker("compaction", {
@@ -1688,14 +1706,19 @@ export class AgentSession {
 
   async newSession(preserveConversation = false): Promise<void> {
     // Approved-plan execution is a clean checkpoint of the same conversation;
-    // explicit new sessions reset the conversation identity.
+    // explicit new sessions reset the conversation identity and phase binding.
     if (!preserveConversation) {
       this.conversationId = "";
       this.sessionPreview = "";
+      this.activePhaseContext = undefined;
     }
-    // A fresh session drops any in-flight plan state so its prompt is clean.
+    // A fresh explicit session drops plan state. A preserved phase checkpoint
+    // reconstructs it from durable execution metadata below.
     this.planModeRef.current = false;
     this.approvedPlanPath = undefined;
+    if (preserveConversation && this.activePhaseContext) {
+      this.restorePlanStateFromActivePhase(this.activePhaseContext);
+    }
     // Display-only history belongs to the OLD session. Without this, stale Ken
     // turns / autopilot verdicts / app markers linger in memory, show up in the
     // new session's /history, and get re-persisted into the new file by the
@@ -1734,6 +1757,7 @@ export class AgentSession {
     } else {
       await this.createNewSession();
       await this.subAgentManager?.resetParentSession(this.sessionId);
+      await this.rePersistActivePhaseContext();
     }
     this.eventBus.emit("session_start", { sessionId: this.sessionId });
   }
@@ -1932,12 +1956,16 @@ export class AgentSession {
   }
 
   private withSystemPromptTail(basePrompt: string): string {
-    if (!this.opts.getSystemPromptTail) return basePrompt;
-    return `${basePrompt}\n\n<!-- uncached -->\n${this.opts.getSystemPromptTail()}`;
+    const tails: string[] = [];
+    if (this.opts.getSystemPromptTail) tails.push(this.opts.getSystemPromptTail());
+    if (this.activePhaseContext) {
+      tails.push(renderActivePhasePackage(this.activePhaseContext).systemPromptSuffix);
+    }
+    if (tails.length === 0) return basePrompt;
+    return `${basePrompt}\n\n<!-- uncached -->\n${tails.join("\n\n")}`;
   }
 
   private refreshSystemPromptTail(): void {
-    if (!this.opts.getSystemPromptTail) return;
     const content = this.withSystemPromptTail(this.baseSystemPrompt);
     if (this.messages[0]?.role === "system") {
       this.messages[0] = { role: "system", content };
@@ -1948,6 +1976,91 @@ export class AgentSession {
 
   getMessages(): Message[] {
     return this.messages;
+  }
+
+  getActivePhaseContext(): ActivePhaseContextV1 | undefined {
+    return this.activePhaseContext ? structuredClone(this.activePhaseContext) : undefined;
+  }
+
+  async setActivePhaseContext(context: ActivePhaseContextV1 | undefined): Promise<void> {
+    if (context === undefined) {
+      this.activePhaseContext = undefined;
+      this.refreshSystemPromptTail();
+      return;
+    }
+    const parsed = parseActivePhaseContext(context);
+    if (!parsed) throw new Error("Cannot activate malformed phase context.");
+    if (parsed.projectKey !== canonicalProjectKey(this.cwd)) {
+      throw new Error("Cannot activate phase context from another project.");
+    }
+    // Rendering applies the deterministic package budget before metadata is persisted.
+    const activeContext = await this.rePersistActivePhaseContext(
+      renderActivePhasePackage(parsed).context,
+    );
+    if (!activeContext) throw new Error("Cannot activate phase context without metadata.");
+    this.restorePlanStateFromActivePhase(activeContext);
+    this.refreshSystemPromptTail();
+  }
+
+  async updateActivePhaseStage(
+    executionStage: ActivePhaseExecutionStage,
+    approvedPlanPath?: string,
+  ): Promise<ActivePhaseContextV1> {
+    if (!this.activePhaseContext) throw new Error("No active phase context is bound.");
+    const activeContext = await this.rePersistActivePhaseContext({
+      ...this.activePhaseContext,
+      executionStage,
+      ...(approvedPlanPath ? { approvedPlanPath } : { approvedPlanPath: undefined }),
+    });
+    if (!activeContext) throw new Error("No active phase context is bound.");
+    this.restorePlanStateFromActivePhase(activeContext);
+    await this.rebuildSystemPromptInPlace();
+    this.refreshSystemPromptTail();
+    return structuredClone(activeContext);
+  }
+
+  private restorePlanStateFromActivePhase(context: ActivePhaseContextV1): void {
+    this.planModeRef.current =
+      context.executionStage === "planning" || context.executionStage === "awaiting-approval";
+    this.approvedPlanPath =
+      context.executionStage === "implementing" ? context.approvedPlanPath : undefined;
+  }
+
+  private async ensureActivePhaseSessionMetadata(): Promise<void> {
+    const context = this.activePhaseContext;
+    if (!context || !this.sessionPath) return;
+    if (
+      context.session.sessionId === this.sessionId &&
+      context.session.sessionPath === this.sessionPath
+    ) {
+      return;
+    }
+    await this.rePersistActivePhaseContext(context);
+  }
+
+  private async rePersistActivePhaseContext(
+    context: ActivePhaseContextV1 | undefined = this.activePhaseContext,
+  ): Promise<ActivePhaseContextV1 | undefined> {
+    if (!context) return undefined;
+    const synchronizedContext = this.sessionId
+      ? {
+          ...context,
+          session: { sessionId: this.sessionId, sessionPath: this.sessionPath || null },
+        }
+      : context;
+    if (this.sessionPath) {
+      const entry: CustomEntry = {
+        type: "custom",
+        kind: ACTIVE_PHASE_CONTEXT_KIND,
+        id: crypto.randomUUID(),
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        data: synchronizedContext,
+      };
+      await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
+    }
+    this.activePhaseContext = synchronizedContext;
+    return synchronizedContext;
   }
 
   getTurnMetrics(): TurnMetricPayload[] {
@@ -2299,7 +2412,22 @@ export class AgentSession {
   }
 
   private async loadExistingSession(sessionPath: string): Promise<void> {
-    const loaded = await this.sessionManager.load(sessionPath);
+    const expectedProjectKey = canonicalProjectKey(this.cwd);
+    const loaded = await this.sessionManager.load(sessionPath, {
+      projectKey: expectedProjectKey,
+    });
+    const storedProjectKey = canonicalProjectKey(loaded.header.cwd);
+    if (storedProjectKey !== expectedProjectKey) {
+      throw new Error(
+        `Cannot resume a session from another project (requested "${expectedProjectKey}", session belongs to "${storedProjectKey}").`,
+      );
+    }
+    const storedActivePhase = this.sessionManager.getActivePhaseContext(loaded.entries);
+    if (storedActivePhase && storedActivePhase.projectKey !== expectedProjectKey) {
+      throw new Error(
+        `Cannot resume phase context from another project (requested "${expectedProjectKey}", context belongs to "${storedActivePhase.projectKey}").`,
+      );
+    }
     // Use the leaf from the header to walk the correct branch
     const loadedMessages = this.sessionManager.getMessages(loaded.entries, loaded.header.leafId);
     this.conversationId = loaded.header.conversationId ?? loaded.header.id;
@@ -2319,6 +2447,14 @@ export class AgentSession {
     // Restore app transcript markers (plan banner / task header / errors / hints).
     this.appMarkers = this.sessionManager.getAppMarkers(loaded.entries);
     this.turnMetrics = this.sessionManager.getTurnMetrics(loaded.entries);
+    this.activePhaseContext = this.sessionManager.getActivePhaseContext(loaded.entries, {
+      projectKey: expectedProjectKey,
+    });
+    if (this.activePhaseContext) {
+      this.restorePlanStateFromActivePhase(this.activePhaseContext);
+      await this.rebuildSystemPromptInPlace();
+      this.refreshSystemPromptTail();
+    }
 
     // Track the current leaf for subsequent entries
     this.currentLeafId = loaded.header.leafId;
@@ -2402,6 +2538,7 @@ export class AgentSession {
       await this.rePersistKenTurns();
       await this.rePersistAutopilotMarkers();
       await this.rePersistAppMarkers();
+      await this.rePersistActivePhaseContext();
       // Record this load-time auto-compaction's counts for the resumed notice.
       await this.persistAppMarker("compaction", {
         originalCount: compacted.result.originalCount,

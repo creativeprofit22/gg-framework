@@ -13,6 +13,12 @@ import type { AgentTurnTiming } from "@kenkaiiii/gg-agent";
 import { log } from "./logger.js";
 import { encodeCwd } from "./encode-cwd.js";
 import type { CompletedItem } from "../ui/app-items.js";
+import { canonicalProjectKey } from "../project-notes-repository.js";
+import {
+  ACTIVE_PHASE_CONTEXT_KIND,
+  parseActivePhaseContext,
+  type ActivePhaseContextV1,
+} from "../phase-context.js";
 import {
   archiveColdSession,
   archiveSessionPath,
@@ -273,6 +279,13 @@ export interface BranchInfo {
 
 // ── Session Manager ────────────────────────────────────────
 
+export class RequiredSessionPersistenceError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "RequiredSessionPersistenceError";
+  }
+}
+
 export class SessionManager {
   private static activePathsByRoot = new Map<string, Map<string, number>>();
   private static maintenanceByRoot = new Map<string, Promise<SessionMaintenanceMetrics>>();
@@ -287,19 +300,26 @@ export class SessionManager {
   }
 
   /**
-   * Session persistence must never crash a live session. Disk-full (ENOSPC),
-   * permission, or quota errors during transcript writes are reported once
-   * per error code and otherwise swallowed — the in-memory session keeps going.
+   * Best-effort transcript persistence reports disk-full (ENOSPC), permission,
+   * and quota errors once per code while allowing the live session to continue.
+   * Required phase metadata uses the same reporting hook but rejects its caller.
    */
-  private handlePersistError(error: unknown, op: string): void {
+  private handlePersistError(error: unknown, op: string, required = false): void {
     const err = error as NodeJS.ErrnoException;
     const code = err?.code ?? "UNKNOWN";
     if (this.warnedPersistCodes.has(code)) return;
     this.warnedPersistCodes.add(code);
-    log("WARN", "session", `Session persistence failed (${op}); continuing without saving`, {
-      code,
-      message: err?.message ?? String(error),
-    });
+    log(
+      required ? "ERROR" : "WARN",
+      "session",
+      required
+        ? `Required session persistence failed (${op})`
+        : `Session persistence failed (${op}); continuing without saving`,
+      {
+        code,
+        message: err?.message ?? String(error),
+      },
+    );
     this.onPersistError?.(err);
   }
 
@@ -371,7 +391,10 @@ export class SessionManager {
     ]);
   }
 
-  async load(sessionPath: string): Promise<{
+  async load(
+    sessionPath: string,
+    expected?: { projectKey?: string },
+  ): Promise<{
     header: SessionHeader;
     entries: SessionEntry[];
     path: string;
@@ -413,7 +436,7 @@ export class SessionManager {
           (entry as MessageEntry).id = crypto.randomUUID();
           (entry as MessageEntry).parentId = null;
         }
-        entries.push(await hydrateSessionEntry(entry, effectivePath));
+        entries.push(entry);
       } catch {
         // Skip malformed JSON lines — cold migration preserves their raw bytes
         // so a future recovery tool still has a chance to repair them.
@@ -423,7 +446,21 @@ export class SessionManager {
     if (!header) {
       throw new Error(`Invalid session file: no header found in ${sessionPath}`);
     }
-    return { header, entries, path: effectivePath };
+    const storedProjectKey = canonicalProjectKey(header.cwd);
+    if (expected?.projectKey !== undefined && storedProjectKey !== expected.projectKey) {
+      throw new Error(
+        `Cannot resume a session from another project (requested "${expected.projectKey}", session belongs to "${storedProjectKey}").`,
+      );
+    }
+    const hydratedEntries: SessionEntry[] = [];
+    for (const entry of entries) {
+      try {
+        hydratedEntries.push(await hydrateSessionEntry(entry, effectivePath));
+      } catch {
+        // Preserve readable entries around structurally malformed records.
+      }
+    }
+    return { header, entries: hydratedEntries, path: effectivePath };
   }
 
   private async readSessionInfo(
@@ -669,17 +706,38 @@ export class SessionManager {
     return metrics;
   }
 
+  private async appendEntryUnsafe(sessionPath: string, entry: SessionEntry): Promise<boolean> {
+    // Persist a sanitized, bounded clone. The live conversation remains
+    // untouched so the current turn keeps full tool output and media.
+    const safeEntry = redactValue(entry, { secrets: environmentSecrets(process.env) });
+    const writablePath = await thawSessionArchive(sessionPath);
+    const normalized = await normalizeSessionEntryForStorage(safeEntry, writablePath);
+    if (normalized === null) return false;
+    await fs.appendFile(writablePath, `${JSON.stringify(normalized)}\n`, "utf-8");
+    return true;
+  }
+
   async appendEntry(sessionPath: string, entry: SessionEntry): Promise<void> {
     try {
-      // Persist a sanitized, bounded clone. The live conversation remains
-      // untouched so the current turn keeps full tool output and media.
-      const safeEntry = redactValue(entry, { secrets: environmentSecrets(process.env) });
-      const writablePath = await thawSessionArchive(sessionPath);
-      const normalized = await normalizeSessionEntryForStorage(safeEntry, writablePath);
-      if (normalized === null) return;
-      await fs.appendFile(writablePath, `${JSON.stringify(normalized)}\n`, "utf-8");
+      await this.appendEntryUnsafe(sessionPath, entry);
     } catch (error) {
       this.handlePersistError(error, "appendEntry");
+    }
+  }
+
+  async appendRequiredEntry(sessionPath: string, entry: SessionEntry): Promise<void> {
+    if (entry.type !== "custom" || entry.kind !== ACTIVE_PHASE_CONTEXT_KIND) {
+      throw new Error("Only active phase context metadata may use required session persistence.");
+    }
+    try {
+      const appended = await this.appendEntryUnsafe(sessionPath, entry);
+      if (!appended) throw new Error("Required active phase context metadata was omitted.");
+    } catch (error) {
+      this.handlePersistError(error, "appendRequiredEntry", true);
+      throw new RequiredSessionPersistenceError(
+        "Failed to persist required active phase context.",
+        { cause: error },
+      );
     }
   }
 
@@ -764,6 +822,27 @@ export class SessionManager {
       const item = payload?.version === 1 ? payload.item : undefined;
       return isCompletedItemLike(item) ? [item] : [];
     });
+  }
+
+  /** Return the last valid durable active-phase record. Malformed entries are
+   * ignored because transcript recovery must remain possible after corruption. */
+  getActivePhaseContext(
+    entries: SessionEntry[],
+    expected?: { projectKey?: string; phaseId?: string },
+  ): ActivePhaseContextV1 | undefined {
+    let activeContext: ActivePhaseContextV1 | undefined;
+    for (const entry of entries) {
+      if (entry.type !== "custom" || entry.kind !== ACTIVE_PHASE_CONTEXT_KIND) continue;
+      const parsed = parseActivePhaseContext(entry.data, expected);
+      if (parsed) {
+        activeContext = parsed;
+      } else {
+        log("WARN", "session", "Ignoring malformed active phase context metadata", {
+          entryId: entry.id,
+        });
+      }
+    }
+    return activeContext;
   }
 
   /** Read all persisted Ken turns in file order. Returns them regardless of

@@ -12,6 +12,7 @@ export default defineConfig({
       "scripts/update-with-local-fixes.test.ts",
       "scripts/build-local-hotfix.test.ts",
       "scripts/smoke-packaged-windows.test.mjs",
+      "scripts/phase-21-native-smoke.test.mjs",
       "scripts/workspace-shell-evidence.test.mjs",
     ],
   },

@@ -6,6 +6,8 @@ import type {
   NotesPhaseStatus,
   NotesReference,
   NotesReferenceOperationResult,
+  NotesSessionLink,
+  PhaseStartResult,
 } from "./notes-types";
 
 interface RoadmapProps {
@@ -25,6 +27,10 @@ interface RoadmapProps {
     phaseId: string,
   ): Promise<NotesReferenceOperationResult>;
   onCreateReference(): void;
+  onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onResumePhase(link: NotesSessionLink): Promise<void>;
+  actionDisabled: boolean;
+  onActionSuccess(): void;
 }
 
 interface ArchiveProps {
@@ -60,6 +66,10 @@ export function NotesRoadmap({
   onLinkReferenceToPhase,
   onUnlinkReferenceFromPhase,
   onCreateReference,
+  onStartPhase,
+  onResumePhase,
+  actionDisabled,
+  onActionSuccess,
 }: RoadmapProps): React.ReactElement {
   const visiblePhases = phases.filter((phase) => phase.archivedAt === null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -68,6 +78,7 @@ export function NotesRoadmap({
   const [goal, setGoal] = useState("");
   const [doneWhen, setDoneWhen] = useState("");
   const [announcement, setAnnouncement] = useState("");
+  const [pendingPhaseId, setPendingPhaseId] = useState<string | null>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
   const newPhaseButtonRef = useRef<HTMLButtonElement>(null);
   const phaseTitleRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -132,6 +143,7 @@ export function NotesRoadmap({
           className="notes-roadmap-new"
           aria-expanded={showCreate}
           aria-controls="notes-roadmap-create"
+          disabled={actionDisabled || pendingPhaseId !== null}
           onClick={() => {
             if (showCreate) {
               closeCreate();
@@ -215,6 +227,7 @@ export function NotesRoadmap({
                     className="notes-roadmap-title"
                     aria-label={`Inspect phase: ${phase.title}`}
                     aria-pressed={selected}
+                    disabled={pendingPhaseId !== null}
                     onClick={() => selectPhase(phase.id)}
                   >
                     {phase.title}
@@ -232,6 +245,7 @@ export function NotesRoadmap({
                     type="button"
                     className="notes-roadmap-primary"
                     aria-label={`${action} phase: ${phase.title}`}
+                    disabled={pendingPhaseId !== null}
                     onClick={() => selectPhase(phase.id)}
                   >
                     {action}
@@ -300,6 +314,11 @@ export function NotesRoadmap({
               });
             }}
             onCreateReference={onCreateReference}
+            onStartPhase={onStartPhase}
+            onResumePhase={onResumePhase}
+            actionDisabled={actionDisabled}
+            onPendingChange={(pending) => setPendingPhaseId(pending ? selectedPhase.id : null)}
+            onActionSuccess={onActionSuccess}
           />
         )}
       </div>
@@ -325,6 +344,11 @@ function PhaseDetail({
   onLinkReference,
   onUnlinkReference,
   onCreateReference,
+  onStartPhase,
+  onResumePhase,
+  actionDisabled,
+  onPendingChange,
+  onActionSuccess,
 }: {
   phase: NotesPhase;
   references: NotesReference[];
@@ -339,11 +363,77 @@ function PhaseDetail({
   onLinkReference(referenceId: string): void;
   onUnlinkReference(referenceId: string): void;
   onCreateReference(): void;
+  onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onResumePhase(link: NotesSessionLink): Promise<void>;
+  actionDisabled: boolean;
+  onPendingChange(pending: boolean): void;
+  onActionSuccess(): void;
 }): React.ReactElement {
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(phase.title);
   const [goal, setGoal] = useState(phase.goal);
   const [doneWhen, setDoneWhen] = useState(phase.doneWhen.join("\n"));
+  const [pending, setPending] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [actionStatus, setActionStatus] = useState("");
+  const [raceLink, setRaceLink] = useState<NotesSessionLink | null>(null);
+  const actionButtonRef = useRef<HTMLButtonElement>(null);
+  const action = primaryAction(phase);
+  const effectiveAction = raceLink ? "Resume" : action;
+  const resumeLink = raceLink ?? phase.session;
+  const controlsDisabled = actionDisabled || pending;
+
+  useEffect(() => {
+    if (phase.session) setRaceLink(null);
+  }, [phase.session]);
+
+  useEffect(() => {
+    if (!pending && actionError) actionButtonRef.current?.focus();
+  }, [pending, actionError]);
+
+  const runPhaseAction = async (): Promise<void> => {
+    if (controlsDisabled || effectiveAction === "Review") return;
+    const reportActionError = (message: string): void => {
+      setActionStatus("");
+      setActionError(message);
+    };
+    setPending(true);
+    onPendingChange(true);
+    setActionError("");
+    setActionStatus(effectiveAction === "Start" ? "Starting phase…" : "Resuming phase…");
+    try {
+      if (effectiveAction === "Start") {
+        const result = await onStartPhase(phase.id);
+        if (result.status === "accepted") {
+          setActionStatus("Phase started. Opening its planning session.");
+          onActionSuccess();
+          return;
+        }
+        if (result.status === "already-bound") {
+          setRaceLink(result.session);
+          reportActionError(
+            "This phase was started in another window. Resume the bound session instead.",
+          );
+        } else {
+          reportActionError(result.message);
+        }
+      } else if (resumeLink) {
+        await onResumePhase(resumeLink);
+        setActionStatus("Phase session resumed.");
+        onActionSuccess();
+        return;
+      } else {
+        reportActionError("This phase has no resumable session. Reopen Notes and retry.");
+      }
+    } catch (error) {
+      reportActionError(
+        error instanceof Error ? error.message : "The phase action failed. Try again.",
+      );
+    } finally {
+      setPending(false);
+      onPendingChange(false);
+    }
+  };
 
   const finishEdit = (save: boolean): void => {
     if (save && title.trim()) onEditPhase(phase.id, { title, goal, doneWhen: lines(doneWhen) });
@@ -360,6 +450,7 @@ function PhaseDetail({
         <div className="notes-phase-detail-actions">
           <button
             type="button"
+            disabled={controlsDisabled}
             onClick={() => {
               if (editing) {
                 finishEdit(false);
@@ -373,7 +464,7 @@ function PhaseDetail({
           >
             {editing ? "Close edit" : "Edit"}
           </button>
-          <button type="button" onClick={onClose}>
+          <button type="button" disabled={controlsDisabled} onClick={onClose}>
             Back to roadmap
           </button>
         </div>
@@ -394,6 +485,7 @@ function PhaseDetail({
               value={title}
               autoFocus
               required
+              disabled={controlsDisabled}
               onChange={(event) => setTitle(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key !== "Escape") return;
@@ -408,6 +500,7 @@ function PhaseDetail({
             <textarea
               id={`notes-phase-edit-goal-${phase.id}`}
               value={goal}
+              disabled={controlsDisabled}
               onChange={(event) => setGoal(event.target.value)}
             />
           </div>
@@ -416,14 +509,15 @@ function PhaseDetail({
             <textarea
               id={`notes-phase-edit-done-${phase.id}`}
               value={doneWhen}
+              disabled={controlsDisabled}
               onChange={(event) => setDoneWhen(event.target.value)}
             />
           </div>
           <div className="notes-phase-form-actions">
-            <button type="submit" disabled={!title.trim()}>
+            <button type="submit" disabled={!title.trim() || controlsDisabled}>
               Save changes
             </button>
-            <button type="button" onClick={() => finishEdit(false)}>
+            <button type="button" disabled={controlsDisabled} onClick={() => finishEdit(false)}>
               Cancel edit
             </button>
           </div>
@@ -509,7 +603,7 @@ function PhaseDetail({
         {references.length === 0 ? (
           <div className="notes-phase-references-empty">
             <p>Create a structured reference before attaching source context.</p>
-            <button type="button" onClick={onCreateReference}>
+            <button type="button" disabled={controlsDisabled} onClick={onCreateReference}>
               Create a reference
             </button>
           </div>
@@ -523,6 +617,7 @@ function PhaseDetail({
                     <input
                       type="checkbox"
                       checked={checked}
+                      disabled={controlsDisabled}
                       onChange={(event) => {
                         if (event.target.checked) onLinkReference(reference.id);
                         else onUnlinkReference(reference.id);
@@ -541,12 +636,63 @@ function PhaseDetail({
         )}
       </section>
 
+      <section
+        className="notes-phase-execution"
+        aria-labelledby={`notes-phase-execution-${phase.id}`}
+        aria-busy={pending}
+      >
+        <div>
+          <h4 id={`notes-phase-execution-${phase.id}`}>Phase session</h4>
+          <p>
+            {effectiveAction === "Start"
+              ? "Review the goal, completion criteria, saved prompt, and attached references above before starting."
+              : effectiveAction === "Resume"
+                ? "Continue the one coding session already bound to this phase."
+                : "This phase is available for scope review only."}
+          </p>
+          {phase.attentionReason && (
+            <p className="notes-phase-attention">Needs attention: {phase.attentionReason}</p>
+          )}
+        </div>
+        {effectiveAction !== "Review" && (
+          <button
+            ref={actionButtonRef}
+            type="button"
+            className="notes-roadmap-primary"
+            disabled={controlsDisabled}
+            onClick={() => void runPhaseAction()}
+          >
+            {pending
+              ? effectiveAction === "Start"
+                ? "Starting…"
+                : "Resuming…"
+              : effectiveAction === "Start"
+                ? "Start phase"
+                : "Resume phase"}
+          </button>
+        )}
+        <div
+          className="notes-phase-action-status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          {actionStatus}
+        </div>
+        {actionError && (
+          <div className="notes-phase-action-error" role="alert">
+            {actionError}
+          </div>
+        )}
+      </section>
+
       <div className="notes-phase-controls">
         <div className="notes-field notes-phase-status-control">
           <label htmlFor={`notes-phase-status-${phase.id}`}>Status override</label>
           <select
             id={`notes-phase-status-${phase.id}`}
             value={phase.status}
+            disabled={controlsDisabled}
             onChange={(event) => onChangePhaseStatus(event.target.value as NotesPhaseStatus)}
           >
             {STATUS_OPTIONS.map((option) => (
@@ -559,24 +705,24 @@ function PhaseDetail({
         <div className="notes-phase-secondary-actions">
           <button
             type="button"
-            disabled={position === 0}
+            disabled={controlsDisabled || position === 0}
             onClick={() => onMovePhase(phase.id, "up")}
           >
             Move up
           </button>
           <button
             type="button"
-            disabled={position === phaseCount - 1}
+            disabled={controlsDisabled || position === phaseCount - 1}
             onClick={() => onMovePhase(phase.id, "down")}
           >
             Move down
           </button>
           {phase.status !== "cancelled" && (
-            <button type="button" onClick={onCancelPhase}>
+            <button type="button" disabled={controlsDisabled} onClick={onCancelPhase}>
               Cancel phase
             </button>
           )}
-          <button type="button" onClick={onArchivePhase}>
+          <button type="button" disabled={controlsDisabled} onClick={onArchivePhase}>
             Archive phase
           </button>
         </div>

@@ -17,6 +17,7 @@ import { type SubAgentLine } from "./SubAgentFeed";
 import { playSound } from "./sounds";
 import { findCompletedSteps, countPlanSteps } from "./plan-steps";
 import type { PendingAttachment } from "./attachments";
+import { isPhaseLaunchErrorEvent } from "./notes-types";
 import type { Item } from "./transcript-types";
 
 /**
@@ -238,10 +239,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // canonical live-file count on session_reset; this content supplies the fallback
   // count when connected to an older sidecar.
   const planReviewContentRef = useRef<string | null>(null);
-  // A timeout recovery may apply a reset from the successful HTTP response before
-  // a delayed copy of the same SSE event arrives. Operation ids make that replay
-  // idempotent so it cannot clear a prompt sent after recovery.
+  // Timeout recovery and typed phase-launch failures may be replayed by the event
+  // bridge. Operation ids make both paths idempotent for user-visible state.
   const appliedSessionResetOperationsRef = useRef<Set<string>>(new Set());
+  const appliedPhaseLaunchErrorOperationsRef = useRef<Set<string>>(new Set());
 
   // Streaming deltas arrive faster than React can usefully render each one.
   // We buffer chunks in a ref and flush every 100ms — imperceptible for prose
@@ -746,6 +747,27 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           );
           break;
         }
+        case "compaction_sync_failed": {
+          const originalCount = typeof d.originalCount === "number" ? d.originalCount : undefined;
+          const newCount = typeof d.newCount === "number" ? d.newCount : undefined;
+          const id = compactionIdRef.current;
+          compactionIdRef.current = null;
+          setItems((prev) =>
+            prev.map((it) =>
+              it.kind === "compaction" && it.id === id
+                ? {
+                    ...it,
+                    status: "sync-failed" as const,
+                    originalCount,
+                    newCount,
+                    message: typeof d.message === "string" ? d.message : undefined,
+                    guidance: typeof d.guidance === "string" ? d.guidance : undefined,
+                  }
+                : it,
+            ),
+          );
+          break;
+        }
         case "run_cancelling":
           setRunning(true);
           setState((previous) =>
@@ -760,6 +782,30 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           );
           setStatus("cancellation failed; agent still running");
           break;
+        case "phase_launch_error": {
+          if (!isPhaseLaunchErrorEvent(e)) break;
+          const failure = e.data;
+          if (appliedPhaseLaunchErrorOperationsRef.current.has(failure.operationId)) break;
+          appliedPhaseLaunchErrorOperationsRef.current.add(failure.operationId);
+          if (appliedPhaseLaunchErrorOperationsRef.current.size > 32) {
+            const oldest = appliedPhaseLaunchErrorOperationsRef.current.values().next().value;
+            if (oldest) appliedPhaseLaunchErrorOperationsRef.current.delete(oldest);
+          }
+          pushItem({
+            kind: "error",
+            id: nextId(),
+            headline:
+              failure.code === "prompt-failed"
+                ? `Roadmap phase ${failure.phaseId} needs attention.`
+                : `Roadmap phase ${failure.phaseId} could not start.`,
+            message: failure.message,
+            guidance:
+              failure.code === "prompt-failed"
+                ? "Open Notes, choose Roadmap, then Resume the phase."
+                : "Open Notes, choose Roadmap, then retry Start phase.",
+          });
+          break;
+        }
         case "error": {
           // Structured payload from the sidecar's broadcastError (headline always
           // present; message/guidance may be omitted for terse capability errors).
@@ -924,6 +970,16 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           break;
         }
+        case "autopilot_plan_checkpoint_failed": {
+          // Autopilot owns normal plan review, but a failed durable checkpoint
+          // must hand the unchanged plan back to the user for an explicit retry.
+          const content = typeof d.content === "string" ? d.content : planReviewContentRef.current;
+          if (content === null) break;
+          planReviewContentRef.current = content;
+          if (typeof d.planPath === "string") planReviewPathRef.current = d.planPath;
+          setPlanReview(content);
+          break;
+        }
         case "autopilot_plan_accepted":
           // Keep an approval-time fallback for older sidecars, close the review
           // modal, and render the approved marker. Current sidecars override this
@@ -983,7 +1039,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               if (oldest) appliedSessionResetOperationsRef.current.delete(oldest);
             }
           }
-          // Sidecar started a fresh session — clear the transcript + counters.
+          // Sidecar started a fresh session — apply its authoritative path before
+          // reset waiters unblock, then clear the transcript + counters.
+          const resetSessionPath = d.sessionPath;
+          if (typeof resetSessionPath === "string" || resetSessionPath === null) {
+            const current = stateRef.current;
+            if (current) stateRef.current = { ...current, sessionPath: resetSessionPath };
+            setState((value) => (value ? { ...value, sessionPath: resetSessionPath } : value));
+          }
           stickToBottomRef.current = true;
           setItems([]);
           setLiveToolFeed([]);

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, utimes, readdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, utimes, readdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ import {
   type TurnMetricPayload,
   type CustomEntry,
 } from "./session-manager.js";
+import { ACTIVE_PHASE_CONTEXT_KIND, type ActivePhaseContextV1 } from "../phase-context.js";
 
 const tempDirs: string[] = [];
 
@@ -95,6 +96,28 @@ describe("SessionManager conversation identity", () => {
     expect(loadedCheckpoint.header.conversationId).toBe(original.id);
     expect(loadedCheckpoint.header.preview).toBe(`Original request ${"x".repeat(63)}`);
   });
+
+  it("skips a malformed valid-JSON entry while hydrating readable neighbors", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const created = await manager.create("/repo", "anthropic", "test-model");
+    await appendFile(
+      created.path,
+      `${JSON.stringify({
+        type: "message",
+        id: "malformed-tool",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        message: { role: "tool", content: null },
+      })}\n`,
+      "utf-8",
+    );
+    await manager.appendEntry(created.path, entry("readable"));
+
+    const loaded = await manager.load(created.path);
+
+    expect(loaded.entries.map((candidate) => candidate.id)).toEqual(["readable"]);
+  });
 });
 
 describe("SessionManager persistence failure handling", () => {
@@ -108,6 +131,27 @@ describe("SessionManager persistence failure handling", () => {
     await expect(manager.appendEntry(badPath, entry("a"))).resolves.toBeUndefined();
     expect(errors).toHaveLength(1);
     expect(errors[0]?.code).toBe("ENOENT");
+  });
+
+  it("appendRequiredEntry rejects when active phase metadata cannot be written", async () => {
+    const manager = new SessionManager(await makeTempDir());
+    const badPath = path.join("/nonexistent-gg-dir", "session.jsonl");
+    const errors: NodeJS.ErrnoException[] = [];
+    manager.onPersistError = (error) => errors.push(error);
+
+    await expect(
+      manager.appendRequiredEntry(badPath, activePhaseEntry("required", activePhaseContext())),
+    ).rejects.toThrow("Failed to persist required active phase context.");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.code).toBe("ENOENT");
+  });
+
+  it("rejects required persistence for unrelated historical markers", async () => {
+    const manager = new SessionManager(await makeTempDir());
+
+    await expect(manager.appendRequiredEntry("unused", entry("message"))).rejects.toThrow(
+      "Only active phase context metadata may use required session persistence.",
+    );
   });
 
   it("reports a persistence failure only once per error code", async () => {
@@ -135,6 +179,77 @@ describe("SessionManager persistence failure handling", () => {
     const lines = content.trim().split("\n");
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[1] ?? "")).toMatchObject({ type: "message", id: "ok" });
+  });
+});
+
+function activePhaseContext(overrides: Partial<ActivePhaseContextV1> = {}): ActivePhaseContextV1 {
+  return {
+    version: 1,
+    projectKey: "project-key",
+    phase: {
+      id: "phase-21",
+      title: "Bound phase",
+      goal: "Plan it",
+      doneWhen: ["Bound"],
+      sourcePrompt: null,
+      status: "not-started",
+      archivedAt: null,
+    },
+    session: { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" },
+    references: [],
+    executionStage: "planning",
+    ...overrides,
+  };
+}
+
+function activePhaseEntry(id: string, data: unknown): CustomEntry {
+  return {
+    type: "custom",
+    kind: ACTIVE_PHASE_CONTEXT_KIND,
+    id,
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    data,
+  };
+}
+
+describe("SessionManager.getActivePhaseContext", () => {
+  const manager = new SessionManager("/unused");
+
+  it("returns the last valid dedicated metadata entry", () => {
+    const first = activePhaseContext();
+    const latest = activePhaseContext({
+      session: { sessionId: "session-2", sessionPath: "/sessions/two.jsonl" },
+      executionStage: "awaiting-approval",
+    });
+    expect(
+      manager.getActivePhaseContext([
+        activePhaseEntry("one", first),
+        entry("message"),
+        activePhaseEntry("two", latest),
+      ]),
+    ).toEqual(latest);
+  });
+
+  it("ignores malformed and unrelated records without replacing the last valid context", () => {
+    const valid = activePhaseContext();
+    expect(
+      manager.getActivePhaseContext([
+        activePhaseEntry("valid", valid),
+        activePhaseEntry("bad-version", { ...valid, version: 2 }),
+        activePhaseEntry("unknown-key", { ...valid, unrelated: true }),
+      ]),
+    ).toEqual(valid);
+  });
+
+  it("rejects cross-project or wrong-phase metadata when an identity is expected", () => {
+    const valid = activePhaseContext();
+    expect(
+      manager.getActivePhaseContext([activePhaseEntry("one", valid)], { projectKey: "other" }),
+    ).toBeUndefined();
+    expect(
+      manager.getActivePhaseContext([activePhaseEntry("one", valid)], { phaseId: "phase-22" }),
+    ).toBeUndefined();
   });
 });
 

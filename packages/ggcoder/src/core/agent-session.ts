@@ -2023,7 +2023,9 @@ export class AgentSession {
     this.planModeRef.current =
       context.executionStage === "planning" || context.executionStage === "awaiting-approval";
     this.approvedPlanPath =
-      context.executionStage === "implementing" ? context.approvedPlanPath : undefined;
+      context.executionStage === "implementing" || context.executionStage === "reviewing"
+        ? context.approvedPlanPath
+        : undefined;
   }
 
   private async ensureActivePhaseSessionMetadata(): Promise<void> {

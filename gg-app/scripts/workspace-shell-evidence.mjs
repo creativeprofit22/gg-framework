@@ -210,11 +210,13 @@ export async function runSupervisedProcess(command, args, options = {}) {
   const deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS;
   const sampleMs = options.sampleMs ?? DEFAULT_SAMPLE_MS;
   const cleanupGraceMs = options.cleanupGraceMs ?? DEFAULT_CLEANUP_GRACE_MS;
+  const survivorSettleMs = options.survivorSettleMs ?? 1_000;
   const processTableReader = options.processTableReader ?? (() => readProcessTable(platform));
   const terminate =
     options.terminate ?? ((pid) => terminateProcessTree(pid, { platform, processTableReader }));
   const output = new BoundedTail(options.tailBytes ?? DEFAULT_TAIL_BYTES);
-  const startedAt = Date.now();
+  const startedAtMs = Date.now();
+  const deadlineAtMs = startedAtMs + deadlineMs;
   const child = spawn(command, args, {
     cwd: options.cwd,
     env: options.env ?? process.env,
@@ -228,6 +230,11 @@ export async function runSupervisedProcess(command, args, options = {}) {
   let exitCode = null;
   let signal = null;
   let timedOut = false;
+  let timeoutTriggeredAtMs = null;
+  let terminationRequestedAtMs = null;
+  let terminationCompletedAtMs = null;
+  let processClosedAtMs = null;
+  let terminationError = null;
   let peakTreeRssBytes = 0;
   let samplingPromise = null;
   let terminationPromise = null;
@@ -244,6 +251,7 @@ export async function runSupervisedProcess(command, args, options = {}) {
       resolve();
     });
     child.once("close", (code, closeSignal) => {
+      processClosedAtMs = Date.now();
       exitCode = code;
       signal = closeSignal;
       resolve();
@@ -272,13 +280,25 @@ export async function runSupervisedProcess(command, args, options = {}) {
   };
   const requestTermination = () => {
     if (!child.pid) return Promise.resolve();
-    terminationPromise ??= terminate(child.pid);
+    if (!terminationPromise) {
+      terminationRequestedAtMs = Date.now();
+      terminationPromise = Promise.resolve()
+        .then(() => terminate(child.pid))
+        .catch((error) => {
+          terminationError = error instanceof Error ? error.message : String(error);
+          output.append(`\n[supervisor termination failed: ${terminationError}]\n`);
+        })
+        .finally(() => {
+          terminationCompletedAtMs = Date.now();
+        });
+    }
     return terminationPromise;
   };
 
   const sampler = setInterval(() => void sample(), sampleMs);
   const deadline = setTimeout(() => {
     timedOut = true;
+    timeoutTriggeredAtMs = Date.now();
     void requestTermination();
   }, deadlineMs);
   await sample();
@@ -286,17 +306,19 @@ export async function runSupervisedProcess(command, args, options = {}) {
   await settleWithin(closed, deadlineMs + cleanupGraceMs);
   if (child.exitCode === null && child.signalCode === null && child.pid) {
     timedOut = true;
+    timeoutTriggeredAtMs ??= Date.now();
     await requestTermination();
     await settleWithin(closed, cleanupGraceMs);
   }
 
   clearInterval(sampler);
   clearTimeout(deadline);
+  if (terminationPromise) await settleWithin(terminationPromise, cleanupGraceMs);
   await sample();
   child.stdout?.destroy();
   child.stderr?.destroy();
 
-  const survivorDeadline = Date.now() + (options.survivorSettleMs ?? 1_000);
+  const survivorDeadline = Date.now() + survivorSettleMs;
   let survivorPids = [];
   try {
     do {
@@ -315,12 +337,29 @@ export async function runSupervisedProcess(command, args, options = {}) {
     output.append(`\n[supervisor survivor check failed: ${message}]\n`);
   }
 
+  const survivorCheckCompletedAtMs = Date.now();
+  const elapsedFromStart = (timestamp) => (timestamp === null ? null : timestamp - startedAtMs);
   const tail = output.snapshot();
   return {
     pid: child.pid ?? null,
-    elapsedMs: Date.now() - startedAt,
+    startedAtMs,
+    deadlineAtMs,
+    elapsedMs: survivorCheckCompletedAtMs - startedAtMs,
     deadlineMs,
+    cleanupGraceMs,
+    survivorSettleMs,
+    sampleMs,
     timedOut,
+    timeoutTriggeredAtMs,
+    timeoutTriggeredElapsedMs: elapsedFromStart(timeoutTriggeredAtMs),
+    terminationRequestedAtMs,
+    terminationRequestedElapsedMs: elapsedFromStart(terminationRequestedAtMs),
+    terminationCompletedAtMs,
+    terminationCompletedElapsedMs: elapsedFromStart(terminationCompletedAtMs),
+    processClosedAtMs,
+    processClosedElapsedMs: elapsedFromStart(processClosedAtMs),
+    survivorCheckCompletedAtMs,
+    terminationError,
     exitCode,
     signal,
     spawnError,
@@ -376,6 +415,7 @@ export async function runEvidenceRuns(options = {}) {
         !result.timedOut &&
         result.exitCode === 0 &&
         !result.spawnError &&
+        !result.terminationError &&
         result.peakTreeRssBytes > 0 &&
         !result.processInspectionErrorCount &&
         result.survivorCount === 0,

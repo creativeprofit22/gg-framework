@@ -15,7 +15,11 @@ export const ACTIVE_PHASE_TRUNCATION_MARKER = "\n[truncated to fit phase context
 export const ACTIVE_PHASE_UNTRUSTED_START = "<active-phase-untrusted-data>";
 export const ACTIVE_PHASE_UNTRUSTED_END = "</active-phase-untrusted-data>";
 
-export type ActivePhaseExecutionStage = "planning" | "awaiting-approval" | "implementing";
+export type ActivePhaseExecutionStage =
+  | "planning"
+  | "awaiting-approval"
+  | "implementing"
+  | "reviewing";
 
 export interface ActivePhaseReferenceV1 {
   id: string;
@@ -116,6 +120,7 @@ const EXECUTION_STAGES = new Set<ActivePhaseExecutionStage>([
   "planning",
   "awaiting-approval",
   "implementing",
+  "reviewing",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {

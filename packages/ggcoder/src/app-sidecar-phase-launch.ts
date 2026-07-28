@@ -12,8 +12,9 @@ import {
 } from "./phase-context.js";
 import type {
   FrozenPhaseLaunchContext,
+  NotesSessionLink,
   ProjectNotesPhaseLaunchOutcome,
-  ProjectNotesPhaseLinkOutcome,
+  ProjectNotesPhaseLifecycleOutcome,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
 
@@ -52,7 +53,8 @@ export interface PhaseLaunchRepository {
     cwd: string,
     phaseId: string,
     reason: string,
-  ): Promise<ProjectNotesPhaseLinkOutcome>;
+    expectedSession?: NotesSessionLink | null,
+  ): Promise<ProjectNotesPhaseLifecycleOutcome>;
 }
 
 export type PhaseStartResponseBody =
@@ -160,12 +162,17 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
     return;
   }
 
+  let attentionExpectedSession: NotesSessionLink | null = null;
   try {
     const outcome = await dependencies.repository.launchPhase(
       dependencies.cwd,
       phaseId,
-      async (frozen) => createOrReuseCandidate(dependencies, frozen),
+      async (frozen) => {
+        attentionExpectedSession = frozen.phase.session ? { ...frozen.phase.session } : null;
+        return createOrReuseCandidate(dependencies, frozen);
+      },
     );
+    if ("session" in outcome) attentionExpectedSession = outcome.session;
 
     if (outcome.status === "phase-not-found" || outcome.status === "phase-archived") {
       await dependencies.candidates.disposeCandidate(phaseId);
@@ -234,6 +241,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
             dependencies.cwd,
             phaseId,
             PROMPT_FAILURE_MESSAGE,
+            outcome.session,
           );
           if (attention.status === "ok") dependencies.broadcastNotesSnapshot(attention.snapshot);
         } catch (attentionError) {
@@ -254,7 +262,12 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
   } catch (error) {
     dependencies.onLaunchFailure?.(error, { operationId: mutation.operationId, phaseId });
     const attention = await dependencies.repository
-      .recordPhaseLaunchAttention(dependencies.cwd, phaseId, LAUNCH_FAILURE_MESSAGE)
+      .recordPhaseLaunchAttention(
+        dependencies.cwd,
+        phaseId,
+        LAUNCH_FAILURE_MESSAGE,
+        attentionExpectedSession,
+      )
       .catch(() => null);
     if (attention?.status === "ok") dependencies.broadcastNotesSnapshot(attention.snapshot);
     dependencies.broadcast("phase_launch_error", {

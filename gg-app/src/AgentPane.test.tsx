@@ -58,11 +58,16 @@ vi.mock("./useAgentEvents", () => ({
     onSessionReset: (operationId: string | null) => void;
     setItems: Dispatch<SetStateAction<Item[]>>;
     setPlanReview: Dispatch<SetStateAction<string | null>>;
+    setState: Dispatch<SetStateAction<AgentModule.AgentState | null>>;
   }) => {
     nativeMocks.onSessionReset = deps.onSessionReset;
     nativeMocks.showPlanReview = (content) => deps.setPlanReview(content);
     return {
       handleEvent: (event: AgentModule.SidecarEvent) => {
+        if (event.type === "ready") {
+          deps.setState(event.data as AgentModule.AgentState);
+          return;
+        }
         if (event.type !== "session_reset") return deps.handleAutopilotEvent(event);
         const data = event.data as { operationId?: unknown };
         deps.setItems([]);
@@ -343,10 +348,97 @@ describe("AgentPane lifecycle", () => {
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it("resumes a bound Roadmap phase through workspace selection and hydration", async () => {
+  it("disables Roadmap Start with coding-mode guidance when authoritative state is chat", async () => {
     const pane = client("primary", 1);
     vi.mocked(pane.getState).mockResolvedValue({
       ...agentState("azure:gpt-test"),
+      sessionPath: "/current.jsonl",
+    });
+    vi.mocked(pane.getNotes).mockResolvedValue({
+      status: "ok",
+      recoveredFromBackup: false,
+      snapshot: { projectKey: "/work", revision: 1, document: roadmapDocument() },
+    });
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const notesButton = await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    expect(handleEvent).toBeDefined();
+    act(() =>
+      handleEvent?.({
+        type: "ready",
+        data: { ...agentState("azure:gpt-test"), mode: "chat", sessionPath: "/current.jsonl" },
+      }),
+    );
+
+    fireEvent.click(notesButton);
+    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start phase: Bound phase" }));
+    const start = screen.getByRole("button", { name: "Start phase" }) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+    expect(start.title).toBe("Switch to coding mode to start this phase.");
+    expect(screen.getByText("Switch to coding mode to start this phase.")).toBeTruthy();
+    fireEvent.click(start);
+    expect(pane.startPhase).not.toHaveBeenCalled();
+  });
+
+  it("keeps bound Roadmap Resume available in chat state and selects a coding workspace", async () => {
+    const pane = client("primary", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      sessionPath: "/current.jsonl",
+    });
+    vi.mocked(pane.getNotes).mockResolvedValue({
+      status: "ok",
+      recoveredFromBackup: false,
+      snapshot: {
+        projectKey: "/work",
+        revision: 1,
+        document: roadmapDocument("/bound.jsonl"),
+      },
+    });
+    vi.mocked(pane.selectWorkspace).mockResolvedValue(2);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const notesButton = await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    expect(handleEvent).toBeDefined();
+    act(() =>
+      handleEvent?.({
+        type: "ready",
+        data: { ...agentState("azure:gpt-test"), mode: "chat", sessionPath: "/current.jsonl" },
+      }),
+    );
+    fireEvent.click(notesButton);
+    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
+    const resume = screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement;
+    expect(resume.disabled).toBe(false);
+    fireEvent.click(resume);
+
+    await waitFor(() =>
+      expect(pane.selectWorkspace).toHaveBeenLastCalledWith(
+        { mode: "code", cwd: "/work", sessionPath: "/bound.jsonl" },
+        0,
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(vi.mocked(pane.waitForReady).mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("selects the bound path when the session id matches but the active path differs", async () => {
+    const pane = client("primary", 1);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      sessionId: "bound-session",
       sessionPath: "/current.jsonl",
     });
     vi.mocked(pane.getNotes).mockResolvedValue({
@@ -376,16 +468,13 @@ describe("AgentPane lifecycle", () => {
       ),
     );
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
-    expect(vi.mocked(pane.waitForReady).mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(pane.newSession).not.toHaveBeenCalled();
-    expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it("rejects a bound phase without a resumable path even when the current path is null", async () => {
+  it("treats a matching live session id as resumed when both session paths are null", async () => {
     const pane = client("primary", 1);
     vi.mocked(pane.getState).mockResolvedValue({
       ...agentState("azure:gpt-test"),
-      sessionId: "current-session",
+      sessionId: "bound-session",
       sessionPath: null,
     });
     const document = roadmapDocument("/placeholder.jsonl");
@@ -402,14 +491,57 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(notesButton);
     fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
-    fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recover phase: Bound phase" }));
     const selectCallsBeforeResume = vi.mocked(pane.selectWorkspace).mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "Resume phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recover phase" }));
 
-    expect(await screen.findByText("This phase has no resumable session file.")).toBeTruthy();
-    expect(screen.getByRole("dialog")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pane.startPhase).not.toHaveBeenCalled();
     expect(pane.selectWorkspace).toHaveBeenCalledTimes(selectCallsBeforeResume);
   });
+
+  it.each(["not-started", "needs-attention", "cancelled"] as const)(
+    "rebinds a foreign null-path %s phase through authoritative phase start",
+    async (status) => {
+      const pane = client("primary", 1);
+      vi.mocked(pane.getState).mockResolvedValue({
+        ...agentState("azure:gpt-test"),
+        sessionId: "current-session",
+        sessionPath: null,
+      });
+      const document = roadmapDocument("/placeholder.jsonl");
+      document.phases[0]!.status = status;
+      document.phases[0]!.session = { sessionId: "bound-session", sessionPath: null };
+      vi.mocked(pane.getNotes).mockResolvedValue({
+        status: "ok",
+        recoveredFromBackup: false,
+        snapshot: { projectKey: "/work", revision: 1, document },
+      });
+      vi.mocked(pane.startPhase).mockImplementation(async () => {
+        queueMicrotask(() => nativeMocks.onSessionReset?.("phase-recovery-1"));
+        return {
+          status: "accepted",
+          operationId: "phase-recovery-1",
+          session: { sessionId: "rebound-session", sessionPath: "/rebound.jsonl" },
+          packageTokenCount: 120,
+        };
+      });
+      render(<AgentPane client={pane} />);
+      fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+      const notesButton = await screen.findByRole("button", { name: "Notes" });
+      await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(notesButton);
+      fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+      fireEvent.click(screen.getByRole("button", { name: "Recover phase: Bound phase" }));
+      const selectCallsBeforeRecovery = vi.mocked(pane.selectWorkspace).mock.calls.length;
+      fireEvent.click(screen.getByRole("button", { name: "Recover phase" }));
+
+      await waitFor(() => expect(pane.startPhase).toHaveBeenCalledExactlyOnceWith("phase-21"));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(pane.selectWorkspace).toHaveBeenCalledTimes(selectCallsBeforeRecovery);
+    },
+  );
 
   it.each([
     ["foreign header", "Cannot resume a session from another project"],

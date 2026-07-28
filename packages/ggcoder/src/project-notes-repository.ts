@@ -218,6 +218,30 @@ export type ProjectNotesPhaseLinkOutcome =
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
+export type NotesAutomaticPhaseStatus = Exclude<NotesPhaseStatus, "not-started" | "done">;
+
+export interface ProjectNotesPhaseLifecycleTransition {
+  status: NotesAutomaticPhaseStatus;
+  source: NotesLifecycleEventSource;
+  reason: string;
+  timestamp: string;
+  expectedSession?: NotesSessionLink | null;
+}
+
+export type ProjectNotesPhaseLifecycleOutcome =
+  | { status: "ok"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
+  | {
+      status:
+        | "same-status"
+        | "manual-override"
+        | "phase-not-found"
+        | "phase-archived"
+        | "stale-session"
+        | "done-terminal";
+    }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
 export interface ProjectNotesPaths {
   directory: string;
   primary: string;
@@ -267,6 +291,7 @@ type CurrentState =
 
 export const NOTES_REFERENCE_URL_MAX_LENGTH = 2_048;
 export const NOTES_REFERENCE_METADATA_MAX_LENGTH = 4_096;
+export const NOTES_PHASE_LIFECYCLE_REASON_MAX_LENGTH = 240;
 export const NOTES_REFERENCE_METADATA_FIELDS = [
   "provider",
   "tool",
@@ -1056,6 +1081,60 @@ function validateAppendOnlyLifecycleEvents(
   return null;
 }
 
+function sameSessionLink(
+  current: NotesSessionLink | null,
+  expected: NotesSessionLink | null,
+): boolean {
+  if (expected === null) return current === null;
+  return (
+    current !== null &&
+    current.sessionId === expected.sessionId &&
+    current.sessionPath === expected.sessionPath
+  );
+}
+
+function chronologicalLifecycleTimestamp(phase: NotesPhase, requested: string): string {
+  const requestedTime = Date.parse(requested);
+  if (!Number.isFinite(requestedTime)) {
+    throw new Error("Cannot record a phase lifecycle transition with an invalid timestamp.");
+  }
+  const previous = phase.lifecycleEvents.at(-1)?.timestamp;
+  if (!previous) return new Date(requestedTime).toISOString();
+  return new Date(Math.max(requestedTime, Date.parse(previous))).toISOString();
+}
+
+function boundedLifecycleReason(reason: string): string {
+  const normalized = reason.replace(/\s+/g, " ").trim();
+  const fallback = "Phase lifecycle changed.";
+  return (normalized || fallback).slice(0, NOTES_PHASE_LIFECYCLE_REASON_MAX_LENGTH).trimEnd();
+}
+
+function applyPhaseLifecycleTransition(
+  phase: NotesPhase,
+  transition: ProjectNotesPhaseLifecycleTransition,
+  createId: () => string,
+): "updated" | "same-status" | "manual-override" | "done-terminal" {
+  if (phase.overrides.status !== null) return "manual-override";
+  if (phase.status === "done") return "done-terminal";
+  if (phase.status === transition.status) return "same-status";
+
+  const reason = boundedLifecycleReason(transition.reason);
+  const fromStatus = phase.status;
+  phase.status = transition.status;
+  phase.attentionReason = transition.status === "needs-attention" ? reason : null;
+  phase.completedAt = transition.status === "cancelled" ? transition.timestamp : null;
+  phase.updatedAt = transition.timestamp;
+  phase.lifecycleEvents.push({
+    id: createId(),
+    fromStatus,
+    toStatus: transition.status,
+    source: transition.source,
+    timestamp: transition.timestamp,
+    reason,
+  });
+  return "updated";
+}
+
 export class ProjectNotesRepository {
   private readonly fileSystem: ProjectNotesFileSystem;
   private readonly lock: <T>(filePath: string, operation: () => Promise<T>) => Promise<T>;
@@ -1197,7 +1276,7 @@ export class ProjectNotesRepository {
         current.envelope.document.references.map((reference) => [reference.id, reference]),
       );
       const references = currentPhase.referenceIds.map((id) => referencesById.get(id)!);
-      if (currentPhase.session) {
+      if (currentPhase.session && currentPhase.session.sessionPath !== null) {
         return {
           status: "already-bound",
           snapshot: toSnapshot(current.envelope),
@@ -1222,8 +1301,19 @@ export class ProjectNotesRepository {
       const document = structuredClone(current.envelope.document);
       const boundPhase = document.phases[phaseIndex]!;
       boundPhase.session = { ...session };
-      boundPhase.attentionReason = null;
-      document.updatedAt = new Date().toISOString();
+      const timestamp = chronologicalLifecycleTimestamp(boundPhase, new Date().toISOString());
+      const transition = applyPhaseLifecycleTransition(
+        boundPhase,
+        {
+          status: "planning",
+          source: "user",
+          reason: "Phase started by user",
+          timestamp,
+        },
+        this.createId,
+      );
+      if (transition !== "updated") boundPhase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
       const next: StoredProjectNotesV1 = {
         storeVersion: 1,
         projectKey,
@@ -1258,14 +1348,72 @@ export class ProjectNotesRepository {
     });
   }
 
+  async recordPhaseLifecycleTransition(
+    cwd: string,
+    phaseId: string,
+    transition: ProjectNotesPhaseLifecycleTransition,
+  ): Promise<ProjectNotesPhaseLifecycleOutcome> {
+    if (!isPhaseStatus(transition.status) || !isLifecycleEventSource(transition.source)) {
+      throw new Error("Cannot record an invalid automatic phase lifecycle transition.");
+    }
+    if (!Number.isFinite(Date.parse(transition.timestamp))) {
+      throw new Error("Cannot record a phase lifecycle transition with an invalid timestamp.");
+    }
+    const projectKey = canonicalProjectKey(cwd);
+    const paths = this.paths(cwd);
+    await this.ensureDirectory(paths.directory);
+    return this.lock(paths.primary, async () => {
+      const current = await this.readCurrent(paths, projectKey);
+      if (current.status === "missing" || current.status === "corrupt") return current;
+      const phaseIndex = current.envelope.document.phases.findIndex(
+        (phase) => phase.id === phaseId,
+      );
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (
+        transition.expectedSession !== undefined &&
+        !sameSessionLink(currentPhase.session, transition.expectedSession)
+      ) {
+        return { status: "stale-session" };
+      }
+      if (currentPhase.overrides.status !== null) return { status: "manual-override" };
+      if (currentPhase.status === "done") return { status: "done-terminal" };
+      if (currentPhase.status === transition.status) return { status: "same-status" };
+
+      const document = structuredClone(current.envelope.document);
+      const phase = document.phases[phaseIndex]!;
+      const timestamp = chronologicalLifecycleTimestamp(phase, transition.timestamp);
+      applyPhaseLifecycleTransition(phase, { ...transition, timestamp }, this.createId);
+      document.updatedAt = timestamp;
+      const next: StoredProjectNotesV1 = {
+        storeVersion: 1,
+        projectKey,
+        revision: current.envelope.revision + 1,
+        document,
+      };
+      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
+      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      return {
+        status: "ok",
+        snapshot: toSnapshot(next),
+        phase: structuredClone(phase),
+      };
+    });
+  }
+
   async recordPhaseLaunchAttention(
     cwd: string,
     phaseId: string,
     reason: string,
-  ): Promise<ProjectNotesPhaseLinkOutcome> {
-    const boundedReason = reason.replace(/\s+/g, " ").trim().slice(0, 500);
-    return this.mutatePhaseLinkFields(cwd, phaseId, (phase) => {
-      phase.attentionReason = boundedReason || "Phase launch failed. Retry the phase action.";
+    expectedSession?: NotesSessionLink | null,
+  ): Promise<ProjectNotesPhaseLifecycleOutcome> {
+    return this.recordPhaseLifecycleTransition(cwd, phaseId, {
+      status: "needs-attention",
+      source: "system",
+      reason,
+      timestamp: new Date().toISOString(),
+      expectedSession,
     });
   }
 

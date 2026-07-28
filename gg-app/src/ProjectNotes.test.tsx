@@ -381,13 +381,68 @@ describe("ProjectNotes", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("disables Start and Recover when coding mode is unavailable and keeps Resume available", async () => {
+    const cwd = "/work/phase-mode-gate";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    const bound = { sessionId: "bound", sessionPath: "/bound.jsonl" };
+    const recoverable = { sessionId: "recoverable", sessionPath: null };
+    populated.phases = [
+      { ...phase("start", "not-started"), title: "Start in code", order: 0 },
+      {
+        ...phase("recover", "needs-attention"),
+        title: "Recover in code",
+        order: 1,
+        session: recoverable,
+      },
+      { ...phase("resume", "planning"), title: "Resume in code", order: 2, session: bound },
+    ];
+    client.seed(cwd, populated);
+    const onStartPhase = vi.fn();
+    const onResumePhase = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProjectNotes
+        cwd={cwd}
+        client={client}
+        onStartPhase={onStartPhase}
+        onResumePhase={onResumePhase}
+        phaseStartUnavailableReason="Switch to coding mode to start this phase."
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Start phase: Start in code" }));
+    const start = screen.getByRole("button", { name: "Start phase" }) as HTMLButtonElement;
+    expect(start.disabled).toBe(true);
+    expect(start.title).toBe("Switch to coding mode to start this phase.");
+    expect(screen.getByText("Switch to coding mode to start this phase.")).toBeTruthy();
+    fireEvent.click(start);
+    expect(onStartPhase).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Recover phase: Recover in code" }));
+    const recover = screen.getByRole("button", { name: "Recover phase" }) as HTMLButtonElement;
+    expect(recover.disabled).toBe(true);
+    expect(recover.title).toBe("Switch to coding mode to start this phase.");
+    fireEvent.click(recover);
+    expect(onResumePhase).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume phase: Resume in code" }));
+    const resume = screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement;
+    expect(resume.disabled).toBe(false);
+    fireEvent.click(resume);
+    await waitFor(() => expect(onResumePhase).toHaveBeenCalledExactlyOnceWith("resume", bound));
+  });
+
   it("announces retryable failure, returns focus, and turns an already-bound race into Resume", async () => {
     const cwd = "/work/phase-recovery";
     const client = new FakeProjectNotesClient(cwd);
     const populated = notes("reference");
     populated.phases = [
       {
-        ...phase("recover", "not-started"),
+        ...phase("recover", "needs-attention"),
         title: "Recover phase",
         attentionReason: "Previous prompt failed.",
       },
@@ -435,9 +490,45 @@ describe("ProjectNotes", () => {
     expect(screen.queryByText("Starting phase…")).toBeNull();
     const resume = screen.getByRole("button", { name: "Resume phase" });
     fireEvent.click(resume);
-    await waitFor(() => expect(onResumePhase).toHaveBeenCalledExactlyOnceWith(bound));
+    await waitFor(() => expect(onResumePhase).toHaveBeenCalledExactlyOnceWith("recover", bound));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
+
+  it.each([
+    ["not-started", "Not started"],
+    ["needs-attention", "Needs attention"],
+    ["cancelled", "Cancelled"],
+  ] as const)(
+    "routes a %s phase with a null-path binding through recovery",
+    async (status, statusLabel) => {
+      const cwd = `/work/null-path-${status}`;
+      const client = new FakeProjectNotesClient(cwd);
+      const populated = notes("reference");
+      const link = { sessionId: "bound", sessionPath: null };
+      populated.phases = [
+        {
+          ...phase(status, status),
+          title: `${statusLabel} recovery`,
+          session: link,
+          attentionReason:
+            status === "needs-attention" ? "The previous session lost its path." : null,
+        },
+      ];
+      client.seed(cwd, populated);
+      const onResumePhase = vi.fn().mockResolvedValue(undefined);
+      render(<ProjectNotes cwd={cwd} client={client} onResumePhase={onResumePhase} />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+      selectNotesTab("Roadmap");
+      fireEvent.click(
+        screen.getByRole("button", { name: `Recover phase: ${statusLabel} recovery` }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Recover phase" }));
+
+      await waitFor(() => expect(onResumePhase).toHaveBeenCalledExactlyOnceWith(status, link));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    },
+  );
 
   it("saves an exact prompt through the imperative handle and renders it in phase detail", async () => {
     const cwd = "/work/saved-prompt";
@@ -474,6 +565,109 @@ describe("ProjectNotes", () => {
     const heading = screen.getByRole("heading", { name: "Saved prompt" });
     expect(heading).toBeTruthy();
     expect(heading.nextElementSibling?.textContent).toBe(prompt);
+  });
+
+  it("renders authoritative lifecycle labels and recovery actions without losing selection", async () => {
+    const cwd = "/work/roadmap-lifecycle";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    const bound = { sessionId: "bound", sessionPath: "/bound.jsonl" };
+    populated.phases = [
+      { ...phase("not-started", "not-started"), title: "Not started phase", order: 0 },
+      { ...phase("planning", "planning"), title: "Planning phase", order: 1 },
+      {
+        ...phase("waiting", "waiting-for-approval"),
+        title: "Waiting phase",
+        order: 2,
+        session: bound,
+      },
+      { ...phase("progress", "in-progress"), title: "Progress phase", order: 3, session: bound },
+      { ...phase("review", "review"), title: "Review phase", order: 4, session: bound },
+      { ...phase("done", "done"), title: "Done phase", order: 5, session: bound },
+      {
+        ...phase("attention", "needs-attention"),
+        title: "Attention phase",
+        order: 6,
+        attentionReason:
+          "The provider failed while validating a very long localized implementation result that still needs recovery.",
+      },
+      {
+        ...phase("attention-bound", "needs-attention"),
+        title: "Bound attention phase",
+        order: 7,
+        session: bound,
+        attentionReason: "Resume the bound phase.",
+      },
+      {
+        ...phase("cancelled", "cancelled"),
+        title: "Cancelled phase",
+        order: 8,
+        session: bound,
+      },
+      {
+        ...phase("manual-cancelled", "cancelled"),
+        title: "Manual cancellation",
+        order: 9,
+        session: bound,
+        overrides: {
+          status: { value: "cancelled", source: "user", updatedAt: NOW },
+          referenceIds: null,
+        },
+      },
+    ];
+    client.seed(cwd, populated);
+    const onResumePhase = vi.fn().mockResolvedValue(undefined);
+    render(<ProjectNotes cwd={cwd} client={client} onResumePhase={onResumePhase} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    const expectedRows = [
+      ["Not started phase", "Not started", "Start"],
+      ["Planning phase", "Planning", "Resume"],
+      ["Waiting phase", "Waiting for approval", "Resume"],
+      ["Progress phase", "In progress", "Resume"],
+      ["Review phase", "Review", "Review"],
+      ["Done phase", "Done", "Review"],
+      ["Attention phase", "Needs attention", "Start"],
+      ["Bound attention phase", "Needs attention", "Resume"],
+      ["Cancelled phase", "Cancelled", "Resume"],
+      ["Manual cancellation", "Cancelled", "Review"],
+    ] as const;
+    for (const [title, label, action] of expectedRows) {
+      const button = screen.getByRole("button", { name: `${action} phase: ${title}` });
+      expect(button.closest("li")?.textContent).toContain(label);
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Start phase: Attention phase" }));
+    expect(screen.getByText(/Needs attention: The provider failed/)).toBeTruthy();
+    const statusSelect = screen.getByLabelText("Status override");
+    const helpId = statusSelect.getAttribute("aria-describedby");
+    expect(helpId).toBeTruthy();
+    expect(document.getElementById(helpId!)?.textContent).toBe(
+      "Choosing a status pauses automatic lifecycle updates for this phase.",
+    );
+
+    const refreshed = structuredClone(populated);
+    refreshed.phases[6] = {
+      ...refreshed.phases[6]!,
+      status: "in-progress",
+      session: bound,
+      attentionReason: "Stale reason must stay hidden.",
+      updatedAt: "2026-07-15T12:01:00.000Z",
+    };
+    act(() => client.publish(cwd, refreshed, 2));
+    expect(await screen.findByRole("heading", { name: "Attention phase" })).toBeTruthy();
+    expect(screen.queryByText(/Stale reason must stay hidden/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Resume phase" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Review phase: Manual cancellation" }));
+    const overriddenSelect = screen.getByLabelText("Status override");
+    const overriddenHelpId = overriddenSelect.getAttribute("aria-describedby");
+    expect(document.getElementById(overriddenHelpId!)?.textContent).toBe(
+      "Automatic lifecycle updates are paused because a manual status override is active.",
+    );
+    expect(screen.queryByRole("button", { name: "Resume phase" })).toBeNull();
   });
 
   it("keeps one selected phase open across authoritative snapshots", async () => {

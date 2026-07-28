@@ -144,6 +144,12 @@ import {
 } from "./project-notes-repository.js";
 import { launchBoundPhase, type BoundPhaseCandidate } from "./app-sidecar-phase-launch.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
+import {
+  AppSidecarPhaseLifecycleCoordinator,
+  type BoundPhaseLifecycleContext,
+  type PhaseLifecycleReconcileOutcome,
+  type PhaseLifecycleSignal,
+} from "./app-sidecar-phase-lifecycle.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import {
   AppSidecarSessionMutationCoordinator,
@@ -1529,6 +1535,12 @@ async function createSession(
       scope: type,
     });
     log("ERROR", "app-sidecar", logLabel, formatted.logFields);
+    if (type !== "ken_error" && phaseLifecycle) {
+      reconcileRuntimeLifecycle({
+        type: "runtime-error",
+        reason: formatted.event.headline || "The phase session failed",
+      });
+    }
     broadcast(type, formatted.event);
     // Persist the error row (display-only marker) so a resumed session shows
     // the same headline/message/guidance the live run did. Best-effort.
@@ -1563,9 +1575,63 @@ async function createSession(
   };
   let session!: AgentSession;
 
+  function phaseLifecycleContext(
+    target: AgentSession = session,
+  ): BoundPhaseLifecycleContext | undefined {
+    const context = target.getActivePhaseContext();
+    if (!context) return undefined;
+    const state = target.getState();
+    return {
+      phaseId: context.phase.id,
+      session: { sessionId: state.sessionId, sessionPath: state.sessionPath },
+      executionStage: context.executionStage,
+    };
+  }
+
+  function requireLifecycleCheckpoint(
+    outcome: PhaseLifecycleReconcileOutcome,
+    checkpoint: string,
+  ): void {
+    if (
+      outcome.status === "committed" ||
+      outcome.status === "same-status" ||
+      outcome.status === "manual-override" ||
+      outcome.status === "done-terminal" ||
+      outcome.status === "no-active-phase"
+    ) {
+      return;
+    }
+    if (outcome.status === "storage-failure") throw outcome.error;
+    throw new Error(`${checkpoint} was not committed: ${outcome.status}`);
+  }
+
+  function reconcileRuntimeLifecycle(
+    signal: PhaseLifecycleSignal,
+    target: AgentSession = session,
+  ): void {
+    const active = phaseLifecycleContext(target);
+    void phaseLifecycle.enqueue(signal, active).then((outcome) => {
+      if (
+        outcome.status === "storage-failure" ||
+        outcome.status === "missing" ||
+        outcome.status === "corrupt"
+      ) {
+        log("WARN", "app-sidecar", "phase lifecycle reconciliation failed", {
+          signal: signal.type,
+          outcome: outcome.status,
+        });
+      }
+    });
+  }
+
   async function enterCodingPlanMode(reason?: string): Promise<void> {
     deactivateApprovedPlan();
     await session.setPlanMode(true);
+    await persistActivePhaseStage({ session, executionStage: "planning" });
+    requireLifecycleCheckpoint(
+      await phaseLifecycle.enqueue({ type: "plan-entered" }),
+      "Plan Mode lifecycle checkpoint",
+    );
     broadcast("plan_progress", { total: 0, completed: [] });
     broadcast("plan_enter", { reason: reason ?? "" });
     await session.persistAppMarker("plan", { reason: reason ?? "" }).catch(() => {});
@@ -1596,9 +1662,14 @@ async function createSession(
             executionStage: "awaiting-approval",
             approvedPlanPath: planPath,
           });
+          requireLifecycleCheckpoint(
+            await phaseLifecycle.enqueue({ type: "plan-submitted" }),
+            "Plan submission lifecycle checkpoint",
+          );
         } catch (error) {
           try {
             await session.setPlanMode(true);
+            await persistActivePhaseStage({ session, executionStage: "planning" });
           } catch (restoreError) {
             throw new AggregateError(
               [error, restoreError],
@@ -1636,6 +1707,19 @@ async function createSession(
   } else {
     session = createCodingSession(resumeSessionPath);
   }
+  const phaseLifecycle = new AppSidecarPhaseLifecycleCoordinator({
+    cwd,
+    repository: notesRepository,
+    getActivePhase: () => phaseLifecycleContext(),
+    broadcastSnapshot: broadcastNotesSnapshot,
+    onError: (error, signal) => {
+      captureSidecarError(error, "app-sidecar.phase.lifecycle", { signal: signal.type });
+      log("ERROR", "app-sidecar", "phase lifecycle persistence failed", {
+        signal: signal.type,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
   await session.initialize();
   const phaseCandidates = new AppSidecarPhaseCandidateStore<BoundPhaseCandidate<AgentSession>>();
   if (mode === "chat") {
@@ -1646,6 +1730,13 @@ async function createSession(
       chatAgent = parseChatAgentId(restoredAgent);
       await switchChatAgent(session, chatAgent, false);
     }
+  }
+  const restoredLifecycle = session.getActivePhaseContext();
+  if (restoredLifecycle) {
+    await phaseLifecycle.enqueue({
+      type: "session-restored",
+      executionStage: restoredLifecycle.executionStage,
+    });
   }
   log("INFO", "app-sidecar", "session ready", { provider, model, mode, chatAgent, cwd });
 
@@ -1786,6 +1877,57 @@ async function createSession(
     });
   }
 
+  async function reconcileImplementationRunStart(target: AgentSession = session): Promise<void> {
+    const context = target.getActivePhaseContext();
+    if (
+      !context ||
+      (context.executionStage !== "implementing" && context.executionStage !== "reviewing")
+    ) {
+      return;
+    }
+    const captured = phaseLifecycleContext(target);
+    if (!captured) return;
+    if (context.executionStage === "reviewing") {
+      await persistActivePhaseStage({
+        session: target,
+        executionStage: "implementing",
+        approvedPlanPath: context.approvedPlanPath,
+      });
+    }
+    requireLifecycleCheckpoint(
+      await phaseLifecycle.enqueue({ type: "implementation-run-started" }, captured),
+      "Implementation run lifecycle checkpoint",
+    );
+  }
+
+  async function reconcileReviewStart(
+    signal: Extract<
+      PhaseLifecycleSignal,
+      { type: "ideal-review-started" | "autopilot-review-started" }
+    >,
+    target: AgentSession = session,
+  ): Promise<void> {
+    const context = target.getActivePhaseContext();
+    if (
+      !context ||
+      (context.executionStage !== "implementing" && context.executionStage !== "reviewing")
+    ) {
+      return;
+    }
+    const captured = phaseLifecycleContext(target);
+    if (context.executionStage === "implementing") {
+      await persistActivePhaseStage({
+        session: target,
+        executionStage: "reviewing",
+        approvedPlanPath: context.approvedPlanPath,
+      });
+    }
+    requireLifecycleCheckpoint(
+      await phaseLifecycle.enqueue(signal, captured),
+      "Review lifecycle checkpoint",
+    );
+  }
+
   // Forward every relevant bus event to the webview. Phase launch replaces the
   // underlying AgentSession, so binding is an explicit reusable seam.
   function bindSessionEvents(target: AgentSession): void {
@@ -1802,8 +1944,11 @@ async function createSession(
     target.eventBus.on("tool_call_end", (d) => {
       const name = toolCallNames.get(d.toolCallId) ?? "unknown";
       toolCallNames.delete(d.toolCallId);
-      if (d.isError && shouldCaptureToolFailure(name, d.result)) {
-        captureSidecarError(new Error(`Tool ${name} failed`), `tool.${name}`, { tool: name });
+      if (d.isError) {
+        reconcileRuntimeLifecycle({ type: "tool-failed", toolName: name }, target);
+        if (shouldCaptureToolFailure(name, d.result)) {
+          captureSidecarError(new Error(`Tool ${name} failed`), `tool.${name}`, { tool: name });
+        }
       }
       log(d.isError ? "ERROR" : "INFO", "tool", `Tool call ended: ${name}`, {
         id: d.toolCallId,
@@ -1820,7 +1965,17 @@ async function createSession(
     target.eventBus.on("truncated", (d) => broadcast("truncated", d));
     target.eventBus.on("error", (d) => broadcastError("error", "agent error", d.error));
     target.eventBus.on("model_change", (d) => broadcast("model_change", d));
-    target.eventBus.on("hook", (d) => broadcast("hook", d));
+    target.eventBus.on("hook", (d) => {
+      if (d.kind !== "ideal") {
+        broadcast("hook", d);
+        return;
+      }
+      void reconcileReviewStart({ type: "ideal-review-started" }, target)
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.phase.ideal-review");
+        })
+        .finally(() => broadcast("hook", d));
+    });
     target.eventBus.on("subagent_state", (d) => broadcast("subagent_state", d));
     target.eventBus.on("compaction_start", (d) => broadcast("compaction_start", d));
     target.eventBus.on("compaction_end", (d) => {
@@ -1915,7 +2070,10 @@ async function createSession(
         .readFile(restoredPhaseContext.approvedPlanPath, "utf-8")
         .catch(() => "");
       setPendingPlan(restoredPhaseContext.approvedPlanPath, restoredContent);
-    } else if (restoredPhaseContext.executionStage === "implementing") {
+    } else if (
+      restoredPhaseContext.executionStage === "implementing" ||
+      restoredPhaseContext.executionStage === "reviewing"
+    ) {
       await activateApprovedPlan(restoredPhaseContext.approvedPlanPath);
     }
   }
@@ -2140,6 +2298,9 @@ async function createSession(
     const cancelGenAtStart = cancelGeneration;
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
     let runSucceeded = false;
+    await reconcileImplementationRunStart().catch((error) => {
+      captureSidecarError(error, "app-sidecar.phase.implementation-run");
+    });
     broadcast("run_start", { text: label, runState: runLifecycle.state });
     try {
       if (!runLifecycle.isCancellationRequested(generation)) await run();
@@ -2217,6 +2378,9 @@ async function createSession(
   // pinned in the digest so it can't scroll out during multi-round cycles.
   async function runAutopilotReview(originalRequest: string): Promise<AutopilotVerdict | null> {
     autopilotReviewing = true;
+    await reconcileReviewStart({ type: "autopilot-review-started" }).catch((error) => {
+      captureSidecarError(error, "app-sidecar.phase.autopilot-review");
+    });
     broadcast("autopilot_review_start", {});
     try {
       const ken = await ensureKenAutoSession();
@@ -2343,6 +2507,8 @@ async function createSession(
               repository: notesRepository,
               cwd,
               planPath,
+              approvalSource: "agent",
+              reconcileLifecycle: (signal) => phaseLifecycle.enqueue(signal),
               prepareFreshSession: async () => {
                 await session.newSession(true);
                 injectedAutopilotPrompts = [];
@@ -2442,6 +2608,14 @@ async function createSession(
             broadcast(event.type, { ...event.data, copySeed: seed });
             void session.persistAutopilotMarker("done");
             return;
+          }
+          if (event.type === "autopilot_human") {
+            reconcileRuntimeLifecycle({ type: "autopilot-human", reason: event.data.reason });
+          } else if (event.type === "autopilot_capped") {
+            reconcileRuntimeLifecycle({
+              type: "autopilot-stopped",
+              reason: `Autopilot reached its review limit after ${event.data.rounds} rounds`,
+            });
           }
           broadcast(event.type, event.data);
           if (event.type === "autopilot_human") {
@@ -3953,6 +4127,9 @@ async function createSession(
           });
           return;
         }
+        if (result.status === "cancelled") {
+          await phaseLifecycle.enqueue({ type: "cancelled" });
+        }
         json(res, 200, {
           cancelled: result.status === "cancelled",
           runState: runLifecycle.state,
@@ -4121,6 +4298,8 @@ async function createSession(
             repository: notesRepository,
             cwd,
             planPath,
+            approvalSource: "user",
+            reconcileLifecycle: (signal) => phaseLifecycle.enqueue(signal),
             prepareFreshSession: async () => {
               await session.newSession(true);
               injectedAutopilotPrompts = [];

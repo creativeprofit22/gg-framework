@@ -223,5 +223,12 @@ describe("active phase context", () => {
     ).toBeNull();
     expect(parseActivePhaseContext(valid, { projectKey: "another-project" })).toBeNull();
     expect(parseActivePhaseContext(valid, { phaseId: "phase-22" })).toBeNull();
+    expect(
+      parseActivePhaseContext({
+        ...valid,
+        executionStage: "reviewing",
+        approvedPlanPath: ".gg/plans/phase-21.md",
+      }),
+    ).toMatchObject({ executionStage: "reviewing", approvedPlanPath: ".gg/plans/phase-21.md" });
   });
 });

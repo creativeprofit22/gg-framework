@@ -69,7 +69,8 @@ interface Props {
   ): Promise<NotesReferenceOperationResult>;
   openSource?: OpenReferenceUrl;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
-  onResumePhase(link: NotesSessionLink): Promise<void>;
+  onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
+  phaseStartUnavailableReason: string | null;
   phaseActionDisabled: boolean;
   onPhaseActionSuccess(): void;
   onChangeHandoff(text: string): void;
@@ -119,6 +120,7 @@ export function NotesModal({
   openSource,
   onStartPhase,
   onResumePhase,
+  phaseStartUnavailableReason,
   phaseActionDisabled,
   onPhaseActionSuccess,
   onChangeHandoff,
@@ -283,6 +285,7 @@ export function NotesModal({
                   onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
                   onStartPhase={onStartPhase}
                   onResumePhase={onResumePhase}
+                  startUnavailableReason={phaseStartUnavailableReason}
                   actionDisabled={phaseActionDisabled}
                   onActionSuccess={onPhaseActionSuccess}
                   onCreateReference={() => {

@@ -1719,6 +1719,10 @@ body {
   color: var(--text-muted);
   font-size: 11px;
 }
+.notes-phase-status-help {
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
 .notes-phase-form-actions,
 .notes-phase-secondary-actions {
   display: flex;

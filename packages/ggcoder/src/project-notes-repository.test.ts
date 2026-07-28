@@ -152,6 +152,7 @@ describe("ProjectNotesRepository phase launch transaction", () => {
     const document = notes();
     document.phases[0]!.session = null;
     document.phases[0]!.status = "not-started";
+    document.phases[0]!.overrides.status = null;
     document.phases[0]!.lifecycleEvents = [];
     await new ProjectNotesRepository(agentDir).migrate(cwd, document);
 
@@ -174,10 +175,65 @@ describe("ProjectNotesRepository phase launch transaction", () => {
     expect(first.session).toEqual(second.session);
     expect(first.session.sessionId).toBe("winner");
     expect(Math.max(first.snapshot.revision, second.snapshot.revision)).toBe(2);
-    expect(first.phase.status).toBe("not-started");
-    expect(first.phase.lifecycleEvents).toEqual([]);
+    expect(first.phase.status).toBe("planning");
+    expect(first.phase.lifecycleEvents).toMatchObject([
+      {
+        fromStatus: "not-started",
+        toStatus: "planning",
+        source: "user",
+        reason: "Phase started by user",
+      },
+    ]);
     expect(first.references.map((reference) => reference.id)).toEqual(["ref-1"]);
   });
+
+  it.each(["not-started", "needs-attention", "cancelled"] as const)(
+    "atomically rebinds a null-path %s phase and makes the replacement authoritative",
+    async (status) => {
+      const agentDir = await tempAgentDir();
+      const cwd = path.join(agentDir, `null-path-${status}`);
+      const document = notes();
+      document.phases[0]!.status = status;
+      document.phases[0]!.session = { sessionId: "bound", sessionPath: null };
+      document.phases[0]!.attentionReason =
+        status === "needs-attention" ? "Previous launch lost its session path." : null;
+      document.phases[0]!.completedAt = status === "cancelled" ? NOW : null;
+      document.phases[0]!.overrides.status = null;
+      document.phases[0]!.lifecycleEvents = [];
+      const repository = new ProjectNotesRepository(agentDir);
+      await repository.migrate(cwd, document);
+      let createCalls = 0;
+
+      const rebound = await repository.launchPhase(cwd, "phase-1", async (frozen) => {
+        createCalls += 1;
+        expect(frozen.phase.session).toEqual({ sessionId: "bound", sessionPath: null });
+        return { sessionId: "rebound", sessionPath: "/sessions/rebound.jsonl" };
+      });
+
+      expect(rebound).toMatchObject({
+        status: "accepted",
+        snapshot: { revision: 2 },
+        phase: {
+          status: "planning",
+          session: { sessionId: "rebound", sessionPath: "/sessions/rebound.jsonl" },
+          attentionReason: null,
+          completedAt: null,
+          lifecycleEvents: [
+            expect.objectContaining({ fromStatus: status, toStatus: "planning", source: "user" }),
+          ],
+        },
+      });
+      const repeated = await repository.launchPhase(cwd, "phase-1", async () => {
+        createCalls += 1;
+        return { sessionId: "duplicate", sessionPath: "/sessions/duplicate.jsonl" };
+      });
+      expect(repeated).toMatchObject({
+        status: "already-bound",
+        session: { sessionId: "rebound", sessionPath: "/sessions/rebound.jsonl" },
+      });
+      expect(createCalls).toBe(1);
+    },
+  );
 
   it("rejects stale and archived phases before creating a candidate", async () => {
     const agentDir = await tempAgentDir();
@@ -229,10 +285,11 @@ describe("ProjectNotesRepository phase launch transaction", () => {
     ).resolves.toMatchObject({ status: "accepted", session: { sessionId: "retry" } });
   });
 
-  it("updates only checkpoint link or launch attention fields", async () => {
+  it("updates a checkpoint link and records launch attention as a lifecycle transition", async () => {
     const agentDir = await tempAgentDir();
     const cwd = path.join(agentDir, "checkpoint-project");
     const document = notes();
+    document.phases[0]!.overrides.status = null;
     await new ProjectNotesRepository(agentDir).migrate(cwd, document);
     const repository = new ProjectNotesRepository(agentDir);
     const originalStatus = document.phases[0]!.status;
@@ -257,11 +314,213 @@ describe("ProjectNotesRepository phase launch transaction", () => {
     );
     expect(attention).toMatchObject({
       status: "ok",
-      phase: { status: originalStatus, lifecycleEvents: originalEvents },
+      phase: {
+        status: "needs-attention",
+        lifecycleEvents: [
+          ...originalEvents,
+          {
+            fromStatus: originalStatus,
+            toStatus: "needs-attention",
+            source: "system",
+          },
+        ],
+      },
     });
     if (attention.status !== "ok") throw new Error("Expected attention update");
-    expect(attention.phase.attentionReason?.length).toBe(500);
+    expect(attention.phase.attentionReason?.length).toBe(240);
     expect(attention.phase.attentionReason).toMatch(/^Prompt failed/);
+  });
+});
+
+describe("ProjectNotesRepository authoritative lifecycle transitions", () => {
+  async function createLifecycleRepository(projectName: string) {
+    const agentDir = await tempAgentDir();
+    const cwd = path.join(agentDir, projectName);
+    const document = notes();
+    document.phases[0]!.overrides.status = null;
+    await new ProjectNotesRepository(agentDir).migrate(cwd, document);
+    return { agentDir, cwd, repository: new ProjectNotesRepository(agentDir) };
+  }
+
+  it("appends transitions, clamps chronology, clears attention, and timestamps cancellation", async () => {
+    const { cwd, repository } = await createLifecycleRepository("lifecycle-project");
+    const expectedSession = { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" };
+    const attention = await repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
+      status: "needs-attention",
+      source: "agent",
+      reason: `  Tool   failed\n${"x".repeat(500)}`,
+      timestamp: "2026-07-25T12:35:00.000Z",
+      expectedSession,
+    });
+    expect(attention).toMatchObject({
+      status: "ok",
+      phase: { status: "needs-attention", completedAt: null },
+    });
+    if (attention.status !== "ok") throw new Error("Expected lifecycle transition");
+    expect(attention.phase.attentionReason).toHaveLength(240);
+    expect(attention.phase.lifecycleEvents).toHaveLength(3);
+
+    const restored = await repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
+      status: "review",
+      source: "session",
+      reason: "Review session resumed",
+      timestamp: "2026-07-24T00:00:00.000Z",
+      expectedSession,
+    });
+    expect(restored).toMatchObject({
+      status: "ok",
+      phase: { status: "review", attentionReason: null, completedAt: null },
+    });
+    if (restored.status !== "ok") throw new Error("Expected restored transition");
+    const restoredEvent = restored.phase.lifecycleEvents.at(-1)!;
+    expect(restoredEvent.timestamp).toBe("2026-07-25T12:35:00.000Z");
+
+    const cancelled = await repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
+      status: "cancelled",
+      source: "user",
+      reason: "Phase run cancelled by user",
+      timestamp: "2026-07-25T12:36:00.000Z",
+      expectedSession,
+    });
+    expect(cancelled).toMatchObject({
+      status: "ok",
+      phase: {
+        status: "cancelled",
+        completedAt: "2026-07-25T12:36:00.000Z",
+        lifecycleEvents: expect.arrayContaining([
+          expect.objectContaining({
+            fromStatus: "review",
+            toStatus: "cancelled",
+            source: "user",
+          }),
+        ]),
+      },
+    });
+  });
+
+  it("matches an explicit unbound guard only while the phase session is null", async () => {
+    const { agentDir, cwd, repository } = await createLifecycleRepository("null-session-guard");
+
+    await expect(
+      repository.recordPhaseLaunchAttention(cwd, "phase-1", "Launch failed", null),
+    ).resolves.toEqual({ status: "stale-session" });
+
+    const unboundCwd = path.join(agentDir, "unbound-session-guard");
+    const unboundDocument = notes();
+    unboundDocument.phases[0]!.session = null;
+    unboundDocument.phases[0]!.status = "not-started";
+    unboundDocument.phases[0]!.overrides.status = null;
+    unboundDocument.phases[0]!.lifecycleEvents = [];
+    await repository.migrate(unboundCwd, unboundDocument);
+
+    await expect(
+      repository.recordPhaseLaunchAttention(unboundCwd, "phase-1", "Launch failed", null),
+    ).resolves.toMatchObject({
+      status: "ok",
+      phase: {
+        status: "needs-attention",
+        session: null,
+        lifecycleEvents: [
+          expect.objectContaining({
+            fromStatus: "not-started",
+            toStatus: "needs-attention",
+            source: "system",
+          }),
+        ],
+      },
+    });
+  });
+
+  it("makes duplicates idempotent and refuses stale sessions, overrides, archives, missing phases, and Done", async () => {
+    const { cwd, repository } = await createLifecycleRepository("guard-project");
+    const transition = {
+      status: "review" as const,
+      source: "agent" as const,
+      reason: "Implementation verification started",
+      timestamp: "2026-07-25T12:40:00.000Z",
+      expectedSession: { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" },
+    };
+    await expect(
+      repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
+        ...transition,
+        expectedSession: { sessionId: "stale", sessionPath: null },
+      }),
+    ).resolves.toEqual({ status: "stale-session" });
+    const accepted = await repository.recordPhaseLifecycleTransition(cwd, "phase-1", transition);
+    expect(accepted).toMatchObject({ status: "ok", snapshot: { revision: 2 } });
+    await expect(
+      repository.recordPhaseLifecycleTransition(cwd, "phase-1", transition),
+    ).resolves.toEqual({ status: "same-status" });
+    await expect(
+      repository.recordPhaseLifecycleTransition(cwd, "missing", transition),
+    ).resolves.toEqual({ status: "phase-not-found" });
+
+    if (accepted.status !== "ok") throw new Error("Expected transition");
+    const overridden = structuredClone(accepted.snapshot.document);
+    overridden.phases[0]!.overrides.status = {
+      value: "review",
+      source: "user",
+      updatedAt: "2026-07-25T12:41:00.000Z",
+    };
+    const savedOverride = await repository.save(cwd, accepted.snapshot.revision, overridden);
+    if (savedOverride.status !== "ok") throw new Error("Expected override save");
+    await expect(
+      repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
+        ...transition,
+        status: "in-progress",
+      }),
+    ).resolves.toEqual({ status: "manual-override" });
+
+    const doneDocument = structuredClone(savedOverride.snapshot.document);
+    doneDocument.phases[0]!.overrides.status = null;
+    doneDocument.phases[0]!.status = "done";
+    doneDocument.phases[0]!.completedAt = "2026-07-25T12:42:00.000Z";
+    doneDocument.phases[0]!.lifecycleEvents.push({
+      id: "manual-done",
+      fromStatus: "review",
+      toStatus: "done",
+      source: "user",
+      timestamp: "2026-07-25T12:42:00.000Z",
+      reason: "Marked done by user",
+    });
+    const savedDone = await repository.save(cwd, savedOverride.snapshot.revision, doneDocument);
+    if (savedDone.status !== "ok") throw new Error("Expected Done save");
+    await expect(
+      repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
+        ...transition,
+        status: "in-progress",
+      }),
+    ).resolves.toEqual({ status: "done-terminal" });
+  });
+
+  it("serializes cross-window status races under the project lock", async () => {
+    const { agentDir, cwd } = await createLifecycleRepository("status-race");
+    const first = new ProjectNotesRepository(agentDir);
+    const second = new ProjectNotesRepository(agentDir);
+    const transition = {
+      status: "review" as const,
+      source: "agent" as const,
+      reason: "Autopilot review started",
+      timestamp: "2026-07-25T13:00:00.000Z",
+      expectedSession: { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" },
+    };
+    const outcomes = await Promise.all([
+      first.recordPhaseLifecycleTransition(cwd, "phase-1", transition),
+      second.recordPhaseLifecycleTransition(cwd, "phase-1", transition),
+    ]);
+    expect(new Set(outcomes.map((outcome) => outcome.status))).toEqual(
+      new Set(["ok", "same-status"]),
+    );
+    const loaded = await first.load(cwd);
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 2,
+        document: { phases: [{ status: "review", lifecycleEvents: expect.any(Array) }] },
+      },
+    });
+    if (loaded.status !== "ok") throw new Error("Expected loaded Notes");
+    expect(loaded.snapshot.document.phases[0]!.lifecycleEvents).toHaveLength(3);
   });
 });
 

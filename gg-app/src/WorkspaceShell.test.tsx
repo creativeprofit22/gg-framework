@@ -342,10 +342,11 @@ describe("WorkspaceShell", () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
 
-    expect((await screen.findByTestId("pane-primary")).dataset.target).toBe("/one");
-    expect(screen.getByTestId("pane-secondary").dataset.target).toBe("/two");
-    fireEvent.pointerDown(screen.getByTestId("pane-secondary"));
-    await waitFor(() => expect(screen.getByTestId("pane-secondary").dataset.focused).toBe("true"));
+    const secondaryPane = await waitForInitialWorkspaceReady();
+    expect(screen.getByTestId("pane-primary").dataset.target).toBe("/one");
+    expect(secondaryPane.dataset.target).toBe("/two");
+    fireEvent.pointerDown(secondaryPane);
+    await waitFor(() => expect(secondaryPane.dataset.focused).toBe("true"));
 
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);

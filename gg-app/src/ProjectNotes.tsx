@@ -26,7 +26,8 @@ interface Props {
   client: NotesClient;
   openSource?: OpenReferenceUrl;
   onStartPhase?(phaseId: string): Promise<PhaseStartResult>;
-  onResumePhase?(link: NotesSessionLink): Promise<void>;
+  onResumePhase?(phaseId: string, link: NotesSessionLink): Promise<void>;
+  phaseStartUnavailableReason?: string | null;
   phaseActionDisabled?: boolean;
 }
 
@@ -55,6 +56,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     onResumePhase = async () => {
       throw new Error("Phase actions are unavailable in this view.");
     },
+    phaseStartUnavailableReason = null,
     phaseActionDisabled = false,
   },
   ref,
@@ -168,6 +170,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             openSource={openSource}
             onStartPhase={onStartPhase}
             onResumePhase={onResumePhase}
+            phaseStartUnavailableReason={phaseStartUnavailableReason}
             phaseActionDisabled={phaseActionDisabled}
             onPhaseActionSuccess={() => setShowNotes(false)}
             onChangeHandoff={changeHandoff}

@@ -176,6 +176,39 @@ describe("AgentSession active phase context", () => {
     }
   }, 15_000);
 
+  it("persists reviewing with the approved plan active across restart", async () => {
+    const original = await makeSession(false);
+    const originalState = original.getState();
+    await original.setActivePhaseContext(
+      activePhaseContext(originalState.sessionId, originalState.sessionPath),
+    );
+    await original.updateActivePhaseStage("reviewing", ".gg/plans/phase-21.md");
+    await original.dispose();
+
+    const { AgentSession } = await import("./agent-session.js");
+    const resumed = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "test system prompt",
+      sessionId: originalState.sessionPath,
+    });
+    await resumed.initialize();
+    try {
+      expect(resumed.getPlanMode()).toBe(false);
+      expect(resumed.getActivePhaseContext()).toMatchObject({
+        executionStage: "reviewing",
+        approvedPlanPath: ".gg/plans/phase-21.md",
+      });
+      expect(String(resumed.getMessages()[0]?.content)).toContain('"executionStage": "reviewing"');
+      expect(String(resumed.getMessages()[0]?.content)).toContain(
+        '"approvedPlanPath": ".gg/plans/phase-21.md"',
+      );
+    } finally {
+      await resumed.dispose();
+    }
+  }, 15_000);
+
   it("rejects Resume when the session header belongs to another project", async () => {
     const original = await makeSession(false);
     const originalState = original.getState();

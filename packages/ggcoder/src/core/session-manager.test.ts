@@ -231,6 +231,16 @@ describe("SessionManager.getActivePhaseContext", () => {
     ).toEqual(latest);
   });
 
+  it("restores the durable reviewing stage and approved plan", () => {
+    const reviewing = activePhaseContext({
+      executionStage: "reviewing",
+      approvedPlanPath: ".gg/plans/phase-21.md",
+    });
+    expect(manager.getActivePhaseContext([activePhaseEntry("reviewing", reviewing)])).toEqual(
+      reviewing,
+    );
+  });
+
   it("ignores malformed and unrelated records without replacing the last valid context", () => {
     const valid = activePhaseContext();
     expect(

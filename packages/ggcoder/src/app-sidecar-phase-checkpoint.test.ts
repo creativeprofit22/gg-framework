@@ -99,6 +99,10 @@ function createRepository(
       events.push("notes-link-persisted");
       return outcome;
     }),
+    recordPhaseLifecycleTransition: vi.fn(async () => {
+      events.push("notes-lifecycle-persisted");
+      return successfulOutcome;
+    }),
   };
 }
 
@@ -119,6 +123,7 @@ async function attemptApproval(options: {
       repository,
       cwd: "/project",
       planPath: "/plans/phase-21.md",
+      approvalSource: "user",
       prepareFreshSession: async () => {
         events.push("fresh-session-prepared");
         return 3;
@@ -174,7 +179,6 @@ describe("plan approval checkpoint", () => {
     expect(result.events).toEqual([
       "fresh-session-prepared",
       "notes-link-persisted",
-      "notes-snapshot-broadcast",
       "stage-persisted",
     ]);
     expect(result.repository.updatePhaseSessionLink).toHaveBeenCalledOnce();
@@ -190,10 +194,97 @@ describe("plan approval checkpoint", () => {
     expect(result.events).toEqual([
       "fresh-session-prepared",
       "notes-link-persisted",
-      "notes-snapshot-broadcast",
       "stage-persisted",
+      "notes-lifecycle-persisted",
+      "notes-snapshot-broadcast",
       "approval-reset",
       "implementation-prompt",
+    ]);
+  });
+
+  it.each(["user", "agent"] as const)(
+    "serializes the %s lifecycle checkpoint before reset",
+    async (approvalSource) => {
+      const events: string[] = [];
+      const session = createSession(events);
+      const repository = createRepository(events);
+      let signal: unknown;
+      await commitPlanApprovalCheckpoint({
+        session,
+        repository,
+        cwd: "/project",
+        planPath: "/plans/phase-21.md",
+        approvalSource,
+        prepareFreshSession: async () => {
+          events.push("fresh-session-prepared");
+          return 3;
+        },
+        reconcileLifecycle: async (value) => {
+          signal = value;
+          events.push("notes-lifecycle-persisted", "notes-snapshot-broadcast");
+          return { status: "committed", snapshot };
+        },
+        onSnapshot: () => events.push("unexpected-direct-fan-out"),
+      });
+      events.push("approval-reset", "implementation-prompt");
+
+      expect(signal).toEqual({ type: "plan-approved", approvalSource });
+      expect(events).toEqual([
+        "fresh-session-prepared",
+        "notes-link-persisted",
+        "stage-persisted",
+        "notes-lifecycle-persisted",
+        "notes-snapshot-broadcast",
+        "approval-reset",
+        "implementation-prompt",
+      ]);
+    },
+  );
+
+  it("restores the pending approval stage when lifecycle persistence fails", async () => {
+    const events: string[] = [];
+    const session = createSession(events);
+    const repository = createRepository(events);
+    const storageError = new Error("notes disk full");
+
+    await expect(
+      commitPlanApprovalCheckpoint({
+        session,
+        repository,
+        cwd: "/project",
+        planPath: "/plans/phase-21.md",
+        approvalSource: "user",
+        prepareFreshSession: async () => {
+          events.push("fresh-session-prepared");
+          return 3;
+        },
+        reconcileLifecycle: async () => {
+          events.push("notes-lifecycle-failed");
+          return { status: "storage-failure", error: storageError };
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "phase-lifecycle-persistence-failed",
+      phaseId: "phase-21",
+      cause: storageError,
+    });
+
+    expect(vi.mocked(session.updateActivePhaseStage)).toHaveBeenNthCalledWith(
+      1,
+      "implementing",
+      "/plans/phase-21.md",
+    );
+    expect(vi.mocked(session.updateActivePhaseStage)).toHaveBeenNthCalledWith(
+      2,
+      "awaiting-approval",
+      "/plans/phase-21.md",
+    );
+    expect(events).toEqual([
+      "fresh-session-prepared",
+      "notes-link-persisted",
+      "stage-persisted",
+      "notes-lifecycle-failed",
+      "stage-persisted",
     ]);
   });
 
@@ -225,6 +316,7 @@ describe("compaction checkpoint", () => {
         events.push("notes-link-started");
         return outcome;
       },
+      recordPhaseLifecycleTransition: async () => successfulOutcome,
     };
 
     const completion = completeCompactionCheckpoint({

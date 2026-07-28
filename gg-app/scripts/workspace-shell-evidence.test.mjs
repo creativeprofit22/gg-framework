@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BoundedTail,
   processTreeSnapshot,
+  readProcessTable,
   runEvidenceRuns,
   runSupervisedProcess,
   survivingProcessIds,
@@ -9,6 +10,66 @@ import {
 
 function nodeEval(source) {
   return [process.execPath, ["-e", source]];
+}
+
+const TIMEOUT_OPTIONS = {
+  deadlineMs: 150,
+  cleanupGraceMs: 2_000,
+  survivorSettleMs: 1_000,
+  sampleMs: 25,
+  tailBytes: 1_024,
+};
+
+function expectBoundedTimeout(result) {
+  const timeoutTriggerBoundMs = result.deadlineMs + result.cleanupGraceMs;
+  const terminationStartedElapsedMs = result.terminationRequestedElapsedMs;
+
+  expect(result.timedOut).toBe(true);
+  expect(result.timeoutTriggeredElapsedMs).toEqual(expect.any(Number));
+  expect(result.timeoutTriggeredElapsedMs).toBeLessThanOrEqual(timeoutTriggerBoundMs);
+  expect(terminationStartedElapsedMs).toEqual(expect.any(Number));
+  expect(terminationStartedElapsedMs).toBeLessThanOrEqual(timeoutTriggerBoundMs);
+
+  // Scheduler delay and process cleanup are separate: Windows may dispatch the deadline late,
+  // but once termination starts the process tree must still close inside the cleanup grace.
+  for (const completedElapsedMs of [
+    result.terminationCompletedElapsedMs,
+    result.processClosedElapsedMs,
+  ]) {
+    expect(completedElapsedMs).toEqual(expect.any(Number));
+    expect(completedElapsedMs).toBeGreaterThanOrEqual(terminationStartedElapsedMs);
+    expect(completedElapsedMs - terminationStartedElapsedMs).toBeLessThanOrEqual(
+      result.cleanupGraceMs,
+    );
+  }
+  expect(result.terminationError).toBeNull();
+  expect(result.outputTail).toContain("timeout-ready");
+  expect(result.processInspectionErrorCount).toBe(0);
+  expect(result.survivorCount).toBe(0);
+  expect(result.survivorPids).toEqual([]);
+}
+
+function timeoutEvidence(run, result, descendantPid = null) {
+  return {
+    run,
+    elapsedMs: result.elapsedMs,
+    deadlineMs: result.deadlineMs,
+    cleanupGraceMs: result.cleanupGraceMs,
+    survivorSettleMs: result.survivorSettleMs,
+    sampleMs: result.sampleMs,
+    startedAtMs: result.startedAtMs,
+    deadlineAtMs: result.deadlineAtMs,
+    timeoutTriggeredAtMs: result.timeoutTriggeredAtMs,
+    schedulerDelayMs: result.timeoutTriggeredAtMs - result.deadlineAtMs,
+    terminationRequestedAtMs: result.terminationRequestedAtMs,
+    terminationCompletedAtMs: result.terminationCompletedAtMs,
+    terminationDurationMs: result.terminationCompletedAtMs - result.terminationRequestedAtMs,
+    processClosedAtMs: result.processClosedAtMs,
+    processCloseAfterTerminationMs: result.processClosedAtMs - result.terminationRequestedAtMs,
+    survivorCheckCompletedAtMs: result.survivorCheckCompletedAtMs,
+    survivorCount: result.survivorCount,
+    descendantPid,
+  };
 }
 
 describe("workspace-shell evidence supervisor", () => {
@@ -86,18 +147,37 @@ describe("workspace-shell evidence supervisor", () => {
 
   it("enforces an external deadline and leaves no supervised process alive", async () => {
     const [command, args] = nodeEval("console.log('timeout-ready'); setInterval(() => {}, 1000)");
-    const result = await runSupervisedProcess(command, args, {
-      deadlineMs: 150,
-      cleanupGraceMs: 2_000,
-      sampleMs: 25,
-      tailBytes: 1_024,
-    });
+    const result = await runSupervisedProcess(command, args, TIMEOUT_OPTIONS);
 
-    expect(result.timedOut).toBe(true);
-    expect(result.elapsedMs).toBeLessThan(5_000);
-    expect(result.outputTail).toContain("timeout-ready");
-    expect(result.survivorCount).toBe(0);
+    expectBoundedTimeout(result);
+    console.info(`WORKSPACE_SHELL_TIMEOUT=${JSON.stringify(timeoutEvidence(1, result))}`);
   }, 15_000);
+
+  it("repeatedly kills supervised descendants within the cleanup bound", async () => {
+    const fixture = [
+      "const { spawn } = require('node:child_process')",
+      "const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })",
+      "console.log('timeout-ready descendant-pid=' + descendant.pid)",
+      "setInterval(() => {}, 1000)",
+    ].join("; ");
+
+    for (let run = 1; run <= 5; run += 1) {
+      const [command, args] = nodeEval(fixture);
+      const result = await runSupervisedProcess(command, args, {
+        ...TIMEOUT_OPTIONS,
+        deadlineMs: 500,
+      });
+
+      expectBoundedTimeout(result);
+      const descendantPid = Number(result.outputTail.match(/descendant-pid=(\d+)/)?.[1]);
+      expect(descendantPid).toBeGreaterThan(0);
+      const liveProcesses = await readProcessTable();
+      expect(liveProcesses.some(({ pid }) => pid === descendantPid)).toBe(false);
+      console.info(
+        `WORKSPACE_SHELL_TIMEOUT_STRESS=${JSON.stringify(timeoutEvidence(run, result, descendantPid))}`,
+      );
+    }
+  }, 60_000);
 
   it("repeats runs and reports memory growth and survivors", async () => {
     let invocation = 0;

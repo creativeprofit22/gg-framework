@@ -171,7 +171,10 @@ interface FixtureOptions {
   failPromptCount?: number;
   failBindingCount?: number;
   failAttention?: boolean;
+  failEnterPlanMode?: boolean;
   pauseBinding?: { promise: Promise<void> };
+  pauseAttention?: { promise: Promise<void> };
+  sessionNumberBase?: number;
 }
 
 class ProductionPhaseFixture {
@@ -223,11 +226,15 @@ class ProductionPhaseFixture {
       createSession: () => {
         this.createCalls += 1;
         this.events.push("candidate-created");
-        const session = new FakePhaseSession(this.createCalls, this.events, {
-          initialize: this.takeFailure("initialize"),
-          context: this.takeFailure("context"),
-          prompt: this.takeFailure("prompt"),
-        });
+        const session = new FakePhaseSession(
+          (this.options.sessionNumberBase ?? 0) + this.createCalls,
+          this.events,
+          {
+            initialize: this.takeFailure("initialize"),
+            context: this.takeFailure("context"),
+            prompt: this.takeFailure("prompt"),
+          },
+        );
         this.createdSessions.push(session);
         return session;
       },
@@ -246,6 +253,7 @@ class ProductionPhaseFixture {
       enterPlanMode: async () => {
         this.currentSession.planMode = true;
         this.events.push("plan-mode");
+        if (this.options.failEnterPlanMode) throw new Error("plan mode failed");
       },
       startPrompt: (_label, run, onFailure) => {
         this.events.push("prompt-started");
@@ -290,10 +298,13 @@ class ProductionPhaseFixture {
         this.events.push("bind-committed");
         return outcome;
       },
-      recordPhaseLaunchAttention: (cwd, phaseId, reason) =>
-        this.options.failAttention
-          ? Promise.reject(new Error("attention persistence failed"))
-          : this.repository.recordPhaseLaunchAttention(cwd, phaseId, reason),
+      recordPhaseLaunchAttention: async (cwd, phaseId, reason, expectedSession) => {
+        await this.options.pauseAttention?.promise;
+        if (this.options.failAttention) {
+          throw new Error("attention persistence failed");
+        }
+        return this.repository.recordPhaseLaunchAttention(cwd, phaseId, reason, expectedSession);
+      },
     };
   }
 
@@ -477,6 +488,197 @@ describe("production launchBoundPhase orchestration", () => {
     expect(first.currentSession.promptCalls + second.currentSession.promptCalls).toBe(1);
   });
 
+  it.each(["not-started", "needs-attention", "cancelled"] as const)(
+    "recovers a null-path %s binding with one authoritative replacement",
+    async (status) => {
+      const { repository, cwd } = await setup();
+      await updatePhase(repository, cwd, (notes) => {
+        const phase = notes.phases[0]!;
+        phase.status = status;
+        phase.session = { sessionId: "bound", sessionPath: null };
+        phase.attentionReason =
+          status === "needs-attention" ? "Previous launch lost its session path." : null;
+        phase.completedAt = status === "cancelled" ? NOW : null;
+        phase.overrides.status = null;
+        phase.lifecycleEvents = [];
+      });
+      const fixture = new ProductionPhaseFixture(repository, cwd);
+
+      const response = await fixture.start();
+      await fixture.promptSettled;
+
+      expect(response).toMatchObject({
+        status: 202,
+        body: {
+          status: "accepted",
+          session: { sessionId: "session-1", sessionPath: "/sessions/session-1.jsonl" },
+        },
+      });
+      expect(fixture.createCalls).toBe(1);
+      expect(fixture.currentSession.promptCalls).toBe(1);
+      expect(await repository.load(cwd)).toMatchObject({
+        status: "ok",
+        snapshot: {
+          document: {
+            phases: [
+              {
+                status: "planning",
+                session: {
+                  sessionId: "session-1",
+                  sessionPath: "/sessions/session-1.jsonl",
+                },
+                lifecycleEvents: [
+                  expect.objectContaining({ fromStatus: status, toStatus: "planning" }),
+                ],
+              },
+            ],
+          },
+        },
+      });
+      await fixture.dispose();
+    },
+  );
+
+  it("records launch attention against the original null-path binding when replacement commit fails", async () => {
+    const { repository, cwd } = await setup();
+    await updatePhase(repository, cwd, (notes) => {
+      const phase = notes.phases[0]!;
+      phase.session = { sessionId: "bound", sessionPath: null };
+    });
+    const fixture = new ProductionPhaseFixture(repository, cwd, { failBindingCount: 1 });
+
+    await expect(fixture.start()).resolves.toMatchObject({
+      status: 500,
+      body: { code: "launch-failed" },
+    });
+
+    expect(await repository.load(cwd)).toMatchObject({
+      status: "ok",
+      snapshot: {
+        document: {
+          phases: [
+            {
+              status: "needs-attention",
+              session: { sessionId: "bound", sessionPath: null },
+              attentionReason: "Phase launch failed. Retry Start phase.",
+            },
+          ],
+        },
+      },
+    });
+    expect(fixture.events.filter((event) => event === "notes-fan-out")).toHaveLength(1);
+    await fixture.dispose();
+  });
+
+  it("rejects losing pre-binding attention after a cross-window winner commits", async () => {
+    const { repository, cwd, root } = await setup();
+    const bindingGate = deferred();
+    const attentionGate = deferred();
+    const loser = new ProductionPhaseFixture(repository, cwd, {
+      failBindingCount: 1,
+      pauseBinding: bindingGate,
+      pauseAttention: attentionGate,
+    });
+    const winner = new ProductionPhaseFixture(
+      new ProjectNotesRepository(path.join(root, ".gg")),
+      cwd,
+      { sessionNumberBase: 100 },
+    );
+
+    const losingStart = loser.start();
+    await viWaitFor(() => loser.candidates.has("phase-21"));
+    const winningStart = winner.start();
+    await viWaitFor(() => winner.events.includes("bind-started"));
+
+    bindingGate.resolve();
+    await viWaitFor(() => loser.events.includes("launch-failure-reported"));
+    await expect(winningStart).resolves.toMatchObject({
+      status: 202,
+      body: { status: "accepted", session: { sessionId: "session-101" } },
+    });
+    await winner.promptSettled;
+    attentionGate.resolve();
+    await expect(losingStart).resolves.toMatchObject({
+      status: 500,
+      body: { code: "launch-failed" },
+    });
+
+    expect(await repository.load(cwd)).toMatchObject({
+      status: "ok",
+      snapshot: {
+        document: {
+          phases: [
+            {
+              status: "planning",
+              session: {
+                sessionId: "session-101",
+                sessionPath: "/sessions/session-101.jsonl",
+              },
+              attentionReason: null,
+              lifecycleEvents: [
+                expect.objectContaining({
+                  fromStatus: "not-started",
+                  toStatus: "planning",
+                  source: "user",
+                }),
+              ],
+            },
+          ],
+        },
+      },
+    });
+    expect(loser.events.filter((event) => event === "notes-fan-out")).toHaveLength(0);
+  });
+
+  it("guards post-binding launch failure attention with the committed session", async () => {
+    const { repository, cwd } = await setup();
+    const attentionGate = deferred();
+    const fixture = new ProductionPhaseFixture(repository, cwd, {
+      failEnterPlanMode: true,
+      pauseAttention: attentionGate,
+    });
+
+    const start = fixture.start();
+    await viWaitFor(() => fixture.events.includes("launch-failure-reported"));
+    await expect(
+      repository.updatePhaseSessionLink(cwd, "phase-21", {
+        sessionId: "session-new-owner",
+        sessionPath: "/sessions/new-owner.jsonl",
+      }),
+    ).resolves.toMatchObject({ status: "ok" });
+    attentionGate.resolve();
+    await expect(start).resolves.toMatchObject({
+      status: 500,
+      body: { code: "launch-failed" },
+    });
+
+    expect(await repository.load(cwd)).toMatchObject({
+      status: "ok",
+      snapshot: {
+        document: {
+          phases: [
+            {
+              status: "planning",
+              session: {
+                sessionId: "session-new-owner",
+                sessionPath: "/sessions/new-owner.jsonl",
+              },
+              attentionReason: null,
+              lifecycleEvents: [
+                expect.objectContaining({
+                  fromStatus: "not-started",
+                  toStatus: "planning",
+                  source: "user",
+                }),
+              ],
+            },
+          ],
+        },
+      },
+    });
+    expect(fixture.events.filter((event) => event === "notes-fan-out")).toHaveLength(1);
+  });
+
   it.each([
     ["session initialization", { failInitializeCount: 1 }],
     ["active-context persistence", { failContextCount: 1 }],
@@ -494,7 +696,23 @@ describe("production launchBoundPhase orchestration", () => {
       expect(fixture.mutations.owner).toBeNull();
       expect(await repository.load(cwd)).toMatchObject({
         status: "ok",
-        snapshot: { document: { phases: [{ session: null }] } },
+        snapshot: {
+          document: {
+            phases: [
+              {
+                status: "needs-attention",
+                session: null,
+                lifecycleEvents: [
+                  expect.objectContaining({
+                    fromStatus: "not-started",
+                    toStatus: "needs-attention",
+                    source: "system",
+                  }),
+                ],
+              },
+            ],
+          },
+        },
       });
 
       await expect(fixture.start()).resolves.toMatchObject({
@@ -715,6 +933,7 @@ describe("production launchBoundPhase orchestration", () => {
         repository,
         cwd,
         planPath: "/plans/phase-21.md",
+        approvalSource: approvalSource === "Autopilot" ? "agent" : "user",
         prepareFreshSession: async () => {
           fixture.events.push(`${approvalSource}-approval`);
           await session.newSession(true);
@@ -727,8 +946,8 @@ describe("production launchBoundPhase orchestration", () => {
       expect(fixture.events.slice(-4)).toEqual([
         `${approvalSource}-approval`,
         "fresh-session:true",
-        "approval-notes-fan-out",
         "stage-persisted",
+        "approval-notes-fan-out",
       ]);
       expect(session.activeContext).toMatchObject({
         executionStage: "implementing",
@@ -740,10 +959,21 @@ describe("production launchBoundPhase orchestration", () => {
           document: {
             phases: [
               {
+                status: "in-progress",
                 session: {
                   sessionId: session.state.sessionId,
                   sessionPath: session.state.sessionPath,
                 },
+                lifecycleEvents: expect.arrayContaining([
+                  expect.objectContaining({
+                    toStatus: "in-progress",
+                    source: approvalSource === "Autopilot" ? "agent" : "user",
+                    reason:
+                      approvalSource === "Autopilot"
+                        ? "Plan approved by Autopilot"
+                        : "Plan approved by user",
+                  }),
+                ]),
               },
             ],
           },
@@ -752,28 +982,24 @@ describe("production launchBoundPhase orchestration", () => {
     },
   );
 
-  it.each(["archive", "deletion"])(
-    "disposes a retained candidate when retry discovers phase %s",
-    async (terminalChange) => {
-      const { repository, cwd } = await setup();
-      const fixture = new ProductionPhaseFixture(repository, cwd, { failBindingCount: 1 });
-      await fixture.start();
-      const stale = fixture.createdSessions[0]!;
-      await updatePhase(repository, cwd, (notes) => {
-        if (terminalChange === "archive") notes.phases[0]!.archivedAt = NOW;
-        else notes.phases = [];
-      });
+  it("disposes a retained candidate when retry discovers a phase archive", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd, { failBindingCount: 1 });
+    await fixture.start();
+    const stale = fixture.createdSessions[0]!;
+    await updatePhase(repository, cwd, (notes) => {
+      notes.phases[0]!.archivedAt = NOW;
+    });
 
-      await expect(fixture.start()).resolves.toMatchObject({
-        status: 409,
-        body: { code: terminalChange === "archive" ? "phase-archived" : "phase-not-found" },
-      });
-      expect(stale.disposeCalls).toBe(1);
-      expect(fixture.candidates.has("phase-21")).toBe(false);
-      await fixture.dispose();
-      expect(stale.disposeCalls).toBe(1);
-    },
-  );
+    await expect(fixture.start()).resolves.toMatchObject({
+      status: 409,
+      body: { code: "phase-archived" },
+    });
+    expect(stale.disposeCalls).toBe(1);
+    expect(fixture.candidates.has("phase-21")).toBe(false);
+    await fixture.dispose();
+    expect(stale.disposeCalls).toBe(1);
+  });
 });
 
 async function viWaitFor(assertion: () => boolean, timeoutMs = 1_000): Promise<void> {

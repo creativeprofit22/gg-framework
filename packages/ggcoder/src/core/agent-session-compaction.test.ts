@@ -225,7 +225,8 @@ describe("AgentSession required phase metadata during compaction", () => {
       },
       session: { sessionId: initial.sessionId, sessionPath: initial.sessionPath },
       references: [],
-      executionStage: "planning",
+      executionStage: "reviewing",
+      approvedPlanPath: ".gg/plans/phase-21.md",
     };
     await session.setActivePhaseContext(context);
 
@@ -244,9 +245,13 @@ describe("AgentSession required phase metadata during compaction", () => {
 
       await expect(session.prompt("retry the phase")).resolves.toBeUndefined();
       expect(agentLoopMock).toHaveBeenCalledOnce();
-      expect(session.getActivePhaseContext()?.session).toEqual({
-        sessionId: session.getState().sessionId,
-        sessionPath: session.getState().sessionPath,
+      expect(session.getActivePhaseContext()).toMatchObject({
+        session: {
+          sessionId: session.getState().sessionId,
+          sessionPath: session.getState().sessionPath,
+        },
+        executionStage: "reviewing",
+        approvedPlanPath: ".gg/plans/phase-21.md",
       });
     } finally {
       append.mockRestore();

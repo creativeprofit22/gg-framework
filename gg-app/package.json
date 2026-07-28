@@ -22,7 +22,9 @@
     "bump": "node scripts/bump-version.mjs",
     "evidence:workspace-shell": "node scripts/workspace-shell-evidence.mjs",
     "smoke:packaged-windows": "node scripts/smoke-packaged-windows.mjs",
-    "test": "vitest run",
+    "test": "pnpm test:parallel && pnpm test:workspace-shell-evidence",
+    "test:parallel": "vitest run --exclude scripts/workspace-shell-evidence.test.mjs",
+    "test:workspace-shell-evidence": "vitest run scripts/workspace-shell-evidence.test.mjs --no-file-parallelism",
     "tauri": "tauri"
   },
   "dependencies": {

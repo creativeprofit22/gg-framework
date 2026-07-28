@@ -137,6 +137,7 @@ const SESSION_RESET_RECOVERY_MESSAGE =
   "The new session opened, but live confirmation was delayed. This pane was recovered from the successful response.";
 const AUTOPILOT_NEW_SESSION_RETRY_MESSAGE =
   "Ken is reviewing this session. Wait for the review to finish or cancel it, then try again.";
+const ROADMAP_PHASE_CODING_MODE_GUIDANCE = "Switch to coding mode to start this phase.";
 
 class SessionResetConfirmationTimeoutError extends Error {
   constructor(readonly operationId: string) {
@@ -1670,6 +1671,14 @@ export function AgentPane({
 
   const startRoadmapPhase = useCallback(
     async (phaseId: string): Promise<PhaseStartResult> => {
+      if (state?.mode !== "code") {
+        return {
+          status: "failed",
+          code: "coding-mode-required",
+          operationId: null,
+          message: ROADMAP_PHASE_CODING_MODE_GUIDANCE,
+        };
+      }
       if (sessionMutationLockRef.current || running || autopilotReviewing) {
         return {
           status: "failed",
@@ -1691,23 +1700,50 @@ export function AgentPane({
         setNewSessionBusy(false);
       }
     },
-    [client, running, autopilotReviewing, registerSessionResetOperationWaiter],
+    [client, running, autopilotReviewing, registerSessionResetOperationWaiter, state?.mode],
   );
 
   const resumeRoadmapPhase = useCallback(
-    async (link: NotesSessionLink): Promise<void> => {
+    async (phaseId: string, link: NotesSessionLink): Promise<void> => {
       if (sessionMutationLockRef.current || running || autopilotReviewing) {
         throw new Error("Wait for the current run or Autopilot review to finish.");
       }
       const current = stateRef.current;
       if (!current?.cwd) throw new Error("The project session is not ready.");
-      if (!link.sessionPath) throw new Error("This phase has no resumable session file.");
-      if (current.sessionId === link.sessionId && current.sessionPath === link.sessionPath) return;
+      if (
+        current.sessionId === link.sessionId &&
+        (link.sessionPath === null || current.sessionPath === link.sessionPath)
+      ) {
+        return;
+      }
+
+      let resumableLink = link;
+      if (resumableLink.sessionPath === null) {
+        const recovery = await startRoadmapPhase(phaseId);
+        if (recovery.status === "failed") throw new Error(recovery.message);
+        if (recovery.status === "accepted") return;
+        resumableLink = recovery.session;
+
+        const active = stateRef.current;
+        if (
+          active?.sessionId === resumableLink.sessionId &&
+          active.sessionPath === resumableLink.sessionPath
+        ) {
+          return;
+        }
+        if (!active?.cwd || active.cwd !== current.cwd) {
+          throw new Error("The project session changed while this phase was recovering.");
+        }
+        if (resumableLink.sessionPath === null) {
+          throw new Error("This phase still has no resumable session file. Retry recovery.");
+        }
+      }
+
       sessionMutationLockRef.current = true;
       setNewSessionBusy(true);
       try {
         await client.selectWorkspace(
-          { mode: "code", cwd: current.cwd, sessionPath: link.sessionPath },
+          { mode: "code", cwd: current.cwd, sessionPath: resumableLink.sessionPath },
           generationRef.current ?? 0,
         );
         // Resume is not complete until the replacement session passes its startup
@@ -1719,7 +1755,7 @@ export function AgentPane({
         setNewSessionBusy(false);
       }
     },
-    [client, running, autopilotReviewing, onProjectChosen],
+    [client, running, autopilotReviewing, onProjectChosen, startRoadmapPhase],
   );
 
   const dispatchKenPromptAction = useCallback(
@@ -2549,6 +2585,9 @@ export function AgentPane({
                   client={client}
                   onStartPhase={startRoadmapPhase}
                   onResumePhase={resumeRoadmapPhase}
+                  phaseStartUnavailableReason={
+                    state?.mode === "code" ? null : ROADMAP_PHASE_CODING_MODE_GUIDANCE
+                  }
                   phaseActionDisabled={running || autopilotReviewing || newSessionBusy}
                 />
                 <button

@@ -28,7 +28,8 @@ interface RoadmapProps {
   ): Promise<NotesReferenceOperationResult>;
   onCreateReference(): void;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
-  onResumePhase(link: NotesSessionLink): Promise<void>;
+  onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
+  startUnavailableReason: string | null;
   actionDisabled: boolean;
   onActionSuccess(): void;
 }
@@ -68,6 +69,7 @@ export function NotesRoadmap({
   onCreateReference,
   onStartPhase,
   onResumePhase,
+  startUnavailableReason,
   actionDisabled,
   onActionSuccess,
 }: RoadmapProps): React.ReactElement {
@@ -316,6 +318,7 @@ export function NotesRoadmap({
             onCreateReference={onCreateReference}
             onStartPhase={onStartPhase}
             onResumePhase={onResumePhase}
+            startUnavailableReason={startUnavailableReason}
             actionDisabled={actionDisabled}
             onPendingChange={(pending) => setPendingPhaseId(pending ? selectedPhase.id : null)}
             onActionSuccess={onActionSuccess}
@@ -346,6 +349,7 @@ function PhaseDetail({
   onCreateReference,
   onStartPhase,
   onResumePhase,
+  startUnavailableReason,
   actionDisabled,
   onPendingChange,
   onActionSuccess,
@@ -364,7 +368,8 @@ function PhaseDetail({
   onUnlinkReference(referenceId: string): void;
   onCreateReference(): void;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
-  onResumePhase(link: NotesSessionLink): Promise<void>;
+  onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
+  startUnavailableReason: string | null;
   actionDisabled: boolean;
   onPendingChange(pending: boolean): void;
   onActionSuccess(): void;
@@ -379,9 +384,12 @@ function PhaseDetail({
   const [raceLink, setRaceLink] = useState<NotesSessionLink | null>(null);
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const action = primaryAction(phase);
-  const effectiveAction = raceLink ? "Resume" : action;
+  const effectiveAction = raceLink ? sessionAction(raceLink) : action;
   const resumeLink = raceLink ?? phase.session;
   const controlsDisabled = actionDisabled || pending;
+  const phaseStartDisabled =
+    (effectiveAction === "Start" || effectiveAction === "Recover") &&
+    startUnavailableReason !== null;
 
   useEffect(() => {
     if (phase.session) setRaceLink(null);
@@ -392,7 +400,7 @@ function PhaseDetail({
   }, [pending, actionError]);
 
   const runPhaseAction = async (): Promise<void> => {
-    if (controlsDisabled || effectiveAction === "Review") return;
+    if (controlsDisabled || phaseStartDisabled || effectiveAction === "Review") return;
     const reportActionError = (message: string): void => {
       setActionStatus("");
       setActionError(message);
@@ -400,7 +408,13 @@ function PhaseDetail({
     setPending(true);
     onPendingChange(true);
     setActionError("");
-    setActionStatus(effectiveAction === "Start" ? "Starting phase…" : "Resuming phase…");
+    setActionStatus(
+      effectiveAction === "Start"
+        ? "Starting phase…"
+        : effectiveAction === "Recover"
+          ? "Recovering phase…"
+          : "Resuming phase…",
+    );
     try {
       if (effectiveAction === "Start") {
         const result = await onStartPhase(phase.id);
@@ -412,14 +426,16 @@ function PhaseDetail({
         if (result.status === "already-bound") {
           setRaceLink(result.session);
           reportActionError(
-            "This phase was started in another window. Resume the bound session instead.",
+            "This phase was started in another window. Continue with the bound session instead.",
           );
         } else {
           reportActionError(result.message);
         }
       } else if (resumeLink) {
-        await onResumePhase(resumeLink);
-        setActionStatus("Phase session resumed.");
+        await onResumePhase(phase.id, resumeLink);
+        setActionStatus(
+          resumeLink.sessionPath === null ? "Phase session recovered." : "Phase session resumed.",
+        );
         onActionSuccess();
         return;
       } else {
@@ -645,12 +661,16 @@ function PhaseDetail({
           <h4 id={`notes-phase-execution-${phase.id}`}>Phase session</h4>
           <p>
             {effectiveAction === "Start"
-              ? "Review the goal, completion criteria, saved prompt, and attached references above before starting."
-              : effectiveAction === "Resume"
-                ? "Continue the one coding session already bound to this phase."
-                : "This phase is available for scope review only."}
+              ? (startUnavailableReason ??
+                "Review the goal, completion criteria, saved prompt, and attached references above before starting.")
+              : effectiveAction === "Recover"
+                ? (startUnavailableReason ??
+                  "Replace the missing session-file binding with a new planning session, unless it is already live in this pane.")
+                : effectiveAction === "Resume"
+                  ? "Continue the one coding session already bound to this phase."
+                  : "This phase is available for scope review only."}
           </p>
-          {phase.attentionReason && (
+          {phase.status === "needs-attention" && phase.attentionReason && (
             <p className="notes-phase-attention">Needs attention: {phase.attentionReason}</p>
           )}
         </div>
@@ -659,16 +679,21 @@ function PhaseDetail({
             ref={actionButtonRef}
             type="button"
             className="notes-roadmap-primary"
-            disabled={controlsDisabled}
+            disabled={controlsDisabled || phaseStartDisabled}
+            title={phaseStartDisabled ? startUnavailableReason : undefined}
             onClick={() => void runPhaseAction()}
           >
             {pending
               ? effectiveAction === "Start"
                 ? "Starting…"
-                : "Resuming…"
+                : effectiveAction === "Recover"
+                  ? "Recovering…"
+                  : "Resuming…"
               : effectiveAction === "Start"
                 ? "Start phase"
-                : "Resume phase"}
+                : effectiveAction === "Recover"
+                  ? "Recover phase"
+                  : "Resume phase"}
           </button>
         )}
         <div
@@ -692,6 +717,7 @@ function PhaseDetail({
           <select
             id={`notes-phase-status-${phase.id}`}
             value={phase.status}
+            aria-describedby={`notes-phase-status-help-${phase.id}`}
             disabled={controlsDisabled}
             onChange={(event) => onChangePhaseStatus(event.target.value as NotesPhaseStatus)}
           >
@@ -701,6 +727,14 @@ function PhaseDetail({
               </option>
             ))}
           </select>
+          <p
+            id={`notes-phase-status-help-${phase.id}`}
+            className="notes-field-help notes-phase-status-help"
+          >
+            {phase.overrides.status
+              ? "Automatic lifecycle updates are paused because a manual status override is active."
+              : "Choosing a status pauses automatic lifecycle updates for this phase."}
+          </p>
         </div>
         <div className="notes-phase-secondary-actions">
           <button
@@ -801,16 +835,24 @@ function referenceLinkAnnouncement(
   return `Couldn’t ${action} the reference. Check Notes storage and try again.`;
 }
 
-function primaryAction(phase: NotesPhase): "Start" | "Resume" | "Review" {
-  if (
-    phase.status === "review" ||
-    phase.status === "needs-attention" ||
-    phase.status === "done" ||
-    phase.status === "cancelled"
-  ) {
-    return "Review";
+type PhasePrimaryAction = "Start" | "Resume" | "Recover" | "Review";
+
+function sessionAction(session: NotesSessionLink): "Resume" | "Recover" {
+  return session.sessionPath === null ? "Recover" : "Resume";
+}
+
+function primaryAction(phase: NotesPhase): PhasePrimaryAction {
+  if (phase.status === "review" || phase.status === "done") return "Review";
+  if (phase.status === "cancelled") {
+    if (phase.overrides.status !== null) return "Review";
+    return phase.session ? sessionAction(phase.session) : "Start";
   }
-  if (phase.status !== "not-started" || phase.session !== null) return "Resume";
+  if (phase.status === "needs-attention") {
+    return phase.session ? sessionAction(phase.session) : "Start";
+  }
+  if (phase.status !== "not-started" || phase.session !== null) {
+    return phase.session ? sessionAction(phase.session) : "Resume";
+  }
   return "Start";
 }
 

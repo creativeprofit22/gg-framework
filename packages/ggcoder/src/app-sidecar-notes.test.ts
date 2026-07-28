@@ -85,6 +85,7 @@ function notes(reference: string): NotesDocumentV3 {
         archivedAt: null,
         overrides: { status: null, referenceIds: null },
         lifecycleEvents: [],
+        roadmapEvents: [],
       },
     ],
   };

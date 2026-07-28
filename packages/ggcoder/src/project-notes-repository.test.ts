@@ -126,6 +126,7 @@ function notes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV3 {
             reason: null,
           },
         ],
+        roadmapEvents: [],
       },
     ],
   };
@@ -524,6 +525,296 @@ describe("ProjectNotesRepository authoritative lifecycle transitions", () => {
   });
 });
 
+describe("ProjectNotesRepository roadmap status reconciliation", () => {
+  function roadmapDocument(): NotesDocumentV3 {
+    const document = notes("roadmap status");
+    const phase = document.phases[0]!;
+    phase.status = "not-started";
+    phase.attentionReason = null;
+    phase.session = { sessionId: "session-roadmap", sessionPath: "/sessions/roadmap.jsonl" };
+    phase.overrides = { status: null, referenceIds: null };
+    phase.lifecycleEvents = [];
+    phase.roadmapEvents = [];
+    phase.referenceIds = [];
+    document.references = [];
+    return document;
+  }
+
+  it.each([
+    ["pending", "planning"],
+    ["in-progress", "in-progress"],
+    ["blocked", "needs-attention"],
+    ["review", "review"],
+  ] as const)("maps %s without any automatic Done path", async (transition, expectedStatus) => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = `/work/roadmap-${transition}`;
+    await repository.migrate(cwd, roadmapDocument());
+    const outcome = await repository.recordRoadmapStatusUpdate(cwd, {
+      updateId: `update-${transition}`,
+      phaseId: "phase-1",
+      actor: "gg-coder",
+      transition,
+      progress: `Progress for ${transition}`,
+      blocker: transition === "blocked" ? "CI is unavailable" : null,
+      evidence: transition === "review" ? ["Focused tests passed"] : [],
+      proposedReferences: [],
+      timestamp: NOW,
+      expectedSession: { sessionId: "session-roadmap", sessionPath: "/sessions/roadmap.jsonl" },
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+    });
+
+    expect(outcome).toMatchObject({
+      status: "committed",
+      statusOutcome: "applied",
+      phase: { status: expectedStatus },
+      snapshot: { revision: 2 },
+    });
+    if (outcome.status === "committed") expect(outcome.phase.status).not.toBe("done");
+  });
+
+  it("keeps retries idempotent, rejects conflicting IDs, and preserves a status override", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const document = roadmapDocument();
+    document.phases[0]!.overrides.status = {
+      value: "not-started",
+      source: "user",
+      updatedAt: NOW,
+    };
+    await repository.migrate("/work/roadmap-duplicates", document);
+    const request = {
+      updateId: "update-stable",
+      phaseId: "phase-1",
+      actor: "ken" as const,
+      transition: "in-progress" as const,
+      progress: "Implementation is underway",
+      blocker: null,
+      evidence: [],
+      proposedReferences: [],
+      timestamp: NOW,
+      expectedRevision: 1,
+      autopilotEnabled: false,
+    };
+
+    await expect(
+      repository.recordRoadmapStatusUpdate("/work/roadmap-duplicates", request),
+    ).resolves.toMatchObject({
+      status: "committed",
+      statusOutcome: "manual-override",
+      phase: { status: "not-started", roadmapEvents: [{ id: "update-stable" }] },
+    });
+    await expect(
+      repository.recordRoadmapStatusUpdate("/work/roadmap-duplicates", request),
+    ).resolves.toMatchObject({
+      status: "duplicate",
+      revision: 2,
+    });
+    await expect(
+      repository.recordRoadmapStatusUpdate("/work/roadmap-duplicates", {
+        ...request,
+        progress: "Different content",
+      }),
+    ).resolves.toEqual({ status: "duplicate-id-conflict", revision: 2 });
+  });
+
+  it("canonicalizes reference coordinates before matching an update ID retry", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/roadmap-normalized-retry";
+    await repository.migrate(cwd, roadmapDocument());
+    const reference = {
+      provider: " GitHub ",
+      tool: null,
+      canonicalUrl: " HTTPS://GITHUB.COM:443/owner/repo/ ",
+      owner: " owner ",
+      repo: " repo ",
+      revision: null,
+      path: null,
+      range: null,
+      issue: null,
+      pullRequest: null,
+      query: null,
+      anchor: null,
+      relevance: "Repository source",
+    };
+    const request = {
+      updateId: "normalized-retry",
+      phaseId: "phase-1",
+      actor: "ken" as const,
+      transition: "in-progress" as const,
+      progress: "Verified normalized coordinates",
+      blocker: null,
+      evidence: [],
+      proposedReferences: [reference],
+      timestamp: NOW,
+      autopilotEnabled: false,
+    };
+
+    await expect(repository.recordRoadmapStatusUpdate(cwd, request)).resolves.toMatchObject({
+      status: "committed",
+      proposals: [{ outcome: "pending" }],
+      snapshot: {
+        document: {
+          phases: [
+            {
+              roadmapEvents: [
+                {
+                  proposedReferences: [
+                    {
+                      provider: "github",
+                      canonicalUrl: "https://github.com/owner/repo",
+                      owner: "owner",
+                      repo: "repo",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        ...request,
+        proposedReferences: [
+          {
+            ...reference,
+            provider: "github",
+            canonicalUrl: "https://github.com/owner/repo",
+            owner: "owner",
+            repo: "repo",
+          },
+        ],
+      }),
+    ).resolves.toMatchObject({
+      status: "duplicate",
+      revision: 2,
+      proposals: [{ outcome: "pending" }],
+    });
+  });
+
+  it("keeps manual proposals pending and auto-accepts or reuses references under Autopilot", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const reference = {
+      provider: "github",
+      tool: "kencode-search",
+      canonicalUrl: "https://github.com/owner/repo/blob/main/src/index.ts",
+      owner: "owner",
+      repo: "repo",
+      revision: "main",
+      path: "src/index.ts",
+      range: null,
+      issue: null,
+      pullRequest: null,
+      query: null,
+      anchor: null,
+      relevance: "Implementation source",
+    };
+    await repository.migrate("/work/roadmap-references", roadmapDocument());
+    const baseRequest = {
+      phaseId: "phase-1",
+      actor: "ken-autopilot" as const,
+      transition: "in-progress" as const,
+      progress: "Verified source",
+      blocker: null,
+      evidence: [],
+      proposedReferences: [reference],
+      timestamp: NOW,
+    };
+
+    await expect(
+      repository.recordRoadmapStatusUpdate("/work/roadmap-references", {
+        ...baseRequest,
+        updateId: "manual",
+        autopilotEnabled: false,
+      }),
+    ).resolves.toMatchObject({
+      status: "committed",
+      proposals: [{ outcome: "pending", policyOutcome: "manual-review" }],
+      snapshot: {
+        document: {
+          phases: [
+            {
+              roadmapEvents: [
+                {
+                  proposedReferences: [{ policyOutcome: "manual-review" }],
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const autoRequest = {
+      ...baseRequest,
+      updateId: "auto",
+      autopilotEnabled: true,
+    };
+    const accepted = await repository.recordRoadmapStatusUpdate(
+      "/work/roadmap-references",
+      autoRequest,
+    );
+    expect(accepted).toMatchObject({
+      status: "committed",
+      proposals: [
+        {
+          outcome: "accepted",
+          policyOutcome: "accepted",
+          referenceId: expect.any(String),
+        },
+      ],
+      snapshot: { revision: 3, document: { references: [expect.objectContaining(reference)] } },
+    });
+    await expect(
+      repository.recordRoadmapStatusUpdate("/work/roadmap-references", autoRequest),
+    ).resolves.toMatchObject({
+      status: "duplicate",
+      revision: 3,
+      proposals: [
+        {
+          outcome: "accepted",
+          policyOutcome: "accepted",
+          referenceId: expect.any(String),
+        },
+      ],
+    });
+    await expect(
+      repository.recordRoadmapStatusUpdate("/work/roadmap-references", {
+        ...baseRequest,
+        updateId: "reuse",
+        autopilotEnabled: true,
+      }),
+    ).resolves.toMatchObject({
+      status: "committed",
+      proposals: [{ outcome: "reused", policyOutcome: "reused" }],
+    });
+
+    const protectedDocument = roadmapDocument();
+    protectedDocument.phases[0]!.overrides.referenceIds = {
+      value: [],
+      source: "user",
+      updatedAt: NOW,
+    };
+    await repository.migrate("/work/roadmap-protected-references", protectedDocument);
+    await expect(
+      repository.recordRoadmapStatusUpdate("/work/roadmap-protected-references", {
+        ...baseRequest,
+        updateId: "protected",
+        autopilotEnabled: true,
+      }),
+    ).resolves.toMatchObject({
+      status: "committed",
+      proposals: [
+        {
+          outcome: "pending",
+          policyOutcome: "reference-override-protected",
+          referenceId: null,
+        },
+      ],
+    });
+  });
+});
+
 describe("project Notes identity and validation", () => {
   it("accepts and exactly round-trips the canonical v3 contract fixture", async () => {
     const fixture = await canonicalNotesFixture();
@@ -664,17 +955,80 @@ describe("project Notes identity and validation", () => {
     });
   });
 
-  it("rewrites the original v3 phase shape with a null archive marker", async () => {
+  it.each([
+    ["archivedAt present and roadmapEvents absent", ["roadmapEvents"]],
+    ["both additive fields absent", ["archivedAt", "roadmapEvents"]],
+    ["archivedAt absent and roadmapEvents present", ["archivedAt"]],
+  ])(
+    "rewrites a v3 phase with %s without changing its revision or existing data",
+    async (caseName, missingFields) => {
+      const agentDir = await tempAgentDir();
+      const cwd = `/work/${caseName.replace(/ /g, "-")}`;
+      const repository = new ProjectNotesRepository(agentDir);
+      const paths = repository.paths(cwd);
+      const expected = notes(caseName);
+      const original = structuredClone(expected) as unknown as {
+        phases: Array<Record<string, unknown>>;
+      };
+      for (const field of missingFields) delete original.phases[0]![field];
+      const envelope = {
+        storeVersion: 1 as const,
+        projectKey: canonicalProjectKey(cwd),
+        revision: 22,
+        document: original,
+      };
+      await fs.mkdir(paths.directory, { recursive: true });
+      await fs.writeFile(paths.primary, JSON.stringify(envelope), "utf8");
+
+      const loaded = await repository.load(cwd);
+      const expectedEnvelope = { ...envelope, document: expected };
+
+      expect(loaded).toEqual({
+        status: "ok",
+        snapshot: {
+          projectKey: envelope.projectKey,
+          revision: envelope.revision,
+          document: expected,
+        },
+        recoveredFromBackup: false,
+      });
+      expect(await readEnvelope(paths.primary)).toEqual(expectedEnvelope);
+      expect(await readEnvelope(paths.backup)).toEqual(expectedEnvelope);
+    },
+  );
+
+  it("migrates legacy v3 proposal outcomes without inferring override protection", async () => {
     const agentDir = await tempAgentDir();
-    const cwd = "/work/original-v3";
+    const cwd = "/work/legacy-roadmap-proposal";
     const repository = new ProjectNotesRepository(agentDir);
     const paths = repository.paths(cwd);
-    const original = notes() as unknown as { phases: Array<Record<string, unknown>> };
-    delete original.phases[0]!.archivedAt;
+    const original = notes("legacy roadmap proposal");
+    const { id: _referenceId, capturedAt: _capturedAt, ...proposal } = original.references[0]!;
+    (original.phases[0] as unknown as { roadmapEvents: unknown[] }).roadmapEvents = [
+      {
+        type: "status-update",
+        id: "legacy-update",
+        actor: "gg-coder",
+        transition: "in-progress",
+        progress: "Legacy report",
+        blocker: null,
+        evidence: [],
+        statusOutcome: "same-status",
+        proposedReferences: [
+          {
+            ...proposal,
+            id: "legacy-proposal",
+            disposition: "pending",
+            referenceId: null,
+          },
+        ],
+        timestamp: NOW,
+      },
+    ];
     const envelope = {
       storeVersion: 1,
       projectKey: canonicalProjectKey(cwd),
-      revision: 3,
+      revision: 4,
       document: original,
     };
     await fs.mkdir(paths.directory, { recursive: true });
@@ -684,20 +1038,79 @@ describe("project Notes identity and validation", () => {
 
     expect(loaded).toMatchObject({
       status: "ok",
-      snapshot: { revision: 3, document: { phases: [{ archivedAt: null }] } },
+      snapshot: {
+        revision: 4,
+        document: {
+          phases: [
+            {
+              roadmapEvents: [
+                {
+                  proposedReferences: [
+                    {
+                      disposition: "pending",
+                      policyOutcome: "manual-review",
+                      referenceId: null,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      },
     });
-    expect((await readEnvelope(paths.primary)).document.phases[0]!.archivedAt).toBeNull();
-    expect((await readEnvelope(paths.backup)).document.phases[0]!.archivedAt).toBeNull();
+    expect((await readEnvelope(paths.primary)).document.phases[0]!.roadmapEvents[0]).toMatchObject({
+      proposedReferences: [{ policyOutcome: "manual-review" }],
+    });
   });
 
-  it("rejects original-v3 archive lookalikes with unknown phase keys", async () => {
+  it("rejects proposal policy outcomes that contradict their disposition", () => {
+    const invalid = notes("invalid roadmap policy");
+    const { id: _referenceId, capturedAt: _capturedAt, ...proposal } = invalid.references[0]!;
+    invalid.phases[0]!.roadmapEvents = [
+      {
+        type: "status-update",
+        id: "invalid-policy-update",
+        actor: "gg-coder",
+        transition: "in-progress",
+        progress: "Invalid policy report",
+        blocker: null,
+        evidence: [],
+        statusOutcome: "same-status",
+        proposedReferences: [
+          {
+            ...proposal,
+            id: "invalid-policy-proposal",
+            disposition: "pending",
+            policyOutcome: "accepted",
+            referenceId: null,
+          },
+        ],
+        timestamp: NOW,
+      },
+    ];
+
+    expect(validateNotesDocumentV3(invalid)).toMatchObject({
+      ok: false,
+      error: {
+        path: "phases[0].roadmapEvents[0].proposedReferences[0].policyOutcome",
+        message: "must match the proposal disposition",
+      },
+    });
+  });
+
+  it.each([
+    ["roadmapEvents absent", ["roadmapEvents"]],
+    ["both additive fields absent", ["archivedAt", "roadmapEvents"]],
+    ["archivedAt absent", ["archivedAt"]],
+  ])("rejects %s lookalikes with unknown phase keys", async (caseName, missingFields) => {
     const agentDir = await tempAgentDir();
     const original = notes() as unknown as { phases: Array<Record<string, unknown>> };
-    delete original.phases[0]!.archivedAt;
+    for (const field of missingFields) delete original.phases[0]![field];
     original.phases[0]!.unexpected = true;
 
     await expect(
-      new ProjectNotesRepository(agentDir).migrate("/work/lookalike", original),
+      new ProjectNotesRepository(agentDir).migrate(`/work/lookalike-${caseName}`, original),
     ).resolves.toMatchObject({
       status: "invalid",
       error: { path: "phases[0]" },
@@ -944,17 +1357,40 @@ describe("ProjectNotesRepository durability", () => {
     expect((await first.load("/work/project")).status).toBe("ok");
   });
 
-  it("recovers a missing or corrupt primary from a fully validated backup", async () => {
+  it("recovers and rewrites a Phase 22 backup without changing revision or data", async () => {
     const agentDir = await tempAgentDir();
+    const cwd = "/work/phase-22-backup";
     const repository = new ProjectNotesRepository(agentDir);
-    const paths = repository.paths("/work/project");
-    await repository.migrate("/work/project", notes());
-
+    const paths = repository.paths(cwd);
+    const expected = notes("Phase 22 backup");
+    const original = structuredClone(expected) as unknown as {
+      phases: Array<Record<string, unknown>>;
+    };
+    delete original.phases[0]!.roadmapEvents;
+    const envelope = {
+      storeVersion: 1 as const,
+      projectKey: canonicalProjectKey(cwd),
+      revision: 22,
+      document: original,
+    };
+    await fs.mkdir(paths.directory, { recursive: true });
     await fs.writeFile(paths.primary, "{broken", "utf8");
-    const recovered = await repository.load("/work/project");
+    await fs.writeFile(paths.backup, JSON.stringify(envelope), "utf8");
 
-    expect(recovered).toMatchObject({ status: "ok", recoveredFromBackup: true });
-    expect(await readEnvelope(paths.primary)).toEqual(await readEnvelope(paths.backup));
+    const recovered = await repository.load(cwd);
+    const expectedEnvelope = { ...envelope, document: expected };
+
+    expect(recovered).toEqual({
+      status: "ok",
+      snapshot: {
+        projectKey: envelope.projectKey,
+        revision: envelope.revision,
+        document: expected,
+      },
+      recoveredFromBackup: true,
+    });
+    expect(await readEnvelope(paths.primary)).toEqual(expectedEnvelope);
+    expect(await readEnvelope(paths.backup)).toEqual(expectedEnvelope);
   });
 
   it("reports dual corruption without replacing either file", async () => {

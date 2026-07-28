@@ -87,6 +87,10 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     deleteReference,
     linkReferenceToPhase,
     unlinkReferenceFromPhase,
+    acceptReferenceProposal,
+    rejectReferenceProposal,
+    resumeAutomaticStatus,
+    resumeAutomaticReferences,
     changeHandoff,
     markHandoffPresented,
     diagnostics,
@@ -167,6 +171,10 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onDeleteReference={deleteReference}
             onLinkReferenceToPhase={linkReferenceToPhase}
             onUnlinkReferenceFromPhase={unlinkReferenceFromPhase}
+            onAcceptReferenceProposal={acceptReferenceProposal}
+            onRejectReferenceProposal={rejectReferenceProposal}
+            onResumeAutomaticStatus={resumeAutomaticStatus}
+            onResumeAutomaticReferences={resumeAutomaticReferences}
             openSource={openSource}
             onStartPhase={onStartPhase}
             onResumePhase={onResumePhase}

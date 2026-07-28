@@ -69,6 +69,7 @@ const successfulOutcome: ProjectNotesPhaseLinkOutcome = {
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
     lifecycleEvents: [],
+    roadmapEvents: [],
   },
 };
 

@@ -70,6 +70,7 @@ function phase(id: string, status: NotesPhaseStatus, withReminder = false): Note
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
     lifecycleEvents: [],
+    roadmapEvents: [],
   };
 }
 
@@ -306,6 +307,133 @@ describe("ProjectNotes", () => {
       expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(1),
     );
     expect(screen.getByRole("tab", { name: "Roadmap" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("renders the latest report, resolves a suggested reference, and exposes merged history", async () => {
+    const cwd = "/work/roadmap-report";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("roadmap evidence");
+    const selected = phase("report", "not-started");
+    selected.title = "Roadmap reporting";
+    selected.overrides.status = { value: "not-started", source: "user", updatedAt: NOW };
+    selected.overrides.referenceIds = { value: [], source: "user", updatedAt: NOW };
+    selected.roadmapEvents = [
+      {
+        type: "status-update",
+        id: "update-report",
+        actor: "ken-autopilot",
+        transition: "blocked",
+        progress: "Repository reconciliation is implemented.",
+        blocker: "The release build is still running.",
+        evidence: ["Focused repository tests passed."],
+        statusOutcome: "manual-override",
+        proposedReferences: [
+          {
+            provider: "github",
+            tool: "searchCode",
+            canonicalUrl: "https://github.com/owner/repo/blob/main/src/roadmap.ts#L1-L20",
+            owner: "owner",
+            repo: "repo",
+            revision: "main",
+            path: "src/roadmap.ts",
+            range: { startLine: 1, endLine: 20 },
+            issue: null,
+            pullRequest: null,
+            query: null,
+            anchor: "L1-L20",
+            relevance: "Roadmap reconciliation source",
+            id: "proposal-report",
+            disposition: "pending",
+            policyOutcome: "manual-review",
+            referenceId: null,
+          },
+        ],
+        timestamp: NOW,
+      },
+    ];
+    populated.phases = [selected];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Roadmap reporting" }));
+
+    expect(screen.getByRole("heading", { name: "Latest report" })).toBeTruthy();
+    expect(screen.getAllByText("Autopilot Ken").length).toBeGreaterThan(0);
+    expect(screen.getByText("Repository reconciliation is implemented.")).toBeTruthy();
+    expect(
+      screen.getAllByText("Blocker: The release build is still running.").length,
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByText("Focused repository tests passed.").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Status was protected by the active manual override/)).toBeTruthy();
+    expect(screen.getByText("Suggested references are pending manual review.")).toBeTruthy();
+    expect(
+      screen.queryByText(/manual reference links were active when this report was recorded/),
+    ).toBeNull();
+    expect(screen.getByRole("heading", { name: "Suggested references" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Reject" })).toBeNull());
+    expect(screen.queryByText("Suggested references are pending manual review.")).toBeNull();
+
+    const protectedAtReportTime = structuredClone(populated);
+    protectedAtReportTime.phases[0]!.overrides.referenceIds = null;
+    const protectedReport = protectedAtReportTime.phases[0]!.roadmapEvents[0];
+    if (protectedReport?.type !== "status-update") throw new Error("Expected a status report");
+    protectedReport.proposedReferences[0]!.policyOutcome = "reference-override-protected";
+    act(() => client.publish(cwd, protectedAtReportTime, 3));
+    await waitFor(() =>
+      expect(
+        screen.getByText(/manual reference links were active when this report was recorded/),
+      ).toBeTruthy(),
+    );
+    expect(screen.queryByText("Suggested references are pending manual review.")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Accept" })).toBeNull());
+    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+
+    fireEvent.click(screen.getByText(/Activity history/));
+    expect(screen.getByText(/Status outcome: manual-override/)).toBeTruthy();
+    expect(screen.getByText("Reference proposal accepted.")).toBeTruthy();
+  });
+
+  it("explains a done-terminal latest report without requiring history expansion", async () => {
+    const cwd = "/work/roadmap-done-terminal";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("done terminal evidence");
+    const selected = phase("done-report", "done");
+    selected.title = "Completed reconciliation";
+    selected.roadmapEvents = [
+      {
+        type: "status-update",
+        id: "update-done-terminal",
+        actor: "gg-coder",
+        transition: "in-progress",
+        progress: "A follow-up report requested more implementation work.",
+        blocker: null,
+        evidence: [],
+        statusOutcome: "done-terminal",
+        proposedReferences: [],
+        timestamp: NOW,
+      },
+    ];
+    populated.phases = [selected];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Review phase: Completed reconciliation" }));
+
+    const latestReport = screen.getByRole("heading", { name: "Latest report" }).closest("section");
+    expect(latestReport?.textContent).toContain(
+      "Done remained terminal, so this report did not change the phase status. The report was retained in history.",
+    );
+    expect(
+      (screen.getByText(/Activity history/).closest("details") as HTMLDetailsElement).open,
+    ).toBe(false);
   });
 
   it("shows attached scope before Start, locks competing controls while pending, and closes on success", async () => {
@@ -665,7 +793,7 @@ describe("ProjectNotes", () => {
     const overriddenSelect = screen.getByLabelText("Status override");
     const overriddenHelpId = overriddenSelect.getAttribute("aria-describedby");
     expect(document.getElementById(overriddenHelpId!)?.textContent).toBe(
-      "Automatic lifecycle updates are paused because a manual status override is active.",
+      "Automatic lifecycle updates are paused. Resuming will set status to Cancelled.",
     );
     expect(screen.queryByRole("button", { name: "Resume phase" })).toBeNull();
   });

@@ -114,6 +114,7 @@ function document(reference: string): NotesDocumentV3 {
         archivedAt: null,
         overrides: { status: null, referenceIds: null },
         lifecycleEvents: [],
+        roadmapEvents: [],
       },
     ],
   };
@@ -292,27 +293,122 @@ describe("structured project notes storage", () => {
     expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!)).toEqual(expected);
   });
 
-  it("adds a null archive marker when loading the original v3 phase shape", () => {
-    const cwd = "/work/original-v3";
+  it.each([
+    ["archivedAt present and roadmapEvents absent", ["roadmapEvents"]],
+    ["both additive fields absent", ["archivedAt", "roadmapEvents"]],
+    ["archivedAt absent and roadmapEvents present", ["archivedAt"]],
+  ])("rewrites a v3 phase with %s without losing existing data", (caseName, missingFields) => {
+    const cwd = `/work/${caseName.replace(/ /g, "-")}`;
     const storage = new MemoryStorage();
-    const original = document("original v3") as unknown as {
+    const expected = document(caseName);
+    const original = structuredClone(expected) as unknown as {
       phases: Array<Record<string, unknown>>;
     };
-    delete original.phases[0]!.archivedAt;
+    for (const field of missingFields) delete original.phases[0]![field];
     storage.setItem(v3NotesKey(cwd), JSON.stringify(original));
 
     const loaded = createNotesRepository(storage, () => NOW).load(cwd);
+    const persisted = JSON.parse(storage.getItem(v3NotesKey(cwd))!) as unknown;
+    const restarted = createNotesRepository(storage, () => NOW).load(cwd);
 
-    expect(loaded.document.phases[0]!.archivedAt).toBeNull();
-    expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!).phases[0].archivedAt).toBeNull();
-    expect(loaded.migrationEligibility).toBe("valid-v3");
+    expect(loaded).toMatchObject({
+      source: "v3",
+      migrationEligibility: "valid-v3",
+      document: expected,
+    });
+    expect(loaded.document).toEqual(expected);
+    expect(persisted).toEqual(expected);
+    expect(restarted.document).toEqual(expected);
   });
 
-  it("rejects archive-shape lookalikes with unknown phase keys", () => {
-    const original = document("invalid original v3") as unknown as {
+  it("migrates legacy v3 proposal outcomes without inferring override protection", () => {
+    const cwd = "/work/legacy-roadmap-proposal";
+    const storage = new MemoryStorage();
+    const legacy = document("legacy roadmap proposal");
+    const { id: _referenceId, capturedAt: _capturedAt, ...proposal } = legacy.references[0]!;
+    (legacy.phases[0] as unknown as { roadmapEvents: unknown[] }).roadmapEvents = [
+      {
+        type: "status-update",
+        id: "legacy-update",
+        actor: "gg-coder",
+        transition: "in-progress",
+        progress: "Legacy report",
+        blocker: null,
+        evidence: [],
+        statusOutcome: "applied",
+        proposedReferences: [
+          {
+            ...proposal,
+            id: "legacy-proposal",
+            disposition: "pending",
+            referenceId: null,
+          },
+        ],
+        timestamp: NOW,
+      },
+    ];
+    storage.setItem(v3NotesKey(cwd), JSON.stringify(legacy));
+
+    const loaded = createNotesRepository(storage, () => NOW).load(cwd);
+
+    expect(loaded.document.phases[0]!.roadmapEvents[0]).toMatchObject({
+      proposedReferences: [
+        {
+          disposition: "pending",
+          policyOutcome: "manual-review",
+          referenceId: null,
+        },
+      ],
+    });
+    expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!).phases[0].roadmapEvents[0]).toMatchObject({
+      proposedReferences: [{ policyOutcome: "manual-review" }],
+    });
+  });
+
+  it("rejects proposal policy outcomes that contradict their disposition", () => {
+    const invalid = document("invalid roadmap policy");
+    const { id: _referenceId, capturedAt: _capturedAt, ...proposal } = invalid.references[0]!;
+    invalid.phases[0]!.roadmapEvents = [
+      {
+        type: "status-update",
+        id: "invalid-policy-update",
+        actor: "gg-coder",
+        transition: "in-progress",
+        progress: "Invalid policy report",
+        blocker: null,
+        evidence: [],
+        statusOutcome: "applied",
+        proposedReferences: [
+          {
+            ...proposal,
+            id: "invalid-policy-proposal",
+            disposition: "pending",
+            policyOutcome: "accepted",
+            referenceId: null,
+          },
+        ],
+        timestamp: NOW,
+      },
+    ];
+
+    expect(validateNotesDocumentV3(invalid)).toMatchObject({
+      ok: false,
+      error: {
+        path: "phases[0].roadmapEvents[0].proposedReferences[0].policyOutcome",
+        message: "must match the proposal disposition",
+      },
+    });
+  });
+
+  it.each([
+    ["roadmapEvents absent", ["roadmapEvents"]],
+    ["both additive fields absent", ["archivedAt", "roadmapEvents"]],
+    ["archivedAt absent", ["archivedAt"]],
+  ])("rejects %s lookalikes with unknown phase keys", (_caseName, missingFields) => {
+    const original = document("invalid additive shape") as unknown as {
       phases: Array<Record<string, unknown>>;
     };
-    delete original.phases[0]!.archivedAt;
+    for (const field of missingFields) delete original.phases[0]![field];
     original.phases[0]!.unexpected = true;
 
     expect(parseNotesDocument(JSON.stringify(original))).toMatchObject({

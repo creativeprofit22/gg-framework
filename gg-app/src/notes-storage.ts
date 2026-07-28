@@ -1,6 +1,6 @@
 import {
   migrateNotesDocumentV2,
-  migrateNotesDocumentV3PhaseArchive,
+  migrateNotesDocumentV3PhaseShape,
   validateNotesDocumentV3,
 } from "./notes-types";
 import type {
@@ -115,7 +115,7 @@ export function parseNotesDocument(raw: string): NotesParseResult {
       migratedArchiveShape: false,
     };
   }
-  const migrated = migrateNotesDocumentV3PhaseArchive(value);
+  const migrated = migrateNotesDocumentV3PhaseShape(value);
   return migrated.ok
     ? {
         ok: true,

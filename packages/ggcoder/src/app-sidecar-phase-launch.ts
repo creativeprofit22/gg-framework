@@ -1,5 +1,6 @@
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
+import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import { isAppSidecarSessionBusy } from "./app-sidecar-session-mutation.js";
 import type {
   AppSidecarSessionBusyState,
@@ -76,6 +77,7 @@ export type PhaseStartResponseBody =
         | "coding-mode-required"
         | "session-busy"
         | "session-mutation-in-progress"
+        | "reconciliation-in-progress"
         | "phase-not-found"
         | "phase-archived"
         | "notes-missing"
@@ -90,6 +92,7 @@ export interface LaunchBoundPhaseDependencies<TSession extends BoundPhaseSession
   mode: "code" | "chat";
   busyState: AppSidecarSessionBusyState;
   mutations: AppSidecarSessionMutationCoordinator;
+  reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   repository: PhaseLaunchRepository;
   cwd: string;
   candidates: AppSidecarPhaseCandidateStore<BoundPhaseCandidate<TSession>>;
@@ -158,6 +161,19 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       code: "session-mutation-in-progress",
       operationId: dependencies.mutations.owner?.operationId ?? null,
       message: "Another session action is already in progress.",
+    });
+    return;
+  }
+
+  const reconciliation = dependencies.reconciliations.tryAcquire(dependencies.cwd, "phase-start");
+  if (!reconciliation) {
+    const owner = dependencies.reconciliations.owner(dependencies.cwd);
+    mutation.release();
+    dependencies.respond(409, {
+      status: "failed",
+      code: "reconciliation-in-progress",
+      operationId: owner?.operationId ?? null,
+      message: "Another Roadmap launch or status update is already in progress for this project.",
     });
     return;
   }
@@ -283,6 +299,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       message: LAUNCH_FAILURE_MESSAGE,
     });
   } finally {
+    reconciliation.release();
     mutation.release();
   }
 }

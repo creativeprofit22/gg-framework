@@ -262,8 +262,8 @@ export interface AgentState {
   gitDirtyFileCount?: number;
   /** True when the active model can accept native video input. */
   supportsVideo?: boolean;
-  /** Autopilot (auto-review) toggle for this window's project. Per-window,
-   *  persisted server-side; absent on frames from older sidecars. */
+  /** Project-wide Autopilot (auto-review) policy shared live by every pane/window
+   *  on this canonical project; absent on frames from older sidecars. */
   autopilot?: boolean;
   /** Provider of the model Ken (mentor + autopilot) uses next turn. */
   kenProvider?: string;
@@ -705,8 +705,8 @@ export async function cancelKen(): Promise<void> {
   }
 }
 
-/** Toggle autopilot (auto-review) for this window's project. Persisted
- *  server-side (~/.gg/gg-app.json, keyed by cwd). Returns the new value. */
+/** Toggle project-wide Autopilot (auto-review). Persisted server-side and fanned
+ *  out live to every pane/window on the same canonical project. */
 export async function setAutopilot(enabled: boolean): Promise<boolean> {
   try {
     await waitForReady();
@@ -717,7 +717,7 @@ export async function setAutopilot(enabled: boolean): Promise<boolean> {
     return res.autopilot ?? enabled;
   } catch (e) {
     await logError(`agent_autopilot_set failed: ${String(e)}`);
-    return enabled;
+    throw e;
   }
 }
 
@@ -2106,8 +2106,9 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
           (await call<{ autopilot?: boolean }>("agent_autopilot_set", { enabled })).autopilot ??
           enabled
         );
-      } catch {
-        return enabled;
+      } catch (error) {
+        await logError(`agent_autopilot_set failed: ${String(error)}`);
+        throw error;
       }
     },
     acceptPlan: (planPath) => call("agent_accept_plan", { planPath }),

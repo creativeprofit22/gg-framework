@@ -13,6 +13,7 @@ import type {
   NotesPhaseStatus,
   NotesReference,
   NotesReferenceOperationResult,
+  NotesRoadmapMutationResult,
   NotesSessionLink,
   NotesTask,
   PhaseStartResult,
@@ -67,6 +68,16 @@ interface Props {
     referenceId: string,
     phaseId: string,
   ): Promise<NotesReferenceOperationResult>;
+  onAcceptReferenceProposal(
+    phaseId: string,
+    proposalId: string,
+  ): Promise<NotesRoadmapMutationResult>;
+  onRejectReferenceProposal(
+    phaseId: string,
+    proposalId: string,
+  ): Promise<NotesRoadmapMutationResult>;
+  onResumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
+  onResumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
   openSource?: OpenReferenceUrl;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
@@ -117,6 +128,10 @@ export function NotesModal({
   onDeleteReference,
   onLinkReferenceToPhase,
   onUnlinkReferenceFromPhase,
+  onAcceptReferenceProposal,
+  onRejectReferenceProposal,
+  onResumeAutomaticStatus,
+  onResumeAutomaticReferences,
   openSource,
   onStartPhase,
   onResumePhase,
@@ -283,6 +298,10 @@ export function NotesModal({
                   onArchivePhase={onArchivePhase}
                   onLinkReferenceToPhase={onLinkReferenceToPhase}
                   onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
+                  onAcceptReferenceProposal={onAcceptReferenceProposal}
+                  onRejectReferenceProposal={onRejectReferenceProposal}
+                  onResumeAutomaticStatus={onResumeAutomaticStatus}
+                  onResumeAutomaticReferences={onResumeAutomaticReferences}
                   onStartPhase={onStartPhase}
                   onResumePhase={onResumePhase}
                   startUnavailableReason={phaseStartUnavailableReason}

@@ -1,15 +1,15 @@
 /**
  * Autopilot toggle — the Material-style switch (Uiverse by lenin55) that turns
- * auto-review on/off for THIS window's project. Sits left of the "+ New" button
- * in the nav row. State lives on the sidecar (persisted per-cwd in gg-app.json);
- * this is a controlled switch that optimistically flips then fires `setAutopilot`.
+ * auto-review on/off for the current project. Sits left of the "+ New" button
+ * in the nav row. State lives on the sidecar and converges live across every
+ * same-project pane/window; this controlled switch shows that shared policy.
  *
  * Markup mirrors the source snippet exactly (label.cl-switch > input + span);
  * the styling lives in `.cl-switch` rules in App.css, re-themed to the app's
  * accent so the "on" track/thumb read as gg-coder purple, not the original teal.
  */
 interface Props {
-  /** Current on/off state (from the sidecar's AgentState). */
+  /** Current shared project state (from the sidecar's AgentState/events). */
   checked: boolean;
   /** Fired with the next value when the user flips the switch. */
   onChange: (next: boolean) => void;

@@ -90,7 +90,52 @@ function phase(id: string, order: number): NotesDocumentV3["phases"][number] {
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
     lifecycleEvents: [],
+    roadmapEvents: [],
   };
+}
+
+function addPendingRoadmapProposal(
+  document: NotesDocumentV3,
+  options: {
+    statusOverride?: boolean;
+    referenceOverride?: boolean;
+    transition?: "in-progress" | "blocked";
+  } = {},
+): NotesDocumentV3 {
+  const selected = phase("phase-roadmap", 0);
+  selected.status = "not-started";
+  selected.overrides = {
+    status: options.statusOverride
+      ? { value: "not-started", source: "user", updatedAt: NOW }
+      : null,
+    referenceIds: options.referenceOverride ? { value: [], source: "user", updatedAt: NOW } : null,
+  };
+  const transition = options.transition ?? "in-progress";
+  selected.roadmapEvents = [
+    {
+      type: "status-update",
+      id: "update-1",
+      actor: "gg-coder",
+      transition,
+      progress: "Implemented the Roadmap status path",
+      blocker: transition === "blocked" ? "Waiting for CI" : null,
+      evidence: ["Focused tests passed"],
+      statusOutcome: options.statusOverride ? "manual-override" : "same-status",
+      proposedReferences: [
+        {
+          ...referenceInput(),
+          id: "proposal-1",
+          disposition: "pending",
+          policyOutcome: options.referenceOverride
+            ? "reference-override-protected"
+            : "manual-review",
+          referenceId: null,
+        },
+      ],
+      timestamp: NOW,
+    },
+  ];
+  return { ...document, phases: [selected] };
 }
 
 class MemoryStorage implements Storage {
@@ -1346,5 +1391,163 @@ describe("useProjectNotes sidecar authority", () => {
     await Promise.resolve();
     expect(hook.result.current.document.reference).toBe("project B");
     expect(slow.listeners.size).toBe(0);
+  });
+
+  it("accepts a pending proposal with canonical reuse and makes repeated decisions idempotent", async () => {
+    const storage = new MemoryStorage();
+    const document = addPendingRoadmapProposal(notes("proposal"));
+    document.references = [savedReference("existing-ref")];
+    seed(storage, "/work/proposal", document);
+    let id = 0;
+    const hook = renderHook(() =>
+      useProjectNotes("/work/proposal", {
+        storage,
+        clock: testClock,
+        idFactory: () => `generated-${++id}`,
+      }),
+    );
+
+    await expect(
+      hook.result.current.acceptReferenceProposal("phase-roadmap", "proposal-1"),
+    ).resolves.toEqual({
+      status: "committed",
+      phaseId: "phase-roadmap",
+      referenceId: "existing-ref",
+    });
+    await waitFor(() =>
+      expect(hook.result.current.document.phases[0]!.roadmapEvents).toHaveLength(2),
+    );
+    expect(hook.result.current.document.references).toHaveLength(1);
+    expect(hook.result.current.document.phases[0]).toMatchObject({
+      referenceIds: ["existing-ref"],
+      overrides: { referenceIds: { value: ["existing-ref"], source: "user" } },
+      roadmapEvents: [
+        expect.objectContaining({ type: "status-update" }),
+        expect.objectContaining({
+          type: "reference-decision",
+          proposalId: "proposal-1",
+          decision: "accepted",
+          referenceId: "existing-ref",
+        }),
+      ],
+    });
+    await expect(
+      hook.result.current.acceptReferenceProposal("phase-roadmap", "proposal-1"),
+    ).resolves.toEqual({
+      status: "already-decided",
+      phaseId: "phase-roadmap",
+      decision: "accepted",
+    });
+    await expect(
+      hook.result.current.rejectReferenceProposal("phase-roadmap", "proposal-1"),
+    ).resolves.toEqual({
+      status: "decision-conflict",
+      phaseId: "phase-roadmap",
+      decision: "accepted",
+    });
+  });
+
+  it("creates a valid reference when accepting a new proposal", async () => {
+    const storage = new MemoryStorage();
+    seed(storage, "/work/new-proposal", addPendingRoadmapProposal(notes("new proposal")));
+    let id = 0;
+    const hook = renderHook(() =>
+      useProjectNotes("/work/new-proposal", {
+        storage,
+        clock: testClock,
+        idFactory: () => `generated-${++id}`,
+      }),
+    );
+
+    await expect(
+      hook.result.current.acceptReferenceProposal("phase-roadmap", "proposal-1"),
+    ).resolves.toEqual({
+      status: "committed",
+      phaseId: "phase-roadmap",
+      referenceId: "generated-2",
+    });
+    await waitFor(() => expect(hook.result.current.document.references).toHaveLength(1));
+    expect(hook.result.current.document.references[0]).toMatchObject({
+      id: "generated-2",
+      capturedAt: expect.any(String),
+      canonicalUrl: "https://github.com/owner/repo/blob/main/src/file.ts#L1-L2",
+    });
+    expect(hook.result.current.document.references[0]).not.toHaveProperty("policyOutcome");
+  });
+
+  it("rejects a pending proposal without attaching it", async () => {
+    const storage = new MemoryStorage();
+    seed(storage, "/work/reject", addPendingRoadmapProposal(notes("reject")));
+    let id = 0;
+    const hook = renderHook(() =>
+      useProjectNotes("/work/reject", {
+        storage,
+        clock: testClock,
+        idFactory: () => `generated-${++id}`,
+      }),
+    );
+
+    await expect(
+      hook.result.current.rejectReferenceProposal("phase-roadmap", "proposal-1"),
+    ).resolves.toEqual({ status: "committed", phaseId: "phase-roadmap" });
+    await waitFor(() =>
+      expect(hook.result.current.document.phases[0]!.roadmapEvents).toHaveLength(2),
+    );
+    expect(hook.result.current.document.references).toEqual([]);
+    const rejectedEvents = hook.result.current.document.phases[0]!.roadmapEvents;
+    expect(rejectedEvents[rejectedEvents.length - 1]).toMatchObject({
+      type: "reference-decision",
+      decision: "rejected",
+      referenceId: null,
+    });
+  });
+
+  it("resumes status from the latest protected report and resets references without changing links", async () => {
+    const storage = new MemoryStorage();
+    const document = addPendingRoadmapProposal(notes("reset"), {
+      statusOverride: true,
+      referenceOverride: true,
+      transition: "blocked",
+    });
+    document.references = [savedReference("existing-ref")];
+    document.phases[0]!.referenceIds = ["existing-ref"];
+    document.phases[0]!.overrides.referenceIds = {
+      value: ["existing-ref"],
+      source: "user",
+      updatedAt: NOW,
+    };
+    seed(storage, "/work/reset", document);
+    let id = 0;
+    const hook = renderHook(() =>
+      useProjectNotes("/work/reset", {
+        storage,
+        clock: testClock,
+        idFactory: () => `generated-${++id}`,
+      }),
+    );
+
+    await expect(hook.result.current.resumeAutomaticStatus("phase-roadmap")).resolves.toEqual({
+      status: "committed",
+      phaseId: "phase-roadmap",
+      resultingStatus: "needs-attention",
+    });
+    await expect(hook.result.current.resumeAutomaticReferences("phase-roadmap")).resolves.toEqual({
+      status: "committed",
+      phaseId: "phase-roadmap",
+    });
+    await waitFor(() =>
+      expect(hook.result.current.document.phases[0]!.overrides.referenceIds).toBeNull(),
+    );
+    expect(hook.result.current.document.phases[0]).toMatchObject({
+      status: "needs-attention",
+      attentionReason: "Waiting for CI",
+      referenceIds: ["existing-ref"],
+      overrides: { status: null, referenceIds: null },
+    });
+    expect(
+      hook.result.current.document.phases[0]!.roadmapEvents.filter(
+        (event) => event.type === "override-reset",
+      ),
+    ).toHaveLength(2);
   });
 });

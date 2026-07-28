@@ -481,6 +481,7 @@ export function AgentPane({
   // is toggled. Null = not showing; the banner clears itself via `onDone`
   // once its slide-out animation finishes.
   const [kenPowerBanner, setKenPowerBanner] = useState<"on" | "off" | null>(null);
+  const [autopilotSaving, setAutopilotSaving] = useState(false);
   const [running, setRunning] = useState(false);
   const cancelling = state?.runState === "cancelling";
   const requestCancel = useCallback(() => {
@@ -621,6 +622,10 @@ export function AgentPane({
   // re-capture state). Lets turn_end pick the right context-token formula by
   // provider without re-subscribing the SSE listener on every state change.
   const stateRef = useRef<AgentState | null>(null);
+  const applyAutopilotState = useCallback((enabled: boolean): void => {
+    if (stateRef.current) stateRef.current = { ...stateRef.current, autopilot: enabled };
+    setState((current) => (current ? { ...current, autopilot: enabled } : current));
+  }, []);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const projectNotesActionsRef = useRef<ProjectNotesPromptActions>(null);
@@ -2557,14 +2562,33 @@ export function AgentPane({
               <span className="picker-head-actions">
                 <AutopilotToggle
                   checked={state?.autopilot ?? false}
-                  disabled={running || autopilotReviewing}
+                  disabled={running || autopilotReviewing || autopilotSaving}
                   onChange={(next) => {
-                    setState((s) => (s ? { ...s, autopilot: next } : s));
-                    void client.setAutopilot(next);
-                    setKenPowerBanner(next ? "on" : "off");
-                    // Dedicated cues for turning autopilot on/off (not the generic
-                    // click, suppressed via data-suppress-click-sound).
-                    playSound(next ? "autopilotOn" : "autopilotOff");
+                    const previous = stateRef.current?.autopilot ?? false;
+                    applyAutopilotState(next);
+                    setAutopilotSaving(true);
+                    void client
+                      .setAutopilot(next)
+                      .then((enabled) => {
+                        // The sidecar event is authoritative and also updates peers.
+                        // Keep local feedback quiet if another pane already changed it.
+                        if (stateRef.current?.autopilot !== enabled) return;
+                        setKenPowerBanner(enabled ? "on" : "off");
+                        playSound(enabled ? "autopilotOn" : "autopilotOff");
+                      })
+                      .catch(async () => {
+                        const authoritative = await client.getState().catch(() => null);
+                        if (typeof authoritative?.autopilot === "boolean") {
+                          applyAutopilotState(authoritative.autopilot);
+                        } else if (stateRef.current?.autopilot === next) {
+                          applyAutopilotState(previous);
+                        }
+                        toast(
+                          "Couldn’t update Autopilot. The project setting is unchanged.",
+                          "error",
+                        );
+                      })
+                      .finally(() => setAutopilotSaving(false));
                   }}
                 />
                 <button

@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { afterEach, describe, expect, it } from "vitest";
+import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import { commitPlanApprovalCheckpoint } from "./app-sidecar-phase-checkpoint.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import {
@@ -11,9 +13,20 @@ import {
   type PhaseLaunchRepository,
   type PhaseStartResponseBody,
 } from "./app-sidecar-phase-launch.js";
+import {
+  APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
+  AppSidecarRoadmapToolHost,
+} from "./app-sidecar-roadmap-tool-host.js";
 import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
+import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import type { ActivePhaseContextV1, ActivePhaseExecutionStage } from "./phase-context.js";
-import { ProjectNotesRepository, type NotesDocumentV3 } from "./project-notes-repository.js";
+import {
+  ProjectNotesRepository,
+  type NotesDocumentV3,
+  type ProjectNotesSnapshot,
+} from "./project-notes-repository.js";
+import { createTools } from "./tools/index.js";
+import { RoadmapStatusParams } from "./tools/roadmap-status.js";
 
 const NOW = "2026-07-26T00:00:00.000Z";
 const roots: string[] = [];
@@ -65,6 +78,7 @@ function document(): NotesDocumentV3 {
         archivedAt: null,
         overrides: { status: null, referenceIds: null },
         lifecycleEvents: [],
+        roadmapEvents: [],
       },
     ],
   };
@@ -183,6 +197,7 @@ class ProductionPhaseFixture {
   readonly broadcasts: Array<{ type: string; data: unknown }> = [];
   readonly candidates = new AppSidecarPhaseCandidateStore<BoundPhaseCandidate<FakePhaseSession>>();
   readonly mutations: AppSidecarSessionMutationCoordinator;
+  readonly reconciliations = new AppSidecarRoadmapReconciliationCoordinator();
   currentSession: FakePhaseSession;
   createdSessions: FakePhaseSession[] = [];
   createCalls = 0;
@@ -218,6 +233,7 @@ class ProductionPhaseFixture {
         runLifecycleRunning: false,
       },
       mutations: this.mutations,
+      reconciliations: this.reconciliations,
       repository,
       cwd: this.cwd,
       candidates: this.candidates,
@@ -350,6 +366,45 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
     resolve = settle;
   });
   return { promise, resolve };
+}
+
+function roadmapInput(
+  updateId: string,
+  overrides: Record<string, unknown> = {},
+): ReturnType<typeof RoadmapStatusParams.parse> {
+  return RoadmapStatusParams.parse({
+    update_id: updateId,
+    phase_id: "phase-21",
+    transition: "in-progress",
+    progress: `Progress for ${updateId}`,
+    ...overrides,
+  });
+}
+
+async function executeRoadmap(
+  tool: AgentTool,
+  input: ReturnType<typeof RoadmapStatusParams.parse>,
+): Promise<Record<string, unknown>> {
+  const output = await tool.execute(input, {} as never);
+  if (typeof output !== "string") throw new Error("roadmap_status returned non-text output");
+  return JSON.parse(output) as Record<string, unknown>;
+}
+
+function roadmapHost(
+  repository: Pick<ProjectNotesRepository, "recordRoadmapStatusUpdate">,
+  cwd: string,
+  reconciliations: AppSidecarRoadmapReconciliationCoordinator,
+  projectAutopilot: AppSidecarProjectAutopilotState,
+  snapshots: ProjectNotesSnapshot[],
+): AppSidecarRoadmapToolHost {
+  return new AppSidecarRoadmapToolHost({
+    cwd,
+    repository,
+    reconciliations,
+    projectAutopilot,
+    broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
+    now: () => NOW,
+  });
 }
 
 afterEach(async () => {
@@ -999,6 +1054,341 @@ describe("production launchBoundPhase orchestration", () => {
     expect(fixture.candidates.has("phase-21")).toBe(false);
     await fixture.dispose();
     expect(stale.disposeCalls).toBe(1);
+  });
+
+  it("registers roadmap_status for coding, Ken, and Autopilot Ken with production actors", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const snapshots: ProjectNotesSnapshot[] = [];
+    const projectAutopilot = new AppSidecarProjectAutopilotState();
+    const host = roadmapHost(repository, cwd, fixture.reconciliations, projectAutopilot, snapshots);
+    const registrations = [
+      {
+        role: "coding" as const,
+        tools: host.createSessionTools("coding", () => fixture.currentSession),
+      },
+      { role: "ken" as const, tools: host.createSessionTools("ken") },
+      { role: "ken-autopilot" as const, tools: host.createSessionTools("ken-autopilot") },
+    ];
+
+    expect(
+      registrations.map(({ role, tools }) => ({ role, names: tools.map((tool) => tool.name) })),
+    ).toEqual([
+      { role: "coding", names: ["roadmap_status"] },
+      { role: "ken", names: ["roadmap_status"] },
+      { role: "ken-autopilot", names: ["roadmap_status"] },
+    ]);
+    expect(APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES).toContain("roadmap_status");
+    await expect(
+      executeRoadmap(registrations[0]!.tools[0]!, roadmapInput("coding-update")),
+    ).resolves.toMatchObject({ result: "committed" });
+    await expect(
+      executeRoadmap(
+        registrations[1]!.tools[0]!,
+        roadmapInput("ken-update", { transition: "blocked", blocker: "Waiting for CI" }),
+      ),
+    ).resolves.toMatchObject({ result: "committed" });
+    await expect(
+      executeRoadmap(
+        registrations[2]!.tools[0]!,
+        roadmapInput("autopilot-update", {
+          transition: "review",
+          evidence: ["Focused tests passed"],
+        }),
+      ),
+    ).resolves.toMatchObject({ result: "committed" });
+
+    const loaded = await repository.load(cwd);
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: {
+        document: {
+          phases: [
+            {
+              status: "review",
+              roadmapEvents: [
+                expect.objectContaining({ id: "coding-update", actor: "gg-coder" }),
+                expect.objectContaining({ id: "ken-update", actor: "ken" }),
+                expect.objectContaining({ id: "autopilot-update", actor: "ken-autopilot" }),
+              ],
+            },
+          ],
+        },
+      },
+    });
+    if (loaded.status === "ok") expect(loaded.snapshot.document.phases[0]!.status).not.toBe("done");
+    expect(snapshots).toHaveLength(3);
+  });
+
+  it("keeps roadmap_status out of ordinary CLI createTools", async () => {
+    const { cwd } = await setup();
+    const created = await createTools(cwd, { lspDiagnostics: false });
+    try {
+      expect(created.tools.map((tool) => tool.name)).not.toContain("roadmap_status");
+    } finally {
+      created.processManager.shutdownAll();
+    }
+  });
+
+  it("enforces the coding session's active phase and durable session binding", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const snapshots: ProjectNotesSnapshot[] = [];
+    const host = roadmapHost(
+      repository,
+      cwd,
+      fixture.reconciliations,
+      new AppSidecarProjectAutopilotState(),
+      snapshots,
+    );
+    const unboundSession = new FakePhaseSession(90, []);
+    const unboundTool = host.createSessionTools("coding", () => unboundSession)[0]!;
+    const codingTool = host.createSessionTools("coding", () => fixture.currentSession)[0]!;
+
+    await expect(executeRoadmap(unboundTool, roadmapInput("no-active-phase"))).resolves.toEqual({
+      result: "phase-not-bound",
+      phaseId: "phase-21",
+    });
+    await expect(
+      executeRoadmap(codingTool, roadmapInput("wrong-active-phase", { phase_id: "phase-other" })),
+    ).resolves.toEqual({ result: "phase-not-bound", phaseId: "phase-other" });
+
+    await updatePhase(repository, cwd, (notes) => {
+      notes.phases[0]!.session = {
+        sessionId: "replacement-owner",
+        sessionPath: "/sessions/replacement-owner.jsonl",
+      };
+    });
+    await expect(executeRoadmap(codingTool, roadmapInput("stale-session"))).resolves.toEqual({
+      result: "stale-session",
+      phaseId: "phase-21",
+    });
+    expect(snapshots).toEqual([]);
+  });
+
+  it("fans out exactly once for a commit and never for duplicate or conflicting calls", async () => {
+    const { repository, cwd } = await setup();
+    const reconciliations = new AppSidecarRoadmapReconciliationCoordinator(
+      () => "status-operation",
+    );
+    const snapshots: ProjectNotesSnapshot[] = [];
+    const host = roadmapHost(
+      repository,
+      cwd,
+      reconciliations,
+      new AppSidecarProjectAutopilotState(),
+      snapshots,
+    );
+    const tool = host.createSessionTools("ken")[0]!;
+    const input = roadmapInput("stable-update");
+
+    await expect(executeRoadmap(tool, input)).resolves.toMatchObject({ result: "committed" });
+    expect(snapshots).toHaveLength(1);
+    await expect(executeRoadmap(tool, input)).resolves.toMatchObject({ result: "duplicate" });
+    expect(snapshots).toHaveLength(1);
+    await expect(
+      executeRoadmap(tool, roadmapInput("stable-update", { progress: "Conflicting payload" })),
+    ).resolves.toMatchObject({ result: "duplicate-id-conflict" });
+    expect(snapshots).toHaveLength(1);
+
+    const owner = reconciliations.tryAcquire(cwd, "phase-start")!;
+    await expect(executeRoadmap(tool, roadmapInput("lease-conflict"))).resolves.toEqual({
+      result: "reconciliation-in-progress",
+      phaseId: "phase-21",
+      owner: { operationId: "status-operation", kind: "phase-start" },
+    });
+    owner.release();
+    expect(snapshots).toHaveLength(1);
+  });
+
+  it("shares one project lease between launch and roadmap_status in both directions", async () => {
+    const first = await setup();
+    const launchGate = deferred();
+    const launchFixture = new ProductionPhaseFixture(first.repository, first.cwd, {
+      pauseBinding: launchGate,
+    });
+    const launchSnapshots: ProjectNotesSnapshot[] = [];
+    const launchHost = roadmapHost(
+      first.repository,
+      first.cwd,
+      launchFixture.reconciliations,
+      new AppSidecarProjectAutopilotState(),
+      launchSnapshots,
+    );
+    const launch = launchFixture.start();
+    await viWaitFor(() => launchFixture.candidates.has("phase-21"));
+
+    await expect(
+      executeRoadmap(launchHost.createSessionTools("ken")[0]!, roadmapInput("during-launch")),
+    ).resolves.toMatchObject({
+      result: "reconciliation-in-progress",
+      owner: { kind: "phase-start" },
+    });
+    expect(launchSnapshots).toEqual([]);
+    launchGate.resolve();
+    await expect(launch).resolves.toMatchObject({ status: 202 });
+    await launchFixture.promptSettled;
+
+    const second = await setup();
+    const updateGate = deferred();
+    const updateEntered = deferred();
+    const updateFixture = new ProductionPhaseFixture(second.repository, second.cwd);
+    const pausingRepository = {
+      recordRoadmapStatusUpdate: async (
+        ...args: Parameters<ProjectNotesRepository["recordRoadmapStatusUpdate"]>
+      ) => {
+        updateEntered.resolve();
+        await updateGate.promise;
+        return second.repository.recordRoadmapStatusUpdate(...args);
+      },
+    };
+    const updateHost = roadmapHost(
+      pausingRepository,
+      second.cwd,
+      updateFixture.reconciliations,
+      new AppSidecarProjectAutopilotState(),
+      [],
+    );
+    const update = executeRoadmap(
+      updateHost.createSessionTools("ken")[0]!,
+      roadmapInput("before-launch"),
+    );
+    await updateEntered.promise;
+
+    await expect(updateFixture.start()).resolves.toMatchObject({
+      status: 409,
+      body: { status: "failed", code: "reconciliation-in-progress" },
+    });
+    expect(updateFixture.createCalls).toBe(0);
+    updateGate.resolve();
+    await expect(update).resolves.toMatchObject({ result: "committed" });
+  });
+
+  it("serializes update-versus-update and releases the lease after the winner", async () => {
+    const { repository, cwd } = await setup();
+    const gate = deferred();
+    const entered = deferred();
+    const reconciliations = new AppSidecarRoadmapReconciliationCoordinator();
+    const pausingRepository = {
+      recordRoadmapStatusUpdate: async (
+        ...args: Parameters<ProjectNotesRepository["recordRoadmapStatusUpdate"]>
+      ) => {
+        entered.resolve();
+        await gate.promise;
+        return repository.recordRoadmapStatusUpdate(...args);
+      },
+    };
+    const host = roadmapHost(
+      pausingRepository,
+      cwd,
+      reconciliations,
+      new AppSidecarProjectAutopilotState(),
+      [],
+    );
+    const first = executeRoadmap(host.createSessionTools("ken")[0]!, roadmapInput("update-winner"));
+    await entered.promise;
+
+    await expect(
+      executeRoadmap(host.createSessionTools("ken-autopilot")[0]!, roadmapInput("update-loser")),
+    ).resolves.toMatchObject({
+      result: "reconciliation-in-progress",
+      owner: { kind: "status-update" },
+    });
+    gate.resolve();
+    await expect(first).resolves.toMatchObject({ result: "committed" });
+    await expect(
+      executeRoadmap(host.createSessionTools("ken-autopilot")[0]!, roadmapInput("update-retry")),
+    ).resolves.toMatchObject({ result: "committed" });
+  });
+
+  it("reads live Autopilot policy and preserves overrides, malformed-call silence, and no Done path", async () => {
+    const { repository, cwd } = await setup();
+    await updatePhase(repository, cwd, (notes) => {
+      notes.phases[0]!.overrides.status = {
+        value: "not-started",
+        source: "user",
+        updatedAt: NOW,
+      };
+    });
+    const projectAutopilot = new AppSidecarProjectAutopilotState();
+    await projectAutopilot.initialize(cwd, async () => false);
+    const snapshots: ProjectNotesSnapshot[] = [];
+    const host = roadmapHost(
+      repository,
+      cwd,
+      new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot,
+      snapshots,
+    );
+    const tool = host.createSessionTools("ken-autopilot")[0]!;
+
+    await expect(
+      executeRoadmap(
+        tool,
+        roadmapInput("manual-override", { transition: "blocked", blocker: "User owns status" }),
+      ),
+    ).resolves.toMatchObject({ result: "committed", statusOutcome: "manual-override" });
+    const reference = {
+      provider: "github",
+      canonical_url: "https://github.com/acme/repo/blob/main/src/phase.ts#L1",
+      owner: "acme",
+      repo: "repo",
+      relevance: "Phase implementation",
+    };
+    await expect(
+      executeRoadmap(tool, roadmapInput("manual-policy", { proposed_references: [reference] })),
+    ).resolves.toMatchObject({
+      result: "committed",
+      proposals: [{ outcome: "pending", policyOutcome: "manual-review" }],
+    });
+
+    projectAutopilot.set(cwd, true);
+    await expect(
+      executeRoadmap(
+        tool,
+        roadmapInput("autopilot-policy", {
+          proposed_references: [
+            {
+              ...reference,
+              canonical_url: "https://github.com/acme/repo/blob/main/src/phase.ts#L2",
+            },
+          ],
+        }),
+      ),
+    ).resolves.toMatchObject({
+      result: "committed",
+      proposals: [{ outcome: "accepted", policyOutcome: "accepted" }],
+    });
+    expect(snapshots).toHaveLength(3);
+
+    await expect(
+      executeRoadmap(
+        tool,
+        roadmapInput("malformed-reference", {
+          proposed_references: [{ ...reference, canonical_url: "not a URL" }],
+        }),
+      ),
+    ).resolves.toMatchObject({ result: "invalid-reference" });
+    expect(snapshots).toHaveLength(3);
+
+    const loaded = await repository.load(cwd);
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: { document: { phases: [{ status: "not-started" }] } },
+    });
+    if (loaded.status === "ok") {
+      const phase = loaded.snapshot.document.phases[0]!;
+      expect(phase.status).not.toBe("done");
+      expect(
+        phase.roadmapEvents
+          .filter((event) => event.type === "status-update")
+          .map((event) => event.transition),
+      ).not.toContain("done");
+    }
   });
 });
 

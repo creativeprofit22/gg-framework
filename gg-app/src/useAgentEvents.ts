@@ -904,6 +904,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         case "chat_agent_change":
           setState((s) => (s ? { ...s, ...(d as Partial<AgentState>) } : s));
           break;
+        case "autopilot": {
+          // Project policy changes fan out to every same-project session. Update
+          // the ref synchronously so a following plan_exit uses the new policy.
+          const enabled = d.autopilot === true;
+          if (stateRef.current) stateRef.current = { ...stateRef.current, autopilot: enabled };
+          setState((s) => (s ? { ...s, autopilot: enabled } : s));
+          break;
+        }
         // Ken's effective model changed — either his pin was set/cleared or he
         // followed a GG Coder switch. Payload keys (kenProvider/kenModel/
         // kenModelOverride) match AgentState, so a spread is enough.

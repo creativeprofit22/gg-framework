@@ -6,6 +6,10 @@ import type {
   NotesPhaseStatus,
   NotesReference,
   NotesReferenceOperationResult,
+  NotesRoadmapEvent,
+  NotesRoadmapMutationResult,
+  NotesRoadmapReferenceProposal,
+  NotesRoadmapStatusUpdate,
   NotesSessionLink,
   PhaseStartResult,
 } from "./notes-types";
@@ -27,6 +31,16 @@ interface RoadmapProps {
     phaseId: string,
   ): Promise<NotesReferenceOperationResult>;
   onCreateReference(): void;
+  onAcceptReferenceProposal(
+    phaseId: string,
+    proposalId: string,
+  ): Promise<NotesRoadmapMutationResult>;
+  onRejectReferenceProposal(
+    phaseId: string,
+    proposalId: string,
+  ): Promise<NotesRoadmapMutationResult>;
+  onResumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
+  onResumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
@@ -55,6 +69,10 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",
 });
+const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
 
 export function NotesRoadmap({
   phases,
@@ -67,6 +85,10 @@ export function NotesRoadmap({
   onLinkReferenceToPhase,
   onUnlinkReferenceFromPhase,
   onCreateReference,
+  onAcceptReferenceProposal,
+  onRejectReferenceProposal,
+  onResumeAutomaticStatus,
+  onResumeAutomaticReferences,
   onStartPhase,
   onResumePhase,
   startUnavailableReason,
@@ -316,6 +338,10 @@ export function NotesRoadmap({
               });
             }}
             onCreateReference={onCreateReference}
+            onAcceptReferenceProposal={onAcceptReferenceProposal}
+            onRejectReferenceProposal={onRejectReferenceProposal}
+            onResumeAutomaticStatus={onResumeAutomaticStatus}
+            onResumeAutomaticReferences={onResumeAutomaticReferences}
             onStartPhase={onStartPhase}
             onResumePhase={onResumePhase}
             startUnavailableReason={startUnavailableReason}
@@ -347,6 +373,10 @@ function PhaseDetail({
   onLinkReference,
   onUnlinkReference,
   onCreateReference,
+  onAcceptReferenceProposal,
+  onRejectReferenceProposal,
+  onResumeAutomaticStatus,
+  onResumeAutomaticReferences,
   onStartPhase,
   onResumePhase,
   startUnavailableReason,
@@ -367,6 +397,16 @@ function PhaseDetail({
   onLinkReference(referenceId: string): void;
   onUnlinkReference(referenceId: string): void;
   onCreateReference(): void;
+  onAcceptReferenceProposal(
+    phaseId: string,
+    proposalId: string,
+  ): Promise<NotesRoadmapMutationResult>;
+  onRejectReferenceProposal(
+    phaseId: string,
+    proposalId: string,
+  ): Promise<NotesRoadmapMutationResult>;
+  onResumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
+  onResumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
@@ -382,11 +422,21 @@ function PhaseDetail({
   const [actionError, setActionError] = useState("");
   const [actionStatus, setActionStatus] = useState("");
   const [raceLink, setRaceLink] = useState<NotesSessionLink | null>(null);
+  const [pendingRoadmapAction, setPendingRoadmapAction] = useState<string | null>(null);
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const action = primaryAction(phase);
   const effectiveAction = raceLink ? sessionAction(raceLink) : action;
   const resumeLink = raceLink ?? phase.session;
-  const controlsDisabled = actionDisabled || pending;
+  const controlsDisabled = actionDisabled || pending || pendingRoadmapAction !== null;
+  const latestReport = latestRoadmapReport(phase);
+  const pendingProposals = unresolvedRoadmapProposals(phase);
+  const latestReportHasPendingManualReview =
+    latestReport !== null &&
+    pendingProposals.some(
+      ({ proposal, report }) =>
+        report.id === latestReport.id && proposal.policyOutcome === "manual-review",
+    );
+  const resumedStatus = latestProtectedStatus(phase);
   const phaseStartDisabled =
     (effectiveAction === "Start" || effectiveAction === "Recover") &&
     startUnavailableReason !== null;
@@ -447,6 +497,35 @@ function PhaseDetail({
       );
     } finally {
       setPending(false);
+      onPendingChange(false);
+    }
+  };
+
+  const runRoadmapMutation = async (
+    actionKey: string,
+    operation: () => Promise<NotesRoadmapMutationResult>,
+  ): Promise<void> => {
+    if (controlsDisabled) return;
+    setPendingRoadmapAction(actionKey);
+    onPendingChange(true);
+    setActionError("");
+    setActionStatus("Saving Roadmap change…");
+    try {
+      const result = await operation();
+      const message = roadmapMutationMessage(result);
+      if (result.status === "failed" || result.status === "decision-conflict") {
+        setActionError(message);
+        setActionStatus("");
+      } else {
+        setActionStatus(message);
+      }
+    } catch (error) {
+      setActionStatus("");
+      setActionError(
+        error instanceof Error ? error.message : "The Roadmap change failed. Try again.",
+      );
+    } finally {
+      setPendingRoadmapAction(null);
       onPendingChange(false);
     }
   };
@@ -603,6 +682,112 @@ function PhaseDetail({
       )}
 
       <section
+        className="notes-roadmap-latest"
+        aria-labelledby={`notes-roadmap-latest-${phase.id}`}
+      >
+        <h4 id={`notes-roadmap-latest-${phase.id}`}>Latest report</h4>
+        {latestReport ? (
+          <div className="notes-roadmap-report">
+            <p className="notes-roadmap-report-meta">
+              <strong>{roadmapActorLabel(latestReport.actor)}</strong>{" "}
+              <time dateTime={latestReport.timestamp}>
+                {formatDateTime(latestReport.timestamp)}
+              </time>
+            </p>
+            <p>{latestReport.progress}</p>
+            {latestReport.blocker && (
+              <p className="notes-roadmap-blocker">Blocker: {latestReport.blocker}</p>
+            )}
+            {latestReport.evidence.length > 0 && (
+              <div>
+                <h5>Evidence</h5>
+                <ul>
+                  {latestReport.evidence.map((item, index) => (
+                    <li key={`${latestReport.id}-evidence-${index}`}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {latestReport.statusOutcome === "manual-override" && (
+              <p className="notes-roadmap-protected">
+                Status was protected by the active manual override. The report remains in history.
+              </p>
+            )}
+            {latestReport.statusOutcome === "done-terminal" && (
+              <p className="notes-roadmap-protected">
+                Done remained terminal, so this report did not change the phase status. The report
+                was retained in history.
+              </p>
+            )}
+            {latestReport.proposedReferences.some(
+              (proposal) => proposal.policyOutcome === "reference-override-protected",
+            ) && (
+              <p className="notes-roadmap-protected">
+                Suggested references stayed pending because manual reference links were active when
+                this report was recorded.
+              </p>
+            )}
+            {latestReportHasPendingManualReview && (
+              <p>Suggested references are pending manual review.</p>
+            )}
+          </div>
+        ) : (
+          <p className="notes-roadmap-empty-report">No agent reports yet.</p>
+        )}
+      </section>
+
+      {pendingProposals.length > 0 && (
+        <section
+          className="notes-roadmap-proposals"
+          aria-labelledby={`notes-roadmap-proposals-${phase.id}`}
+        >
+          <h4 id={`notes-roadmap-proposals-${phase.id}`}>Suggested references</h4>
+          <ul>
+            {pendingProposals.map(({ proposal, report }) => {
+              const proposalPending = pendingRoadmapAction === `proposal:${proposal.id}`;
+              return (
+                <li key={proposal.id}>
+                  <div>
+                    <strong>{roadmapProposalLabel(proposal)}</strong>
+                    <small>
+                      {proposal.owner}/{proposal.repo} · {roadmapActorLabel(report.actor)} ·{" "}
+                      <time dateTime={report.timestamp}>{formatDateTime(report.timestamp)}</time>
+                    </small>
+                    <span>{proposal.canonicalUrl}</span>
+                    <p>{proposal.relevance || "No relevance note."}</p>
+                  </div>
+                  <div className="notes-roadmap-proposal-actions">
+                    <button
+                      type="button"
+                      disabled={controlsDisabled}
+                      onClick={() =>
+                        void runRoadmapMutation(`proposal:${proposal.id}`, () =>
+                          onAcceptReferenceProposal(phase.id, proposal.id),
+                        )
+                      }
+                    >
+                      {proposalPending ? "Saving…" : "Accept"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={controlsDisabled}
+                      onClick={() =>
+                        void runRoadmapMutation(`proposal:${proposal.id}`, () =>
+                          onRejectReferenceProposal(phase.id, proposal.id),
+                        )
+                      }
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+
+      <section
         className="notes-phase-references"
         aria-labelledby={`notes-phase-references-${phase.id}`}
       >
@@ -615,6 +800,21 @@ function PhaseDetail({
                 : `${phase.referenceIds.length} sources attached`}
             </p>
           </div>
+          {phase.overrides.referenceIds && (
+            <button
+              type="button"
+              disabled={controlsDisabled}
+              onClick={() =>
+                void runRoadmapMutation("resume-references", () =>
+                  onResumeAutomaticReferences(phase.id),
+                )
+              }
+            >
+              {pendingRoadmapAction === "resume-references"
+                ? "Resuming…"
+                : "Resume automatic references"}
+            </button>
+          )}
         </div>
         {references.length === 0 ? (
           <div className="notes-phase-references-empty">
@@ -651,6 +851,21 @@ function PhaseDetail({
           </ul>
         )}
       </section>
+
+      <details className="notes-roadmap-history">
+        <summary>
+          Activity history ({phase.lifecycleEvents.length + phase.roadmapEvents.length})
+        </summary>
+        {phase.lifecycleEvents.length + phase.roadmapEvents.length === 0 ? (
+          <p>No activity recorded.</p>
+        ) : (
+          <ol>
+            {activityHistory(phase).map((item) => (
+              <li key={`${item.kind}-${item.event.id}`}>{renderActivityItem(item)}</li>
+            ))}
+          </ol>
+        )}
+      </details>
 
       <section
         className="notes-phase-execution"
@@ -732,9 +947,23 @@ function PhaseDetail({
             className="notes-field-help notes-phase-status-help"
           >
             {phase.overrides.status
-              ? "Automatic lifecycle updates are paused because a manual status override is active."
+              ? `Automatic lifecycle updates are paused. Resuming will set status to ${statusLabel(resumedStatus)}.`
               : "Choosing a status pauses automatic lifecycle updates for this phase."}
           </p>
+          {phase.overrides.status && (
+            <button
+              type="button"
+              disabled={controlsDisabled}
+              aria-describedby={`notes-phase-status-help-${phase.id}`}
+              onClick={() =>
+                void runRoadmapMutation("resume-status", () => onResumeAutomaticStatus(phase.id))
+              }
+            >
+              {pendingRoadmapAction === "resume-status"
+                ? "Resuming…"
+                : `Resume automatic status: ${statusLabel(resumedStatus)}`}
+            </button>
+          )}
         </div>
         <div className="notes-phase-secondary-actions">
           <button
@@ -856,6 +1085,147 @@ function primaryAction(phase: NotesPhase): PhasePrimaryAction {
   return "Start";
 }
 
+function latestRoadmapReport(phase: NotesPhase): NotesRoadmapStatusUpdate | null {
+  for (let index = phase.roadmapEvents.length - 1; index >= 0; index -= 1) {
+    const event = phase.roadmapEvents[index];
+    if (event?.type === "status-update") return event;
+  }
+  return null;
+}
+
+function unresolvedRoadmapProposals(
+  phase: NotesPhase,
+): Array<{ proposal: NotesRoadmapReferenceProposal; report: NotesRoadmapStatusUpdate }> {
+  const decided = new Set(
+    phase.roadmapEvents
+      .filter((event) => event.type === "reference-decision")
+      .map((event) => event.proposalId),
+  );
+  const pending: Array<{
+    proposal: NotesRoadmapReferenceProposal;
+    report: NotesRoadmapStatusUpdate;
+  }> = [];
+  for (const event of phase.roadmapEvents) {
+    if (event.type !== "status-update") continue;
+    for (const proposal of event.proposedReferences) {
+      if (proposal.disposition === "pending" && !decided.has(proposal.id)) {
+        pending.push({ proposal, report: event });
+      }
+    }
+  }
+  return pending;
+}
+
+function latestProtectedStatus(phase: NotesPhase): NotesPhaseStatus {
+  for (let index = phase.roadmapEvents.length - 1; index >= 0; index -= 1) {
+    const event = phase.roadmapEvents[index];
+    if (
+      event?.type === "status-update" &&
+      (event.statusOutcome === "manual-override" || event.statusOutcome === "done-terminal")
+    ) {
+      if (phase.status === "done") return "done";
+      if (event.transition === "pending") return "planning";
+      if (event.transition === "in-progress") return "in-progress";
+      if (event.transition === "blocked") return "needs-attention";
+      return "review";
+    }
+  }
+  return phase.status;
+}
+
+function roadmapActorLabel(actor: NotesRoadmapStatusUpdate["actor"]): string {
+  if (actor === "gg-coder") return "GG Coder";
+  if (actor === "ken-autopilot") return "Autopilot Ken";
+  return "Ken";
+}
+
+function roadmapProposalLabel(proposal: NotesRoadmapReferenceProposal): string {
+  if (proposal.pullRequest !== null) return `Pull request #${proposal.pullRequest}`;
+  if (proposal.issue !== null) return `Issue #${proposal.issue}`;
+  if (proposal.path && proposal.range) {
+    return `${proposal.path}:L${proposal.range.startLine}-L${proposal.range.endLine}`;
+  }
+  return proposal.path ?? proposal.revision ?? proposal.tool ?? proposal.provider;
+}
+
+type ActivityItem =
+  | { kind: "lifecycle"; event: NotesPhase["lifecycleEvents"][number] }
+  | { kind: "roadmap"; event: NotesRoadmapEvent };
+
+function activityHistory(phase: NotesPhase): ActivityItem[] {
+  return [
+    ...phase.lifecycleEvents.map((event): ActivityItem => ({ kind: "lifecycle", event })),
+    ...phase.roadmapEvents.map((event): ActivityItem => ({ kind: "roadmap", event })),
+  ].sort((left, right) => Date.parse(right.event.timestamp) - Date.parse(left.event.timestamp));
+}
+
+function renderActivityItem(item: ActivityItem): React.ReactNode {
+  const timestamp = (
+    <time dateTime={item.event.timestamp}>{formatDateTime(item.event.timestamp)}</time>
+  );
+  if (item.kind === "lifecycle") {
+    return (
+      <>
+        <strong>{item.event.source === "user" ? "User" : item.event.source}</strong> {timestamp}
+        <p>
+          {statusLabel(item.event.fromStatus ?? "not-started")} to{" "}
+          {statusLabel(item.event.toStatus)}
+          {item.event.reason ? `: ${item.event.reason}` : ""}
+        </p>
+      </>
+    );
+  }
+  const event = item.event;
+  if (event.type === "status-update") {
+    return (
+      <>
+        <strong>{roadmapActorLabel(event.actor)}</strong> {timestamp}
+        <p>
+          {event.progress} Status outcome: {event.statusOutcome}.
+        </p>
+        {event.blocker && <p>Blocker: {event.blocker}</p>}
+        {event.evidence.length > 0 && (
+          <ul>
+            {event.evidence.map((evidence, index) => (
+              <li key={`${event.id}-history-evidence-${index}`}>{evidence}</li>
+            ))}
+          </ul>
+        )}
+      </>
+    );
+  }
+  if (event.type === "reference-decision") {
+    return (
+      <>
+        <strong>User</strong> {timestamp}
+        <p>Reference proposal {event.decision}.</p>
+      </>
+    );
+  }
+  return (
+    <>
+      <strong>User</strong> {timestamp}
+      <p>Automatic {event.field} updates resumed.</p>
+    </>
+  );
+}
+
+function roadmapMutationMessage(result: NotesRoadmapMutationResult): string {
+  if (result.status === "committed") return "Roadmap change saved.";
+  if (result.status === "already-decided") return `Proposal was already ${result.decision}.`;
+  if (result.status === "decision-conflict") {
+    return `Proposal was already ${result.decision} in another window.`;
+  }
+  if (result.status === "missing-proposal") {
+    return "The proposal is no longer pending. Review the latest activity and try again.";
+  }
+  if (result.status === "missing-phase" || result.status === "archived-phase") {
+    return "The phase is no longer available. Return to the Roadmap and choose an active phase.";
+  }
+  if (result.status === "no-protected-update") return "No protected status report is available.";
+  return "The Roadmap change could not be saved. Check Notes storage and try again.";
+}
+
 function lines(value: string): string[] {
   return value
     .split(/\r?\n/)
@@ -865,4 +1235,8 @@ function lines(value: string): string[] {
 
 function formatDate(value: string): string {
   return dateFormatter.format(new Date(value));
+}
+
+function formatDateTime(value: string): string {
+  return dateTimeFormatter.format(new Date(value));
 }

@@ -143,6 +143,12 @@ import {
   type ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
 import { launchBoundPhase, type BoundPhaseCandidate } from "./app-sidecar-phase-launch.js";
+import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import {
+  APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
+  AppSidecarRoadmapToolHost,
+} from "./app-sidecar-roadmap-tool-host.js";
+import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import {
   AppSidecarPhaseLifecycleCoordinator,
@@ -210,8 +216,8 @@ interface AppSettings {
   /** Model + thinking prefs keyed by normalized project cwd. A window restores
    *  its own entry on boot; absent → global settings.json → provider default. */
   projectModels?: Record<string, ProjectModelPrefs>;
-  /** Autopilot (auto-review) on/off keyed by normalized project cwd. Per-window
-   *  (one window = one cwd); absent/false → off. Restored on boot. */
+  /** Project-wide Autopilot (auto-review) on/off keyed by canonical project cwd.
+   *  Every pane/window for the same project shares this policy; absent/false → off. */
   autopilot?: Record<string, boolean>;
   /** Ken's model override keyed by normalized project cwd. Absent → Ken follows
    *  GG Coder's model (the historical behavior). Set → Ken (chat + autopilot)
@@ -294,15 +300,29 @@ async function saveKenModelPref(cwd: string, pref: KenModelPref | null): Promise
 /** Read this project's persisted autopilot flag (default off). */
 async function loadAutopilot(cwd: string): Promise<boolean> {
   const s = await loadAppSettings();
-  return s.autopilot?.[projectModelKey(cwd)] ?? false;
+  const key = canonicalProjectKey(cwd);
+  const canonicalValue = s.autopilot?.[key];
+  if (canonicalValue !== undefined) return canonicalValue;
+  // Preserve flags written under a non-canonical spelling before this policy
+  // became daemon-shared (for example, an uppercase Windows drive/path).
+  return (
+    Object.entries(s.autopilot ?? {}).find(
+      ([savedKey]) => canonicalProjectKey(savedKey) === key,
+    )?.[1] ?? false
+  );
 }
 
 /** Persist this project's autopilot flag via read-modify-write so the rest of
  *  the settings file (projectsRoot, model map, other projects) is preserved. */
 async function saveAutopilot(cwd: string, enabled: boolean): Promise<void> {
   const s = await loadAppSettings();
-  const key = projectModelKey(cwd);
-  s.autopilot = { ...(s.autopilot ?? {}), [key]: enabled };
+  const key = canonicalProjectKey(cwd);
+  const next = { ...(s.autopilot ?? {}) };
+  for (const savedKey of Object.keys(next)) {
+    if (savedKey !== key && canonicalProjectKey(savedKey) === key) delete next[savedKey];
+  }
+  next[key] = enabled;
+  s.autopilot = next;
   await saveAppSettings(s);
 }
 
@@ -810,6 +830,8 @@ async function main(): Promise<void> {
   const sessions = new AppSidecarSessionRouter<SessionContext>();
   const reloadCoordinator = new AppSidecarReloadCoordinator();
   const notesRepository = new ProjectNotesRepository(paths.agentDir);
+  const roadmapReconciliations = new AppSidecarRoadmapReconciliationCoordinator();
+  const projectAutopilot = new AppSidecarProjectAutopilotState();
   const broadcastNotesSnapshot = (snapshot: ProjectNotesSnapshot): void => {
     for (const context of sessions.values()) {
       if (canonicalProjectKey(context.cwd) === snapshot.projectKey) {
@@ -1033,6 +1055,8 @@ async function main(): Promise<void> {
                 reloadCoordinator,
                 notes,
                 notesRepository,
+                roadmapReconciliations,
+                projectAutopilot,
                 broadcastNotesSnapshot,
               },
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
@@ -1156,20 +1180,6 @@ async function main(): Promise<void> {
   }, 1_000);
   parentWatch.unref?.();
 }
-
-/** Ken's read-only tool allow-list. Excludes every mutating tool (write/edit/
- *  bash/tasks/subagent/generate_image/enter_plan/exit_plan/task_*) so the mentor
- *  agent can research + see, but never change the repo. */
-const KEN_ALLOWED_TOOLS = [
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "source_path",
-  "web_fetch",
-  "web_search",
-  "screenshot",
-];
 
 /** MCP servers Ken is allowed to use. kencode-search lets him look into real
  *  public repos / verify against actual code instead of assuming — core to how
@@ -1368,6 +1378,8 @@ async function createSession(
     reloadCoordinator: AppSidecarReloadCoordinator;
     notes: AppSidecarNotesHandler;
     notesRepository: ProjectNotesRepository;
+    roadmapReconciliations: AppSidecarRoadmapReconciliationCoordinator;
+    projectAutopilot: AppSidecarProjectAutopilotState;
     broadcastNotesSnapshot: (snapshot: ProjectNotesSnapshot) => void;
   },
   opts: {
@@ -1386,6 +1398,8 @@ async function createSession(
     reloadCoordinator,
     notes,
     notesRepository,
+    roadmapReconciliations,
+    projectAutopilot,
     broadcastNotesSnapshot,
   } = deps;
   const paths = deps.paths;
@@ -1637,11 +1651,33 @@ async function createSession(
     await session.persistAppMarker("plan", { reason: reason ?? "" }).catch(() => {});
   }
 
+  const roadmapToolHost = new AppSidecarRoadmapToolHost({
+    cwd,
+    repository: notesRepository,
+    reconciliations: roadmapReconciliations,
+    projectAutopilot,
+    broadcastNotesSnapshot,
+    onNonCommit: ({ result, phaseId, updateId }) => {
+      log("WARN", "app-sidecar", "roadmap status reconciliation did not commit", {
+        result,
+        phaseId,
+        updateId,
+      });
+    },
+    onError: (error, { phaseId, updateId }) => {
+      log("ERROR", "app-sidecar", "roadmap status reconciliation failed", {
+        phaseId,
+        updateId,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+
   const createCodingSession = (
     sessionPath?: string,
     active?: { provider: Provider; model: string; thinkingLevel?: ThinkingLevel },
-  ): AgentSession =>
-    new AgentSession({
+  ): AgentSession => {
+    const created: AgentSession = new AgentSession({
       ...baseSessionOptions,
       ...(active ?? {}),
       signal: abort.signal,
@@ -1683,7 +1719,10 @@ async function createSession(
         broadcast("plan_exit", { planPath, content });
         return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
       },
+      additionalTools: roadmapToolHost.createSessionTools("coding", (): AgentSession => created),
     });
+    return created;
+  };
 
   if (mode === "chat") {
     session = createChatAgent(chatAgent, {
@@ -2006,12 +2045,11 @@ async function createSession(
   // Bumped by /cancel — a run whose cancel generation changed mid-flight was
   // canceled and earns no XP.
   let cancelGeneration = 0;
-  // Autopilot (auto-review) toggle for THIS window's project. Loaded from
-  // gg-app.json on boot; flipped via POST /autopilot. When on, POST /prompt runs
-  // runAutopilotCycle after the user's turn settles — Ken auto-reviews the work
-  // and drives the review→prompt→review loop. Ken is the sole verification
-  // owner in this mode, so suppress the build session's redundant Ideal hook.
-  let autopilot = mode === "code" && (await loadAutopilot(cwd));
+  // Project-wide Autopilot policy. The daemon initializes it once from gg-app.json,
+  // then every same-project session receives live changes from any pane/window.
+  // When on, POST /prompt runs runAutopilotCycle after the user's turn settles.
+  let autopilot =
+    mode === "code" && (await projectAutopilot.initialize(cwd, () => loadAutopilot(cwd)));
   session.setIdealReviewSuppressed(autopilot);
   // True while an autopilot review is in flight (used to defer kenAuto model
   // switches, like kenRunning does for chat Ken, and to drive the spinner).
@@ -2022,6 +2060,16 @@ async function createSession(
   // of starting a run that would collide with an injected one on the same
   // session (AgentSession.prompt has no concurrency guard).
   let autopilotActive = false;
+  const unsubscribeProjectAutopilot =
+    mode === "code"
+      ? projectAutopilot.subscribe(cwd, (enabled) => {
+          autopilot = enabled;
+          // Toggle-off during an active cycle takes effect after Ken finishes;
+          // injected build runs continue suppressing the redundant Ideal review.
+          session.setIdealReviewSuppressed(enabled || autopilotActive);
+          broadcast("autopilot", { autopilot: enabled });
+        })
+      : () => {};
   const sessionBusyState = () => ({
     running,
     autopilotActive,
@@ -2158,8 +2206,9 @@ async function createSession(
       model: target.model,
       cwd,
       systemPrompt: await buildKenSystemPrompt(cwd),
-      allowedTools: KEN_ALLOWED_TOOLS,
+      allowedTools: [...APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES],
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
+      additionalTools: roadmapToolHost.createSessionTools("ken"),
       transient: true,
       signal: kenAbort.signal,
       // Ken's bursty, spread-out turns (chat) outlast the default 5-min cache
@@ -2227,8 +2276,9 @@ async function createSession(
       model: target.model,
       cwd,
       systemPrompt: await buildKenAutopilotSystemPrompt(cwd),
-      allowedTools: KEN_ALLOWED_TOOLS,
+      allowedTools: [...APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES],
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
+      additionalTools: roadmapToolHost.createSessionTools("ken-autopilot"),
       transient: true,
       signal: kenAutoAbort.signal,
       // Autopilot review rounds routinely span the injected GG Coder run
@@ -3732,14 +3782,24 @@ async function createSession(
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        autopilot = enabled;
-        // A toggle-off during an active cycle takes effect after Ken finishes;
-        // until then, injected build runs must not re-enable Ideal self-review.
-        session.setIdealReviewSuppressed(enabled || autopilotActive);
-        await saveAutopilot(cwd, enabled);
-        log("INFO", "app-sidecar", "autopilot toggled", { enabled: String(enabled) });
-        broadcast("autopilot", { autopilot: enabled });
-        json(res, 200, { autopilot: enabled });
+        try {
+          // Persistence is the project policy authority. Publish the live value only
+          // after it commits so every roadmap_status call and UI sees one decision.
+          await saveAutopilot(cwd, enabled);
+          projectAutopilot.set(cwd, enabled);
+          log("INFO", "app-sidecar", "autopilot toggled", {
+            projectKey: canonicalProjectKey(cwd),
+            enabled: String(enabled),
+          });
+          json(res, 200, { autopilot: enabled });
+        } catch (error) {
+          captureSidecarError(error, "app-sidecar.settings.persist-autopilot");
+          log("ERROR", "app-sidecar", "failed to persist autopilot", {
+            projectKey: canonicalProjectKey(cwd),
+            message: error instanceof Error ? error.message : String(error),
+          });
+          json(res, 500, { error: "Autopilot could not be saved." });
+        }
       });
       return;
     }
@@ -4168,6 +4228,7 @@ async function createSession(
         mode,
         busyState: sessionBusyState(),
         mutations: sessionMutations,
+        reconciliations: roadmapReconciliations,
         repository: notesRepository,
         cwd,
         candidates: phaseCandidates,
@@ -4178,7 +4239,7 @@ async function createSession(
           session = replacement;
         },
         bindSessionEvents,
-        autopilotEnabled: autopilot,
+        autopilotEnabled: projectAutopilot.isEnabled(cwd),
         broadcastNotesSnapshot,
         broadcast,
         resetSessionState: () => {
@@ -4756,6 +4817,7 @@ async function createSession(
   }
 
   async function dispose(): Promise<void> {
+    unsubscribeProjectAutopilot();
     tasksPollStopped = true;
     if (tasksPoll) clearTimeout(tasksPoll);
     gitPollStopped = true;

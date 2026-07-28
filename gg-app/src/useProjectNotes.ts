@@ -14,6 +14,8 @@ import {
   type NotesPromptSaveInput,
   type NotesPromptSaveResult,
   type NotesReferenceOperationResult,
+  type NotesRoadmapMutationResult,
+  type NotesRoadmapReferenceProposal,
   type NotesSaveResult,
   type NotesValidationError,
   type ProjectNotesSaveOutcome,
@@ -72,6 +74,10 @@ export interface UseProjectNotesResult {
     referenceId: string,
     phaseId: string,
   ): Promise<NotesReferenceOperationResult>;
+  acceptReferenceProposal(phaseId: string, proposalId: string): Promise<NotesRoadmapMutationResult>;
+  rejectReferenceProposal(phaseId: string, proposalId: string): Promise<NotesRoadmapMutationResult>;
+  resumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
+  resumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
   changeHandoff(text: string): void;
   markHandoffPresented(expectedText: string, expectedUpdatedAt: string | null): void;
   diagnostics: {
@@ -101,6 +107,11 @@ interface ReferenceMutationApplication {
 interface PromptSaveMutationApplication {
   document: NotesDocumentV3 | null;
   result: NotesPromptSaveResult;
+}
+
+interface RoadmapMutationApplication {
+  document: NotesDocumentV3 | null;
+  result: NotesRoadmapMutationResult;
 }
 
 const systemClock = (): string => new Date().toISOString();
@@ -596,6 +607,21 @@ export function useProjectNotes(
     [enqueueMutation],
   );
 
+  const enqueueRoadmapMutation = useCallback(
+    (
+      evaluate: (document: NotesDocumentV3) => RoadmapMutationApplication,
+    ): Promise<NotesRoadmapMutationResult> =>
+      new Promise((resolve) => {
+        enqueueMutation({
+          apply: (current) => evaluate(current).document,
+          operationResult: (current) => evaluate(current).result,
+          settle: (result) => resolve(result as NotesRoadmapMutationResult),
+          failure: (reason) => ({ status: "failed", reason }),
+        });
+      }),
+    [enqueueMutation],
+  );
+
   const onChange = useCallback(
     (value: string) => {
       const now = clock();
@@ -789,6 +815,7 @@ export function useProjectNotes(
             archivedAt: null,
             overrides: { status: null, referenceIds: null },
             lifecycleEvents: [],
+            roadmapEvents: [],
           };
           return { ...current, phases: [...current.phases, phase], updatedAt: now };
         },
@@ -1127,6 +1154,69 @@ export function useProjectNotes(
     [clock, enqueueReferenceMutation],
   );
 
+  const acceptReferenceProposal = useCallback(
+    (phaseId: string, proposalId: string): Promise<NotesRoadmapMutationResult> => {
+      const requestedAt = clock();
+      const decisionId = idFactory();
+      const referenceId = idFactory();
+      return enqueueRoadmapMutation((current) =>
+        evaluateReferenceProposalDecision(
+          current,
+          phaseId,
+          proposalId,
+          "accepted",
+          requestedAt,
+          decisionId,
+          referenceId,
+        ),
+      );
+    },
+    [clock, enqueueRoadmapMutation, idFactory],
+  );
+
+  const rejectReferenceProposal = useCallback(
+    (phaseId: string, proposalId: string): Promise<NotesRoadmapMutationResult> => {
+      const requestedAt = clock();
+      const decisionId = idFactory();
+      const unusedReferenceId = idFactory();
+      return enqueueRoadmapMutation((current) =>
+        evaluateReferenceProposalDecision(
+          current,
+          phaseId,
+          proposalId,
+          "rejected",
+          requestedAt,
+          decisionId,
+          unusedReferenceId,
+        ),
+      );
+    },
+    [clock, enqueueRoadmapMutation, idFactory],
+  );
+
+  const resumeAutomaticStatus = useCallback(
+    (phaseId: string): Promise<NotesRoadmapMutationResult> => {
+      const requestedAt = clock();
+      const resetId = idFactory();
+      const lifecycleId = idFactory();
+      return enqueueRoadmapMutation((current) =>
+        evaluateStatusOverrideReset(current, phaseId, requestedAt, resetId, lifecycleId),
+      );
+    },
+    [clock, enqueueRoadmapMutation, idFactory],
+  );
+
+  const resumeAutomaticReferences = useCallback(
+    (phaseId: string): Promise<NotesRoadmapMutationResult> => {
+      const requestedAt = clock();
+      const resetId = idFactory();
+      return enqueueRoadmapMutation((current) =>
+        evaluateReferenceOverrideReset(current, phaseId, requestedAt, resetId),
+      );
+    },
+    [clock, enqueueRoadmapMutation, idFactory],
+  );
+
   const changeHandoff = useCallback(
     (text: string) => {
       const now = clock();
@@ -1192,6 +1282,10 @@ export function useProjectNotes(
     deleteReference,
     linkReferenceToPhase,
     unlinkReferenceFromPhase,
+    acceptReferenceProposal,
+    rejectReferenceProposal,
+    resumeAutomaticStatus,
+    resumeAutomaticReferences,
     changeHandoff,
     markHandoffPresented,
     diagnostics: {
@@ -1266,6 +1360,7 @@ function evaluatePromptSave(
       archivedAt: null,
       overrides: { status: null, referenceIds: null },
       lifecycleEvents: [],
+      roadmapEvents: [],
     };
     return {
       document: {
@@ -1311,6 +1406,252 @@ function evaluatePromptSave(
     document: { ...current, phases, updatedAt: timestamp },
     result: { status: "committed", phaseId: phase.id, title: phase.title },
   };
+}
+
+function evaluateReferenceProposalDecision(
+  current: NotesDocumentV3,
+  phaseId: string,
+  proposalId: string,
+  decision: "accepted" | "rejected",
+  requestedAt: string,
+  decisionId: string,
+  generatedReferenceId: string,
+): RoadmapMutationApplication {
+  const phaseIndex = current.phases.findIndex((phase) => phase.id === phaseId);
+  const phase = current.phases[phaseIndex];
+  if (!phase) return { document: null, result: { status: "missing-phase", phaseId } };
+  if (phase.archivedAt !== null) {
+    return { document: null, result: { status: "archived-phase", phaseId } };
+  }
+  const proposal = findRoadmapProposal(phase, proposalId);
+  if (!proposal || proposal.disposition !== "pending") {
+    return { document: null, result: { status: "missing-proposal", phaseId, proposalId } };
+  }
+  const priorDecision = phase.roadmapEvents.find(
+    (event) => event.type === "reference-decision" && event.proposalId === proposalId,
+  );
+  if (priorDecision?.type === "reference-decision") {
+    return {
+      document: null,
+      result:
+        priorDecision.decision === decision
+          ? { status: "already-decided", phaseId, decision }
+          : { status: "decision-conflict", phaseId, decision: priorDecision.decision },
+    };
+  }
+
+  const timestamp = chronologicalRoadmapMutationTimestamp(requestedAt, current.updatedAt, phase);
+  const phases = [...current.phases];
+  let references = current.references;
+  let acceptedReferenceId: string | null = null;
+  let referenceIds = phase.referenceIds;
+  let overrides = phase.overrides;
+
+  if (decision === "accepted") {
+    const identity = canonicalReferenceIdentity(proposal);
+    if (!identity) return { document: null, result: { status: "failed", reason: "invalid" } };
+    const winner = current.references.find(
+      (reference) => canonicalReferenceIdentity(reference) === identity,
+    );
+    if (!winner && current.references.some((reference) => reference.id === generatedReferenceId)) {
+      return { document: null, result: { status: "failed", reason: "invalid" } };
+    }
+    acceptedReferenceId = winner?.id ?? generatedReferenceId;
+    if (!winner) {
+      references = [
+        ...current.references,
+        {
+          ...roadmapProposalReferenceFields(proposal),
+          id: acceptedReferenceId,
+          capturedAt: timestamp,
+        },
+      ];
+    }
+    referenceIds = phase.referenceIds.includes(acceptedReferenceId)
+      ? phase.referenceIds
+      : [...phase.referenceIds, acceptedReferenceId];
+    overrides = {
+      ...phase.overrides,
+      referenceIds: { value: referenceIds, source: "user", updatedAt: timestamp },
+    };
+  }
+
+  const nextPhase: NotesPhase = {
+    ...phase,
+    referenceIds,
+    overrides,
+    updatedAt: timestamp,
+    roadmapEvents: [
+      ...phase.roadmapEvents,
+      {
+        type: "reference-decision",
+        id: decisionId,
+        proposalId,
+        decision,
+        referenceId: acceptedReferenceId,
+        timestamp,
+      },
+    ],
+  };
+  phases[phaseIndex] = nextPhase;
+  return {
+    document: { ...current, references, phases, updatedAt: timestamp },
+    result: {
+      status: "committed",
+      phaseId,
+      ...(acceptedReferenceId ? { referenceId: acceptedReferenceId } : {}),
+    },
+  };
+}
+
+function evaluateStatusOverrideReset(
+  current: NotesDocumentV3,
+  phaseId: string,
+  requestedAt: string,
+  resetId: string,
+  lifecycleId: string,
+): RoadmapMutationApplication {
+  const phaseIndex = current.phases.findIndex((phase) => phase.id === phaseId);
+  const phase = current.phases[phaseIndex];
+  if (!phase) return { document: null, result: { status: "missing-phase", phaseId } };
+  if (phase.archivedAt !== null) {
+    return { document: null, result: { status: "archived-phase", phaseId } };
+  }
+  if (phase.overrides.status === null) {
+    return {
+      document: null,
+      result: { status: "committed", phaseId, resultingStatus: phase.status },
+    };
+  }
+  const latestProtected = [...phase.roadmapEvents]
+    .reverse()
+    .find(
+      (event) =>
+        event.type === "status-update" &&
+        (event.statusOutcome === "manual-override" || event.statusOutcome === "done-terminal"),
+    );
+  const targetStatus =
+    phase.status === "done" || latestProtected?.type !== "status-update"
+      ? phase.status
+      : roadmapTransitionPhaseStatus(latestProtected.transition);
+  const timestamp = chronologicalRoadmapMutationTimestamp(requestedAt, current.updatedAt, phase);
+  const lifecycleEvents = [...phase.lifecycleEvents];
+  if (targetStatus !== phase.status) {
+    lifecycleEvents.push({
+      id: lifecycleId,
+      fromStatus: phase.status,
+      toStatus: targetStatus,
+      source: "user",
+      timestamp,
+      reason: "Automatic status updates resumed by user",
+    });
+  }
+  const phases = [...current.phases];
+  phases[phaseIndex] = {
+    ...phase,
+    status: targetStatus,
+    attentionReason:
+      latestProtected?.type === "status-update" && latestProtected.transition === "blocked"
+        ? latestProtected.blocker
+        : targetStatus === phase.status
+          ? phase.attentionReason
+          : null,
+    completedAt: targetStatus === "done" || targetStatus === "cancelled" ? phase.completedAt : null,
+    updatedAt: timestamp,
+    overrides: { ...phase.overrides, status: null },
+    lifecycleEvents,
+    roadmapEvents: [
+      ...phase.roadmapEvents,
+      { type: "override-reset", id: resetId, field: "status", timestamp },
+    ],
+  };
+  return {
+    document: { ...current, phases, updatedAt: timestamp },
+    result: { status: "committed", phaseId, resultingStatus: targetStatus },
+  };
+}
+
+function evaluateReferenceOverrideReset(
+  current: NotesDocumentV3,
+  phaseId: string,
+  requestedAt: string,
+  resetId: string,
+): RoadmapMutationApplication {
+  const phaseIndex = current.phases.findIndex((phase) => phase.id === phaseId);
+  const phase = current.phases[phaseIndex];
+  if (!phase) return { document: null, result: { status: "missing-phase", phaseId } };
+  if (phase.archivedAt !== null) {
+    return { document: null, result: { status: "archived-phase", phaseId } };
+  }
+  if (phase.overrides.referenceIds === null) {
+    return { document: null, result: { status: "committed", phaseId } };
+  }
+  const timestamp = chronologicalRoadmapMutationTimestamp(requestedAt, current.updatedAt, phase);
+  const phases = [...current.phases];
+  phases[phaseIndex] = {
+    ...phase,
+    updatedAt: timestamp,
+    overrides: { ...phase.overrides, referenceIds: null },
+    roadmapEvents: [
+      ...phase.roadmapEvents,
+      { type: "override-reset", id: resetId, field: "references", timestamp },
+    ],
+  };
+  return {
+    document: { ...current, phases, updatedAt: timestamp },
+    result: { status: "committed", phaseId },
+  };
+}
+
+function findRoadmapProposal(
+  phase: NotesPhase,
+  proposalId: string,
+): NotesRoadmapReferenceProposal | undefined {
+  for (const event of phase.roadmapEvents) {
+    if (event.type !== "status-update") continue;
+    const proposal = event.proposedReferences.find((item) => item.id === proposalId);
+    if (proposal) return proposal;
+  }
+  return undefined;
+}
+
+function roadmapProposalReferenceFields(
+  proposal: NotesRoadmapReferenceProposal,
+): Omit<NotesDocumentV3["references"][number], "id" | "capturedAt"> {
+  const {
+    id: _id,
+    disposition: _disposition,
+    policyOutcome: _policyOutcome,
+    referenceId: _referenceId,
+    ...reference
+  } = proposal;
+  return reference;
+}
+
+function roadmapTransitionPhaseStatus(
+  transition: "pending" | "in-progress" | "blocked" | "review",
+): NotesPhaseStatus {
+  if (transition === "pending") return "planning";
+  if (transition === "in-progress") return "in-progress";
+  if (transition === "blocked") return "needs-attention";
+  return "review";
+}
+
+function chronologicalRoadmapMutationTimestamp(
+  requestedAt: string,
+  documentUpdatedAt: string,
+  phase: NotesPhase,
+): string {
+  const latest = [
+    requestedAt,
+    documentUpdatedAt,
+    phase.updatedAt,
+    phase.lifecycleEvents[phase.lifecycleEvents.length - 1]?.timestamp,
+    phase.roadmapEvents[phase.roadmapEvents.length - 1]?.timestamp,
+  ]
+    .filter((value): value is string => value !== undefined)
+    .reduce((maximum, value) => Math.max(maximum, Date.parse(value)), -Infinity);
+  return new Date(latest).toISOString();
 }
 
 function updateTask(

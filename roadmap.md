@@ -11,7 +11,7 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Implementation status:** Phases 00–22 are complete and verified; Phase 23 is next.
+- **Implementation status:** Phases 00–23 are complete and verified; Phase 24 is next.
 - **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
@@ -28,9 +28,10 @@ This file is an implementation plan, not a storage surface for user roadmap data
 - **2026-07-25 Phase 18 evidence:** Commit `6e9569b3` adds strict original-v3 archive-shape compatibility plus ordered create, inspect, edit, move, status override, cancel, archive, and position-preserving restore flows. The focused release reruns passed 67 gg-app tests across 5 files and 35 sidecar repository/route tests across 2 files; the broader recorded gate passed app and ggcoder typechecks/builds, app tests, lint, format, generated audits, Rust tests, and diff checks.
 - **2026-07-26 Phase 20 evidence:** Ken prompt fences now dispatch typed current-send, authoritative fresh-send, manual/Autopilot Notes save-preview, and save-commit actions. The full gg-app suite passed 481 tests across 49 files; all 103 Rust tests passed. App check/lint/format/build, ggcoder build, sidecar bundle, all generated-output audits, and diff checks passed. Desktop and 320 px rendered evidence covers default, expanded, manual preview, replacement, pending, success, and failure states; performance telemetry and a native Tauri interaction smoke remain unverified.
 - **2026-07-27 Phase 21 evidence:** Phase Start now locks the project/phase transaction, persists one versioned phase-only context before binding, broadcasts the committed link before reset/Plan Mode/first prompt, and resumes the same conversation across restart, compaction, and approval checkpoints. The current audit passed all 2,046 ggcoder tests with 15 explicit platform skips, all 521 gg-app tests, and all 111 Rust tests. Both package typechecks, root lint, targeted formatting, roadmap coverage, diff checks, and generated-output audits pass; the audit's one caught-error lint finding was fixed by preserving the failed Plan Mode restoration as the `AggregateError` cause.
-- **Next phase:** Phase 23 — Add the roadmap-status tool and protected reconciliation.
+- **2026-07-28 Phase 23 evidence:** The app-hosted `roadmap_status` tool now records bounded pending/in-progress/blocked/review reports for GG Coder, Ken, and Autopilot Ken through one project lease and one atomic Notes revision. Manual overrides retain authority; duplicate IDs, stale revisions, malformed references, launch/update races, pending manual proposals, Autopilot acceptance/reuse, explicit proposal decisions, and override resets have typed recovery. Focused gates passed 146 backend and 108 app tests. Full gates passed 2,117 ggcoder tests with 15 explicit skips, 539 gg-app tests, 111 Rust tests, 12 generated-audit tests, both typechecks, root lint/format, both production builds, and sidecar bundling. Rendered evidence is under `.gg/evidence/phase-23-roadmap-*.png`; desktop, 360 px, empty, blocked, accepted/history, storage failure/retry, and decision-conflict states were captured. Native screen-reader speech, 200% interaction, and field performance remain unmeasured.
+- **Next phase:** Phase 24 — Gate automatic completion through verification and review.
 - **Track A freeze:** Complete at `7c1d4a13`; the three-OS matrix, workspace memory evidence, and two-window Windows desktop timeout smoke are green. Subsequent commits add Track B Notes behavior without changing the frozen Track A lifecycle implementation; `0c6fe66b` has no separate Actions run because CI triggers only for `main` pushes and pull requests.
-- **Later-track audit:** Phases 15–22 are complete; Phases 23–26 have not started. Phase 22 binds automatic status only to explicit sidecar lifecycle signals, preserves manual overrides, and leaves automatic Done to Phase 24.
+- **Later-track audit:** Phases 15–23 are complete; Phases 24–26 have not started. Phase 23 adds protected structured progress/reference reconciliation while leaving automatic Done exclusively to Phase 24.
 - **Notes baseline:** Notes retains Now, Next, Handoff, free-form Reference, and Done / Archive semantics inside a four-tab shell. Roadmap provides ordered phase CRUD and lifecycle controls; the shared structured-reference library now provides canonical deduplication, repository grouping, exact source opening, conflict-replayed CRUD, and many-to-many phase links.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -1129,7 +1130,7 @@ Successful generic `run_end`, tool success, `autopilot_done`, and elapsed time a
 
 ## Phase 23 — Add the roadmap-status tool and protected reconciliation
 
-**Status:** Not started.
+**Status:** Complete.
 
 **Outcome:** GG Coder/Ken can record progress, blockers, evidence, and discovered references without overwriting user changes.
 
@@ -1159,7 +1160,7 @@ Successful generic `run_end`, tool success, `autopilot_done`, and elapsed time a
 - Manual status/reference changes survive automatic updates until reset.
 - Proposed reference additions preview in manual mode and auto-accept only under explicit policy.
 
-**Hard stop:** Demonstrate conflict and override recovery. Do not enable automatic Done until user control is proven.
+**Hard stop:** Satisfied — conflict, duplicate, stale-revision, malformed-reference, manual status/reference override, pending proposal, explicit decision, Autopilot acceptance/reuse, storage failure/retry, and narrow/desktop recovery evidence pass together. Automatic Done remains unavailable until Phase 24.
 
 ## Phase 24 — Gate automatic completion through verification and review
 

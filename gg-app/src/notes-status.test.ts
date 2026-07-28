@@ -30,6 +30,7 @@ function phase(status: NotesPhaseStatus, withReminder = false): NotesPhase {
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
     lifecycleEvents: [],
+    roadmapEvents: [],
   };
 }
 

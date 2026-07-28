@@ -106,6 +106,60 @@ export interface NotesLifecycleEvent {
   reason: string | null;
 }
 
+export type NotesRoadmapActor = "gg-coder" | "ken" | "ken-autopilot";
+export type NotesRoadmapTransition = "pending" | "in-progress" | "blocked" | "review";
+export type NotesRoadmapStatusOutcome =
+  | "applied"
+  | "same-status"
+  | "manual-override"
+  | "done-terminal";
+export type NotesRoadmapReferencePolicyOutcome =
+  | "manual-review"
+  | "reference-override-protected"
+  | "accepted"
+  | "reused";
+
+export interface NotesRoadmapReferenceProposal extends Omit<NotesReference, "id" | "capturedAt"> {
+  id: string;
+  disposition: "pending" | "accepted" | "reused";
+  policyOutcome: NotesRoadmapReferencePolicyOutcome;
+  referenceId: string | null;
+}
+
+export interface NotesRoadmapStatusUpdate {
+  type: "status-update";
+  id: string;
+  actor: NotesRoadmapActor;
+  transition: NotesRoadmapTransition;
+  progress: string;
+  blocker: string | null;
+  evidence: string[];
+  statusOutcome: NotesRoadmapStatusOutcome;
+  proposedReferences: NotesRoadmapReferenceProposal[];
+  timestamp: string;
+}
+
+export interface NotesRoadmapReferenceDecision {
+  type: "reference-decision";
+  id: string;
+  proposalId: string;
+  decision: "accepted" | "rejected";
+  referenceId: string | null;
+  timestamp: string;
+}
+
+export interface NotesRoadmapOverrideReset {
+  type: "override-reset";
+  id: string;
+  field: "status" | "references";
+  timestamp: string;
+}
+
+export type NotesRoadmapEvent =
+  | NotesRoadmapStatusUpdate
+  | NotesRoadmapReferenceDecision
+  | NotesRoadmapOverrideReset;
+
 export interface NotesPhase {
   id: string;
   title: string;
@@ -124,6 +178,7 @@ export interface NotesPhase {
   archivedAt: string | null;
   overrides: NotesPhaseOverrides;
   lifecycleEvents: NotesLifecycleEvent[];
+  roadmapEvents: NotesRoadmapEvent[];
 }
 
 export interface NotesDocumentV3 {
@@ -239,6 +294,53 @@ export type ProjectNotesPhaseLifecycleOutcome =
         | "stale-session"
         | "done-terminal";
     }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
+export interface ProjectNotesRoadmapStatusRequest {
+  updateId: string;
+  phaseId: string;
+  expectedRevision?: number;
+  actor: NotesRoadmapActor;
+  transition: NotesRoadmapTransition;
+  progress: string;
+  blocker: string | null;
+  evidence: string[];
+  proposedReferences: Array<Omit<NotesReference, "id" | "capturedAt">>;
+  timestamp: string;
+  expectedSession?: NotesSessionLink | null;
+  requireBoundPhase?: boolean;
+  autopilotEnabled: boolean;
+}
+
+export interface ProjectNotesRoadmapProposalOutcome {
+  proposalId: string;
+  outcome: "pending" | "accepted" | "reused";
+  policyOutcome: NotesRoadmapReferencePolicyOutcome;
+  referenceId: string | null;
+}
+
+export type ProjectNotesRoadmapStatusOutcome =
+  | {
+      status: "committed";
+      snapshot: ProjectNotesSnapshot;
+      phase: NotesPhase;
+      statusOutcome: NotesRoadmapStatusOutcome;
+      proposals: ProjectNotesRoadmapProposalOutcome[];
+    }
+  | {
+      status: "duplicate";
+      revision: number;
+      phaseId: string;
+      statusOutcome: NotesRoadmapStatusOutcome;
+      proposals: ProjectNotesRoadmapProposalOutcome[];
+    }
+  | { status: "duplicate-id-conflict"; revision: number }
+  | { status: "stale-revision"; revision: number }
+  | {
+      status: "phase-not-found" | "phase-archived" | "phase-not-bound" | "stale-session";
+    }
+  | { status: "invalid-reference"; path: string; message: string }
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
@@ -363,31 +465,57 @@ const PHASE_KEYS = [
   "archivedAt",
   "overrides",
   "lifecycleEvents",
+  "roadmapEvents",
 ];
-const ORIGINAL_V3_PHASE_KEYS = [
-  "id",
-  "title",
-  "goal",
-  "doneWhen",
-  "order",
-  "status",
-  "sourcePrompt",
-  "referenceIds",
-  "session",
-  "reminder",
-  "attentionReason",
-  "createdAt",
-  "updatedAt",
-  "completedAt",
-  "overrides",
-  "lifecycleEvents",
-];
+const LEGACY_V3_PHASE_REQUIRED_KEYS = PHASE_KEYS.filter(
+  (key) => key !== "archivedAt" && key !== "roadmapEvents",
+);
 const SESSION_KEYS = ["sessionId", "sessionPath"];
 const REMINDER_KEYS = ["id", "dueAt", "note", "createdAt"];
 const OVERRIDES_KEYS = ["status", "referenceIds"];
 const STATUS_OVERRIDE_KEYS = ["value", "source", "updatedAt"];
 const REFERENCE_IDS_OVERRIDE_KEYS = ["value", "source", "updatedAt"];
 const LIFECYCLE_EVENT_KEYS = ["id", "fromStatus", "toStatus", "source", "timestamp", "reason"];
+const ROADMAP_STATUS_UPDATE_KEYS = [
+  "type",
+  "id",
+  "actor",
+  "transition",
+  "progress",
+  "blocker",
+  "evidence",
+  "statusOutcome",
+  "proposedReferences",
+  "timestamp",
+];
+const ROADMAP_REFERENCE_DECISION_KEYS = [
+  "type",
+  "id",
+  "proposalId",
+  "decision",
+  "referenceId",
+  "timestamp",
+];
+const ROADMAP_OVERRIDE_RESET_KEYS = ["type", "id", "field", "timestamp"];
+const LEGACY_ROADMAP_PROPOSAL_KEYS = [
+  "id",
+  "provider",
+  "tool",
+  "canonicalUrl",
+  "owner",
+  "repo",
+  "revision",
+  "path",
+  "range",
+  "issue",
+  "pullRequest",
+  "query",
+  "anchor",
+  "relevance",
+  "disposition",
+  "referenceId",
+];
+const ROADMAP_PROPOSAL_KEYS = [...LEGACY_ROADMAP_PROPOSAL_KEYS, "policyOutcome"];
 const PHASE_STATUSES = new Set<NotesPhaseStatus>([
   "not-started",
   "planning",
@@ -403,6 +531,19 @@ const LIFECYCLE_EVENT_SOURCES = new Set<NotesLifecycleEventSource>([
   "session",
   "agent",
   "system",
+]);
+const ROADMAP_ACTORS = new Set<NotesRoadmapActor>(["gg-coder", "ken", "ken-autopilot"]);
+const ROADMAP_TRANSITIONS = new Set<NotesRoadmapTransition>([
+  "pending",
+  "in-progress",
+  "blocked",
+  "review",
+]);
+const ROADMAP_STATUS_OUTCOMES = new Set<NotesRoadmapStatusOutcome>([
+  "applied",
+  "same-status",
+  "manual-override",
+  "done-terminal",
 ]);
 
 export function canonicalProjectKey(cwd: string): string {
@@ -769,10 +910,16 @@ function validatePhase(
     knownReferenceIds,
   );
   if (overridesError) return overridesError;
-  return validateLifecycleEvents(
+  const lifecycleError = validateLifecycleEvents(
     value.lifecycleEvents,
     `${pathPrefix}.lifecycleEvents`,
     value.status,
+  );
+  if (lifecycleError) return lifecycleError;
+  return validateRoadmapEvents(
+    value.roadmapEvents,
+    `${pathPrefix}.roadmapEvents`,
+    knownReferenceIds,
   );
 }
 
@@ -923,6 +1070,231 @@ function validateLifecycleEvents(
   return null;
 }
 
+function validateRoadmapEvents(
+  value: unknown,
+  pathPrefix: string,
+  knownReferenceIds: ReadonlySet<string>,
+): NotesValidationError | null {
+  if (!Array.isArray(value)) {
+    return validationError(pathPrefix, "expected an append-only event array");
+  }
+  const eventIds = new Set<string>();
+  const proposalIds = new Set<string>();
+  const pendingProposalIds = new Set<string>();
+  const decidedProposalIds = new Set<string>();
+  let previousTimestamp = -Infinity;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const event = value[index];
+    const eventPath = `${pathPrefix}[${index}]`;
+    if (typeof event !== "object" || event === null || Array.isArray(event)) {
+      return validationError(eventPath, "invalid roadmap event record");
+    }
+    const record = event as Record<string, unknown>;
+    if (!isNonEmptyString(record.id)) {
+      return validationError(`${eventPath}.id`, "event ID is required");
+    }
+    if (eventIds.has(record.id)) {
+      return validationError(`${eventPath}.id`, `duplicate ID: ${record.id}`);
+    }
+    eventIds.add(record.id);
+    if (!isTimestamp(record.timestamp)) {
+      return validationError(`${eventPath}.timestamp`, "expected an ISO timestamp");
+    }
+    const timestamp = Date.parse(record.timestamp);
+    if (timestamp < previousTimestamp) {
+      return validationError(`${eventPath}.timestamp`, "events must be chronological");
+    }
+    previousTimestamp = timestamp;
+
+    if (record.type === "status-update") {
+      if (!isRecordWithKeys(record, ROADMAP_STATUS_UPDATE_KEYS)) {
+        return validationError(eventPath, "invalid roadmap status update");
+      }
+      if (
+        typeof record.actor !== "string" ||
+        !ROADMAP_ACTORS.has(record.actor as NotesRoadmapActor)
+      ) {
+        return validationError(`${eventPath}.actor`, "unknown roadmap actor");
+      }
+      if (
+        typeof record.transition !== "string" ||
+        !ROADMAP_TRANSITIONS.has(record.transition as NotesRoadmapTransition)
+      ) {
+        return validationError(`${eventPath}.transition`, "unknown roadmap transition");
+      }
+      if (!isBoundedNonEmptyString(record.progress, 4_096)) {
+        return validationError(`${eventPath}.progress`, "expected 1 to 4,096 characters");
+      }
+      if (record.transition === "blocked") {
+        if (!isBoundedNonEmptyString(record.blocker, 1_024)) {
+          return validationError(`${eventPath}.blocker`, "blocked reports require a blocker");
+        }
+      } else if (record.blocker !== null) {
+        return validationError(
+          `${eventPath}.blocker`,
+          "only blocked reports may include a blocker",
+        );
+      }
+      if (
+        !Array.isArray(record.evidence) ||
+        record.evidence.length > 20 ||
+        !record.evidence.every((item) => isBoundedNonEmptyString(item, 4_096))
+      ) {
+        return validationError(`${eventPath}.evidence`, "expected up to 20 bounded evidence items");
+      }
+      if (record.transition === "review" && record.evidence.length === 0) {
+        return validationError(`${eventPath}.evidence`, "review reports require evidence");
+      }
+      if (
+        typeof record.statusOutcome !== "string" ||
+        !ROADMAP_STATUS_OUTCOMES.has(record.statusOutcome as NotesRoadmapStatusOutcome)
+      ) {
+        return validationError(`${eventPath}.statusOutcome`, "unknown status outcome");
+      }
+      if (!Array.isArray(record.proposedReferences) || record.proposedReferences.length > 20) {
+        return validationError(`${eventPath}.proposedReferences`, "expected up to 20 proposals");
+      }
+      for (
+        let proposalIndex = 0;
+        proposalIndex < record.proposedReferences.length;
+        proposalIndex += 1
+      ) {
+        const proposal = record.proposedReferences[proposalIndex];
+        const proposalPath = `${eventPath}.proposedReferences[${proposalIndex}]`;
+        const proposalError = validateRoadmapProposal(
+          proposal,
+          proposalPath,
+          record.timestamp,
+          knownReferenceIds,
+        );
+        if (proposalError) return proposalError;
+        const typed = proposal as NotesRoadmapReferenceProposal;
+        if (proposalIds.has(typed.id)) {
+          return validationError(`${proposalPath}.id`, `duplicate ID: ${typed.id}`);
+        }
+        proposalIds.add(typed.id);
+        if (typed.disposition === "pending") pendingProposalIds.add(typed.id);
+      }
+      continue;
+    }
+
+    if (record.type === "reference-decision") {
+      if (!isRecordWithKeys(record, ROADMAP_REFERENCE_DECISION_KEYS)) {
+        return validationError(eventPath, "invalid reference decision");
+      }
+      if (!isNonEmptyString(record.proposalId) || !pendingProposalIds.has(record.proposalId)) {
+        return validationError(`${eventPath}.proposalId`, "expected a prior pending proposal ID");
+      }
+      if (decidedProposalIds.has(record.proposalId)) {
+        return validationError(`${eventPath}.proposalId`, "proposal already has a decision");
+      }
+      if (record.decision !== "accepted" && record.decision !== "rejected") {
+        return validationError(`${eventPath}.decision`, "expected accepted or rejected");
+      }
+      if (record.decision === "accepted") {
+        if (!isNonEmptyString(record.referenceId) || !knownReferenceIds.has(record.referenceId)) {
+          return validationError(
+            `${eventPath}.referenceId`,
+            "accepted decisions require a known reference ID",
+          );
+        }
+      } else if (record.referenceId !== null) {
+        return validationError(
+          `${eventPath}.referenceId`,
+          "rejected decisions cannot attach a reference",
+        );
+      }
+      decidedProposalIds.add(record.proposalId);
+      continue;
+    }
+
+    if (record.type === "override-reset") {
+      if (!isRecordWithKeys(record, ROADMAP_OVERRIDE_RESET_KEYS)) {
+        return validationError(eventPath, "invalid override reset");
+      }
+      if (record.field !== "status" && record.field !== "references") {
+        return validationError(`${eventPath}.field`, "expected status or references");
+      }
+      continue;
+    }
+
+    return validationError(`${eventPath}.type`, "unknown roadmap event type");
+  }
+  return null;
+}
+
+function validateRoadmapProposal(
+  value: unknown,
+  pathPrefix: string,
+  timestamp: string,
+  knownReferenceIds: ReadonlySet<string>,
+): NotesValidationError | null {
+  if (!isRecordWithKeys(value, ROADMAP_PROPOSAL_KEYS)) {
+    return validationError(pathPrefix, `expected exactly: ${ROADMAP_PROPOSAL_KEYS.join(", ")}`);
+  }
+  if (!isNonEmptyString(value.id))
+    return validationError(`${pathPrefix}.id`, "proposal ID is required");
+  const referenceError = validateReference(
+    {
+      id: value.id,
+      provider: value.provider,
+      tool: value.tool,
+      canonicalUrl: value.canonicalUrl,
+      owner: value.owner,
+      repo: value.repo,
+      revision: value.revision,
+      path: value.path,
+      range: value.range,
+      issue: value.issue,
+      pullRequest: value.pullRequest,
+      query: value.query,
+      anchor: value.anchor,
+      relevance: value.relevance,
+      capturedAt: timestamp,
+    },
+    pathPrefix,
+  );
+  if (referenceError) return referenceError;
+  if (
+    value.disposition !== "pending" &&
+    value.disposition !== "accepted" &&
+    value.disposition !== "reused"
+  ) {
+    return validationError(`${pathPrefix}.disposition`, "expected pending, accepted, or reused");
+  }
+  const expectedDisposition =
+    value.policyOutcome === "manual-review" ||
+    value.policyOutcome === "reference-override-protected"
+      ? "pending"
+      : value.policyOutcome === "accepted" || value.policyOutcome === "reused"
+        ? value.policyOutcome
+        : null;
+  if (expectedDisposition === null) {
+    return validationError(
+      `${pathPrefix}.policyOutcome`,
+      "expected manual-review, reference-override-protected, accepted, or reused",
+    );
+  }
+  if (value.disposition !== expectedDisposition) {
+    return validationError(`${pathPrefix}.policyOutcome`, "must match the proposal disposition");
+  }
+  if (value.disposition === "accepted" || value.disposition === "reused") {
+    if (!isNonEmptyString(value.referenceId) || !knownReferenceIds.has(value.referenceId)) {
+      return validationError(
+        `${pathPrefix}.referenceId`,
+        "accepted or reused proposals require a known reference ID",
+      );
+    }
+  } else if (value.referenceId !== null) {
+    return validationError(
+      `${pathPrefix}.referenceId`,
+      "pending proposals cannot attach a reference",
+    );
+  }
+  return null;
+}
+
 function invalid(path: string, message: string): NotesValidationResult {
   return { ok: false, error: validationError(path, message) };
 }
@@ -933,6 +1305,10 @@ function validationError(path: string, message: string): NotesValidationError {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isBoundedNonEmptyString(value: unknown, maximum: number): value is string {
+  return isNonEmptyString(value) && value.length <= maximum;
 }
 
 function isReferenceMetadataTooLong(value: unknown): boolean {
@@ -1015,9 +1391,50 @@ function coerceNotesDocumentV3(value: unknown): NotesValidationResult & {
 
   let migratedLegacyShape = false;
   const phases = value.phases.map((phase) => {
-    if (!isRecordWithKeys(phase, ORIGINAL_V3_PHASE_KEYS)) return phase;
-    migratedLegacyShape = true;
-    return { ...phase, archivedAt: null };
+    if (typeof phase !== "object" || phase === null || Array.isArray(phase)) return phase;
+    const record = phase as Record<string, unknown>;
+    const keys = Object.keys(record);
+    const hasRequiredKeys = LEGACY_V3_PHASE_REQUIRED_KEYS.every((key) => keys.includes(key));
+    const onlyCurrentKeys = keys.every((key) => PHASE_KEYS.includes(key));
+    if (!hasRequiredKeys || !onlyCurrentKeys) return phase;
+
+    const missingPhaseFields = !keys.includes("archivedAt") || !keys.includes("roadmapEvents");
+    if (missingPhaseFields) migratedLegacyShape = true;
+    const migratedPhase = {
+      ...record,
+      archivedAt: keys.includes("archivedAt") ? record.archivedAt : null,
+      roadmapEvents: keys.includes("roadmapEvents") ? record.roadmapEvents : [],
+    };
+    if (!Array.isArray(migratedPhase.roadmapEvents)) return migratedPhase;
+
+    const roadmapEvents = migratedPhase.roadmapEvents.map((event) => {
+      if (
+        typeof event !== "object" ||
+        event === null ||
+        Array.isArray(event) ||
+        (event as Record<string, unknown>).type !== "status-update"
+      ) {
+        return event;
+      }
+      const statusUpdate = event as Record<string, unknown>;
+      if (!Array.isArray(statusUpdate.proposedReferences)) return event;
+      let migratedEvent = false;
+      const proposedReferences = statusUpdate.proposedReferences.map((proposal) => {
+        if (!isRecordWithKeys(proposal, LEGACY_ROADMAP_PROPOSAL_KEYS)) return proposal;
+        const policyOutcome =
+          proposal.disposition === "pending"
+            ? "manual-review"
+            : proposal.disposition === "accepted" || proposal.disposition === "reused"
+              ? proposal.disposition
+              : null;
+        if (policyOutcome === null) return proposal;
+        migratedEvent = true;
+        migratedLegacyShape = true;
+        return { ...proposal, policyOutcome };
+      });
+      return migratedEvent ? { ...statusUpdate, proposedReferences } : event;
+    });
+    return { ...migratedPhase, roadmapEvents };
   });
   if (!migratedLegacyShape) return current;
   const migrated = validateNotesDocumentV3({ ...value, phases });
@@ -1081,6 +1498,42 @@ function validateAppendOnlyLifecycleEvents(
   return null;
 }
 
+function validateAppendOnlyRoadmapEvents(
+  previous: NotesDocumentV3,
+  next: NotesDocumentV3,
+): NotesValidationError | null {
+  const nextById = new Map(next.phases.map((phase, index) => [phase.id, { phase, index }]));
+  for (const previousPhase of previous.phases) {
+    const current = nextById.get(previousPhase.id);
+    if (!current) {
+      if (previousPhase.roadmapEvents.length > 0) {
+        return validationError(
+          `phases.${previousPhase.id}.roadmapEvents`,
+          "cannot remove a phase with roadmap history",
+        );
+      }
+      continue;
+    }
+    if (current.phase.roadmapEvents.length < previousPhase.roadmapEvents.length) {
+      return validationError(
+        `phases[${current.index}].roadmapEvents`,
+        "roadmap events are append-only",
+      );
+    }
+    for (let index = 0; index < previousPhase.roadmapEvents.length; index += 1) {
+      if (
+        !isDeepStrictEqual(current.phase.roadmapEvents[index], previousPhase.roadmapEvents[index])
+      ) {
+        return validationError(
+          `phases[${current.index}].roadmapEvents[${index}]`,
+          "existing roadmap events and proposals cannot be changed",
+        );
+      }
+    }
+  }
+  return null;
+}
+
 function sameSessionLink(
   current: NotesSessionLink | null,
   expected: NotesSessionLink | null,
@@ -1133,6 +1586,96 @@ function applyPhaseLifecycleTransition(
     reason,
   });
   return "updated";
+}
+
+function roadmapTransitionStatus(transition: NotesRoadmapTransition): NotesAutomaticPhaseStatus {
+  switch (transition) {
+    case "pending":
+      return "planning";
+    case "in-progress":
+      return "in-progress";
+    case "blocked":
+      return "needs-attention";
+    case "review":
+      return "review";
+  }
+}
+
+function roadmapStatusOutcome(
+  outcome: "updated" | "same-status" | "manual-override" | "done-terminal",
+): NotesRoadmapStatusOutcome {
+  return outcome === "updated" ? "applied" : outcome;
+}
+
+function chronologicalRoadmapTimestamp(phase: NotesPhase, requested: string): string {
+  const requestedTime = Date.parse(requested);
+  if (!Number.isFinite(requestedTime)) throw new Error("Invalid roadmap status timestamp.");
+  const priorTimes = [
+    phase.lifecycleEvents.at(-1)?.timestamp,
+    phase.roadmapEvents.at(-1)?.timestamp,
+    phase.updatedAt,
+  ]
+    .filter((value): value is string => value !== undefined)
+    .map(Date.parse)
+    .filter(Number.isFinite);
+  return new Date(Math.max(requestedTime, ...priorTimes)).toISOString();
+}
+
+function normalizeRoadmapProposedReference(
+  proposed: Omit<NotesReference, "id" | "capturedAt">,
+): Omit<NotesReference, "id" | "capturedAt"> {
+  const canonicalUrl = normalizeCanonicalUrl(proposed.canonicalUrl);
+  return {
+    ...proposed,
+    provider: proposed.provider.trim().toLowerCase(),
+    canonicalUrl: canonicalUrl ?? proposed.canonicalUrl.trim(),
+    owner: proposed.owner.trim(),
+    repo: proposed.repo.trim(),
+  };
+}
+
+function roadmapProposalOutcome(
+  proposal: NotesRoadmapReferenceProposal,
+): ProjectNotesRoadmapProposalOutcome {
+  return {
+    proposalId: proposal.id,
+    outcome: proposal.disposition,
+    policyOutcome: proposal.policyOutcome,
+    referenceId: proposal.referenceId,
+  };
+}
+
+function sameRoadmapStatusPayload(
+  event: NotesRoadmapStatusUpdate,
+  request: ProjectNotesRoadmapStatusRequest,
+): boolean {
+  const storedReferences = event.proposedReferences.map(
+    ({
+      id: _id,
+      disposition: _disposition,
+      policyOutcome: _policyOutcome,
+      referenceId: _referenceId,
+      ...reference
+    }) => reference,
+  );
+  return isDeepStrictEqual(
+    {
+      actor: event.actor,
+      transition: event.transition,
+      progress: event.progress,
+      blocker: event.blocker,
+      evidence: event.evidence,
+      proposedReferences: storedReferences,
+    },
+    {
+      actor: request.actor,
+      transition: request.transition,
+      progress: request.progress,
+      blocker: request.blocker,
+      evidence: request.evidence,
+      proposedReferences: request.proposedReferences,
+    },
+  );
 }
 
 export class ProjectNotesRepository {
@@ -1242,6 +1785,11 @@ export class ProjectNotesRepository {
         validated.document,
       );
       if (appendOnlyError) return { status: "invalid", error: appendOnlyError };
+      const roadmapAppendOnlyError = validateAppendOnlyRoadmapEvents(
+        current.envelope.document,
+        validated.document,
+      );
+      if (roadmapAppendOnlyError) return { status: "invalid", error: roadmapAppendOnlyError };
 
       const next: StoredProjectNotesV1 = {
         storeVersion: 1,
@@ -1252,6 +1800,159 @@ export class ProjectNotesRepository {
       await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
       await this.atomicWrite(paths.primary, serializeEnvelope(next));
       return { status: "ok", snapshot: toSnapshot(next) };
+    });
+  }
+
+  async recordRoadmapStatusUpdate(
+    cwd: string,
+    request: ProjectNotesRoadmapStatusRequest,
+  ): Promise<ProjectNotesRoadmapStatusOutcome> {
+    const projectKey = canonicalProjectKey(cwd);
+    const paths = this.paths(cwd);
+    await this.ensureDirectory(paths.directory);
+    return this.lock(paths.primary, async () => {
+      const current = await this.readCurrent(paths, projectKey);
+      if (current.status === "missing" || current.status === "corrupt") return current;
+      const revision = current.envelope.revision;
+      const phaseIndex = current.envelope.document.phases.findIndex(
+        (phase) => phase.id === request.phaseId,
+      );
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      const normalizedReferences = request.proposedReferences.map(
+        normalizeRoadmapProposedReference,
+      );
+      const normalizedRequest = { ...request, proposedReferences: normalizedReferences };
+      const prior = currentPhase.roadmapEvents.find(
+        (event): event is NotesRoadmapStatusUpdate =>
+          event.type === "status-update" && event.id === request.updateId,
+      );
+      if (prior) {
+        if (!sameRoadmapStatusPayload(prior, normalizedRequest)) {
+          return { status: "duplicate-id-conflict", revision };
+        }
+        return {
+          status: "duplicate",
+          revision,
+          phaseId: request.phaseId,
+          statusOutcome: prior.statusOutcome,
+          proposals: prior.proposedReferences.map(roadmapProposalOutcome),
+        };
+      }
+
+      if (request.expectedRevision !== undefined && request.expectedRevision !== revision) {
+        return { status: "stale-revision", revision };
+      }
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (request.requireBoundPhase && currentPhase.session === null) {
+        return { status: "phase-not-bound" };
+      }
+      if (
+        request.expectedSession !== undefined &&
+        !sameSessionLink(currentPhase.session, request.expectedSession)
+      ) {
+        return { status: "stale-session" };
+      }
+      const timestamp = chronologicalRoadmapTimestamp(currentPhase, request.timestamp);
+      for (let index = 0; index < normalizedReferences.length; index += 1) {
+        const normalized = normalizedReferences[index]!;
+        const error = validateReference(
+          { ...normalized, id: `proposal-${index + 1}`, capturedAt: timestamp },
+          `proposed_references[${index}]`,
+        );
+        if (error) return { status: "invalid-reference", path: error.path, message: error.message };
+      }
+
+      const document = structuredClone(current.envelope.document);
+      const phase = document.phases[phaseIndex]!;
+      const lifecycleOutcome = applyPhaseLifecycleTransition(
+        phase,
+        {
+          status: roadmapTransitionStatus(request.transition),
+          source: "agent",
+          reason:
+            request.transition === "blocked"
+              ? request.blocker!
+              : `Roadmap report: ${request.progress}`,
+          timestamp,
+        },
+        this.createId,
+      );
+      const statusOutcome = roadmapStatusOutcome(lifecycleOutcome);
+      const proposals: NotesRoadmapReferenceProposal[] = [];
+
+      for (const proposed of normalizedReferences) {
+        let disposition: NotesRoadmapReferenceProposal["disposition"] = "pending";
+        let policyOutcome: NotesRoadmapReferencePolicyOutcome = request.autopilotEnabled
+          ? "reference-override-protected"
+          : "manual-review";
+        let referenceId: string | null = null;
+        if (request.autopilotEnabled && phase.overrides.referenceIds === null) {
+          const identity = canonicalReferenceIdentity(proposed)!;
+          const existing = document.references.find(
+            (reference) => canonicalReferenceIdentity(reference) === identity,
+          );
+          if (existing) {
+            referenceId = existing.id;
+            disposition = "reused";
+            policyOutcome = "reused";
+          } else {
+            referenceId = this.createId();
+            document.references.push({ ...proposed, id: referenceId, capturedAt: timestamp });
+            disposition = "accepted";
+            policyOutcome = "accepted";
+          }
+          if (!phase.referenceIds.includes(referenceId)) phase.referenceIds.push(referenceId);
+        }
+        proposals.push({
+          ...proposed,
+          id: this.createId(),
+          disposition,
+          policyOutcome,
+          referenceId,
+        });
+      }
+
+      phase.roadmapEvents.push({
+        type: "status-update",
+        id: request.updateId,
+        actor: request.actor,
+        transition: request.transition,
+        progress: request.progress,
+        blocker: request.blocker,
+        evidence: [...request.evidence],
+        statusOutcome,
+        proposedReferences: proposals,
+        timestamp,
+      });
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const validation = validateNotesDocumentV3(document);
+      if (!validation.ok) {
+        if (validation.error.path.includes("proposedReferences")) {
+          return {
+            status: "invalid-reference",
+            path: validation.error.path,
+            message: validation.error.message,
+          };
+        }
+        throw new Error(`Roadmap reconciliation created invalid Notes: ${validation.error.path}`);
+      }
+      const next: StoredProjectNotesV1 = {
+        storeVersion: 1,
+        projectKey,
+        revision: revision + 1,
+        document: validation.document,
+      };
+      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
+      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      return {
+        status: "committed",
+        snapshot: toSnapshot(next),
+        phase: structuredClone(phase),
+        statusOutcome,
+        proposals: proposals.map(roadmapProposalOutcome),
+      };
     });
   }
 

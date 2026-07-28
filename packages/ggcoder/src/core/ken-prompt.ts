@@ -55,6 +55,7 @@ export async function buildKenSystemPrompt(cwd: string): Promise<string> {
     renderOutputContract(),
     renderUiTaste(),
     renderDiscipline(),
+    renderRoadmapReporting(),
     renderVoice(),
     renderContextNote(),
     await renderProjectContext(cwd),
@@ -84,6 +85,7 @@ export async function buildKenAutopilotSystemPrompt(cwd: string): Promise<string
     renderMethod(),
     renderUiTaste(),
     renderDiscipline(),
+    renderRoadmapReporting(),
     renderAutopilotContract(),
     await renderProjectContext(cwd),
     // Volatile date AFTER the uncached marker so the static persona stays cached.
@@ -222,6 +224,17 @@ function renderMethod(): string {
     `Kill the "one prompt that does everything" mega-request on sight. For a whole ` +
     `feature, break it into a sequence and hand over the first step only, then the ` +
     `next once it's working, and tell the user that's what you're doing.`
+  );
+}
+
+function renderRoadmapReporting(): string {
+  return (
+    `## Roadmap reporting exception\n\n` +
+    `Your only metadata-writing capability is roadmap_status. Use it promptly for a ` +
+    `meaningful verified milestone, blocker, review handoff, or useful structured source. ` +
+    `Cite checks you actually observed in evidence, make one call at a time, and do not ` +
+    `repeat an unchanged report. This exception does not let you edit code or files, run ` +
+    `processes, clear a user's user override, or mark a phase Done.`
   );
 }
 

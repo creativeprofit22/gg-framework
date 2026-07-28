@@ -916,6 +916,29 @@ describe("useAgentEvents", () => {
     });
     expect(getState()).toMatchObject({ chatAgent: "therapist" });
   });
+
+  it("adopts same-project Autopilot enable and disable events before the next plan decision", () => {
+    const { hook, getState, getPlanReview } = setup(() => false, { autopilot: false });
+
+    act(() => {
+      hook.result.current.handleEvent(ev("autopilot", { autopilot: true }));
+      hook.result.current.handleEvent(
+        ev("plan_exit", { planPath: "/tmp/auto.md", content: "# Auto plan" }),
+      );
+    });
+    expect(getState()).toMatchObject({ autopilot: true });
+    expect(getPlanReview()).toBeNull();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("autopilot", { autopilot: false }));
+      hook.result.current.handleEvent(
+        ev("plan_exit", { planPath: "/tmp/manual.md", content: "# Manual plan" }),
+      );
+    });
+    expect(getState()).toMatchObject({ autopilot: false });
+    expect(getPlanReview()).toBe("# Manual plan");
+  });
+
   it("delegates ken_ events to handleKenEvent and does not handle them locally", () => {
     const handleKenEvent = vi.fn(() => true);
     const { hook, getItems, setRunning } = setup(handleKenEvent);

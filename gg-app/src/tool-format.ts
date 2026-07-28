@@ -48,6 +48,7 @@ const VERBS: Record<string, VerbPair> = {
   screenshot: { running: "Capturing", done: "Captured" },
   enter_plan: { running: "Entering plan", done: "Entered plan" },
   exit_plan: { running: "Submitting plan", done: "Submitted plan" },
+  roadmap_status: { running: "Updating roadmap", done: "Updated roadmap" },
   "mcp__kencode-search__searchCode": { running: "Searching code", done: "Searched code" },
   "mcp__kencode-search__referenceSources": {
     running: "Finding references",
@@ -80,7 +81,7 @@ export function getToolTone(name: string): ToolTone {
   )
     return "web";
   if (["subagent", "skill"].includes(name)) return "agent";
-  if (["tasks"].includes(name)) return "state";
+  if (["tasks", "roadmap_status"].includes(name)) return "state";
   if (["source_path"].includes(name)) return "source";
   if (name.startsWith("mcp__")) return "web";
   return "default";
@@ -192,6 +193,8 @@ function toolDetail(name: string, args: Record<string, unknown>): { text: string
       return { text: shorten(String(args.skill ?? "")), quote: false };
     case "source_path":
       return { text: shorten(String(args.package ?? "")), quote: false };
+    case "roadmap_status":
+      return { text: shorten(String(args.phase_id ?? "")), quote: false };
     default:
       return { text: "", quote: false };
   }

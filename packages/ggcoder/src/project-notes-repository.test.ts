@@ -98,7 +98,14 @@ function notes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV3 {
         sourcePrompt: "Implement Phase 16",
         referenceIds: ["ref-1"],
         session: { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" },
-        reminder: { id: "reminder-1", dueAt: NOW, note: "Review schema", createdAt: NOW },
+        reminder: {
+          id: "reminder-1",
+          occurrenceKey: "occurrence-1",
+          dueAt: NOW,
+          note: "Review schema",
+          createdAt: NOW,
+          lastDelivery: null,
+        },
         attentionReason: null,
         createdAt: "2026-07-24T10:00:00.000Z",
         updatedAt: NOW,
@@ -144,6 +151,340 @@ async function readEnvelope(filePath: string): Promise<StoredProjectNotesV1> {
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
+describe("ProjectNotesRepository reminder occurrence contract", () => {
+  it("deterministically upgrades legacy v3 reminders without changing their existing fields", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/legacy-reminder";
+    const legacy = structuredClone(notes()) as unknown as {
+      phases: Array<{ reminder: Record<string, unknown> | null }>;
+    };
+    const current = legacy.phases[0]!.reminder!;
+    delete current.occurrenceKey;
+    delete current.lastDelivery;
+
+    expect(validateNotesDocumentV3(legacy)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0].reminder" },
+    });
+    await expect(new ProjectNotesRepository(agentDir).migrate(cwd, legacy)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        document: {
+          phases: [
+            {
+              reminder: {
+                id: "reminder-1",
+                occurrenceKey: "reminder-1",
+                dueAt: NOW,
+                note: "Review schema",
+                createdAt: NOW,
+                lastDelivery: null,
+              },
+            },
+          ],
+        },
+      },
+    });
+    await expect(new ProjectNotesRepository(agentDir).load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 1,
+        document: { phases: [{ reminder: { occurrenceKey: "reminder-1", lastDelivery: null } }] },
+      },
+    });
+  });
+
+  it("strictly validates bounded reminder notes and nested delivery evidence", () => {
+    const valid = notes();
+    valid.phases[0]!.reminder!.lastDelivery = {
+      occurrenceKey: "occurrence-1",
+      attemptedAt: NOW,
+      channel: "native",
+      permission: "granted",
+    };
+    expect(validateNotesDocumentV3(valid)).toEqual({ ok: true, document: valid });
+
+    const malformedDelivery = structuredClone(valid) as NotesDocumentV3 & {
+      phases: Array<{ reminder: Record<string, unknown> | null }>;
+    };
+    malformedDelivery.phases[0]!.reminder!.unexpected = true;
+    expect(validateNotesDocumentV3(malformedDelivery)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0].reminder" },
+    });
+
+    const invalidChannel = structuredClone(valid) as unknown as {
+      phases: Array<{ reminder: { lastDelivery: { channel: string } } }>;
+    };
+    invalidChannel.phases[0]!.reminder.lastDelivery.channel = "email";
+    expect(validateNotesDocumentV3(invalidChannel)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0].reminder.lastDelivery.channel" },
+    });
+
+    const oversized = structuredClone(valid);
+    oversized.phases[0]!.reminder!.note = "x".repeat(501);
+    expect(validateNotesDocumentV3(oversized)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0].reminder.note" },
+    });
+  });
+
+  it("allows create, reschedule, and dismiss while keeping delivery evidence repository-owned", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/reminder-authority";
+    const initial = notes();
+    await repository.migrate(cwd, initial);
+
+    const forged = structuredClone(initial);
+    forged.phases[0]!.reminder!.lastDelivery = {
+      occurrenceKey: "occurrence-1",
+      attemptedAt: NOW,
+      channel: "in-app",
+      permission: "not-required",
+    };
+    await expect(repository.save(cwd, 1, forged)).resolves.toEqual({
+      status: "invalid",
+      error: {
+        path: "phases[0].reminder.lastDelivery",
+        message: "delivery evidence is repository-owned",
+      },
+    });
+
+    const rescheduled = structuredClone(initial);
+    rescheduled.phases[0]!.reminder = {
+      ...rescheduled.phases[0]!.reminder!,
+      occurrenceKey: "occurrence-2",
+      dueAt: "2026-07-26T12:34:56.000Z",
+      createdAt: "2026-07-25T13:00:00.000Z",
+    };
+    await expect(repository.save(cwd, 1, rescheduled)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2 },
+    });
+
+    const dismissed = structuredClone(rescheduled);
+    dismissed.phases[0]!.reminder = null;
+    await expect(repository.save(cwd, 2, dismissed)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 3 },
+    });
+
+    const recreated = structuredClone(dismissed);
+    recreated.phases[0]!.reminder = {
+      id: "reminder-2",
+      occurrenceKey: "occurrence-3",
+      dueAt: "2026-07-27T12:34:56.000Z",
+      note: "Try again",
+      createdAt: "2026-07-25T14:00:00.000Z",
+      lastDelivery: null,
+    };
+    await expect(repository.save(cwd, 3, recreated)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 4, document: recreated },
+    });
+  });
+});
+
+describe("ProjectNotesRepository reminder delivery claims", () => {
+  it("records one durable revision under concurrent claims and does not replay after restart", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/concurrent-reminder-claim";
+    await new ProjectNotesRepository(agentDir).migrate(cwd, notes());
+    const request = {
+      phaseId: "phase-1",
+      occurrenceKey: "occurrence-1",
+      attemptedAt: NOW,
+      channel: "in-app" as const,
+      permission: "not-required" as const,
+    };
+
+    const [first, second] = await Promise.all([
+      new ProjectNotesRepository(agentDir).recordReminderDelivery(cwd, request),
+      new ProjectNotesRepository(agentDir).recordReminderDelivery(cwd, request),
+    ]);
+    expect(new Set([first.status, second.status])).toEqual(new Set(["ok", "already-delivered"]));
+
+    const restarted = new ProjectNotesRepository(agentDir);
+    await expect(restarted.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [
+            {
+              reminder: {
+                occurrenceKey: "occurrence-1",
+                lastDelivery: {
+                  occurrenceKey: "occurrence-1",
+                  attemptedAt: NOW,
+                  channel: "in-app",
+                  permission: "not-required",
+                },
+              },
+            },
+          ],
+        },
+      },
+    });
+    await expect(restarted.recordReminderDelivery(cwd, request)).resolves.toEqual({
+      status: "already-delivered",
+    });
+  });
+
+  it.each([
+    ["archived", { archivedAt: NOW }, "phase-archived"],
+    ["done", { status: "done", completedAt: NOW }, "phase-inactive"],
+    ["cancelled", { status: "cancelled", completedAt: NOW }, "phase-inactive"],
+    ["missing reminder", { reminder: null }, "reminder-not-found"],
+  ] as const)(
+    "rejects a %s phase without changing its stored reminder",
+    async (_label, patch, status) => {
+      const agentDir = await tempAgentDir();
+      const cwd = `/work/reminder-${status}-${Math.random()}`;
+      const initial = notes();
+      Object.assign(initial.phases[0]!, patch);
+      initial.phases[0]!.overrides.status = null;
+      initial.phases[0]!.lifecycleEvents = [];
+      await new ProjectNotesRepository(agentDir).migrate(cwd, initial);
+      const repository = new ProjectNotesRepository(agentDir);
+
+      await expect(
+        repository.recordReminderDelivery(cwd, {
+          phaseId: "phase-1",
+          occurrenceKey: "occurrence-1",
+          attemptedAt: NOW,
+          channel: "native",
+          permission: "granted",
+        }),
+      ).resolves.toEqual({ status });
+      await expect(repository.load(cwd)).resolves.toMatchObject({
+        status: "ok",
+        snapshot: { revision: 1 },
+      });
+    },
+  );
+
+  it("rejects missing, stale, not-due, and incoherent delivery requests", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/reminder-guards";
+    const initial = notes();
+    initial.phases[0]!.reminder!.dueAt = "2026-07-26T12:34:56.000Z";
+    await repository.migrate(cwd, initial);
+
+    const base = {
+      phaseId: "phase-1",
+      occurrenceKey: "occurrence-1",
+      attemptedAt: NOW,
+      channel: "native" as const,
+      permission: "granted" as const,
+    };
+    await expect(
+      repository.recordReminderDelivery(cwd, { ...base, phaseId: "missing" }),
+    ).resolves.toEqual({ status: "phase-not-found" });
+    await expect(
+      repository.recordReminderDelivery(cwd, { ...base, occurrenceKey: "stale" }),
+    ).resolves.toEqual({ status: "stale-occurrence" });
+    await expect(repository.recordReminderDelivery(cwd, base)).resolves.toEqual({
+      status: "not-due",
+    });
+    await expect(
+      repository.recordReminderDelivery(cwd, {
+        ...base,
+        channel: "in-app",
+        permission: "granted",
+      }),
+    ).resolves.toMatchObject({
+      status: "invalid",
+      error: { path: "permission" },
+    });
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1 },
+    });
+  });
+
+  it("persists unavailable platform evidence only for in-app fallback delivery", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/reminder-unavailable";
+    await repository.migrate(cwd, notes());
+
+    await expect(
+      repository.recordReminderDelivery(cwd, {
+        phaseId: "phase-1",
+        occurrenceKey: "occurrence-1",
+        attemptedAt: NOW,
+        channel: "in-app-fallback",
+        permission: "unavailable",
+      }),
+    ).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [
+            {
+              reminder: {
+                lastDelivery: { channel: "in-app-fallback", permission: "unavailable" },
+              },
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  it("keeps the occurrence retryable after storage failure and can claim from backup recovery", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/reminder-storage-failure";
+    const initialRepository = new ProjectNotesRepository(agentDir);
+    await initialRepository.migrate(cwd, notes());
+    const paths = initialRepository.paths(cwd);
+    const injected = failingRenameFileSystem(paths.primary);
+    const request = {
+      phaseId: "phase-1",
+      occurrenceKey: "occurrence-1",
+      attemptedAt: NOW,
+      channel: "in-app-fallback" as const,
+      permission: "denied" as const,
+    };
+
+    await expect(
+      new ProjectNotesRepository(agentDir, {
+        fileSystem: injected.fileSystem,
+      }).recordReminderDelivery(cwd, request),
+    ).rejects.toThrow("injected rename failure");
+    await expect(new ProjectNotesRepository(agentDir).load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1, document: { phases: [{ reminder: { lastDelivery: null } }] } },
+    });
+
+    await fs.writeFile(paths.primary, "{broken", "utf8");
+    await expect(
+      new ProjectNotesRepository(agentDir).recordReminderDelivery(cwd, request),
+    ).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2 },
+    });
+    await expect(new ProjectNotesRepository(agentDir).load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      recoveredFromBackup: false,
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [
+            {
+              reminder: {
+                lastDelivery: { channel: "in-app-fallback", permission: "denied" },
+              },
+            },
+          ],
+        },
+      },
+    });
+  });
 });
 
 describe("ProjectNotesRepository phase launch transaction", () => {

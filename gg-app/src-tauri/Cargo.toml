@@ -35,6 +35,7 @@ keyring = { version = "=4.1.5", default-features = false, features = ["v1"] }
 atomic-write-file = { version = "=0.3.0", default-features = false }
 tokio = { version = "1", features = ["time"] }
 base64 = "0.22"
+tauri-plugin-notification = "2"
 
 # Updater + process (relaunch) are desktop-only — the updater plugin doesn't
 # build for mobile targets.
@@ -44,4 +45,14 @@ tauri-plugin-process = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "=0.61.3", features = ["UI_Notifications", "Win32_System_WinRT"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSError"] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["block2", "UNNotificationSettings", "UNUserNotificationCenter"] }
+tauri-plugin-webdriver-automation = "=0.1.3"
 

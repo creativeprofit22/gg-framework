@@ -138,6 +138,11 @@ import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
 import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
 import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
 import {
+  AppSidecarReminderCoordinator,
+  createAppSidecarReminderHandler,
+  type AppSidecarReminderHandler,
+} from "./app-sidecar-reminders.js";
+import {
   ProjectNotesRepository,
   canonicalProjectKey,
   type ProjectNotesSnapshot,
@@ -837,16 +842,41 @@ async function main(): Promise<void> {
   const notesRepository = new ProjectNotesRepository(paths.agentDir);
   const roadmapReconciliations = new AppSidecarRoadmapReconciliationCoordinator();
   const projectAutopilot = new AppSidecarProjectAutopilotState();
-  const broadcastNotesSnapshot = (snapshot: ProjectNotesSnapshot): void => {
+  function broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void {
+    reminderCoordinator.observeSnapshot(snapshot);
     for (const context of sessions.values()) {
       if (canonicalProjectKey(context.cwd) === snapshot.projectKey) {
         context.broadcastNotesChange(snapshot);
       }
     }
-  };
+  }
+  const reminderCoordinator = new AppSidecarReminderCoordinator({
+    repository: notesRepository,
+    onReminderDue: (projectKey) => {
+      for (const context of sessions.values()) {
+        if (canonicalProjectKey(context.cwd) === projectKey) {
+          context.broadcast("roadmap_reminder_due", {});
+        }
+      }
+    },
+    onCommitted: broadcastNotesSnapshot,
+    onError: (error) => {
+      captureSidecarError(error, "app-sidecar.reminders.coordinator");
+      log("ERROR", "app-sidecar", "reminder coordinator failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+  const reminders = createAppSidecarReminderHandler(reminderCoordinator, (error) => {
+    captureSidecarError(error, "app-sidecar.reminders.request");
+    log("ERROR", "app-sidecar", "reminder request failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  });
   const notes = createAppSidecarNotesHandler({
     repository: notesRepository,
     sessions,
+    onCommittedSnapshot: broadcastNotesSnapshot,
     onError: (error) => {
       captureSidecarError(error, "app-sidecar.notes.request");
       log("ERROR", "app-sidecar", "notes request failed", {
@@ -1059,6 +1089,8 @@ async function main(): Promise<void> {
                 jiwaStore,
                 reloadCoordinator,
                 notes,
+                reminders,
+                reminderCoordinator,
                 notesRepository,
                 roadmapReconciliations,
                 projectAutopilot,
@@ -1067,6 +1099,7 @@ async function main(): Promise<void> {
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
             );
             sessions.add(id, ctx);
+            await reminderCoordinator.watchSession({ id, cwd: sessionCwd });
             log("INFO", "app-sidecar", "session created", {
               id,
               mode,
@@ -1162,6 +1195,7 @@ async function main(): Promise<void> {
     // at the daemon level, not per session.
     stopRadio();
     await sessions.disposeAll();
+    reminderCoordinator.dispose();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     process.exit(0);
   }
@@ -1382,6 +1416,8 @@ async function createSession(
     jiwaStore: JiwaStore;
     reloadCoordinator: AppSidecarReloadCoordinator;
     notes: AppSidecarNotesHandler;
+    reminders: AppSidecarReminderHandler;
+    reminderCoordinator: AppSidecarReminderCoordinator;
     notesRepository: ProjectNotesRepository;
     roadmapReconciliations: AppSidecarRoadmapReconciliationCoordinator;
     projectAutopilot: AppSidecarProjectAutopilotState;
@@ -1402,6 +1438,8 @@ async function createSession(
     jiwaStore,
     reloadCoordinator,
     notes,
+    reminders,
+    reminderCoordinator,
     notesRepository,
     roadmapReconciliations,
     projectAutopilot,
@@ -3132,6 +3170,7 @@ async function createSession(
     method: string,
   ): void {
     if (notes.handle(req, res, { cwd, broadcastNotesChange }, url, method)) return;
+    if (reminders.handle(req, res, { id: opts.id, cwd }, url, method)) return;
 
     if (method === "GET" && url === "/state") {
       const st = session.getState();
@@ -5032,6 +5071,7 @@ async function createSession(
   }
 
   async function dispose(): Promise<void> {
+    reminderCoordinator.unwatchSession(opts.id);
     unsubscribeProjectAutopilot();
     tasksPollStopped = true;
     if (tasksPoll) clearTimeout(tasksPoll);

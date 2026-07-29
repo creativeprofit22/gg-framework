@@ -1,16 +1,19 @@
-import { forwardRef, useEffect, useImperativeHandle, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, AlertTriangle, Database, HardDrive } from "lucide-react";
 import { NotesModal } from "./NotesModal";
+import { RoadmapReminderAlert } from "./RoadmapReminderAlert";
 import type { OpenReferenceUrl } from "./notes-open-source";
 import { NotesStatusBadge, notesStatusLabel } from "./NotesStatusBadge";
 import {
   getActiveNotesPhaseCount,
   getActiveNotesReminderCount,
+  getDueNotesReminderCount,
   getUnfinishedNotesTaskCount,
   isNotesHandoffUnread,
 } from "./notes-status";
 import { canonicalProjectKey } from "./notes-storage";
+import { RoadmapReminderDeliveryHost, type InAppReminderDelivery } from "./roadmap-reminders";
 import { useProjectNotes, type UseProjectNotesResult } from "./useProjectNotes";
 import type {
   NotesClient,
@@ -19,6 +22,7 @@ import type {
   NotesSessionLink,
   PhaseStartResult,
 } from "./notes-types";
+import { isRoadmapReminderDueEvent } from "./notes-types";
 import type { KenPromptSaveDestination } from "./ken-prompt-actions";
 
 interface Props {
@@ -29,6 +33,8 @@ interface Props {
   onResumePhase?(phaseId: string, link: NotesSessionLink): Promise<void>;
   phaseStartUnavailableReason?: string | null;
   phaseActionDisabled?: boolean;
+  paneFocused?: boolean;
+  windowFocused?: boolean;
 }
 
 interface NotesPersistenceStatus {
@@ -58,16 +64,26 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     },
     phaseStartUnavailableReason = null,
     phaseActionDisabled = false,
+    paneFocused = true,
+    windowFocused = true,
   },
   ref,
 ): React.ReactElement {
   const [showNotes, setShowNotes] = useState(false);
   const [modalProjectIdentity, setModalProjectIdentity] = useState<string | null>(null);
+  const [roadmapTargetPhaseId, setRoadmapTargetPhaseId] = useState<string | null>(null);
+  const [reminderQueue, setReminderQueue] = useState<InAppReminderDelivery[]>([]);
+  const [reminderPending, setReminderPending] = useState(false);
+  const [reminderError, setReminderError] = useState<string | null>(null);
+  const deliveryHostRef = useRef<RoadmapReminderDeliveryHost | null>(null);
+  const authorityReadyRef = useRef(false);
+  const focusRef = useRef(true);
   const activeProjectIdentity = cwd ? canonicalProjectKey(cwd) : null;
   const {
     value,
     onChange,
     document: notesDocument,
+    authorityReady,
     changeCurrentFocus,
     createTask,
     editTask,
@@ -91,12 +107,16 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     rejectReferenceProposal,
     resumeAutomaticStatus,
     resumeAutomaticReferences,
+    schedulePhaseReminder,
+    snoozePhaseReminder,
+    dismissPhaseReminder,
     changeHandoff,
     markHandoffPresented,
     diagnostics,
   } = useProjectNotes(cwd, { client });
   const status = {
     unfinishedCount: getUnfinishedNotesTaskCount(notesDocument),
+    dueReminderCount: getDueNotesReminderCount(notesDocument),
     handoffUnread: isNotesHandoffUnread(notesDocument),
   };
   const activePhaseCount = getActiveNotesPhaseCount(notesDocument);
@@ -104,7 +124,73 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
 
   useEffect(() => {
     setShowNotes(false);
+    setRoadmapTargetPhaseId(null);
+    setReminderQueue([]);
+    setReminderError(null);
   }, [activeProjectIdentity]);
+
+  useEffect(() => {
+    authorityReadyRef.current = authorityReady;
+    focusRef.current = paneFocused && windowFocused;
+  }, [authorityReady, paneFocused, windowFocused]);
+
+  useEffect(() => {
+    setReminderQueue((current) => {
+      if (current.length === 0) return current;
+      return current.flatMap((delivery) => {
+        const phase = notesDocument.phases.find((candidate) => candidate.id === delivery.phase.id);
+        if (
+          !phase ||
+          phase.archivedAt !== null ||
+          phase.status === "done" ||
+          phase.status === "cancelled" ||
+          phase.reminder === null ||
+          phase.reminder.occurrenceKey !== delivery.reminder.occurrenceKey
+        ) {
+          return [];
+        }
+        return [
+          {
+            ...delivery,
+            phase: { id: phase.id, title: phase.title, session: phase.session },
+            reminder: {
+              id: phase.reminder.id,
+              occurrenceKey: phase.reminder.occurrenceKey,
+              dueAt: phase.reminder.dueAt,
+              note: phase.reminder.note,
+            },
+          },
+        ];
+      });
+    });
+  }, [notesDocument]);
+
+  useEffect(() => {
+    if (!activeProjectIdentity) return;
+    const host = new RoadmapReminderDeliveryHost(client, (delivery) => {
+      setReminderQueue((current) =>
+        current.some((item) => item.reminder.occurrenceKey === delivery.reminder.occurrenceKey)
+          ? current
+          : [...current, delivery],
+      );
+    });
+    deliveryHostRef.current = host;
+    const unsubscribe = client.subscribe((event) => {
+      if (authorityReadyRef.current && isRoadmapReminderDueEvent(event)) {
+        void host.drain(focusRef.current);
+      }
+    });
+    return () => {
+      unsubscribe();
+      host.dispose();
+      if (deliveryHostRef.current === host) deliveryHostRef.current = null;
+    };
+  }, [activeProjectIdentity, client]);
+
+  useEffect(() => {
+    if (!authorityReady) return;
+    void deliveryHostRef.current?.drain(paneFocused && windowFocused);
+  }, [authorityReady, paneFocused, windowFocused]);
 
   useImperativeHandle(
     ref,
@@ -123,6 +209,34 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     [notesDocument.phases, savePrompt],
   );
 
+  const activeReminder = reminderQueue[0] ?? null;
+  const removeActiveReminder = (): void => {
+    if (!activeReminder) return;
+    setReminderQueue((current) =>
+      current.filter(
+        (item) => item.reminder.occurrenceKey !== activeReminder.reminder.occurrenceKey,
+      ),
+    );
+    setReminderError(null);
+  };
+  const runReminderMutation = async (
+    mutation: () => Promise<{ status: string }>,
+    failureMessage: string,
+  ): Promise<void> => {
+    if (!activeReminder || reminderPending) return;
+    setReminderPending(true);
+    setReminderError(null);
+    try {
+      const result = await mutation();
+      if (result.status !== "committed") throw new Error(failureMessage);
+      removeActiveReminder();
+    } catch (error) {
+      setReminderError(error instanceof Error && error.message ? error.message : failureMessage);
+    } finally {
+      setReminderPending(false);
+    }
+  };
+
   return (
     <>
       <button
@@ -132,11 +246,60 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
         disabled={cwd === null}
         onClick={() => {
           setModalProjectIdentity(activeProjectIdentity);
+          setRoadmapTargetPhaseId(null);
           setShowNotes(true);
         }}
       >
         <NotesStatusBadge {...status} />
       </button>
+      {activeReminder &&
+        createPortal(
+          <div className="roadmap-reminder-alert-layer">
+            <RoadmapReminderAlert
+              delivery={activeReminder}
+              pending={reminderPending || phaseActionDisabled}
+              error={reminderError}
+              onPrimary={() => {
+                if (activeReminder.phase.session) {
+                  void runReminderMutation(async () => {
+                    await onResumePhase(activeReminder.phase.id, activeReminder.phase.session!);
+                    return dismissPhaseReminder(
+                      activeReminder.phase.id,
+                      activeReminder.reminder.occurrenceKey,
+                    );
+                  }, "Couldn’t resume this phase. The reminder is still active.");
+                } else {
+                  setModalProjectIdentity(activeProjectIdentity);
+                  setRoadmapTargetPhaseId(activeReminder.phase.id);
+                  setShowNotes(true);
+                  removeActiveReminder();
+                }
+              }}
+              onSnooze={() => {
+                void runReminderMutation(
+                  () =>
+                    snoozePhaseReminder(
+                      activeReminder.phase.id,
+                      new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+                      activeReminder.reminder.occurrenceKey,
+                    ),
+                  "Couldn’t snooze this reminder. Try again.",
+                );
+              }}
+              onDismiss={() => {
+                void runReminderMutation(
+                  () =>
+                    dismissPhaseReminder(
+                      activeReminder.phase.id,
+                      activeReminder.reminder.occurrenceKey,
+                    ),
+                  "Couldn’t dismiss this reminder. Try again.",
+                );
+              }}
+            />
+          </div>,
+          document.body,
+        )}
       {showNotes &&
         modalProjectIdentity === activeProjectIdentity &&
         createPortal(
@@ -152,6 +315,8 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             handoffUnread={status.handoffUnread}
             activePhaseCount={activePhaseCount}
             activeReminderCount={activeReminderCount}
+            authorityReady={authorityReady}
+            initialRoadmapPhaseId={roadmapTargetPhaseId}
             persistenceStatus={<NotesPersistenceStatus {...notesPersistenceStatus(diagnostics)} />}
             onChangeCurrentFocus={changeCurrentFocus}
             onCreateTask={createTask}
@@ -175,6 +340,9 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onRejectReferenceProposal={rejectReferenceProposal}
             onResumeAutomaticStatus={resumeAutomaticStatus}
             onResumeAutomaticReferences={resumeAutomaticReferences}
+            onScheduleReminder={schedulePhaseReminder}
+            onSnoozeReminder={snoozePhaseReminder}
+            onDismissReminder={dismissPhaseReminder}
             openSource={openSource}
             onStartPhase={onStartPhase}
             onResumePhase={onResumePhase}

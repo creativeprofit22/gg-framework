@@ -24,6 +24,7 @@ use futures_util::StreamExt;
 use tauri::{
     Emitter, EventTarget, Manager, RunEvent, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 /// The single shared Node daemon process. Every window's `AgentSession` lives
@@ -1417,6 +1418,396 @@ async fn agent_notes_save(
         .await
         .map_err(|error| error.to_string())?;
     notes_response(response).await
+}
+
+const ROADMAP_REMINDER_NOTIFICATION_TITLE: &str = "Roadmap reminder due";
+const ROADMAP_REMINDER_NOTIFICATION_BODY: &str = "Open GG Coder to review it.";
+
+#[derive(Debug, PartialEq)]
+struct RoadmapReminderNotificationSpec {
+    title: &'static str,
+    body: &'static str,
+    sound: Option<&'static str>,
+}
+
+fn roadmap_reminder_sound() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        return "Submarine";
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return "Mail";
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return "message-new-instant";
+    }
+    #[allow(unreachable_code)]
+    "default"
+}
+
+fn roadmap_reminder_notification_spec(sound_enabled: bool) -> RoadmapReminderNotificationSpec {
+    RoadmapReminderNotificationSpec {
+        title: ROADMAP_REMINDER_NOTIFICATION_TITLE,
+        body: ROADMAP_REMINDER_NOTIFICATION_BODY,
+        sound: sound_enabled.then(roadmap_reminder_sound),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotificationAvailabilitySignal {
+    Enabled,
+    Disabled,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum RoadmapReminderNotificationPermission {
+    Granted,
+    Denied,
+    Unavailable,
+}
+
+fn notification_permission_from_signal(
+    signal: NotificationAvailabilitySignal,
+) -> RoadmapReminderNotificationPermission {
+    match signal {
+        NotificationAvailabilitySignal::Enabled => RoadmapReminderNotificationPermission::Granted,
+        NotificationAvailabilitySignal::Disabled => RoadmapReminderNotificationPermission::Denied,
+        NotificationAvailabilitySignal::Unknown => {
+            RoadmapReminderNotificationPermission::Unavailable
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_notification_signal(
+    setting: Option<windows::UI::Notifications::NotificationSetting>,
+) -> NotificationAvailabilitySignal {
+    use windows::UI::Notifications::NotificationSetting;
+
+    match setting {
+        Some(NotificationSetting::Enabled) => NotificationAvailabilitySignal::Enabled,
+        Some(
+            NotificationSetting::DisabledForApplication
+            | NotificationSetting::DisabledForUser
+            | NotificationSetting::DisabledByGroupPolicy
+            | NotificationSetting::DisabledByManifest,
+        ) => NotificationAvailabilitySignal::Disabled,
+        Some(_) | None => NotificationAvailabilitySignal::Unknown,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn platform_notification_signal(app_id: &str) -> NotificationAvailabilitySignal {
+    use windows::core::HSTRING;
+    use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
+    use windows::UI::Notifications::ToastNotificationManager;
+
+    let initialized = unsafe { RoInitialize(RO_INIT_MULTITHREADED) }.is_ok();
+    let setting = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(app_id))
+        .and_then(|notifier| notifier.Setting());
+    if initialized {
+        unsafe { RoUninitialize() };
+    }
+    match setting {
+        Ok(setting) => windows_notification_signal(Some(setting)),
+        Err(error) => {
+            log::warn!("Windows notification availability probe failed: {error}");
+            windows_notification_signal(None)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MacosNotificationState {
+    Enabled,
+    Disabled,
+    NotDetermined,
+    Unknown,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_notification_state(
+    authorization: objc2_user_notifications::UNAuthorizationStatus,
+    alert: objc2_user_notifications::UNNotificationSetting,
+) -> MacosNotificationState {
+    use objc2_user_notifications::{UNAuthorizationStatus, UNNotificationSetting};
+
+    match authorization {
+        UNAuthorizationStatus::Denied => MacosNotificationState::Disabled,
+        UNAuthorizationStatus::Authorized
+        | UNAuthorizationStatus::Provisional
+        | UNAuthorizationStatus::Ephemeral
+            if alert == UNNotificationSetting::Enabled =>
+        {
+            MacosNotificationState::Enabled
+        }
+        UNAuthorizationStatus::Authorized
+        | UNAuthorizationStatus::Provisional
+        | UNAuthorizationStatus::Ephemeral => MacosNotificationState::Disabled,
+        UNAuthorizationStatus::NotDetermined => MacosNotificationState::NotDetermined,
+        _ => MacosNotificationState::Unknown,
+    }
+}
+
+#[cfg(all(target_os = "macos", test))]
+fn macos_notification_signal(
+    authorization: objc2_user_notifications::UNAuthorizationStatus,
+    alert: objc2_user_notifications::UNNotificationSetting,
+) -> NotificationAvailabilitySignal {
+    match macos_notification_state(authorization, alert) {
+        MacosNotificationState::Enabled => NotificationAvailabilitySignal::Enabled,
+        MacosNotificationState::Disabled => NotificationAvailabilitySignal::Disabled,
+        MacosNotificationState::NotDetermined | MacosNotificationState::Unknown => {
+            NotificationAvailabilitySignal::Unknown
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_current_notification_state() -> MacosNotificationState {
+    use block2::RcBlock;
+    use objc2_user_notifications::{UNNotificationSettings, UNUserNotificationCenter};
+    use std::ptr::NonNull;
+    use std::sync::mpsc;
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let callback = RcBlock::new(move |settings: NonNull<UNNotificationSettings>| {
+        let settings = unsafe { settings.as_ref() };
+        let _ = sender.send(macos_notification_state(
+            settings.authorizationStatus(),
+            settings.alertSetting(),
+        ));
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .getNotificationSettingsWithCompletionHandler(&callback);
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or(MacosNotificationState::Unknown)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_notification_signal(_app_id: &str) -> NotificationAvailabilitySignal {
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_foundation::NSError;
+    use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
+    use std::sync::mpsc;
+
+    match macos_current_notification_state() {
+        MacosNotificationState::Enabled => return NotificationAvailabilitySignal::Enabled,
+        MacosNotificationState::Disabled => return NotificationAvailabilitySignal::Disabled,
+        MacosNotificationState::Unknown => return NotificationAvailabilitySignal::Unknown,
+        MacosNotificationState::NotDetermined => {}
+    }
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let callback = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+        let _ = sender.send(if !error.is_null() {
+            NotificationAvailabilitySignal::Unknown
+        } else if granted.as_bool() {
+            NotificationAvailabilitySignal::Enabled
+        } else {
+            NotificationAvailabilitySignal::Disabled
+        });
+    });
+    UNUserNotificationCenter::currentNotificationCenter()
+        .requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            &callback,
+        );
+    let requested = receiver
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap_or(NotificationAvailabilitySignal::Unknown);
+    if requested != NotificationAvailabilitySignal::Enabled {
+        return requested;
+    }
+
+    match macos_current_notification_state() {
+        MacosNotificationState::Enabled => NotificationAvailabilitySignal::Enabled,
+        MacosNotificationState::Disabled => NotificationAvailabilitySignal::Disabled,
+        MacosNotificationState::NotDetermined | MacosNotificationState::Unknown => {
+            NotificationAvailabilitySignal::Unknown
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_notification_signal(_app_id: &str) -> NotificationAvailabilitySignal {
+    // Freedesktop notification services expose delivery, not a reliable per-app
+    // authorization state. Linux therefore uses the visible in-app fallback and
+    // records `unavailable` instead of manufacturing a `granted` audit result.
+    NotificationAvailabilitySignal::Unknown
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn platform_notification_signal(_app_id: &str) -> NotificationAvailabilitySignal {
+    NotificationAvailabilitySignal::Unknown
+}
+
+#[tauri::command]
+async fn roadmap_reminder_notification_permission(
+    app: tauri::AppHandle,
+) -> RoadmapReminderNotificationPermission {
+    let app_id = app.config().identifier.clone();
+    tauri::async_runtime::spawn_blocking(move || platform_notification_signal(&app_id))
+        .await
+        .map(notification_permission_from_signal)
+        .unwrap_or(RoadmapReminderNotificationPermission::Unavailable)
+}
+
+#[tauri::command]
+fn show_roadmap_reminder_notification(
+    app: tauri::AppHandle,
+    sound_enabled: bool,
+) -> Result<(), String> {
+    let spec = roadmap_reminder_notification_spec(sound_enabled);
+    let mut notification = app
+        .notification()
+        .builder()
+        .title(spec.title)
+        .body(spec.body);
+    if let Some(sound) = spec.sound {
+        notification = notification.sound(sound);
+    }
+    notification.show().map_err(|error| error.to_string())
+}
+
+fn normalize_reminder_response(
+    status: reqwest::StatusCode,
+    body: &str,
+    allowed_statuses: &[&str],
+) -> Result<serde_json::Value, String> {
+    let value = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid reminder response".to_string())?;
+    let typed_status = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .filter(|candidate| allowed_statuses.contains(candidate));
+    if typed_status.is_some() {
+        return Ok(value);
+    }
+    Err(if status.is_success() {
+        "invalid reminder response".to_string()
+    } else {
+        sidecar_error_text(status, body)
+    })
+}
+
+async fn reminder_response(
+    response: reqwest::Response,
+    allowed_statuses: &[&str],
+) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    normalize_reminder_response(status, &body, allowed_statuses)
+}
+
+#[tauri::command]
+async fn agent_reminder_reserve(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    focused: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/reminders/reserve", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "focused": focused }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    reminder_response(
+        response,
+        &[
+            "reserved",
+            "deferred",
+            "leased",
+            "none",
+            "already-delivered",
+            "missing",
+            "corrupt",
+        ],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn agent_reminder_claim(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    lease_token: String,
+    channel: String,
+    permission: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/reminders/claim", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({
+            "leaseToken": lease_token,
+            "channel": channel,
+            "permission": permission,
+        }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    reminder_response(
+        response,
+        &[
+            "ok",
+            "phase-not-found",
+            "phase-inactive",
+            "phase-archived",
+            "reminder-not-found",
+            "stale-occurrence",
+            "not-due",
+            "already-delivered",
+            "invalid-lease",
+            "expired-lease",
+            "wrong-session",
+            "invalid",
+            "missing",
+            "corrupt",
+        ],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn agent_reminder_release(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    lease_token: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/reminders/release", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "leaseToken": lease_token }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    reminder_response(
+        response,
+        &[
+            "released",
+            "invalid-lease",
+            "expired-lease",
+            "wrong-session",
+        ],
+    )
+    .await
 }
 
 /// Proxy: shared durable chat memories.
@@ -3701,6 +4092,27 @@ fn apply_mac_overlay<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
 /// shows — the in-app `chat-head-title` is the ONLY title. Building via the
 /// builder (rather than the config + a runtime patch) is the only way to hide
 /// the native title, since there's no runtime `set_hidden_title` setter.
+fn exact_fixture_opt_in(enabled: bool, value: Option<&str>) -> bool {
+    enabled && value == Some("1")
+}
+
+fn phase25_dev_fixture_enabled() -> bool {
+    exact_fixture_opt_in(
+        cfg!(debug_assertions),
+        std::env::var("GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP")
+            .ok()
+            .as_deref(),
+    )
+}
+
+#[cfg(all(debug_assertions, target_os = "macos"))]
+fn phase26_macos_smoke_enabled() -> bool {
+    exact_fixture_opt_in(
+        cfg!(all(debug_assertions, target_os = "macos")),
+        std::env::var("GG_PHASE26_MACOS_SMOKE").ok().as_deref(),
+    )
+}
+
 fn build_app_window_with_visibility(
     app: &tauri::AppHandle,
     label: &str,
@@ -3712,13 +4124,19 @@ fn build_app_window_with_visibility(
         .min_inner_size(480.0, 360.0)
         .background_color(APP_BG)
         .visible(visible);
-    #[cfg(all(target_os = "windows", feature = "native-smoke"))]
-    {
-        let cdp_port = std::env::var("GG_APP_NATIVE_SMOKE_CDP_PORT")
-            .map_err(|_| "GG_APP_NATIVE_SMOKE_CDP_PORT is required".to_string())?
+    #[cfg(target_os = "windows")]
+    if cfg!(feature = "native-smoke") || phase25_dev_fixture_enabled() {
+        let port_variable = if cfg!(feature = "native-smoke") {
+            "GG_APP_NATIVE_SMOKE_CDP_PORT"
+        } else {
+            "GG_PHASE25_DEV_FIXTURE_CDP_PORT"
+        };
+        let cdp_port = std::env::var(port_variable)
+            .map_err(|_| format!("{port_variable} is required"))?
             .parse::<u16>()
-            .map_err(|_| "GG_APP_NATIVE_SMOKE_CDP_PORT must be a TCP port".to_string())?;
-        builder = builder.additional_browser_args(&format!("--remote-debugging-port={cdp_port}"));
+            .map_err(|_| format!("{port_variable} must be a TCP port"))?;
+        let browser_args = format!("--remote-debugging-port={cdp_port}");
+        builder = builder.additional_browser_args(&browser_args);
     }
     // Windows needs HTML5 drop enabled for the existing browser attachment path.
     // macOS keeps Tauri's native handler so folder drops include absolute paths.
@@ -5478,7 +5896,15 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    let builder = if phase26_macos_smoke_enabled() {
+        builder.plugin(tauri_plugin_webdriver_automation::init())
+    } else {
+        builder
+    };
+    builder
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -5526,6 +5952,11 @@ pub fn run() {
             agent_phase_start,
             agent_notes_migrate,
             agent_notes_save,
+            agent_reminder_reserve,
+            agent_reminder_claim,
+            agent_reminder_release,
+            roadmap_reminder_notification_permission,
+            show_roadmap_reminder_notification,
             agent_memories,
             agent_delete_memory,
             agent_jiwa,
@@ -5600,7 +6031,11 @@ pub fn run() {
             // instances BEFORE spawning any new sidecars — they'd otherwise
             // accumulate forever across launches. Best-effort + logged.
             // Cross-platform: uses `ps` on Unix, PowerShell CIM on Windows.
-            sweep_orphan_sidecars();
+            // The isolated Phase 25 dev fixture must never inspect or terminate
+            // a pre-existing host sidecar.
+            if !phase25_dev_fixture_enabled() {
+                sweep_orphan_sidecars();
+            }
             // Spawn the ONE shared Node daemon before any window asks for a
             // session. Window session creation (in restore/setup) awaits its
             // `GG_APP_LISTENING` port via `await_daemon_port`.
@@ -5840,6 +6275,26 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn dev_fixture_flags_require_debug_builds_and_exact_opt_in() {
+        for value in [None, Some(""), Some("0"), Some("true")] {
+            assert!(!exact_fixture_opt_in(true, value));
+            assert!(!exact_fixture_opt_in(false, value));
+        }
+        assert!(exact_fixture_opt_in(true, Some("1")));
+        assert!(!exact_fixture_opt_in(false, Some("1")));
+    }
+
+    #[test]
+    fn release_builds_ignore_dev_fixture_environment_opt_in() {
+        assert!(!exact_fixture_opt_in(false, Some("1")));
+    }
+
+    #[test]
+    fn debug_dev_fixture_can_suppress_only_the_startup_sweep() {
+        assert!(exact_fixture_opt_in(true, Some("1")));
+    }
+
     fn prompt_proxy_result(
         status: reqwest::StatusCode,
         body: &str,
@@ -6007,6 +6462,171 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, "notes request failed");
+    }
+
+    #[test]
+    fn roadmap_reminder_notification_is_fixed_private_and_uses_at_most_one_platform_sound() {
+        let muted = roadmap_reminder_notification_spec(false);
+        assert_eq!(muted.title, "Roadmap reminder due");
+        assert_eq!(muted.body, "Open GG Coder to review it.");
+        assert_eq!(muted.sound, None);
+
+        let audible = roadmap_reminder_notification_spec(true);
+        assert_eq!(audible.title, muted.title);
+        assert_eq!(audible.body, muted.body);
+        assert_eq!(audible.sound, Some(roadmap_reminder_sound()));
+        #[cfg(target_os = "windows")]
+        assert_eq!(audible.sound, Some("Mail"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(audible.sound, Some("Submarine"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(audible.sound, Some("message-new-instant"));
+    }
+
+    #[test]
+    fn notification_availability_maps_enabled_disabled_and_unknown_without_drift() {
+        assert_eq!(
+            notification_permission_from_signal(NotificationAvailabilitySignal::Enabled),
+            RoadmapReminderNotificationPermission::Granted
+        );
+        assert_eq!(
+            notification_permission_from_signal(NotificationAvailabilitySignal::Disabled),
+            RoadmapReminderNotificationPermission::Denied
+        );
+        assert_eq!(
+            notification_permission_from_signal(NotificationAvailabilitySignal::Unknown),
+            RoadmapReminderNotificationPermission::Unavailable
+        );
+        assert_eq!(
+            serde_json::to_value(RoadmapReminderNotificationPermission::Granted).unwrap(),
+            serde_json::json!("granted")
+        );
+        assert_eq!(
+            serde_json::to_value(RoadmapReminderNotificationPermission::Denied).unwrap(),
+            serde_json::json!("denied")
+        );
+        assert_eq!(
+            serde_json::to_value(RoadmapReminderNotificationPermission::Unavailable).unwrap(),
+            serde_json::json!("unavailable")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_toast_setting_maps_enabled_disabled_and_unknown() {
+        use windows::UI::Notifications::NotificationSetting;
+
+        assert_eq!(
+            windows_notification_signal(Some(NotificationSetting::Enabled)),
+            NotificationAvailabilitySignal::Enabled
+        );
+        for setting in [
+            NotificationSetting::DisabledForApplication,
+            NotificationSetting::DisabledForUser,
+            NotificationSetting::DisabledByGroupPolicy,
+            NotificationSetting::DisabledByManifest,
+        ] {
+            assert_eq!(
+                windows_notification_signal(Some(setting)),
+                NotificationAvailabilitySignal::Disabled
+            );
+        }
+        assert_eq!(
+            windows_notification_signal(None),
+            NotificationAvailabilitySignal::Unknown
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_authorization_maps_enabled_disabled_and_unknown() {
+        use objc2_user_notifications::{UNAuthorizationStatus, UNNotificationSetting};
+
+        assert_eq!(
+            macos_notification_signal(
+                UNAuthorizationStatus::Authorized,
+                UNNotificationSetting::Enabled,
+            ),
+            NotificationAvailabilitySignal::Enabled
+        );
+        assert_eq!(
+            macos_notification_signal(
+                UNAuthorizationStatus::Denied,
+                UNNotificationSetting::Disabled,
+            ),
+            NotificationAvailabilitySignal::Disabled
+        );
+        assert_eq!(
+            macos_notification_state(
+                UNAuthorizationStatus::NotDetermined,
+                UNNotificationSetting::NotSupported,
+            ),
+            MacosNotificationState::NotDetermined
+        );
+        assert_eq!(
+            macos_notification_signal(
+                UNAuthorizationStatus::NotDetermined,
+                UNNotificationSetting::NotSupported,
+            ),
+            NotificationAvailabilitySignal::Unknown
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_policy_reports_unavailable_instead_of_granted() {
+        assert_eq!(
+            platform_notification_signal("com.ggcoder.app"),
+            NotificationAvailabilitySignal::Unknown
+        );
+    }
+
+    #[test]
+    fn reminder_proxy_preserves_only_route_typed_outcomes() {
+        let reserved = r#"{"status":"reserved","leaseToken":"lease-1"}"#;
+        assert_eq!(
+            normalize_reminder_response(
+                reqwest::StatusCode::OK,
+                reserved,
+                &["reserved", "deferred", "none"],
+            )
+            .unwrap(),
+            serde_json::from_str::<serde_json::Value>(reserved).unwrap()
+        );
+        let denied = r#"{"status":"wrong-session"}"#;
+        assert_eq!(
+            normalize_reminder_response(reqwest::StatusCode::OK, denied, &["ok", "wrong-session"],)
+                .unwrap(),
+            serde_json::json!({ "status": "wrong-session" })
+        );
+        assert_eq!(
+            normalize_reminder_response(
+                reqwest::StatusCode::OK,
+                r#"{"status":"released"}"#,
+                &["reserved", "deferred", "none"],
+            ),
+            Err("invalid reminder response".to_string())
+        );
+    }
+
+    #[test]
+    fn reminder_proxy_rejects_malformed_and_ambiguous_responses() {
+        assert_eq!(
+            normalize_reminder_response(
+                reqwest::StatusCode::BAD_GATEWAY,
+                "not json",
+                &["reserved"],
+            ),
+            Err("invalid reminder response".to_string())
+        );
+        assert_eq!(
+            normalize_reminder_response(
+                reqwest::StatusCode::OK,
+                r#"{"status":"maybe"}"#,
+                &["reserved"],
+            ),
+            Err("invalid reminder response".to_string())
+        );
     }
 
     #[test]

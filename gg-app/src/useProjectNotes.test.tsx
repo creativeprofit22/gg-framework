@@ -8,6 +8,7 @@ import type {
   NotesClient,
   NotesDocumentV3,
   NotesReferenceOperationResult,
+  NotesReminderMutationResult,
   NotesSidecarEvent,
   ProjectNotesMigrationOutcome,
   ProjectNotesReadOutcome,
@@ -258,6 +259,18 @@ class FakeNotesClient implements NotesClient {
     return new Promise((resolve) => {
       this.pendingSaves.push({ expectedRevision, document, resolve });
     });
+  }
+
+  async reserveReminder() {
+    return { status: "none" as const };
+  }
+
+  async claimReminder() {
+    return { status: "already-delivered" as const };
+  }
+
+  async releaseReminder() {
+    return { status: "released" as const };
   }
 
   subscribe(onEvent: (event: NotesSidecarEvent) => void): () => void {
@@ -1561,6 +1574,262 @@ describe("useProjectNotes sidecar authority", () => {
       ],
     });
     expect(client.saveCalls).toHaveLength(4);
+  });
+
+  it("schedules, snoozes, and dismisses reminders without changing phase status", async () => {
+    const cwd = "/work/reminder-mutations";
+    const server = new FakeNotesServer();
+    const document = notes("reminders");
+    const reminderPhase = phase("phase-reminder", 0);
+    reminderPhase.status = "in-progress";
+    document.phases = [reminderPhase];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document });
+    const client = server.connect(cwd);
+    const storage = new MemoryStorage();
+    let id = 0;
+    const hook = renderHook(() =>
+      useProjectNotes(cwd, {
+        ...hookOptions(client, storage),
+        idFactory: () => `reminder-generated-${++id}`,
+      }),
+    );
+    await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
+
+    const scheduled = await hook.result.current.schedulePhaseReminder("phase-reminder", {
+      dueAt: "2026-07-25T13:00:00.000Z",
+      note: " Review the result ",
+    });
+    expect(scheduled).toEqual({
+      status: "committed",
+      phaseId: "phase-reminder",
+      occurrenceKey: "reminder-generated-1",
+    });
+    await waitFor(() =>
+      expect(hook.result.current.document.phases[0]!.reminder?.occurrenceKey).toBe(
+        "reminder-generated-1",
+      ),
+    );
+    expect(hook.result.current.document.phases[0]).toMatchObject({
+      status: "in-progress",
+      reminder: {
+        id: "reminder-generated-2",
+        occurrenceKey: "reminder-generated-1",
+        dueAt: "2026-07-25T13:00:00.000Z",
+        note: "Review the result",
+        lastDelivery: null,
+      },
+    });
+
+    const claimed = structuredClone(server.snapshots.get(cwd)!);
+    claimed.revision += 1;
+    claimed.document.phases[0]!.reminder!.lastDelivery = {
+      occurrenceKey: "reminder-generated-1",
+      attemptedAt: "2026-07-25T13:00:01.000Z",
+      channel: "in-app",
+      permission: "not-required",
+    };
+    server.snapshots.set(cwd, claimed);
+    act(() => client.emit({ type: "notes_change", data: claimed }));
+    await waitFor(() =>
+      expect(hook.result.current.document.phases[0]!.reminder!.lastDelivery).not.toBeNull(),
+    );
+
+    const snoozed = await hook.result.current.snoozePhaseReminder(
+      "phase-reminder",
+      "2026-07-25T14:00:00.000Z",
+    );
+    expect(snoozed).toEqual({
+      status: "committed",
+      phaseId: "phase-reminder",
+      occurrenceKey: "reminder-generated-3",
+    });
+    await waitFor(() =>
+      expect(hook.result.current.document.phases[0]!.reminder?.occurrenceKey).toBe(
+        "reminder-generated-3",
+      ),
+    );
+    expect(hook.result.current.document.phases[0]).toMatchObject({
+      status: "in-progress",
+      reminder: {
+        id: "reminder-generated-2",
+        occurrenceKey: "reminder-generated-3",
+        note: "Review the result",
+        lastDelivery: { occurrenceKey: "reminder-generated-1", channel: "in-app" },
+      },
+    });
+
+    const dismissed = await hook.result.current.dismissPhaseReminder("phase-reminder");
+    expect(dismissed).toEqual({ status: "committed", phaseId: "phase-reminder" });
+    await waitFor(() => expect(hook.result.current.document.phases[0]!.reminder).toBeNull());
+    expect(hook.result.current.document.phases[0]).toMatchObject({
+      status: "in-progress",
+      reminder: null,
+    });
+  });
+
+  it.each(["snooze", "dismiss"] as const)(
+    "rejects a stale alert %s after conflict replay without mutating the replacement occurrence",
+    async (actionName) => {
+      const cwd = `/work/stale-${actionName}`;
+      const server = new FakeNotesServer();
+      const document = notes("stale alert reminder");
+      const reminderPhase = phase("phase-reminder", 0);
+      reminderPhase.status = "in-progress";
+      reminderPhase.reminder = {
+        id: "reminder-1",
+        occurrenceKey: "occurrence-a",
+        dueAt: NOW,
+        note: "Occurrence A",
+        createdAt: NOW,
+        lastDelivery: null,
+      };
+      document.phases = [reminderPhase];
+      server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document });
+      const client = server.connect(cwd);
+      client.deferSaves = true;
+      const storage = new MemoryStorage();
+      let id = 0;
+      const hook = renderHook(() =>
+        useProjectNotes(cwd, {
+          ...hookOptions(client, storage),
+          idFactory: () => `replacement-${++id}`,
+        }),
+      );
+      await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
+
+      let resultPromise!: Promise<NotesReminderMutationResult>;
+      act(() => {
+        resultPromise =
+          actionName === "snooze"
+            ? hook.result.current.snoozePhaseReminder(
+                "phase-reminder",
+                "2026-07-25T13:00:00.000Z",
+                "occurrence-a",
+              )
+            : hook.result.current.dismissPhaseReminder("phase-reminder", "occurrence-a");
+      });
+      await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+
+      const replacement = structuredClone(server.snapshots.get(cwd)!);
+      replacement.revision = 2;
+      replacement.document.phases[0]!.reminder = {
+        ...replacement.document.phases[0]!.reminder!,
+        occurrenceKey: "occurrence-b",
+        dueAt: "2026-07-25T14:00:00.000Z",
+        note: "Occurrence B",
+      };
+      server.snapshots.set(cwd, replacement);
+      act(() => client.flushNextSave());
+
+      let result!: NotesReminderMutationResult;
+      await act(async () => {
+        result = await resultPromise;
+      });
+      expect(result).toEqual({
+        status: "stale-occurrence",
+        phaseId: "phase-reminder",
+        expectedOccurrenceKey: "occurrence-a",
+        actualOccurrenceKey: "occurrence-b",
+      });
+      expect(client.saveCalls).toHaveLength(1);
+      expect(server.snapshots.get(cwd)?.document.phases[0]!.reminder).toMatchObject({
+        occurrenceKey: "occurrence-b",
+        dueAt: "2026-07-25T14:00:00.000Z",
+        note: "Occurrence B",
+      });
+      await waitFor(() =>
+        expect(hook.result.current.document.phases[0]!.reminder?.occurrenceKey).toBe(
+          "occurrence-b",
+        ),
+      );
+    },
+  );
+
+  it("revalidates a future reminder after conflict replay and rejects it when time has passed", async () => {
+    const cwd = "/work/reminder-stale-replay";
+    const server = new FakeNotesServer();
+    const document = notes("stale reminder");
+    document.phases = [phase("phase-reminder", 0)];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document });
+    const client = server.connect(cwd);
+    const storage = new MemoryStorage();
+    client.deferSaves = true;
+    let now = "2026-07-25T12:01:00.000Z";
+    const mutableClock = () => now;
+    let id = 0;
+    const hook = renderHook(() =>
+      useProjectNotes(cwd, {
+        ...hookOptions(client, storage),
+        clock: mutableClock,
+        idFactory: () => `stale-${++id}`,
+      }),
+    );
+    await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
+
+    let resultPromise!: ReturnType<typeof hook.result.current.schedulePhaseReminder>;
+    act(() => {
+      resultPromise = hook.result.current.schedulePhaseReminder("phase-reminder", {
+        dueAt: "2026-07-25T12:02:00.000Z",
+        note: "Soon",
+      });
+    });
+    await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+    server.snapshots.set(cwd, { ...server.snapshots.get(cwd)!, revision: 2 });
+    now = "2026-07-25T12:03:00.000Z";
+    act(() => client.flushNextSave());
+
+    await expect(resultPromise).resolves.toEqual({
+      status: "invalid-time",
+      phaseId: "phase-reminder",
+    });
+    expect(client.saveCalls).toHaveLength(1);
+    await waitFor(() => expect(hook.result.current.document.phases[0]!.reminder).toBeNull());
+  });
+
+  it("returns typed reminder guards for missing, archived, inactive, and malformed requests", async () => {
+    const storage = new MemoryStorage();
+    const document = notes("reminder guards");
+    const archived = phase("archived", 0);
+    archived.archivedAt = LATER;
+    const inactive = phase("inactive", 1);
+    inactive.status = "done";
+    inactive.completedAt = LATER;
+    document.phases = [archived, inactive];
+    seed(storage, "/work/reminder-guards", document);
+    let id = 0;
+    const hook = renderHook(() =>
+      useProjectNotes("/work/reminder-guards", {
+        storage,
+        clock: testClock,
+        idFactory: () => `guard-${++id}`,
+      }),
+    );
+
+    await expect(
+      hook.result.current.schedulePhaseReminder("missing", {
+        dueAt: "2026-07-25T13:00:00.000Z",
+        note: "Missing",
+      }),
+    ).resolves.toEqual({ status: "missing-phase", phaseId: "missing" });
+    await expect(
+      hook.result.current.schedulePhaseReminder("archived", {
+        dueAt: "2026-07-25T13:00:00.000Z",
+        note: "Archived",
+      }),
+    ).resolves.toEqual({ status: "archived-phase", phaseId: "archived" });
+    await expect(
+      hook.result.current.schedulePhaseReminder("inactive", {
+        dueAt: "2026-07-25T13:00:00.000Z",
+        note: "Inactive",
+      }),
+    ).resolves.toEqual({ status: "inactive-phase", phaseId: "inactive" });
+    await expect(
+      hook.result.current.schedulePhaseReminder("inactive", { dueAt: "bad", note: "Bad" }),
+    ).resolves.toEqual({ status: "inactive-phase", phaseId: "inactive" });
+    await expect(hook.result.current.snoozePhaseReminder("archived", "bad")).resolves.toEqual({
+      status: "archived-phase",
+      phaseId: "archived",
+    });
   });
 
   it("resumes status from the latest protected report and resets references without changing links", async () => {

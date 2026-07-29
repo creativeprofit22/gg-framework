@@ -49,9 +49,16 @@
       },
       "reminder": {
         "id": "reminder-review-contract",
+        "occurrenceKey": "occurrence-review-contract",
         "dueAt": "2026-07-26T09:00:00.000Z",
         "note": "Review the contract before Phase 17 starts",
-        "createdAt": "2026-07-25T10:00:00.000Z"
+        "createdAt": "2026-07-25T10:00:00.000Z",
+        "lastDelivery": {
+          "occurrenceKey": "occurrence-review-contract",
+          "attemptedAt": "2026-07-26T09:00:01.000Z",
+          "channel": "in-app",
+          "permission": "not-required"
+        }
       },
       "attentionReason": "Awaiting cross-boundary verification",
       "createdAt": "2026-07-23T09:00:00.000Z",

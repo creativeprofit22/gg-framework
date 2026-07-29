@@ -3,11 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  cleanupOwnedProcesses,
-  collectOwnedProcessIds,
+  PACKAGED_WINDOWS_SMOKE_DISABLED_MESSAGE,
   discoverChangedMsi,
   discoverPackagedLayout,
-  removeTemporaryDirectory,
+  runPackagedWindowsSmoke,
   snapshotMsiArtifacts,
   waitFor,
 } from "./smoke-packaged-windows.mjs";
@@ -210,73 +209,28 @@ describe("Phase 20 native smoke evidence", () => {
   });
 });
 
-describe("packaged Windows smoke cleanup", () => {
-  it("launches without inherited pipes and owns only its scoped process tree", () => {
+describe("packaged Windows smoke automation safety", () => {
+  it("retires the runner and removes its normal package command", async () => {
+    await expect(runPackagedWindowsSmoke()).rejects.toThrow(
+      PACKAGED_WINDOWS_SMOKE_DISABLED_MESSAGE,
+    );
+    const packageManifest = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    );
+    expect(packageManifest.scripts["smoke:packaged-windows"]).toBeUndefined();
+  });
+
+  it("contains no process, installer, launch, or cleanup integration", () => {
     const source = readFileSync(new URL("./smoke-packaged-windows.mjs", import.meta.url), "utf8");
-    expect(source).toContain('stdio: "ignore"');
-    expect(source).not.toContain('stdio: ["ignore", "pipe", "pipe"]');
-
-    const processes = [
-      { ProcessId: 10, ParentProcessId: 1, ExecutablePath: "C:\\package\\gg-app.exe" },
-      { ProcessId: 20, ParentProcessId: 10, ExecutablePath: "C:\\package\\ggnode.exe" },
-      { ProcessId: 30, ParentProcessId: 20, ExecutablePath: "C:\\Windows\\helper.exe" },
-      { ProcessId: 40, ParentProcessId: 1, CommandLine: "tool C:\\smoke\\sidecar.mjs" },
-      { ProcessId: 50, ParentProcessId: 1, ExecutablePath: "C:\\Users\\live\\gg-app.exe" },
-    ];
-
-    expect(collectOwnedProcessIds(processes, 10, ["C:\\package", "C:\\smoke"]).sort()).toEqual([
-      10, 20, 30, 40,
-    ]);
-  });
-
-  it("does not trust a reused root PID without temporary-path evidence", () => {
-    const processes = [
-      { ProcessId: 10, ParentProcessId: 1, ExecutablePath: "C:\\Users\\live\\gg-app.exe" },
-    ];
-
-    expect(collectOwnedProcessIds(processes, 10, ["C:\\package"])).toEqual([]);
-  });
-
-  it("retries temporary-directory removal while WebView handles are releasing", async () => {
-    let attempts = 0;
-    let present = true;
-
-    await removeTemporaryDirectory("C:\\smoke", {
-      remove: () => {
-        attempts += 1;
-        if (attempts < 3) throw new Error("EBUSY");
-        present = false;
-      },
-      exists: () => present,
-      sleep: async () => {},
-      attempts: 3,
-    });
-
-    expect(attempts).toBe(3);
-  });
-
-  it("kills the scoped process tree until no owned process remains", async () => {
-    const alive = new Set([10, 20, 50]);
-    const killed = [];
-    const processes = [
-      { ProcessId: 10, ParentProcessId: 1, ExecutablePath: "C:\\package\\gg-app.exe" },
-      { ProcessId: 20, ParentProcessId: 10, ExecutablePath: "C:\\package\\ggnode.exe" },
-      { ProcessId: 50, ParentProcessId: 1, ExecutablePath: "C:\\Users\\live\\gg-app.exe" },
-    ];
-
-    await cleanupOwnedProcesses({
-      rootPid: 10,
-      ownedRoots: ["C:\\package"],
-      snapshot: async () => processes,
-      exists: (pid) => alive.has(pid),
-      kill: async (pid) => {
-        killed.push(pid);
-        alive.delete(pid);
-      },
-      timeoutMs: 100,
-    });
-
-    expect(killed).toEqual([20, 10]);
-    expect(alive).toEqual(new Set([50]));
+    for (const forbidden of [
+      "node:child_process",
+      "taskkill.exe",
+      "msiexec.exe",
+      "Get-CimInstance",
+      "Stop-Process",
+      "WScript.Shell",
+    ]) {
+      expect(source).not.toContain(forbidden);
+    }
   });
 });

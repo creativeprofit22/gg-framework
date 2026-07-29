@@ -1,11 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { referenceRepositoryLabel, referenceSourceLabel } from "./notes-reference";
+import {
+  dateToLocalInputValue,
+  localDateTimeToIso,
+  reminderPresetTimes,
+} from "./roadmap-reminders";
 import type { NotesPhaseInput } from "./useProjectNotes";
 import type {
   NotesPhase,
   NotesPhaseStatus,
   NotesReference,
   NotesReferenceOperationResult,
+  NotesReminderMutationResult,
   NotesRoadmapCompletionReview,
   NotesRoadmapEvent,
   NotesRoadmapImplementationCheckpoint,
@@ -19,6 +25,8 @@ import type {
 interface RoadmapProps {
   phases: NotesPhase[];
   references: NotesReference[];
+  authorityReady: boolean;
+  initialSelectedPhaseId?: string | null;
   onCreatePhase(input: NotesPhaseInput): void;
   onEditPhase(id: string, input: NotesPhaseInput): void;
   onMovePhase(id: string, direction: "up" | "down"): void;
@@ -43,6 +51,12 @@ interface RoadmapProps {
   ): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
+  onScheduleReminder(
+    phaseId: string,
+    input: { dueAt: string; note: string },
+  ): Promise<NotesReminderMutationResult>;
+  onSnoozeReminder(phaseId: string, dueAt: string): Promise<NotesReminderMutationResult>;
+  onDismissReminder(phaseId: string): Promise<NotesReminderMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
@@ -75,10 +89,13 @@ const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
   timeStyle: "short",
 });
+const timeFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
 
 export function NotesRoadmap({
   phases,
   references,
+  authorityReady,
+  initialSelectedPhaseId = null,
   onCreatePhase,
   onEditPhase,
   onMovePhase,
@@ -91,6 +108,9 @@ export function NotesRoadmap({
   onRejectReferenceProposal,
   onResumeAutomaticStatus,
   onResumeAutomaticReferences,
+  onScheduleReminder,
+  onSnoozeReminder,
+  onDismissReminder,
   onStartPhase,
   onResumePhase,
   startUnavailableReason,
@@ -98,7 +118,8 @@ export function NotesRoadmap({
   onActionSuccess,
 }: RoadmapProps): React.ReactElement {
   const visiblePhases = phases.filter((phase) => phase.archivedAt === null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [rowNow] = useState(() => new Date());
+  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedPhaseId);
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState("");
   const [goal, setGoal] = useState("");
@@ -262,11 +283,7 @@ export function NotesRoadmap({
                   <span className="notes-phase-count">
                     {phase.referenceIds.length} {phase.referenceIds.length === 1 ? "ref" : "refs"}
                   </span>
-                  <span className="notes-phase-reminder">
-                    {phase.reminder
-                      ? `Reminder ${formatDate(phase.reminder.dueAt)}`
-                      : "No reminder"}
-                  </span>
+                  <span className="notes-phase-reminder">{reminderRowLabel(phase, rowNow)}</span>
                   <button
                     type="button"
                     className="notes-roadmap-primary"
@@ -287,6 +304,7 @@ export function NotesRoadmap({
             key={selectedPhase.id}
             phase={selectedPhase}
             references={references}
+            authorityReady={authorityReady}
             position={visiblePhases.findIndex((phase) => phase.id === selectedPhase.id)}
             phaseCount={visiblePhases.length}
             onClose={closeDetail}
@@ -344,6 +362,9 @@ export function NotesRoadmap({
             onRejectReferenceProposal={onRejectReferenceProposal}
             onResumeAutomaticStatus={onResumeAutomaticStatus}
             onResumeAutomaticReferences={onResumeAutomaticReferences}
+            onScheduleReminder={onScheduleReminder}
+            onSnoozeReminder={onSnoozeReminder}
+            onDismissReminder={onDismissReminder}
             onStartPhase={onStartPhase}
             onResumePhase={onResumePhase}
             startUnavailableReason={startUnavailableReason}
@@ -364,6 +385,7 @@ export function NotesRoadmap({
 function PhaseDetail({
   phase,
   references,
+  authorityReady,
   position,
   phaseCount,
   onClose,
@@ -379,6 +401,9 @@ function PhaseDetail({
   onRejectReferenceProposal,
   onResumeAutomaticStatus,
   onResumeAutomaticReferences,
+  onScheduleReminder,
+  onSnoozeReminder,
+  onDismissReminder,
   onStartPhase,
   onResumePhase,
   startUnavailableReason,
@@ -388,6 +413,7 @@ function PhaseDetail({
 }: {
   phase: NotesPhase;
   references: NotesReference[];
+  authorityReady: boolean;
   position: number;
   phaseCount: number;
   onClose(): void;
@@ -409,6 +435,12 @@ function PhaseDetail({
   ): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
+  onScheduleReminder(
+    phaseId: string,
+    input: { dueAt: string; note: string },
+  ): Promise<NotesReminderMutationResult>;
+  onSnoozeReminder(phaseId: string, dueAt: string): Promise<NotesReminderMutationResult>;
+  onDismissReminder(phaseId: string): Promise<NotesReminderMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
@@ -425,6 +457,15 @@ function PhaseDetail({
   const [actionStatus, setActionStatus] = useState("");
   const [raceLink, setRaceLink] = useState<NotesSessionLink | null>(null);
   const [pendingRoadmapAction, setPendingRoadmapAction] = useState<string | null>(null);
+  const [reminderNow] = useState(() => new Date());
+  const reminderPresets = useMemo(() => reminderPresetTimes(reminderNow), [reminderNow]);
+  const [reminderNote, setReminderNote] = useState(phase.reminder?.note ?? "");
+  const [customReminderValue, setCustomReminderValue] = useState(() =>
+    dateToLocalInputValue(
+      phase.reminder ? new Date(phase.reminder.dueAt) : reminderPresets.tomorrow,
+    ),
+  );
+  const [customReminderError, setCustomReminderError] = useState("");
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const action = primaryAction(phase);
   const effectiveAction = raceLink ? sessionAction(raceLink) : action;
@@ -538,6 +579,15 @@ function PhaseDetail({
         }
       } else if (resumeLink) {
         await onResumePhase(phase.id, resumeLink);
+        if (phase.reminder) {
+          const reminderResult = await onDismissReminder(phase.id);
+          if (reminderResult.status !== "committed") {
+            reportActionError(
+              "The phase resumed, but its reminder could not be dismissed. Try again.",
+            );
+            return;
+          }
+        }
         setActionStatus(
           resumeLink.sessionPath === null ? "Phase session recovered." : "Phase session resumed.",
         );
@@ -583,6 +633,54 @@ function PhaseDetail({
       setPendingRoadmapAction(null);
       onPendingChange(false);
     }
+  };
+
+  const runReminderMutation = async (
+    actionKey: string,
+    operation: () => Promise<NotesReminderMutationResult>,
+  ): Promise<void> => {
+    if (controlsDisabled) return;
+    setPendingRoadmapAction(actionKey);
+    onPendingChange(true);
+    setActionError("");
+    setActionStatus("Saving reminder…");
+    try {
+      const result = await operation();
+      if (result.status === "committed") {
+        setActionStatus("Reminder saved.");
+        setCustomReminderError("");
+      } else {
+        const message = reminderMutationMessage(result);
+        setActionError(message);
+        setActionStatus("");
+      }
+    } catch (error) {
+      setActionStatus("");
+      setActionError(
+        error instanceof Error ? error.message : "The reminder change failed. Try again.",
+      );
+    } finally {
+      setPendingRoadmapAction(null);
+      onPendingChange(false);
+    }
+  };
+
+  const scheduleReminder = (dueAt: Date): void => {
+    void runReminderMutation("schedule-reminder", () =>
+      onScheduleReminder(phase.id, { dueAt: dueAt.toISOString(), note: reminderNote }),
+    );
+  };
+
+  const submitCustomReminder = (): void => {
+    const dueAt = localDateTimeToIso(customReminderValue, new Date());
+    if (!dueAt) {
+      setCustomReminderError("Choose a valid future local date and time.");
+      return;
+    }
+    setCustomReminderError("");
+    void runReminderMutation("custom-reminder", () =>
+      onScheduleReminder(phase.id, { dueAt, note: reminderNote }),
+    );
   };
 
   const finishEdit = (save: boolean): void => {
@@ -735,6 +833,141 @@ function PhaseDetail({
           </dl>
         </>
       )}
+
+      <section className="notes-reminder-section" aria-labelledby={`notes-reminder-${phase.id}`}>
+        <div className="notes-reminder-heading">
+          <div>
+            <h4 id={`notes-reminder-${phase.id}`}>Reminder</h4>
+            <p>Future reminders are recovered when GG Coder opens.</p>
+          </div>
+          {phase.reminder && (
+            <button
+              type="button"
+              disabled={controlsDisabled}
+              onClick={() =>
+                void runReminderMutation("dismiss-reminder", () => onDismissReminder(phase.id))
+              }
+            >
+              Dismiss reminder
+            </button>
+          )}
+        </div>
+
+        {!authorityReady && (
+          <p className="notes-reminder-authority">
+            Local fallback can save this schedule, but automatic delivery resumes only when project
+            storage reconnects.
+          </p>
+        )}
+
+        {phase.reminder ? (
+          <div className="notes-reminder-current">
+            <p>
+              {Date.parse(phase.reminder.dueAt) <= reminderNow.getTime()
+                ? "Due now"
+                : "Scheduled for"}{" "}
+              <time dateTime={phase.reminder.dueAt}>{formatDateTime(phase.reminder.dueAt)}</time>
+            </p>
+            {phase.reminder.note && <p>{phase.reminder.note}</p>}
+            {phase.reminder.lastDelivery?.occurrenceKey === phase.reminder.occurrenceKey && (
+              <p>
+                {phase.reminder.lastDelivery.permission === "denied"
+                  ? "Native notification permission was denied. Use the in-app actions here."
+                  : phase.reminder.lastDelivery.permission === "unavailable"
+                    ? "Native notification availability could not be verified. Use the in-app actions here."
+                    : phase.reminder.lastDelivery.channel === "native"
+                      ? "A private native notification was requested."
+                      : "An in-app reminder was requested in GG Coder."}
+              </p>
+            )}
+            {Date.parse(phase.reminder.dueAt) <= reminderNow.getTime() && (
+              <button
+                type="button"
+                disabled={controlsDisabled}
+                onClick={() =>
+                  void runReminderMutation("snooze-reminder", () =>
+                    onSnoozeReminder(
+                      phase.id,
+                      new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+                    ),
+                  )
+                }
+              >
+                Snooze 1 hour
+              </button>
+            )}
+          </div>
+        ) : (
+          <p className="notes-reminder-empty">No reminder scheduled.</p>
+        )}
+
+        <div className="notes-field">
+          <label htmlFor={`notes-reminder-note-${phase.id}`}>Reminder note (optional)</label>
+          <textarea
+            id={`notes-reminder-note-${phase.id}`}
+            value={reminderNote}
+            maxLength={500}
+            disabled={controlsDisabled}
+            onChange={(event) => setReminderNote(event.target.value)}
+          />
+        </div>
+
+        <div className="notes-reminder-presets" aria-label="Reminder presets">
+          {reminderPresets.laterToday && (
+            <button
+              type="button"
+              disabled={controlsDisabled}
+              onClick={() => scheduleReminder(reminderPresets.laterToday!)}
+            >
+              Later today, {formatTime(reminderPresets.laterToday.toISOString())}
+            </button>
+          )}
+          <button
+            type="button"
+            disabled={controlsDisabled}
+            onClick={() => scheduleReminder(reminderPresets.tomorrow)}
+          >
+            Tomorrow, {formatTime(reminderPresets.tomorrow.toISOString())}
+          </button>
+        </div>
+
+        <form
+          className="notes-reminder-custom"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitCustomReminder();
+          }}
+        >
+          <div className="notes-field">
+            <label htmlFor={`notes-reminder-custom-${phase.id}`}>Choose local date and time</label>
+            <input
+              id={`notes-reminder-custom-${phase.id}`}
+              type="datetime-local"
+              value={customReminderValue}
+              disabled={controlsDisabled}
+              aria-invalid={customReminderError ? "true" : undefined}
+              aria-describedby={
+                customReminderError ? `notes-reminder-custom-error-${phase.id}` : undefined
+              }
+              onChange={(event) => {
+                setCustomReminderValue(event.target.value);
+                setCustomReminderError("");
+              }}
+            />
+            {customReminderError && (
+              <p
+                id={`notes-reminder-custom-error-${phase.id}`}
+                className="notes-phase-action-error"
+              >
+                {customReminderError}
+              </p>
+            )}
+          </div>
+          <button type="submit" disabled={controlsDisabled}>
+            Save custom time
+          </button>
+        </form>
+      </section>
 
       <section
         className="notes-completion-gates"
@@ -1534,6 +1767,23 @@ function renderActivityItem(item: ActivityItem): React.ReactNode {
   );
 }
 
+function reminderMutationMessage(result: NotesReminderMutationResult): string {
+  if (result.status === "committed") return "Reminder saved.";
+  if (result.status === "invalid-time") return "Choose a future reminder time.";
+  if (result.status === "missing-reminder") return "This reminder is no longer scheduled.";
+  if (result.status === "stale-occurrence") {
+    return "This reminder changed in another window. Review the latest reminder.";
+  }
+  if (
+    result.status === "missing-phase" ||
+    result.status === "archived-phase" ||
+    result.status === "inactive-phase"
+  ) {
+    return "This phase is no longer eligible for reminders.";
+  }
+  return "The reminder could not be saved. Check Notes storage and try again.";
+}
+
 function roadmapMutationMessage(result: NotesRoadmapMutationResult): string {
   if (result.status === "committed") return "Roadmap change saved.";
   if (result.status === "already-decided") return `Proposal was already ${result.decision}.`;
@@ -1555,6 +1805,25 @@ function lines(value: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function reminderRowLabel(phase: NotesPhase, now = new Date()): string {
+  const reminder = phase.reminder;
+  if (!reminder) return "No reminder";
+  const due = new Date(reminder.dueAt);
+  if (due.getTime() <= now.getTime()) return "Due now";
+  if (
+    due.getFullYear() === now.getFullYear() &&
+    due.getMonth() === now.getMonth() &&
+    due.getDate() === now.getDate()
+  ) {
+    return `Reminder today, ${timeFormatter.format(due)}`;
+  }
+  return `Reminder ${dateTimeFormatter.format(due)}`;
+}
+
+function formatTime(value: string): string {
+  return timeFormatter.format(new Date(value));
 }
 
 function formatDate(value: string): string {

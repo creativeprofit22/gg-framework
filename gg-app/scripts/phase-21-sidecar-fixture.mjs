@@ -13,7 +13,7 @@ const planReason = "Plan Roadmap phase: Bound phase";
 const sessions = new Map();
 let nextLogicalSessionId = 1;
 let notesRevision = 1;
-let phaseBound = false;
+let phaseBound = process.env.GG_PHASE21_SMOKE_PREBOUND === "1";
 
 function canonicalProjectKey(cwd) {
   const normalized = resolve(cwd).replaceAll("\\", "/");

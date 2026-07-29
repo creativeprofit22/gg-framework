@@ -26,6 +26,12 @@ jobs:
         node: [22.x]
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Record exact reviewed SHA
+        run: test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+        shell: bash
 
       - uses: pnpm/action-setup@v6
         with:
@@ -75,6 +81,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Record exact reviewed SHA
+        run: test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+        shell: bash
 
       - uses: pnpm/action-setup@v6
         with:

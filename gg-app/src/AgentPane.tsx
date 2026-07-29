@@ -2613,6 +2613,8 @@ export function AgentPane({
                     state?.mode === "code" ? null : ROADMAP_PHASE_CODING_MODE_GUIDANCE
                   }
                   phaseActionDisabled={running || autopilotReviewing || newSessionBusy}
+                  paneFocused={focused}
+                  windowFocused={windowFocused && workspaceWindowFocused}
                 />
                 <button
                   className="btn btn-sm btn-ghost"

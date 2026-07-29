@@ -2753,6 +2753,161 @@ body {
   padding-inline-start: 8px;
   color: var(--error);
 }
+.notes-reminder-section {
+  display: grid;
+  gap: 12px;
+  margin-block: 16px;
+  padding-block: 14px;
+  border-block: 1px solid var(--border);
+}
+
+.notes-reminder-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notes-reminder-heading h4,
+.notes-reminder-heading p,
+.notes-reminder-current p,
+.notes-reminder-empty,
+.notes-reminder-authority {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.notes-reminder-heading p,
+.notes-reminder-current p,
+.notes-reminder-empty,
+.notes-reminder-authority {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.notes-reminder-authority {
+  border-inline-start: 3px solid var(--border-strong);
+  padding-inline-start: 9px;
+}
+
+.notes-reminder-current {
+  display: grid;
+  gap: 8px;
+}
+
+.notes-reminder-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.notes-reminder-custom {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.notes-reminder-section button {
+  min-height: 32px;
+}
+
+.notes-reminder-section input,
+.notes-reminder-section textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  background: var(--surface-1);
+  color: var(--text);
+  font: inherit;
+  padding: 8px 10px;
+}
+
+.notes-reminder-section textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+
+.roadmap-reminder-alert-layer {
+  position: fixed;
+  inset-inline-end: 18px;
+  inset-block-end: 84px;
+  z-index: 199;
+  width: min(440px, calc(100vw - 24px));
+  pointer-events: none;
+}
+
+.roadmap-reminder-alert {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface-2);
+  box-shadow: 0 12px 34px -12px rgba(0, 0, 0, 0.7);
+  padding: 14px;
+  color: var(--text);
+  pointer-events: auto;
+  animation: roadmap-reminder-in 180ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
+
+.roadmap-reminder-alert-copy {
+  min-width: 0;
+}
+
+.roadmap-reminder-alert h2,
+.roadmap-reminder-alert p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.roadmap-reminder-alert h2 {
+  margin-block: 3px 5px;
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.roadmap-reminder-alert-copy p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.roadmap-reminder-alert-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.roadmap-reminder-alert-actions .btn {
+  min-height: 36px;
+}
+
+.roadmap-reminder-alert-status {
+  min-height: 16px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.roadmap-reminder-alert-status.error {
+  border-inline-start: 3px solid var(--error);
+  padding-inline-start: 8px;
+  color: var(--error);
+}
+
+@keyframes roadmap-reminder-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .notes-roadmap button:disabled,
 .notes-phase-reference-options input:disabled {
   cursor: default;
@@ -2874,13 +3029,19 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .notes-tabs button,
-  .notes-reference-row strong {
+  .notes-reference-row strong,
+  .roadmap-reminder-alert {
     transition: none;
+  }
+  .roadmap-reminder-alert {
+    animation: none;
   }
 }
 @media (forced-colors: active) {
   .notes-persistence,
   .notes-roadmap-summary,
+  .notes-reminder-section,
+  .roadmap-reminder-alert,
   .notes-section,
   .notes-phase-detail,
   .notes-phase-execution,
@@ -2919,6 +3080,7 @@ body {
   }
   .notes-reference-form [aria-invalid="true"],
   .notes-phase-action-error,
+  .roadmap-reminder-alert-status.error,
   .notes-reference-error,
   .notes-reference-error-summary {
     border-color: Mark;
@@ -2972,6 +3134,7 @@ body {
   }
   .notes-phase-content,
   .notes-phase-controls,
+  .notes-reminder-custom,
   .notes-phase-execution,
   .notes-reference-metadata {
     grid-template-columns: 1fr;
@@ -3009,7 +3172,9 @@ body {
     padding: 14px;
   }
   .notes-add-controls,
-  .notes-task-row {
+  .notes-task-row,
+  .notes-reminder-heading,
+  .roadmap-reminder-alert-actions {
     flex-wrap: wrap;
   }
   .notes-phase-metadata {
@@ -3052,7 +3217,8 @@ body {
   .notes-reference-detail-actions {
     flex: 1 1 100%;
   }
-  .notes-add-controls button {
+  .notes-add-controls button,
+  .roadmap-reminder-alert-actions button {
     flex: 1 1 auto;
   }
   .notes-task-actions {

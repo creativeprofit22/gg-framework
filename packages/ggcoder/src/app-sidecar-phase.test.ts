@@ -466,6 +466,217 @@ describe("production launchBoundPhase orchestration", () => {
     expect(promoted.disposeCalls).toBe(1);
   });
 
+  it("persists the complete Phase 26 release-gate journey through restart and Resume", async () => {
+    const { repository, cwd, root } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+
+    const accepted = await fixture.start();
+    await fixture.promptSettled;
+
+    expect(accepted).toMatchObject({
+      status: 202,
+      body: {
+        status: "accepted",
+        session: { sessionId: "session-1", sessionPath: "/sessions/session-1.jsonl" },
+      },
+    });
+    expect(fixture.currentSession.activeContext).toMatchObject({
+      phase: {
+        id: "phase-21",
+        sourcePrompt: "Plan only this phase",
+      },
+      references: [
+        {
+          id: "ref-1",
+          canonicalUrl: "https://github.com/acme/repo/blob/main/src/phase.ts#L1-L2",
+        },
+      ],
+    });
+    expect(fixture.currentSession.lastPrompt).toContain("Plan only this phase");
+    expect(fixture.currentSession.lastPrompt).toContain(
+      "https://github.com/acme/repo/blob/main/src/phase.ts#L1-L2",
+    );
+    expect(fixture.currentSession.lastPrompt).not.toContain("unrelated free-form Notes");
+    expect(fixture.currentSession.lastPrompt).not.toContain("unrelated handoff");
+    expect(fixture.currentSession.lastPrompt).not.toContain("another phase");
+
+    const session = fixture.currentSession;
+    await expect(
+      commitPlanApprovalCheckpoint({
+        session,
+        repository,
+        cwd,
+        planPath: "/plans/phase-26-release-gate.md",
+        approvalSource: "user",
+        prepareFreshSession: async () => {
+          await session.newSession(true);
+          return 3;
+        },
+      }),
+    ).resolves.toMatchObject({ planTotal: 3, phaseLink: { status: "synchronized" } });
+
+    const afterApproval = await repository.load(cwd);
+    if (afterApproval.status !== "ok") throw new Error("Expected approved phase");
+    const approvedPhase = afterApproval.snapshot.document.phases[0]!;
+    const boundSession = approvedPhase.session!;
+    const approvalTime = Date.parse(approvedPhase.lifecycleEvents.at(-1)!.timestamp);
+    const checkpointAt = new Date(approvalTime + 1_000).toISOString();
+    const verificationAt = new Date(approvalTime + 2_000).toISOString();
+    const reviewAt = new Date(approvalTime + 3_000).toISOString();
+
+    await expect(
+      repository.recordImplementationCheckpoint(cwd, {
+        checkpointId: "phase-26-implementation",
+        phaseId: "phase-21",
+        expectedSession: boundSession,
+        planStepTotal: 3,
+        completedPlanSteps: [1, 2, 3],
+        runOutcome: "succeeded",
+        timestamp: checkpointAt,
+      }),
+    ).resolves.toMatchObject({ status: "committed" });
+
+    let roadmapTimestamp = verificationAt;
+    const snapshots: ProjectNotesSnapshot[] = [];
+    const host = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      reconciliations: fixture.reconciliations,
+      projectAutopilot: new AppSidecarProjectAutopilotState(),
+      broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
+      now: () => roadmapTimestamp,
+    });
+    await expect(
+      executeRoadmap(
+        host.createSessionTools("coding", () => fixture.currentSession)[0]!,
+        roadmapInput("phase-26-verification", {
+          transition: "review",
+          progress: "Phase 26 focused verification passed",
+          evidence: ["Focused Track B tests passed"],
+          verification: { result: "passed" },
+        }),
+      ),
+    ).resolves.toMatchObject({ result: "committed", statusOutcome: "applied" });
+
+    roadmapTimestamp = reviewAt;
+    await expect(
+      executeRoadmap(
+        host.createSessionTools("ken-autopilot")[0]!,
+        roadmapInput("phase-26-final-status", {
+          transition: "review",
+          progress: "Phase 26 completion evidence reviewed",
+          evidence: ["Implementation and verification evidence accepted"],
+          final_review: {
+            review_id: "phase-26-final-review",
+            decision: "accepted",
+            evidence: ["Autopilot Ken accepted every completion gate"],
+          },
+        }),
+      ),
+    ).resolves.toMatchObject({
+      result: "completion-review-committed",
+      gateOutcome: "done",
+      unmetGateCodes: [],
+    });
+    expect(snapshots).toHaveLength(2);
+
+    await fixture.dispose();
+
+    const restartedRepository = new ProjectNotesRepository(path.join(root, ".gg"));
+    const restartedLoad = await restartedRepository.load(cwd);
+    if (restartedLoad.status !== "ok") throw new Error("Expected durable completed phase");
+    const durable = restartedLoad.snapshot.document.phases[0]!;
+    expect(durable).toMatchObject({
+      id: "phase-21",
+      sourcePrompt: "Plan only this phase",
+      referenceIds: ["ref-1"],
+      session: boundSession,
+      status: "done",
+      archivedAt: null,
+    });
+    expect(restartedLoad.snapshot.document.references).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "ref-1",
+          canonicalUrl: "https://github.com/acme/repo/blob/main/src/phase.ts#L1-L2",
+        }),
+      ]),
+    );
+    expect(durable.roadmapEvents).toEqual([
+      expect.objectContaining({
+        type: "implementation-checkpoint",
+        id: "phase-26-implementation",
+        session: boundSession,
+        planStepTotal: 3,
+        completedPlanSteps: [1, 2, 3],
+        runOutcome: "succeeded",
+      }),
+      expect.objectContaining({
+        type: "status-update",
+        id: "phase-26-verification",
+        actor: "gg-coder",
+        verification: "passed",
+        verificationSession: boundSession,
+        evidence: ["Focused Track B tests passed"],
+      }),
+      expect.objectContaining({
+        type: "status-update",
+        id: "phase-26-final-status",
+        actor: "ken-autopilot",
+        statusOutcome: "evidence-only",
+      }),
+      expect.objectContaining({
+        type: "completion-review",
+        id: "phase-26-final-review",
+        reviewer: "ken-autopilot",
+        decision: "accepted",
+        implementationCheckpointId: "phase-26-implementation",
+        verificationStatusUpdateId: "phase-26-verification",
+        gateOutcome: "done",
+        unmetGateCodes: [],
+      }),
+    ]);
+    expect(durable.lifecycleEvents.map((event) => event.toStatus)).toEqual([
+      "planning",
+      "in-progress",
+      "review",
+      "done",
+    ]);
+    expect(durable.lifecycleEvents.filter((event) => event.toStatus === "done")).toHaveLength(1);
+    const chronologicalActivity = [
+      ...durable.lifecycleEvents.map((event) => ({
+        label: `lifecycle:${event.toStatus}`,
+        timestamp: event.timestamp,
+      })),
+      ...durable.roadmapEvents.map((event) => ({
+        label: `${event.type}:${event.id}`,
+        timestamp: event.timestamp,
+      })),
+    ]
+      .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp))
+      .map(({ label }) => label);
+    expect(chronologicalActivity).toEqual([
+      "lifecycle:planning",
+      "lifecycle:in-progress",
+      "implementation-checkpoint:phase-26-implementation",
+      "lifecycle:review",
+      "status-update:phase-26-verification",
+      "lifecycle:done",
+      "status-update:phase-26-final-status",
+      "completion-review:phase-26-final-review",
+    ]);
+
+    const restarted = new ProductionPhaseFixture(restartedRepository, cwd);
+    await expect(restarted.start()).resolves.toMatchObject({
+      status: 200,
+      body: { status: "already-bound", session: boundSession, packageTokenCount: 0 },
+    });
+    expect(restarted.createCalls).toBe(0);
+    expect(restarted.currentSession.promptCalls).toBe(0);
+    expect(restarted.events).not.toContain("prompt-started");
+    await restarted.dispose();
+  });
+
   it.each([
     ["chat mode", { mode: "chat" as const }, "coding-mode-required"],
     [

@@ -13,6 +13,7 @@ import type {
   NotesPhaseStatus,
   NotesReference,
   NotesReferenceOperationResult,
+  NotesReminderMutationResult,
   NotesRoadmapMutationResult,
   NotesSessionLink,
   NotesTask,
@@ -40,6 +41,8 @@ interface Props {
   handoffUnread: boolean;
   activePhaseCount: number;
   activeReminderCount: number;
+  authorityReady: boolean;
+  initialRoadmapPhaseId?: string | null;
   persistenceStatus: React.ReactNode;
   onChangeCurrentFocus(value: string): void;
   onCreateTask(text: string): void;
@@ -78,6 +81,12 @@ interface Props {
   ): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
+  onScheduleReminder(
+    phaseId: string,
+    input: { dueAt: string; note: string },
+  ): Promise<NotesReminderMutationResult>;
+  onSnoozeReminder(phaseId: string, dueAt: string): Promise<NotesReminderMutationResult>;
+  onDismissReminder(phaseId: string): Promise<NotesReminderMutationResult>;
   openSource?: OpenReferenceUrl;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
@@ -109,6 +118,8 @@ export function NotesModal({
   handoffUnread,
   activePhaseCount,
   activeReminderCount,
+  authorityReady,
+  initialRoadmapPhaseId = null,
   persistenceStatus,
   onChangeCurrentFocus,
   onCreateTask,
@@ -132,6 +143,9 @@ export function NotesModal({
   onRejectReferenceProposal,
   onResumeAutomaticStatus,
   onResumeAutomaticReferences,
+  onScheduleReminder,
+  onSnoozeReminder,
+  onDismissReminder,
   openSource,
   onStartPhase,
   onResumePhase,
@@ -150,7 +164,9 @@ export function NotesModal({
     reference: null,
     archive: null,
   });
-  const [activeTab, setActiveTab] = useState<NotesTab>("overview");
+  const [activeTab, setActiveTab] = useState<NotesTab>(
+    initialRoadmapPhaseId ? "roadmap" : "overview",
+  );
   const [showArchived, setShowArchived] = useState(false);
   const [referenceCreateRequest, setReferenceCreateRequest] = useState(0);
   const archivedTasks = tasks.filter((task) => task.archivedAt !== null);
@@ -291,6 +307,8 @@ export function NotesModal({
                 <NotesRoadmap
                   phases={phases}
                   references={references}
+                  authorityReady={authorityReady}
+                  initialSelectedPhaseId={initialRoadmapPhaseId}
                   onCreatePhase={onCreatePhase}
                   onEditPhase={onEditPhase}
                   onMovePhase={onMovePhase}
@@ -302,6 +320,9 @@ export function NotesModal({
                   onRejectReferenceProposal={onRejectReferenceProposal}
                   onResumeAutomaticStatus={onResumeAutomaticStatus}
                   onResumeAutomaticReferences={onResumeAutomaticReferences}
+                  onScheduleReminder={onScheduleReminder}
+                  onSnoozeReminder={onSnoozeReminder}
+                  onDismissReminder={onDismissReminder}
                   onStartPhase={onStartPhase}
                   onResumePhase={onResumePhase}
                   startUnavailableReason={phaseStartUnavailableReason}

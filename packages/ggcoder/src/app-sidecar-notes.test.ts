@@ -13,6 +13,7 @@ import {
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
   ProjectNotesRepository,
+  canonicalProjectKey,
   type NotesDocumentV3,
 } from "./project-notes-repository.js";
 
@@ -27,6 +28,7 @@ let server: http.Server;
 let baseUrl: string;
 let sessions: Map<string, FakeSession>;
 let repository: ProjectNotesRepository;
+let committedSnapshots: Array<{ projectKey: string; revision: number }>;
 
 function notes(reference: string): NotesDocumentV3 {
   return {
@@ -105,6 +107,7 @@ function fakeSession(cwd: string): FakeSession {
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-sidecar-notes-route-"));
   repository = new ProjectNotesRepository(path.join(root, ".gg"));
+  committedSnapshots = [];
   sessions = new Map([
     ["a", fakeSession("C:\\Work\\Project")],
     ["alias", fakeSession("c:/work/./project")],
@@ -113,6 +116,14 @@ beforeEach(async () => {
   const handler = createAppSidecarNotesHandler({
     repository,
     sessions: { values: () => sessions.values() },
+    onCommittedSnapshot: (snapshot) => {
+      committedSnapshots.push({ projectKey: snapshot.projectKey, revision: snapshot.revision });
+      for (const session of sessions.values()) {
+        if (canonicalProjectKey(session.cwd) === snapshot.projectKey) {
+          session.broadcastNotesChange(snapshot);
+        }
+      }
+    },
   });
   server = http.createServer((req, res) => {
     const header = req.headers["x-gg-session"];
@@ -229,6 +240,10 @@ describe("app sidecar Notes routes", () => {
       status: "ok",
       snapshot: { projectKey: "c:/work/project", revision: 1, document },
     });
+    expect(committedSnapshots).toEqual([{ projectKey: "c:/work/project", revision: 1 }]);
+    expect(sessions.get("a")?.events).toHaveLength(1);
+    expect(sessions.get("alias")?.events).toHaveLength(1);
+    expect(sessions.get("other")?.events).toEqual([]);
   });
 
   it("round-trips exact reference metadata and many-to-many links through save, fan-out, and restart", async () => {

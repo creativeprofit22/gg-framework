@@ -23,6 +23,7 @@ export interface AppSidecarNotesSessions {
 export interface AppSidecarNotesHandlerOptions {
   repository: Pick<ProjectNotesRepository, "load" | "migrate" | "save">;
   sessions: AppSidecarNotesSessions;
+  onCommittedSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
   onError?: (error: unknown) => void;
 }
 
@@ -42,7 +43,7 @@ type ErrorResponse = { status: "error"; message: "notes request failed" };
 export function createAppSidecarNotesHandler(
   options: AppSidecarNotesHandlerOptions,
 ): AppSidecarNotesHandler {
-  const { repository, sessions, onError } = options;
+  const { repository, sessions, onCommittedSnapshot, onError } = options;
 
   return {
     handle(req, res, context, requestUrl, method) {
@@ -67,7 +68,7 @@ export function createAppSidecarNotesHandler(
             }
             const outcome = await repository.migrate(context.cwd, body.document);
             if (outcome.status === "ok" && outcome.migrated) {
-              broadcastSnapshot(sessions, outcome.snapshot);
+              commitSnapshot(sessions, outcome.snapshot, onCommittedSnapshot);
             }
             sendMigrationOutcome(res, outcome);
           })
@@ -87,7 +88,9 @@ export function createAppSidecarNotesHandler(
               body.expectedRevision,
               body.document,
             );
-            if (outcome.status === "ok") broadcastSnapshot(sessions, outcome.snapshot);
+            if (outcome.status === "ok") {
+              commitSnapshot(sessions, outcome.snapshot, onCommittedSnapshot);
+            }
             sendSaveOutcome(res, outcome);
           })
           .catch((error) => sendBodyReadError(res, error, onError));
@@ -122,6 +125,18 @@ function sendSaveOutcome(res: http.ServerResponse, outcome: ProjectNotesSaveOutc
           ? 409
           : 200;
   sendJson(res, status, outcome);
+}
+
+function commitSnapshot(
+  sessions: AppSidecarNotesSessions,
+  snapshot: ProjectNotesSnapshot,
+  onCommittedSnapshot: ((snapshot: ProjectNotesSnapshot) => void) | undefined,
+): void {
+  if (onCommittedSnapshot) {
+    onCommittedSnapshot(snapshot);
+    return;
+  }
+  broadcastSnapshot(sessions, snapshot);
 }
 
 function broadcastSnapshot(

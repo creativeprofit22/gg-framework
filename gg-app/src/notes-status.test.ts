@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getActiveNotesPhaseCount,
   getActiveNotesReminderCount,
+  getDueNotesReminderCount,
   getUnfinishedNotesTaskCount,
   isNotesHandoffUnread,
 } from "./notes-status";
@@ -21,7 +22,14 @@ function phase(status: NotesPhaseStatus, withReminder = false): NotesPhase {
     referenceIds: [],
     session: null,
     reminder: withReminder
-      ? { id: `reminder-${status}`, dueAt: NOW, note: "Review", createdAt: NOW }
+      ? {
+          id: `reminder-${status}`,
+          occurrenceKey: `occurrence-${status}`,
+          dueAt: NOW,
+          note: "Review",
+          createdAt: NOW,
+          lastDelivery: null,
+        }
       : null,
     attentionReason: null,
     createdAt: NOW,
@@ -111,14 +119,37 @@ describe("Notes status selectors", () => {
     expect(getActiveNotesReminderCount(notes)).toBe(2);
   });
 
+  it("counts only current delivered occurrences as due reminder actions", () => {
+    const delivered = phase("in-progress", true);
+    delivered.reminder!.lastDelivery = {
+      occurrenceKey: delivered.reminder!.occurrenceKey,
+      attemptedAt: NOW,
+      channel: "in-app",
+      permission: "not-required",
+    };
+    const priorOccurrence = phase("review", true);
+    priorOccurrence.reminder!.lastDelivery = {
+      occurrenceKey: "prior-occurrence",
+      attemptedAt: NOW,
+      channel: "native",
+      permission: "granted",
+    };
+
+    expect(
+      getDueNotesReminderCount(document([delivered, priorOccurrence, phase("done", true)])),
+    ).toBe(1);
+  });
+
   it("excludes archived active phases and their reminders", () => {
     const archived = { ...phase("in-progress", true), archivedAt: NOW };
     expect(getActiveNotesPhaseCount(document([archived]))).toBe(0);
     expect(getActiveNotesReminderCount(document([archived]))).toBe(0);
+    expect(getDueNotesReminderCount(document([archived]))).toBe(0);
   });
 
   it("returns zero counts for an empty roadmap", () => {
     expect(getActiveNotesPhaseCount(document())).toBe(0);
     expect(getActiveNotesReminderCount(document())).toBe(0);
+    expect(getDueNotesReminderCount(document())).toBe(0);
   });
 });

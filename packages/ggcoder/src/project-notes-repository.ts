@@ -77,11 +77,23 @@ export interface NotesSessionLink {
   sessionPath: string | null;
 }
 
+export type NotesReminderDeliveryChannel = "in-app" | "native" | "in-app-fallback";
+export type NotesReminderPermission = "not-required" | "granted" | "denied" | "unavailable";
+
+export interface NotesReminderDelivery {
+  occurrenceKey: string;
+  attemptedAt: string;
+  channel: NotesReminderDeliveryChannel;
+  permission: NotesReminderPermission;
+}
+
 export interface NotesReminder {
   id: string;
+  occurrenceKey: string;
   dueAt: string;
   note: string;
   createdAt: string;
+  lastDelivery: NotesReminderDelivery | null;
 }
 
 export interface NotesStatusOverride {
@@ -296,6 +308,31 @@ export type ProjectNotesSaveOutcome =
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption)
   | { status: "invalid"; error: NotesValidationError };
+
+export interface ProjectNotesReminderDeliveryRequest {
+  phaseId: string;
+  occurrenceKey: string;
+  attemptedAt: string;
+  channel: NotesReminderDeliveryChannel;
+  permission: NotesReminderPermission;
+}
+
+export type ProjectNotesReminderDeliveryOutcome =
+  | { status: "ok"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
+  | {
+      status:
+        | "phase-not-found"
+        | "phase-inactive"
+        | "phase-archived"
+        | "reminder-not-found"
+        | "stale-occurrence"
+        | "not-due"
+        | "already-delivered";
+    }
+  | { status: "invalid"; error: NotesValidationError }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
 export interface FrozenPhaseLaunchContext {
   projectKey: string;
   phase: NotesPhase;
@@ -535,6 +572,7 @@ type CurrentState =
 
 export const NOTES_REFERENCE_URL_MAX_LENGTH = 2_048;
 export const NOTES_REFERENCE_METADATA_MAX_LENGTH = 4_096;
+export const NOTES_REMINDER_NOTE_MAX_LENGTH = 500;
 export const NOTES_PHASE_LIFECYCLE_REASON_MAX_LENGTH = 240;
 export const NOTES_REFERENCE_METADATA_FIELDS = [
   "provider",
@@ -613,7 +651,20 @@ const LEGACY_V3_PHASE_REQUIRED_KEYS = PHASE_KEYS.filter(
   (key) => key !== "archivedAt" && key !== "roadmapEvents",
 );
 const SESSION_KEYS = ["sessionId", "sessionPath"];
-const REMINDER_KEYS = ["id", "dueAt", "note", "createdAt"];
+const LEGACY_REMINDER_KEYS = ["id", "dueAt", "note", "createdAt"];
+const REMINDER_KEYS = ["id", "occurrenceKey", "dueAt", "note", "createdAt", "lastDelivery"];
+const REMINDER_DELIVERY_KEYS = ["occurrenceKey", "attemptedAt", "channel", "permission"];
+const REMINDER_DELIVERY_CHANNELS = new Set<NotesReminderDeliveryChannel>([
+  "in-app",
+  "native",
+  "in-app-fallback",
+]);
+const REMINDER_PERMISSIONS = new Set<NotesReminderPermission>([
+  "not-required",
+  "granted",
+  "denied",
+  "unavailable",
+]);
 const OVERRIDES_KEYS = ["status", "referenceIds"];
 const STATUS_OVERRIDE_KEYS = ["value", "source", "updatedAt"];
 const REFERENCE_IDS_OVERRIDE_KEYS = ["value", "source", "updatedAt"];
@@ -1166,16 +1217,57 @@ function validateSession(value: unknown, pathPrefix: string): NotesValidationErr
 function validateReminder(value: unknown, pathPrefix: string): NotesValidationError | null {
   if (value === null) return null;
   if (!isRecordWithKeys(value, REMINDER_KEYS)) {
-    return validationError(pathPrefix, "expected id, dueAt, note, and createdAt or null");
+    return validationError(
+      pathPrefix,
+      "expected id, occurrenceKey, dueAt, note, createdAt, and lastDelivery or null",
+    );
   }
   if (!isNonEmptyString(value.id))
     return validationError(`${pathPrefix}.id`, "reminder ID is required");
+  if (!isNonEmptyString(value.occurrenceKey)) {
+    return validationError(`${pathPrefix}.occurrenceKey`, "occurrence key is required");
+  }
   if (!isTimestamp(value.dueAt))
     return validationError(`${pathPrefix}.dueAt`, "expected an ISO timestamp");
   if (typeof value.note !== "string")
     return validationError(`${pathPrefix}.note`, "expected a string");
+  if (value.note.length > NOTES_REMINDER_NOTE_MAX_LENGTH) {
+    return validationError(
+      `${pathPrefix}.note`,
+      `expected ${NOTES_REMINDER_NOTE_MAX_LENGTH.toLocaleString("en-US")} characters or fewer`,
+    );
+  }
   if (!isTimestamp(value.createdAt)) {
     return validationError(`${pathPrefix}.createdAt`, "expected an ISO timestamp");
+  }
+  return validateReminderDelivery(value.lastDelivery, `${pathPrefix}.lastDelivery`);
+}
+
+function validateReminderDelivery(value: unknown, pathPrefix: string): NotesValidationError | null {
+  if (value === null) return null;
+  if (!isRecordWithKeys(value, REMINDER_DELIVERY_KEYS)) {
+    return validationError(
+      pathPrefix,
+      "expected occurrenceKey, attemptedAt, channel, and permission or null",
+    );
+  }
+  if (!isNonEmptyString(value.occurrenceKey)) {
+    return validationError(`${pathPrefix}.occurrenceKey`, "occurrence key is required");
+  }
+  if (!isTimestamp(value.attemptedAt)) {
+    return validationError(`${pathPrefix}.attemptedAt`, "expected an ISO timestamp");
+  }
+  if (
+    typeof value.channel !== "string" ||
+    !REMINDER_DELIVERY_CHANNELS.has(value.channel as NotesReminderDeliveryChannel)
+  ) {
+    return validationError(`${pathPrefix}.channel`, "unknown delivery channel");
+  }
+  if (
+    typeof value.permission !== "string" ||
+    !REMINDER_PERMISSIONS.has(value.permission as NotesReminderPermission)
+  ) {
+    return validationError(`${pathPrefix}.permission`, "unknown notification permission");
   }
   return null;
 }
@@ -1836,8 +1928,18 @@ function coerceNotesDocumentV3(value: unknown): NotesValidationResult & {
 
     const missingPhaseFields = !keys.includes("archivedAt") || !keys.includes("roadmapEvents");
     if (missingPhaseFields) migratedLegacyShape = true;
+    let reminder = record.reminder;
+    if (isRecordWithKeys(reminder, LEGACY_REMINDER_KEYS)) {
+      migratedLegacyShape = true;
+      reminder = {
+        ...reminder,
+        occurrenceKey: reminder.id,
+        lastDelivery: null,
+      };
+    }
     const migratedPhase = {
       ...record,
+      reminder,
       archivedAt: keys.includes("archivedAt") ? record.archivedAt : null,
       roadmapEvents: keys.includes("roadmapEvents") ? record.roadmapEvents : [],
     };
@@ -2028,6 +2130,50 @@ function validateGenericSaveEventSuffixes(
           "privileged roadmap events require their dedicated authority path",
         );
       }
+    }
+  }
+  return null;
+}
+
+function validateGenericSaveReminderAuthority(
+  previous: NotesDocumentV3,
+  next: NotesDocumentV3,
+): NotesValidationError | null {
+  const previousById = new Map(previous.phases.map((phase) => [phase.id, phase]));
+  for (let phaseIndex = 0; phaseIndex < next.phases.length; phaseIndex += 1) {
+    const phase = next.phases[phaseIndex]!;
+    const currentReminder = phase.reminder;
+    if (currentReminder === null) continue;
+    const previousReminder = previousById.get(phase.id)?.reminder ?? null;
+    const pathPrefix = `phases[${phaseIndex}].reminder`;
+
+    if (previousReminder === null) {
+      if (currentReminder.lastDelivery !== null) {
+        return validationError(
+          `${pathPrefix}.lastDelivery`,
+          "new reminders cannot supply delivery evidence",
+        );
+      }
+      continue;
+    }
+
+    if (currentReminder.id !== previousReminder.id) {
+      return validationError(`${pathPrefix}.id`, "existing reminder ID cannot be changed");
+    }
+    if (currentReminder.occurrenceKey === previousReminder.occurrenceKey) {
+      if (!isDeepStrictEqual(currentReminder.lastDelivery, previousReminder.lastDelivery)) {
+        return validationError(
+          `${pathPrefix}.lastDelivery`,
+          "delivery evidence is repository-owned",
+        );
+      }
+      continue;
+    }
+    if (!isDeepStrictEqual(currentReminder.lastDelivery, previousReminder.lastDelivery)) {
+      return validationError(
+        `${pathPrefix}.lastDelivery`,
+        "a new occurrence must preserve prior delivery evidence",
+      );
     }
   }
   return null;
@@ -2505,6 +2651,11 @@ export class ProjectNotesRepository {
         validated.document,
       );
       if (eventAuthorityError) return { status: "invalid", error: eventAuthorityError };
+      const reminderAuthorityError = validateGenericSaveReminderAuthority(
+        current.envelope.document,
+        validated.document,
+      );
+      if (reminderAuthorityError) return { status: "invalid", error: reminderAuthorityError };
 
       const next: StoredProjectNotesV1 = {
         storeVersion: 1,
@@ -2515,6 +2666,107 @@ export class ProjectNotesRepository {
       await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
       await this.atomicWrite(paths.primary, serializeEnvelope(next));
       return { status: "ok", snapshot: toSnapshot(next) };
+    });
+  }
+
+  async recordReminderDelivery(
+    cwd: string,
+    request: ProjectNotesReminderDeliveryRequest,
+  ): Promise<ProjectNotesReminderDeliveryOutcome> {
+    if (!isNonEmptyString(request.phaseId)) {
+      return {
+        status: "invalid",
+        error: validationError("phaseId", "phase ID is required"),
+      };
+    }
+    if (!isNonEmptyString(request.occurrenceKey)) {
+      return {
+        status: "invalid",
+        error: validationError("occurrenceKey", "occurrence key is required"),
+      };
+    }
+    if (!isTimestamp(request.attemptedAt)) {
+      return {
+        status: "invalid",
+        error: validationError("attemptedAt", "expected an ISO timestamp"),
+      };
+    }
+    const permissionMatchesChannel =
+      (request.channel === "in-app" && request.permission === "not-required") ||
+      (request.channel === "native" && request.permission === "granted") ||
+      (request.channel === "in-app-fallback" &&
+        (request.permission === "denied" || request.permission === "unavailable"));
+    if (!REMINDER_DELIVERY_CHANNELS.has(request.channel)) {
+      return {
+        status: "invalid",
+        error: validationError("channel", "unknown delivery channel"),
+      };
+    }
+    if (!REMINDER_PERMISSIONS.has(request.permission)) {
+      return {
+        status: "invalid",
+        error: validationError("permission", "unknown notification permission"),
+      };
+    }
+    if (!permissionMatchesChannel) {
+      return {
+        status: "invalid",
+        error: validationError("permission", "permission does not match delivery channel"),
+      };
+    }
+
+    const projectKey = canonicalProjectKey(cwd);
+    const paths = this.paths(cwd);
+    await this.ensureDirectory(paths.directory);
+    return this.lock(paths.primary, async () => {
+      const current = await this.readCurrent(paths, projectKey);
+      if (current.status === "missing" || current.status === "corrupt") return current;
+      const phaseIndex = current.envelope.document.phases.findIndex(
+        (phase) => phase.id === request.phaseId,
+      );
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (currentPhase.status === "done" || currentPhase.status === "cancelled") {
+        return { status: "phase-inactive" };
+      }
+      const currentReminder = currentPhase.reminder;
+      if (currentReminder === null) return { status: "reminder-not-found" };
+      if (currentReminder.occurrenceKey !== request.occurrenceKey) {
+        return { status: "stale-occurrence" };
+      }
+      if (currentReminder.lastDelivery?.occurrenceKey === request.occurrenceKey) {
+        return { status: "already-delivered" };
+      }
+      if (Date.parse(currentReminder.dueAt) > Date.parse(request.attemptedAt)) {
+        return { status: "not-due" };
+      }
+
+      const document = structuredClone(current.envelope.document);
+      const phase = document.phases[phaseIndex]!;
+      phase.reminder!.lastDelivery = {
+        occurrenceKey: request.occurrenceKey,
+        attemptedAt: request.attemptedAt,
+        channel: request.channel,
+        permission: request.permission,
+      };
+      const validation = validateNotesDocumentV3(document);
+      if (!validation.ok) {
+        throw new Error(`Reminder delivery created invalid Notes: ${validation.error.path}`);
+      }
+      const next: StoredProjectNotesV1 = {
+        storeVersion: 1,
+        projectKey,
+        revision: current.envelope.revision + 1,
+        document: validation.document,
+      };
+      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
+      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      return {
+        status: "ok",
+        snapshot: toSnapshot(next),
+        phase: structuredClone(phase),
+      };
     });
   }
 

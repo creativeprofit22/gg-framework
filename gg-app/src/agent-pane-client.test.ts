@@ -71,6 +71,9 @@ describe("pane agent client", () => {
       if (command === "agent_notes_save") {
         return { status: "ok", snapshot: { ...notesSnapshot, revision: 2 } };
       }
+      if (command === "agent_reminder_reserve") return { status: "none" };
+      if (command === "agent_reminder_claim") return { status: "already-delivered" };
+      if (command === "agent_reminder_release") return { status: "released" };
       if (command === "agent_new_session") return { operationId: "operation-1" };
       if (command === "agent_phase_start") {
         return {
@@ -91,6 +94,9 @@ describe("pane agent client", () => {
     await c.getNotes();
     await c.migrateNotes(notesDocument);
     await c.saveNotes(1, notesDocument);
+    await c.reserveReminder(true);
+    await c.claimReminder("lease-1", "native", "granted");
+    await c.releaseReminder("lease-1");
     await c.startPhase("phase/21");
     await c.listMemories();
     await c.deleteMemory("m");
@@ -167,10 +173,74 @@ describe("pane agent client", () => {
       expectedRevision: 1,
       document: notesDocument,
     });
+    expect(invoke).toHaveBeenCalledWith("agent_reminder_reserve", {
+      paneId: "right",
+      focused: true,
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_reminder_claim", {
+      paneId: "right",
+      leaseToken: "lease-1",
+      channel: "native",
+      permission: "granted",
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_reminder_release", {
+      paneId: "right",
+      leaseToken: "lease-1",
+    });
     expect(invoke).toHaveBeenCalledWith("agent_phase_start", {
       paneId: "right",
       phaseId: "phase/21",
     });
+  });
+
+  it("strictly validates reminder reserve, claim, and release outcomes", async () => {
+    const client = createPaneAgentClient("right");
+    const reserved = {
+      status: "reserved",
+      leaseToken: "lease-1",
+      expiresAt: "2026-07-25T12:00:15.000Z",
+      phase: {
+        id: "phase-1",
+        title: "Private in-app title",
+        session: { sessionId: "session-1", sessionPath: "/session" },
+      },
+      reminder: {
+        id: "reminder-1",
+        occurrenceKey: "occurrence-1",
+        dueAt: "2026-07-25T12:00:00.000Z",
+        note: "Private in-app note",
+      },
+    } as const;
+    invoke.mockResolvedValueOnce(reserved);
+    await expect(client.reserveReminder(true)).resolves.toBe(reserved);
+
+    for (const invalid of [
+      { ...reserved, extra: true },
+      { ...reserved, phase: { ...reserved.phase, sourcePrompt: "leak" } },
+      { ...reserved, reminder: { ...reserved.reminder, dueAt: "soon" } },
+      { status: "deferred" },
+    ]) {
+      invoke.mockResolvedValueOnce(invalid);
+      await expect(client.reserveReminder(true)).rejects.toThrow(
+        "invalid reminder reserve response",
+      );
+    }
+
+    invoke.mockResolvedValueOnce({ status: "not-due" });
+    await expect(client.claimReminder("lease-1", "native", "granted")).resolves.toEqual({
+      status: "not-due",
+    });
+    invoke.mockResolvedValueOnce({ status: "not-due", snapshot: notesSnapshot });
+    await expect(client.claimReminder("lease-1", "native", "granted")).rejects.toThrow(
+      "invalid reminder claim response",
+    );
+
+    invoke.mockResolvedValueOnce({ status: "released" });
+    await expect(client.releaseReminder("lease-1")).resolves.toEqual({ status: "released" });
+    invoke.mockResolvedValueOnce({ status: "released", extra: true });
+    await expect(client.releaseReminder("lease-1")).rejects.toThrow(
+      "invalid reminder release response",
+    );
   });
 
   it("strictly validates phase-start outcomes", async () => {

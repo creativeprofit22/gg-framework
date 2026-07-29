@@ -106,7 +106,14 @@ function document(reference: string): NotesDocumentV3 {
         sourcePrompt: "Implement Phase 16",
         referenceIds: ["ref-1"],
         session: { sessionId: "session-1", sessionPath: "/session" },
-        reminder: { id: "reminder-1", dueAt: NOW, note: "Check", createdAt: NOW },
+        reminder: {
+          id: "reminder-1",
+          occurrenceKey: "occurrence-1",
+          dueAt: NOW,
+          note: "Check",
+          createdAt: NOW,
+          lastDelivery: null,
+        },
         attentionReason: null,
         createdAt: NOW,
         updatedAt: NOW,
@@ -135,6 +142,71 @@ describe("structured project notes storage", () => {
 
     expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!)).toEqual(fixture);
     expect(repository.load(cwd).document).toEqual(fixture);
+  });
+
+  it("deterministically upgrades legacy v3 reminders and round-trips the current shape", () => {
+    const legacy = structuredClone(document("legacy reminder")) as unknown as {
+      phases: Array<{ reminder: Record<string, unknown> | null }>;
+    };
+    const legacyReminder = legacy.phases[0]!.reminder!;
+    delete legacyReminder.occurrenceKey;
+    delete legacyReminder.lastDelivery;
+
+    expect(validateNotesDocumentV3(legacy)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0].reminder" },
+    });
+    const parsed = parseNotesDocument(JSON.stringify(legacy));
+    expect(parsed).toMatchObject({
+      ok: true,
+      migratedArchiveShape: true,
+      document: {
+        phases: [
+          {
+            reminder: {
+              id: "reminder-1",
+              occurrenceKey: "reminder-1",
+              dueAt: NOW,
+              note: "Check",
+              createdAt: NOW,
+              lastDelivery: null,
+            },
+          },
+        ],
+      },
+    });
+    if (!parsed.ok) throw new Error("Expected legacy reminder migration");
+
+    const cwd = "/work/legacy-reminder";
+    const repository = createNotesRepository(new MemoryStorage(), () => NOW);
+    repository.save(cwd, parsed.document);
+    expect(repository.load(cwd).document).toEqual(parsed.document);
+  });
+
+  it("rejects malformed nested delivery evidence and oversized reminder notes", () => {
+    const invalidDelivery = document("invalid delivery") as unknown as {
+      phases: Array<{
+        reminder: { lastDelivery: Record<string, unknown>; note: string };
+      }>;
+    };
+    invalidDelivery.phases[0]!.reminder.lastDelivery = {
+      occurrenceKey: "occurrence-1",
+      attemptedAt: NOW,
+      channel: "native",
+      permission: "granted",
+      privateContent: "must not survive",
+    };
+    expect(validateNotesDocumentV3(invalidDelivery)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0].reminder.lastDelivery" },
+    });
+
+    const oversized = document("oversized reminder");
+    oversized.phases[0]!.reminder!.note = "x".repeat(501);
+    expect(validateNotesDocumentV3(oversized)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0].reminder.note" },
+    });
   });
 
   it("accepts equal timestamps in append order across lifecycle and roadmap histories", async () => {

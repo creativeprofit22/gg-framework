@@ -27,8 +27,17 @@ import type {
   ProjectNotesReadOutcome,
   ProjectNotesSaveOutcome,
   ProjectNotesSnapshot,
+  ReminderClaimOutcome,
+  ReminderReserveOutcome,
 } from "./notes-types";
 
+const tauriMocks = vi.hoisted(() => ({
+  invoke: vi.fn(),
+  logError: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: tauriMocks.invoke }));
+vi.mock("@tauri-apps/plugin-log", () => ({ error: tauriMocks.logError }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: vi.fn() }));
 
 const NOW = "2026-07-15T12:00:00.000Z";
@@ -62,7 +71,14 @@ function phase(id: string, status: NotesPhaseStatus, withReminder = false): Note
     referenceIds: [],
     session: null,
     reminder: withReminder
-      ? { id: `reminder-${id}`, dueAt: NOW, note: "Review", createdAt: NOW }
+      ? {
+          id: `reminder-${id}`,
+          occurrenceKey: `occurrence-${id}`,
+          dueAt: NOW,
+          note: "Review",
+          createdAt: NOW,
+          lastDelivery: null,
+        }
       : null,
     attentionReason: null,
     createdAt: NOW,
@@ -72,6 +88,22 @@ function phase(id: string, status: NotesPhaseStatus, withReminder = false): Note
     overrides: { status: null, referenceIds: null },
     lifecycleEvents: [],
     roadmapEvents: [],
+  };
+}
+
+function reminderReservation(selected: NotesPhase): ReminderReserveOutcome {
+  if (!selected.reminder) throw new Error("Expected reminder");
+  return {
+    status: "reserved",
+    leaseToken: `lease-${selected.reminder.occurrenceKey}`,
+    expiresAt: "2026-07-29T12:00:15.000Z",
+    phase: { id: selected.id, title: selected.title, session: selected.session },
+    reminder: {
+      id: selected.reminder.id,
+      occurrenceKey: selected.reminder.occurrenceKey,
+      dueAt: selected.reminder.dueAt,
+      note: selected.reminder.note,
+    },
   };
 }
 
@@ -180,6 +212,10 @@ class FakeProjectNotesClient implements NotesClient {
   migrationError: unknown = null;
   saveOutcome: ProjectNotesSaveOutcome | null = null;
   beforeNextSave: (() => void) | null = null;
+  readonly reserveCalls: boolean[] = [];
+  readonly claimCalls: Array<{ leaseToken: string; channel: string; permission: string }> = [];
+  readonly reserveOutcomes: ReminderReserveOutcome[] = [];
+  claimOutcome: ReminderClaimOutcome | null = null;
   constructor(cwd: string) {
     this.cwd = cwd;
   }
@@ -229,6 +265,43 @@ class FakeProjectNotesClient implements NotesClient {
     return { status: "ok", snapshot };
   }
 
+  async reserveReminder(focused: boolean) {
+    this.reserveCalls.push(focused);
+    return this.reserveOutcomes.shift() ?? { status: "none" as const };
+  }
+
+  async claimReminder(
+    leaseToken: string,
+    channel: "in-app" | "native" | "in-app-fallback",
+    permission: "not-required" | "granted" | "denied",
+  ): Promise<ReminderClaimOutcome> {
+    this.claimCalls.push({ leaseToken, channel, permission });
+    if (this.claimOutcome) return this.claimOutcome;
+    const projectKey = canonicalProjectKey(this.cwd);
+    const current = this.snapshots.get(projectKey);
+    const reservedOccurrence = leaseToken.replace(/^lease-/, "");
+    const phase = current?.document.phases.find(
+      (candidate) => candidate.reminder?.occurrenceKey === reservedOccurrence,
+    );
+    if (!current || !phase?.reminder) return { status: "stale-occurrence" };
+    const document = structuredClone(current.document);
+    const nextPhase = document.phases.find((candidate) => candidate.id === phase.id)!;
+    nextPhase.reminder!.lastDelivery = {
+      occurrenceKey: nextPhase.reminder!.occurrenceKey,
+      attemptedAt: new Date().toISOString(),
+      channel,
+      permission,
+    };
+    const snapshot = { projectKey, revision: current.revision + 1, document };
+    this.snapshots.set(projectKey, snapshot);
+    this.emit(snapshot);
+    return { status: "ok", snapshot, phase: nextPhase };
+  }
+
+  async releaseReminder() {
+    return { status: "released" as const };
+  }
+
   subscribe(listener: (event: NotesSidecarEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -249,10 +322,283 @@ class FakeProjectNotesClient implements NotesClient {
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  tauriMocks.invoke.mockReset();
+  tauriMocks.logError.mockReset();
   vi.clearAllMocks();
 });
 
 describe("ProjectNotes", () => {
+  it("refreshes queued reminder details and removes a stale occurrence after an authoritative snapshot", async () => {
+    const cwd = "/work/reconciled-reminder";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("reconciled reminder");
+    const selected = phase("reconciled", "in-progress", true);
+    initial.phases = [selected];
+    client.seed(cwd, initial);
+    client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    expect(await screen.findByRole("region", { name: "Phase reconciled" })).toBeTruthy();
+
+    const claimed = client.snapshots.get(canonicalProjectKey(cwd))!;
+    const refreshed = structuredClone(claimed.document);
+    refreshed.phases[0]!.title = "Authoritative title";
+    refreshed.phases[0]!.session = {
+      sessionId: "authoritative-session",
+      sessionPath: "/sessions/authoritative",
+    };
+    refreshed.phases[0]!.reminder!.note = "Authoritative note";
+    act(() => client.publish(cwd, refreshed, claimed.revision + 1));
+
+    const refreshedAlert = await screen.findByRole("region", { name: "Authoritative title" });
+    expect(refreshedAlert.textContent).toContain("Authoritative note");
+    expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy();
+
+    const replaced = structuredClone(refreshed);
+    replaced.phases[0]!.reminder!.occurrenceKey = "occurrence-replacement";
+    replaced.phases[0]!.reminder!.note = "Replacement note";
+    act(() => client.publish(cwd, replaced, claimed.revision + 2));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Authoritative title" })).toBeNull(),
+    );
+    expect(screen.queryByText("Replacement note")).toBeNull();
+  });
+
+  it.each([
+    { action: "Resume cleanup", buttonName: "Resume", withSession: true },
+    { action: "Snooze", buttonName: "Snooze 1 hour", withSession: false },
+    { action: "Dismiss", buttonName: "Dismiss reminder", withSession: false },
+  ] as const)(
+    "guards alert-originated $action when a conflict replaces the occurrence",
+    async ({ action, buttonName, withSession }) => {
+      const cwd = `/work/guarded-${action.toLowerCase().replace(/\s+/g, "-")}`;
+      const client = new FakeProjectNotesClient(cwd);
+      const initial = notes("guarded reminder");
+      const selected = phase("guarded", "in-progress", true);
+      if (withSession) {
+        selected.session = { sessionId: "session-a", sessionPath: "/sessions/a" };
+      }
+      initial.phases = [selected];
+      client.seed(cwd, initial);
+      client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+      const onResumePhase = vi.fn(async () => undefined);
+
+      render(<ProjectNotes cwd={cwd} client={client} onResumePhase={onResumePhase} />);
+      expect(await screen.findByRole("region", { name: "Phase guarded" })).toBeTruthy();
+
+      client.beforeNextSave = () => {
+        const current = client.snapshots.get(canonicalProjectKey(cwd))!;
+        const replacement = structuredClone(current.document);
+        replacement.phases[0]!.reminder = {
+          ...replacement.phases[0]!.reminder!,
+          occurrenceKey: "occurrence-b",
+          dueAt: "2026-08-01T12:00:00.000Z",
+          note: "Newer reminder",
+        };
+        client.publish(cwd, replacement, current.revision + 1);
+      };
+
+      fireEvent.click(screen.getByRole("button", { name: buttonName }));
+
+      await waitFor(() => expect(client.beforeNextSave).toBeNull());
+      await waitFor(() =>
+        expect(screen.queryByRole("region", { name: "Phase guarded" })).toBeNull(),
+      );
+      expect(client.snapshots.get(canonicalProjectKey(cwd))).toMatchObject({
+        revision: 3,
+        document: {
+          phases: [
+            {
+              reminder: {
+                occurrenceKey: "occurrence-b",
+                dueAt: "2026-08-01T12:00:00.000Z",
+                note: "Newer reminder",
+              },
+            },
+          ],
+        },
+      });
+      expect(onResumePhase).toHaveBeenCalledTimes(withSession ? 1 : 0);
+    },
+  );
+
+  it("claims one focused reminder, announces it, and resumes before dismissing only the reminder", async () => {
+    const cwd = "/work/focused-reminder";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("focused reminder");
+    const selected = phase("focused", "in-progress", true);
+    selected.session = { sessionId: "bound", sessionPath: "/sessions/bound" };
+    document.phases = [selected];
+    client.seed(cwd, document);
+    client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+    const onResumePhase = vi.fn(async () => undefined);
+
+    render(
+      <ProjectNotes
+        cwd={cwd}
+        client={client}
+        paneFocused={true}
+        windowFocused={true}
+        onResumePhase={onResumePhase}
+      />,
+    );
+
+    const alert = await screen.findByRole("region", { name: "Phase focused" });
+    expect(alert.textContent).toContain("Review");
+    expect(client.claimCalls).toEqual([
+      {
+        leaseToken: `lease-${selected.reminder!.occurrenceKey}`,
+        channel: "in-app",
+        permission: "not-required",
+      },
+    ]);
+    expect(await screen.findByRole("button", { name: "Notes, 1 reminder due" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(onResumePhase).toHaveBeenCalledWith("focused", selected.session));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Phase focused" })).toBeNull());
+    expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.phases[0]).toMatchObject({
+      status: "in-progress",
+      reminder: null,
+    });
+  });
+
+  it("opens an unbound reminder directly on its Roadmap detail without clearing the schedule", async () => {
+    const cwd = "/work/open-reminder";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("open reminder");
+    const selected = phase("open-target", "not-started", true);
+    document.phases = [selected];
+    client.seed(cwd, document);
+    client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open phase" }));
+
+    expect(
+      (await screen.findByRole("tab", { name: "Roadmap" })).getAttribute("aria-selected"),
+    ).toBe("true");
+    expect(screen.getByRole("heading", { name: "Phase open-target" })).toBeTruthy();
+    expect(
+      client.snapshots.get(canonicalProjectKey(cwd))?.document.phases[0]!.reminder,
+    ).not.toBeNull();
+  });
+
+  it("schedules a preset, keeps invalid custom wall time in place, and explains local fallback delivery", async () => {
+    const cwd = "/work/schedule-reminder";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("schedule reminder");
+    document.phases = [phase("schedule", "planning")];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Phase schedule" }));
+    expect(screen.getByText(/Future reminders are recovered when GG Coder opens/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Tomorrow,/ }));
+    await waitFor(() =>
+      expect(
+        client.snapshots.get(canonicalProjectKey(cwd))?.document.phases[0]!.reminder,
+      ).not.toBeNull(),
+    );
+
+    const custom = screen.getByLabelText("Choose local date and time") as HTMLInputElement;
+    fireEvent.change(custom, { target: { value: "2020-01-01T09:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save custom time" }));
+    expect(await screen.findByText("Choose a valid future local date and time.")).toBeTruthy();
+    expect(custom.value).toBe("2020-01-01T09:00");
+  });
+
+  it("describes a claimed in-app reminder as requested in due phase detail", async () => {
+    const cwd = "/work/in-app-reminder-evidence";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("in-app reminder evidence");
+    const selected = phase("in-app-evidence", "review", true);
+    document.phases = [selected];
+    client.seed(cwd, document);
+    client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    await waitFor(() =>
+      expect(client.claimCalls).toEqual([
+        {
+          leaseToken: `lease-${selected.reminder!.occurrenceKey}`,
+          channel: "in-app",
+          permission: "not-required",
+        },
+      ]),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Notes, 1 reminder due" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Review phase: Phase in-app-evidence" }));
+    expect(screen.getByText("An in-app reminder was requested in GG Coder.")).toBeTruthy();
+  });
+
+  it("keeps native evidence truthful after mocked dispatch failure", async () => {
+    tauriMocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "roadmap_reminder_notification_permission") return "granted";
+      if (command === "show_roadmap_reminder_notification") {
+        throw new Error("native unavailable");
+      }
+      throw new Error(`Unexpected Tauri command: ${command}`);
+    });
+    const cwd = "/work/native-reminder-evidence";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("native reminder evidence");
+    const selected = phase("native-evidence", "review", true);
+    document.phases = [selected];
+    client.seed(cwd, document);
+    client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+
+    render(<ProjectNotes cwd={cwd} client={client} paneFocused={false} />);
+    await waitFor(() =>
+      expect(client.claimCalls).toEqual([
+        {
+          leaseToken: `lease-${selected.reminder!.occurrenceKey}`,
+          channel: "native",
+          permission: "granted",
+        },
+      ]),
+    );
+    await waitFor(() =>
+      expect(tauriMocks.logError).toHaveBeenCalledWith(
+        expect.stringContaining("native unavailable"),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Notes, 1 reminder due" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Review phase: Phase native-evidence" }));
+    expect(screen.getByText("A private native notification was requested.")).toBeTruthy();
+  });
+
+  it("shows exact denied native fallback evidence in due phase detail", async () => {
+    const cwd = "/work/denied-reminder";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("denied reminder");
+    const selected = phase("denied", "review", true);
+    selected.reminder!.lastDelivery = {
+      occurrenceKey: selected.reminder!.occurrenceKey,
+      attemptedAt: NOW,
+      channel: "in-app-fallback",
+      permission: "denied",
+    };
+    document.phases = [selected];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} paneFocused={false} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 reminder due" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Review phase: Phase denied" }));
+    expect(
+      screen.getByText("Native notification permission was denied. Use the in-app actions here."),
+    ).toBeTruthy();
+  });
+
   it("renders four stable tabs with automatic keyboard navigation and one visible panel", async () => {
     const cwd = "/work/shell";
     const client = new FakeProjectNotesClient(cwd);

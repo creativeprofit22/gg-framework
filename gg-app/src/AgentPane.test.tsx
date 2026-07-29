@@ -177,7 +177,7 @@ vi.mock("./update", () => ({ useAppUpdate: () => ({ phase: "idle", progressLines
 vi.mock("./build-info", () => ({
   formatBuildIdentity: () => "Supah Coder Local Fork · abc1234",
 }));
-vi.mock("./sounds", () => ({ playSound: vi.fn() }));
+vi.mock("./sounds", () => ({ playSound: vi.fn(), isSoundEnabled: () => false }));
 vi.mock("./toast", () => ({ toast: nativeMocks.toast }));
 vi.mock("./RadioButton", () => ({ RadioButton: () => null }));
 vi.mock("./agent", async (importOriginal) => {

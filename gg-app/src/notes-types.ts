@@ -127,11 +127,25 @@ export function isPhaseLaunchErrorEvent(event: {
   );
 }
 
+export const NOTES_REMINDER_NOTE_MAX_LENGTH = 500;
+
+export type NotesReminderDeliveryChannel = "in-app" | "native" | "in-app-fallback";
+export type NotesReminderPermission = "not-required" | "granted" | "denied" | "unavailable";
+
+export interface NotesReminderDelivery {
+  occurrenceKey: string;
+  attemptedAt: string;
+  channel: NotesReminderDeliveryChannel;
+  permission: NotesReminderPermission;
+}
+
 export interface NotesReminder {
   id: string;
+  occurrenceKey: string;
   dueAt: string;
   note: string;
   createdAt: string;
+  lastDelivery: NotesReminderDelivery | null;
 }
 
 export interface NotesStatusOverride {
@@ -407,6 +421,25 @@ export type NotesReferenceOperationResult =
   | { status: "missing-phase"; phaseId: string }
   | { status: "failed"; reason: NotesOperationFailureReason };
 
+export type NotesReminderMutationResult =
+  | { status: "committed"; phaseId: string; occurrenceKey?: string }
+  | { status: "missing-phase"; phaseId: string }
+  | { status: "archived-phase"; phaseId: string }
+  | { status: "inactive-phase"; phaseId: string }
+  | { status: "missing-reminder"; phaseId: string }
+  | {
+      status: "stale-occurrence";
+      phaseId: string;
+      expectedOccurrenceKey: string;
+      actualOccurrenceKey: string | null;
+    }
+  | { status: "invalid-time"; phaseId: string }
+  | {
+      status: "failed";
+      reason: "unavailable" | "storage" | "validation";
+      error?: NotesValidationError;
+    };
+
 export type NotesRoadmapMutationResult =
   | {
       status: "committed";
@@ -457,10 +490,57 @@ export interface NotesReadyEvent extends NotesSidecarEvent {
   type: "ready";
 }
 
+export interface RoadmapReminderDueEvent extends NotesSidecarEvent {
+  type: "roadmap_reminder_due";
+  data: Record<string, never>;
+}
+
+export interface ReservedReminderOccurrence {
+  leaseToken: string;
+  expiresAt: string;
+  phase: Pick<NotesPhase, "id" | "title" | "session">;
+  reminder: Pick<NotesReminder, "id" | "occurrenceKey" | "dueAt" | "note">;
+}
+
+export type ReminderReserveOutcome =
+  | ({ status: "reserved" } & ReservedReminderOccurrence)
+  | { status: "deferred"; retryAt: string }
+  | { status: "leased" | "none" | "already-delivered" | "missing" | "corrupt" };
+
+export type ReminderClaimOutcome =
+  | { status: "ok"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
+  | {
+      status:
+        | "phase-not-found"
+        | "phase-inactive"
+        | "phase-archived"
+        | "reminder-not-found"
+        | "stale-occurrence"
+        | "not-due"
+        | "already-delivered"
+        | "invalid-lease"
+        | "expired-lease"
+        | "wrong-session"
+        | "missing";
+    }
+  | ({ status: "corrupt" } & ProjectNotesCorruption)
+  | { status: "invalid"; error: NotesValidationError };
+
+export type ReminderReleaseOutcome =
+  | { status: "released" }
+  | { status: "invalid-lease" | "expired-lease" | "wrong-session" };
+
 export interface NotesClient {
   getNotes(): Promise<ProjectNotesReadOutcome>;
   migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome>;
   saveNotes(expectedRevision: number, document: NotesDocumentV3): Promise<ProjectNotesSaveOutcome>;
+  reserveReminder(focused: boolean): Promise<ReminderReserveOutcome>;
+  claimReminder(
+    leaseToken: string,
+    channel: NotesReminderDeliveryChannel,
+    permission: NotesReminderPermission,
+  ): Promise<ReminderClaimOutcome>;
+  releaseReminder(leaseToken: string): Promise<ReminderReleaseOutcome>;
   subscribe(onEvent: (event: NotesSidecarEvent) => void): () => void;
 }
 
@@ -551,6 +631,94 @@ export function isProjectNotesSaveOutcome(value: unknown): value is ProjectNotes
   );
 }
 
+export function isReminderReserveOutcome(value: unknown): value is ReminderReserveOutcome {
+  if (!isRecord(value) || typeof value.status !== "string") return false;
+  if (
+    value.status === "leased" ||
+    value.status === "none" ||
+    value.status === "already-delivered" ||
+    value.status === "missing" ||
+    value.status === "corrupt"
+  ) {
+    return hasExactKeys(value, ["status"]);
+  }
+  if (value.status === "deferred") {
+    return hasExactKeys(value, ["status", "retryAt"]) && isTimestamp(value.retryAt);
+  }
+  if (value.status !== "reserved") return false;
+  return (
+    hasExactKeys(value, ["status", "leaseToken", "expiresAt", "phase", "reminder"]) &&
+    isNonEmptyString(value.leaseToken) &&
+    isTimestamp(value.expiresAt) &&
+    isRecord(value.phase) &&
+    hasExactKeys(value.phase, ["id", "title", "session"]) &&
+    isNonEmptyString(value.phase.id) &&
+    typeof value.phase.title === "string" &&
+    (value.phase.session === null || isNotesSessionLink(value.phase.session)) &&
+    isRecord(value.reminder) &&
+    hasExactKeys(value.reminder, ["id", "occurrenceKey", "dueAt", "note"]) &&
+    isNonEmptyString(value.reminder.id) &&
+    isNonEmptyString(value.reminder.occurrenceKey) &&
+    isTimestamp(value.reminder.dueAt) &&
+    typeof value.reminder.note === "string" &&
+    value.reminder.note.length <= NOTES_REMINDER_NOTE_MAX_LENGTH
+  );
+}
+
+export function isReminderClaimOutcome(value: unknown): value is ReminderClaimOutcome {
+  if (!isRecord(value) || typeof value.status !== "string") return false;
+  const bareStatuses = new Set([
+    "phase-not-found",
+    "phase-inactive",
+    "phase-archived",
+    "reminder-not-found",
+    "stale-occurrence",
+    "not-due",
+    "already-delivered",
+    "invalid-lease",
+    "expired-lease",
+    "wrong-session",
+    "missing",
+  ]);
+  if (bareStatuses.has(value.status)) return hasExactKeys(value, ["status"]);
+  if (value.status === "corrupt") return isCorruption(value);
+  if (value.status === "invalid") return isInvalidOutcome(value);
+  if (
+    value.status !== "ok" ||
+    !hasExactKeys(value, ["status", "snapshot", "phase"]) ||
+    !isProjectNotesSnapshot(value.snapshot) ||
+    !isRecord(value.phase)
+  ) {
+    return false;
+  }
+  const responsePhase = value.phase;
+  const phase = value.snapshot.document.phases.find(
+    (candidate) => candidate.id === responsePhase.id,
+  );
+  return phase !== undefined && JSON.stringify(phase) === JSON.stringify(responsePhase);
+}
+
+export function isReminderReleaseOutcome(value: unknown): value is ReminderReleaseOutcome {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["status"]) &&
+    (value.status === "released" ||
+      value.status === "invalid-lease" ||
+      value.status === "expired-lease" ||
+      value.status === "wrong-session")
+  );
+}
+
+export function isRoadmapReminderDueEvent(
+  value: NotesSidecarEvent,
+): value is RoadmapReminderDueEvent {
+  return (
+    value.type === "roadmap_reminder_due" &&
+    isRecord(value.data) &&
+    Object.keys(value.data).length === 0
+  );
+}
+
 export function isNotesChangeEvent(value: NotesSidecarEvent): value is NotesChangeEvent {
   return value.type === "notes_change" && isProjectNotesSnapshot(value.data);
 }
@@ -611,6 +779,20 @@ const PHASE_KEYS = [
 const LEGACY_V3_PHASE_REQUIRED_KEYS = PHASE_KEYS.filter(
   (key) => key !== "archivedAt" && key !== "roadmapEvents",
 );
+const LEGACY_REMINDER_KEYS = ["id", "dueAt", "note", "createdAt"];
+const REMINDER_KEYS = ["id", "occurrenceKey", "dueAt", "note", "createdAt", "lastDelivery"];
+const REMINDER_DELIVERY_KEYS = ["occurrenceKey", "attemptedAt", "channel", "permission"];
+const REMINDER_DELIVERY_CHANNELS = new Set<NotesReminderDeliveryChannel>([
+  "in-app",
+  "native",
+  "in-app-fallback",
+]);
+const REMINDER_PERMISSIONS = new Set<NotesReminderPermission>([
+  "not-required",
+  "granted",
+  "denied",
+  "unavailable",
+]);
 const LEGACY_ROADMAP_STATUS_UPDATE_KEYS = [
   "type",
   "id",
@@ -785,8 +967,18 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
 
     const missingPhaseFields = !keys.includes("archivedAt") || !keys.includes("roadmapEvents");
     if (missingPhaseFields) migrated = true;
+    let reminder = phase.reminder;
+    if (isRecord(reminder) && hasExactKeys(reminder, LEGACY_REMINDER_KEYS)) {
+      migrated = true;
+      reminder = {
+        ...reminder,
+        occurrenceKey: reminder.id,
+        lastDelivery: null,
+      };
+    }
     const migratedPhase = {
       ...phase,
+      reminder,
       archivedAt: keys.includes("archivedAt") ? phase.archivedAt : null,
       roadmapEvents: keys.includes("roadmapEvents") ? phase.roadmapEvents : [],
     };
@@ -1151,15 +1343,56 @@ function validateSession(value: unknown, path: string): NotesValidationError | n
 
 function validateReminder(value: unknown, path: string): NotesValidationError | null {
   if (value === null) return null;
-  if (!isRecord(value) || !hasExactKeys(value, ["id", "dueAt", "note", "createdAt"])) {
-    return validationError(path, "expected id, dueAt, note, and createdAt or null");
+  if (!isRecord(value) || !hasExactKeys(value, REMINDER_KEYS)) {
+    return validationError(
+      path,
+      "expected id, occurrenceKey, dueAt, note, createdAt, and lastDelivery or null",
+    );
   }
   if (!isNonEmptyString(value.id)) return validationError(`${path}.id`, "reminder ID is required");
+  if (!isNonEmptyString(value.occurrenceKey)) {
+    return validationError(`${path}.occurrenceKey`, "occurrence key is required");
+  }
   if (!isTimestamp(value.dueAt))
     return validationError(`${path}.dueAt`, "expected an ISO timestamp");
   if (typeof value.note !== "string") return validationError(`${path}.note`, "expected a string");
+  if (value.note.length > NOTES_REMINDER_NOTE_MAX_LENGTH) {
+    return validationError(
+      `${path}.note`,
+      `expected ${NOTES_REMINDER_NOTE_MAX_LENGTH.toLocaleString("en-US")} characters or fewer`,
+    );
+  }
   if (!isTimestamp(value.createdAt))
     return validationError(`${path}.createdAt`, "expected an ISO timestamp");
+  return validateReminderDelivery(value.lastDelivery, `${path}.lastDelivery`);
+}
+
+function validateReminderDelivery(value: unknown, path: string): NotesValidationError | null {
+  if (value === null) return null;
+  if (!isRecord(value) || !hasExactKeys(value, REMINDER_DELIVERY_KEYS)) {
+    return validationError(
+      path,
+      "expected occurrenceKey, attemptedAt, channel, and permission or null",
+    );
+  }
+  if (!isNonEmptyString(value.occurrenceKey)) {
+    return validationError(`${path}.occurrenceKey`, "occurrence key is required");
+  }
+  if (!isTimestamp(value.attemptedAt)) {
+    return validationError(`${path}.attemptedAt`, "expected an ISO timestamp");
+  }
+  if (
+    typeof value.channel !== "string" ||
+    !REMINDER_DELIVERY_CHANNELS.has(value.channel as NotesReminderDeliveryChannel)
+  ) {
+    return validationError(`${path}.channel`, "unknown delivery channel");
+  }
+  if (
+    typeof value.permission !== "string" ||
+    !REMINDER_PERMISSIONS.has(value.permission as NotesReminderPermission)
+  ) {
+    return validationError(`${path}.permission`, "unknown notification permission");
+  }
   return null;
 }
 

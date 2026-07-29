@@ -25,3 +25,15 @@ export function getActiveNotesReminderCount(document: NotesDocumentV3): number {
     (phase) => phase.archivedAt === null && isActivePhase(phase.status) && phase.reminder !== null,
   ).length;
 }
+
+export function getDueNotesReminderCount(document: NotesDocumentV3): number {
+  return document.phases.filter((phase) => {
+    const reminder = phase.reminder;
+    return (
+      phase.archivedAt === null &&
+      isActivePhase(phase.status) &&
+      reminder !== null &&
+      reminder.lastDelivery?.occurrenceKey === reminder.occurrenceKey
+    );
+  }).length;
+}

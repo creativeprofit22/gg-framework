@@ -7,6 +7,7 @@ import {
   type NotesAuthorityDiagnostic,
   type NotesClient,
   type NotesDocumentV3,
+  NOTES_REMINDER_NOTE_MAX_LENGTH,
   type NotesLoadResult,
   type NotesOperationFailureReason,
   type NotesPhase,
@@ -14,6 +15,7 @@ import {
   type NotesPromptSaveInput,
   type NotesPromptSaveResult,
   type NotesReferenceOperationResult,
+  type NotesReminderMutationResult,
   type NotesRoadmapMutationResult,
   type NotesRoadmapReferenceProposal,
   type NotesSaveResult,
@@ -46,6 +48,7 @@ export interface UseProjectNotesResult {
   value: string;
   onChange(value: string): void;
   document: NotesDocumentV3;
+  authorityReady: boolean;
   changeCurrentFocus(value: string): void;
   createTask(text: string): void;
   editTask(id: string, text: string): void;
@@ -78,6 +81,19 @@ export interface UseProjectNotesResult {
   rejectReferenceProposal(phaseId: string, proposalId: string): Promise<NotesRoadmapMutationResult>;
   resumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
   resumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
+  schedulePhaseReminder(
+    phaseId: string,
+    input: { dueAt: string; note: string },
+  ): Promise<NotesReminderMutationResult>;
+  snoozePhaseReminder(
+    phaseId: string,
+    dueAt: string,
+    expectedOccurrenceKey?: string,
+  ): Promise<NotesReminderMutationResult>;
+  dismissPhaseReminder(
+    phaseId: string,
+    expectedOccurrenceKey?: string,
+  ): Promise<NotesReminderMutationResult>;
   changeHandoff(text: string): void;
   markHandoffPresented(expectedText: string, expectedUpdatedAt: string | null): void;
   diagnostics: {
@@ -114,6 +130,11 @@ interface RoadmapMutationApplication {
   result: NotesRoadmapMutationResult;
 }
 
+interface ReminderMutationApplication {
+  document: NotesDocumentV3 | null;
+  result: NotesReminderMutationResult;
+}
+
 const systemClock = (): string => new Date().toISOString();
 
 export function useProjectNotes(
@@ -137,6 +158,7 @@ export function useProjectNotes(
   const [loadDiagnostics, setLoadDiagnostics] = useState<NotesLoadResult | null>(null);
   const [saveDiagnostics, setSaveDiagnostics] = useState<NotesSaveResult | null>(null);
   const [authorityDiagnostics, setAuthorityDiagnostics] = useState<NotesAuthorityDiagnostic[]>([]);
+  const [authorityReady, setAuthorityReady] = useState(false);
 
   const documentRef = useRef(document);
   const activeCwdRef = useRef(cwd);
@@ -181,6 +203,7 @@ export function useProjectNotes(
       if (!authoritativeResponse && current && snapshot.revision <= current.revision) return false;
       authoritativeRef.current = snapshot;
       modeRef.current = "sidecar";
+      setAuthorityReady(true);
       setLoadDiagnostics(null);
       setSaveDiagnostics(null);
       renderSidecarState();
@@ -199,6 +222,7 @@ export function useProjectNotes(
       if (epoch !== epochRef.current || activeCwdRef.current !== projectCwd) return;
       modeRef.current = "fallback";
       authoritativeRef.current = null;
+      setAuthorityReady(false);
       const pending = queueRef.current;
       const appliedOperationResults: Array<{
         mutation: NotesMutation;
@@ -247,6 +271,7 @@ export function useProjectNotes(
     queueRef.current = [];
     inFlightMutationIdRef.current = null;
     authoritativeRef.current = null;
+    setAuthorityReady(false);
     setAuthorityDiagnostics([]);
     setLoadDiagnostics(null);
     setSaveDiagnostics(null);
@@ -617,6 +642,30 @@ export function useProjectNotes(
           operationResult: (current) => evaluate(current).result,
           settle: (result) => resolve(result as NotesRoadmapMutationResult),
           failure: (reason) => ({ status: "failed", reason }),
+        });
+      }),
+    [enqueueMutation],
+  );
+
+  const enqueueReminderMutation = useCallback(
+    (
+      evaluate: (document: NotesDocumentV3) => ReminderMutationApplication,
+    ): Promise<NotesReminderMutationResult> =>
+      new Promise((resolve) => {
+        enqueueMutation({
+          apply: (current) => evaluate(current).document,
+          operationResult: (current) => evaluate(current).result,
+          settle: (result) => resolve(result as NotesReminderMutationResult),
+          failure: (reason, error) => ({
+            status: "failed",
+            reason:
+              reason === "invalid"
+                ? "validation"
+                : reason === "storage"
+                  ? "storage"
+                  : "unavailable",
+            ...(error ? { error } : {}),
+          }),
         });
       }),
     [enqueueMutation],
@@ -1217,6 +1266,49 @@ export function useProjectNotes(
     [clock, enqueueRoadmapMutation, idFactory],
   );
 
+  const schedulePhaseReminder = useCallback(
+    (
+      phaseId: string,
+      input: { dueAt: string; note: string },
+    ): Promise<NotesReminderMutationResult> => {
+      const occurrenceKey = idFactory();
+      const newReminderId = idFactory();
+      return enqueueReminderMutation((current) =>
+        evaluateReminderSchedule(current, phaseId, input, clock(), occurrenceKey, newReminderId),
+      );
+    },
+    [clock, enqueueReminderMutation, idFactory],
+  );
+
+  const snoozePhaseReminder = useCallback(
+    (
+      phaseId: string,
+      dueAt: string,
+      expectedOccurrenceKey?: string,
+    ): Promise<NotesReminderMutationResult> => {
+      const occurrenceKey = idFactory();
+      return enqueueReminderMutation((current) =>
+        evaluateReminderSnooze(
+          current,
+          phaseId,
+          dueAt,
+          clock(),
+          occurrenceKey,
+          expectedOccurrenceKey,
+        ),
+      );
+    },
+    [clock, enqueueReminderMutation, idFactory],
+  );
+
+  const dismissPhaseReminder = useCallback(
+    (phaseId: string, expectedOccurrenceKey?: string): Promise<NotesReminderMutationResult> =>
+      enqueueReminderMutation((current) =>
+        evaluateReminderDismiss(current, phaseId, clock(), expectedOccurrenceKey),
+      ),
+    [clock, enqueueReminderMutation],
+  );
+
   const changeHandoff = useCallback(
     (text: string) => {
       const now = clock();
@@ -1263,6 +1355,7 @@ export function useProjectNotes(
     value: document.reference,
     onChange,
     document,
+    authorityReady,
     changeCurrentFocus,
     createTask,
     editTask,
@@ -1286,6 +1379,9 @@ export function useProjectNotes(
     rejectReferenceProposal,
     resumeAutomaticStatus,
     resumeAutomaticReferences,
+    schedulePhaseReminder,
+    snoozePhaseReminder,
+    dismissPhaseReminder,
     changeHandoff,
     markHandoffPresented,
     diagnostics: {
@@ -1293,6 +1389,172 @@ export function useProjectNotes(
       save: saveDiagnostics,
       authority: authorityDiagnostics,
     },
+  };
+}
+
+function evaluateReminderSchedule(
+  current: NotesDocumentV3,
+  phaseId: string,
+  input: { dueAt: string; note: string },
+  now: string,
+  occurrenceKey: string,
+  newReminderId: string,
+): ReminderMutationApplication {
+  const guarded = reminderPhaseGuard(current, phaseId);
+  if (guarded.result) return { document: null, result: guarded.result };
+  if (!isFutureReminderTime(input.dueAt, now)) {
+    return { document: null, result: { status: "invalid-time", phaseId } };
+  }
+  const note = input.note.trim();
+  if (note.length > NOTES_REMINDER_NOTE_MAX_LENGTH) {
+    return {
+      document: null,
+      result: {
+        status: "failed",
+        reason: "validation",
+        error: {
+          path: `phases.${phaseId}.reminder.note`,
+          message: `expected ${NOTES_REMINDER_NOTE_MAX_LENGTH} characters or fewer`,
+        },
+      },
+    };
+  }
+  const phase = guarded.phase!;
+  const reminder = phase.reminder;
+  const timestamp = reminderMutationTimestamp(now, current.updatedAt, phase.updatedAt);
+  const nextPhase: NotesPhase = {
+    ...phase,
+    updatedAt: timestamp,
+    reminder: {
+      id: reminder?.id ?? newReminderId,
+      occurrenceKey,
+      dueAt: new Date(input.dueAt).toISOString(),
+      note,
+      createdAt: now,
+      lastDelivery: reminder?.lastDelivery ?? null,
+    },
+  };
+  return {
+    document: replaceReminderPhase(current, nextPhase, timestamp),
+    result: { status: "committed", phaseId, occurrenceKey },
+  };
+}
+
+function evaluateReminderSnooze(
+  current: NotesDocumentV3,
+  phaseId: string,
+  dueAt: string,
+  now: string,
+  occurrenceKey: string,
+  expectedOccurrenceKey?: string,
+): ReminderMutationApplication {
+  const guarded = reminderPhaseGuard(current, phaseId);
+  if (guarded.result) return { document: null, result: guarded.result };
+  const phase = guarded.phase!;
+  const staleResult = staleReminderOccurrence(phase, expectedOccurrenceKey);
+  if (staleResult) return { document: null, result: staleResult };
+  if (phase.reminder === null) {
+    return { document: null, result: { status: "missing-reminder", phaseId } };
+  }
+  if (!isFutureReminderTime(dueAt, now)) {
+    return { document: null, result: { status: "invalid-time", phaseId } };
+  }
+  const timestamp = reminderMutationTimestamp(now, current.updatedAt, phase.updatedAt);
+  const nextPhase: NotesPhase = {
+    ...phase,
+    updatedAt: timestamp,
+    reminder: {
+      ...phase.reminder,
+      occurrenceKey,
+      dueAt: new Date(dueAt).toISOString(),
+      createdAt: now,
+    },
+  };
+  return {
+    document: replaceReminderPhase(current, nextPhase, timestamp),
+    result: { status: "committed", phaseId, occurrenceKey },
+  };
+}
+
+function evaluateReminderDismiss(
+  current: NotesDocumentV3,
+  phaseId: string,
+  now: string,
+  expectedOccurrenceKey?: string,
+): ReminderMutationApplication {
+  const guarded = reminderPhaseGuard(current, phaseId);
+  if (guarded.result) return { document: null, result: guarded.result };
+  const phase = guarded.phase!;
+  const staleResult = staleReminderOccurrence(phase, expectedOccurrenceKey);
+  if (staleResult) return { document: null, result: staleResult };
+  if (phase.reminder === null) {
+    return { document: null, result: { status: "missing-reminder", phaseId } };
+  }
+  const timestamp = reminderMutationTimestamp(now, current.updatedAt, phase.updatedAt);
+  return {
+    document: replaceReminderPhase(
+      current,
+      { ...phase, reminder: null, updatedAt: timestamp },
+      timestamp,
+    ),
+    result: { status: "committed", phaseId },
+  };
+}
+
+function staleReminderOccurrence(
+  phase: NotesPhase,
+  expectedOccurrenceKey: string | undefined,
+): Extract<NotesReminderMutationResult, { status: "stale-occurrence" }> | null {
+  const actualOccurrenceKey = phase.reminder?.occurrenceKey ?? null;
+  if (expectedOccurrenceKey === undefined || expectedOccurrenceKey === actualOccurrenceKey) {
+    return null;
+  }
+  return {
+    status: "stale-occurrence",
+    phaseId: phase.id,
+    expectedOccurrenceKey,
+    actualOccurrenceKey,
+  };
+}
+
+function reminderPhaseGuard(
+  current: NotesDocumentV3,
+  phaseId: string,
+): { phase?: NotesPhase; result?: NotesReminderMutationResult } {
+  const phase = current.phases.find((candidate) => candidate.id === phaseId);
+  if (!phase) return { result: { status: "missing-phase", phaseId } };
+  if (phase.archivedAt !== null) return { result: { status: "archived-phase", phaseId } };
+  if (phase.status === "done" || phase.status === "cancelled") {
+    return { result: { status: "inactive-phase", phaseId } };
+  }
+  return { phase };
+}
+
+function isFutureReminderTime(dueAt: string, now: string): boolean {
+  const due = Date.parse(dueAt);
+  const current = Date.parse(now);
+  return Number.isFinite(due) && Number.isFinite(current) && due > current;
+}
+
+function reminderMutationTimestamp(
+  now: string,
+  documentUpdatedAt: string,
+  phaseUpdatedAt: string,
+): string {
+  return new Date(
+    Math.max(Date.parse(now), Date.parse(documentUpdatedAt), Date.parse(phaseUpdatedAt)),
+  ).toISOString();
+}
+
+function replaceReminderPhase(
+  current: NotesDocumentV3,
+  nextPhase: NotesPhase,
+  updatedAt: string,
+): NotesDocumentV3 {
+  return {
+    ...current,
+    phases: current.phases.map((phase) => (phase.id === nextPhase.id ? nextPhase : phase)),
+    updatedAt,
   };
 }
 

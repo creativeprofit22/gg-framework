@@ -12,12 +12,18 @@ import {
   isProjectNotesMigrationOutcome,
   isProjectNotesReadOutcome,
   isProjectNotesSaveOutcome,
+  isReminderClaimOutcome,
+  isReminderReleaseOutcome,
+  isReminderReserveOutcome,
   type NotesClient,
   type NotesDocumentV3,
   type PhaseStartResult,
   type ProjectNotesMigrationOutcome,
   type ProjectNotesReadOutcome,
   type ProjectNotesSaveOutcome,
+  type ReminderClaimOutcome,
+  type ReminderReleaseOutcome,
+  type ReminderReserveOutcome,
 } from "./notes-types";
 export { isPhaseLaunchErrorEvent } from "./notes-types";
 export type { PhaseLaunchErrorEvent, PhaseLaunchErrorCode } from "./notes-types";
@@ -1882,6 +1888,13 @@ export interface PaneAgentClient extends NotesClient {
   getNotes(): Promise<ProjectNotesReadOutcome>;
   migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome>;
   saveNotes(expectedRevision: number, document: NotesDocumentV3): Promise<ProjectNotesSaveOutcome>;
+  reserveReminder(focused: boolean): Promise<ReminderReserveOutcome>;
+  claimReminder(
+    leaseToken: string,
+    channel: "in-app" | "native" | "in-app-fallback",
+    permission: "not-required" | "granted" | "denied",
+  ): Promise<ReminderClaimOutcome>;
+  releaseReminder(leaseToken: string): Promise<ReminderReleaseOutcome>;
   startPhase(phaseId: string): Promise<PhaseStartResult>;
   listMemories(): Promise<MemorySnapshot>;
   deleteMemory(id: string): Promise<MemorySnapshot>;
@@ -2070,6 +2083,31 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async saveNotes(expectedRevision, document) {
       const outcome = await call<unknown>("agent_notes_save", { expectedRevision, document });
       if (!isProjectNotesSaveOutcome(outcome)) throw new Error("invalid Notes save response");
+      return outcome;
+    },
+    async reserveReminder(focused) {
+      const outcome = await call<unknown>("agent_reminder_reserve", { focused });
+      if (!isReminderReserveOutcome(outcome)) {
+        throw new Error("invalid reminder reserve response");
+      }
+      return outcome;
+    },
+    async claimReminder(leaseToken, channel, permission) {
+      const outcome = await call<unknown>("agent_reminder_claim", {
+        leaseToken,
+        channel,
+        permission,
+      });
+      if (!isReminderClaimOutcome(outcome)) {
+        throw new Error("invalid reminder claim response");
+      }
+      return outcome;
+    },
+    async releaseReminder(leaseToken) {
+      const outcome = await call<unknown>("agent_reminder_release", { leaseToken });
+      if (!isReminderReleaseOutcome(outcome)) {
+        throw new Error("invalid reminder release response");
+      }
       return outcome;
     },
     async startPhase(phaseId) {

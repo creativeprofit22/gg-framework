@@ -11,7 +11,7 @@ This file is an implementation plan, not a storage surface for user roadmap data
 
 ## Current baseline
 
-- **Implementation status:** Phases 00–23 are complete and verified; Phase 24 is next.
+- **Implementation status:** Phases 00–24 are complete and verified; Phase 25 is next.
 - **Historical Phase 00 evidence:** CI run [`29904554147`](https://github.com/creativeprofit22/gg-framework/actions/runs/29904554147) is green across all three framework jobs and all three app jobs; each platform completed three supervised workspace runs with zero survivors.
 - **2026-07-23 Phase 08 evidence:** The focused ProcessManager/foreground lifecycle run passed 65 tests with 2 platform skips across 67 tests. The ggcoder typecheck, targeted ESLint, and targeted Prettier checks passed.
 - **2026-07-24 implementation audit:** Commit ancestry and source/test inspection confirm Phases 00–09 are implemented. A 190-test ggcoder lifecycle/background matrix reported 186 passed, 1 expected failure, and 3 platform skips; the nested-launcher probe exposed its full worker tree in this supervised run. The 41-test workspace suite, 34 focused app diagnostics/Notes tests, and 3 sidecar diagnostics/isolation tests also passed, for 264 passing targeted tests overall. The ggcoder and gg-app typechecks, targeted ESLint, targeted Prettier, and roadmap coverage check passed.
@@ -29,9 +29,10 @@ This file is an implementation plan, not a storage surface for user roadmap data
 - **2026-07-26 Phase 20 evidence:** Ken prompt fences now dispatch typed current-send, authoritative fresh-send, manual/Autopilot Notes save-preview, and save-commit actions. The full gg-app suite passed 481 tests across 49 files; all 103 Rust tests passed. App check/lint/format/build, ggcoder build, sidecar bundle, all generated-output audits, and diff checks passed. Desktop and 320 px rendered evidence covers default, expanded, manual preview, replacement, pending, success, and failure states; performance telemetry and a native Tauri interaction smoke remain unverified.
 - **2026-07-27 Phase 21 evidence:** Phase Start now locks the project/phase transaction, persists one versioned phase-only context before binding, broadcasts the committed link before reset/Plan Mode/first prompt, and resumes the same conversation across restart, compaction, and approval checkpoints. The current audit passed all 2,046 ggcoder tests with 15 explicit platform skips, all 521 gg-app tests, and all 111 Rust tests. Both package typechecks, root lint, targeted formatting, roadmap coverage, diff checks, and generated-output audits pass; the audit's one caught-error lint finding was fixed by preserving the failed Plan Mode restoration as the `AggregateError` cause.
 - **2026-07-28 Phase 23 evidence:** The app-hosted `roadmap_status` tool now records bounded pending/in-progress/blocked/review reports for GG Coder, Ken, and Autopilot Ken through one project lease and one atomic Notes revision. Manual overrides retain authority; duplicate IDs, stale revisions, malformed references, launch/update races, pending manual proposals, Autopilot acceptance/reuse, explicit proposal decisions, and override resets have typed recovery. Focused gates passed 146 backend and 108 app tests. Full gates passed 2,117 ggcoder tests with 15 explicit skips, 539 gg-app tests, 111 Rust tests, 12 generated-audit tests, both typechecks, root lint/format, both production builds, and sidecar bundling. Rendered evidence is under `.gg/evidence/phase-23-roadmap-*.png`; desktop, 360 px, empty, blocked, accepted/history, storage failure/retry, and decision-conflict states were captured. Native screen-reader speech, 200% interaction, and field performance remain unmeasured.
-- **Next phase:** Phase 24 — Gate automatic completion through verification and review.
+- **2026-07-28 Phase 24 evidence:** Notes v3 now persists typed verification, bound implementation checkpoints, and reviewer-attributed completion reviews. The repository atomically evaluates every gate under the project lock, writes Done once, protects user overrides, leaves `archivedAt` unchanged, and makes generic run/tool success incapable of completion. Autopilot now awaits accepted/rejected review persistence before terminal emission or revision. Focused gates passed 195 backend and 119 app tests. Full gates passed 2,155 ggcoder tests with 15 explicit skips, 545 gg-app tests plus 8 workspace-shell evidence tests, 111 Rust tests, and 12 generated-audit tests; both typechecks, app lint/format, production builds, sidecar bundling, root format, and diff checks passed. Desktop and 320 px renders plus 200% zoom, forced-colors, reduced-motion, long localized content, semantic heading/definition/time inspection, and keyboard focus checks passed with zero horizontal overflow. Native screen-reader speech and field Core Web Vitals remain unverified.
+- **Next phase:** Phase 25 — Add deduplicated reminders and notifications.
 - **Track A freeze:** Complete at `7c1d4a13`; the three-OS matrix, workspace memory evidence, and two-window Windows desktop timeout smoke are green. Subsequent commits add Track B Notes behavior without changing the frozen Track A lifecycle implementation; `0c6fe66b` has no separate Actions run because CI triggers only for `main` pushes and pull requests.
-- **Later-track audit:** Phases 15–23 are complete; Phases 24–26 have not started. Phase 23 adds protected structured progress/reference reconciliation while leaving automatic Done exclusively to Phase 24.
+- **Later-track audit:** Phases 15–24 are complete; Phases 25–26 have not started. Phase 24 makes automatic Done depend on durable implementation, verification, resolution, and reviewer evidence while preserving manual override and archive separation.
 - **Notes baseline:** Notes retains Now, Next, Handoff, free-form Reference, and Done / Archive semantics inside a four-tab shell. Roadmap provides ordered phase CRUD and lifecycle controls; the shared structured-reference library now provides canonical deduplication, repository grouping, exact source opening, conflict-replayed CRUD, and many-to-many phase links.
 - **Planning rule:** no phase starts until the previous phase has passed its acceptance tests and its hard-stop evidence is recorded.
 - **Change boundary:** each phase is a small review unit. Implementation may commit at a phase boundary, but this roadmap update changes documentation only.
@@ -1164,7 +1165,7 @@ Successful generic `run_end`, tool success, `autopilot_done`, and elapsed time a
 
 ## Phase 24 — Gate automatic completion through verification and review
 
-**Status:** Not started.
+**Status:** Complete and verified on 2026-07-28.
 
 **Outcome:** A phase becomes Done automatically only after implementation, verification, and final Ken/Autopilot review all succeed.
 
@@ -1195,7 +1196,11 @@ Successful generic `run_end`, tool success, `autopilot_done`, and elapsed time a
 - Successful full path reaches Done once and archives only by separate user/policy action.
 - Manual override remains available and is not reverted by reconciliation.
 
-**Hard stop:** Record one positive and every negative gate fixture. Do not add reminder delivery until completion state is trustworthy.
+**Completion evidence:** Positive Done, missing/incomplete/stale implementation, failed run, missing/failed/exception verification, unresolved approval/attention, rejected review, duplicate review, terminal Done, restart persistence, manual override, and archive-separation fixtures pass. The focused backend gate passed 195 tests and the focused app gate passed 119 tests. Full package, Rust, generated-audit, typecheck, lint, format, build, sidecar-bundle, and diff gates pass.
+
+**Rendered/accessibility evidence:** `.gg/screenshots/phase24-completion-desktop.png`, `.gg/screenshots/phase24-completion-320.png`, `.gg/screenshots/phase24-200-percent.png`, `.gg/screenshots/phase24-forced-colors.png`, and `.gg/screenshots/phase24-reduced-motion.png` show the compact three-row evidence section before Latest report. Browser inspection found three semantic definition rows, concrete `<time>` values, keyboard focus, long/localized wrapping, and no horizontal overflow at 320 CSS px or 200% zoom. Native screen-reader speech and field performance are explicitly unverified.
+
+**Hard stop:** Satisfied — one positive and every negative gate fixture pass together, completion evidence is durable and reviewer-attributed, and Phase 25 reminder delivery was not started.
 
 ## Phase 25 — Add deduplicated reminders and notifications
 

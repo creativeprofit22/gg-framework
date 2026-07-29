@@ -6,6 +6,28 @@ describe("parseAutopilotVerdict", () => {
     expect(parseAutopilotVerdict("ALL_CLEAR")).toEqual({ kind: "all_clear" });
   });
 
+  it("parses explicit verification-exception acceptance on ALL_CLEAR", () => {
+    expect(
+      parseAutopilotVerdict(
+        'ALL_CLEAR\nACCEPT_VERIFICATION_EXCEPTION {"id":"verification-exception-24"}',
+      ),
+    ).toEqual({
+      kind: "all_clear",
+      acceptedVerificationExceptionId: "verification-exception-24",
+    });
+  });
+
+  it("does not infer exception acceptance from bare, malformed, or chatty ALL_CLEAR", () => {
+    expect(parseAutopilotVerdict("ALL_CLEAR")).toEqual({ kind: "all_clear" });
+    expect(
+      parseAutopilotVerdict("ALL_CLEAR\nACCEPT_VERIFICATION_EXCEPTION verification-24"),
+    ).toEqual({ kind: "all_clear" });
+    expect(
+      parseAutopilotVerdict(
+        'ALL_CLEAR\nACCEPT_VERIFICATION_EXCEPTION {"id":"verification-24"}\nLooks good.',
+      ),
+    ).toEqual({ kind: "all_clear" });
+  });
   it("parses fuzzy ALL CLEAR (space + lowercase)", () => {
     expect(parseAutopilotVerdict("all clear")).toEqual({ kind: "all_clear" });
     expect(parseAutopilotVerdict("All Clear\nlooks good")).toEqual({ kind: "all_clear" });
@@ -107,6 +129,15 @@ describe("parseAutopilotVerdict", () => {
       "The label is now a plain non-clickable <span>, model name is the separate " +
       "clickable button. Matches the request exactly. Typecheck passed.\nALL_CLEAR";
     expect(parseAutopilotVerdict(reply)).toEqual({ kind: "all_clear" });
+  });
+
+  it("recovers explicit exception acceptance after pre-verdict commentary", () => {
+    const reply =
+      'Reviewed the evidence.\nALL_CLEAR\nACCEPT_VERIFICATION_EXCEPTION {"id":"verification-24"}';
+    expect(parseAutopilotVerdict(reply)).toEqual({
+      kind: "all_clear",
+      acceptedVerificationExceptionId: "verification-24",
+    });
   });
 
   it("recovers IGNORE from a trailing bare keyword line after commentary", () => {

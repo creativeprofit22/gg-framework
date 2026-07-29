@@ -55,7 +55,7 @@ export async function buildKenSystemPrompt(cwd: string): Promise<string> {
     renderOutputContract(),
     renderUiTaste(),
     renderDiscipline(),
-    renderRoadmapReporting(),
+    renderRoadmapReporting("ken"),
     renderVoice(),
     renderContextNote(),
     await renderProjectContext(cwd),
@@ -85,7 +85,7 @@ export async function buildKenAutopilotSystemPrompt(cwd: string): Promise<string
     renderMethod(),
     renderUiTaste(),
     renderDiscipline(),
-    renderRoadmapReporting(),
+    renderRoadmapReporting("autopilot"),
     renderAutopilotContract(),
     await renderProjectContext(cwd),
     // Volatile date AFTER the uncached marker so the static persona stays cached.
@@ -227,14 +227,25 @@ function renderMethod(): string {
   );
 }
 
-function renderRoadmapReporting(): string {
+function renderRoadmapReporting(role: "ken" | "autopilot"): string {
+  const decisionInstruction =
+    role === "ken"
+      ? `When you make a final completion decision for a bound phase, include final_review: ` +
+        `accepted with evidence or rejected with a concrete reason. You are an authorized reviewer, ` +
+        `but the durable completion gate still decides whether Done is allowed.`
+      : `Do not call roadmap_status for your machine verdict. The Autopilot cycle maps your parsed ` +
+        `ALL_CLEAR to accepted review, PROMPT to rejected review, HUMAN to attention, and IGNORE to no acceptance, ` +
+        `then awaits durable persistence before it emits completion. Only the explicit exception-acceptance ` +
+        `signal described below accepts a verification exception; ALL_CLEAR alone never does.`;
   return (
     `## Roadmap reporting exception\n\n` +
     `Your only metadata-writing capability is roadmap_status. Use it promptly for a ` +
     `meaningful verified milestone, blocker, review handoff, or useful structured source. ` +
-    `Cite checks you actually observed in evidence, make one call at a time, and do not ` +
-    `repeat an unchanged report. This exception does not let you edit code or files, run ` +
-    `processes, clear a user's user override, or mark a phase Done.`
+    `Cite checks you actually observed in evidence and use typed verification: passed only for ` +
+    `checks that ran, failed with the failure reason, or exception-requested with why verification ` +
+    `cannot run. Make one call at a time and do not repeat an unchanged report. ` +
+    `${decisionInstruction} This exception does not let you edit code or files, run processes, ` +
+    `clear a user's user override, or directly mark a phase Done.`
   );
 }
 
@@ -278,6 +289,9 @@ function renderAutopilotContract(): string {
     `PROMPT\n<a runnable GG Coder prompt, 1-3 lines, terminology-correct, says what ` +
     `to do — include a why only if GG Coder needs it to do the work>\n\n` +
     `ALL_CLEAR\n\n` +
+    `ALL_CLEAR\nACCEPT_VERIFICATION_EXCEPTION {"id":"<exact current exception ID>"}\n` +
+    `(use this two-line form only to explicitly accept the persisted exception shown ` +
+    `in a 'Verification exception awaiting review' section)\n\n` +
     `IGNORE\n\n` +
     `HUMAN\n<one short line: why a human decision is needed>\n\n` +
     `WRONG — reasoning before the keyword kills the whole cycle:\n` +
@@ -323,10 +337,11 @@ function renderAutopilotContract(): string {
     `is truly in doubt; otherwise judge from the transcript and answer. Every wasted ` +
     `tool call costs tokens.\n` +
     `- Never wrap the verdict in prose or a code fence, and never add commentary ` +
-    `before OR after the keyword line (no recap of what you found, no "Looks good", ` +
-    `no explanation of the verdict). The keyword line is your entire reply for ` +
-    `ALL_CLEAR and IGNORE; PROMPT and HUMAN take only the payload described above, ` +
-    `nothing more.`
+    `before OR after the verdict (no recap of what you found, no "Looks good", ` +
+    `no explanation). IGNORE is one keyword line. ALL_CLEAR is one keyword line ` +
+    `unless you explicitly accept the current verification exception with the exact ` +
+    `second machine-readable line above. PROMPT and HUMAN take only the payload ` +
+    `described above, nothing more.`
   );
 }
 

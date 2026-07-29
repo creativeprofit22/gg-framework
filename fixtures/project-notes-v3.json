@@ -96,7 +96,52 @@
           "reason": "Cross-boundary fixture evidence required"
         }
       ],
-      "roadmapEvents": []
+      "roadmapEvents": [
+        {
+          "type": "status-update",
+          "id": "roadmap-schema-verification",
+          "actor": "gg-coder",
+          "transition": "review",
+          "progress": "Verified the shared Notes v3 contract",
+          "blocker": null,
+          "evidence": ["Backend and app validators accepted the canonical fixture"],
+          "verification": "passed",
+          "verificationReason": null,
+          "verificationSession": {
+            "sessionId": "session-phase-16-contract",
+            "sessionPath": "/sessions/phase-16-contract.jsonl"
+          },
+          "statusOutcome": "manual-override",
+          "proposedReferences": [],
+          "timestamp": "2026-07-25T12:34:56.000Z"
+        },
+        {
+          "type": "implementation-checkpoint",
+          "id": "checkpoint-schema-contract",
+          "session": {
+            "sessionId": "session-phase-16-contract",
+            "sessionPath": "/sessions/phase-16-contract.jsonl"
+          },
+          "planStepTotal": 3,
+          "completedPlanSteps": [1, 2, 3],
+          "runOutcome": "succeeded",
+          "timestamp": "2026-07-25T12:34:56.000Z"
+        },
+        {
+          "type": "completion-review",
+          "id": "review-schema-contract",
+          "reviewer": "ken-autopilot",
+          "decision": "accepted",
+          "evidence": ["Canonical contract checks are complete"],
+          "reason": null,
+          "implementationCheckpointId": "checkpoint-schema-contract",
+          "verificationStatusUpdateId": "roadmap-schema-verification",
+          "acceptsVerificationException": false,
+          "gateOutcome": "done",
+          "unmetGateCodes": [],
+          "timestamp": "2026-07-25T12:34:56.000Z"
+        }
+      ]
     },
     {
       "id": "phase-migration-proof",

@@ -137,6 +137,105 @@ describe("structured project notes storage", () => {
     expect(repository.load(cwd).document).toEqual(fixture);
   });
 
+  it("accepts equal timestamps in append order across lifecycle and roadmap histories", async () => {
+    const fixture = (await canonicalNotesFixture()) as NotesDocumentV3;
+    const phase = fixture.phases[0]!;
+    const sharedTimestamp = phase.lifecycleEvents[0]!.timestamp;
+    phase.lifecycleEvents = phase.lifecycleEvents.map((event) => ({
+      ...event,
+      timestamp: sharedTimestamp,
+    }));
+
+    expect(new Set(phase.lifecycleEvents.map(({ timestamp }) => timestamp)).size).toBe(1);
+    expect(new Set(phase.roadmapEvents.map(({ timestamp }) => timestamp)).size).toBe(1);
+    expect(validateNotesDocumentV3(fixture)).toEqual({ ok: true, document: fixture });
+
+    const cwd = "/work/equal-event-timestamps";
+    const repository = createNotesRepository(new MemoryStorage(), () => NOW);
+    repository.save(cwd, fixture);
+    expect(repository.load(cwd).document).toEqual(fixture);
+  });
+
+  it.each([
+    "failed implementation checkpoint",
+    "incomplete implementation checkpoint",
+    "failed verification",
+    "unaccepted verification exception",
+    "exception acceptance without an exception",
+    "verification from a different session",
+    "evidence from before the latest rejection",
+  ] as const)("rejects an impossible automatic Done with %s", async (shape) => {
+    const fixture = (await canonicalNotesFixture()) as NotesDocumentV3;
+    const events = fixture.phases[0]!.roadmapEvents;
+    const checkpoint = events.find((event) => event.type === "implementation-checkpoint")!;
+    const verification = events.find((event) => event.type === "status-update")!;
+    const review = events.find((event) => event.type === "completion-review")!;
+
+    switch (shape) {
+      case "failed implementation checkpoint":
+        checkpoint.runOutcome = "failed";
+        break;
+      case "incomplete implementation checkpoint":
+        checkpoint.completedPlanSteps = [1, 2];
+        break;
+      case "failed verification":
+        verification.verification = "failed";
+        verification.verificationReason = "Focused verification failed";
+        break;
+      case "unaccepted verification exception":
+        verification.verification = "exception-requested";
+        verification.verificationReason = "Verification exception requires review";
+        break;
+      case "exception acceptance without an exception":
+        review.acceptsVerificationException = true;
+        break;
+      case "verification from a different session":
+        verification.verificationSession = {
+          sessionId: "replacement-session",
+          sessionPath: "/sessions/replacement.jsonl",
+        };
+        break;
+      case "evidence from before the latest rejection":
+        events.splice(events.indexOf(review), 0, {
+          type: "completion-review",
+          id: "review-rejected-before-acceptance",
+          reviewer: "ken-autopilot",
+          decision: "rejected",
+          evidence: [],
+          reason: "Revise the implementation",
+          implementationCheckpointId: checkpoint.id,
+          verificationStatusUpdateId: verification.id,
+          acceptsVerificationException: false,
+          gateOutcome: "review",
+          unmetGateCodes: [],
+          timestamp: review.timestamp,
+        });
+        break;
+    }
+
+    expect(validateNotesDocumentV3(fixture)).toMatchObject({ ok: false });
+    expect(parseNotesDocument(JSON.stringify(fixture))).toMatchObject({
+      ok: false,
+      reason: "invalid-shape",
+    });
+  });
+
+  it("accepts and persists automatic Done with an accepted verification exception", async () => {
+    const fixture = (await canonicalNotesFixture()) as NotesDocumentV3;
+    const events = fixture.phases[0]!.roadmapEvents;
+    const verification = events.find((event) => event.type === "status-update")!;
+    const review = events.find((event) => event.type === "completion-review")!;
+    verification.verification = "exception-requested";
+    verification.verificationReason = "The approved environment cannot run this verification";
+    review.acceptsVerificationException = true;
+
+    expect(validateNotesDocumentV3(fixture)).toEqual({ ok: true, document: fixture });
+    const cwd = "/work/accepted-exception";
+    const repository = createNotesRepository(new MemoryStorage(), () => NOW);
+    repository.save(cwd, fixture);
+    expect(repository.load(cwd).document).toEqual(fixture);
+  });
+
   it("enforces canonical reference identity and GitHub coordinate parity", () => {
     const valid = document("identity");
     const first = valid.references[0]!;
@@ -352,6 +451,9 @@ describe("structured project notes storage", () => {
     const loaded = createNotesRepository(storage, () => NOW).load(cwd);
 
     expect(loaded.document.phases[0]!.roadmapEvents[0]).toMatchObject({
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
       proposedReferences: [
         {
           disposition: "pending",
@@ -361,6 +463,9 @@ describe("structured project notes storage", () => {
       ],
     });
     expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!).phases[0].roadmapEvents[0]).toMatchObject({
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
       proposedReferences: [{ policyOutcome: "manual-review" }],
     });
   });
@@ -377,6 +482,9 @@ describe("structured project notes storage", () => {
         progress: "Invalid policy report",
         blocker: null,
         evidence: [],
+        verification: null,
+        verificationReason: null,
+        verificationSession: null,
         statusOutcome: "applied",
         proposedReferences: [
           {

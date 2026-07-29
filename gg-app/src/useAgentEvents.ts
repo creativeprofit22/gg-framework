@@ -11,6 +11,11 @@ import {
   type ProjectTask,
   type SlashCommand,
 } from "./agent";
+import {
+  isPhaseCompletionCheckpointFailedEvent,
+  isPhaseCompletionReviewBlockedEvent,
+  isPhaseCompletionReviewFailedEvent,
+} from "./phase-completion-events";
 import { formatTokenCount } from "./ActivityBar";
 import { getBashDiagnostics, type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -67,6 +72,21 @@ interface BashProgressUpdate {
 }
 
 const MAX_BASH_PROGRESS_CHARS = 8 * 1024;
+
+function phaseCompletionFailureMessage(failure: {
+  code: string;
+  detail?: string;
+  owner?: { kind: string } | null;
+}): string {
+  const detail = failure.detail?.trim();
+  return [
+    `Reason: ${failure.code.replace(/-/g, " ")}.`,
+    failure.owner ? `Active Roadmap update: ${failure.owner.kind}.` : null,
+    detail ? `Details: ${detail}` : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" ");
+}
 
 function isBashProgressUpdate(update: unknown): update is BashProgressUpdate {
   if (typeof update !== "object" || update === null) return false;
@@ -227,6 +247,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   const runStartRef = useRef<number>(0);
   const toolsUsedRef = useRef<Set<string>>(new Set());
   const tokensRef = useRef<number>(0);
+  // A checkpoint failure arrives before run_end. Preserve that terminal fact so
+  // run teardown cannot replace recovery UX with a success sound/status.
+  const completionCheckpointFailedRef = useRef(false);
   // Accumulated assistant text this run, for detecting [DONE:n] plan-step
   // markers that may split across deltas.
   const assistantTextRef = useRef<string>("");
@@ -376,6 +399,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           runStartRef.current = Date.now();
           toolsUsedRef.current = new Set();
           tokensRef.current = 0;
+          completionCheckpointFailedRef.current = false;
           assistantTextRef.current = "";
           thinkingStartRef.current = null;
           thinkingAccumRef.current = 0;
@@ -782,6 +806,52 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           );
           setStatus("cancellation failed; agent still running");
           break;
+        case "phase_completion_checkpoint_failed": {
+          if (!isPhaseCompletionCheckpointFailedEvent(e)) break;
+          const failure = e.data;
+          completionCheckpointFailedRef.current = true;
+          setDoneStatus(null);
+          setStatus("needs attention");
+          pushItem({
+            kind: "error",
+            id: nextId(),
+            headline: `Roadmap checkpoint for phase ${failure.phaseId} was not saved.`,
+            message: phaseCompletionFailureMessage(failure),
+            guidance: failure.recovery,
+          });
+          break;
+        }
+        case "phase_completion_review_failed": {
+          if (!isPhaseCompletionReviewFailedEvent(e)) break;
+          const failure = e.data;
+          setDoneStatus(null);
+          setStatus("needs attention");
+          pushItem({
+            kind: "error",
+            id: nextId(),
+            headline: `Autopilot final review for phase ${failure.phaseId} was not saved.`,
+            message: phaseCompletionFailureMessage(failure),
+            guidance: failure.recovery,
+          });
+          break;
+        }
+        case "phase_completion_review_blocked": {
+          if (!isPhaseCompletionReviewBlockedEvent(e)) break;
+          const blocked = e.data;
+          setDoneStatus(null);
+          setStatus("needs attention");
+          pushItem({
+            kind: "autopilot",
+            id: nextId(),
+            phase: "human",
+            reason: [
+              `Roadmap phase ${blocked.phaseId} is not complete.`,
+              blocked.recovery,
+              `Unmet gates: ${blocked.unmetGateCodes.join(", ")}.`,
+            ].join("\n\n"),
+          });
+          break;
+        }
         case "phase_launch_error": {
           if (!isPhaseLaunchErrorEvent(e)) break;
           const failure = e.data;
@@ -872,6 +942,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           if (d.cancelled) {
             setDoneStatus(null);
             setStatus("cancelled");
+          } else if (completionCheckpointFailedRef.current) {
+            // The backend deliberately retains approved-plan tracking when the
+            // durable checkpoint fails. Keep the recovery status and wait for an
+            // authoritative plan_progress { total: 0 } before hiding the widget.
+            setDoneStatus(null);
+            setStatus("needs attention");
           } else {
             const elapsedMs = runStartRef.current ? Date.now() - runStartRef.current : 0;
             const verb = pickDoneVerb(toolsUsedRef.current);
@@ -881,21 +957,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             }
             setDoneStatus(parts.join(" \u2022 "));
             setStatus("ready");
-            const completedPlan =
-              planTotalRef.current > 0 &&
-              Array.from({ length: planTotalRef.current }, (_, i) => i + 1).every((step) =>
-                planDoneRef.current.has(step),
-              );
-            if (completedPlan) {
-              planTotalRef.current = 0;
-              planDoneRef.current = new Set();
-              setPlanTotal(0);
-              setPlanDone(new Set());
-            }
             playSound("done");
+          }
+          if (!d.cancelled) {
             // A run may have created/removed `.gg/commands/*.md` (e.g.
-            // /setup-commit writing commit.md). Refresh so the top-right
-            // commit button flips /setup-commit → /commit without a restart.
+            // /setup-commit writing commit.md). Refresh even when completion
+            // recovery is required; command availability is independent state.
             void (client ? client.listCommands() : listCommands()).then(setCommands);
           }
           break;

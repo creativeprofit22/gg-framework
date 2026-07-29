@@ -8,6 +8,8 @@ describe("AppSidecarRoadmapReconciliationCoordinator", () => {
 
     expect(lease).toMatchObject({ operationId: "operation-1", kind: "phase-start" });
     expect(coordinator.tryAcquire("c:/work/./project", "status-update")).toBeNull();
+    expect(coordinator.tryAcquire("c:/work/project", "implementation-checkpoint")).toBeNull();
+    expect(coordinator.tryAcquire("c:/work/project", "completion-review")).toBeNull();
     expect(coordinator.owner("c:/WORK/project")).toMatchObject({
       operationId: "operation-1",
       kind: "phase-start",
@@ -38,8 +40,9 @@ describe("AppSidecarRoadmapReconciliationCoordinator", () => {
     }
 
     expect(coordinator.owner("/work/project")).toBeUndefined();
-    expect(coordinator.tryAcquire("/work/project", "phase-start")).toMatchObject({
+    expect(coordinator.tryAcquire("/work/project", "completion-review")).toMatchObject({
       operationId: "operation-2",
+      kind: "completion-review",
     });
   });
 });

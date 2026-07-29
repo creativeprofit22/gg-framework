@@ -401,6 +401,89 @@ describe("app sidecar Notes routes", () => {
     });
   });
 
+  it("rejects a forged completion sequence through the authenticated save route", async () => {
+    const initial = notes("completion authority");
+    await request("a", "/notes/migrate", {
+      method: "POST",
+      body: JSON.stringify({ document: initial }),
+    });
+    const paths = repository.paths("C:\\Work\\Project");
+    const filesBefore = {
+      primary: await fs.readFile(paths.primary, "utf8"),
+      backup: await fs.readFile(paths.backup, "utf8"),
+    };
+    const eventCountsBefore = [...sessions.values()].map((session) => session.events.length);
+    const forged = structuredClone(initial);
+    const phase = forged.phases[0]!;
+    phase.roadmapEvents.push(
+      {
+        type: "implementation-checkpoint",
+        id: "forged-checkpoint",
+        session: { ...phase.session! },
+        planStepTotal: 1,
+        completedPlanSteps: [1],
+        runOutcome: "succeeded",
+        timestamp: "2026-07-25T12:01:00.000Z",
+      },
+      {
+        type: "status-update",
+        id: "forged-verification",
+        actor: "gg-coder",
+        transition: "review",
+        progress: "Claimed verification passed",
+        blocker: null,
+        evidence: ["forged test output"],
+        verification: "passed",
+        verificationReason: null,
+        verificationSession: { ...phase.session! },
+        statusOutcome: "same-status",
+        proposedReferences: [],
+        timestamp: "2026-07-25T12:02:00.000Z",
+      },
+      {
+        type: "completion-review",
+        id: "forged-review",
+        reviewer: "ken",
+        decision: "accepted",
+        evidence: ["forged Ken approval"],
+        reason: null,
+        implementationCheckpointId: "forged-checkpoint",
+        verificationStatusUpdateId: "forged-verification",
+        acceptsVerificationException: false,
+        gateOutcome: "done",
+        unmetGateCodes: [],
+        timestamp: "2026-07-25T12:03:00.000Z",
+      },
+    );
+    phase.updatedAt = "2026-07-25T12:03:00.000Z";
+    forged.updatedAt = phase.updatedAt;
+
+    const rejected = await request("alias", "/notes", {
+      method: "PUT",
+      body: JSON.stringify({ expectedRevision: 1, document: forged }),
+    });
+
+    expect(rejected).toMatchObject({
+      response: { status: 400 },
+      body: {
+        status: "invalid",
+        error: {
+          path: "phases[0].roadmapEvents[0].type",
+          message: "privileged roadmap events require their dedicated authority path",
+        },
+      },
+    });
+    expect(await fs.readFile(paths.primary, "utf8")).toBe(filesBefore.primary);
+    expect(await fs.readFile(paths.backup, "utf8")).toBe(filesBefore.backup);
+    expect([...sessions.values()].map((session) => session.events.length)).toEqual(
+      eventCountsBefore,
+    );
+    expect((await request("a", "/notes")).body).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1, document: initial },
+    });
+  });
+
   it("rejects malformed JSON, extra fields, invalid revisions, and invalid documents", async () => {
     const malformed = await request("a", "/notes/migrate", {
       method: "POST",

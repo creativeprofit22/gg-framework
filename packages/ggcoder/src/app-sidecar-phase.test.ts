@@ -1122,6 +1122,122 @@ describe("production launchBoundPhase orchestration", () => {
     expect(snapshots).toHaveLength(3);
   });
 
+  it("routes typed verification and reviewer-only final decisions through the completion gate", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Expected bound phase");
+    const bound = loaded.snapshot.document.phases[0]!.session!;
+    await repository.recordImplementationCheckpoint(cwd, {
+      checkpointId: "checkpoint-final-review",
+      phaseId: "phase-21",
+      expectedSession: bound,
+      planStepTotal: 2,
+      completedPlanSteps: [1, 2],
+      runOutcome: "succeeded",
+      timestamp: "2026-07-26T00:01:00.000Z",
+    });
+    await repository.recordRoadmapStatusUpdate(cwd, {
+      updateId: "verification-final-review",
+      phaseId: "phase-21",
+      actor: "gg-coder",
+      transition: "review",
+      progress: "Focused checks passed",
+      blocker: null,
+      evidence: ["pnpm test passed"],
+      verification: "passed",
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: "2026-07-26T00:02:00.000Z",
+      expectedSession: bound,
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+    });
+    const snapshots: ProjectNotesSnapshot[] = [];
+    const host = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      reconciliations: fixture.reconciliations,
+      projectAutopilot: new AppSidecarProjectAutopilotState(),
+      broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
+      now: () => "2026-07-26T00:03:00.000Z",
+    });
+    const finalReview = {
+      review_id: "review-final",
+      decision: "accepted",
+      evidence: ["Ken reviewed all completion gates"],
+    };
+
+    await expect(
+      executeRoadmap(
+        host.createSessionTools("coding", () => fixture.currentSession)[0]!,
+        roadmapInput("coder-cannot-review", {
+          transition: "review",
+          evidence: ["Verification reported"],
+          final_review: finalReview,
+        }),
+      ),
+    ).resolves.toEqual({ result: "reviewer-not-authorized", phaseId: "phase-21" });
+    const checkpointBlockedHost = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      canSubmitFinalReview: () => false,
+      reconciliations: fixture.reconciliations,
+      projectAutopilot: new AppSidecarProjectAutopilotState(),
+      broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
+      now: () => "2026-07-26T00:03:00.000Z",
+    });
+    await expect(
+      executeRoadmap(
+        checkpointBlockedHost.createSessionTools("ken")[0]!,
+        roadmapInput("blocked-final-status", {
+          transition: "review",
+          evidence: ["This evidence must not persist"],
+          final_review: { ...finalReview, review_id: "blocked-final-review" },
+        }),
+      ),
+    ).resolves.toEqual({ result: "completion-checkpoint-blocked", phaseId: "phase-21" });
+    const afterBlockedCheckpoint = await repository.load(cwd);
+    if (afterBlockedCheckpoint.status !== "ok") throw new Error("Expected bound phase");
+    expect(afterBlockedCheckpoint.snapshot.document.phases[0]!.roadmapEvents).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "blocked-final-status" }),
+        expect.objectContaining({ id: "blocked-final-review" }),
+      ]),
+    );
+    expect(snapshots).toEqual([]);
+
+    await expect(
+      executeRoadmap(
+        host.createSessionTools("ken")[0]!,
+        roadmapInput("ken-final-status", {
+          transition: "review",
+          evidence: ["Ken reviewed the phase"],
+          final_review: finalReview,
+        }),
+      ),
+    ).resolves.toMatchObject({
+      result: "completion-review-committed",
+      gateOutcome: "done",
+      unmetGateCodes: [],
+    });
+    const completed = await repository.load(cwd);
+    expect(completed).toMatchObject({
+      status: "ok",
+      snapshot: { document: { phases: [{ status: "done", archivedAt: null }] } },
+    });
+    expect(snapshots).toHaveLength(1);
+    if (completed.status !== "ok") throw new Error("Expected completed phase");
+    expect(completed.snapshot.document.phases[0]!.roadmapEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "ken-final-status", statusOutcome: "evidence-only" }),
+        expect.objectContaining({ id: "review-final", type: "completion-review" }),
+      ]),
+    );
+  });
+
   it("keeps roadmap_status out of ordinary CLI createTools", async () => {
     const { cwd } = await setup();
     const created = await createTools(cwd, { lspDiagnostics: false });

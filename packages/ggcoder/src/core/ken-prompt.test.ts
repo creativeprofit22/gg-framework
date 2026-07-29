@@ -21,6 +21,15 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     }
   });
 
+  it("requires an exact explicit signal to accept a verification exception", () => {
+    expect(prompt).toContain(
+      'ALL_CLEAR\nACCEPT_VERIFICATION_EXCEPTION {"id":"<exact current exception ID>"}',
+    );
+    expect(prompt).toContain("use this two-line form only to explicitly accept");
+    expect(prompt).toContain("ALL_CLEAR alone never does");
+    expect(prompt).toContain("one keyword line unless you explicitly accept");
+  });
+
   it("routes only real user-level questions/options to HUMAN", () => {
     // Leak regression: without this rule, GG Coder ending with "want me to…?"
     // or an A/B/C menu reads as "unfinished" and Ken answers for the user.

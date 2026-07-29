@@ -151,6 +151,46 @@ describe("buildKenDigest", () => {
     expect(digest).toContain("HUMAN");
   });
 
+  it("carries the latest typed verification exception and exact acceptance signal", () => {
+    const digest = buildKenAutopilotContext({
+      cwd: base.cwd,
+      gitBranch: base.gitBranch,
+      platform: base.platform,
+      messages: [],
+      verificationException: {
+        id: "verification-exception-24",
+        requesterActor: "gg-coder",
+        reason: "CI is unavailable in the isolated environment.",
+        timestamp: "2026-07-28T12:00:00.000Z",
+        evidence: ["Local typecheck passed", "CI endpoint returned 503"],
+      },
+    });
+
+    expect(digest).toContain("## Verification exception awaiting review");
+    expect(digest).toContain('"id": "verification-exception-24"');
+    expect(digest).toContain('"requesterActor": "gg-coder"');
+    expect(digest).toContain("CI is unavailable in the isolated environment.");
+    expect(digest).toContain("2026-07-28T12:00:00.000Z");
+    expect(digest).toContain("Local typecheck passed");
+    expect(digest).toContain('ACCEPT_VERIFICATION_EXCEPTION {"id":"verification-exception-24"}');
+    expect(digest).toContain("A bare ALL_CLEAR leaves the phase in Review");
+    expect(digest.indexOf("## Verification exception awaiting review")).toBeLessThan(
+      digest.indexOf("## They just asked you"),
+    );
+  });
+
+  it("omits verification-exception context for ordinary passed-verification reviews", () => {
+    const digest = buildKenAutopilotContext({
+      cwd: base.cwd,
+      gitBranch: base.gitBranch,
+      platform: base.platform,
+      messages: [],
+      verificationException: null,
+    });
+    expect(digest).not.toContain("## Verification exception awaiting review");
+    expect(digest).not.toContain("ACCEPT_VERIFICATION_EXCEPTION {");
+  });
+
   it("autopilot review instruction separates true human decisions from safe implied follow-ups", () => {
     // GG Coder ending with a question/options is HUMAN only when it needs a
     // real user-level decision. Permission to continue safe work implied by the

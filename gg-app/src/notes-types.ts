@@ -161,7 +161,28 @@ export interface NotesLifecycleEvent {
 }
 
 export type NotesRoadmapActor = "gg-coder" | "ken" | "ken-autopilot";
+export type NotesRoadmapReviewer = Exclude<NotesRoadmapActor, "gg-coder">;
 export type NotesRoadmapTransition = "pending" | "in-progress" | "blocked" | "review";
+export type NotesVerificationStatus = "passed" | "failed" | "exception-requested";
+export type NotesImplementationRunOutcome = "succeeded" | "failed" | "cancelled" | "interrupted";
+export type NotesCompletionGateOutcome =
+  | "done"
+  | "review"
+  | "needs-attention"
+  | "waiting-for-approval"
+  | "manual-override"
+  | "done-terminal";
+export type NotesCompletionUnmetGateCode =
+  | "missing-implementation"
+  | "stale-session"
+  | "run-not-successful"
+  | "incomplete-plan"
+  | "missing-verification"
+  | "failed-verification"
+  | "verification-exception-not-accepted"
+  | "unresolved-approval"
+  | "unresolved-attention"
+  | "inactive-phase";
 export type NotesRoadmapStatusOutcome =
   | "applied"
   | "same-status"
@@ -188,6 +209,9 @@ export interface NotesRoadmapStatusUpdate {
   progress: string;
   blocker: string | null;
   evidence: string[];
+  verification: NotesVerificationStatus | null;
+  verificationReason: string | null;
+  verificationSession: NotesSessionLink | null;
   statusOutcome: NotesRoadmapStatusOutcome;
   proposedReferences: NotesRoadmapReferenceProposal[];
   timestamp: string;
@@ -209,10 +233,37 @@ export interface NotesRoadmapOverrideReset {
   timestamp: string;
 }
 
+export interface NotesRoadmapImplementationCheckpoint {
+  type: "implementation-checkpoint";
+  id: string;
+  session: NotesSessionLink;
+  planStepTotal: number;
+  completedPlanSteps: number[];
+  runOutcome: NotesImplementationRunOutcome;
+  timestamp: string;
+}
+
+export interface NotesRoadmapCompletionReview {
+  type: "completion-review";
+  id: string;
+  reviewer: NotesRoadmapReviewer;
+  decision: "accepted" | "rejected";
+  evidence: string[];
+  reason: string | null;
+  implementationCheckpointId: string | null;
+  verificationStatusUpdateId: string | null;
+  acceptsVerificationException: boolean;
+  gateOutcome: NotesCompletionGateOutcome;
+  unmetGateCodes: NotesCompletionUnmetGateCode[];
+  timestamp: string;
+}
+
 export type NotesRoadmapEvent =
   | NotesRoadmapStatusUpdate
   | NotesRoadmapReferenceDecision
-  | NotesRoadmapOverrideReset;
+  | NotesRoadmapOverrideReset
+  | NotesRoadmapImplementationCheckpoint
+  | NotesRoadmapCompletionReview;
 
 export interface NotesPhase {
   id: string;
@@ -560,7 +611,7 @@ const PHASE_KEYS = [
 const LEGACY_V3_PHASE_REQUIRED_KEYS = PHASE_KEYS.filter(
   (key) => key !== "archivedAt" && key !== "roadmapEvents",
 );
-const ROADMAP_STATUS_UPDATE_KEYS = [
+const LEGACY_ROADMAP_STATUS_UPDATE_KEYS = [
   "type",
   "id",
   "actor",
@@ -572,6 +623,15 @@ const ROADMAP_STATUS_UPDATE_KEYS = [
   "proposedReferences",
   "timestamp",
 ];
+const UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS = [
+  ...LEGACY_ROADMAP_STATUS_UPDATE_KEYS,
+  "verification",
+  "verificationReason",
+];
+const ROADMAP_STATUS_UPDATE_KEYS = [
+  ...UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS,
+  "verificationSession",
+];
 const ROADMAP_REFERENCE_DECISION_KEYS = [
   "type",
   "id",
@@ -581,6 +641,29 @@ const ROADMAP_REFERENCE_DECISION_KEYS = [
   "timestamp",
 ];
 const ROADMAP_OVERRIDE_RESET_KEYS = ["type", "id", "field", "timestamp"];
+const ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS = [
+  "type",
+  "id",
+  "session",
+  "planStepTotal",
+  "completedPlanSteps",
+  "runOutcome",
+  "timestamp",
+];
+const ROADMAP_COMPLETION_REVIEW_KEYS = [
+  "type",
+  "id",
+  "reviewer",
+  "decision",
+  "evidence",
+  "reason",
+  "implementationCheckpointId",
+  "verificationStatusUpdateId",
+  "acceptsVerificationException",
+  "gateOutcome",
+  "unmetGateCodes",
+  "timestamp",
+];
 const LEGACY_ROADMAP_PROPOSAL_KEYS = [
   "id",
   "provider",
@@ -628,6 +711,37 @@ const ROADMAP_STATUS_OUTCOMES = new Set<NotesRoadmapStatusOutcome>([
   "same-status",
   "manual-override",
   "done-terminal",
+]);
+const VERIFICATION_STATUSES = new Set<NotesVerificationStatus>([
+  "passed",
+  "failed",
+  "exception-requested",
+]);
+const IMPLEMENTATION_RUN_OUTCOMES = new Set<NotesImplementationRunOutcome>([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+const COMPLETION_GATE_OUTCOMES = new Set<NotesCompletionGateOutcome>([
+  "done",
+  "review",
+  "needs-attention",
+  "waiting-for-approval",
+  "manual-override",
+  "done-terminal",
+]);
+const COMPLETION_UNMET_GATE_CODES = new Set<NotesCompletionUnmetGateCode>([
+  "missing-implementation",
+  "stale-session",
+  "run-not-successful",
+  "incomplete-plan",
+  "missing-verification",
+  "failed-verification",
+  "verification-exception-not-accepted",
+  "unresolved-approval",
+  "unresolved-attention",
+  "inactive-phase",
 ]);
 
 export function isNotesDocumentV2(value: unknown): value is NotesDocumentV2 {
@@ -680,9 +794,32 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
 
     const roadmapEvents = migratedPhase.roadmapEvents.map((event) => {
       if (!isRecord(event) || event.type !== "status-update") return event;
-      if (!Array.isArray(event.proposedReferences)) return event;
       let migratedEvent = false;
-      const proposedReferences = event.proposedReferences.map((proposal) => {
+      const migratedStatusUpdate: Record<string, unknown> = hasExactKeys(
+        event,
+        LEGACY_ROADMAP_STATUS_UPDATE_KEYS,
+      )
+        ? (() => {
+            migratedEvent = true;
+            migrated = true;
+            return {
+              ...event,
+              verification: null,
+              verificationReason: null,
+              verificationSession: null,
+            };
+          })()
+        : hasExactKeys(event, UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS)
+          ? (() => {
+              migratedEvent = true;
+              migrated = true;
+              return { ...event, verificationSession: null };
+            })()
+          : event;
+      if (!Array.isArray(migratedStatusUpdate.proposedReferences)) {
+        return migratedEvent ? migratedStatusUpdate : event;
+      }
+      const proposedReferences = migratedStatusUpdate.proposedReferences.map((proposal) => {
         if (!isRecord(proposal) || !hasExactKeys(proposal, LEGACY_ROADMAP_PROPOSAL_KEYS)) {
           return proposal;
         }
@@ -697,7 +834,7 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
         migrated = true;
         return { ...proposal, policyOutcome };
       });
-      return migratedEvent ? { ...event, proposedReferences } : event;
+      return migratedEvent ? { ...migratedStatusUpdate, proposedReferences } : event;
     });
     return { ...migratedPhase, roadmapEvents };
   });
@@ -1131,6 +1268,11 @@ function validateRoadmapEvents(
   const proposalIds = new Set<string>();
   const pendingProposalIds = new Set<string>();
   const decidedProposalIds = new Set<string>();
+  const implementationCheckpoints = new Map<string, NotesRoadmapImplementationCheckpoint>();
+  const implementationCheckpointIndexes = new Map<string, number>();
+  const verificationUpdates = new Map<string, NotesRoadmapStatusUpdate>();
+  const verificationUpdateIndexes = new Map<string, number>();
+  let latestRejectedReviewIndex = -1;
   let previousTimestamp = -Infinity;
 
   for (let index = 0; index < value.length; index += 1) {
@@ -1189,6 +1331,53 @@ function validateRoadmapEvents(
       }
       if (event.transition === "review" && event.evidence.length === 0) {
         return validationError(`${eventPath}.evidence`, "review reports require evidence");
+      }
+      if (event.verification === null) {
+        if (event.verificationReason !== null) {
+          return validationError(
+            `${eventPath}.verificationReason`,
+            "verification reason requires a verification result",
+          );
+        }
+        if (event.verificationSession !== null) {
+          return validationError(
+            `${eventPath}.verificationSession`,
+            "verification session requires a verification result",
+          );
+        }
+      } else {
+        if (
+          typeof event.verification !== "string" ||
+          !VERIFICATION_STATUSES.has(event.verification as NotesVerificationStatus)
+        ) {
+          return validationError(`${eventPath}.verification`, "unknown verification result");
+        }
+        if (event.verification === "passed") {
+          if (event.evidence.length === 0) {
+            return validationError(
+              `${eventPath}.evidence`,
+              "passed verification requires evidence",
+            );
+          }
+          if (event.verificationReason !== null) {
+            return validationError(
+              `${eventPath}.verificationReason`,
+              "passed verification cannot include a failure or exception reason",
+            );
+          }
+        } else if (!isBoundedNonEmptyString(event.verificationReason, 1_024)) {
+          return validationError(
+            `${eventPath}.verificationReason`,
+            "failed or exception verification requires a bounded reason",
+          );
+        }
+        const verificationSessionError = validateSession(
+          event.verificationSession,
+          `${eventPath}.verificationSession`,
+        );
+        if (verificationSessionError) return verificationSessionError;
+        verificationUpdates.set(event.id, event as unknown as NotesRoadmapStatusUpdate);
+        verificationUpdateIndexes.set(event.id, index);
       }
       if (
         typeof event.statusOutcome !== "string" ||
@@ -1263,6 +1452,185 @@ function validateRoadmapEvents(
       }
       continue;
     }
+
+    if (event.type === "implementation-checkpoint") {
+      if (!hasExactKeys(event, ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS)) {
+        return validationError(eventPath, "invalid implementation checkpoint");
+      }
+      const sessionError = validateSession(event.session, `${eventPath}.session`);
+      if (sessionError || event.session === null) {
+        return (
+          sessionError ?? validationError(`${eventPath}.session`, "a bound session is required")
+        );
+      }
+      if (!isPositiveInteger(event.planStepTotal)) {
+        return validationError(`${eventPath}.planStepTotal`, "expected a positive integer");
+      }
+      if (!Array.isArray(event.completedPlanSteps)) {
+        return validationError(`${eventPath}.completedPlanSteps`, "expected a sorted step array");
+      }
+      let priorStep = 0;
+      for (let stepIndex = 0; stepIndex < event.completedPlanSteps.length; stepIndex += 1) {
+        const step = event.completedPlanSteps[stepIndex];
+        if (!isPositiveInteger(step) || step > event.planStepTotal || step <= priorStep) {
+          return validationError(
+            `${eventPath}.completedPlanSteps[${stepIndex}]`,
+            "expected unique ascending steps within the plan total",
+          );
+        }
+        priorStep = step;
+      }
+      if (
+        typeof event.runOutcome !== "string" ||
+        !IMPLEMENTATION_RUN_OUTCOMES.has(event.runOutcome as NotesImplementationRunOutcome)
+      ) {
+        return validationError(`${eventPath}.runOutcome`, "unknown implementation run outcome");
+      }
+      implementationCheckpoints.set(
+        event.id,
+        event as unknown as NotesRoadmapImplementationCheckpoint,
+      );
+      implementationCheckpointIndexes.set(event.id, index);
+      continue;
+    }
+
+    if (event.type === "completion-review") {
+      if (!hasExactKeys(event, ROADMAP_COMPLETION_REVIEW_KEYS)) {
+        return validationError(eventPath, "invalid completion review");
+      }
+      if (event.reviewer !== "ken" && event.reviewer !== "ken-autopilot") {
+        return validationError(`${eventPath}.reviewer`, "expected Ken or Autopilot Ken");
+      }
+      if (event.decision !== "accepted" && event.decision !== "rejected") {
+        return validationError(`${eventPath}.decision`, "expected accepted or rejected");
+      }
+      if (
+        !Array.isArray(event.evidence) ||
+        event.evidence.length > 20 ||
+        !event.evidence.every((item) => isBoundedNonEmptyString(item, 4_096))
+      ) {
+        return validationError(`${eventPath}.evidence`, "expected up to 20 bounded evidence items");
+      }
+      if (event.decision === "accepted" && event.evidence.length === 0) {
+        return validationError(`${eventPath}.evidence`, "accepted reviews require evidence");
+      }
+      if (event.reason !== null && !isBoundedNonEmptyString(event.reason, 1_024)) {
+        return validationError(`${eventPath}.reason`, "expected a bounded reason or null");
+      }
+      if (event.decision === "rejected" && event.reason === null) {
+        return validationError(`${eventPath}.reason`, "rejected reviews require a reason");
+      }
+      if (
+        event.implementationCheckpointId !== null &&
+        (!isNonEmptyString(event.implementationCheckpointId) ||
+          !implementationCheckpoints.has(event.implementationCheckpointId))
+      ) {
+        return validationError(
+          `${eventPath}.implementationCheckpointId`,
+          "expected a prior implementation checkpoint ID or null",
+        );
+      }
+      if (
+        event.verificationStatusUpdateId !== null &&
+        (!isNonEmptyString(event.verificationStatusUpdateId) ||
+          !verificationUpdates.has(event.verificationStatusUpdateId))
+      ) {
+        return validationError(
+          `${eventPath}.verificationStatusUpdateId`,
+          "expected a prior typed verification update ID or null",
+        );
+      }
+      if (typeof event.acceptsVerificationException !== "boolean") {
+        return validationError(`${eventPath}.acceptsVerificationException`, "expected a boolean");
+      }
+      if (
+        event.acceptsVerificationException &&
+        (event.verificationStatusUpdateId === null ||
+          verificationUpdates.get(event.verificationStatusUpdateId)?.verification !==
+            "exception-requested")
+      ) {
+        return validationError(
+          `${eventPath}.acceptsVerificationException`,
+          "can only accept a referenced verification exception",
+        );
+      }
+      if (
+        typeof event.gateOutcome !== "string" ||
+        !COMPLETION_GATE_OUTCOMES.has(event.gateOutcome as NotesCompletionGateOutcome)
+      ) {
+        return validationError(`${eventPath}.gateOutcome`, "unknown completion gate outcome");
+      }
+      if (!Array.isArray(event.unmetGateCodes) || event.unmetGateCodes.length > 20) {
+        return validationError(`${eventPath}.unmetGateCodes`, "expected up to 20 unmet gate codes");
+      }
+      const unmetCodes = new Set<string>();
+      for (let gateIndex = 0; gateIndex < event.unmetGateCodes.length; gateIndex += 1) {
+        const gate = event.unmetGateCodes[gateIndex];
+        if (
+          typeof gate !== "string" ||
+          !COMPLETION_UNMET_GATE_CODES.has(gate as NotesCompletionUnmetGateCode) ||
+          unmetCodes.has(gate)
+        ) {
+          return validationError(
+            `${eventPath}.unmetGateCodes[${gateIndex}]`,
+            "expected a unique known completion gate code",
+          );
+        }
+        unmetCodes.add(gate);
+      }
+      if (event.gateOutcome === "done") {
+        const implementationCheckpoint =
+          typeof event.implementationCheckpointId === "string"
+            ? implementationCheckpoints.get(event.implementationCheckpointId)
+            : undefined;
+        const verificationStatusUpdate =
+          typeof event.verificationStatusUpdateId === "string"
+            ? verificationUpdates.get(event.verificationStatusUpdateId)
+            : undefined;
+        const hasCompleteSuccessfulImplementation =
+          implementationCheckpoint !== undefined &&
+          implementationCheckpoint.runOutcome === "succeeded" &&
+          implementationCheckpoint.completedPlanSteps.length ===
+            implementationCheckpoint.planStepTotal &&
+          implementationCheckpoint.completedPlanSteps.every((step, index) => step === index + 1);
+        const hasAcceptedVerification =
+          (verificationStatusUpdate?.verification === "passed" &&
+            !event.acceptsVerificationException) ||
+          (verificationStatusUpdate?.verification === "exception-requested" &&
+            event.acceptsVerificationException);
+        const hasFreshReviewRoundEvidence =
+          implementationCheckpoint !== undefined &&
+          verificationStatusUpdate !== undefined &&
+          (implementationCheckpointIndexes.get(implementationCheckpoint.id) ?? -1) >
+            latestRejectedReviewIndex &&
+          (verificationUpdateIndexes.get(verificationStatusUpdate.id) ?? -1) >
+            latestRejectedReviewIndex;
+        const hasSameSessionEvidence =
+          implementationCheckpoint !== undefined &&
+          verificationStatusUpdate?.verificationSession !== null &&
+          verificationStatusUpdate?.verificationSession !== undefined &&
+          implementationCheckpoint.session.sessionId ===
+            verificationStatusUpdate.verificationSession.sessionId &&
+          implementationCheckpoint.session.sessionPath ===
+            verificationStatusUpdate.verificationSession.sessionPath;
+        if (
+          event.decision !== "accepted" ||
+          !hasCompleteSuccessfulImplementation ||
+          !hasAcceptedVerification ||
+          !hasFreshReviewRoundEvidence ||
+          !hasSameSessionEvidence ||
+          event.unmetGateCodes.length > 0
+        ) {
+          return validationError(
+            eventPath,
+            "Done requires accepted review evidence, a successful complete implementation checkpoint, passed verification or an accepted verification exception, and no unmet gates",
+          );
+        }
+      }
+      if (event.decision === "rejected") latestRejectedReviewIndex = index;
+      continue;
+    }
+
     return validationError(`${eventPath}.type`, "unknown roadmap event type");
   }
   return null;

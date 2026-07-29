@@ -109,6 +109,12 @@ export interface AutopilotCycleDeps {
   runImplement: () => Promise<void>;
   /** Feed a PROMPT verdict's body to GG Coder as an injected run. */
   runPrompt: (body: string) => Promise<void>;
+  /** Persist the authoritative work-review decision before terminal emission or
+   *  a revision run. False means persistence failed or went stale, so the cycle stops. */
+  persistReviewDecision: (
+    verdict: Extract<AutopilotVerdict, { kind: "all_clear" | "prompt" }>,
+    round: number,
+  ) => Promise<boolean>;
   /** Called BEFORE runPrompt: record the injected body (digest labeling) and
    *  broadcast the autopilot_prompted marker. */
   onInjected: (body: string, round: number) => void;
@@ -169,6 +175,7 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
     const verdict = await deps.review();
     if (!verdict || deps.isCancelled()) return;
     if (verdict.kind === "all_clear") {
+      if (!(await deps.persistReviewDecision(verdict, round)) || deps.isCancelled()) return;
       deps.emit({ type: "autopilot_done", data: {} });
       return;
     }
@@ -180,6 +187,7 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
       deps.emit({ type: "autopilot_human", data: { reason: verdict.reason } });
       return;
     }
+    if (!(await deps.persistReviewDecision(verdict, round)) || deps.isCancelled()) return;
     deps.onInjected(verdict.body, round);
     await deps.runPrompt(verdict.body);
     if (deps.isCancelled()) return;

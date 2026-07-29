@@ -6,12 +6,34 @@ import type { Item } from "./App";
 import type { SidecarEvent } from "./agent";
 import { useAutopilot } from "./useAutopilot";
 
+const phaseSession = { sessionId: "session-24", sessionPath: "/sessions/24.jsonl" };
+
 const terminalEvents: SidecarEvent[] = [
   { type: "autopilot_done", data: {} },
   { type: "autopilot_ignored", data: {} },
   { type: "autopilot_human", data: { reason: "needs a decision" } },
   { type: "autopilot_capped", data: {} },
   { type: "autopilot_error", data: { message: "review failed" } },
+  {
+    type: "phase_completion_review_failed",
+    data: {
+      code: "storage-failure",
+      phaseId: "phase-24",
+      session: phaseSession,
+      recovery: "Free space, then rerun final review.",
+      detail: "disk full",
+    },
+  },
+  {
+    type: "phase_completion_review_blocked",
+    data: {
+      phaseId: "phase-24",
+      session: phaseSession,
+      gateOutcome: "needs-attention",
+      unmetGateCodes: ["failed-verification"],
+      recovery: "Fix verification, then rerun final review.",
+    },
+  },
   { type: "run_end", data: { cancelled: true } },
 ];
 
@@ -43,4 +65,24 @@ describe("useAutopilot active review state", () => {
 
     expect(hook.result.current.autopilotReviewing).toBe(false);
   });
+
+  it.each(["phase_completion_review_failed", "phase_completion_review_blocked"])(
+    "passes malformed %s frames through without settling the active review",
+    (type) => {
+      const hook = setup();
+      act(() =>
+        hook.result.current.handleAutopilotEvent({ type: "autopilot_review_start", data: {} }),
+      );
+
+      let consumed = true;
+      expect(() => {
+        act(() => {
+          consumed = hook.result.current.handleAutopilotEvent({ type, data: null });
+        });
+      }).not.toThrow();
+
+      expect(consumed).toBe(false);
+      expect(hook.result.current.autopilotReviewing).toBe(true);
+    },
+  );
 });

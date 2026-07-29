@@ -108,6 +108,44 @@ const Evidence = z
   .max(20)
   .default([]);
 const ProposedReferences = z.array(RoadmapReferenceProposalParams).max(20).default([]);
+const ReviewReason = z
+  .string()
+  .max(1_024)
+  .transform(normalizedText)
+  .refine((value) => value.length > 0, "reason is required");
+const Verification = z
+  .discriminatedUnion("result", [
+    z.object({ result: z.literal("passed") }).strict(),
+    z.object({ result: z.literal("failed"), reason: ReviewReason }).strict(),
+    z.object({ result: z.literal("exception-requested"), reason: ReviewReason }).strict(),
+  ])
+  .nullish()
+  .transform((value) => value ?? null);
+const FinalReview = z
+  .discriminatedUnion("decision", [
+    z
+      .object({
+        review_id: StableId,
+        decision: z.literal("accepted"),
+        evidence: Evidence.refine((items) => items.length > 0, {
+          message: "accepted reviews require at least one evidence item",
+        }),
+        reason: ReviewReason.nullish().transform((value) => value ?? null),
+        accepts_verification_exception: z.boolean().default(false),
+      })
+      .strict(),
+    z
+      .object({
+        review_id: StableId,
+        decision: z.literal("rejected"),
+        evidence: Evidence,
+        reason: ReviewReason,
+        accepts_verification_exception: z.literal(false).default(false),
+      })
+      .strict(),
+  ])
+  .nullish()
+  .transform((value) => value ?? null);
 
 const commonFields = {
   update_id: StableId,
@@ -115,46 +153,58 @@ const commonFields = {
   expected_revision: z.number().int().nonnegative().optional(),
   progress: Progress,
   evidence: Evidence,
+  verification: Verification,
+  final_review: FinalReview,
   proposed_references: ProposedReferences,
 };
 
-export const RoadmapStatusParams = z.discriminatedUnion("transition", [
-  z
-    .object({
-      ...commonFields,
-      transition: z.literal("pending"),
-      blocker: z.never().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      ...commonFields,
-      transition: z.literal("in-progress"),
-      blocker: z.never().optional(),
-    })
-    .strict(),
-  z
-    .object({
-      ...commonFields,
-      transition: z.literal("blocked"),
-      blocker: z
-        .string()
-        .max(1_024)
-        .transform(normalizedText)
-        .refine((value) => value.length > 0, "blocker is required for blocked reports"),
-    })
-    .strict(),
-  z
-    .object({
-      ...commonFields,
-      transition: z.literal("review"),
-      blocker: z.never().optional(),
-      evidence: Evidence.refine((items) => items.length > 0, {
-        message: "review reports require at least one evidence item",
-      }),
-    })
-    .strict(),
-]);
+export const RoadmapStatusParams = z
+  .discriminatedUnion("transition", [
+    z
+      .object({
+        ...commonFields,
+        transition: z.literal("pending"),
+        blocker: z.never().optional(),
+      })
+      .strict(),
+    z
+      .object({
+        ...commonFields,
+        transition: z.literal("in-progress"),
+        blocker: z.never().optional(),
+      })
+      .strict(),
+    z
+      .object({
+        ...commonFields,
+        transition: z.literal("blocked"),
+        blocker: z
+          .string()
+          .max(1_024)
+          .transform(normalizedText)
+          .refine((value) => value.length > 0, "blocker is required for blocked reports"),
+      })
+      .strict(),
+    z
+      .object({
+        ...commonFields,
+        transition: z.literal("review"),
+        blocker: z.never().optional(),
+        evidence: Evidence.refine((items) => items.length > 0, {
+          message: "review reports require at least one evidence item",
+        }),
+      })
+      .strict(),
+  ])
+  .superRefine((report, context) => {
+    if (report.verification?.result === "passed" && report.evidence.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["evidence"],
+        message: "passed verification requires at least one evidence item",
+      });
+    }
+  });
 
 export type RoadmapStatusInput = z.infer<typeof RoadmapStatusParams>;
 export type RoadmapReferenceProposalInput = z.infer<typeof RoadmapReferenceProposalParams>;
@@ -178,10 +228,11 @@ export function createRoadmapStatusTool(
   return {
     name: "roadmap_status",
     description:
-      "Append one bounded Roadmap progress, blocker, evidence, and structured-reference report. " +
-      "Report meaningful milestones promptly, one call at a time. Cite actual verification in evidence, " +
-      "reuse update_id only when retrying the same report, and avoid repeating an unchanged report. " +
-      "This tool cannot mark a phase Done or clear a user override.",
+      "Append one bounded Roadmap progress, blocker, typed verification, final-review decision, and structured-reference report. " +
+      "Report meaningful milestones promptly, one call at a time. Cite actual checks in evidence, " +
+      "reuse IDs only when retrying the same report, and avoid repeating an unchanged report. " +
+      "GG Coder may report verification but only Ken or Autopilot Ken may submit final_review; " +
+      "the completion gate, not this tool text, decides Done and preserves user overrides.",
     parameters: RoadmapStatusParams,
     executionMode: "sequential",
     async execute(input) {

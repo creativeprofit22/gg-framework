@@ -557,6 +557,8 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       progress: `Progress for ${transition}`,
       blocker: transition === "blocked" ? "CI is unavailable" : null,
       evidence: transition === "review" ? ["Focused tests passed"] : [],
+      verification: null,
+      verificationReason: null,
       proposedReferences: [],
       timestamp: NOW,
       expectedSession: { sessionId: "session-roadmap", sessionPath: "/sessions/roadmap.jsonl" },
@@ -590,6 +592,8 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       progress: "Implementation is underway",
       blocker: null,
       evidence: [],
+      verification: null,
+      verificationReason: null,
       proposedReferences: [],
       timestamp: NOW,
       expectedRevision: 1,
@@ -644,6 +648,8 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       progress: "Verified normalized coordinates",
       blocker: null,
       evidence: [],
+      verification: null,
+      verificationReason: null,
       proposedReferences: [reference],
       timestamp: NOW,
       autopilotEnabled: false,
@@ -718,6 +724,8 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       progress: "Verified source",
       blocker: null,
       evidence: [],
+      verification: null,
+      verificationReason: null,
       proposedReferences: [reference],
       timestamp: NOW,
     };
@@ -839,6 +847,90 @@ describe("project Notes identity and validation", () => {
       snapshot: { document: fixture },
     });
     expect((await readEnvelope(repository.paths(cwd).primary)).document).toEqual(fixture);
+  });
+
+  it.each([
+    "failed implementation checkpoint",
+    "incomplete implementation checkpoint",
+    "failed verification",
+    "unaccepted verification exception",
+    "exception acceptance without an exception",
+    "verification from a different session",
+    "evidence from before the latest rejection",
+  ] as const)("rejects an impossible automatic Done with %s", async (shape) => {
+    const fixture = (await canonicalNotesFixture()) as NotesDocumentV3;
+    const events = fixture.phases[0]!.roadmapEvents;
+    const checkpoint = events.find((event) => event.type === "implementation-checkpoint")!;
+    const verification = events.find((event) => event.type === "status-update")!;
+    const review = events.find((event) => event.type === "completion-review")!;
+
+    switch (shape) {
+      case "failed implementation checkpoint":
+        checkpoint.runOutcome = "failed";
+        break;
+      case "incomplete implementation checkpoint":
+        checkpoint.completedPlanSteps = [1, 2];
+        break;
+      case "failed verification":
+        verification.verification = "failed";
+        verification.verificationReason = "Focused verification failed";
+        break;
+      case "unaccepted verification exception":
+        verification.verification = "exception-requested";
+        verification.verificationReason = "Verification exception requires review";
+        break;
+      case "exception acceptance without an exception":
+        review.acceptsVerificationException = true;
+        break;
+      case "verification from a different session":
+        verification.verificationSession = {
+          sessionId: "replacement-session",
+          sessionPath: "/sessions/replacement.jsonl",
+        };
+        break;
+      case "evidence from before the latest rejection":
+        events.splice(events.indexOf(review), 0, {
+          type: "completion-review",
+          id: "review-rejected-before-acceptance",
+          reviewer: "ken-autopilot",
+          decision: "rejected",
+          evidence: [],
+          reason: "Revise the implementation",
+          implementationCheckpointId: checkpoint.id,
+          verificationStatusUpdateId: verification.id,
+          acceptsVerificationException: false,
+          gateOutcome: "review",
+          unmetGateCodes: [],
+          timestamp: review.timestamp,
+        });
+        break;
+    }
+
+    expect(validateNotesDocumentV3(fixture)).toMatchObject({ ok: false });
+    await expect(
+      new ProjectNotesRepository(await tempAgentDir()).migrate(`/work/${shape}`, fixture),
+    ).resolves.toMatchObject({ status: "invalid" });
+  });
+
+  it("accepts and persists automatic Done with an accepted verification exception", async () => {
+    const fixture = (await canonicalNotesFixture()) as NotesDocumentV3;
+    const events = fixture.phases[0]!.roadmapEvents;
+    const verification = events.find((event) => event.type === "status-update")!;
+    const review = events.find((event) => event.type === "completion-review")!;
+    verification.verification = "exception-requested";
+    verification.verificationReason = "The approved environment cannot run this verification";
+    review.acceptsVerificationException = true;
+
+    expect(validateNotesDocumentV3(fixture)).toEqual({ ok: true, document: fixture });
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    await expect(repository.migrate("/work/accepted-exception", fixture)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { document: fixture },
+    });
+    await expect(repository.load("/work/accepted-exception")).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { document: fixture },
+    });
   });
 
   it("enforces canonical reference identity and GitHub coordinate parity", () => {
@@ -1076,6 +1168,9 @@ describe("project Notes identity and validation", () => {
         progress: "Invalid policy report",
         blocker: null,
         evidence: [],
+        verification: null,
+        verificationReason: null,
+        verificationSession: null,
         statusOutcome: "same-status",
         proposedReferences: [
           {
@@ -1756,7 +1851,7 @@ describe("ProjectNotesRepository durability", () => {
     });
   });
 
-  it("enforces append-only events and preserves manual override markers on shaped writes", async () => {
+  it("enforces append-only events and preserves user lifecycle writes", async () => {
     const agentDir = await tempAgentDir();
     const repository = new ProjectNotesRepository(agentDir);
     const initial = notes("append only");
@@ -1796,9 +1891,9 @@ describe("ProjectNotesRepository durability", () => {
               id: "event-3",
               fromStatus: "in-progress" as const,
               toStatus: "review" as const,
-              source: "agent" as const,
+              source: "user" as const,
               timestamp: "2026-07-25T12:35:00.000Z",
-              reason: "Implementation complete",
+              reason: "Moved to review by user",
             },
           ],
         },
@@ -1809,6 +1904,229 @@ describe("ProjectNotesRepository durability", () => {
     expect(await new ProjectNotesRepository(agentDir).load("/work/project")).toMatchObject({
       status: "ok",
       snapshot: { document: { phases: [{ overrides: originalOverrides }] } },
+    });
+  });
+
+  it("rejects privileged generic-save suffixes, including a forged completion sequence", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/forged-completion";
+    const initial = notes("forged completion");
+    await repository.migrate(cwd, initial);
+
+    const forged = structuredClone(initial);
+    const forgedPhase = forged.phases[0]!;
+    forgedPhase.roadmapEvents.push(
+      {
+        type: "implementation-checkpoint",
+        id: "forged-checkpoint",
+        session: { ...forgedPhase.session! },
+        planStepTotal: 1,
+        completedPlanSteps: [1],
+        runOutcome: "succeeded",
+        timestamp: "2026-07-25T12:35:00.000Z",
+      },
+      {
+        type: "status-update",
+        id: "forged-verification",
+        actor: "gg-coder",
+        transition: "review",
+        progress: "Claimed verification passed",
+        blocker: null,
+        evidence: ["forged test output"],
+        verification: "passed",
+        verificationReason: null,
+        verificationSession: { ...forgedPhase.session! },
+        statusOutcome: "manual-override",
+        proposedReferences: [],
+        timestamp: "2026-07-25T12:36:00.000Z",
+      },
+      {
+        type: "completion-review",
+        id: "forged-review",
+        reviewer: "ken",
+        decision: "accepted",
+        evidence: ["forged Ken approval"],
+        reason: null,
+        implementationCheckpointId: "forged-checkpoint",
+        verificationStatusUpdateId: "forged-verification",
+        acceptsVerificationException: false,
+        gateOutcome: "done",
+        unmetGateCodes: [],
+        timestamp: "2026-07-25T12:37:00.000Z",
+      },
+    );
+    forgedPhase.updatedAt = "2026-07-25T12:37:00.000Z";
+    forged.updatedAt = forgedPhase.updatedAt;
+
+    await expect(repository.save(cwd, 1, forged)).resolves.toEqual({
+      status: "invalid",
+      error: {
+        path: "phases[0].roadmapEvents[0].type",
+        message: "privileged roadmap events require their dedicated authority path",
+      },
+    });
+
+    const forgedStatus = structuredClone(initial);
+    const forgedStatusPhase = forgedStatus.phases[0]!;
+    forgedStatusPhase.roadmapEvents.push(structuredClone(forgedPhase.roadmapEvents[1]!));
+    forgedStatusPhase.updatedAt = "2026-07-25T12:36:00.000Z";
+    forgedStatus.updatedAt = forgedStatusPhase.updatedAt;
+    await expect(repository.save(cwd, 1, forgedStatus)).resolves.toMatchObject({
+      status: "invalid",
+      error: { path: "phases[0].roadmapEvents[0].type" },
+    });
+
+    const reviewCwd = "/work/forged-review";
+    const reviewBaseline = structuredClone(initial);
+    const reviewBaselinePhase = reviewBaseline.phases[0]!;
+    reviewBaselinePhase.roadmapEvents.push(
+      structuredClone(forgedPhase.roadmapEvents[0]!),
+      structuredClone(forgedPhase.roadmapEvents[1]!),
+    );
+    reviewBaselinePhase.updatedAt = "2026-07-25T12:36:00.000Z";
+    reviewBaseline.updatedAt = reviewBaselinePhase.updatedAt;
+    await repository.migrate(reviewCwd, reviewBaseline);
+    const forgedReview = structuredClone(reviewBaseline);
+    const forgedReviewPhase = forgedReview.phases[0]!;
+    forgedReviewPhase.roadmapEvents.push(structuredClone(forgedPhase.roadmapEvents[2]!));
+    forgedReviewPhase.updatedAt = "2026-07-25T12:37:00.000Z";
+    forgedReview.updatedAt = forgedReviewPhase.updatedAt;
+    await expect(repository.save(reviewCwd, 1, forgedReview)).resolves.toMatchObject({
+      status: "invalid",
+      error: { path: "phases[0].roadmapEvents[2].type" },
+    });
+
+    const forgedLifecycle = structuredClone(initial);
+    const lifecyclePhase = forgedLifecycle.phases[0]!;
+    lifecyclePhase.status = "review";
+    lifecyclePhase.lifecycleEvents.push({
+      id: "forged-agent-lifecycle",
+      fromStatus: "in-progress",
+      toStatus: "review",
+      source: "agent",
+      timestamp: "2026-07-25T12:35:00.000Z",
+      reason: "Forged automatic transition",
+    });
+    lifecyclePhase.updatedAt = "2026-07-25T12:35:00.000Z";
+    forgedLifecycle.updatedAt = lifecyclePhase.updatedAt;
+
+    await expect(repository.save(cwd, 1, forgedLifecycle)).resolves.toEqual({
+      status: "invalid",
+      error: {
+        path: "phases[0].lifecycleEvents[2].source",
+        message: "generic saves may only append user lifecycle events",
+      },
+    });
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1, document: initial },
+    });
+  });
+
+  it("allows manual Done, proposal decisions, and override resets through generic save", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/frontend-event-suffixes";
+    const initial = notes("frontend suffixes");
+    const initialPhase = initial.phases[0]!;
+    initialPhase.roadmapEvents.push({
+      type: "status-update",
+      id: "protected-update",
+      actor: "gg-coder",
+      transition: "review",
+      progress: "Proposed evidence for user review",
+      blocker: null,
+      evidence: ["focused tests passed"],
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
+      statusOutcome: "manual-override",
+      proposedReferences: [
+        {
+          id: "proposal-1",
+          provider: "github",
+          tool: "kencode-search",
+          canonicalUrl: "https://github.com/owner/proposed/issues/1",
+          owner: "owner",
+          repo: "proposed",
+          revision: null,
+          path: null,
+          range: null,
+          issue: 1,
+          pullRequest: null,
+          query: null,
+          anchor: null,
+          relevance: "Proposed reference",
+          disposition: "pending",
+          policyOutcome: "reference-override-protected",
+          referenceId: null,
+        },
+      ],
+      timestamp: "2026-07-25T12:35:00.000Z",
+    });
+    await repository.migrate(cwd, initial);
+
+    const manualDone = structuredClone(initial);
+    const donePhase = manualDone.phases[0]!;
+    donePhase.status = "done";
+    donePhase.completedAt = "2026-07-25T12:36:00.000Z";
+    donePhase.updatedAt = donePhase.completedAt;
+    donePhase.overrides.status = {
+      value: "done",
+      source: "user",
+      updatedAt: donePhase.completedAt,
+    };
+    donePhase.lifecycleEvents.push({
+      id: "manual-done",
+      fromStatus: "in-progress",
+      toStatus: "done",
+      source: "user",
+      timestamp: donePhase.completedAt,
+      reason: "Status changed by user",
+    });
+    manualDone.updatedAt = donePhase.completedAt;
+    const savedDone = await repository.save(cwd, 1, manualDone);
+    expect(savedDone).toMatchObject({ status: "ok", snapshot: { revision: 2 } });
+    if (savedDone.status !== "ok") throw new Error("Expected manual Done save");
+
+    const decided = structuredClone(savedDone.snapshot.document);
+    const decidedPhase = decided.phases[0]!;
+    decidedPhase.roadmapEvents.push({
+      type: "reference-decision",
+      id: "decision-1",
+      proposalId: "proposal-1",
+      decision: "rejected",
+      referenceId: null,
+      timestamp: "2026-07-25T12:36:00.000Z",
+    });
+    decidedPhase.updatedAt = "2026-07-25T12:36:00.000Z";
+    decided.updatedAt = decidedPhase.updatedAt;
+    const savedDecision = await repository.save(cwd, 2, decided);
+    expect(savedDecision).toMatchObject({ status: "ok", snapshot: { revision: 3 } });
+    if (savedDecision.status !== "ok") throw new Error("Expected proposal decision save");
+
+    const reset = structuredClone(savedDecision.snapshot.document);
+    const resetPhase = reset.phases[0]!;
+    resetPhase.overrides = { status: null, referenceIds: null };
+    resetPhase.roadmapEvents.push(
+      {
+        type: "override-reset",
+        id: "status-reset",
+        field: "status",
+        timestamp: "2026-07-25T12:37:00.000Z",
+      },
+      {
+        type: "override-reset",
+        id: "references-reset",
+        field: "references",
+        timestamp: "2026-07-25T12:37:00.000Z",
+      },
+    );
+    resetPhase.updatedAt = "2026-07-25T12:37:00.000Z";
+    reset.updatedAt = resetPhase.updatedAt;
+
+    await expect(repository.save(cwd, 3, reset)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 4, document: reset },
     });
   });
 
@@ -1831,6 +2149,547 @@ describe("ProjectNotesRepository durability", () => {
       expect(conflict.snapshot).toEqual(success.snapshot);
       expect(success.snapshot.revision).toBe(2);
     }
+  });
+});
+
+describe("ProjectNotesRepository completion transactions", () => {
+  async function completionSetup(name: string, withOverride = false) {
+    const agentDir = await tempAgentDir();
+    const cwd = `/work/${name}`;
+    const document = notes(name);
+    const phase = document.phases[0]!;
+    phase.status = "review";
+    phase.attentionReason = null;
+    phase.completedAt = null;
+    phase.archivedAt = null;
+    phase.overrides.status = withOverride
+      ? { value: "review", source: "user", updatedAt: NOW }
+      : null;
+    phase.lifecycleEvents.push({
+      id: "event-review",
+      fromStatus: "in-progress",
+      toStatus: "review",
+      source: "agent",
+      timestamp: "2026-07-25T12:35:00.000Z",
+      reason: "Implementation review started",
+    });
+    phase.updatedAt = "2026-07-25T12:35:00.000Z";
+    document.updatedAt = phase.updatedAt;
+    const repository = new ProjectNotesRepository(agentDir);
+    await repository.migrate(cwd, document);
+    const expectedSession = { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" };
+    return { agentDir, cwd, repository, expectedSession };
+  }
+
+  async function recordCompleteEvidence(
+    repository: ProjectNotesRepository,
+    cwd: string,
+    expectedSession: { sessionId: string; sessionPath: string | null },
+  ) {
+    const checkpoint = await repository.recordImplementationCheckpoint(cwd, {
+      checkpointId: "checkpoint-complete",
+      phaseId: "phase-1",
+      expectedSession,
+      planStepTotal: 3,
+      completedPlanSteps: [1, 2, 3],
+      runOutcome: "succeeded",
+      timestamp: "2026-07-25T12:36:00.000Z",
+    });
+    expect(checkpoint).toMatchObject({ status: "committed", snapshot: { revision: 2 } });
+    const verification = await repository.recordRoadmapStatusUpdate(cwd, {
+      updateId: "verification-complete",
+      phaseId: "phase-1",
+      actor: "gg-coder",
+      transition: "review",
+      progress: "Focused verification passed",
+      blocker: null,
+      evidence: ["pnpm test passed"],
+      verification: "passed",
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: "2026-07-25T12:37:00.000Z",
+      expectedSession,
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+    });
+    expect(verification).toMatchObject({ status: "committed", snapshot: { revision: 3 } });
+  }
+
+  it("sets Done exactly once under a duplicate-review race and leaves archive separate", async () => {
+    const { agentDir, cwd, repository, expectedSession } = await completionSetup("completion-race");
+    await recordCompleteEvidence(repository, cwd, expectedSession);
+    const request = {
+      reviewId: "review-accepted",
+      phaseId: "phase-1",
+      expectedSession,
+      reviewer: "ken-autopilot" as const,
+      decision: "accepted" as const,
+      evidence: ["Autopilot Ken returned ALL_CLEAR"],
+      reason: null,
+      acceptsVerificationException: false,
+      timestamp: "2026-07-25T12:38:00.000Z",
+    };
+    const outcomes = await Promise.all([
+      repository.recordCompletionReview(cwd, request),
+      new ProjectNotesRepository(agentDir).recordCompletionReview(cwd, request),
+    ]);
+
+    expect(outcomes.map(({ status }) => status).sort()).toEqual(["committed", "duplicate"]);
+    const restarted = await new ProjectNotesRepository(agentDir).load(cwd);
+    expect(restarted).toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 4,
+        document: {
+          phases: [
+            {
+              status: "done",
+              completedAt: "2026-07-25T12:38:00.000Z",
+              archivedAt: null,
+              attentionReason: null,
+            },
+          ],
+        },
+      },
+    });
+    if (restarted.status !== "ok") throw new Error("Expected completion persistence");
+    const completed = restarted.snapshot.document.phases[0]!;
+    expect(completed.lifecycleEvents.filter((event) => event.toStatus === "done")).toHaveLength(1);
+    expect(
+      completed.roadmapEvents.filter((event) => event.type === "completion-review"),
+    ).toHaveLength(1);
+
+    const terminal = await repository.recordCompletionReview(cwd, {
+      ...request,
+      reviewId: "review-after-done",
+      timestamp: "2026-07-25T12:39:00.000Z",
+    });
+    expect(terminal).toMatchObject({
+      status: "committed",
+      evaluation: { gateOutcome: "done-terminal" },
+      phase: { status: "done", archivedAt: null },
+    });
+    if (terminal.status !== "committed") throw new Error("Expected terminal review evidence");
+    expect(
+      terminal.phase.lifecycleEvents.filter((event) => event.toStatus === "done"),
+    ).toHaveLength(1);
+  });
+
+  it("records protected review evidence without changing a user status override", async () => {
+    const { cwd, repository, expectedSession } = await completionSetup("completion-override", true);
+    await recordCompleteEvidence(repository, cwd, expectedSession);
+
+    const reviewed = await repository.recordCompletionReview(cwd, {
+      reviewId: "review-protected",
+      phaseId: "phase-1",
+      expectedSession,
+      reviewer: "ken",
+      decision: "accepted",
+      evidence: ["Ken accepted the final review"],
+      reason: null,
+      acceptsVerificationException: false,
+      timestamp: "2026-07-25T12:38:00.000Z",
+    });
+
+    expect(reviewed).toMatchObject({
+      status: "committed",
+      evaluation: { gateOutcome: "manual-override" },
+      phase: {
+        status: "review",
+        completedAt: null,
+        archivedAt: null,
+        overrides: { status: { source: "user" } },
+      },
+    });
+  });
+
+  it.each([
+    {
+      blocker: "approval",
+      status: "waiting-for-approval" as const,
+      source: "agent" as const,
+      reason: "Plan submitted for approval",
+      expectedGate: "waiting-for-approval",
+      expectedCode: "unresolved-approval",
+      resolution: {
+        status: "in-progress" as const,
+        source: "user" as const,
+        reason: "Plan approved by user",
+      },
+    },
+    {
+      blocker: "question",
+      status: "needs-attention" as const,
+      source: "agent" as const,
+      reason: "Choose the public API shape",
+      expectedGate: "needs-attention",
+      expectedCode: "unresolved-attention",
+      resolution: {
+        status: "in-progress" as const,
+        source: "session" as const,
+        reason: "Implementation run started",
+      },
+    },
+    {
+      blocker: "runtime error",
+      status: "needs-attention" as const,
+      source: "session" as const,
+      reason: "Provider connection failed",
+      expectedGate: "needs-attention",
+      expectedCode: "unresolved-attention",
+      resolution: {
+        status: "in-progress" as const,
+        source: "session" as const,
+        reason: "Implementation session resumed",
+      },
+    },
+    {
+      blocker: "tool failure",
+      status: "needs-attention" as const,
+      source: "agent" as const,
+      reason: "bash failed: typecheck failed",
+      expectedGate: "needs-attention",
+      expectedCode: "unresolved-attention",
+      resolution: {
+        status: "in-progress" as const,
+        source: "session" as const,
+        reason: "Implementation run started",
+      },
+    },
+  ])(
+    "does not let bundled final-review status evidence self-resolve a $blocker blocker",
+    async ({ blocker, status, source, reason, expectedGate, expectedCode, resolution }) => {
+      const { agentDir, cwd, repository, expectedSession } = await completionSetup(
+        `final-review-${blocker}`,
+      );
+      await recordCompleteEvidence(repository, cwd, expectedSession);
+      await expect(
+        repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
+          status,
+          source,
+          reason,
+          timestamp: "2026-07-25T12:38:00.000Z",
+          expectedSession,
+        }),
+      ).resolves.toMatchObject({ status: "ok" });
+
+      const first = await repository.recordRoadmapFinalReview(cwd, {
+        statusUpdate: {
+          updateId: `status-${blocker}-blocked`,
+          phaseId: "phase-1",
+          actor: "ken",
+          transition: "review",
+          progress: `Ken reviewed the ${blocker} blocker`,
+          blocker: null,
+          evidence: ["Reviewer report must not resolve lifecycle blockers"],
+          verification: null,
+          verificationReason: null,
+          proposedReferences: [],
+          timestamp: "2026-07-25T12:39:00.000Z",
+          autopilotEnabled: false,
+        },
+        review: {
+          reviewId: `review-${blocker}-blocked`,
+          decision: "accepted",
+          evidence: ["Ken reviewed all completion evidence"],
+          reason: null,
+          acceptsVerificationException: false,
+        },
+      });
+      expect(first).toMatchObject({
+        status: "committed",
+        statusOutcome: "evidence-only",
+        evaluation: {
+          gateOutcome: expectedGate,
+          unmetGateCodes: expect.arrayContaining([expectedCode]),
+        },
+        phase: { status },
+      });
+      if (first.status !== "committed") throw new Error("Expected blocked final review to commit");
+      expect(
+        first.phase.roadmapEvents.filter(
+          (event) =>
+            event.id === `status-${blocker}-blocked` || event.id === `review-${blocker}-blocked`,
+        ),
+      ).toHaveLength(2);
+
+      await expect(
+        repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
+          ...resolution,
+          timestamp: "2026-07-25T12:38:00.000Z",
+          expectedSession,
+        }),
+      ).resolves.toMatchObject({ status: "ok" });
+
+      const restartedRepository = new ProjectNotesRepository(agentDir);
+      const restarted = await restartedRepository.load(cwd);
+      expect(restarted).toMatchObject({ status: "ok" });
+      if (restarted.status !== "ok") throw new Error("Expected lifecycle resolution persistence");
+      expect(
+        restarted.snapshot.document.phases[0]!.lifecycleEvents.slice(-2).map(
+          ({ timestamp }) => timestamp,
+        ),
+      ).toEqual(["2026-07-25T12:38:00.000Z", "2026-07-25T12:38:00.000Z"]);
+
+      await expect(
+        restartedRepository.recordRoadmapFinalReview(cwd, {
+          statusUpdate: {
+            updateId: `status-${blocker}-resolved`,
+            phaseId: "phase-1",
+            actor: "ken",
+            transition: "review",
+            progress: `Ken confirmed the ${blocker} resolution`,
+            blocker: null,
+            evidence: ["A distinct lifecycle resolution was recorded"],
+            verification: null,
+            verificationReason: null,
+            proposedReferences: [],
+            timestamp: "2026-07-25T12:41:00.000Z",
+            autopilotEnabled: false,
+          },
+          review: {
+            reviewId: `review-${blocker}-resolved`,
+            decision: "accepted",
+            evidence: ["Ken confirmed every completion gate"],
+            reason: null,
+            acceptsVerificationException: false,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: "committed",
+        evaluation: { gateOutcome: "done", unmetGateCodes: [] },
+        phase: { status: "done" },
+      });
+    },
+  );
+
+  it("evaluates bundled verification before applying an accepted final review", async () => {
+    const { cwd, repository, expectedSession } = await completionSetup("bundled-verification");
+    await expect(
+      repository.recordImplementationCheckpoint(cwd, {
+        checkpointId: "checkpoint-bundled-verification",
+        phaseId: "phase-1",
+        expectedSession,
+        planStepTotal: 2,
+        completedPlanSteps: [1, 2],
+        runOutcome: "succeeded",
+        timestamp: "2026-07-25T12:36:00.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "committed" });
+
+    const reviewed = await repository.recordRoadmapFinalReview(cwd, {
+      statusUpdate: {
+        updateId: "verification-bundled-with-review",
+        phaseId: "phase-1",
+        actor: "ken",
+        transition: "review",
+        progress: "Ken completed verification and final review",
+        blocker: null,
+        evidence: ["pnpm test passed"],
+        verification: "passed",
+        verificationReason: null,
+        proposedReferences: [],
+        timestamp: "2026-07-25T12:37:00.000Z",
+        autopilotEnabled: false,
+      },
+      review: {
+        reviewId: "review-bundled-verification",
+        decision: "accepted",
+        evidence: ["Ken accepted every completion gate"],
+        reason: null,
+        acceptsVerificationException: false,
+      },
+    });
+
+    expect(reviewed).toMatchObject({
+      status: "committed",
+      evaluation: {
+        gateOutcome: "done",
+        verificationStatusUpdateId: "verification-bundled-with-review",
+        unmetGateCodes: [],
+      },
+      phase: { status: "done" },
+    });
+  });
+
+  it("rejects incompatible final-review transitions and equal bundled event IDs", async () => {
+    const { cwd, repository } = await completionSetup("final-review-request-guards");
+    const review = {
+      decision: "accepted" as const,
+      evidence: ["Ken reviewed every completion gate"],
+      reason: null,
+      acceptsVerificationException: false,
+    };
+    const statusUpdate = {
+      updateId: "guard-status",
+      phaseId: "phase-1",
+      actor: "ken" as const,
+      transition: "review" as const,
+      progress: "Ken completed final review",
+      blocker: null,
+      evidence: ["Review evidence"],
+      verification: null,
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: "2026-07-25T12:37:00.000Z",
+      autopilotEnabled: false,
+    };
+
+    await expect(
+      repository.recordRoadmapFinalReview(cwd, {
+        statusUpdate: {
+          ...statusUpdate,
+          updateId: "blocked-final-review-status",
+          transition: "blocked",
+          blocker: "Verification failed",
+        },
+        review: { ...review, reviewId: "blocked-final-review" },
+      }),
+    ).resolves.toEqual({
+      status: "invalid-review",
+      message: "Final reviews require a review status transition.",
+    });
+
+    await expect(
+      repository.recordRoadmapFinalReview(cwd, {
+        statusUpdate: { ...statusUpdate, updateId: "shared-final-review-id" },
+        review: { ...review, reviewId: "shared-final-review-id" },
+      }),
+    ).resolves.toEqual({ status: "duplicate-id-conflict", revision: 1 });
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1 },
+    });
+  });
+
+  it("leaves no bundled status evidence when final-review validation fails", async () => {
+    const { cwd, repository, expectedSession } = await completionSetup("invalid-atomic-review");
+    await recordCompleteEvidence(repository, cwd, expectedSession);
+    const before = await repository.load(cwd);
+    if (before.status !== "ok") throw new Error("Expected completion fixture");
+
+    await expect(
+      repository.recordRoadmapFinalReview(cwd, {
+        statusUpdate: {
+          updateId: "status-invalid-review",
+          phaseId: "phase-1",
+          actor: "ken",
+          transition: "review",
+          progress: "This status must not persist",
+          blocker: null,
+          evidence: [],
+          verification: null,
+          verificationReason: null,
+          proposedReferences: [],
+          timestamp: "2026-07-25T12:38:00.000Z",
+          autopilotEnabled: false,
+        },
+        review: {
+          reviewId: "review-invalid",
+          decision: "accepted",
+          evidence: [],
+          reason: null,
+          acceptsVerificationException: false,
+        },
+      }),
+    ).resolves.toMatchObject({ status: "invalid-review" });
+    const after = await repository.load(cwd);
+    expect(after).toMatchObject({ status: "ok", snapshot: { revision: before.snapshot.revision } });
+    if (after.status !== "ok") throw new Error("Expected unchanged completion fixture");
+    expect(after.snapshot.document.phases[0]!.roadmapEvents).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "status-invalid-review" }),
+        expect.objectContaining({ id: "review-invalid" }),
+      ]),
+    );
+  });
+
+  it("leaves the prior snapshot intact when atomic final-review persistence fails", async () => {
+    const { agentDir, cwd, repository, expectedSession } =
+      await completionSetup("failed-atomic-review");
+    await recordCompleteEvidence(repository, cwd, expectedSession);
+    const before = await repository.load(cwd);
+    if (before.status !== "ok") throw new Error("Expected completion fixture");
+    const failure = failingSyncFileSystem(repository.paths(cwd).primary);
+    const failingRepository = new ProjectNotesRepository(agentDir, {
+      fileSystem: failure.fileSystem,
+    });
+
+    await expect(
+      failingRepository.recordRoadmapFinalReview(cwd, {
+        statusUpdate: {
+          updateId: "status-storage-failure",
+          phaseId: "phase-1",
+          actor: "ken",
+          transition: "review",
+          progress: "This status must remain atomic",
+          blocker: null,
+          evidence: ["Ken reviewed all completion evidence"],
+          verification: null,
+          verificationReason: null,
+          proposedReferences: [],
+          timestamp: "2026-07-25T12:38:00.000Z",
+          autopilotEnabled: false,
+        },
+        review: {
+          reviewId: "review-storage-failure",
+          decision: "accepted",
+          evidence: ["Ken accepted every completion gate"],
+          reason: null,
+          acceptsVerificationException: false,
+        },
+      }),
+    ).rejects.toThrow("injected sync failure");
+    expect(failure.failed).toBe(true);
+
+    const after = await repository.load(cwd);
+    expect(after).toMatchObject({ status: "ok", snapshot: { revision: before.snapshot.revision } });
+    if (after.status !== "ok") throw new Error("Expected unchanged completion fixture");
+    expect(after.snapshot.document.phases[0]!.roadmapEvents).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "status-storage-failure" }),
+        expect.objectContaining({ id: "review-storage-failure" }),
+      ]),
+    );
+  });
+
+  it("rejects stale sessions, malformed checkpoints, and unauthorized review data", async () => {
+    const { cwd, repository, expectedSession } = await completionSetup("completion-guards");
+    await expect(
+      repository.recordImplementationCheckpoint(cwd, {
+        checkpointId: "bad-checkpoint",
+        phaseId: "phase-1",
+        expectedSession,
+        planStepTotal: 3,
+        completedPlanSteps: [2, 1],
+        runOutcome: "succeeded",
+        timestamp: NOW,
+      }),
+    ).resolves.toMatchObject({ status: "invalid-checkpoint" });
+    await expect(
+      repository.recordImplementationCheckpoint(cwd, {
+        checkpointId: "stale-checkpoint",
+        phaseId: "phase-1",
+        expectedSession: { sessionId: "stale", sessionPath: null },
+        planStepTotal: 1,
+        completedPlanSteps: [1],
+        runOutcome: "succeeded",
+        timestamp: NOW,
+      }),
+    ).resolves.toEqual({ status: "stale-session" });
+    await expect(
+      repository.recordCompletionReview(cwd, {
+        reviewId: "bad-review",
+        phaseId: "phase-1",
+        expectedSession,
+        reviewer: "gg-coder" as never,
+        decision: "accepted",
+        evidence: ["claim"],
+        reason: null,
+        acceptsVerificationException: false,
+        timestamp: NOW,
+      }),
+    ).resolves.toMatchObject({ status: "invalid-review" });
   });
 });
 

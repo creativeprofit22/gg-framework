@@ -33,6 +33,13 @@ export type PhaseLifecycleSignal =
   | { type: "autopilot-done" }
   | { type: "elapsed" };
 
+export type PhaseLifecycleResolution =
+  | "approval-opened"
+  | "approval-resolved"
+  | "attention-opened"
+  | "attention-resolved"
+  | "none";
+
 export interface PhaseLifecycleTransition {
   status: NotesAutomaticPhaseStatus;
   source: NotesLifecycleEventSource;
@@ -118,6 +125,38 @@ const RESTORED_STAGE_TRANSITIONS: Record<ActivePhaseExecutionStage, PhaseLifecyc
     reason: "Review session resumed",
   },
 };
+
+export function phaseLifecycleResolution(signal: PhaseLifecycleSignal): PhaseLifecycleResolution {
+  switch (signal.type) {
+    case "plan-submitted":
+      return "approval-opened";
+    case "plan-approved":
+      return "approval-resolved";
+    case "autopilot-human":
+    case "tool-failed":
+    case "runtime-error":
+    case "autopilot-stopped":
+    case "launch-failed":
+      return "attention-opened";
+    case "implementation-run-started":
+      return "attention-resolved";
+    case "session-restored":
+      return signal.executionStage === "awaiting-approval"
+        ? "approval-opened"
+        : signal.executionStage === "implementing" || signal.executionStage === "reviewing"
+          ? "attention-resolved"
+          : "none";
+    case "plan-entered":
+    case "ideal-review-started":
+    case "autopilot-review-started":
+    case "cancelled":
+    case "run-ended":
+    case "tool-succeeded":
+    case "autopilot-done":
+    case "elapsed":
+      return "none";
+  }
+}
 
 export function mapPhaseLifecycleSignal(
   signal: PhaseLifecycleSignal,

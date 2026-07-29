@@ -257,7 +257,7 @@ describe("pane agent client", () => {
     expect(await client.saveNotes(1, notesDocument)).toBe(saved);
   });
 
-  it("passes schema and route validation errors unchanged and rejects legacy bare outcomes", async () => {
+  it("passes schema, route, and event-authority errors unchanged and rejects legacy bare outcomes", async () => {
     const client = createPaneAgentClient("right");
     const schemaError = {
       status: "invalid",
@@ -271,15 +271,24 @@ describe("pane agent client", () => {
       status: "invalid",
       error: { path: "$", message: "invalid request body" },
     } as const;
+    const eventAuthorityError = {
+      status: "invalid",
+      error: {
+        path: "phases[0].roadmapEvents[0].type",
+        message: "privileged roadmap events require their dedicated authority path",
+      },
+    } as const;
     invoke
       .mockResolvedValueOnce(schemaError)
       .mockResolvedValueOnce(malformedJson)
       .mockResolvedValueOnce(invalidBody)
+      .mockResolvedValueOnce(eventAuthorityError)
       .mockResolvedValueOnce({ status: "invalid" });
 
     expect(await client.migrateNotes(notesDocument)).toBe(schemaError);
     expect(await client.migrateNotes(notesDocument)).toBe(malformedJson);
     expect(await client.saveNotes(1, notesDocument)).toBe(invalidBody);
+    expect(await client.saveNotes(1, notesDocument)).toBe(eventAuthorityError);
     await expect(client.saveNotes(1, notesDocument)).rejects.toThrow("invalid Notes save response");
   });
 
@@ -369,6 +378,39 @@ describe("pane agent client", () => {
     status.resolve({ ready: true, error: null, generation: 1, sessionId: "session" });
     await vi.waitFor(() => expect(onEvent).toHaveBeenCalledTimes(1));
     expect(onEvent).toHaveBeenCalledWith({ type: "notes_change", data: notesSnapshot });
+    unsubscribe();
+  });
+
+  it("forwards typed phase-completion events without changing their payload", async () => {
+    const onEvent = vi.fn();
+    const unsubscribe = createPaneAgentClient("right").subscribe(onEvent);
+    await vi.waitFor(() => expect(listeners.has("agent-event")).toBe(true));
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("agent_pane_status", { paneId: "right" }),
+    );
+    const data = {
+      phaseId: "phase-24",
+      session: { sessionId: "session", sessionPath: "/sessions/24.jsonl" },
+      gateOutcome: "needs-attention",
+      unmetGateCodes: ["failed-verification"],
+      recovery: "Fix verification, then rerun final review.",
+    };
+
+    listeners.get("agent-event")!({
+      payload: {
+        paneId: "right",
+        sessionId: "session",
+        type: "phase_completion_review_blocked",
+        data,
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(onEvent).toHaveBeenCalledWith({
+        type: "phase_completion_review_blocked",
+        data,
+      }),
+    );
     unsubscribe();
   });
 

@@ -2532,6 +2532,7 @@ body {
   font-size: 11px;
   line-height: 1.45;
 }
+.notes-completion-gates,
 .notes-roadmap-latest,
 .notes-roadmap-proposals,
 .notes-roadmap-history {
@@ -2539,12 +2540,66 @@ body {
   padding: 14px;
   border-top: 1px solid var(--border);
 }
+.notes-completion-gates h4,
 .notes-roadmap-latest h4,
 .notes-roadmap-proposals h4 {
   margin: 0 0 9px;
   color: var(--text);
   font-size: 13px;
   font-weight: 650;
+}
+.notes-completion-gates dl {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  overflow: hidden;
+}
+.notes-completion-gates dl > div {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.28fr) minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.notes-completion-gates dl > div:last-child {
+  border-bottom: 0;
+}
+.notes-completion-gates dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.notes-completion-gates dd {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.notes-completion-gates dd strong {
+  color: var(--text);
+  font-size: 12px;
+}
+.notes-completion-gates dd time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.notes-completion-gates dd ul {
+  margin: 2px 0 0;
+  padding-inline-start: 18px;
+}
+.notes-completion-unreviewed {
+  display: grid;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
 }
 .notes-roadmap-report {
   border-inline-start: 3px solid var(--primary);
@@ -2836,6 +2891,7 @@ body {
   .notes-reference-initial-phases,
   .notes-reference-phase-links,
   .notes-phase-reference-options,
+  .notes-completion-gates dl,
   .notes-roadmap-proposals > ul,
   .notes-roadmap-history ol,
   .notes-roadmap-row,
@@ -2958,6 +3014,10 @@ body {
   }
   .notes-phase-metadata {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .notes-completion-gates dl > div {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
   .notes-phase-secondary-actions {
     justify-content: flex-start;

@@ -120,6 +120,9 @@ function addPendingRoadmapProposal(
       progress: "Implemented the Roadmap status path",
       blocker: transition === "blocked" ? "Waiting for CI" : null,
       evidence: ["Focused tests passed"],
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
       statusOutcome: options.statusOverride ? "manual-override" : "same-status",
       proposedReferences: [
         {
@@ -1500,6 +1503,64 @@ describe("useProjectNotes sidecar authority", () => {
       decision: "rejected",
       referenceId: null,
     });
+  });
+
+  it("saves only user-owned lifecycle, proposal-decision, and override-reset suffixes", async () => {
+    const cwd = "/work/frontend-suffixes";
+    const server = new FakeNotesServer();
+    const document = addPendingRoadmapProposal(notes("frontend suffixes"), {
+      statusOverride: true,
+      referenceOverride: true,
+      transition: "blocked",
+    });
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document });
+    const client = server.connect(cwd);
+    let id = 0;
+    const options = {
+      ...hookOptions(client, new MemoryStorage()),
+      idFactory: () => `frontend-${++id}`,
+    };
+    const hook = renderHook(() => useProjectNotes(cwd, options));
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(1));
+
+    act(() => hook.result.current.changePhaseStatus("phase-roadmap", "done"));
+    await waitFor(() => expect(server.snapshots.get(cwd)?.document.phases[0]?.status).toBe("done"));
+    let decision!: Awaited<ReturnType<typeof hook.result.current.rejectReferenceProposal>>;
+    await act(async () => {
+      decision = await hook.result.current.rejectReferenceProposal("phase-roadmap", "proposal-1");
+    });
+    expect(decision).toMatchObject({ status: "committed" });
+    let statusReset!: Awaited<ReturnType<typeof hook.result.current.resumeAutomaticStatus>>;
+    await act(async () => {
+      statusReset = await hook.result.current.resumeAutomaticStatus("phase-roadmap");
+    });
+    expect(statusReset).toMatchObject({ status: "committed", resultingStatus: "done" });
+    let referenceReset!: Awaited<ReturnType<typeof hook.result.current.resumeAutomaticReferences>>;
+    await act(async () => {
+      referenceReset = await hook.result.current.resumeAutomaticReferences("phase-roadmap");
+    });
+    expect(referenceReset).toMatchObject({ status: "committed" });
+
+    const saved = server.snapshots.get(cwd)!;
+    expect(saved.revision).toBe(5);
+    expect(saved.document.phases[0]).toMatchObject({
+      status: "done",
+      overrides: { status: null, referenceIds: null },
+      lifecycleEvents: [
+        expect.objectContaining({
+          fromStatus: "not-started",
+          toStatus: "done",
+          source: "user",
+        }),
+      ],
+      roadmapEvents: [
+        expect.objectContaining({ type: "status-update" }),
+        expect.objectContaining({ type: "reference-decision", decision: "rejected" }),
+        expect.objectContaining({ type: "override-reset", field: "status" }),
+        expect.objectContaining({ type: "override-reset", field: "references" }),
+      ],
+    });
+    expect(client.saveCalls).toHaveLength(4);
   });
 
   it("resumes status from the latest protected report and resets references without changing links", async () => {

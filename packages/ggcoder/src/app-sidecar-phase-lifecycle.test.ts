@@ -3,6 +3,7 @@ import {
   AppSidecarPhaseLifecycleCoordinator,
   PHASE_LIFECYCLE_REASON_MAX_LENGTH,
   mapPhaseLifecycleSignal,
+  phaseLifecycleResolution,
   type BoundPhaseLifecycleContext,
   type PhaseLifecycleRepository,
   type PhaseLifecycleRepositoryOutcome,
@@ -209,6 +210,17 @@ describe("phase lifecycle signal mapper", () => {
     { type: "elapsed" },
   ] as const)("ignores $type instead of inferring Done or attention", (signal) => {
     expect(mapPhaseLifecycleSignal(signal, "implementing")).toBeNull();
+  });
+
+  it("separates blocker resolution signals from reviewer-start evidence", () => {
+    expect(phaseLifecycleResolution({ type: "plan-approved", approvalSource: "user" })).toBe(
+      "approval-resolved",
+    );
+    expect(phaseLifecycleResolution({ type: "implementation-run-started" })).toBe(
+      "attention-resolved",
+    );
+    expect(phaseLifecycleResolution({ type: "ideal-review-started" })).toBe("none");
+    expect(phaseLifecycleResolution({ type: "autopilot-review-started" })).toBe("none");
   });
 
   it("requires implementation stages for run and review start signals", () => {

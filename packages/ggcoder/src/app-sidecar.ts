@@ -145,6 +145,11 @@ import {
 import { launchBoundPhase, type BoundPhaseCandidate } from "./app-sidecar-phase-launch.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import {
+  AppSidecarPhaseCompletionCoordinator,
+  autopilotVerdictAcceptsVerificationException,
+  latestVerificationExceptionForReview,
+} from "./app-sidecar-phase-completion.js";
+import {
   APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
   AppSidecarRoadmapToolHost,
 } from "./app-sidecar-roadmap-tool-host.js";
@@ -1651,9 +1656,24 @@ async function createSession(
     await session.persistAppMarker("plan", { reason: reason ?? "" }).catch(() => {});
   }
 
+  let completionCheckpointBlocked = false;
+  const phaseCompletion = new AppSidecarPhaseCompletionCoordinator({
+    cwd,
+    repository: notesRepository,
+    broadcastSnapshot: broadcastNotesSnapshot,
+    onError: (error, kind) => {
+      captureSidecarError(error, "app-sidecar.phase.completion", { kind });
+      log("ERROR", "app-sidecar", "phase completion persistence failed", {
+        kind,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
     cwd,
     repository: notesRepository,
+    canSubmitFinalReview: () => !completionCheckpointBlocked,
     reconciliations: roadmapReconciliations,
     projectAutopilot,
     broadcastNotesSnapshot,
@@ -1876,6 +1896,7 @@ async function createSession(
 
   async function activateApprovedPlan(planPath: string | undefined): Promise<number> {
     deactivateApprovedPlan();
+    completionCheckpointBlocked = false;
     await session.setApprovedPlan(planPath);
     if (!planPath) return 0;
     approvedPlanPath = planPath;
@@ -1905,6 +1926,81 @@ async function createSession(
     }
     planMarkerTail = candidate.slice(-32);
     if (changed) void queueApprovedPlanProgressSync();
+  }
+
+  async function persistImplementationCheckpoint(
+    runOutcome: "succeeded" | "failed" | "cancelled" | "interrupted",
+    target: AgentSession = session,
+  ): Promise<boolean> {
+    const active = phaseLifecycleContext(target);
+    if (!active) return true;
+    let progress = approvedPlanPath === null ? null : planProgressPayload();
+    if (progress === null) {
+      const loaded = await notesRepository.load(cwd);
+      const phase =
+        loaded.status === "ok"
+          ? loaded.snapshot.document.phases.find((candidate) => candidate.id === active.phaseId)
+          : undefined;
+      const prior = [...(phase?.roadmapEvents ?? [])]
+        .reverse()
+        .find(
+          (event) =>
+            event.type === "implementation-checkpoint" &&
+            event.session.sessionId === active.session.sessionId &&
+            event.session.sessionPath === active.session.sessionPath,
+        );
+      if (!prior || prior.type !== "implementation-checkpoint") return true;
+      progress = {
+        total: prior.planStepTotal,
+        completed: [...prior.completedPlanSteps],
+      };
+    }
+    const reconciliation = roadmapReconciliations.tryAcquire(cwd, "implementation-checkpoint");
+    if (!reconciliation) {
+      const owner = roadmapReconciliations.owner(cwd);
+      completionCheckpointBlocked = true;
+      broadcast("phase_completion_checkpoint_failed", {
+        code: "reconciliation-in-progress",
+        phaseId: active.phaseId,
+        session: active.session,
+        owner: owner ? { operationId: owner.operationId, kind: owner.kind } : null,
+        recovery: "Retry the implementation run after the active Roadmap update finishes.",
+      });
+      return false;
+    }
+    try {
+      const outcome = await phaseCompletion.checkpoint({
+        checkpointId: randomUUID(),
+        phaseId: active.phaseId,
+        expectedSession: active.session,
+        planStepTotal: progress.total,
+        completedPlanSteps: progress.completed,
+        runOutcome,
+        timestamp: new Date().toISOString(),
+      });
+      if (outcome.status === "committed" || outcome.status === "duplicate") {
+        completionCheckpointBlocked = false;
+        return true;
+      }
+      completionCheckpointBlocked = true;
+      broadcast("phase_completion_checkpoint_failed", {
+        code: outcome.status,
+        phaseId: active.phaseId,
+        session: active.session,
+        recovery: "Resume the bound phase and rerun verification before final review.",
+        ...(outcome.status === "storage-failure"
+          ? {
+              detail:
+                outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+            }
+          : outcome.status === "invalid-checkpoint"
+            ? { detail: outcome.message }
+            : {}),
+      });
+      return false;
+    } finally {
+      reconciliation.release();
+    }
   }
 
   async function syncActivePhaseSessionLink(target: AgentSession = session) {
@@ -2379,15 +2475,17 @@ async function createSession(
         getGitDirtyFileCount(cwd).catch(() => gitDirtyFileCount),
       ]);
       // Serialize behind any marker/tool-triggered refresh so the terminal
-      // progress snapshot uses the live plan file. Once every canonical step
-      // is complete, remove the approved plan from future system prompts and
-      // clear the widget before run_end paints the idle activity bar.
-      if (
-        runSucceeded &&
-        !cancelled &&
-        approvedPlanPath !== null &&
-        (await queueApprovedPlanProgressSync())
-      ) {
+      // progress snapshot uses the live plan file. Persist that authoritative
+      // snapshot before cleanup; a failed checkpoint keeps the plan visible and
+      // prevents a later reviewer verdict from inferring completion.
+      let approvedPlanComplete = false;
+      if (approvedPlanPath !== null) {
+        approvedPlanComplete = await queueApprovedPlanProgressSync();
+      }
+      const checkpointPersisted = await persistImplementationCheckpoint(
+        cancelled ? "cancelled" : runSucceeded ? "succeeded" : "failed",
+      );
+      if (runSucceeded && !cancelled && approvedPlanComplete && checkpointPersisted) {
         try {
           await session.setApprovedPlan(undefined);
           deactivateApprovedPlan();
@@ -2421,6 +2519,18 @@ async function createSession(
   }
 
   // ── Autopilot orchestration ─────────────────────────────────
+
+  async function loadLatestAutopilotVerificationException() {
+    const active = phaseLifecycleContext();
+    if (!active) return null;
+    const loaded = await notesRepository.load(cwd);
+    if (loaded.status !== "ok") return null;
+    const phase = loaded.snapshot.document.phases.find(
+      (candidate) => candidate.id === active.phaseId,
+    );
+    return latestVerificationExceptionForReview(phase);
+  }
+
   // One review = prompt the kenAuto session with the review digest, read its
   // final assistant text, parse a verdict. Returns null on failure (surfaced as
   // an autopilot_error frame) so the cycle stops rather than looping blind.
@@ -2434,13 +2544,18 @@ async function createSession(
     broadcast("autopilot_review_start", {});
     try {
       const ken = await ensureKenAutoSession();
+      const [workflowCommands, verificationException] = await Promise.all([
+        loadWorkflowCommandSpecs(),
+        loadLatestAutopilotVerificationException(),
+      ]);
       const digest = buildKenAutopilotContext({
         cwd,
         gitBranch,
         messages: session.getMessages(),
         originalRequest,
         injectedPrompts: [...injectedAutopilotPrompts],
-        workflowCommands: await loadWorkflowCommandSpecs(),
+        workflowCommands,
+        verificationException,
       });
       await ken.prompt(digest);
       return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
@@ -2506,6 +2621,105 @@ async function createSession(
   // manual approval produce identical implementation turns.
   const IMPLEMENT_PLAN_PROMPT =
     "The plan has been approved. Implement it now, following each step in order.";
+
+  async function persistAutopilotReviewDecision(
+    verdict: Extract<AutopilotVerdict, { kind: "all_clear" | "prompt" }>,
+    round: number,
+  ): Promise<boolean> {
+    const active = phaseLifecycleContext();
+    if (!active) return true;
+    if (completionCheckpointBlocked) {
+      broadcast("phase_completion_review_failed", {
+        code: "completion-checkpoint-blocked",
+        phaseId: active.phaseId,
+        session: active.session,
+        recovery: "Rerun the implementation so its completion checkpoint can be persisted.",
+      });
+      return false;
+    }
+    const reconciliation = roadmapReconciliations.tryAcquire(cwd, "completion-review");
+    if (!reconciliation) {
+      const owner = roadmapReconciliations.owner(cwd);
+      broadcast("phase_completion_review_failed", {
+        code: "reconciliation-in-progress",
+        phaseId: active.phaseId,
+        session: active.session,
+        owner: owner ? { operationId: owner.operationId, kind: owner.kind } : null,
+        recovery: "Retry final review after the active Roadmap update finishes.",
+      });
+      return false;
+    }
+    try {
+      const currentVerificationException =
+        verdict.kind === "all_clear" && verdict.acceptedVerificationExceptionId !== undefined
+          ? await loadLatestAutopilotVerificationException()
+          : null;
+      const acceptsVerificationException =
+        verdict.kind === "all_clear" &&
+        autopilotVerdictAcceptsVerificationException(verdict, currentVerificationException);
+      const feedback =
+        verdict.kind === "prompt" ? verdict.body.replace(/\s+/g, " ").trim().slice(0, 1_024) : null;
+      const outcome = await phaseCompletion.review({
+        reviewId: randomUUID(),
+        phaseId: active.phaseId,
+        expectedSession: active.session,
+        reviewer: "ken-autopilot",
+        decision: verdict.kind === "all_clear" ? "accepted" : "rejected",
+        evidence:
+          verdict.kind === "all_clear"
+            ? [
+                `Autopilot Ken returned ALL_CLEAR after review round ${round}.`,
+                ...(acceptsVerificationException && currentVerificationException
+                  ? [
+                      `Autopilot Ken explicitly accepted verification exception ${currentVerificationException.id}.`,
+                    ]
+                  : []),
+              ]
+            : [],
+        reason: feedback,
+        acceptsVerificationException,
+        timestamp: new Date().toISOString(),
+      });
+      if (
+        (outcome.status === "committed" || outcome.status === "duplicate") &&
+        "evaluation" in outcome
+      ) {
+        if (verdict.kind === "prompt") return true;
+        if (
+          outcome.evaluation.gateOutcome === "done" ||
+          outcome.evaluation.gateOutcome === "manual-override" ||
+          outcome.evaluation.gateOutcome === "done-terminal"
+        ) {
+          return true;
+        }
+        broadcast("phase_completion_review_blocked", {
+          phaseId: active.phaseId,
+          session: active.session,
+          gateOutcome: outcome.evaluation.gateOutcome,
+          unmetGateCodes: outcome.evaluation.unmetGateCodes,
+          recovery: outcome.evaluation.reason,
+        });
+        return false;
+      }
+      broadcast("phase_completion_review_failed", {
+        code: outcome.status,
+        phaseId: active.phaseId,
+        session: active.session,
+        recovery: "Resume the bound phase and rerun final review.",
+        ...(outcome.status === "storage-failure"
+          ? {
+              detail:
+                outcome.error instanceof Error ? outcome.error.message : String(outcome.error),
+            }
+          : outcome.status === "invalid-review"
+            ? { detail: outcome.message }
+            : {}),
+      });
+      return false;
+    } finally {
+      reconciliation.release();
+    }
+  }
 
   // Drive the review→prompt→review loop for one finished user turn. Only ever
   // called after shouldStartAutopilotCycle approves the turn (POST /prompt or
@@ -2621,6 +2835,7 @@ async function createSession(
           await kenAutoSession?.newSession().catch(() => {});
         },
         review: () => runAutopilotReview(originalRequest),
+        persistReviewDecision: persistAutopilotReviewDecision,
         // prompt → record the injected body (so later digests label it as
         // Ken's, not the user's), show a compact Ken-tinted marker (not the
         // prompt body), then feed GG Coder bracketed by runAgent so the run

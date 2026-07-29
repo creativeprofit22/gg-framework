@@ -50,6 +50,7 @@ function makeDeps(
     runPrompt: async (body: string) => {
       ran.push(body);
     },
+    persistReviewDecision: vi.fn(async () => true),
     onInjected: (body: string, round: number) => {
       injected.push({ body, round });
     },
@@ -100,6 +101,39 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
     expect(deps.resetReviewer).toHaveBeenCalledTimes(1);
   });
 
+  it("awaits accepted-review persistence before autopilot_done", async () => {
+    const order: string[] = [];
+    const deps = makeDeps([{ kind: "all_clear" }], {
+      persistReviewDecision: vi.fn(async () => {
+        order.push("persisted");
+        return true;
+      }),
+      emit: () => order.push("emitted"),
+    });
+    await driveAutopilotCycle(deps);
+    expect(order).toEqual(["persisted", "emitted"]);
+  });
+
+  it("forwards explicit exception acceptance unchanged to durable persistence", async () => {
+    const verdict: AutopilotVerdict = {
+      kind: "all_clear",
+      acceptedVerificationExceptionId: "verification-exception-24",
+    };
+    const deps = makeDeps([verdict]);
+    await driveAutopilotCycle(deps);
+    expect(deps.persistReviewDecision).toHaveBeenCalledWith(verdict, 1);
+    expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
+  });
+
+  it("stops without terminal emission when accepted-review persistence fails", async () => {
+    const deps = makeDeps([{ kind: "all_clear" }], {
+      persistReviewDecision: vi.fn(async () => false),
+    });
+    await driveAutopilotCycle(deps);
+    expect(deps.emitted).toEqual([]);
+    expect(deps.persistReviewDecision).toHaveBeenCalledWith({ kind: "all_clear" }, 1);
+  });
+
   it("IGNORE → autopilot_ignored, no injected run", async () => {
     const deps = makeDeps([{ kind: "ignore" }]);
     await driveAutopilotCycle(deps);
@@ -128,8 +162,32 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
     // onInjected must precede runPrompt — the digest labeling depends on the
     // body being recorded before the injected run's messages exist.
     expect(order).toEqual(["injected:fix the test", "ran:fix the test"]);
+    expect(deps.persistReviewDecision).toHaveBeenNthCalledWith(
+      1,
+      { kind: "prompt", body: "fix the test" },
+      1,
+    );
+    expect(deps.persistReviewDecision).toHaveBeenNthCalledWith(2, { kind: "all_clear" }, 2);
     expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
     expect(deps.review).toHaveBeenCalledTimes(2);
+  });
+
+  it("persists rejected review before injection and stops when that write fails", async () => {
+    const onInjected = vi.fn();
+    const runPrompt = vi.fn(async () => {});
+    const deps = makeDeps([{ kind: "prompt", body: "fix the test" }], {
+      persistReviewDecision: vi.fn(async () => false),
+      onInjected,
+      runPrompt,
+    });
+    await driveAutopilotCycle(deps);
+    expect(deps.persistReviewDecision).toHaveBeenCalledWith(
+      { kind: "prompt", body: "fix the test" },
+      1,
+    );
+    expect(onInjected).not.toHaveBeenCalled();
+    expect(runPrompt).not.toHaveBeenCalled();
+    expect(deps.emitted).toEqual([]);
   });
 
   it("caps at maxRounds PROMPT verdicts → autopilot_capped", async () => {

@@ -65,6 +65,27 @@ export interface SidecarEvent {
   data: unknown;
 }
 
+export {
+  isPhaseCompletionCheckpointFailedEvent,
+  isPhaseCompletionReviewBlockedEvent,
+  isPhaseCompletionReviewFailedEvent,
+} from "./phase-completion-events";
+export type {
+  PhaseCompletionBlockedGateOutcome,
+  PhaseCompletionCheckpointFailedEvent,
+  PhaseCompletionCheckpointFailedPayload,
+  PhaseCompletionCheckpointFailureCode,
+  PhaseCompletionReconciliationKind,
+  PhaseCompletionReconciliationOwner,
+  PhaseCompletionReviewBlockedEvent,
+  PhaseCompletionReviewBlockedPayload,
+  PhaseCompletionReviewFailedEvent,
+  PhaseCompletionReviewFailedPayload,
+  PhaseCompletionReviewFailureCode,
+  PhaseCompletionSession,
+  PhaseCompletionUnmetGateCode,
+} from "./phase-completion-events";
+
 export type BashExecutionReason =
   | "completed"
   | "nonZeroExit"
@@ -668,8 +689,9 @@ export async function cancel(): Promise<CancelResult> {
 // Autopilot Ken (auto-reviewer) is a SEPARATE, non-chatty mode of the same Ken.
 // When autopilot is on, after each GG Coder run the sidecar silently drives a
 // review→prompt→review loop and emits the `autopilot_*` family (no chat bubble,
-// no new IPC — cancel reuses agent_cancel). All ride the same generic
-// `agent-event` SSE channel:
+// no new IPC — cancel reuses agent_cancel). Completion persistence failures use
+// the typed `phase_completion_*` family. All ride the same generic `agent-event`
+// SSE channel:
 //   autopilot_review_start {}       — Ken started an auto-review (spinner)
 //   autopilot_prompted { round }    — Ken fed GG Coder another prompt (marker)
 //   autopilot_done {}               — Ken gave the all-clear, loop stops
@@ -681,6 +703,9 @@ export async function cancel(): Promise<CancelResult> {
 //                                     the webview can seed the plan-progress
 //                                     widget from the still-open plan modal
 //   autopilot_error { headline, … } — a review failed (structured, like error)
+//   phase_completion_checkpoint_failed { code, recovery, … } — checkpoint recovery
+//   phase_completion_review_failed { code, recovery, … }     — review persistence recovery
+//   phase_completion_review_blocked { unmetGateCodes, … }    — unmet completion gates
 
 /** Ask Ken Kai. Fires the read-only mentor run; reply arrives via `ken_*`
  *  SSE events. Lazily boots Ken's session on first use. */

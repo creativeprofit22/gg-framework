@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { canonicalProjectKey } from "./project-notes-repository.js";
 
-export type RoadmapReconciliationKind = "phase-start" | "status-update";
+export type RoadmapReconciliationKind =
+  | "phase-start"
+  | "status-update"
+  | "implementation-checkpoint"
+  | "completion-review";
 
 export interface RoadmapReconciliationOwner {
   projectKey: string;
@@ -13,7 +17,7 @@ export interface RoadmapReconciliationLease extends RoadmapReconciliationOwner {
   release(): void;
 }
 
-/** Daemon-shared fail-fast lease for launch/status intent on one project. */
+/** Daemon-shared fail-fast lease for launch, status, and completion intent on one project. */
 export class AppSidecarRoadmapReconciliationCoordinator {
   private readonly owners = new Map<string, RoadmapReconciliationOwner>();
 

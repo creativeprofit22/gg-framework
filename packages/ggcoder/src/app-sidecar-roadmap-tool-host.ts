@@ -36,7 +36,9 @@ export interface AppSidecarRoadmapToolSession {
 
 export interface AppSidecarRoadmapToolHostDependencies {
   cwd: string;
-  repository: Pick<ProjectNotesRepository, "recordRoadmapStatusUpdate">;
+  repository: Pick<ProjectNotesRepository, "recordRoadmapStatusUpdate"> &
+    Partial<Pick<ProjectNotesRepository, "recordRoadmapFinalReview">>;
+  canSubmitFinalReview?(): boolean;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   projectAutopilot: Pick<AppSidecarProjectAutopilotState, "isEnabled">;
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
@@ -76,6 +78,9 @@ export class AppSidecarRoadmapToolHost {
     getOwningSession?: () => AppSidecarRoadmapToolSession,
   ): Promise<RoadmapStatusToolResult> {
     const { cwd, reconciliations } = this.dependencies;
+    if (actor === "gg-coder" && input.final_review !== null) {
+      return { result: "reviewer-not-authorized", phaseId: input.phase_id };
+    }
     const reconciliation = reconciliations.tryAcquire(cwd, "status-update");
     if (!reconciliation) {
       const owner = reconciliations.owner(cwd);
@@ -91,7 +96,7 @@ export class AppSidecarRoadmapToolHost {
       if (actor === "gg-coder" && activePhase?.phaseId !== input.phase_id) {
         return { result: "phase-not-bound", phaseId: input.phase_id };
       }
-      const outcome = await this.dependencies.repository.recordRoadmapStatusUpdate(cwd, {
+      const statusRequest = {
         updateId: input.update_id,
         phaseId: input.phase_id,
         ...(input.expected_revision === undefined
@@ -102,28 +107,34 @@ export class AppSidecarRoadmapToolHost {
         progress: input.progress,
         blocker: input.transition === "blocked" ? input.blocker : null,
         evidence: [...input.evidence],
+        verification: input.verification?.result ?? null,
+        verificationReason:
+          input.verification && "reason" in input.verification ? input.verification.reason : null,
         proposedReferences: input.proposed_references.map(roadmapReferenceFromToolInput),
         timestamp: (this.dependencies.now ?? (() => new Date().toISOString()))(),
         ...(actor === "gg-coder"
           ? { expectedSession: activePhase!.session, requireBoundPhase: true }
           : {}),
         autopilotEnabled: this.dependencies.projectAutopilot.isEnabled(cwd),
-      });
-      if (outcome.status === "committed") {
-        this.dependencies.broadcastNotesSnapshot(outcome.snapshot);
-        return {
-          result: "committed",
-          phaseId: input.phase_id,
-          revision: outcome.snapshot.revision,
-          statusOutcome: outcome.statusOutcome,
-          proposals: outcome.proposals,
-        };
+      };
+      if (input.final_review !== null) {
+        if (actor === "gg-coder") {
+          return { result: "reviewer-not-authorized", phaseId: input.phase_id };
+        }
+        return this.recordFinalReview(actor, input, statusRequest);
       }
-      if (outcome.status === "duplicate") {
+      const outcome = await this.dependencies.repository.recordRoadmapStatusUpdate(
+        cwd,
+        statusRequest,
+      );
+      if (outcome.status === "committed" || outcome.status === "duplicate") {
+        if (outcome.status === "committed") {
+          this.dependencies.broadcastNotesSnapshot(outcome.snapshot);
+        }
         return {
-          result: "duplicate",
+          result: outcome.status,
           phaseId: input.phase_id,
-          revision: outcome.revision,
+          revision: outcome.status === "committed" ? outcome.snapshot.revision : outcome.revision,
           statusOutcome: outcome.statusOutcome,
           proposals: outcome.proposals,
         };
@@ -156,6 +167,74 @@ export class AppSidecarRoadmapToolHost {
     } finally {
       reconciliation.release();
     }
+  }
+
+  private async recordFinalReview(
+    actor: Exclude<RoadmapStatusActor, "gg-coder">,
+    input: RoadmapStatusInput,
+    statusUpdate: Parameters<ProjectNotesRepository["recordRoadmapFinalReview"]>[1]["statusUpdate"],
+  ): Promise<RoadmapStatusToolResult> {
+    const finalReview = input.final_review!;
+    if (this.dependencies.canSubmitFinalReview?.() === false) {
+      return { result: "completion-checkpoint-blocked", phaseId: input.phase_id };
+    }
+    if (!this.dependencies.repository.recordRoadmapFinalReview) {
+      return { result: "completion-unavailable", phaseId: input.phase_id };
+    }
+    const completion = await this.dependencies.repository.recordRoadmapFinalReview(
+      this.dependencies.cwd,
+      {
+        statusUpdate: { ...statusUpdate, actor },
+        review: {
+          reviewId: finalReview.review_id,
+          decision: finalReview.decision,
+          evidence: [...finalReview.evidence],
+          reason: finalReview.reason,
+          acceptsVerificationException: finalReview.accepts_verification_exception,
+        },
+      },
+    );
+    if (completion.status === "committed") {
+      this.dependencies.broadcastNotesSnapshot(completion.snapshot);
+      return {
+        result: "completion-review-committed",
+        phaseId: input.phase_id,
+        revision: completion.snapshot.revision,
+        statusUpdate: completion.status,
+        gateOutcome: completion.evaluation.gateOutcome,
+        unmetGateCodes: completion.evaluation.unmetGateCodes,
+      };
+    }
+    if (completion.status === "duplicate") {
+      return {
+        result: "completion-review-duplicate",
+        phaseId: input.phase_id,
+        revision: completion.revision,
+        gateOutcome: completion.evaluation.gateOutcome,
+        unmetGateCodes: completion.evaluation.unmetGateCodes,
+      };
+    }
+    const result =
+      completion.status === "missing"
+        ? "notes-missing"
+        : completion.status === "corrupt"
+          ? "notes-corrupt"
+          : completion.status;
+    this.dependencies.onNonCommit?.({
+      result,
+      phaseId: input.phase_id,
+      updateId: input.update_id,
+    });
+    return {
+      result,
+      phaseId: input.phase_id,
+      ...("revision" in completion ? { revision: completion.revision } : {}),
+      ...(completion.status === "invalid-review"
+        ? { message: completion.message }
+        : completion.status === "invalid-reference"
+          ? { path: completion.path, message: completion.message }
+          : {}),
+    };
   }
 }
 

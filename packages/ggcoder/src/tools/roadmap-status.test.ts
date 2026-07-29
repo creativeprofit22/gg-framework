@@ -15,6 +15,8 @@ describe("RoadmapStatusParams", () => {
       transition,
       progress: "Implemented the repository seam.",
       evidence: [],
+      verification: null,
+      final_review: null,
       proposed_references: [],
     });
   });
@@ -39,6 +41,79 @@ describe("RoadmapStatusParams", () => {
       }).evidence,
     ).toEqual(["pnpm test passed"]);
     expect(() => RoadmapStatusParams.parse({ ...base, transition: "done" })).toThrow();
+  });
+
+  it("validates typed verification evidence and reasons", () => {
+    expect(() =>
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "in-progress",
+        verification: { result: "passed" },
+      }),
+    ).toThrow();
+    expect(
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "in-progress",
+        evidence: [" pnpm test passed "],
+        verification: { result: "passed" },
+      }).verification,
+    ).toEqual({ result: "passed" });
+    expect(() =>
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "in-progress",
+        verification: { result: "failed" },
+      }),
+    ).toThrow();
+    expect(
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "blocked",
+        blocker: "Tests failed",
+        verification: { result: "failed", reason: " Typecheck failed " },
+      }).verification,
+    ).toEqual({ result: "failed", reason: "Typecheck failed" });
+  });
+
+  it("normalizes strict accepted and rejected final-review decisions", () => {
+    expect(
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "review",
+        evidence: ["Implementation reviewed"],
+        final_review: {
+          review_id: " review-1 ",
+          decision: "accepted",
+          evidence: [" All gates checked "],
+        },
+      }).final_review,
+    ).toEqual({
+      review_id: "review-1",
+      decision: "accepted",
+      evidence: ["All gates checked"],
+      reason: null,
+      accepts_verification_exception: false,
+    });
+    expect(() =>
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "in-progress",
+        final_review: { review_id: "review-2", decision: "rejected" },
+      }),
+    ).toThrow();
+    expect(() =>
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "in-progress",
+        final_review: {
+          review_id: "review-2",
+          decision: "rejected",
+          reason: "Needs work",
+          accepts_verification_exception: true,
+        },
+      }),
+    ).toThrow();
   });
 
   it("normalizes optional reference coordinates to null", () => {

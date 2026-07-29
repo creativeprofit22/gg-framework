@@ -5972,6 +5972,16 @@ mod tests {
                 }),
             ),
             (
+                reqwest::StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "status": "invalid",
+                    "error": {
+                        "path": "phases[0].roadmapEvents[0].type",
+                        "message": "privileged roadmap events require their dedicated authority path"
+                    }
+                }),
+            ),
+            (
                 reqwest::StatusCode::PAYLOAD_TOO_LARGE,
                 serde_json::json!({
                     "status": "invalid",

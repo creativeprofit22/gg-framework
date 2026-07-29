@@ -16,6 +16,7 @@ vi.mock("./agent", () => ({ listCommands: vi.fn().mockResolvedValue([]) }));
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
 import { listCommands } from "./agent";
+import { playSound } from "./sounds";
 import type {
   AgentState,
   BackgroundTask,
@@ -133,6 +134,8 @@ function setup(
     },
   ) as unknown as AgentEventsDeps["setLiveToolFeed"];
   const setRunning = vi.fn() as unknown as AgentEventsDeps["setRunning"];
+  const setStatus = vi.fn() as unknown as AgentEventsDeps["setStatus"];
+  const setDoneStatus = vi.fn() as unknown as AgentEventsDeps["setDoneStatus"];
   const setTokens = vi.fn() as unknown as AgentEventsDeps["setTokens"];
 
   // Real reducer-style state holder so functional setState updates (used by
@@ -162,12 +165,12 @@ function setup(
       tasks = typeof update === "function" ? update(tasks) : update;
     }) as AgentEventsDeps["setTasks"],
     setProjectTasks: noop as unknown as AgentEventsDeps["setProjectTasks"],
-    setStatus: noop as unknown as AgentEventsDeps["setStatus"],
+    setStatus,
     setRunning,
     setLiveToolFeed,
     setTokens,
     setContextTokens: noop as unknown as AgentEventsDeps["setContextTokens"],
-    setDoneStatus: noop as unknown as AgentEventsDeps["setDoneStatus"],
+    setDoneStatus,
     setIsThinking: noop as unknown as AgentEventsDeps["setIsThinking"],
     setThinkingStartTs: noop as unknown as AgentEventsDeps["setThinkingStartTs"],
     setThinkingAccumMs: noop as unknown as AgentEventsDeps["setThinkingAccumMs"],
@@ -207,6 +210,8 @@ function setup(
     getCommands: () => commands,
     getState: () => agentState,
     setRunning,
+    setStatus,
+    setDoneStatus,
     setTokens,
   };
 }
@@ -470,6 +475,116 @@ describe("useAgentEvents", () => {
         }),
       );
     });
+
+    expect(getItems()).toEqual([]);
+  });
+
+  it("shows checkpoint reconciliation recovery in one actionable error", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_completion_checkpoint_failed", {
+          code: "reconciliation-in-progress",
+          phaseId: "phase-24",
+          session: { sessionId: "session-24", sessionPath: "/sessions/24.jsonl" },
+          owner: { operationId: "operation-active", kind: "status-update" },
+          recovery: "Retry the implementation run after the active Roadmap update finishes.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "Roadmap checkpoint for phase phase-24 was not saved.",
+        message: "Reason: reconciliation in progress. Active Roadmap update: status-update.",
+        guidance: "Retry the implementation run after the active Roadmap update finishes.",
+      }),
+    ]);
+  });
+
+  it("shows completion-review storage detail and recovery in one actionable error", () => {
+    const { hook, getItems, setStatus, setDoneStatus } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_completion_review_failed", {
+          code: "storage-failure",
+          phaseId: "phase-24",
+          session: { sessionId: "session-24", sessionPath: "/sessions/24.jsonl" },
+          recovery: "Free space, then resume the phase and rerun final review.",
+          detail: "disk full",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "Autopilot final review for phase phase-24 was not saved.",
+        message: "Reason: storage failure. Details: disk full",
+        guidance: "Free space, then resume the phase and rerun final review.",
+      }),
+    ]);
+    expect(setStatus).toHaveBeenLastCalledWith("needs attention");
+    expect(setDoneStatus).toHaveBeenLastCalledWith(null);
+  });
+
+  it("shows blocked completion gates as one human-attention item", () => {
+    const { hook, getItems, setStatus, setDoneStatus } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_completion_review_blocked", {
+          phaseId: "phase-24",
+          session: { sessionId: "session-24", sessionPath: "/sessions/24.jsonl" },
+          gateOutcome: "needs-attention",
+          unmetGateCodes: ["failed-verification", "unresolved-attention"],
+          recovery: "Fix verification and resolve the open attention item.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "autopilot",
+        phase: "human",
+        reason:
+          "Roadmap phase phase-24 is not complete.\n\nFix verification and resolve the open attention item.\n\nUnmet gates: failed-verification, unresolved-attention.",
+      }),
+    ]);
+    expect(setStatus).toHaveBeenLastCalledWith("needs attention");
+    expect(setDoneStatus).toHaveBeenLastCalledWith(null);
+  });
+
+  it("ignores malformed phase-completion frames safely", () => {
+    const { hook, getItems } = setup();
+
+    expect(() => {
+      act(() => {
+        hook.result.current.handleEvent({
+          type: "phase_completion_checkpoint_failed",
+          data: null,
+        });
+        hook.result.current.handleEvent(
+          ev("phase_completion_review_failed", {
+            code: "storage-failure",
+            phaseId: "phase-24",
+            recovery: "Missing the session contract.",
+          }),
+        );
+        hook.result.current.handleEvent(
+          ev("phase_completion_review_blocked", {
+            phaseId: "phase-24",
+            session: { sessionId: "session-24", sessionPath: null },
+            gateOutcome: "review",
+            unmetGateCodes: ["unknown-gate"],
+            recovery: "Untrusted payload.",
+          }),
+        );
+      });
+    }).not.toThrow();
 
     expect(getItems()).toEqual([]);
   });
@@ -1185,7 +1300,7 @@ describe("useAgentEvents", () => {
     ]);
   });
 
-  it("run_end clears completed plan progress and running state", () => {
+  it("retains completed plan progress until authoritative checkpoint success", () => {
     const { hook, deps, setRunning } = setup();
     deps.planTotalRef.current = 3;
     deps.planDoneRef.current = new Set([1, 2, 3]);
@@ -1196,8 +1311,38 @@ describe("useAgentEvents", () => {
     });
 
     expect(setRunning).toHaveBeenLastCalledWith(false);
+    expect(deps.planTotalRef.current).toBe(3);
+    expect([...deps.planDoneRef.current]).toEqual([1, 2, 3]);
+
+    act(() => hook.result.current.handleEvent(ev("plan_progress", { total: 0, completed: [] })));
     expect(deps.planTotalRef.current).toBe(0);
     expect(deps.planDoneRef.current.size).toBe(0);
+  });
+
+  it("suppresses success status and sound when checkpoint persistence fails", () => {
+    const { hook, deps, setStatus, setDoneStatus } = setup();
+    deps.planTotalRef.current = 2;
+    deps.planDoneRef.current = new Set([1, 2]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(
+        ev("phase_completion_checkpoint_failed", {
+          code: "storage-failure",
+          phaseId: "phase-24",
+          session: { sessionId: "session-24", sessionPath: "/sessions/24.jsonl" },
+          recovery: "Free space, then rerun the implementation.",
+          detail: "disk full",
+        }),
+      );
+      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+    });
+
+    expect(setStatus).toHaveBeenLastCalledWith("needs attention");
+    expect(setDoneStatus).toHaveBeenLastCalledWith(null);
+    expect(playSound).not.toHaveBeenCalled();
+    expect(deps.planTotalRef.current).toBe(2);
+    expect([...deps.planDoneRef.current]).toEqual([1, 2]);
   });
 
   it("upserts persistent async agents by agent_id through idle and interrupted states", () => {

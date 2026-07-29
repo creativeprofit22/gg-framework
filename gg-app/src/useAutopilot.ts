@@ -1,6 +1,10 @@
 import { useCallback, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { SidecarEvent } from "./agent";
+import {
+  isPhaseCompletionReviewBlockedEvent,
+  isPhaseCompletionReviewFailedEvent,
+} from "./phase-completion-events";
 import type { Item } from "./App";
 
 /**
@@ -55,7 +59,8 @@ export function useAutopilot(opts: {
 
   const handleAutopilotEvent = useCallback(
     (e: SidecarEvent): boolean => {
-      const d = e.data as Record<string, unknown>;
+      const d =
+        typeof e.data === "object" && e.data !== null ? (e.data as Record<string, unknown>) : {};
       switch (e.type) {
         case "autopilot_review_start":
           setAutopilotReviewing(true);
@@ -99,6 +104,16 @@ export function useAutopilot(opts: {
         // stop the spinner here and return false so the main handler still
         // processes the frame — same peek-and-pass-through as run_end below.
         case "autopilot_plan_accepted":
+          setAutopilotReviewing(false);
+          return false;
+        // Completion-review failures are rendered once by useAgentEvents. This
+        // hook only settles the review spinner, then passes the typed frame on.
+        case "phase_completion_review_failed":
+          if (!isPhaseCompletionReviewFailedEvent(e)) return false;
+          setAutopilotReviewing(false);
+          return false;
+        case "phase_completion_review_blocked":
+          if (!isPhaseCompletionReviewBlockedEvent(e)) return false;
           setAutopilotReviewing(false);
           return false;
         // Not an autopilot event, but a cancel settles the build run WITHOUT a

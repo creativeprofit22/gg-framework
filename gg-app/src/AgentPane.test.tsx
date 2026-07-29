@@ -55,6 +55,7 @@ vi.mock("./useAgentEvents", () => ({
   HOOK_PRESENTATION: {},
   useAgentEvents: (deps: {
     handleAutopilotEvent: (event: AgentModule.SidecarEvent) => boolean;
+    nextId: () => number;
     onSessionReset: (operationId: string | null) => void;
     setItems: Dispatch<SetStateAction<Item[]>>;
     setPlanReview: Dispatch<SetStateAction<string | null>>;
@@ -68,10 +69,73 @@ vi.mock("./useAgentEvents", () => ({
           deps.setState(event.data as AgentModule.AgentState);
           return;
         }
-        if (event.type !== "session_reset") return deps.handleAutopilotEvent(event);
-        const data = event.data as { operationId?: unknown };
-        deps.setItems([]);
-        deps.onSessionReset(typeof data.operationId === "string" ? data.operationId : null);
+        if (event.type === "session_reset") {
+          const data = event.data as { operationId?: unknown };
+          deps.setItems([]);
+          deps.onSessionReset(typeof data.operationId === "string" ? data.operationId : null);
+          return;
+        }
+        if (deps.handleAutopilotEvent(event)) return;
+        if (typeof event.data !== "object" || event.data === null) return;
+        const data = event.data as Record<string, unknown>;
+        const phaseId = typeof data.phaseId === "string" ? data.phaseId : null;
+        const recovery = typeof data.recovery === "string" ? data.recovery : null;
+        if (!phaseId || !recovery) return;
+        if (
+          event.type === "phase_completion_checkpoint_failed" ||
+          event.type === "phase_completion_review_failed"
+        ) {
+          if (typeof data.code !== "string" || typeof data.session !== "object") return;
+          const owner =
+            typeof data.owner === "object" && data.owner !== null
+              ? (data.owner as { kind?: unknown })
+              : null;
+          const detail = typeof data.detail === "string" ? data.detail.trim() : "";
+          const message = [
+            `Reason: ${data.code.replace(/-/g, " ")}.`,
+            typeof owner?.kind === "string" ? `Active Roadmap update: ${owner.kind}.` : null,
+            detail ? `Details: ${detail}` : null,
+          ]
+            .filter((part): part is string => part !== null)
+            .join(" ");
+          deps.setItems((current) => [
+            ...current,
+            {
+              kind: "error",
+              id: deps.nextId(),
+              headline:
+                event.type === "phase_completion_checkpoint_failed"
+                  ? `Roadmap checkpoint for phase ${phaseId} was not saved.`
+                  : `Autopilot final review for phase ${phaseId} was not saved.`,
+              message,
+              guidance: recovery,
+            },
+          ]);
+          return;
+        }
+        if (event.type === "phase_completion_review_blocked") {
+          const unmetGateCodes = data.unmetGateCodes;
+          if (
+            typeof data.session !== "object" ||
+            !Array.isArray(unmetGateCodes) ||
+            !unmetGateCodes.every((code) => typeof code === "string")
+          ) {
+            return;
+          }
+          deps.setItems((current) => [
+            ...current,
+            {
+              kind: "autopilot",
+              id: deps.nextId(),
+              phase: "human",
+              reason: [
+                `Roadmap phase ${phaseId} is not complete.`,
+                recovery,
+                `Unmet gates: ${unmetGateCodes.join(", ")}.`,
+              ].join("\n\n"),
+            },
+          ]);
+        }
       },
       pushItem: (item: Item) => deps.setItems((current) => [...current, item]),
       endStreamingText: vi.fn(),
@@ -758,6 +822,87 @@ describe("AgentPane lifecycle", () => {
         expect.objectContaining({ paneId: "pane-1", activeWork: false }),
       ),
     );
+  });
+
+  it("renders phase-completion recovery and settles valid terminal reviews", async () => {
+    const pane = client("pane-phase-completion", 7);
+    render(<AgentPane client={pane} target={target} />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    expect(handleEvent).toBeDefined();
+
+    act(() =>
+      handleEvent?.({
+        type: "phase_completion_checkpoint_failed",
+        data: {
+          code: "reconciliation-in-progress",
+          phaseId: "phase-24",
+          session: { sessionId: "session-24", sessionPath: "/sessions/24.jsonl" },
+          owner: { operationId: "operation-active", kind: "status-update" },
+          recovery: "Retry after the active Roadmap update finishes.",
+        },
+      }),
+    );
+    expect(
+      await screen.findByText("Roadmap checkpoint for phase phase-24 was not saved."),
+    ).toBeTruthy();
+    expect(screen.getByText(/Active Roadmap update: status-update/)).toBeTruthy();
+    expect(screen.getByText("Retry after the active Roadmap update finishes.")).toBeTruthy();
+
+    act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
+    expect(await screen.findByText("Supah reviewing…")).toBeTruthy();
+    act(() =>
+      handleEvent?.({
+        type: "phase_completion_review_failed",
+        data: {
+          code: "storage-failure",
+          phaseId: "phase-24",
+          session: { sessionId: "session-24", sessionPath: "/sessions/24.jsonl" },
+          recovery: "Free space, then rerun final review.",
+          detail: "disk full",
+        },
+      }),
+    );
+    await waitFor(() => expect(screen.queryByText("Supah reviewing…")).toBeNull());
+    expect(
+      screen.getByText("Autopilot final review for phase phase-24 was not saved."),
+    ).toBeTruthy();
+    expect(screen.getByText(/Details: disk full/)).toBeTruthy();
+    expect(screen.getByText("Free space, then rerun final review.")).toBeTruthy();
+
+    act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
+    expect(await screen.findByText("Supah reviewing…")).toBeTruthy();
+    act(() =>
+      handleEvent?.({
+        type: "phase_completion_review_blocked",
+        data: {
+          phaseId: "phase-24",
+          session: { sessionId: "session-24", sessionPath: "/sessions/24.jsonl" },
+          gateOutcome: "needs-attention",
+          unmetGateCodes: ["failed-verification", "unresolved-attention"],
+          recovery: "Fix verification and resolve the open attention item.",
+        },
+      }),
+    );
+    await waitFor(() => expect(screen.queryByText("Supah reviewing…")).toBeNull());
+    expect(screen.getByText("Roadmap phase phase-24 is not complete.")).toBeTruthy();
+    expect(screen.getByText(/Unmet gates: failed-verification, unresolved-attention/)).toBeTruthy();
+
+    act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
+    expect(await screen.findByText("Supah reviewing…")).toBeTruthy();
+    expect(() => {
+      act(() =>
+        handleEvent?.({
+          type: "phase_completion_review_failed",
+          data: null,
+        }),
+      );
+    }).not.toThrow();
+    expect(screen.getByText("Supah reviewing…")).toBeTruthy();
+    expect(
+      screen.getAllByText("Autopilot final review for phase phase-24 was not saved."),
+    ).toHaveLength(1);
   });
 
   it("managed panes restore an existing native session without owning its disposal", async () => {

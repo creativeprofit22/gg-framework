@@ -71,9 +71,17 @@ export function preparePhase26MacosDevFixture({
   const scenario = preparePhase21Scenario({ home: paths.home, projectDir: paths.project });
   writeFileSync(join(paths.home, ".gg", "auth.json"), "{}\n");
 
+  const hostHome = baseEnvironment.HOME ?? baseEnvironment.USERPROFILE;
+  const cargoHome = baseEnvironment.CARGO_HOME ?? (hostHome ? join(hostHome, ".cargo") : null);
+  const rustupHome = baseEnvironment.RUSTUP_HOME ?? (hostHome ? join(hostHome, ".rustup") : null);
+  if (!cargoHome || !rustupHome) {
+    throw new Error("Phase 26 macOS fixture requires host Cargo and rustup tool roots");
+  }
   const fixtureVariables = {
     HOME: paths.home,
     USERPROFILE: paths.home,
+    CARGO_HOME: cargoHome,
+    RUSTUP_HOME: rustupHome,
     TMPDIR: paths.temp,
     TEMP: paths.temp,
     TMP: paths.temp,
@@ -93,6 +101,7 @@ export function preparePhase26MacosDevFixture({
     root: paths.root,
     profileRoot: paths.home,
     dataRoots: [paths.cache, paths.config, paths.data, paths.temp],
+    toolRoots: { cargoHome, rustupHome },
     project: paths.project,
     evidence: paths.evidence,
     screenshots: paths.screenshots,

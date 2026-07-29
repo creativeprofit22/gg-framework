@@ -48,6 +48,12 @@ describe("Phase 26 macOS dev fixture", () => {
       ).toBe(true);
     }
     expect(fixture.environment.HOME).toBe(fixture.paths.home);
+    expect(fixture.environment.CARGO_HOME).toBe(join("/protected/home", ".cargo"));
+    expect(fixture.environment.RUSTUP_HOME).toBe(join("/protected/home", ".rustup"));
+    expect(fixture.descriptor.toolRoots).toEqual({
+      cargoHome: join("/protected/home", ".cargo"),
+      rustupHome: join("/protected/home", ".rustup"),
+    });
     expect(fixture.environment.XDG_DATA_HOME).toBe(fixture.paths.data);
     expect(fixture.environment.GG_PHASE21_SMOKE_PREBOUND).toBe("1");
     expect(fixture.environment.GG_PHASE26_MACOS_SMOKE).toBe("1");

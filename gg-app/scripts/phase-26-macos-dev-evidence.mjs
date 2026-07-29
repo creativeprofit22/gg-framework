@@ -221,6 +221,7 @@ export async function capturePhase26MacosDevEvidence({ fixture, port, startedAt 
     fixtureDescriptor: fixture.descriptorPath,
     profileRoot: descriptor.profileRoot,
     dataRoots: descriptor.dataRoots,
+    toolRoots: descriptor.toolRoots,
     project: descriptor.project,
     initialSessionPath: descriptor.initialSessionPath,
     boundSessionPath: descriptor.boundSessionPath,
@@ -268,18 +269,24 @@ export async function runPhase26MacosDevEvidence() {
       child.once("error", rejectSpawn);
     });
     if (!Number.isInteger(child.pid)) throw new Error("Tauri dev did not expose a process id");
+    const unexpectedExit = new Promise((_, rejectExit) => {
+      child.once("exit", (code, signal) => {
+        rejectExit(
+          new Error(`Tauri dev exited before evidence capture: code=${code} signal=${signal}`),
+        );
+      });
+    });
     writeFileSync(
       join(fixture.paths.evidence, "process.json"),
       `${JSON.stringify({ pid: child.pid, processGroupId: child.pid, command: "pnpm --filter gg-app tauri dev" }, null, 2)}\n`,
     );
-    const port = await waitFor(
-      "embedded macOS WebDriver",
-      () => webdriverPort(fixture.paths.devLog),
-      {
-        timeoutMs: 12 * 60_000,
+    const port = await Promise.race([
+      waitFor("embedded macOS WebDriver", () => webdriverPort(fixture.paths.devLog), {
+        timeoutMs: 20 * 60_000,
         intervalMs: 500,
-      },
-    );
+      }),
+      unexpectedExit,
+    ]);
     evidence = await capturePhase26MacosDevEvidence({ fixture, port, startedAt });
   } catch (error) {
     failure = error;

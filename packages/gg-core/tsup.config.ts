@@ -1,7 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.ts", "src/model-registry.ts", "src/paths.ts"],
+  entry: ["src/index.ts", "src/model-registry.ts", "src/paths.ts", "src/project-notes.ts"],
   format: ["esm", "cjs"],
   dts: true,
   clean: true,

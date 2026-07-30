@@ -190,14 +190,14 @@ export async function capturePhase26MacosDevEvidence({ fixture, webdriver, start
   await webdriver.execute(
     `const layout={version:9,root:{type:"leaf",paneId:"primary"},focusedPaneId:"primary",panes:{primary:{kind:"agent",mode:"code",cwd:${JSON.stringify(descriptor.project)},sessionPath:${JSON.stringify(descriptor.initialSessionPath)}}}};localStorage.setItem("gg-workspace-layout-recursive:main",JSON.stringify(layout));location.reload();return true;`,
   );
-  await waitFor("reloaded isolated macOS pane", () =>
+  await waitFor("hydrated isolated macOS pane", () =>
     webdriver.execute(
-      'return Boolean(document.querySelector(".agent-pane") && document.querySelector(\'button[aria-label^="Notes"]\'))',
+      'const button=document.querySelector(\'button[aria-label^="Notes"]\');return Boolean(document.querySelector(".agent-pane") && button && !button.disabled)',
     ),
   );
 
   await webdriver.execute(
-    "document.querySelector('button[aria-label^=\"Notes\"]')?.click();return true;",
+    'const button=document.querySelector(\'button[aria-label^="Notes"]\');if(!button||button.disabled)throw new Error("enabled Notes control is missing");button.click();return true;',
   );
   await waitFor("Notes dialog", () =>
     webdriver.execute("return document.querySelector('[role=\"dialog\"]') !== null"),

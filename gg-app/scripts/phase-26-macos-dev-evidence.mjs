@@ -183,6 +183,10 @@ export async function capturePhase26MacosDevEvidence({ fixture, webdriver, start
   const inspectScreenshot = join(descriptor.screenshots, "notes-bound-phase.png");
   const resumeScreenshot = join(descriptor.screenshots, "notes-resumed-session.png");
 
+  await waitFor("isolated macOS dev origin", async () => {
+    const href = await webdriver.execute("return window.location.href");
+    return typeof href === "string" && href.startsWith("http://localhost:1420") ? href : null;
+  });
   await webdriver.execute(
     `const layout={version:9,root:{type:"leaf",paneId:"primary"},focusedPaneId:"primary",panes:{primary:{kind:"agent",mode:"code",cwd:${JSON.stringify(descriptor.project)},sessionPath:${JSON.stringify(descriptor.initialSessionPath)}}}};localStorage.setItem("gg-workspace-layout-recursive:main",JSON.stringify(layout));location.reload();return true;`,
   );

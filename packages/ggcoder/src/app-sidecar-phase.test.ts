@@ -466,7 +466,7 @@ describe("production launchBoundPhase orchestration", () => {
     expect(promoted.disposeCalls).toBe(1);
   });
 
-  it("persists the complete Phase 26 release-gate journey through restart and Resume", async () => {
+  it("persists the complete Phase 26 release-gate journey and rejects restart after Done", async () => {
     const { repository, cwd, root } = await setup();
     const fixture = new ProductionPhaseFixture(repository, cwd);
 
@@ -668,11 +668,17 @@ describe("production launchBoundPhase orchestration", () => {
 
     const restarted = new ProductionPhaseFixture(restartedRepository, cwd);
     await expect(restarted.start()).resolves.toMatchObject({
-      status: 200,
-      body: { status: "already-bound", session: boundSession, packageTokenCount: 0 },
+      status: 409,
+      body: {
+        status: "failed",
+        code: "phase-inactive",
+        message: "This phase is already Done. Reopen Roadmap to review its completion evidence.",
+      },
     });
     expect(restarted.createCalls).toBe(0);
     expect(restarted.currentSession.promptCalls).toBe(0);
+    expect(restarted.events).not.toContain("session-replaced");
+    expect(restarted.events).not.toContain("phase-state-reset");
     expect(restarted.events).not.toContain("prompt-started");
     await restarted.dispose();
   });
@@ -1267,6 +1273,62 @@ describe("production launchBoundPhase orchestration", () => {
     expect(stale.disposeCalls).toBe(1);
   });
 
+  it("disposes a stale candidate when another window completes the phase before Start", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    const staleCandidate = new FakePhaseSession(99, fixture.events);
+    await fixture.candidates.add("phase-21", {
+      session: staleCandidate,
+      initialPrompt: "stale prompt",
+      tokenCount: 1,
+    });
+    await updatePhase(repository, cwd, (notes) => {
+      const phase = notes.phases[0]!;
+      phase.status = "done";
+      phase.completedAt = NOW;
+      phase.overrides.status = null;
+      phase.lifecycleEvents.push({
+        id: "event-done",
+        fromStatus: "not-started",
+        toStatus: "done",
+        source: "user",
+        timestamp: NOW,
+        reason: "Completion review accepted",
+      });
+    });
+    const beforeStart = await repository.load(cwd);
+    if (beforeStart.status !== "ok") throw new Error("Expected completed phase");
+
+    await expect(fixture.start()).resolves.toEqual({
+      status: 409,
+      body: {
+        status: "failed",
+        code: "phase-inactive",
+        operationId: "operation-1",
+        message: "This phase is already Done. Reopen Roadmap to review its completion evidence.",
+      },
+    });
+
+    expect(fixture.createCalls).toBe(0);
+    expect(staleCandidate.disposeCalls).toBe(1);
+    expect(fixture.candidates.has("phase-21")).toBe(false);
+    expect(fixture.events).not.toContain("session-replaced");
+    expect(fixture.events).not.toContain("phase-state-reset");
+    expect(fixture.events).not.toContain("session-reset");
+    expect(fixture.events).not.toContain("plan-mode");
+    expect(fixture.events).not.toContain("prompt-started");
+    expect(staleCandidate.promptCalls).toBe(0);
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: beforeStart.snapshot.revision,
+        document: { phases: [{ status: "done", session: null }] },
+      },
+    });
+    await fixture.dispose();
+    expect(staleCandidate.disposeCalls).toBe(1);
+  });
+
   it("registers roadmap_status for coding, Ken, and Autopilot Ken with production actors", async () => {
     const { repository, cwd } = await setup();
     const fixture = new ProductionPhaseFixture(repository, cwd);
@@ -1447,6 +1509,137 @@ describe("production launchBoundPhase orchestration", () => {
         expect.objectContaining({ id: "review-final", type: "completion-review" }),
       ]),
     );
+  });
+
+  it("forwards manual-review proposals for committed and duplicate final reviews", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const snapshots: ProjectNotesSnapshot[] = [];
+    const host = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      reconciliations: fixture.reconciliations,
+      projectAutopilot: new AppSidecarProjectAutopilotState(),
+      broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
+      now: () => "2026-07-26T00:03:00.000Z",
+    });
+    const tool = host.createSessionTools("ken")[0]!;
+    const input = roadmapInput("manual-final-status", {
+      transition: "review",
+      evidence: ["Ken reviewed the manual reference proposal"],
+      proposed_references: [
+        {
+          provider: "github",
+          canonical_url: "https://github.com/acme/repo/blob/main/src/manual.ts",
+          owner: "acme",
+          repo: "repo",
+          relevance: "Manual review source",
+        },
+      ],
+      final_review: {
+        review_id: "manual-final-review",
+        decision: "accepted",
+        evidence: ["Ken reviewed the completion evidence"],
+      },
+    });
+
+    const committed = await executeRoadmap(tool, input);
+    expect(committed).toMatchObject({
+      result: "completion-review-committed",
+      statusOutcome: "evidence-only",
+      proposals: [
+        {
+          proposalId: expect.any(String),
+          outcome: "pending",
+          policyOutcome: "manual-review",
+          referenceId: null,
+        },
+      ],
+    });
+    expect(committed).not.toHaveProperty("statusUpdate");
+    await expect(executeRoadmap(tool, input)).resolves.toEqual({
+      ...committed,
+      result: "completion-review-duplicate",
+    });
+    expect(snapshots).toHaveLength(1);
+  });
+
+  it("forwards Autopilot accepted and reused proposals for committed and duplicate final reviews", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const snapshots: ProjectNotesSnapshot[] = [];
+    const projectAutopilot = new AppSidecarProjectAutopilotState();
+    projectAutopilot.set(cwd, true);
+    const host = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      reconciliations: fixture.reconciliations,
+      projectAutopilot,
+      broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
+      now: () => "2026-07-26T00:03:00.000Z",
+    });
+    const tool = host.createSessionTools("ken-autopilot")[0]!;
+    const input = roadmapInput("autopilot-final-status", {
+      transition: "review",
+      evidence: ["Autopilot reviewed both reference proposals"],
+      proposed_references: [
+        {
+          provider: "github",
+          canonical_url: "https://github.com/acme/repo/blob/main/src/autopilot.ts",
+          owner: "acme",
+          repo: "repo",
+          relevance: "New Autopilot source",
+        },
+        {
+          provider: "github",
+          tool: "searchCode",
+          canonical_url: "https://github.com/acme/repo/blob/main/src/phase.ts#L1-L2",
+          owner: "acme",
+          repo: "repo",
+          revision: "main",
+          path: "src/phase.ts",
+          range: { start_line: 1, end_line: 2 },
+          query: "launchPhase(",
+          anchor: "launchPhase",
+          relevance: "Existing phase source",
+        },
+      ],
+      final_review: {
+        review_id: "autopilot-final-review",
+        decision: "accepted",
+        evidence: ["Autopilot accepted the completion evidence"],
+      },
+    });
+
+    const committed = await executeRoadmap(tool, input);
+    expect(committed).toMatchObject({
+      result: "completion-review-committed",
+      statusOutcome: "evidence-only",
+      proposals: [
+        {
+          proposalId: expect.any(String),
+          outcome: "accepted",
+          policyOutcome: "accepted",
+          referenceId: expect.any(String),
+        },
+        {
+          proposalId: expect.any(String),
+          outcome: "reused",
+          policyOutcome: "reused",
+          referenceId: "ref-1",
+        },
+      ],
+    });
+    expect(committed).not.toHaveProperty("statusUpdate");
+    await expect(executeRoadmap(tool, input)).resolves.toEqual({
+      ...committed,
+      result: "completion-review-duplicate",
+    });
+    expect(snapshots).toHaveLength(1);
   });
 
   it("keeps roadmap_status out of ordinary CLI createTools", async () => {

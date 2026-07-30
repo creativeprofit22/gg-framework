@@ -1,9 +1,12 @@
 import { estimateTokens } from "./core/compaction/token-estimator.js";
-import type {
-  NotesPhase,
-  NotesPhaseStatus,
-  NotesReference,
-  NotesSessionLink,
+import {
+  validateNotesReferenceProjection,
+  validateNotesSessionLink,
+  type NotesPhase,
+  type NotesPhaseStatus,
+  type NotesReference,
+  type NotesReferenceProjection,
+  type NotesSessionLink,
 } from "./project-notes-repository.js";
 
 export const ACTIVE_PHASE_CONTEXT_KIND = "active_phase_context";
@@ -21,22 +24,7 @@ export type ActivePhaseExecutionStage =
   | "implementing"
   | "reviewing";
 
-export interface ActivePhaseReferenceV1 {
-  id: string;
-  provider: string;
-  tool: string | null;
-  canonicalUrl: string;
-  owner: string;
-  repo: string;
-  revision: string | null;
-  path: string | null;
-  range: { startLine: number; endLine: number } | null;
-  issue: number | null;
-  pullRequest: number | null;
-  query: string | null;
-  anchor: string | null;
-  relevance: string;
-}
+export type ActivePhaseReferenceV1 = NotesReferenceProjection;
 
 export interface ActivePhaseContextV1 {
   version: 1;
@@ -88,24 +76,6 @@ const PHASE_KEYS = [
   "status",
   "archivedAt",
 ] as const;
-const SESSION_KEYS = ["sessionId", "sessionPath"] as const;
-const REFERENCE_KEYS = [
-  "id",
-  "provider",
-  "tool",
-  "canonicalUrl",
-  "owner",
-  "repo",
-  "revision",
-  "path",
-  "range",
-  "issue",
-  "pullRequest",
-  "query",
-  "anchor",
-  "relevance",
-] as const;
-const RANGE_KEYS = ["startLine", "endLine"] as const;
 const PHASE_STATUSES = new Set<NotesPhaseStatus>([
   "not-started",
   "planning",
@@ -139,40 +109,8 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-function isNullableInteger(value: unknown): value is number | null {
-  return value === null || (Number.isInteger(value) && (value as number) >= 0);
-}
-
-function isRange(value: unknown): value is ActivePhaseReferenceV1["range"] {
-  return (
-    value === null ||
-    (isRecord(value) &&
-      hasOnlyKeys(value, RANGE_KEYS) &&
-      Number.isInteger(value.startLine) &&
-      Number.isInteger(value.endLine) &&
-      (value.startLine as number) > 0 &&
-      (value.endLine as number) >= (value.startLine as number))
-  );
-}
-
 function isReference(value: unknown): value is ActivePhaseReferenceV1 {
-  if (!isRecord(value) || !hasOnlyKeys(value, REFERENCE_KEYS)) return false;
-  return (
-    isNonEmptyString(value.id) &&
-    isNonEmptyString(value.provider) &&
-    isNullableString(value.tool) &&
-    isNonEmptyString(value.canonicalUrl) &&
-    typeof value.owner === "string" &&
-    typeof value.repo === "string" &&
-    isNullableString(value.revision) &&
-    isNullableString(value.path) &&
-    isRange(value.range) &&
-    isNullableInteger(value.issue) &&
-    isNullableInteger(value.pullRequest) &&
-    isNullableString(value.query) &&
-    isNullableString(value.anchor) &&
-    typeof value.relevance === "string"
-  );
+  return validateNotesReferenceProjection(value, "activePhaseContext.references[]") === null;
 }
 
 export function parseActivePhaseContext(
@@ -195,9 +133,7 @@ export function parseActivePhaseContext(
     !PHASE_STATUSES.has(phase.status as NotesPhaseStatus) ||
     phase.archivedAt !== null ||
     !isRecord(session) ||
-    !hasOnlyKeys(session, SESSION_KEYS) ||
-    !isNonEmptyString(session.sessionId) ||
-    !isNullableString(session.sessionPath) ||
+    validateNotesSessionLink(session, "activePhaseContext.session") !== null ||
     !Array.isArray(value.references) ||
     !value.references.every(isReference) ||
     !EXECUTION_STAGES.has(value.executionStage as ActivePhaseExecutionStage) ||

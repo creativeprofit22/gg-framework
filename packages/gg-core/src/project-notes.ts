@@ -38,6 +38,16 @@ export type NotesPhaseStatus =
   | "cancelled";
 
 export type NotesLifecycleEventSource = "user" | "session" | "agent" | "system";
+export type NotesLifecycleEventKind =
+  | "approval-opened"
+  | "approval-resolved"
+  | "attention-question-opened"
+  | "attention-runtime-opened"
+  | "attention-tool-opened"
+  | "attention-generic-opened"
+  | "attention-implementation-resolved"
+  | "attention-review-resolved"
+  | "other";
 
 export interface NotesReferenceRange {
   startLine: number;
@@ -67,6 +77,9 @@ export interface NotesSessionLink {
   sessionPath: string | null;
 }
 
+/** Durable/reference consumers may omit capture provenance but share all source semantics. */
+export type NotesReferenceProjection = Omit<NotesReference, "capturedAt">;
+
 export type NotesReminderDeliveryChannel = "in-app" | "native" | "in-app-fallback";
 export type NotesReminderPermission = "not-required" | "granted" | "denied" | "unavailable";
 
@@ -78,7 +91,9 @@ export interface NotesReminderDelivery {
 }
 
 export interface NotesReminder {
+  /** Unique across every reminder in the document. */
   id: string;
+  /** Unique across every current reminder occurrence in the document. */
   occurrenceKey: string;
   dueAt: string;
   note: string;
@@ -110,6 +125,8 @@ export interface NotesLifecycleEvent {
   source: NotesLifecycleEventSource;
   timestamp: string;
   reason: string | null;
+  /** Absent only in legacy in-memory records; persistence migration always adds it. */
+  kind?: NotesLifecycleEventKind;
 }
 
 export type NotesRoadmapActor = "gg-coder" | "ken" | "ken-autopilot";
@@ -292,6 +309,48 @@ export type ProjectNotesSaveOutcome =
   | ({ status: "corrupt" } & ProjectNotesCorruption)
   | { status: "invalid"; error: NotesValidationError };
 
+/**
+ * Produces the shared project identity used by browser and sidecar Notes storage.
+ * Windows drive and UNC paths are case-insensitive; POSIX paths preserve case.
+ */
+export function canonicalProjectKey(cwd: string): string {
+  const normalized = cwd.replace(/\\/g, "/");
+  const driveMatch = /^([A-Za-z]):(?:\/|$)/.exec(normalized);
+
+  if (driveMatch) {
+    const drive = `${driveMatch[1]!.toLowerCase()}:`;
+    const remainder = normalized.slice(driveMatch[0].length);
+    const segments = resolveSegments(remainder.split("/"), true);
+    return segments.length === 0 ? `${drive}/` : `${drive}/${segments.join("/")}`.toLowerCase();
+  }
+
+  if (normalized.startsWith("//")) {
+    const parts = normalized.slice(2).split("/").filter(Boolean);
+    const rootParts = parts.slice(0, 2);
+    const segments = resolveSegments(parts.slice(2), true);
+    return `//${[...rootParts, ...segments].join("/")}`.toLowerCase();
+  }
+
+  const absolute = normalized.startsWith("/");
+  const segments = resolveSegments(normalized.split("/"), absolute);
+  const result = `${absolute ? "/" : ""}${segments.join("/")}`;
+  return result || (absolute ? "/" : ".");
+}
+
+function resolveSegments(parts: string[], rooted: boolean): string[] {
+  const result: string[] = [];
+  for (const part of parts) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (result.length > 0 && result[result.length - 1] !== "..") result.pop();
+      else if (!rooted) result.push(part);
+    } else {
+      result.push(part);
+    }
+  }
+  return result;
+}
+
 export const NOTES_REFERENCE_URL_MAX_LENGTH = 2_048;
 export const NOTES_REFERENCE_METADATA_MAX_LENGTH = 4_096;
 export const NOTES_REMINDER_NOTE_MAX_LENGTH = 500;
@@ -337,6 +396,7 @@ const REFERENCE_KEYS = [
   "relevance",
   "capturedAt",
 ];
+const REFERENCE_PROJECTION_KEYS = REFERENCE_KEYS.filter((key) => key !== "capturedAt");
 const REFERENCE_RANGE_KEYS = ["startLine", "endLine"];
 const PHASE_KEYS = [
   "id",
@@ -376,10 +436,26 @@ const REMINDER_PERMISSIONS = new Set<NotesReminderPermission>([
   "denied",
   "unavailable",
 ]);
+
+export function isValidNotesReminderDeliveryPair(channel: unknown, permission: unknown): boolean {
+  return (
+    (channel === "in-app" && permission === "not-required") ||
+    (channel === "native" && permission === "granted") ||
+    (channel === "in-app-fallback" && (permission === "denied" || permission === "unavailable"))
+  );
+}
 const OVERRIDES_KEYS = ["status", "referenceIds"];
 const STATUS_OVERRIDE_KEYS = ["value", "source", "updatedAt"];
 const REFERENCE_IDS_OVERRIDE_KEYS = ["value", "source", "updatedAt"];
-const LIFECYCLE_EVENT_KEYS = ["id", "fromStatus", "toStatus", "source", "timestamp", "reason"];
+const LEGACY_LIFECYCLE_EVENT_KEYS = [
+  "id",
+  "fromStatus",
+  "toStatus",
+  "source",
+  "timestamp",
+  "reason",
+];
+const LIFECYCLE_EVENT_KEYS = [...LEGACY_LIFECYCLE_EVENT_KEYS, "kind"];
 const LEGACY_ROADMAP_STATUS_UPDATE_KEYS = [
   "type",
   "id",
@@ -468,6 +544,17 @@ const LIFECYCLE_EVENT_SOURCES = new Set<NotesLifecycleEventSource>([
   "agent",
   "system",
 ]);
+const LIFECYCLE_EVENT_KINDS = new Set<NotesLifecycleEventKind>([
+  "approval-opened",
+  "approval-resolved",
+  "attention-question-opened",
+  "attention-runtime-opened",
+  "attention-tool-opened",
+  "attention-generic-opened",
+  "attention-implementation-resolved",
+  "attention-review-resolved",
+  "other",
+]);
 const ROADMAP_ACTORS = new Set<NotesRoadmapActor>(["gg-coder", "ken", "ken-autopilot"]);
 const ROADMAP_TRANSITIONS = new Set<NotesRoadmapTransition>([
   "pending",
@@ -514,6 +601,69 @@ const COMPLETION_UNMET_GATE_CODES = new Set<NotesCompletionUnmetGateCode>([
   "inactive-phase",
 ]);
 
+export function classifyLegacyNotesLifecycleEvent(event: {
+  toStatus: unknown;
+  source: unknown;
+  reason: unknown;
+}): NotesLifecycleEventKind {
+  if (event.toStatus === "waiting-for-approval") return "approval-opened";
+  if (event.toStatus === "needs-attention") {
+    if (event.source === "session") return "attention-runtime-opened";
+    if (event.source === "agent" && /(^|\s)\S+ failed(?::|$)/i.test(String(event.reason ?? ""))) {
+      return "attention-tool-opened";
+    }
+    return event.source === "agent" ? "attention-question-opened" : "attention-generic-opened";
+  }
+  if (
+    event.toStatus === "in-progress" &&
+    ((event.source === "user" && event.reason === "Plan approved by user") ||
+      (event.source === "agent" && event.reason === "Plan approved by Autopilot"))
+  ) {
+    return "approval-resolved";
+  }
+  if (
+    event.toStatus === "in-progress" &&
+    event.source === "session" &&
+    (event.reason === "Implementation run started" ||
+      event.reason === "Implementation session resumed")
+  ) {
+    return "attention-implementation-resolved";
+  }
+  if (
+    event.toStatus === "review" &&
+    event.source === "session" &&
+    event.reason === "Review session resumed"
+  ) {
+    return "attention-review-resolved";
+  }
+  return "other";
+}
+
+function isLifecycleEventKindCompatible(
+  kind: NotesLifecycleEventKind,
+  toStatus: NotesPhaseStatus,
+  source: NotesLifecycleEventSource,
+): boolean {
+  switch (kind) {
+    case "approval-opened":
+      return toStatus === "waiting-for-approval";
+    case "approval-resolved":
+      return toStatus === "in-progress" && (source === "user" || source === "agent");
+    case "attention-question-opened":
+    case "attention-tool-opened":
+      return toStatus === "needs-attention" && source === "agent";
+    case "attention-runtime-opened":
+      return toStatus === "needs-attention" && source === "session";
+    case "attention-generic-opened":
+      return toStatus === "needs-attention";
+    case "attention-implementation-resolved":
+      return toStatus === "in-progress" && source === "session";
+    case "attention-review-resolved":
+      return toStatus === "review" && source === "session";
+    case "other":
+      return true;
+  }
+}
 export function isNotesDocumentV2(value: unknown): value is NotesDocumentV2 {
   return validateNotesDocumentV2(value) === null;
 }
@@ -538,7 +688,7 @@ export function isNotesDocumentV3(value: unknown): value is NotesDocumentV3 {
   return validateNotesDocumentV3(value).ok;
 }
 
-/** Adds missing additive fields to legacy v3 phase and roadmap records, then validates. */
+/** Adds missing additive fields to legacy v3 phase, lifecycle, and roadmap records, then validates. */
 export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidationResult {
   if (!isRecord(value) || !hasExactKeys(value, DOCUMENT_V3_KEYS) || value.version !== 3) {
     return validateNotesDocumentV3(value);
@@ -568,9 +718,28 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
       ...phase,
       reminder,
       archivedAt: keys.includes("archivedAt") ? phase.archivedAt : null,
+      lifecycleEvents: phase.lifecycleEvents,
       roadmapEvents: keys.includes("roadmapEvents") ? phase.roadmapEvents : [],
     };
-    if (!Array.isArray(migratedPhase.roadmapEvents)) return migratedPhase;
+    if (
+      !Array.isArray(migratedPhase.lifecycleEvents) ||
+      !Array.isArray(migratedPhase.roadmapEvents)
+    ) {
+      return migratedPhase;
+    }
+
+    const lifecycleEvents = migratedPhase.lifecycleEvents.map((event) => {
+      if (!isRecord(event) || !hasExactKeys(event, LEGACY_LIFECYCLE_EVENT_KEYS)) return event;
+      migrated = true;
+      return {
+        ...event,
+        kind: classifyLegacyNotesLifecycleEvent({
+          toStatus: event.toStatus,
+          source: event.source,
+          reason: event.reason,
+        }),
+      };
+    });
 
     const roadmapEvents = migratedPhase.roadmapEvents.map((event) => {
       if (!isRecord(event) || event.type !== "status-update") return event;
@@ -616,7 +785,7 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
       });
       return migratedEvent ? { ...migratedStatusUpdate, proposedReferences } : event;
     });
-    return { ...migratedPhase, roadmapEvents };
+    return { ...migratedPhase, lifecycleEvents, roadmapEvents };
   });
   return validateNotesDocumentV3(migrated ? { ...value, phases } : value);
 }
@@ -652,13 +821,38 @@ export function validateNotesDocumentV3(value: unknown): NotesValidationResult {
   }
 
   const phaseIds = new Set<string>();
+  const reminderIdPaths = new Map<string, string>();
+  const occurrenceKeyPaths = new Map<string, string>();
   for (let index = 0; index < value.phases.length; index += 1) {
     const phase = value.phases[index];
     const phaseError = validatePhase(phase, index, referenceIds);
     if (phaseError) return { ok: false, error: phaseError };
-    const id = (phase as NotesPhase).id;
-    if (phaseIds.has(id)) return invalid(`phases[${index}].id`, `duplicate ID: ${id}`);
-    phaseIds.add(id);
+    const validatedPhase = phase as NotesPhase;
+    if (phaseIds.has(validatedPhase.id)) {
+      return invalid(`phases[${index}].id`, `duplicate ID: ${validatedPhase.id}`);
+    }
+    phaseIds.add(validatedPhase.id);
+
+    const reminder = validatedPhase.reminder;
+    if (reminder === null) continue;
+    const reminderPath = `phases[${index}].reminder`;
+    const existingReminderIdPath = reminderIdPaths.get(reminder.id);
+    if (existingReminderIdPath) {
+      return invalid(
+        `${reminderPath}.id`,
+        `duplicate reminder ID; already used at ${existingReminderIdPath}`,
+      );
+    }
+    reminderIdPaths.set(reminder.id, `${reminderPath}.id`);
+
+    const existingOccurrencePath = occurrenceKeyPaths.get(reminder.occurrenceKey);
+    if (existingOccurrencePath) {
+      return invalid(
+        `${reminderPath}.occurrenceKey`,
+        `duplicate occurrence key; already used at ${existingOccurrencePath}`,
+      );
+    }
+    occurrenceKeyPaths.set(reminder.occurrenceKey, `${reminderPath}.occurrenceKey`);
   }
 
   return { ok: true, document: value as unknown as NotesDocumentV3 };
@@ -729,6 +923,28 @@ function validateReference(value: unknown, pathPrefix: string): NotesValidationE
   if (!isRecordWithKeys(value, REFERENCE_KEYS)) {
     return validationError(pathPrefix, `expected exactly: ${REFERENCE_KEYS.join(", ")}`);
   }
+  const projectionError = validateReferenceProjectionFields(value, pathPrefix);
+  if (projectionError) return projectionError;
+  if (!isTimestamp(value.capturedAt)) {
+    return validationError(`${pathPrefix}.capturedAt`, "expected an ISO timestamp");
+  }
+  return null;
+}
+
+export function validateNotesReferenceProjection(
+  value: unknown,
+  pathPrefix = "reference",
+): NotesValidationError | null {
+  if (!isRecordWithKeys(value, REFERENCE_PROJECTION_KEYS)) {
+    return validationError(pathPrefix, `expected exactly: ${REFERENCE_PROJECTION_KEYS.join(", ")}`);
+  }
+  return validateReferenceProjectionFields(value, pathPrefix);
+}
+
+function validateReferenceProjectionFields(
+  value: Record<string, unknown>,
+  pathPrefix: string,
+): NotesValidationError | null {
   if (!isNonEmptyString(value.id))
     return validationError(`${pathPrefix}.id`, "expected a stable ID");
   if (!isNonEmptyString(value.provider)) {
@@ -803,7 +1019,7 @@ function validateReference(value: unknown, pathPrefix: string): NotesValidationE
     );
   }
   const semanticError = validateReferenceCoordinates(
-    value as unknown as NotesReference,
+    value as unknown as NotesReferenceProjection,
     pathPrefix,
   );
   if (semanticError) return semanticError;
@@ -813,14 +1029,11 @@ function validateReference(value: unknown, pathPrefix: string): NotesValidationE
   if (isReferenceMetadataTooLong(value.relevance)) {
     return referenceMetadataLengthError(`${pathPrefix}.relevance`);
   }
-  if (!isTimestamp(value.capturedAt)) {
-    return validationError(`${pathPrefix}.capturedAt`, "expected an ISO timestamp");
-  }
   return null;
 }
 
 function validateReferenceCoordinates(
-  reference: NotesReference,
+  reference: NotesReferenceProjection,
   pathPrefix: string,
 ): NotesValidationError | null {
   if (reference.provider.trim().toLowerCase() !== "github") return null;
@@ -896,7 +1109,7 @@ function validatePhase(
     knownReferenceIds,
   );
   if (referenceIdsError) return referenceIdsError;
-  const sessionError = validateSession(value.session, `${pathPrefix}.session`);
+  const sessionError = validateNotesSessionLink(value.session, `${pathPrefix}.session`);
   if (sessionError) return sessionError;
   const reminderError = validateReminder(value.reminder, `${pathPrefix}.reminder`);
   if (reminderError) return reminderError;
@@ -954,7 +1167,10 @@ function validateReferenceIds(
   return null;
 }
 
-function validateSession(value: unknown, pathPrefix: string): NotesValidationError | null {
+export function validateNotesSessionLink(
+  value: unknown,
+  pathPrefix = "session",
+): NotesValidationError | null {
   if (value === null) return null;
   if (!isRecordWithKeys(value, SESSION_KEYS)) {
     return validationError(pathPrefix, "expected sessionId and sessionPath or null");
@@ -1022,6 +1238,12 @@ function validateReminderDelivery(value: unknown, pathPrefix: string): NotesVali
     !REMINDER_PERMISSIONS.has(value.permission as NotesReminderPermission)
   ) {
     return validationError(`${pathPrefix}.permission`, "unknown notification permission");
+  }
+  if (!isValidNotesReminderDeliveryPair(value.channel, value.permission)) {
+    return validationError(
+      `${pathPrefix}.permission`,
+      "permission does not match delivery channel",
+    );
   }
   return null;
 }
@@ -1112,6 +1334,21 @@ function validateLifecycleEvents(
     }
     if (!isNullableNonEmptyString(event.reason)) {
       return validationError(`${eventPath}.reason`, "expected a non-empty string or null");
+    }
+    if (
+      typeof event.kind !== "string" ||
+      !LIFECYCLE_EVENT_KINDS.has(event.kind as NotesLifecycleEventKind)
+    ) {
+      return validationError(`${eventPath}.kind`, "unknown lifecycle event kind");
+    }
+    if (
+      !isLifecycleEventKindCompatible(
+        event.kind as NotesLifecycleEventKind,
+        event.toStatus as NotesPhaseStatus,
+        event.source as NotesLifecycleEventSource,
+      )
+    ) {
+      return validationError(`${eventPath}.kind`, "kind does not match lifecycle transition");
     }
     previousStatus = event.toStatus;
     previousTimestamp = timestamp;
@@ -1242,7 +1479,7 @@ function validateRoadmapEvents(
             "failed or exception verification requires a bounded reason",
           );
         }
-        const verificationSessionError = validateSession(
+        const verificationSessionError = validateNotesSessionLink(
           record.verificationSession,
           `${eventPath}.verificationSession`,
         );
@@ -1327,7 +1564,7 @@ function validateRoadmapEvents(
       if (!isRecordWithKeys(record, ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS)) {
         return validationError(eventPath, "invalid implementation checkpoint");
       }
-      const sessionError = validateSession(record.session, `${eventPath}.session`);
+      const sessionError = validateNotesSessionLink(record.session, `${eventPath}.session`);
       if (sessionError || record.session === null) {
         return (
           sessionError ?? validationError(`${eventPath}.session`, "a bound session is required")

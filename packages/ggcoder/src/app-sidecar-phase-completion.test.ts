@@ -341,7 +341,8 @@ describe("evaluatePhaseCompletion", () => {
         toStatus: "waiting-for-approval",
         source: "agent",
         timestamp: LATER,
-        reason: "Plan submitted for approval",
+        reason: "Aprobación pendiente",
+        kind: "approval-opened",
       },
       {
         id: "approval-resolved",
@@ -349,7 +350,8 @@ describe("evaluatePhaseCompletion", () => {
         toStatus: "in-progress",
         source: "user",
         timestamp: LATER,
-        reason: "Plan approved by user",
+        reason: "Aprobado por la persona usuaria",
+        kind: "approval-resolved",
       },
     ];
 
@@ -366,7 +368,8 @@ describe("evaluatePhaseCompletion", () => {
         toStatus: "needs-attention",
         source: "agent",
         timestamp: LATER,
-        reason: "Choose the public API shape",
+        reason: "Choisissez la forme de l’API publique",
+        kind: "attention-question-opened",
       },
       {
         id: "attention-resolved",
@@ -374,7 +377,8 @@ describe("evaluatePhaseCompletion", () => {
         toStatus: "in-progress",
         source: "session",
         timestamp: LATER,
-        reason: "Implementation run started",
+        reason: "Exécution de l’implémentation démarrée",
+        kind: "attention-implementation-resolved",
       },
     ];
 
@@ -386,53 +390,103 @@ describe("evaluatePhaseCompletion", () => {
       blocker: "approval",
       status: "waiting-for-approval" as const,
       source: "agent" as const,
-      reason: "Plan submitted for approval",
+      reason: "Approval copy may change",
+      kind: "approval-opened" as const,
       expectedGate: "waiting-for-approval",
       resolution: {
         toStatus: "in-progress" as const,
         source: "user" as const,
-        reason: "Plan approved by user",
+        reason: "Approval resolution copy may change",
+        kind: "approval-resolved" as const,
       },
     },
     {
       blocker: "question",
       status: "needs-attention" as const,
       source: "agent" as const,
-      reason: "Choose the public API shape",
+      reason: "Question copy may change",
+      kind: "attention-question-opened" as const,
       expectedGate: "needs-attention",
       resolution: {
         toStatus: "in-progress" as const,
         source: "session" as const,
-        reason: "Implementation run started",
+        reason: "Implementation resolution copy may change",
+        kind: "attention-implementation-resolved" as const,
       },
     },
     {
-      blocker: "runtime error",
+      blocker: "runtime error via implementation",
       status: "needs-attention" as const,
       source: "session" as const,
-      reason: "Provider connection failed",
+      reason: "Runtime copy may change",
+      kind: "attention-runtime-opened" as const,
       expectedGate: "needs-attention",
       resolution: {
         toStatus: "in-progress" as const,
         source: "session" as const,
-        reason: "Implementation session resumed",
+        reason: "Runtime implementation resolution copy may change",
+        kind: "attention-implementation-resolved" as const,
+      },
+    },
+    {
+      blocker: "runtime error via review",
+      status: "needs-attention" as const,
+      source: "session" as const,
+      reason: "Runtime copy may change",
+      kind: "attention-runtime-opened" as const,
+      expectedGate: "needs-attention",
+      resolution: {
+        toStatus: "review" as const,
+        source: "session" as const,
+        reason: "Runtime review resolution copy may change",
+        kind: "attention-review-resolved" as const,
       },
     },
     {
       blocker: "tool failure",
       status: "needs-attention" as const,
       source: "agent" as const,
-      reason: "bash failed: typecheck failed",
+      reason: "Tool copy has no legacy failure pattern",
+      kind: "attention-tool-opened" as const,
       expectedGate: "needs-attention",
       resolution: {
         toStatus: "in-progress" as const,
         source: "session" as const,
-        reason: "Implementation run started",
+        reason: "Tool resolution copy may change",
+        kind: "attention-implementation-resolved" as const,
+      },
+    },
+    {
+      blocker: "generic attention via implementation",
+      status: "needs-attention" as const,
+      source: "system" as const,
+      reason: "Generic attention copy may change",
+      kind: "attention-generic-opened" as const,
+      expectedGate: "needs-attention",
+      resolution: {
+        toStatus: "in-progress" as const,
+        source: "session" as const,
+        reason: "Generic implementation resolution copy may change",
+        kind: "attention-implementation-resolved" as const,
+      },
+    },
+    {
+      blocker: "generic attention via review",
+      status: "needs-attention" as const,
+      source: "system" as const,
+      reason: "Generic attention copy may change",
+      kind: "attention-generic-opened" as const,
+      expectedGate: "needs-attention",
+      resolution: {
+        toStatus: "review" as const,
+        source: "session" as const,
+        reason: "Generic review resolution copy may change",
+        kind: "attention-review-resolved" as const,
       },
     },
   ])(
     "requires an explicit lifecycle resolution for a $blocker blocker",
-    ({ status, source, reason, expectedGate, resolution }) => {
+    ({ status, source, reason, kind, expectedGate, resolution }) => {
       const candidate = phase();
       candidate.status = "review";
       candidate.lifecycleEvents = [
@@ -443,6 +497,7 @@ describe("evaluatePhaseCompletion", () => {
           source,
           timestamp: "2026-07-28T12:02:00.000Z",
           reason,
+          kind,
         },
         {
           id: "generic-review-report",
@@ -451,6 +506,7 @@ describe("evaluatePhaseCompletion", () => {
           source: "agent",
           timestamp: "2026-07-28T12:03:00.000Z",
           reason: "Roadmap report: Ken submitted final review",
+          kind: "other",
         },
         {
           id: "reviewer-started",
@@ -459,6 +515,7 @@ describe("evaluatePhaseCompletion", () => {
           source: "agent",
           timestamp: "2026-07-28T12:03:30.000Z",
           reason: "Autopilot review started",
+          kind: "other",
         },
       ];
       expect(evaluate(candidate)).toMatchObject({ gateOutcome: expectedGate });

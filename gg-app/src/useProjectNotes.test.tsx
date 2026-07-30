@@ -1667,6 +1667,114 @@ describe("useProjectNotes sidecar authority", () => {
     });
   });
 
+  it("rejects a generated reminder-ID collision before local fallback persistence", async () => {
+    const cwd = "/work/reminder-id-collision";
+    const storage = new MemoryStorage();
+    const document = notes("reminder ID collision");
+    const target = phase("target", 0);
+    const occupied = phase("occupied", 1);
+    occupied.reminder = {
+      id: "shared-reminder-id",
+      occurrenceKey: "occupied-occurrence",
+      dueAt: "2026-07-25T13:00:00.000Z",
+      note: "Existing reminder",
+      createdAt: NOW,
+      lastDelivery: null,
+    };
+    document.phases = [target, occupied];
+    seed(storage, cwd, document);
+    const generatedIds = ["new-occurrence", "shared-reminder-id"];
+    let mutationClockCalls = 0;
+    const mutationClock = () => {
+      mutationClockCalls += 1;
+      return LATER;
+    };
+    const hook = renderHook(() =>
+      useProjectNotes(cwd, {
+        storage,
+        clock: mutationClock,
+        idFactory: () => generatedIds.shift()!,
+      }),
+    );
+    await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(2));
+    mutationClockCalls = 0;
+
+    await expect(
+      hook.result.current.schedulePhaseReminder("target", {
+        dueAt: "2026-07-25T14:00:00.000Z",
+        note: "Colliding reminder",
+      }),
+    ).resolves.toEqual({
+      status: "failed",
+      reason: "validation",
+      error: {
+        path: "phases[0].reminder.id",
+        message: "duplicate reminder ID; already used at phases[1].reminder.id",
+      },
+    });
+    expect(mutationClockCalls).toBe(1);
+    expect(hook.result.current.document.phases[0]!.reminder).toBeNull();
+    expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!)).toMatchObject({
+      phases: [{ reminder: null }, { reminder: { id: "shared-reminder-id" } }],
+    });
+  });
+
+  it("drops a queued occurrence-key collision after conflict replay instead of saving it", async () => {
+    const cwd = "/work/reminder-occurrence-replay-collision";
+    const server = new FakeNotesServer();
+    const document = notes("reminder occurrence replay collision");
+    document.phases = [phase("target", 0), phase("remote", 1)];
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document });
+    const client = server.connect(cwd);
+    client.deferSaves = true;
+    const storage = new MemoryStorage();
+    const generatedIds = ["replay-occurrence", "target-reminder"];
+    const hook = renderHook(() =>
+      useProjectNotes(cwd, {
+        ...hookOptions(client, storage),
+        idFactory: () => generatedIds.shift()!,
+      }),
+    );
+    await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
+
+    let resultPromise!: ReturnType<typeof hook.result.current.schedulePhaseReminder>;
+    act(() => {
+      resultPromise = hook.result.current.schedulePhaseReminder("target", {
+        dueAt: "2026-07-25T14:00:00.000Z",
+        note: "Queued reminder",
+      });
+    });
+    await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+
+    const remote = structuredClone(server.snapshots.get(cwd)!);
+    remote.revision = 2;
+    remote.document.phases[1]!.reminder = {
+      id: "remote-reminder",
+      occurrenceKey: "replay-occurrence",
+      dueAt: "2026-07-25T13:00:00.000Z",
+      note: "Remote winner",
+      createdAt: NOW,
+      lastDelivery: null,
+    };
+    server.snapshots.set(cwd, remote);
+    act(() => client.flushNextSave());
+
+    await expect(resultPromise).resolves.toEqual({
+      status: "failed",
+      reason: "validation",
+      error: {
+        path: "phases[0].reminder.occurrenceKey",
+        message: "duplicate occurrence key; already used at phases[1].reminder.occurrenceKey",
+      },
+    });
+    expect(client.saveCalls).toHaveLength(1);
+    expect(server.snapshots.get(cwd)?.document.phases).toMatchObject([
+      { reminder: null },
+      { reminder: { id: "remote-reminder", occurrenceKey: "replay-occurrence" } },
+    ]);
+    await waitFor(() => expect(hook.result.current.document.phases[0]!.reminder).toBeNull());
+  });
+
   it.each(["snooze", "dismiss"] as const)(
     "rejects a stale alert %s after conflict replay without mutating the replacement occurrence",
     async (actionName) => {
@@ -1755,7 +1863,11 @@ describe("useProjectNotes sidecar authority", () => {
     const storage = new MemoryStorage();
     client.deferSaves = true;
     let now = "2026-07-25T12:01:00.000Z";
-    const mutableClock = () => now;
+    let mutationClockCalls = 0;
+    const mutableClock = () => {
+      mutationClockCalls += 1;
+      return now;
+    };
     let id = 0;
     const hook = renderHook(() =>
       useProjectNotes(cwd, {
@@ -1765,6 +1877,7 @@ describe("useProjectNotes sidecar authority", () => {
       }),
     );
     await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
+    mutationClockCalls = 0;
 
     let resultPromise!: ReturnType<typeof hook.result.current.schedulePhaseReminder>;
     act(() => {
@@ -1774,6 +1887,7 @@ describe("useProjectNotes sidecar authority", () => {
       });
     });
     await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+    expect(mutationClockCalls).toBe(1);
     server.snapshots.set(cwd, { ...server.snapshots.get(cwd)!, revision: 2 });
     now = "2026-07-25T12:03:00.000Z";
     act(() => client.flushNextSave());
@@ -1782,6 +1896,7 @@ describe("useProjectNotes sidecar authority", () => {
       status: "invalid-time",
       phaseId: "phase-reminder",
     });
+    expect(mutationClockCalls).toBe(2);
     expect(client.saveCalls).toHaveLength(1);
     await waitFor(() => expect(hook.result.current.document.phases[0]!.reminder).toBeNull());
   });

@@ -4,13 +4,17 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { withFileLock } from "@kenkaiiii/gg-core";
 import {
+  canonicalProjectKey,
   canonicalReferenceIdentity,
+  classifyLegacyNotesLifecycleEvent,
+  isValidNotesReminderDeliveryPair,
   migrateNotesDocumentV2,
   migrateNotesDocumentV3PhaseShape,
   normalizeCanonicalUrl,
   validateNotesDocumentV3,
   type NotesDocumentV3,
   type NotesImplementationRunOutcome,
+  type NotesLifecycleEventKind,
   type NotesLifecycleEventSource,
   type NotesPhase,
   type NotesPhaseStatus,
@@ -97,6 +101,7 @@ export type ProjectNotesPhaseLaunchOutcome =
     }
   | { status: "phase-not-found" }
   | { status: "phase-archived" }
+  | { status: "done-terminal" }
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
@@ -114,6 +119,7 @@ export interface ProjectNotesPhaseLifecycleTransition {
   source: NotesLifecycleEventSource;
   reason: string;
   timestamp: string;
+  kind?: NotesLifecycleEventKind;
   expectedSession?: NotesSessionLink | null;
 }
 
@@ -357,30 +363,6 @@ const IMPLEMENTATION_RUN_OUTCOMES = new Set<NotesImplementationRunOutcome>([
   "cancelled",
   "interrupted",
 ]);
-
-export function canonicalProjectKey(cwd: string): string {
-  const normalized = cwd.replace(/\\/g, "/");
-  const driveMatch = /^([A-Za-z]):(?:\/|$)/.exec(normalized);
-
-  if (driveMatch) {
-    const drive = `${driveMatch[1]!.toLowerCase()}:`;
-    const remainder = normalized.slice(driveMatch[0].length);
-    const segments = resolveSegments(remainder.split("/"), true);
-    return segments.length === 0 ? `${drive}/` : `${drive}/${segments.join("/")}`.toLowerCase();
-  }
-
-  if (normalized.startsWith("//")) {
-    const parts = normalized.slice(2).split("/").filter(Boolean);
-    const rootParts = parts.slice(0, 2);
-    const segments = resolveSegments(parts.slice(2), true);
-    return `//${[...rootParts, ...segments].join("/")}`.toLowerCase();
-  }
-
-  const absolute = normalized.startsWith("/");
-  const segments = resolveSegments(normalized.split("/"), absolute);
-  const result = `${absolute ? "/" : ""}${segments.join("/")}`;
-  return result || (absolute ? "/" : ".");
-}
 
 export function projectNotesHash(projectKey: string): string {
   return createHash("sha256").update(projectKey, "utf8").digest("hex");
@@ -678,6 +660,13 @@ function applyPhaseLifecycleTransition(
     source: transition.source,
     timestamp: transition.timestamp,
     reason,
+    kind:
+      transition.kind ??
+      classifyLegacyNotesLifecycleEvent({
+        toStatus: transition.status,
+        source: transition.source,
+        reason,
+      }),
   });
   return "updated";
 }
@@ -955,6 +944,12 @@ function applyCompletionEvaluation(
     source: "system",
     timestamp,
     reason,
+    kind:
+      evaluation.targetStatus === "waiting-for-approval"
+        ? "approval-opened"
+        : evaluation.targetStatus === "needs-attention"
+          ? "attention-generic-opened"
+          : "other",
   });
 }
 
@@ -1080,7 +1075,7 @@ export class ProjectNotesRepository {
         error: validationError("expectedRevision", "expected a non-negative integer"),
       };
     }
-    const validated = validateNotesDocumentV3(document);
+    const validated = coerceNotesDocumentV3(document);
     if (!validated.ok) return { status: "invalid", error: validated.error };
     const projectKey = canonicalProjectKey(cwd);
     const paths = this.paths(cwd);
@@ -1152,11 +1147,6 @@ export class ProjectNotesRepository {
         error: validationError("attemptedAt", "expected an ISO timestamp"),
       };
     }
-    const permissionMatchesChannel =
-      (request.channel === "in-app" && request.permission === "not-required") ||
-      (request.channel === "native" && request.permission === "granted") ||
-      (request.channel === "in-app-fallback" &&
-        (request.permission === "denied" || request.permission === "unavailable"));
     if (!REMINDER_DELIVERY_CHANNELS.has(request.channel)) {
       return {
         status: "invalid",
@@ -1169,7 +1159,7 @@ export class ProjectNotesRepository {
         error: validationError("permission", "unknown notification permission"),
       };
     }
-    if (!permissionMatchesChannel) {
+    if (!isValidNotesReminderDeliveryPair(request.channel, request.permission)) {
       return {
         status: "invalid",
         error: validationError("permission", "permission does not match delivery channel"),
@@ -1300,6 +1290,7 @@ export class ProjectNotesRepository {
               ? request.blocker!
               : `Roadmap report: ${request.progress}`,
           timestamp,
+          kind: request.transition === "blocked" ? "attention-question-opened" : "other",
         },
         this.createId,
       );
@@ -1733,6 +1724,7 @@ export class ProjectNotesRepository {
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.envelope.document.phases[phaseIndex]!;
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (currentPhase.status === "done") return { status: "done-terminal" };
       const referencesById = new Map(
         current.envelope.document.references.map((reference) => [reference.id, reference]),
       );
@@ -1770,6 +1762,7 @@ export class ProjectNotesRepository {
           source: "user",
           reason: "Phase started by user",
           timestamp,
+          kind: "other",
         },
         this.createId,
       );
@@ -1874,6 +1867,7 @@ export class ProjectNotesRepository {
       source: "system",
       reason,
       timestamp: new Date().toISOString(),
+      kind: "attention-generic-opened",
       expectedSession,
     });
   }
@@ -2016,20 +2010,6 @@ export class ProjectNotesRepository {
       migratedFromV2: parsed.migratedFromV2,
     };
   }
-}
-
-function resolveSegments(parts: string[], rooted: boolean): string[] {
-  const result: string[] = [];
-  for (const part of parts) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (result.length > 0 && result[result.length - 1] !== "..") result.pop();
-      else if (!rooted) result.push(part);
-    } else {
-      result.push(part);
-    }
-  }
-  return result;
 }
 
 function parseStoredEnvelope(

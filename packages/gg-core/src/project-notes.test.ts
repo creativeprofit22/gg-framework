@@ -1,9 +1,12 @@
 import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
+  canonicalProjectKey,
   canonicalReferenceIdentity,
+  classifyLegacyNotesLifecycleEvent,
   isNotesDocumentV2,
   isNotesDocumentV3,
+  isValidNotesReminderDeliveryPair,
   migrateNotesDocumentV2,
   migrateNotesDocumentV3PhaseShape,
   normalizeCanonicalUrl,
@@ -12,6 +15,8 @@ import {
   NOTES_REFERENCE_URL_MAX_LENGTH,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
   validateNotesDocumentV3,
+  validateNotesReferenceProjection,
+  validateNotesSessionLink,
   type NotesDocumentV2,
   type NotesDocumentV3,
 } from "./project-notes.js";
@@ -73,6 +78,26 @@ function expectError(value: unknown, path: string, message?: string): void {
 }
 
 describe("project Notes contract", () => {
+  it.each([
+    ["C:\\Work\\.\\App\\..\\Project\\", "c:/work/project"],
+    ["C:/../Project", "c:/project"],
+    ["\\\\Server\\Share\\Folder\\..\\Project", "//server/share/project"],
+    ["/Work/./App/../Project/", "/Work/Project"],
+    ["/work/../../project", "/project"],
+    ["work/../../project", "../project"],
+    ["", "."],
+  ])("canonicalizes project path %s", (cwd, expected) => {
+    expect(canonicalProjectKey(cwd)).toBe(expected);
+  });
+
+  it("folds Windows path case while preserving POSIX path case", () => {
+    expect(canonicalProjectKey("C:/WORK/PROJECT")).toBe(canonicalProjectKey("c:\\work\\project"));
+    expect(canonicalProjectKey("\\\\SERVER\\SHARE\\PROJECT")).toBe(
+      canonicalProjectKey("//server/share/project"),
+    );
+    expect(canonicalProjectKey("/Work/Project")).not.toBe(canonicalProjectKey("/work/project"));
+  });
+
   it("accepts the canonical fixture without cloning or rewriting it", async () => {
     const document = await fixture();
 
@@ -81,6 +106,60 @@ describe("project Notes contract", () => {
     expect(migrateNotesDocumentV3PhaseShape(document)).toEqual({ ok: true, document });
   });
 
+  it("validates reference and session projections with the authoritative semantics", async () => {
+    const document = await fixture();
+    const { capturedAt: _capturedAt, ...projection } = document.references[0]!;
+
+    expect(validateNotesReferenceProjection(projection)).toBeNull();
+    expect(validateNotesReferenceProjection({ ...projection, issue: 0 })).toMatchObject({
+      path: "reference.issue",
+    });
+    expect(
+      validateNotesReferenceProjection({
+        ...projection,
+        path: null,
+        range: { startLine: 1, endLine: 2 },
+      }),
+    ).toMatchObject({ path: "reference.path" });
+    expect(
+      validateNotesSessionLink({ sessionId: "session-1", sessionPath: "/session.jsonl" }),
+    ).toBeNull();
+    expect(validateNotesSessionLink({ sessionId: "session-1", sessionPath: "" })).toMatchObject({
+      path: "session.sessionPath",
+    });
+  });
+
+  it.each([
+    ["in-app", "not-required"],
+    ["native", "granted"],
+    ["in-app-fallback", "denied"],
+    ["in-app-fallback", "unavailable"],
+  ] as const)("accepts the valid %s and %s reminder delivery pair", (channel, permission) => {
+    expect(isValidNotesReminderDeliveryPair(channel, permission)).toBe(true);
+  });
+
+  it.each([
+    ["in-app", "granted"],
+    ["native", "denied"],
+    ["in-app-fallback", "not-required"],
+  ] as const)("rejects the impossible %s and %s reminder delivery pair", (channel, permission) => {
+    expect(isValidNotesReminderDeliveryPair(channel, permission)).toBe(false);
+  });
+
+  it("rejects impossible current-v3 reminder evidence at its permission path", async () => {
+    const document = await fixture();
+    document.phases[0]!.reminder!.lastDelivery!.permission = "granted";
+    const expected = {
+      ok: false as const,
+      error: {
+        path: "phases[0].reminder.lastDelivery.permission",
+        message: "permission does not match delivery channel",
+      },
+    };
+
+    expect(validateNotesDocumentV3(document)).toEqual(expected);
+    expect(migrateNotesDocumentV3PhaseShape(document)).toEqual(expected);
+  });
   it("accepts the backend final-review evidence-only status outcome", async () => {
     const document = await fixture();
     const update = document.phases[0]!.roadmapEvents.find(
@@ -110,6 +189,30 @@ describe("project Notes contract", () => {
     });
   });
 
+  it.each([
+    ["waiting-for-approval", "agent", "legacy approval copy", "approval-opened"],
+    ["needs-attention", "session", "legacy runtime copy", "attention-runtime-opened"],
+    ["needs-attention", "agent", "bash failed: legacy copy", "attention-tool-opened"],
+    ["needs-attention", "agent", "legacy question copy", "attention-question-opened"],
+    ["needs-attention", "system", "legacy generic copy", "attention-generic-opened"],
+    ["in-progress", "user", "Plan approved by user", "approval-resolved"],
+    ["in-progress", "agent", "Plan approved by Autopilot", "approval-resolved"],
+    ["in-progress", "session", "Implementation run started", "attention-implementation-resolved"],
+    [
+      "in-progress",
+      "session",
+      "Implementation session resumed",
+      "attention-implementation-resolved",
+    ],
+    ["review", "session", "Review session resumed", "attention-review-resolved"],
+    ["in-progress", "session", "localized new copy", "other"],
+  ] as const)(
+    "classifies legacy $0/$1 lifecycle copy once as $3",
+    (toStatus, source, reason, expected) => {
+      expect(classifyLegacyNotesLifecycleEvent({ toStatus, source, reason })).toBe(expected);
+    },
+  );
+
   it("migrates every additive legacy-v3 field family and nothing else", async () => {
     const expected = await fixture();
     const legacy = structuredClone(expected) as unknown as {
@@ -120,6 +223,11 @@ describe("project Notes contract", () => {
     delete firstPhase.archivedAt;
     delete secondPhase.archivedAt;
     delete secondPhase.roadmapEvents;
+    for (const phase of legacy.phases) {
+      for (const event of phase.lifecycleEvents as Array<Record<string, unknown>>) {
+        delete event.kind;
+      }
+    }
 
     const reminder = firstPhase.reminder as Record<string, unknown>;
     delete reminder.occurrenceKey;
@@ -161,6 +269,11 @@ describe("project Notes contract", () => {
         phases: [
           {
             archivedAt: null,
+            lifecycleEvents: [
+              { kind: "other" },
+              { kind: "other" },
+              { kind: "attention-question-opened" },
+            ],
             reminder: {
               occurrenceKey: "reminder-review-contract",
               lastDelivery: null,
@@ -174,7 +287,11 @@ describe("project Notes contract", () => {
               },
             ],
           },
-          { archivedAt: null, roadmapEvents: [] },
+          {
+            archivedAt: null,
+            lifecycleEvents: [{ kind: "other" }, { kind: "other" }],
+            roadmapEvents: [],
+          },
         ],
       },
     });
@@ -315,6 +432,38 @@ describe("project Notes contract", () => {
     };
     expectError(duplicateIdentity, "references[1].canonicalUrl");
   });
+
+  it.each([
+    {
+      field: "id" as const,
+      duplicateValue: "reminder-review-contract",
+      uniqueValue: "occurrence-second-reminder",
+      path: "phases[1].reminder.id",
+      message: "duplicate reminder ID; already used at phases[0].reminder.id",
+    },
+    {
+      field: "occurrenceKey" as const,
+      duplicateValue: "occurrence-review-contract",
+      uniqueValue: "reminder-second-reminder",
+      path: "phases[1].reminder.occurrenceKey",
+      message: "duplicate occurrence key; already used at phases[0].reminder.occurrenceKey",
+    },
+  ])(
+    "rejects a document-wide duplicate reminder $field at its duplicate path",
+    async (testCase) => {
+      const document = await fixture();
+      const firstReminder = document.phases[0]!.reminder!;
+      document.phases[1]!.reminder = {
+        ...firstReminder,
+        id: testCase.field === "id" ? testCase.duplicateValue : testCase.uniqueValue,
+        occurrenceKey:
+          testCase.field === "occurrenceKey" ? testCase.duplicateValue : testCase.uniqueValue,
+        lastDelivery: null,
+      };
+
+      expectError(document, testCase.path, testCase.message);
+    },
+  );
 
   it("enforces lifecycle and roadmap chronology", async () => {
     const lifecycle = await fixture();

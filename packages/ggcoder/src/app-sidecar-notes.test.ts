@@ -246,6 +246,82 @@ describe("app sidecar Notes routes", () => {
     expect(sessions.get("other")?.events).toEqual([]);
   });
 
+  it("rejects impossible current-v3 delivery evidence at the migration boundary", async () => {
+    const document = notes("impossible reminder delivery");
+    document.phases[0]!.reminder = {
+      id: "reminder-1",
+      occurrenceKey: "occurrence-1",
+      dueAt: NOW,
+      note: "Review delivery evidence",
+      createdAt: NOW,
+      lastDelivery: {
+        occurrenceKey: "occurrence-1",
+        attemptedAt: NOW,
+        channel: "in-app",
+        permission: "granted",
+      },
+    };
+
+    const rejected = await request("a", "/notes/migrate", {
+      method: "POST",
+      body: JSON.stringify({ document }),
+    });
+
+    expect(rejected).toEqual({
+      response: expect.objectContaining({ status: 400 }),
+      body: {
+        status: "invalid",
+        error: {
+          path: "phases[0].reminder.lastDelivery.permission",
+          message: "permission does not match delivery channel",
+        },
+      },
+    });
+    expect((await request("a", "/notes")).body).toEqual({ status: "missing" });
+    expect(committedSnapshots).toEqual([]);
+    expect([...sessions.values()].flatMap((session) => session.events)).toEqual([]);
+  });
+
+  it("rejects duplicate occurrence keys at the migration route without persisting or broadcasting", async () => {
+    const document = notes("duplicate occurrence route");
+    document.phases[0]!.reminder = {
+      id: "reminder-1",
+      occurrenceKey: "occurrence-shared",
+      dueAt: NOW,
+      note: "First",
+      createdAt: NOW,
+      lastDelivery: null,
+    };
+    const secondPhase = structuredClone(document.phases[0]!);
+    secondPhase.id = "phase-2";
+    secondPhase.order = 1;
+    secondPhase.reminder = {
+      ...secondPhase.reminder!,
+      id: "reminder-2",
+      note: "Second",
+    };
+    document.phases.push(secondPhase);
+
+    const rejected = await request("a", "/notes/migrate", {
+      method: "POST",
+      body: JSON.stringify({ document }),
+    });
+
+    expect(rejected).toEqual({
+      response: expect.objectContaining({ status: 400 }),
+      body: {
+        status: "invalid",
+        error: {
+          path: "phases[1].reminder.occurrenceKey",
+          message: "duplicate occurrence key; already used at phases[0].reminder.occurrenceKey",
+        },
+      },
+    });
+    expect((await request("a", "/notes")).body).toEqual({ status: "missing" });
+    expect(committedSnapshots).toEqual([]);
+    expect([...sessions.values()].flatMap((session) => session.events)).toEqual([]);
+  });
+
   it("round-trips exact reference metadata and many-to-many links through save, fan-out, and restart", async () => {
     const initial = notes("structured references");
     await request("a", "/notes/migrate", {

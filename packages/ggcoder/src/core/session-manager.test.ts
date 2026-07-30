@@ -252,6 +252,46 @@ describe("SessionManager.getActivePhaseContext", () => {
     ).toEqual(valid);
   });
 
+  it("ignores semantically malformed durable contexts instead of restoring them", () => {
+    const valid = activePhaseContext();
+    const malformedContexts: unknown[] = [
+      { ...valid, session: { ...valid.session, sessionPath: "" } },
+      {
+        ...valid,
+        references: [
+          {
+            id: "ref-1",
+            provider: "github",
+            tool: null,
+            canonicalUrl: "https://github.com/acme/repo/issues/1",
+            owner: "acme",
+            repo: "repo",
+            revision: null,
+            path: null,
+            range: null,
+            issue: 0,
+            pullRequest: null,
+            query: null,
+            anchor: null,
+            relevance: "Invalid zero issue coordinate.",
+          },
+        ],
+      },
+    ];
+
+    for (const [index, malformed] of malformedContexts.entries()) {
+      expect(
+        manager.getActivePhaseContext([
+          activePhaseEntry("valid", valid),
+          activePhaseEntry(`malformed-${index}`, malformed),
+        ]),
+      ).toEqual(valid);
+      expect(
+        manager.getActivePhaseContext([activePhaseEntry("malformed", malformed)]),
+      ).toBeUndefined();
+    }
+  });
+
   it("rejects cross-project or wrong-phase metadata when an identity is expected", () => {
     const valid = activePhaseContext();
     expect(

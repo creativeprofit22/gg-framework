@@ -16,3 +16,4 @@ export * from "./oauth/kimi.js";
 export * from "./telegram.js";
 export * from "./voice-transcriber.js";
 export * from "./auto-update.js";
+export * from "./phase-start-protocol.js";

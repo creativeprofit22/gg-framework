@@ -209,6 +209,37 @@ describe("structured project notes storage", () => {
     });
   });
 
+  it("rejects impossible current-v3 delivery evidence before sidecar migration", () => {
+    const cwd = "/work/impossible-delivery";
+    const storage = new MemoryStorage();
+    const invalid = document("impossible delivery");
+    invalid.phases[0]!.reminder!.lastDelivery = {
+      occurrenceKey: "occurrence-1",
+      attemptedAt: NOW,
+      channel: "in-app-fallback",
+      permission: "granted",
+    };
+    const raw = JSON.stringify(invalid);
+
+    expect(validateNotesDocumentV3(invalid)).toEqual({
+      ok: false,
+      error: {
+        path: "phases[0].reminder.lastDelivery.permission",
+        message: "permission does not match delivery channel",
+      },
+    });
+    expect(parseNotesDocument(raw)).toMatchObject({
+      ok: false,
+      reason: "invalid-shape",
+      error: { path: "phases[0].reminder.lastDelivery.permission" },
+    });
+
+    storage.setItem(v3NotesKey(cwd), raw);
+    const loaded = createNotesRepository(storage, () => NOW).load(cwd);
+    expect(loaded.migrationEligibility).toBe("ineligible-invalid-document");
+    expect(storage.getItem(v3NotesKey(cwd))).toBe(raw);
+  });
+
   it("accepts equal timestamps in append order across lifecycle and roadmap histories", async () => {
     const fixture = (await canonicalNotesFixture()) as NotesDocumentV3;
     const phase = fixture.phases[0]!;
@@ -804,6 +835,9 @@ describe("structured project notes storage", () => {
   it("converges Windows cwd aliases but preserves POSIX case", () => {
     expect(v2NotesKey("C:\\Work\\.\\App\\..\\Project\\")).toBe(v2NotesKey("c:/work/project"));
     expect(v3NotesKey("C:\\Work\\.\\App\\..\\Project\\")).toBe(v3NotesKey("c:/work/project"));
+    expect(v3NotesKey("\\\\Server\\Share\\Folder\\..\\Project")).toBe(
+      v3NotesKey("//server/share/project"),
+    );
     expect(canonicalProjectKey("/Work/Project")).not.toBe(canonicalProjectKey("/work/project"));
   });
 });

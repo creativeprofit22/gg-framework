@@ -85,8 +85,15 @@ interface Props {
     phaseId: string,
     input: { dueAt: string; note: string },
   ): Promise<NotesReminderMutationResult>;
-  onSnoozeReminder(phaseId: string, dueAt: string): Promise<NotesReminderMutationResult>;
-  onDismissReminder(phaseId: string): Promise<NotesReminderMutationResult>;
+  onSnoozeReminder(
+    phaseId: string,
+    dueAt: string,
+    expectedOccurrenceKey: string,
+  ): Promise<NotesReminderMutationResult>;
+  onDismissReminder(
+    phaseId: string,
+    expectedOccurrenceKey: string,
+  ): Promise<NotesReminderMutationResult>;
   openSource?: OpenReferenceUrl;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;

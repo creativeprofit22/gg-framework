@@ -200,7 +200,8 @@ export class AppSidecarRoadmapToolHost {
         result: "completion-review-committed",
         phaseId: input.phase_id,
         revision: completion.snapshot.revision,
-        statusUpdate: completion.status,
+        statusOutcome: completion.statusOutcome,
+        proposals: completion.proposals,
         gateOutcome: completion.evaluation.gateOutcome,
         unmetGateCodes: completion.evaluation.unmetGateCodes,
       };
@@ -210,6 +211,8 @@ export class AppSidecarRoadmapToolHost {
         result: "completion-review-duplicate",
         phaseId: input.phase_id,
         revision: completion.revision,
+        statusOutcome: completion.statusOutcome,
+        proposals: completion.proposals,
         gateOutcome: completion.evaluation.gateOutcome,
         unmetGateCodes: completion.evaluation.unmetGateCodes,
       };

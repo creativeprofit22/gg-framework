@@ -55,8 +55,15 @@ interface RoadmapProps {
     phaseId: string,
     input: { dueAt: string; note: string },
   ): Promise<NotesReminderMutationResult>;
-  onSnoozeReminder(phaseId: string, dueAt: string): Promise<NotesReminderMutationResult>;
-  onDismissReminder(phaseId: string): Promise<NotesReminderMutationResult>;
+  onSnoozeReminder(
+    phaseId: string,
+    dueAt: string,
+    expectedOccurrenceKey: string,
+  ): Promise<NotesReminderMutationResult>;
+  onDismissReminder(
+    phaseId: string,
+    expectedOccurrenceKey: string,
+  ): Promise<NotesReminderMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
@@ -90,6 +97,7 @@ const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
   timeStyle: "short",
 });
 const timeFormatter = new Intl.DateTimeFormat(undefined, { timeStyle: "short" });
+const ROADMAP_CLOCK_FALLBACK_MS = 60_000;
 
 export function NotesRoadmap({
   phases,
@@ -118,7 +126,7 @@ export function NotesRoadmap({
   onActionSuccess,
 }: RoadmapProps): React.ReactElement {
   const visiblePhases = phases.filter((phase) => phase.archivedAt === null);
-  const [rowNow] = useState(() => new Date());
+  const currentTime = useRoadmapCurrentTime(phases);
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedPhaseId);
   const [showCreate, setShowCreate] = useState(false);
   const [title, setTitle] = useState("");
@@ -283,7 +291,9 @@ export function NotesRoadmap({
                   <span className="notes-phase-count">
                     {phase.referenceIds.length} {phase.referenceIds.length === 1 ? "ref" : "refs"}
                   </span>
-                  <span className="notes-phase-reminder">{reminderRowLabel(phase, rowNow)}</span>
+                  <span className="notes-phase-reminder">
+                    {reminderRowLabel(phase, currentTime)}
+                  </span>
                   <button
                     type="button"
                     className="notes-roadmap-primary"
@@ -303,6 +313,7 @@ export function NotesRoadmap({
           <PhaseDetail
             key={selectedPhase.id}
             phase={selectedPhase}
+            currentTime={currentTime}
             references={references}
             authorityReady={authorityReady}
             position={visiblePhases.findIndex((phase) => phase.id === selectedPhase.id)}
@@ -384,6 +395,7 @@ export function NotesRoadmap({
 
 function PhaseDetail({
   phase,
+  currentTime,
   references,
   authorityReady,
   position,
@@ -412,6 +424,7 @@ function PhaseDetail({
   onActionSuccess,
 }: {
   phase: NotesPhase;
+  currentTime: Date;
   references: NotesReference[];
   authorityReady: boolean;
   position: number;
@@ -439,8 +452,15 @@ function PhaseDetail({
     phaseId: string,
     input: { dueAt: string; note: string },
   ): Promise<NotesReminderMutationResult>;
-  onSnoozeReminder(phaseId: string, dueAt: string): Promise<NotesReminderMutationResult>;
-  onDismissReminder(phaseId: string): Promise<NotesReminderMutationResult>;
+  onSnoozeReminder(
+    phaseId: string,
+    dueAt: string,
+    expectedOccurrenceKey: string,
+  ): Promise<NotesReminderMutationResult>;
+  onDismissReminder(
+    phaseId: string,
+    expectedOccurrenceKey: string,
+  ): Promise<NotesReminderMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
@@ -457,8 +477,7 @@ function PhaseDetail({
   const [actionStatus, setActionStatus] = useState("");
   const [raceLink, setRaceLink] = useState<NotesSessionLink | null>(null);
   const [pendingRoadmapAction, setPendingRoadmapAction] = useState<string | null>(null);
-  const [reminderNow] = useState(() => new Date());
-  const reminderPresets = useMemo(() => reminderPresetTimes(reminderNow), [reminderNow]);
+  const reminderPresets = useMemo(() => reminderPresetTimes(currentTime), [currentTime]);
   const [reminderNote, setReminderNote] = useState(phase.reminder?.note ?? "");
   const [customReminderValue, setCustomReminderValue] = useState(() =>
     dateToLocalInputValue(
@@ -580,10 +599,12 @@ function PhaseDetail({
       } else if (resumeLink) {
         await onResumePhase(phase.id, resumeLink);
         if (phase.reminder) {
-          const reminderResult = await onDismissReminder(phase.id);
+          const reminderResult = await onDismissReminder(phase.id, phase.reminder.occurrenceKey);
           if (reminderResult.status !== "committed") {
             reportActionError(
-              "The phase resumed, but its reminder could not be dismissed. Try again.",
+              reminderResult.status === "stale-occurrence"
+                ? `The phase resumed, but reminder cleanup did not complete. ${reminderMutationMessage(reminderResult)}`
+                : "The phase resumed, but its reminder could not be dismissed. Try again.",
             );
             return;
           }
@@ -845,7 +866,9 @@ function PhaseDetail({
               type="button"
               disabled={controlsDisabled}
               onClick={() =>
-                void runReminderMutation("dismiss-reminder", () => onDismissReminder(phase.id))
+                void runReminderMutation("dismiss-reminder", () =>
+                  onDismissReminder(phase.id, phase.reminder!.occurrenceKey),
+                )
               }
             >
               Dismiss reminder
@@ -863,7 +886,7 @@ function PhaseDetail({
         {phase.reminder ? (
           <div className="notes-reminder-current">
             <p>
-              {Date.parse(phase.reminder.dueAt) <= reminderNow.getTime()
+              {Date.parse(phase.reminder.dueAt) <= currentTime.getTime()
                 ? "Due now"
                 : "Scheduled for"}{" "}
               <time dateTime={phase.reminder.dueAt}>{formatDateTime(phase.reminder.dueAt)}</time>
@@ -880,7 +903,7 @@ function PhaseDetail({
                       : "An in-app reminder was requested in GG Coder."}
               </p>
             )}
-            {Date.parse(phase.reminder.dueAt) <= reminderNow.getTime() && (
+            {Date.parse(phase.reminder.dueAt) <= currentTime.getTime() && (
               <button
                 type="button"
                 disabled={controlsDisabled}
@@ -889,6 +912,7 @@ function PhaseDetail({
                     onSnoozeReminder(
                       phase.id,
                       new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+                      phase.reminder!.occurrenceKey,
                     ),
                   )
                 }
@@ -1807,7 +1831,37 @@ function lines(value: string): string[] {
     .filter(Boolean);
 }
 
-function reminderRowLabel(phase: NotesPhase, now = new Date()): string {
+function useRoadmapCurrentTime(phases: NotesPhase[]): Date {
+  const reminderDueTimes = useMemo(
+    () =>
+      phases
+        .flatMap((phase) =>
+          phase.archivedAt === null && phase.reminder ? [Date.parse(phase.reminder.dueAt)] : [],
+        )
+        .filter(Number.isFinite)
+        .sort((left, right) => left - right),
+    [phases],
+  );
+  const [currentTimeMs, setCurrentTimeMs] = useState(Date.now);
+
+  useEffect(() => {
+    const actualNow = Date.now();
+    const nextReminderDueAt = reminderDueTimes.find((dueAt) => dueAt > actualNow);
+    const delayMs = Math.max(
+      1,
+      Math.min(
+        ROADMAP_CLOCK_FALLBACK_MS,
+        nextReminderDueAt === undefined ? ROADMAP_CLOCK_FALLBACK_MS : nextReminderDueAt - actualNow,
+      ),
+    );
+    const timer = window.setTimeout(() => setCurrentTimeMs(Date.now()), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [currentTimeMs, reminderDueTimes]);
+
+  return useMemo(() => new Date(currentTimeMs), [currentTimeMs]);
+}
+
+function reminderRowLabel(phase: NotesPhase, now: Date): string {
   const reminder = phase.reminder;
   if (!reminder) return "No reminder";
   const due = new Date(reminder.dueAt);

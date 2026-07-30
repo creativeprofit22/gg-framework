@@ -1,3 +1,4 @@
+import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 import {
   migrateNotesDocumentV2,
   migrateNotesDocumentV3PhaseShape,
@@ -21,43 +22,7 @@ export interface NotesRepository {
   save(cwd: string, document: NotesDocumentV3): NotesSaveResult;
 }
 
-export function canonicalProjectKey(cwd: string): string {
-  const normalized = cwd.replace(/\\/g, "/");
-  const driveMatch = /^([A-Za-z]):(?:\/|$)/.exec(normalized);
-
-  if (driveMatch) {
-    const drive = `${driveMatch[1].toLowerCase()}:`;
-    const remainder = normalized.slice(driveMatch[0].length);
-    const segments = resolveSegments(remainder.split("/"), true);
-    return segments.length === 0 ? `${drive}/` : `${drive}/${segments.join("/")}`.toLowerCase();
-  }
-
-  if (normalized.startsWith("//")) {
-    const parts = normalized.slice(2).split("/").filter(Boolean);
-    const rootParts = parts.slice(0, 2);
-    const segments = resolveSegments(parts.slice(2), true);
-    return `//${[...rootParts, ...segments].join("/")}`.toLowerCase();
-  }
-
-  const absolute = normalized.startsWith("/");
-  const segments = resolveSegments(normalized.split("/"), absolute);
-  const result = `${absolute ? "/" : ""}${segments.join("/")}`;
-  return result || (absolute ? "/" : ".");
-}
-
-function resolveSegments(parts: string[], rooted: boolean): string[] {
-  const result: string[] = [];
-  for (const part of parts) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (result.length > 0 && result[result.length - 1] !== "..") result.pop();
-      else if (!rooted) result.push(part);
-    } else {
-      result.push(part);
-    }
-  }
-  return result;
-}
+export { canonicalProjectKey };
 
 export function legacyNotesKey(cwd: string): string {
   return `${LEGACY_PREFIX}${cwd}`;

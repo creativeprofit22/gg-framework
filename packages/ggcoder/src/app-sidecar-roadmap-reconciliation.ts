@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { canonicalProjectKey } from "./project-notes-repository.js";
+import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 
 export type RoadmapReconciliationKind =
   | "phase-start"

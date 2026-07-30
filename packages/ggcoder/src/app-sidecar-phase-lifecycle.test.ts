@@ -3,7 +3,6 @@ import {
   AppSidecarPhaseLifecycleCoordinator,
   PHASE_LIFECYCLE_REASON_MAX_LENGTH,
   mapPhaseLifecycleSignal,
-  phaseLifecycleResolution,
   type BoundPhaseLifecycleContext,
   type PhaseLifecycleRepository,
   type PhaseLifecycleRepositoryOutcome,
@@ -38,7 +37,7 @@ const contract: Array<{
   name: string;
   signal: PhaseLifecycleSignal;
   stage: BoundPhaseLifecycleContext["executionStage"];
-  expected: PhaseLifecycleTransition | null;
+  expected: Omit<PhaseLifecycleTransition, "kind"> | null;
 }> = [
   {
     name: "restored planning",
@@ -190,17 +189,65 @@ const contract: Array<{
       reason: "Phase run cancelled by user",
     },
   },
-  {
-    name: "launch fails",
-    signal: { type: "launch-failed", phaseId: "phase-22", reason: "Binding failed" },
-    stage: "planning",
-    expected: { status: "needs-attention", source: "system", reason: "Binding failed" },
-  },
 ];
 
 describe("phase lifecycle signal mapper", () => {
   it.each(contract)("maps $name to its authoritative contract", ({ signal, stage, expected }) => {
-    expect(mapPhaseLifecycleSignal(signal, stage)).toEqual(expected);
+    expect(mapPhaseLifecycleSignal(signal, stage)).toMatchObject(expected ?? {});
+  });
+
+  it.each([
+    ["approval opened", { type: "plan-submitted" }, "planning", "approval-opened"],
+    [
+      "user approval resolved",
+      { type: "plan-approved", approvalSource: "user" },
+      "implementing",
+      "approval-resolved",
+    ],
+    [
+      "Autopilot approval resolved",
+      { type: "plan-approved", approvalSource: "agent" },
+      "implementing",
+      "approval-resolved",
+    ],
+    [
+      "question opened",
+      { type: "autopilot-human", reason: "Localized question" },
+      "implementing",
+      "attention-question-opened",
+    ],
+    [
+      "tool blocker opened",
+      { type: "tool-failed", toolName: "bash", reason: "Localized failure" },
+      "implementing",
+      "attention-tool-opened",
+    ],
+    [
+      "runtime blocker opened",
+      { type: "runtime-error", reason: "Localized runtime error" },
+      "implementing",
+      "attention-runtime-opened",
+    ],
+    [
+      "generic attention opened",
+      { type: "autopilot-stopped", reason: "Localized stop" },
+      "reviewing",
+      "attention-generic-opened",
+    ],
+    [
+      "implementation resolved attention",
+      { type: "implementation-run-started" },
+      "implementing",
+      "attention-implementation-resolved",
+    ],
+    [
+      "review restoration resolved attention",
+      { type: "session-restored", executionStage: "reviewing" },
+      "reviewing",
+      "attention-review-resolved",
+    ],
+  ] as const)("assigns a stable kind when $0", (_name, signal, stage, kind) => {
+    expect(mapPhaseLifecycleSignal(signal as PhaseLifecycleSignal, stage)?.kind).toBe(kind);
   });
 
   it.each([
@@ -210,17 +257,6 @@ describe("phase lifecycle signal mapper", () => {
     { type: "elapsed" },
   ] as const)("ignores $type instead of inferring Done or attention", (signal) => {
     expect(mapPhaseLifecycleSignal(signal, "implementing")).toBeNull();
-  });
-
-  it("separates blocker resolution signals from reviewer-start evidence", () => {
-    expect(phaseLifecycleResolution({ type: "plan-approved", approvalSource: "user" })).toBe(
-      "approval-resolved",
-    );
-    expect(phaseLifecycleResolution({ type: "implementation-run-started" })).toBe(
-      "attention-resolved",
-    );
-    expect(phaseLifecycleResolution({ type: "ideal-review-started" })).toBe("none");
-    expect(phaseLifecycleResolution({ type: "autopilot-review-started" })).toBe("none");
   });
 
   it("requires implementation stages for run and review start signals", () => {
@@ -291,34 +327,6 @@ describe("phase lifecycle coordinator", () => {
       transition: { timestamp: "2026-07-27T00:00:02.000Z", status: "review" },
     });
     expect(broadcasts).toEqual([1, 2]);
-  });
-
-  it("preserves an explicit unbound guard for launch-failed signals", async () => {
-    const recordPhaseLifecycleTransition = vi.fn(async () => ({
-      status: "stale-session" as const,
-    }));
-    const broadcastSnapshot = vi.fn();
-    const coordinator = new AppSidecarPhaseLifecycleCoordinator({
-      cwd: "/project",
-      repository: { recordPhaseLifecycleTransition },
-      getActivePhase: () => active,
-      broadcastSnapshot,
-    });
-
-    await expect(
-      coordinator.enqueue({
-        type: "launch-failed",
-        phaseId: "phase-22",
-        reason: "Binding failed",
-        expectedSession: null,
-      }),
-    ).resolves.toEqual({ status: "stale-session" });
-    expect(recordPhaseLifecycleTransition).toHaveBeenCalledWith(
-      "/project",
-      "phase-22",
-      expect.objectContaining({ expectedSession: null }),
-    );
-    expect(broadcastSnapshot).not.toHaveBeenCalled();
   });
 
   it.each([

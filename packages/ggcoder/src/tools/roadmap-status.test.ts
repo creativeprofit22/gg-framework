@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { RoadmapStatusParams, createRoadmapStatusTool } from "./roadmap-status.js";
+import {
+  RoadmapStatusParams,
+  createRoadmapStatusTool,
+  type RoadmapStatusToolContext,
+  type RoadmapStatusToolResult,
+} from "./roadmap-status.js";
 
 const base = {
   update_id: " update-1 ",
@@ -171,16 +176,17 @@ describe("RoadmapStatusParams", () => {
 
 describe("createRoadmapStatusTool", () => {
   it("attributes the actor and returns compact JSON", async () => {
-    const record = vi.fn(async ({ actor, input }) => ({
-      result: "committed",
-      phaseId: input.phase_id,
-      actor,
-    }));
+    const record = vi.fn(
+      async ({ input }: RoadmapStatusToolContext): Promise<RoadmapStatusToolResult> => ({
+        result: "phase-not-bound",
+        phaseId: input.phase_id,
+      }),
+    );
     const tool = createRoadmapStatusTool("ken", record);
     const input = RoadmapStatusParams.parse({ ...base, transition: "pending" });
 
     await expect(tool.execute(input, {} as never)).resolves.toBe(
-      JSON.stringify({ result: "committed", phaseId: "phase-1", actor: "ken" }),
+      JSON.stringify({ result: "phase-not-bound", phaseId: "phase-1" }),
     );
     expect(record).toHaveBeenCalledWith({ actor: "ken", input });
     expect(tool.name).toBe("roadmap_status");

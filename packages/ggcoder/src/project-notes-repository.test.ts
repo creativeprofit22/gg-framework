@@ -123,6 +123,7 @@ function notes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV3 {
             source: "user",
             timestamp: "2026-07-25T12:30:00.000Z",
             reason: "Started planning",
+            kind: "other",
           },
           {
             id: "event-2",
@@ -131,6 +132,7 @@ function notes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV3 {
             source: "session",
             timestamp: NOW,
             reason: null,
+            kind: "other",
           },
         ],
         roadmapEvents: [],
@@ -196,6 +198,30 @@ describe("ProjectNotesRepository reminder occurrence contract", () => {
     });
   });
 
+  it("rejects duplicate reminder IDs during repository migration without creating the store", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/duplicate-reminder-id";
+    const document = notes();
+    const secondPhase = structuredClone(document.phases[0]!);
+    secondPhase.id = "phase-2";
+    secondPhase.order = 1;
+    secondPhase.reminder = {
+      ...secondPhase.reminder!,
+      occurrenceKey: "occurrence-2",
+      lastDelivery: null,
+    };
+    document.phases.push(secondPhase);
+
+    await expect(repository.migrate(cwd, document)).resolves.toEqual({
+      status: "invalid",
+      error: {
+        path: "phases[1].reminder.id",
+        message: "duplicate reminder ID; already used at phases[0].reminder.id",
+      },
+    });
+    await expect(repository.load(cwd)).resolves.toEqual({ status: "missing" });
+  });
+
   it("strictly validates bounded reminder notes and nested delivery evidence", () => {
     const valid = notes();
     valid.phases[0]!.reminder!.lastDelivery = {
@@ -230,6 +256,27 @@ describe("ProjectNotesRepository reminder occurrence contract", () => {
       ok: false,
       error: { path: "phases[0].reminder.note" },
     });
+  });
+
+  it("rejects impossible current-v3 delivery evidence before migration persistence", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/impossible-delivery-migration";
+    const invalid = notes();
+    invalid.phases[0]!.reminder!.lastDelivery = {
+      occurrenceKey: "occurrence-1",
+      attemptedAt: NOW,
+      channel: "native",
+      permission: "denied",
+    };
+
+    await expect(repository.migrate(cwd, invalid)).resolves.toEqual({
+      status: "invalid",
+      error: {
+        path: "phases[0].reminder.lastDelivery.permission",
+        message: "permission does not match delivery channel",
+      },
+    });
+    await expect(repository.load(cwd)).resolves.toEqual({ status: "missing" });
   });
 
   it("allows create, reschedule, and dismiss while keeping delivery evidence repository-owned", async () => {
@@ -576,6 +623,43 @@ describe("ProjectNotesRepository phase launch transaction", () => {
       expect(createCalls).toBe(1);
     },
   );
+
+  it("rejects a terminal Done phase before candidate creation and leaves its binding untouched", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = path.join(agentDir, "done-launch");
+    const document = notes();
+    const originalSession = { ...document.phases[0]!.session! };
+    document.phases[0]!.status = "done";
+    document.phases[0]!.completedAt = NOW;
+    document.phases[0]!.overrides.status = null;
+    document.phases[0]!.lifecycleEvents.push({
+      id: "event-done",
+      fromStatus: "in-progress",
+      toStatus: "done",
+      source: "user",
+      timestamp: NOW,
+      reason: "Completion review accepted",
+    });
+    const repository = new ProjectNotesRepository(agentDir);
+    await repository.migrate(cwd, document);
+    let createCalls = 0;
+
+    await expect(
+      repository.launchPhase(cwd, "phase-1", async () => {
+        createCalls += 1;
+        return { sessionId: "stale", sessionPath: "/sessions/stale.jsonl" };
+      }),
+    ).resolves.toEqual({ status: "done-terminal" });
+
+    expect(createCalls).toBe(0);
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 1,
+        document: { phases: [{ status: "done", session: originalSession }] },
+      },
+    });
+  });
 
   it("rejects stale and archived phases before creating a candidate", async () => {
     const agentDir = await tempAgentDir();
@@ -1687,6 +1771,45 @@ describe("ProjectNotesRepository durability", () => {
     expect((await fs.readFile(paths.primary, "utf8")).endsWith("\n")).toBe(true);
   });
 
+  it("upgrades legacy lifecycle events in place and preserves semantic kinds after restart", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/legacy-lifecycle-kind";
+    const repository = new ProjectNotesRepository(agentDir);
+    const paths = repository.paths(cwd);
+    const legacy = notes("legacy lifecycle kinds");
+    for (const event of legacy.phases[0]!.lifecycleEvents) delete event.kind;
+    await fs.mkdir(paths.directory, { recursive: true });
+    await fs.writeFile(
+      paths.primary,
+      `${JSON.stringify({
+        storeVersion: 1,
+        projectKey: canonicalProjectKey(cwd),
+        revision: 7,
+        document: legacy,
+      })}\n`,
+      "utf8",
+    );
+
+    const loaded = await repository.load(cwd);
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 7,
+        document: { phases: [{ lifecycleEvents: [{ kind: "other" }, { kind: "other" }] }] },
+      },
+    });
+    const persisted = await readEnvelope(paths.primary);
+    expect(persisted.document.phases[0]!.lifecycleEvents.map(({ kind }) => kind)).toEqual([
+      "other",
+      "other",
+    ]);
+    await expect(new ProjectNotesRepository(agentDir).load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      recoveredFromBackup: false,
+      snapshot: { revision: 7, document: persisted.document },
+    });
+  });
+
   it("migrates v2 to v3 without changing any existing Notes field and persists it across restart", async () => {
     const agentDir = await tempAgentDir();
     const cwd = "/work/v2-project";
@@ -2649,57 +2772,65 @@ describe("ProjectNotesRepository completion transactions", () => {
       blocker: "approval",
       status: "waiting-for-approval" as const,
       source: "agent" as const,
-      reason: "Plan submitted for approval",
+      reason: "Bundled approval copy may change",
+      kind: "approval-opened" as const,
       expectedGate: "waiting-for-approval",
       expectedCode: "unresolved-approval",
       resolution: {
         status: "in-progress" as const,
         source: "user" as const,
-        reason: "Plan approved by user",
+        reason: "Bundled approval resolution copy may change",
+        kind: "approval-resolved" as const,
       },
     },
     {
       blocker: "question",
       status: "needs-attention" as const,
       source: "agent" as const,
-      reason: "Choose the public API shape",
+      reason: "Bundled question copy may change",
+      kind: "attention-question-opened" as const,
       expectedGate: "needs-attention",
       expectedCode: "unresolved-attention",
       resolution: {
         status: "in-progress" as const,
         source: "session" as const,
-        reason: "Implementation run started",
+        reason: "Bundled implementation resolution copy may change",
+        kind: "attention-implementation-resolved" as const,
       },
     },
     {
       blocker: "runtime error",
       status: "needs-attention" as const,
       source: "session" as const,
-      reason: "Provider connection failed",
+      reason: "Bundled runtime copy may change",
+      kind: "attention-runtime-opened" as const,
       expectedGate: "needs-attention",
       expectedCode: "unresolved-attention",
       resolution: {
         status: "in-progress" as const,
         source: "session" as const,
-        reason: "Implementation session resumed",
+        reason: "Bundled runtime resolution copy may change",
+        kind: "attention-implementation-resolved" as const,
       },
     },
     {
       blocker: "tool failure",
       status: "needs-attention" as const,
       source: "agent" as const,
-      reason: "bash failed: typecheck failed",
+      reason: "Bundled tool copy has no legacy failure pattern",
+      kind: "attention-tool-opened" as const,
       expectedGate: "needs-attention",
       expectedCode: "unresolved-attention",
       resolution: {
         status: "in-progress" as const,
         source: "session" as const,
-        reason: "Implementation run started",
+        reason: "Bundled tool resolution copy may change",
+        kind: "attention-implementation-resolved" as const,
       },
     },
   ])(
     "does not let bundled final-review status evidence self-resolve a $blocker blocker",
-    async ({ blocker, status, source, reason, expectedGate, expectedCode, resolution }) => {
+    async ({ blocker, status, source, reason, kind, expectedGate, expectedCode, resolution }) => {
       const { agentDir, cwd, repository, expectedSession } = await completionSetup(
         `final-review-${blocker}`,
       );
@@ -2709,6 +2840,7 @@ describe("ProjectNotesRepository completion transactions", () => {
           status,
           source,
           reason,
+          kind,
           timestamp: "2026-07-25T12:38:00.000Z",
           expectedSession,
         }),
@@ -2768,9 +2900,12 @@ describe("ProjectNotesRepository completion transactions", () => {
       if (restarted.status !== "ok") throw new Error("Expected lifecycle resolution persistence");
       expect(
         restarted.snapshot.document.phases[0]!.lifecycleEvents.slice(-2).map(
-          ({ timestamp }) => timestamp,
+          ({ timestamp, kind: persistedKind }) => ({ timestamp, kind: persistedKind }),
         ),
-      ).toEqual(["2026-07-25T12:38:00.000Z", "2026-07-25T12:38:00.000Z"]);
+      ).toEqual([
+        { timestamp: "2026-07-25T12:38:00.000Z", kind },
+        { timestamp: "2026-07-25T12:38:00.000Z", kind: resolution.kind },
+      ]);
 
       await expect(
         restartedRepository.recordRoadmapFinalReview(cwd, {

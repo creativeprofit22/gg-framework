@@ -26,6 +26,8 @@ function notes(
     status?: NotesDocumentV3["phases"][number]["status"];
     archivedAt?: string | null;
     delivered?: boolean;
+    occurrenceKey?: string;
+    reminderId?: string;
   }> = [{ phaseId: "phase-1", dueAt: new Date(NOW_MS).toISOString() }],
 ): NotesDocumentV3 {
   return {
@@ -38,7 +40,7 @@ function notes(
     legacyImportedAt: null,
     references: [],
     phases: occurrences.map((item, index) => {
-      const occurrenceKey = `occurrence-${item.phaseId}`;
+      const occurrenceKey = item.occurrenceKey ?? `occurrence-${item.phaseId}`;
       return {
         id: item.phaseId,
         title: `Phase ${item.phaseId}`,
@@ -50,7 +52,7 @@ function notes(
         referenceIds: [],
         session: { sessionId: `session-${item.phaseId}`, sessionPath: `/sessions/${item.phaseId}` },
         reminder: {
-          id: `reminder-${item.phaseId}`,
+          id: item.reminderId ?? `reminder-${item.phaseId}`,
           occurrenceKey,
           dueAt: item.dueAt,
           note: `Private note ${item.phaseId}`,
@@ -201,6 +203,41 @@ describe("reminder due selection", () => {
 });
 
 describe("AppSidecarReminderCoordinator", () => {
+  it("treats a same-key fixture as one project-global lease namespace", async () => {
+    const clock = new FakeClock();
+    const repository = new FakeRepository(
+      notes([
+        {
+          phaseId: "first",
+          dueAt: new Date(NOW_MS - 2_000).toISOString(),
+          occurrenceKey: "shared-occurrence",
+        },
+        {
+          phaseId: "second",
+          dueAt: new Date(NOW_MS - 1_000).toISOString(),
+          occurrenceKey: "shared-occurrence",
+        },
+      ]),
+    );
+    const coordinator = new AppSidecarReminderCoordinator({
+      repository,
+      clock,
+      onReminderDue: () => {},
+      createToken: () => "shared-lease",
+    });
+    const focused = session("focused");
+    await coordinator.watchSession(focused);
+
+    await expect(coordinator.reserve(focused, true)).resolves.toMatchObject({
+      status: "reserved",
+      leaseToken: "shared-lease",
+      phase: { id: "first" },
+      reminder: { occurrenceKey: "shared-occurrence" },
+    });
+    await expect(coordinator.reserve(focused, true)).resolves.toEqual({ status: "leased" });
+    coordinator.dispose();
+  });
+
   it("recovers one startup-overdue event and caps future waits for clock changes", async () => {
     const clock = new FakeClock();
     const repository = new FakeRepository();
@@ -438,6 +475,18 @@ describe("app sidecar reminder routes", () => {
         status: "reserved",
         leaseToken: "route-lease",
       });
+
+      const impossibleClaim = await fetch(`${base}/reminders/claim`, {
+        method: "POST",
+        headers: { "x-session": logicalSession.id, "content-type": "application/json" },
+        body: JSON.stringify({
+          leaseToken: "route-lease",
+          channel: "native",
+          permission: "denied",
+        }),
+      });
+      expect(impossibleClaim.status).toBe(400);
+      await expect(impossibleClaim.json()).resolves.toMatchObject({ status: "invalid" });
 
       const claim = await fetch(`${base}/reminders/claim`, {
         method: "POST",

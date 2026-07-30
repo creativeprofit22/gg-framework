@@ -1,3 +1,4 @@
+import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, AlertTriangle, Database, HardDrive } from "lucide-react";
@@ -12,7 +13,6 @@ import {
   getUnfinishedNotesTaskCount,
   isNotesHandoffUnread,
 } from "./notes-status";
-import { canonicalProjectKey } from "./notes-storage";
 import { RoadmapReminderDeliveryHost, type InAppReminderDelivery } from "./roadmap-reminders";
 import { useProjectNotes, type UseProjectNotesResult } from "./useProjectNotes";
 import type {
@@ -53,12 +53,9 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     cwd,
     client,
     openSource,
-    onStartPhase = async () => ({
-      status: "failed",
-      code: "unavailable",
-      operationId: null,
-      message: "Phase actions are unavailable in this view.",
-    }),
+    onStartPhase = async () => {
+      throw new Error("Phase actions are unavailable in this view.");
+    },
     onResumePhase = async () => {
       throw new Error("Phase actions are unavailable in this view.");
     },

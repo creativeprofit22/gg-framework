@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type http from "node:http";
+import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 import {
-  canonicalProjectKey,
+  isValidNotesReminderDeliveryPair,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
   type NotesDocumentV3,
   type NotesPhase,
@@ -546,13 +547,7 @@ function isClaimBody(value: unknown): value is {
   return (
     isExactRecord(value, ["leaseToken", "channel", "permission"]) &&
     isBoundedString(value.leaseToken, 1, 256) &&
-    (value.channel === "in-app" ||
-      value.channel === "native" ||
-      value.channel === "in-app-fallback") &&
-    (value.permission === "not-required" ||
-      value.permission === "granted" ||
-      value.permission === "denied" ||
-      value.permission === "unavailable")
+    isValidNotesReminderDeliveryPair(value.channel, value.permission)
   );
 }
 

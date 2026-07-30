@@ -17,6 +17,19 @@ import {
   type ProjectNotesSnapshot,
 } from "@kenkaiiii/gg-core/project-notes";
 export {
+  PHASE_START_FAILURE_CODES,
+  PHASE_START_STATUSES,
+  isPhaseStartFailureCode,
+  isPhaseStartResult,
+  isPhaseStartSession,
+} from "@kenkaiiii/gg-core/phase-start-protocol";
+export type {
+  PhaseStartFailureCode,
+  PhaseStartResult,
+  PhaseStartSession,
+  PhaseStartStatus,
+} from "@kenkaiiii/gg-core/phase-start-protocol";
+export {
   isNotesDocumentV2,
   isNotesDocumentV3,
   migrateNotesDocumentV2,
@@ -32,6 +45,7 @@ export type {
   NotesHandoff,
   NotesImplementationRunOutcome,
   NotesLifecycleEvent,
+  NotesLifecycleEventKind,
   NotesLifecycleEventSource,
   NotesPhase,
   NotesPhaseOverrides,
@@ -68,26 +82,6 @@ export type {
   ProjectNotesSaveOutcome,
   ProjectNotesSnapshot,
 } from "@kenkaiiii/gg-core/project-notes";
-
-export type PhaseStartResult =
-  | {
-      status: "accepted";
-      operationId: string;
-      session: NotesSessionLink;
-      packageTokenCount: number;
-    }
-  | {
-      status: "already-bound";
-      operationId: string;
-      session: NotesSessionLink;
-      packageTokenCount: number;
-    }
-  | {
-      status: "failed";
-      code: string;
-      operationId: string | null;
-      message: string;
-    };
 
 export type PhaseLaunchErrorCode = "prompt-failed" | "launch-failed";
 
@@ -321,27 +315,6 @@ export type NotesAuthorityDiagnostic =
   | { kind: "migration-failed"; error: unknown }
   | { kind: "save-failed"; error: unknown }
   | { kind: "fallback-storage"; load: NotesLoadResult; save: NotesSaveResult | null };
-
-export function isPhaseStartResult(value: unknown): value is PhaseStartResult {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  if (record.status === "accepted" || record.status === "already-bound") {
-    return (
-      hasExactKeys(record, ["status", "operationId", "session", "packageTokenCount"]) &&
-      typeof record.operationId === "string" &&
-      isNotesSessionLink(record.session) &&
-      Number.isInteger(record.packageTokenCount) &&
-      (record.packageTokenCount as number) >= 0
-    );
-  }
-  return (
-    record.status === "failed" &&
-    hasExactKeys(record, ["status", "code", "operationId", "message"]) &&
-    typeof record.code === "string" &&
-    (record.operationId === null || typeof record.operationId === "string") &&
-    typeof record.message === "string"
-  );
-}
 
 function isNotesSessionLink(value: unknown): value is NotesSessionLink {
   return (

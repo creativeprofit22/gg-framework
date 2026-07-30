@@ -148,6 +148,7 @@ import {
   type ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
 import { launchBoundPhase, type BoundPhaseCandidate } from "./app-sidecar-phase-launch.js";
+import { handlePhaseStartRoute } from "./app-sidecar-phase-route.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import {
   AppSidecarPhaseCompletionCoordinator,
@@ -4461,66 +4462,60 @@ async function createSession(
       return;
     }
 
-    const phaseStartMatch = new URL(url, `http://${host}`).pathname.match(
-      /^\/phases\/([^/]+)\/start$/,
-    );
-    if (method === "POST" && phaseStartMatch) {
-      let phaseId: string;
-      try {
-        phaseId = decodeURIComponent(phaseStartMatch[1]!);
-      } catch {
-        json(res, 400, {
-          status: "failed",
-          code: "invalid-phase-id",
-          operationId: null,
-          message: "The phase identifier is malformed.",
-        });
-        return;
-      }
-      void launchBoundPhase({
-        phaseId,
-        mode,
-        busyState: sessionBusyState(),
-        mutations: sessionMutations,
-        reconciliations: roadmapReconciliations,
-        repository: notesRepository,
-        cwd,
-        candidates: phaseCandidates,
-        getSession: () => session,
-        getThinkingLevel: () => session.getThinkingLevel(),
-        createSession: (active) => createCodingSession(undefined, active),
-        replaceSession: (replacement) => {
-          session = replacement;
-        },
-        bindSessionEvents,
-        autopilotEnabled: projectAutopilot.isEnabled(cwd),
-        broadcastNotesSnapshot,
-        broadcast,
-        resetSessionState: () => {
-          clearPendingPlan();
-          deactivateApprovedPlan();
-          injectedAutopilotPrompts = [];
-        },
-        enterPlanMode: enterCodingPlanMode,
-        startPrompt: (label, run, onFailure) => {
-          void runAgent(label, run, onFailure, "callback-only");
-        },
+    if (
+      handlePhaseStartRoute({
+        method,
+        url,
+        host,
         respond: (status, body) => json(res, status, body),
-        onLaunchFailure: (error, metadata) => {
-          captureSidecarError(error, "app-sidecar.phase.launch", metadata);
-          log("ERROR", "app-sidecar", "phase launch failed", {
-            ...metadata,
-            detail: error instanceof Error ? error.message : String(error),
+        start: (phaseId) => {
+          void launchBoundPhase({
+            phaseId,
+            mode,
+            busyState: sessionBusyState(),
+            mutations: sessionMutations,
+            reconciliations: roadmapReconciliations,
+            repository: notesRepository,
+            cwd,
+            candidates: phaseCandidates,
+            getSession: () => session,
+            getThinkingLevel: () => session.getThinkingLevel(),
+            createSession: (active) => createCodingSession(undefined, active),
+            replaceSession: (replacement) => {
+              session = replacement;
+            },
+            bindSessionEvents,
+            autopilotEnabled: projectAutopilot.isEnabled(cwd),
+            broadcastNotesSnapshot,
+            broadcast,
+            resetSessionState: () => {
+              clearPendingPlan();
+              deactivateApprovedPlan();
+              injectedAutopilotPrompts = [];
+            },
+            enterPlanMode: enterCodingPlanMode,
+            startPrompt: (label, run, onFailure) => {
+              void runAgent(label, run, onFailure, "callback-only");
+            },
+            respond: (status, body) => json(res, status, body),
+            onLaunchFailure: (error, metadata) => {
+              captureSidecarError(error, "app-sidecar.phase.launch", metadata);
+              log("ERROR", "app-sidecar", "phase launch failed", {
+                ...metadata,
+                detail: error instanceof Error ? error.message : String(error),
+              });
+            },
+            onAttentionFailure: (error, metadata) => {
+              captureSidecarError(error, "app-sidecar.phase.launch-attention", metadata);
+              log("ERROR", "app-sidecar", "phase launch attention persistence failed", {
+                ...metadata,
+                detail: error instanceof Error ? error.message : String(error),
+              });
+            },
           });
         },
-        onAttentionFailure: (error, metadata) => {
-          captureSidecarError(error, "app-sidecar.phase.launch-attention", metadata);
-          log("ERROR", "app-sidecar", "phase launch attention persistence failed", {
-            ...metadata,
-            detail: error instanceof Error ? error.message : String(error),
-          });
-        },
-      });
+      })
+    ) {
       return;
     }
 

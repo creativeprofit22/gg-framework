@@ -97,6 +97,37 @@ function activePhaseContext(
   };
 }
 
+const malformedContextMutations: Array<[string, (context: ActivePhaseContextV1) => unknown]> = [
+  [
+    "empty session path",
+    (context) => ({ ...context, session: { ...context.session, sessionPath: "" } }),
+  ],
+  [
+    "zero issue coordinate",
+    (context) => ({
+      ...context,
+      references: [
+        {
+          id: "ref-1",
+          provider: "github",
+          tool: null,
+          canonicalUrl: "https://github.com/acme/repo/issues/1",
+          owner: "acme",
+          repo: "repo",
+          revision: null,
+          path: null,
+          range: null,
+          issue: 0,
+          pullRequest: null,
+          query: null,
+          anchor: null,
+          relevance: "Invalid zero issue coordinate.",
+        },
+      ],
+    }),
+  ],
+];
+
 async function makeSession(transient = true) {
   const { AgentSession } = await import("./agent-session.js");
   const session = new AgentSession({
@@ -208,6 +239,40 @@ describe("AgentSession active phase context", () => {
       await resumed.dispose();
     }
   }, 15_000);
+
+  it.each(malformedContextMutations)(
+    "ignores a durable context with %s across restart",
+    async (_name, mutate) => {
+      const original = await makeSession(false);
+      const originalState = original.getState();
+      await original.setActivePhaseContext(
+        activePhaseContext(originalState.sessionId, originalState.sessionPath),
+      );
+      await original.dispose();
+      await rewriteSessionFile(originalState.sessionPath, (line) => {
+        if (line.type !== "custom" || line.kind !== "active_phase_context") return line;
+        return { ...line, data: mutate(line.data as ActivePhaseContextV1) };
+      });
+
+      const { AgentSession } = await import("./agent-session.js");
+      const resumed = new AgentSession({
+        provider: "anthropic",
+        model: "claude-test",
+        cwd: tmpProject,
+        systemPrompt: "test system prompt",
+        sessionId: originalState.sessionPath,
+      });
+      await resumed.initialize();
+      try {
+        expect(resumed.getActivePhaseContext()).toBeUndefined();
+        expect(resumed.getPlanMode()).toBe(false);
+        expect(String(resumed.getMessages()[0]?.content)).not.toContain("Active Roadmap phase");
+      } finally {
+        await resumed.dispose();
+      }
+    },
+    15_000,
+  );
 
   it("rejects Resume when the session header belongs to another project", async () => {
     const original = await makeSession(false);

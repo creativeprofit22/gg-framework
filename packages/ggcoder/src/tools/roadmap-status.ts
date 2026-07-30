@@ -1,5 +1,11 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type {
+  NotesCompletionGateOutcome,
+  NotesCompletionUnmetGateCode,
+  NotesRoadmapStatusOutcome,
+} from "@kenkaiiii/gg-core/project-notes";
+import type { ProjectNotesRoadmapProposalOutcome } from "../project-notes-repository.js";
 
 const normalizedText = (value: string): string => value.replace(/\r\n?/g, "\n").trim();
 const normalizedCoordinate = (value: string): string => value.trim();
@@ -216,10 +222,45 @@ export interface RoadmapStatusToolContext {
   input: RoadmapStatusInput;
 }
 
-export type RoadmapStatusToolResult = Record<string, unknown> & {
-  result: string;
-  phaseId: string;
-};
+export type RoadmapStatusToolResult =
+  | {
+      result: "committed" | "duplicate";
+      phaseId: string;
+      revision: number;
+      statusOutcome: NotesRoadmapStatusOutcome;
+      proposals: ProjectNotesRoadmapProposalOutcome[];
+    }
+  | {
+      result: "completion-review-committed" | "completion-review-duplicate";
+      phaseId: string;
+      revision: number;
+      statusOutcome: NotesRoadmapStatusOutcome;
+      proposals: ProjectNotesRoadmapProposalOutcome[];
+      gateOutcome: NotesCompletionGateOutcome;
+      unmetGateCodes: NotesCompletionUnmetGateCode[];
+    }
+  | {
+      result:
+        | "reviewer-not-authorized"
+        | "reconciliation-in-progress"
+        | "phase-not-bound"
+        | "notes-missing"
+        | "notes-corrupt"
+        | "duplicate-id-conflict"
+        | "stale-revision"
+        | "phase-not-found"
+        | "phase-archived"
+        | "stale-session"
+        | "invalid-reference"
+        | "completion-checkpoint-blocked"
+        | "completion-unavailable"
+        | "invalid-review";
+      phaseId: string;
+      revision?: number;
+      owner?: { operationId: string; kind: string } | null;
+      path?: string;
+      message?: string;
+    };
 
 export function createRoadmapStatusTool(
   actor: RoadmapStatusActor,

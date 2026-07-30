@@ -321,6 +321,7 @@ class FakeProjectNotesClient implements NotesClient {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   localStorage.clear();
   tauriMocks.invoke.mockReset();
   tauriMocks.logError.mockReset();
@@ -365,6 +366,34 @@ describe("ProjectNotes", () => {
     expect(screen.queryByText("Replacement note")).toBeNull();
   });
 
+  it("queues alerts for two document-unique reminder occurrences without suppressing either", async () => {
+    const cwd = "/work/two-reminder-alerts";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("two reminder alerts");
+    const first = phase("first-alert", "in-progress", true);
+    const second = phase("second-alert", "review", true);
+    second.order = 1;
+    second.reminder!.note = "Second alert note";
+    document.phases = [first, second];
+    client.seed(cwd, document);
+    client.reserveOutcomes.push(reminderReservation(first), reminderReservation(second), {
+      status: "none",
+    });
+
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    expect(await screen.findByRole("region", { name: "Phase first-alert" })).toBeTruthy();
+    await waitFor(() => expect(client.claimCalls).toHaveLength(2));
+    fireEvent.click(screen.getByRole("button", { name: "Open phase" }));
+
+    const secondAlert = await screen.findByRole("region", { name: "Phase second-alert" });
+    expect(secondAlert.textContent).toContain("Second alert note");
+    expect(client.claimCalls.map((claim) => claim.leaseToken)).toEqual([
+      "lease-occurrence-first-alert",
+      "lease-occurrence-second-alert",
+    ]);
+  });
+
   it.each([
     { action: "Resume cleanup", buttonName: "Resume", withSession: true },
     { action: "Snooze", buttonName: "Snooze 1 hour", withSession: false },
@@ -407,6 +436,76 @@ describe("ProjectNotes", () => {
       );
       expect(client.snapshots.get(canonicalProjectKey(cwd))).toMatchObject({
         revision: 3,
+        document: {
+          phases: [
+            {
+              reminder: {
+                occurrenceKey: "occurrence-b",
+                dueAt: "2026-08-01T12:00:00.000Z",
+                note: "Newer reminder",
+              },
+            },
+          ],
+        },
+      });
+      expect(onResumePhase).toHaveBeenCalledTimes(withSession ? 1 : 0);
+    },
+  );
+
+  it.each([
+    {
+      action: "Resume cleanup",
+      buttonName: "Resume phase",
+      withSession: true,
+      expectedMessage:
+        "The phase resumed, but reminder cleanup did not complete. This reminder changed in another window. Review the latest reminder.",
+    },
+    {
+      action: "Snooze",
+      buttonName: "Snooze 1 hour",
+      withSession: false,
+      expectedMessage: "This reminder changed in another window. Review the latest reminder.",
+    },
+    {
+      action: "Dismiss",
+      buttonName: "Dismiss reminder",
+      withSession: false,
+      expectedMessage: "This reminder changed in another window. Review the latest reminder.",
+    },
+  ] as const)(
+    "guards detail-originated $action when a conflict replaces the occurrence",
+    async ({ action, buttonName, withSession, expectedMessage }) => {
+      const cwd = `/work/guarded-detail-${action.toLowerCase().replace(/\s+/g, "-")}`;
+      const client = new FakeProjectNotesClient(cwd);
+      const initial = notes("guarded detail reminder");
+      const selected = phase("guarded-detail", "in-progress", true);
+      if (withSession) {
+        selected.session = { sessionId: "session-a", sessionPath: "/sessions/a" };
+      }
+      initial.phases = [selected];
+      client.seed(cwd, initial);
+      const onResumePhase = vi.fn(async () => undefined);
+
+      render(<ProjectNotes cwd={cwd} client={client} onResumePhase={onResumePhase} />);
+      await openRoadmapPhase(selected.title);
+
+      client.beforeNextSave = () => {
+        const current = client.snapshots.get(canonicalProjectKey(cwd))!;
+        const replacement = structuredClone(current.document);
+        replacement.phases[0]!.reminder = {
+          ...replacement.phases[0]!.reminder!,
+          occurrenceKey: "occurrence-b",
+          dueAt: "2026-08-01T12:00:00.000Z",
+          note: "Newer reminder",
+        };
+        client.publish(cwd, replacement, current.revision + 1);
+      };
+
+      fireEvent.click(screen.getByRole("button", { name: buttonName }));
+
+      expect((await screen.findByRole("alert")).textContent).toContain(expectedMessage);
+      expect(client.snapshots.get(canonicalProjectKey(cwd))).toMatchObject({
+        revision: 2,
         document: {
           phases: [
             {
@@ -510,6 +609,42 @@ describe("ProjectNotes", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save custom time" }));
     expect(await screen.findByText("Choose a valid future local date and time.")).toBeTruthy();
     expect(custom.value).toBe("2020-01-01T09:00");
+  });
+
+  it("updates a mounted Roadmap row and detail when a future reminder becomes due", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));
+    const cwd = "/work/mounted-reminder-boundary";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("mounted reminder boundary");
+    const selected = phase("mounted-boundary", "in-progress", true);
+    selected.reminder!.dueAt = "2026-07-15T12:00:30.000Z";
+    document.phases = [selected];
+    client.seed(cwd, document);
+
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: `Inspect phase: ${selected.title}` }));
+
+    const row = screen
+      .getByRole("button", { name: `Inspect phase: ${selected.title}` })
+      .closest("li");
+    const reminderSection = screen.getByRole("heading", { name: "Reminder" }).closest("section");
+    expect(row?.textContent).not.toContain("Due now");
+    expect(reminderSection?.textContent).toContain("Scheduled for");
+    expect(screen.queryByRole("button", { name: "Snooze 1 hour" })).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_001);
+    });
+
+    expect(row?.textContent).toContain("Due now");
+    expect(reminderSection?.textContent).toContain("Due now");
+    expect(screen.getByRole("button", { name: "Snooze 1 hour" })).toBeTruthy();
   });
 
   it("describes a claimed in-app reminder as requested in due phase detail", async () => {

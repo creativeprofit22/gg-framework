@@ -1,3 +1,4 @@
+import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { canonicalReferenceIdentity, type NotesReferenceInput } from "./notes-reference";
 import { isNotesHandoffUnread } from "./notes-status";
@@ -24,7 +25,6 @@ import {
   type ProjectNotesSnapshot,
 } from "./notes-types";
 import {
-  canonicalProjectKey,
   createEmptyNotesDocument,
   createNotesRepository,
   type NotesRepository,
@@ -106,11 +106,19 @@ export interface UseProjectNotesResult {
 type AuthorityMode = "opening" | "sidecar" | "fallback" | "none";
 type CoalesceKey = "reference" | "current-focus" | "handoff";
 
+interface NotesMutationEvaluation {
+  document: NotesDocumentV3 | null;
+  result?: unknown;
+}
+
 interface NotesMutation {
   id: number;
   coalesceKey?: CoalesceKey;
-  apply(document: NotesDocumentV3): NotesDocumentV3 | null;
-  operationResult?(document: NotesDocumentV3): unknown;
+  evaluate(document: NotesDocumentV3): NotesMutationEvaluation;
+  cachedEvaluation?: {
+    base: NotesDocumentV3;
+    value: NotesMutationEvaluation;
+  };
   settle?(result: unknown): void;
   failure?(reason: NotesOperationFailureReason, error?: NotesValidationError): unknown;
 }
@@ -231,15 +239,16 @@ export function useProjectNotes(
       let fallbackDocument = loaded.document;
       let changed = false;
       for (const mutation of pending) {
-        const result = mutation.operationResult?.(fallbackDocument);
-        const next = mutation.apply(fallbackDocument);
-        if (next === null) {
-          if (result) mutation.settle?.(result);
+        const evaluation = evaluateMutation(mutation, fallbackDocument);
+        if (evaluation.document === null) {
+          if (evaluation.result !== undefined) mutation.settle?.(evaluation.result);
           continue;
         }
-        fallbackDocument = next;
+        fallbackDocument = evaluation.document;
         changed = true;
-        if (result) appliedOperationResults.push({ mutation, result });
+        if (evaluation.result !== undefined) {
+          appliedOperationResults.push({ mutation, result: evaluation.result });
+        }
       }
       queueRef.current = [];
       inFlightMutationIdRef.current = null;
@@ -472,11 +481,10 @@ export function useProjectNotes(
     }
 
     const epoch = epochRef.current;
-    const operationResult = mutation.operationResult?.(authoritative.document);
-    const nextDocument = mutation.apply(authoritative.document);
-    if (nextDocument === null) {
+    const evaluation = evaluateMutation(mutation, authoritative.document);
+    if (evaluation.document === null) {
       queueRef.current.shift();
-      if (operationResult) mutation.settle?.(operationResult);
+      if (evaluation.result !== undefined) mutation.settle?.(evaluation.result);
       renderSidecarState();
       queueMicrotask(() => processQueueRef.current());
       return;
@@ -484,7 +492,7 @@ export function useProjectNotes(
 
     inFlightMutationIdRef.current = mutation.id;
     void client
-      .saveNotes(authoritative.revision, nextDocument)
+      .saveNotes(authoritative.revision, evaluation.document)
       .then((outcome) => {
         if (
           epoch !== epochRef.current ||
@@ -507,12 +515,13 @@ export function useProjectNotes(
           setAuthorityDiagnostics((current) =>
             current.filter((diagnostic) => diagnostic.kind !== "save-failed"),
           );
-          if (operationResult) mutation.settle?.(operationResult);
+          if (evaluation.result !== undefined) mutation.settle?.(evaluation.result);
           renderSidecarState();
           queueMicrotask(() => processQueueRef.current());
           return;
         }
         if (outcome.status === "conflict") {
+          mutation.cachedEvaluation = undefined;
           adoptSnapshot(outcome.snapshot, canonicalProjectKey(projectCwd), epoch, true);
           queueMicrotask(() => processQueueRef.current());
           return;
@@ -565,7 +574,7 @@ export function useProjectNotes(
   }, [processQueue]);
 
   const enqueueMutation = useCallback(
-    (mutation: Omit<NotesMutation, "id">) => {
+    (mutation: Omit<NotesMutation, "id" | "cachedEvaluation">) => {
       const projectCwd = activeCwdRef.current;
       if (projectCwd === null || modeRef.current === "none") {
         mutation.settle?.(
@@ -576,19 +585,18 @@ export function useProjectNotes(
       const queued: NotesMutation = { ...mutation, id: ++nextMutationIdRef.current };
 
       if (modeRef.current === "fallback") {
-        const operationResult = queued.operationResult?.(documentRef.current);
-        const next = queued.apply(documentRef.current);
-        if (next === null) {
-          if (operationResult) queued.settle?.(operationResult);
+        const evaluation = evaluateMutation(queued, documentRef.current);
+        if (evaluation.document === null) {
+          if (evaluation.result !== undefined) queued.settle?.(evaluation.result);
           return;
         }
-        showDocument(next);
-        const save = repository.save(projectCwd, next);
+        showDocument(evaluation.document);
+        const save = repository.save(projectCwd, evaluation.document);
         setSaveDiagnostics(save);
-        if (operationResult) {
+        if (evaluation.result !== undefined) {
           queued.settle?.(
             save.v3.ok
-              ? operationResult
+              ? evaluation.result
               : (queued.failure?.("storage") ?? { status: "failed", reason: "storage" }),
           );
         }
@@ -609,8 +617,8 @@ export function useProjectNotes(
 
       if (authoritativeRef.current) renderSidecarState();
       else {
-        const next = queued.apply(documentRef.current);
-        if (next !== null) showDocument(next);
+        const evaluation = evaluateMutation(queued, documentRef.current);
+        if (evaluation.document !== null) showDocument(evaluation.document);
       }
       processQueueRef.current();
     },
@@ -623,8 +631,7 @@ export function useProjectNotes(
     ): Promise<NotesReferenceOperationResult> =>
       new Promise((resolve) => {
         enqueueMutation({
-          apply: (current) => evaluate(current).document,
-          operationResult: (current) => evaluate(current).result,
+          evaluate,
           settle: (result) => resolve(result as NotesReferenceOperationResult),
           failure: (reason) => ({ status: "failed", reason }),
         });
@@ -638,8 +645,7 @@ export function useProjectNotes(
     ): Promise<NotesRoadmapMutationResult> =>
       new Promise((resolve) => {
         enqueueMutation({
-          apply: (current) => evaluate(current).document,
-          operationResult: (current) => evaluate(current).result,
+          evaluate,
           settle: (result) => resolve(result as NotesRoadmapMutationResult),
           failure: (reason) => ({ status: "failed", reason }),
         });
@@ -653,8 +659,7 @@ export function useProjectNotes(
     ): Promise<NotesReminderMutationResult> =>
       new Promise((resolve) => {
         enqueueMutation({
-          apply: (current) => evaluate(current).document,
-          operationResult: (current) => evaluate(current).result,
+          evaluate,
           settle: (result) => resolve(result as NotesReminderMutationResult),
           failure: (reason, error) => ({
             status: "failed",
@@ -676,8 +681,9 @@ export function useProjectNotes(
       const now = clock();
       enqueueMutation({
         coalesceKey: "reference",
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           current.reference === value ? null : { ...current, reference: value, updatedAt: now },
+        ),
       });
     },
     [clock, enqueueMutation],
@@ -688,10 +694,11 @@ export function useProjectNotes(
       const now = clock();
       enqueueMutation({
         coalesceKey: "current-focus",
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           current.currentFocus === value
             ? null
             : { ...current, currentFocus: value, updatedAt: now },
+        ),
       });
     },
     [clock, enqueueMutation],
@@ -704,7 +711,7 @@ export function useProjectNotes(
       const now = clock();
       const id = idFactory();
       enqueueMutation({
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           current.tasks.some((task) => task.id === id)
             ? null
             : {
@@ -723,6 +730,7 @@ export function useProjectNotes(
                 ],
                 updatedAt: now,
               },
+        ),
       });
     },
     [clock, enqueueMutation, idFactory],
@@ -734,14 +742,14 @@ export function useProjectNotes(
       if (!trimmed) return;
       const now = clock();
       enqueueMutation({
-        apply: (current) => {
+        evaluate: documentMutation((current) => {
           const index = current.tasks.findIndex((task) => task.id === id);
           const task = current.tasks[index];
           if (!task || task.archivedAt !== null || task.text === trimmed) return null;
           const tasks = [...current.tasks];
           tasks[index] = { ...task, text: trimmed, updatedAt: now };
           return { ...current, tasks, updatedAt: now };
-        },
+        }),
       });
     },
     [clock, enqueueMutation],
@@ -754,7 +762,7 @@ export function useProjectNotes(
       const now = clock();
       const targetStatus = selectedTask.status === "todo" ? "done" : "todo";
       enqueueMutation({
-        apply: (current) => {
+        evaluate: documentMutation((current) => {
           const index = current.tasks.findIndex((task) => task.id === id);
           const task = current.tasks[index];
           if (!task || task.archivedAt !== null || task.status === targetStatus) return null;
@@ -766,7 +774,7 @@ export function useProjectNotes(
             updatedAt: now,
           };
           return { ...current, tasks, updatedAt: now };
-        },
+        }),
       });
     },
     [clock, enqueueMutation],
@@ -782,7 +790,7 @@ export function useProjectNotes(
       const now = clock();
       const placeBeforeTarget = direction === "up";
       enqueueMutation({
-        apply: (current) => {
+        evaluate: documentMutation((current) => {
           const activeIds = current.tasks
             .filter((task) => task.archivedAt === null)
             .map((task) => task.id);
@@ -803,7 +811,7 @@ export function useProjectNotes(
           const targetIndex = tasks.findIndex((task) => task.id === targetId);
           tasks.splice(placeBeforeTarget ? targetIndex : targetIndex + 1, 0, movedTask);
           return { ...current, tasks, updatedAt: now };
-        },
+        }),
       });
     },
     [clock, enqueueMutation],
@@ -813,10 +821,11 @@ export function useProjectNotes(
     (id: string) => {
       const now = clock();
       enqueueMutation({
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           updateTask(current, id, now, (task) =>
             task.archivedAt === null ? { ...task, archivedAt: now, updatedAt: now } : null,
           ),
+        ),
       });
     },
     [clock, enqueueMutation],
@@ -826,10 +835,11 @@ export function useProjectNotes(
     (id: string) => {
       const now = clock();
       enqueueMutation({
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           updateTask(current, id, now, (task) =>
             task.archivedAt !== null ? { ...task, archivedAt: null, updatedAt: now } : null,
           ),
+        ),
       });
     },
     [clock, enqueueMutation],
@@ -844,7 +854,7 @@ export function useProjectNotes(
       const now = clock();
       const id = idFactory();
       enqueueMutation({
-        apply: (current) => {
+        evaluate: documentMutation((current) => {
           if (current.phases.some((phase) => phase.id === id)) return null;
           const phase: NotesPhase = {
             id,
@@ -867,7 +877,7 @@ export function useProjectNotes(
             roadmapEvents: [],
           };
           return { ...current, phases: [...current.phases, phase], updatedAt: now };
-        },
+        }),
       });
     },
     [clock, enqueueMutation, idFactory],
@@ -881,7 +891,7 @@ export function useProjectNotes(
       const doneWhen = normalizeDoneWhen(input.doneWhen);
       const now = clock();
       enqueueMutation({
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           updatePhase(current, id, now, (phase) => {
             if (phase.archivedAt !== null) return null;
             if (
@@ -893,6 +903,7 @@ export function useProjectNotes(
             }
             return { ...phase, title, goal, doneWhen, updatedAt: now };
           }),
+        ),
       });
     },
     [clock, enqueueMutation],
@@ -907,7 +918,7 @@ export function useProjectNotes(
       const now = clock();
       const placeBeforeTarget = direction === "up";
       enqueueMutation({
-        apply: (current) => {
+        evaluate: documentMutation((current) => {
           const visiblePhases = current.phases.filter((phase) => phase.archivedAt === null);
           const sourcePosition = visiblePhases.findIndex((phase) => phase.id === id);
           const anchorPosition = visiblePhases.findIndex((phase) => phase.id === targetId);
@@ -935,7 +946,7 @@ export function useProjectNotes(
             phase.archivedAt === null ? reorderedVisiblePhases[visibleIndex++]! : phase,
           );
           return { ...current, phases: normalizePhaseOrder(phases), updatedAt: now };
-        },
+        }),
       });
     },
     [clock, enqueueMutation],
@@ -946,7 +957,7 @@ export function useProjectNotes(
       const now = clock();
       const eventId = idFactory();
       enqueueMutation({
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           updatePhase(current, id, now, (phase) => {
             if (phase.archivedAt !== null || phase.status === status) return null;
             const timestamp = chronologicalTimestamp(now, phase);
@@ -970,10 +981,12 @@ export function useProjectNotes(
                   timestamp,
                   reason:
                     status === "cancelled" ? "Phase cancelled by user" : "Status changed by user",
+                  kind: "other",
                 },
               ],
             };
           }),
+        ),
       });
     },
     [clock, enqueueMutation, idFactory],
@@ -983,10 +996,11 @@ export function useProjectNotes(
     (id: string) => {
       const now = clock();
       enqueueMutation({
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           updatePhase(current, id, now, (phase) =>
             phase.archivedAt === null ? { ...phase, archivedAt: now, updatedAt: now } : null,
           ),
+        ),
       });
     },
     [clock, enqueueMutation],
@@ -996,10 +1010,11 @@ export function useProjectNotes(
     (id: string) => {
       const now = clock();
       enqueueMutation({
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           updatePhase(current, id, now, (phase) =>
             phase.archivedAt !== null ? { ...phase, archivedAt: null, updatedAt: now } : null,
           ),
+        ),
       });
     },
     [clock, enqueueMutation],
@@ -1016,10 +1031,8 @@ export function useProjectNotes(
       const requestedAt = clock();
       return new Promise((resolve) => {
         enqueueMutation({
-          apply: (current) =>
-            evaluatePromptSave(current, input, phaseId, title, prompt, requestedAt).document,
-          operationResult: (current) =>
-            evaluatePromptSave(current, input, phaseId, title, prompt, requestedAt).result,
+          evaluate: (current) =>
+            evaluatePromptSave(current, input, phaseId, title, prompt, requestedAt),
           settle: (result) => resolve(result as NotesPromptSaveResult),
           failure: (reason, error) => ({
             status: "failed",
@@ -1314,7 +1327,7 @@ export function useProjectNotes(
       const now = clock();
       enqueueMutation({
         coalesceKey: "handoff",
-        apply: (current) =>
+        evaluate: documentMutation((current) =>
           current.handoff.text === text
             ? null
             : {
@@ -1322,6 +1335,7 @@ export function useProjectNotes(
                 handoff: { text, updatedAt: now, readAt: null },
                 updatedAt: now,
               },
+        ),
       });
     },
     [clock, enqueueMutation],
@@ -1332,7 +1346,7 @@ export function useProjectNotes(
       if (expectedUpdatedAt === null) return;
       const now = clock();
       enqueueMutation({
-        apply: (current) => {
+        evaluate: documentMutation((current) => {
           if (
             current.handoff.text !== expectedText ||
             current.handoff.updatedAt !== expectedUpdatedAt ||
@@ -1345,7 +1359,7 @@ export function useProjectNotes(
             handoff: { ...current.handoff, readAt: now },
             updatedAt: now,
           };
-        },
+        }),
       });
     },
     [clock, enqueueMutation],
@@ -1421,6 +1435,17 @@ function evaluateReminderSchedule(
   }
   const phase = guarded.phase!;
   const reminder = phase.reminder;
+  const occurrenceCollision = reminderIdentityCollision(
+    current,
+    phaseId,
+    "occurrenceKey",
+    occurrenceKey,
+  );
+  if (occurrenceCollision) return { document: null, result: occurrenceCollision };
+  if (reminder === null) {
+    const idCollision = reminderIdentityCollision(current, phaseId, "id", newReminderId);
+    if (idCollision) return { document: null, result: idCollision };
+  }
   const timestamp = reminderMutationTimestamp(now, current.updatedAt, phase.updatedAt);
   const nextPhase: NotesPhase = {
     ...phase,
@@ -1459,6 +1484,13 @@ function evaluateReminderSnooze(
   if (!isFutureReminderTime(dueAt, now)) {
     return { document: null, result: { status: "invalid-time", phaseId } };
   }
+  const occurrenceCollision = reminderIdentityCollision(
+    current,
+    phaseId,
+    "occurrenceKey",
+    occurrenceKey,
+  );
+  if (occurrenceCollision) return { document: null, result: occurrenceCollision };
   const timestamp = reminderMutationTimestamp(now, current.updatedAt, phase.updatedAt);
   const nextPhase: NotesPhase = {
     ...phase,
@@ -1473,6 +1505,26 @@ function evaluateReminderSnooze(
   return {
     document: replaceReminderPhase(current, nextPhase, timestamp),
     result: { status: "committed", phaseId, occurrenceKey },
+  };
+}
+
+function reminderIdentityCollision(
+  current: NotesDocumentV3,
+  targetPhaseId: string,
+  field: "id" | "occurrenceKey",
+  value: string,
+): Extract<NotesReminderMutationResult, { status: "failed" }> | null {
+  const existingIndex = current.phases.findIndex((phase) => phase.reminder?.[field] === value);
+  if (existingIndex === -1) return null;
+  const targetIndex = current.phases.findIndex((phase) => phase.id === targetPhaseId);
+  const label = field === "id" ? "reminder ID" : "occurrence key";
+  return {
+    status: "failed",
+    reason: "validation",
+    error: {
+      path: `phases[${targetIndex}].reminder.${field}`,
+      message: `duplicate ${label}; already used at phases[${existingIndex}].reminder.${field}`,
+    },
   };
 }
 
@@ -1563,8 +1615,23 @@ function replayMutations(
   mutations: readonly NotesMutation[],
 ): NotesDocumentV3 {
   let current = base;
-  for (const mutation of mutations) current = mutation.apply(current) ?? current;
+  for (const mutation of mutations) {
+    current = evaluateMutation(mutation, current).document ?? current;
+  }
   return current;
+}
+
+function evaluateMutation(mutation: NotesMutation, base: NotesDocumentV3): NotesMutationEvaluation {
+  if (mutation.cachedEvaluation?.base === base) return mutation.cachedEvaluation.value;
+  const value = mutation.evaluate(base);
+  mutation.cachedEvaluation = { base, value };
+  return value;
+}
+
+function documentMutation(
+  update: (document: NotesDocumentV3) => NotesDocumentV3 | null,
+): (document: NotesDocumentV3) => NotesMutationEvaluation {
+  return (document) => ({ document: update(document) });
 }
 
 function settlePendingMutations(
@@ -1806,6 +1873,12 @@ function evaluateStatusOverrideReset(
       source: "user",
       timestamp,
       reason: "Automatic status updates resumed by user",
+      kind:
+        targetStatus === "waiting-for-approval"
+          ? "approval-opened"
+          : targetStatus === "needs-attention"
+            ? "attention-generic-opened"
+            : "other",
     });
   }
   const phases = [...current.phases];

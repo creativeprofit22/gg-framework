@@ -68,6 +68,7 @@ export interface PhaseCheckpointRepository {
       status: "in-progress";
       source: "user" | "agent";
       reason: string;
+      kind: "approval-resolved";
       timestamp: string;
       expectedSession: { sessionId: string; sessionPath: string | null };
     },
@@ -208,6 +209,7 @@ export async function commitPlanApprovalCheckpoint(input: {
               input.approvalSource === "user"
                 ? "Plan approved by user"
                 : "Plan approved by Autopilot",
+            kind: "approval-resolved",
             timestamp: new Date().toISOString(),
             expectedSession: { ...input.session.getState() },
           },

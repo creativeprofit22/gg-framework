@@ -84,7 +84,8 @@
           "toStatus": "planning",
           "source": "user",
           "timestamp": "2026-07-23T09:00:00.000Z",
-          "reason": "Contract scope approved"
+          "reason": "Contract scope approved",
+          "kind": "other"
         },
         {
           "id": "event-schema-progress",
@@ -92,7 +93,8 @@
           "toStatus": "in-progress",
           "source": "session",
           "timestamp": "2026-07-24T12:00:00.000Z",
-          "reason": null
+          "reason": null,
+          "kind": "other"
         },
         {
           "id": "event-schema-attention",
@@ -100,7 +102,8 @@
           "toStatus": "needs-attention",
           "source": "agent",
           "timestamp": "2026-07-25T12:34:56.000Z",
-          "reason": "Cross-boundary fixture evidence required"
+          "reason": "Cross-boundary fixture evidence required",
+          "kind": "attention-question-opened"
         }
       ],
       "roadmapEvents": [
@@ -177,7 +180,8 @@
           "toStatus": "in-progress",
           "source": "agent",
           "timestamp": "2026-07-22T08:15:00.000Z",
-          "reason": "Migration implementation started"
+          "reason": "Migration implementation started",
+          "kind": "other"
         },
         {
           "id": "event-migration-done",
@@ -185,7 +189,8 @@
           "toStatus": "done",
           "source": "system",
           "timestamp": "2026-07-24T11:30:00.000Z",
-          "reason": "Migration and restart checks passed"
+          "reason": "Migration and restart checks passed",
+          "kind": "other"
         }
       ],
       "roadmapEvents": []

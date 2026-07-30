@@ -1,8 +1,10 @@
+import { classifyLegacyNotesLifecycleEvent } from "@kenkaiiii/gg-core/project-notes";
 import type { AutopilotVerdict } from "./core/autopilot-verdict.js";
 import type { KenVerificationException } from "./core/ken-context.js";
 import type {
   NotesCompletionGateOutcome,
   NotesCompletionUnmetGateCode,
+  NotesLifecycleEventKind,
   NotesPhase,
   NotesPhaseStatus,
   NotesRoadmapCompletionReview,
@@ -246,37 +248,22 @@ function hasEveryPlanStep(checkpoint: NotesRoadmapImplementationCheckpoint): boo
   return checkpoint.completedPlanSteps.every((step, index) => step === index + 1);
 }
 
-type LifecycleBlockerKind = "approval" | "question" | "runtime" | "tool" | "attention";
+type LifecycleBlockerKind = Extract<
+  NotesLifecycleEventKind,
+  | "approval-opened"
+  | "attention-question-opened"
+  | "attention-runtime-opened"
+  | "attention-tool-opened"
+  | "attention-generic-opened"
+>;
 
-interface LifecycleResolutionRule {
-  toStatus: "in-progress" | "review";
-  source: "user" | "session" | "agent";
-  reason: string;
-}
-
-const APPROVAL_RESOLUTION_RULES: readonly LifecycleResolutionRule[] = [
-  { toStatus: "in-progress", source: "user", reason: "Plan approved by user" },
-  { toStatus: "in-progress", source: "agent", reason: "Plan approved by Autopilot" },
-];
-
-const IMPLEMENTATION_RESOLUTION_RULES: readonly LifecycleResolutionRule[] = [
-  { toStatus: "in-progress", source: "session", reason: "Implementation run started" },
-  { toStatus: "in-progress", source: "session", reason: "Implementation session resumed" },
-];
-
-const ATTENTION_RESOLUTION_RULES: Readonly<
-  Record<Exclude<LifecycleBlockerKind, "approval">, readonly LifecycleResolutionRule[]>
+const ATTENTION_RESOLUTION_KINDS: Readonly<
+  Record<Exclude<LifecycleBlockerKind, "approval-opened">, readonly NotesLifecycleEventKind[]>
 > = {
-  question: IMPLEMENTATION_RESOLUTION_RULES,
-  runtime: [
-    ...IMPLEMENTATION_RESOLUTION_RULES,
-    { toStatus: "review", source: "session", reason: "Review session resumed" },
-  ],
-  tool: IMPLEMENTATION_RESOLUTION_RULES,
-  attention: [
-    ...IMPLEMENTATION_RESOLUTION_RULES,
-    { toStatus: "review", source: "session", reason: "Review session resumed" },
-  ],
+  "attention-question-opened": ["attention-implementation-resolved"],
+  "attention-runtime-opened": ["attention-implementation-resolved", "attention-review-resolved"],
+  "attention-tool-opened": ["attention-implementation-resolved"],
+  "attention-generic-opened": ["attention-implementation-resolved", "attention-review-resolved"],
 };
 
 function hasUnresolvedLifecycleStatus(
@@ -292,37 +279,27 @@ function hasUnresolvedLifecycleStatus(
   }
   if (blockingIndex < 0) return phase.status === status;
   const blockingEvent = phase.lifecycleEvents[blockingIndex]!;
+  const blockerKind = lifecycleEventKind(blockingEvent);
+  if (status === "waiting-for-approval" && blockerKind !== "approval-opened") return true;
+  if (status === "needs-attention" && !(blockerKind in ATTENTION_RESOLUTION_KINDS)) return true;
+
+  const resolutionKinds: readonly NotesLifecycleEventKind[] =
+    blockerKind === "approval-opened"
+      ? ["approval-resolved"]
+      : ATTENTION_RESOLUTION_KINDS[blockerKind as Exclude<LifecycleBlockerKind, "approval-opened">];
   const blockingTimestamp = Date.parse(blockingEvent.timestamp);
-  const blockerKind = lifecycleBlockerKind(status, blockingEvent.source, blockingEvent.reason);
-  const rules =
-    blockerKind === "approval"
-      ? APPROVAL_RESOLUTION_RULES
-      : ATTENTION_RESOLUTION_RULES[blockerKind];
   const resolved = phase.lifecycleEvents
     .slice(blockingIndex + 1)
     .some(
       (event) =>
         Date.parse(event.timestamp) >= blockingTimestamp &&
-        rules.some(
-          (rule) =>
-            event.toStatus === rule.toStatus &&
-            event.source === rule.source &&
-            event.reason === rule.reason,
-        ),
+        resolutionKinds.some((kind) => kind === lifecycleEventKind(event)),
     );
   return !resolved;
 }
 
-function lifecycleBlockerKind(
-  status: "waiting-for-approval" | "needs-attention",
-  source: NotesPhase["lifecycleEvents"][number]["source"],
-  reason: string | null,
-): LifecycleBlockerKind {
-  if (status === "waiting-for-approval") return "approval";
-  if (source === "session") return "runtime";
-  if (source === "agent" && /(^|\s)\S+ failed(?::|$)/i.test(reason ?? "")) return "tool";
-  if (source === "agent") return "question";
-  return "attention";
+function lifecycleEventKind(event: NotesPhase["lifecycleEvents"][number]): NotesLifecycleEventKind {
+  return event.kind ?? classifyLegacyNotesLifecycleEvent(event);
 }
 
 function completionRecoveryReason(unmet: NotesCompletionUnmetGateCode[]): string {

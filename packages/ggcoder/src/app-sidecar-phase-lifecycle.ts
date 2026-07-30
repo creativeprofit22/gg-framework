@@ -2,6 +2,7 @@ import type { ActivePhaseExecutionStage } from "./phase-context.js";
 import { NOTES_PHASE_LIFECYCLE_REASON_MAX_LENGTH } from "./project-notes-repository.js";
 import type {
   NotesAutomaticPhaseStatus,
+  NotesLifecycleEventKind,
   NotesLifecycleEventSource,
   NotesSessionLink,
   ProjectNotesSnapshot,
@@ -22,28 +23,16 @@ export type PhaseLifecycleSignal =
   | { type: "runtime-error"; reason: string }
   | { type: "autopilot-stopped"; reason: string }
   | { type: "cancelled" }
-  | {
-      type: "launch-failed";
-      phaseId: string;
-      reason: string;
-      expectedSession?: NotesSessionLink | null;
-    }
   | { type: "run-ended" }
   | { type: "tool-succeeded" }
   | { type: "autopilot-done" }
   | { type: "elapsed" };
 
-export type PhaseLifecycleResolution =
-  | "approval-opened"
-  | "approval-resolved"
-  | "attention-opened"
-  | "attention-resolved"
-  | "none";
-
 export interface PhaseLifecycleTransition {
   status: NotesAutomaticPhaseStatus;
   source: NotesLifecycleEventSource;
   reason: string;
+  kind: NotesLifecycleEventKind;
 }
 
 export interface BoundPhaseLifecycleContext {
@@ -108,55 +97,27 @@ const RESTORED_STAGE_TRANSITIONS: Record<ActivePhaseExecutionStage, PhaseLifecyc
     status: "planning",
     source: "session",
     reason: "Planning session resumed",
+    kind: "other",
   },
   "awaiting-approval": {
     status: "waiting-for-approval",
     source: "session",
     reason: "Plan approval resumed",
+    kind: "approval-opened",
   },
   implementing: {
     status: "in-progress",
     source: "session",
     reason: "Implementation session resumed",
+    kind: "attention-implementation-resolved",
   },
   reviewing: {
     status: "review",
     source: "session",
     reason: "Review session resumed",
+    kind: "attention-review-resolved",
   },
 };
-
-export function phaseLifecycleResolution(signal: PhaseLifecycleSignal): PhaseLifecycleResolution {
-  switch (signal.type) {
-    case "plan-submitted":
-      return "approval-opened";
-    case "plan-approved":
-      return "approval-resolved";
-    case "autopilot-human":
-    case "tool-failed":
-    case "runtime-error":
-    case "autopilot-stopped":
-    case "launch-failed":
-      return "attention-opened";
-    case "implementation-run-started":
-      return "attention-resolved";
-    case "session-restored":
-      return signal.executionStage === "awaiting-approval"
-        ? "approval-opened"
-        : signal.executionStage === "implementing" || signal.executionStage === "reviewing"
-          ? "attention-resolved"
-          : "none";
-    case "plan-entered":
-    case "ideal-review-started":
-    case "autopilot-review-started":
-    case "cancelled":
-    case "run-ended":
-    case "tool-succeeded":
-    case "autopilot-done":
-    case "elapsed":
-      return "none";
-  }
-}
 
 export function mapPhaseLifecycleSignal(
   signal: PhaseLifecycleSignal,
@@ -166,23 +127,35 @@ export function mapPhaseLifecycleSignal(
     case "session-restored":
       return RESTORED_STAGE_TRANSITIONS[signal.executionStage];
     case "plan-entered":
-      return { status: "planning", source: "agent", reason: "Plan Mode entered" };
+      return { status: "planning", source: "agent", reason: "Plan Mode entered", kind: "other" };
     case "plan-submitted":
       return {
         status: "waiting-for-approval",
         source: "agent",
         reason: "Plan submitted for approval",
+        kind: "approval-opened",
       };
     case "plan-approved":
       return signal.approvalSource === "user"
-        ? { status: "in-progress", source: "user", reason: "Plan approved by user" }
-        : { status: "in-progress", source: "agent", reason: "Plan approved by Autopilot" };
+        ? {
+            status: "in-progress",
+            source: "user",
+            reason: "Plan approved by user",
+            kind: "approval-resolved",
+          }
+        : {
+            status: "in-progress",
+            source: "agent",
+            reason: "Plan approved by Autopilot",
+            kind: "approval-resolved",
+          };
     case "implementation-run-started":
       return executionStage === "implementing" || executionStage === "reviewing"
         ? {
             status: "in-progress",
             source: "session",
             reason: "Implementation run started",
+            kind: "attention-implementation-resolved",
           }
         : null;
     case "ideal-review-started":
@@ -191,17 +164,19 @@ export function mapPhaseLifecycleSignal(
             status: "review",
             source: "agent",
             reason: "Implementation verification started",
+            kind: "other",
           }
         : null;
     case "autopilot-review-started":
       return executionStage === "implementing" || executionStage === "reviewing"
-        ? { status: "review", source: "agent", reason: "Autopilot review started" }
+        ? { status: "review", source: "agent", reason: "Autopilot review started", kind: "other" }
         : null;
     case "autopilot-human":
       return {
         status: "needs-attention",
         source: "agent",
         reason: boundedReason(signal.reason, "Autopilot needs a user decision"),
+        kind: "attention-question-opened",
       };
     case "tool-failed": {
       const toolName = boundedReason(signal.toolName, "Unknown tool", 80);
@@ -210,6 +185,7 @@ export function mapPhaseLifecycleSignal(
         status: "needs-attention",
         source: "agent",
         reason: boundedReason(`${toolName} failed${detail}`, `${toolName} failed`),
+        kind: "attention-tool-opened",
       };
     }
     case "runtime-error":
@@ -217,24 +193,21 @@ export function mapPhaseLifecycleSignal(
         status: "needs-attention",
         source: "session",
         reason: boundedReason(signal.reason, "The phase session failed"),
+        kind: "attention-runtime-opened",
       };
     case "autopilot-stopped":
       return {
         status: "needs-attention",
         source: "system",
         reason: boundedReason(signal.reason, "Autopilot could not continue"),
+        kind: "attention-generic-opened",
       };
     case "cancelled":
       return {
         status: "cancelled",
         source: "user",
         reason: "Phase run cancelled by user",
-      };
-    case "launch-failed":
-      return {
-        status: "needs-attention",
-        source: "system",
-        reason: boundedReason(signal.reason, "Phase launch failed. Retry Start phase."),
+        kind: "other",
       };
     case "run-ended":
     case "tool-succeeded":
@@ -254,7 +227,7 @@ export class AppSidecarPhaseLifecycleCoordinator {
     activePhase?: BoundPhaseLifecycleContext,
   ): Promise<PhaseLifecycleReconcileOutcome> {
     const timestamp = this.options.now?.() ?? new Date().toISOString();
-    const captured = this.capture(signal, activePhase);
+    const captured = this.capture(activePhase);
     const operation = this.tail.then(() => this.reconcile(signal, timestamp, captured));
     this.tail = operation.then(
       () => undefined,
@@ -264,15 +237,8 @@ export class AppSidecarPhaseLifecycleCoordinator {
   }
 
   private capture(
-    signal: PhaseLifecycleSignal,
     activePhase?: BoundPhaseLifecycleContext,
-  ):
-    | BoundPhaseLifecycleContext
-    | { phaseId: string; expectedSession?: NotesSessionLink | null }
-    | undefined {
-    if (signal.type === "launch-failed") {
-      return { phaseId: signal.phaseId, expectedSession: signal.expectedSession };
-    }
+  ): BoundPhaseLifecycleContext | undefined {
     const active = activePhase ?? this.options.getActivePhase();
     return active
       ? {
@@ -286,26 +252,17 @@ export class AppSidecarPhaseLifecycleCoordinator {
   private async reconcile(
     signal: PhaseLifecycleSignal,
     timestamp: string,
-    captured:
-      | BoundPhaseLifecycleContext
-      | { phaseId: string; expectedSession?: NotesSessionLink | null }
-      | undefined,
+    captured: BoundPhaseLifecycleContext | undefined,
   ): Promise<PhaseLifecycleReconcileOutcome> {
     if (!captured) return { status: "no-active-phase" };
-    const executionStage =
-      "executionStage" in captured ? captured.executionStage : ("planning" as const);
-    const transition = mapPhaseLifecycleSignal(signal, executionStage);
+    const transition = mapPhaseLifecycleSignal(signal, captured.executionStage);
     if (!transition) return { status: "ignored" };
 
     try {
       const outcome = await this.options.repository.recordPhaseLifecycleTransition(
         this.options.cwd,
         captured.phaseId,
-        {
-          ...transition,
-          timestamp,
-          expectedSession: "session" in captured ? captured.session : captured.expectedSession,
-        },
+        { ...transition, timestamp, expectedSession: captured.session },
       );
       if (outcome.status !== "ok") return outcome;
       this.options.broadcastSnapshot(outcome.snapshot);

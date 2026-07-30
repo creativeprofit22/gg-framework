@@ -19,6 +19,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
 import { createPaneAgentClient, getState, NewSessionError, sendPrompt } from "./agent";
+import { PHASE_START_FAILURE_CODES } from "./notes-types";
 
 const target = {
   mode: "chat" as const,
@@ -244,7 +245,7 @@ describe("pane agent client", () => {
     );
   });
 
-  it("strictly validates phase-start outcomes", async () => {
+  it("strictly validates phase-start success outcomes and rejects unknown failure codes", async () => {
     const client = createPaneAgentClient("right");
     const accepted = {
       status: "accepted",
@@ -252,19 +253,46 @@ describe("pane agent client", () => {
       session: { sessionId: "session-1", sessionPath: "/session.jsonl" },
       packageTokenCount: 42,
     } as const;
-    invoke.mockResolvedValueOnce(accepted);
+    const alreadyBound = {
+      ...accepted,
+      status: "already-bound",
+      packageTokenCount: 0,
+    } as const;
+    invoke.mockResolvedValueOnce(accepted).mockResolvedValueOnce(alreadyBound);
     await expect(client.startPhase("phase-21")).resolves.toBe(accepted);
+    await expect(client.startPhase("phase-21")).resolves.toBe(alreadyBound);
 
     for (const invalid of [
       { ...accepted, extra: true },
       { ...accepted, packageTokenCount: -1 },
       { ...accepted, session: { sessionId: "session-1" } },
-      { status: "failed", code: "busy", operationId: null },
+      { ...alreadyBound, packageTokenCount: 1 },
+      {
+        status: "failed",
+        code: "future-phase-start-code",
+        operationId: null,
+        message: "Upgrade required.",
+      },
     ]) {
       invoke.mockResolvedValueOnce(invalid);
       await expect(client.startPhase("phase-21")).rejects.toThrow("invalid phase start response");
     }
   });
+
+  it.each(PHASE_START_FAILURE_CODES)(
+    "accepts recognized phase-start failure code %s",
+    async (code) => {
+      const client = createPaneAgentClient("right");
+      const failure = {
+        status: "failed",
+        code,
+        operationId: null,
+        message: `Phase start failed: ${code}`,
+      } as const;
+      invoke.mockResolvedValueOnce(failure);
+      await expect(client.startPhase("phase-21")).resolves.toBe(failure);
+    },
+  );
 
   it("validates and preserves the authoritative prompt queue result", async () => {
     const client = createPaneAgentClient("right");

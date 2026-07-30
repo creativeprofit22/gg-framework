@@ -1,4 +1,5 @@
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { PhaseStartResult } from "@kenkaiiii/gg-core/phase-start-protocol";
 import type { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import { isAppSidecarSessionBusy } from "./app-sidecar-session-mutation.js";
@@ -58,34 +59,7 @@ export interface PhaseLaunchRepository {
   ): Promise<ProjectNotesPhaseLifecycleOutcome>;
 }
 
-export type PhaseStartResponseBody =
-  | {
-      status: "accepted";
-      operationId: string;
-      session: { sessionId: string; sessionPath: string | null };
-      packageTokenCount: number;
-    }
-  | {
-      status: "already-bound";
-      operationId: string;
-      session: { sessionId: string; sessionPath: string | null };
-      packageTokenCount: 0;
-    }
-  | {
-      status: "failed";
-      code:
-        | "coding-mode-required"
-        | "session-busy"
-        | "session-mutation-in-progress"
-        | "reconciliation-in-progress"
-        | "phase-not-found"
-        | "phase-archived"
-        | "notes-missing"
-        | "notes-corrupt"
-        | "launch-failed";
-      operationId: string | null;
-      message: string;
-    };
+export type PhaseStartResponseBody = PhaseStartResult;
 
 export interface LaunchBoundPhaseDependencies<TSession extends BoundPhaseSession> {
   phaseId: string;
@@ -141,7 +115,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       code: "coding-mode-required",
       operationId: null,
       message: "Roadmap phases can only start in coding mode.",
-    });
+    } satisfies PhaseStartResponseBody);
     return;
   }
   if (isAppSidecarSessionBusy(dependencies.busyState)) {
@@ -150,7 +124,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       code: "session-busy",
       operationId: null,
       message: "Wait for the current run or Autopilot review to finish.",
-    });
+    } satisfies PhaseStartResponseBody);
     return;
   }
 
@@ -161,7 +135,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       code: "session-mutation-in-progress",
       operationId: dependencies.mutations.owner?.operationId ?? null,
       message: "Another session action is already in progress.",
-    });
+    } satisfies PhaseStartResponseBody);
     return;
   }
 
@@ -174,7 +148,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       code: "reconciliation-in-progress",
       operationId: owner?.operationId ?? null,
       message: "Another Roadmap launch or status update is already in progress for this project.",
-    });
+    } satisfies PhaseStartResponseBody);
     return;
   }
 
@@ -200,7 +174,17 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
           outcome.status === "phase-archived"
             ? "This phase was archived. Reopen Roadmap and choose an active phase."
             : "This phase no longer exists. Reopen Roadmap and try again.",
-      });
+      } satisfies PhaseStartResponseBody);
+      return;
+    }
+    if (outcome.status === "done-terminal") {
+      await dependencies.candidates.disposeCandidate(phaseId);
+      dependencies.respond(409, {
+        status: "failed",
+        code: "phase-inactive",
+        operationId: mutation.operationId,
+        message: "This phase is already Done. Reopen Roadmap to review its completion evidence.",
+      } satisfies PhaseStartResponseBody);
       return;
     }
     if (outcome.status === "missing" || outcome.status === "corrupt") {
@@ -209,7 +193,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
         code: outcome.status === "missing" ? "notes-missing" : "notes-corrupt",
         operationId: mutation.operationId,
         message: "Project Notes are unavailable. Reopen Notes and retry.",
-      });
+      } satisfies PhaseStartResponseBody);
       return;
     }
     if (outcome.status === "already-bound") {
@@ -220,7 +204,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
         operationId: mutation.operationId,
         session: outcome.session,
         packageTokenCount: 0,
-      });
+      } satisfies PhaseStartResponseBody);
       return;
     }
 
@@ -247,7 +231,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       operationId: mutation.operationId,
       session: outcome.session,
       packageTokenCount: candidate.tokenCount,
-    });
+    } satisfies PhaseStartResponseBody);
     dependencies.startPrompt(
       candidate.initialPrompt,
       () => candidate.session.prompt(candidate.initialPrompt),
@@ -297,7 +281,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       code: "launch-failed",
       operationId: mutation.operationId,
       message: LAUNCH_FAILURE_MESSAGE,
-    });
+    } satisfies PhaseStartResponseBody);
   } finally {
     reconciliation.release();
     mutation.release();

@@ -200,6 +200,7 @@ export type NotesCompletionUnmetGateCode =
 export type NotesRoadmapStatusOutcome =
   | "applied"
   | "same-status"
+  | "evidence-only"
   | "manual-override"
   | "done-terminal";
 export type NotesRoadmapReferencePolicyOutcome =
@@ -891,6 +892,7 @@ const ROADMAP_TRANSITIONS = new Set<NotesRoadmapTransition>([
 const ROADMAP_STATUS_OUTCOMES = new Set<NotesRoadmapStatusOutcome>([
   "applied",
   "same-status",
+  "evidence-only",
   "manual-override",
   "done-terminal",
 ]);

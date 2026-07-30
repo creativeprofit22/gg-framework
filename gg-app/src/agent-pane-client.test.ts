@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { invoke, listeners } = vi.hoisted(() => ({
@@ -325,6 +326,37 @@ describe("pane agent client", () => {
     expect(await client.getNotes()).toBe(read);
     expect(await client.migrateNotes(notesDocument)).toBe(migrated);
     expect(await client.saveNotes(1, notesDocument)).toBe(saved);
+  });
+
+  it("loads a backend final-review snapshot with evidence-only status evidence", async () => {
+    const client = createPaneAgentClient("right");
+    const finalReviewDocument = JSON.parse(
+      await fs.readFile(new URL("../../fixtures/project-notes-v3.json", import.meta.url), "utf8"),
+    ) as { phases: Array<{ roadmapEvents: Array<Record<string, unknown>> }> };
+    const events = finalReviewDocument.phases[0]!.roadmapEvents;
+    events.splice(events.length - 1, 0, {
+      type: "status-update",
+      id: "final-review-status",
+      actor: "ken-autopilot",
+      transition: "review",
+      progress: "Completion evidence reviewed",
+      blocker: null,
+      evidence: ["Final review accepted the implementation and verification evidence"],
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
+      statusOutcome: "evidence-only",
+      proposedReferences: [],
+      timestamp: "2026-07-25T12:34:56.000Z",
+    });
+    const read = {
+      status: "ok",
+      snapshot: { projectKey: "/work", revision: 2, document: finalReviewDocument },
+      recoveredFromBackup: false,
+    } as const;
+    invoke.mockResolvedValueOnce(read);
+
+    expect(await client.getNotes()).toBe(read);
   });
 
   it("passes schema, route, and event-authority errors unchanged and rejects legacy bare outcomes", async () => {

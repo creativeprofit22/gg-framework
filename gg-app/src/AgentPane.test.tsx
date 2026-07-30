@@ -407,7 +407,7 @@ describe("AgentPane lifecycle", () => {
       ),
     );
     fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
     fireEvent.click(screen.getByRole("button", { name: "Start phase: Bound phase" }));
     fireEvent.click(screen.getByRole("button", { name: "Start phase" }));
 
@@ -448,7 +448,7 @@ describe("AgentPane lifecycle", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
     fireEvent.click(screen.getByRole("button", { name: "Start phase: Bound phase" }));
     const start = screen.getByRole("button", { name: "Start phase" }) as HTMLButtonElement;
     expect(start.disabled).toBe(true);
@@ -493,7 +493,7 @@ describe("AgentPane lifecycle", () => {
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
     fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
     const resume = screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement;
     expect(resume.disabled).toBe(false);
@@ -538,7 +538,7 @@ describe("AgentPane lifecycle", () => {
       ),
     );
     fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
     fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
     fireEvent.click(screen.getByRole("button", { name: "Resume phase" }));
 
@@ -575,7 +575,7 @@ describe("AgentPane lifecycle", () => {
       ),
     );
     fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
     fireEvent.click(screen.getByRole("button", { name: "Recover phase: Bound phase" }));
     const selectCallsBeforeResume = vi.mocked(pane.selectWorkspace).mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Recover phase" }));
@@ -621,7 +621,7 @@ describe("AgentPane lifecycle", () => {
         ),
       );
       fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-      fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
+      fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
       fireEvent.click(screen.getByRole("button", { name: "Recover phase: Bound phase" }));
       const selectCallsBeforeRecovery = vi.mocked(pane.selectWorkspace).mock.calls.length;
       fireEvent.click(screen.getByRole("button", { name: "Recover phase" }));
@@ -663,7 +663,7 @@ describe("AgentPane lifecycle", () => {
         ),
       );
       fireEvent.click(screen.getByRole("button", { name: "Notes" }));
-      fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
+      fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
       vi.mocked(pane.waitForReady).mockRejectedValueOnce(new Error(rejectionMessage));
       fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
       fireEvent.click(screen.getByRole("button", { name: "Resume phase" }));

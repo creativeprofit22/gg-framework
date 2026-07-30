@@ -183,11 +183,6 @@ export async function capturePhase26MacosDevEvidence({ fixture, webdriver, start
   const inspectScreenshot = join(descriptor.screenshots, "notes-bound-phase.png");
   const resumeScreenshot = join(descriptor.screenshots, "notes-resumed-session.png");
 
-  await waitFor("isolated macOS agent pane", () =>
-    webdriver.execute(
-      'return Boolean(document.querySelector(".agent-pane") && document.querySelector(\'button[aria-label^="Notes"]\'))',
-    ),
-  );
   await webdriver.execute(
     `const layout={version:9,root:{type:"leaf",paneId:"primary"},focusedPaneId:"primary",panes:{primary:{kind:"agent",mode:"code",cwd:${JSON.stringify(descriptor.project)},sessionPath:${JSON.stringify(descriptor.initialSessionPath)}}}};localStorage.setItem("gg-workspace-layout-recursive:main",JSON.stringify(layout));location.reload();return true;`,
   );

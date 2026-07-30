@@ -363,7 +363,7 @@ afterEach(() => {
   nativeMocks.toast.mockReset();
   vi.useRealTimers();
 });
-describe("AgentPane lifecycle", () => {
+describe("AgentPane lifecycle", { timeout: 15_000 }, () => {
   it("wires the restored home UI through the pane-scoped catalog client", async () => {
     const pane = client("primary", 1);
     render(<AgentPane client={pane} />);

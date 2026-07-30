@@ -22,11 +22,13 @@ describe("Phase 26 macOS dev fixture", () => {
     const fixture = preparePhase26MacosDevFixture({
       root,
       descriptorPath,
+      webdriverPort: 45_321,
       baseEnvironment: {
         PATH: process.env.PATH,
         HOME: "/protected/home",
         GG_SIDECAR_PATH: "/protected/sidecar.mjs",
         TAURI_PRIVATE_KEY: "must-not-survive",
+        TAURI_WEBDRIVER_PORT: "must-not-survive",
       },
     });
 
@@ -57,6 +59,8 @@ describe("Phase 26 macOS dev fixture", () => {
     expect(fixture.environment.XDG_DATA_HOME).toBe(fixture.paths.data);
     expect(fixture.environment.GG_PHASE21_SMOKE_PREBOUND).toBe("1");
     expect(fixture.environment.GG_PHASE26_MACOS_SMOKE).toBe("1");
+    expect(fixture.environment.TAURI_WEBDRIVER_PORT).toBe("45321");
+    expect(fixture.descriptor.webdriverPort).toBe(45_321);
     expect(fixture.environment.TAURI_PRIVATE_KEY).toBeUndefined();
     expect(existsSync(descriptorPath)).toBe(true);
     expect(JSON.parse(readFileSync(descriptorPath, "utf8"))).toEqual(fixture.descriptor);
@@ -69,5 +73,11 @@ describe("Phase 26 macOS dev fixture", () => {
         home: resolve("outside-root"),
       }),
     ).toThrow("escaped its temporary root");
+  });
+
+  it("requires a fixture-owned WebDriver port", () => {
+    expect(() => preparePhase26MacosDevFixture({ webdriverPort: 0 })).toThrow(
+      "requires an explicit WebDriver port",
+    );
   });
 });

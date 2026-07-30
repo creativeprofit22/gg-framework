@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -39,36 +40,88 @@ async function waitFor(label, check, { timeoutMs = 60_000, intervalMs = 200 } = 
   throw new Error(`${label} timed out${detail}`);
 }
 
-async function post(port, pathname, body = {}) {
+async function requestWebDriver(port, pathname, { method = "GET", body } = {}) {
   const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    method,
+    ...(body === undefined
+      ? {}
+      : {
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
   });
   const text = await response.text();
-  if (!response.ok) throw new Error(`${pathname} failed (${response.status}): ${text}`);
-  return text ? JSON.parse(text) : null;
-}
-
-async function execute(port, script) {
-  const result = await post(port, "/script/execute", { script, args: [] });
-  return result?.value;
-}
-
-async function screenshot(port, path) {
-  const result = await post(port, "/screenshot");
-  if (typeof result?.data !== "string" || result.data.length === 0) {
-    throw new Error(`WebDriver returned no screenshot data for ${path}`);
+  const payload = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    throw new Error(`${pathname} failed (${response.status}): ${JSON.stringify(payload)}`);
   }
-  writeFileSync(path, Buffer.from(result.data, "base64"));
+  return payload;
 }
 
-function webdriverPort(logPath) {
-  if (!existsSync(logPath)) return null;
-  const matches = [
-    ...readFileSync(logPath, "utf8").matchAll(/\[webdriver\] listening on port (\d+)/g),
-  ];
-  return matches.length === 0 ? null : Number(matches.at(-1)[1]);
+async function availableLoopbackPort() {
+  const server = createServer();
+  await new Promise((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : null;
+  await new Promise((resolveClose, rejectClose) =>
+    server.close((error) => (error ? rejectClose(error) : resolveClose())),
+  );
+  if (!Number.isInteger(port)) throw new Error("Could not allocate a fixture WebDriver port");
+  return port;
+}
+
+async function connectWebDriver(port, unexpectedExit) {
+  await Promise.race([
+    waitFor(
+      "embedded macOS WebDriver",
+      async () => {
+        const status = await requestWebDriver(port, "/status");
+        return status?.value?.ready === false ? null : status;
+      },
+      { timeoutMs: 20 * 60_000, intervalMs: 500 },
+    ),
+    unexpectedExit,
+  ]);
+  const session = await requestWebDriver(port, "/session", {
+    method: "POST",
+    body: {
+      capabilities: {
+        alwaysMatch: {
+          browserName: "tauri",
+          "wdio:tauriServiceOptions": { windowLabel: "main" },
+        },
+        firstMatch: [{}],
+      },
+    },
+  });
+  const sessionId = session?.value?.sessionId;
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    throw new Error(`WebDriver did not create a session: ${JSON.stringify(session)}`);
+  }
+  return {
+    port,
+    sessionId,
+    async execute(script) {
+      const result = await requestWebDriver(port, `/session/${sessionId}/execute/sync`, {
+        method: "POST",
+        body: { script, args: [] },
+      });
+      return result?.value;
+    },
+    async screenshot(path) {
+      const result = await requestWebDriver(port, `/session/${sessionId}/screenshot`);
+      if (typeof result?.value !== "string" || result.value.length === 0) {
+        throw new Error(`WebDriver returned no screenshot data for ${path}`);
+      }
+      writeFileSync(path, Buffer.from(result.value, "base64"));
+    },
+    async close() {
+      await requestWebDriver(port, `/session/${sessionId}`, { method: "DELETE" });
+    },
+  };
 }
 
 function exactHead() {
@@ -125,50 +178,43 @@ async function stopFixtureProcessGroup(processGroupId) {
   return cleanup;
 }
 
-export async function capturePhase26MacosDevEvidence({ fixture, port, startedAt }) {
+export async function capturePhase26MacosDevEvidence({ fixture, webdriver, startedAt }) {
   const { descriptor } = fixture;
   const inspectScreenshot = join(descriptor.screenshots, "notes-bound-phase.png");
   const resumeScreenshot = join(descriptor.screenshots, "notes-resumed-session.png");
 
   await waitFor("isolated macOS agent pane", () =>
-    execute(
-      port,
+    webdriver.execute(
       'return Boolean(document.querySelector(".agent-pane") && document.querySelector(\'button[aria-label^="Notes"]\'))',
     ),
   );
-  await execute(
-    port,
+  await webdriver.execute(
     `const layout={version:9,root:{type:"leaf",paneId:"primary"},focusedPaneId:"primary",panes:{primary:{kind:"agent",mode:"code",cwd:${JSON.stringify(descriptor.project)},sessionPath:${JSON.stringify(descriptor.initialSessionPath)}}}};localStorage.setItem("gg-workspace-layout-recursive:main",JSON.stringify(layout));location.reload();return true;`,
   );
   await waitFor("reloaded isolated macOS pane", () =>
-    execute(
-      port,
+    webdriver.execute(
       'return Boolean(document.querySelector(".agent-pane") && document.querySelector(\'button[aria-label^="Notes"]\'))',
     ),
   );
 
-  await execute(
-    port,
+  await webdriver.execute(
     "document.querySelector('button[aria-label^=\"Notes\"]')?.click();return true;",
   );
   await waitFor("Notes dialog", () =>
-    execute(port, "return document.querySelector('[role=\"dialog\"]') !== null"),
+    webdriver.execute("return document.querySelector('[role=\"dialog\"]') !== null"),
   );
-  await execute(port, 'document.querySelector("#notes-tab-roadmap")?.click();return true;');
+  await webdriver.execute('document.querySelector("#notes-tab-roadmap")?.click();return true;');
   await waitFor("bound phase row", () =>
-    execute(
-      port,
+    webdriver.execute(
       "return document.querySelector('button[aria-label=\"Resume phase: Bound phase\"]') !== null",
     ),
   );
-  await execute(
-    port,
+  await webdriver.execute(
     "document.querySelector('button[aria-label=\"Resume phase: Bound phase\"]')?.click();return true;",
   );
 
   const inspected = await waitFor("bound phase detail", () =>
-    execute(
-      port,
+    webdriver.execute(
       `const detail=document.querySelector(".notes-phase-detail");if(!detail)return null;const action=[...detail.querySelectorAll("button")].find((button)=>button.textContent?.trim()==="Resume phase");return action?{heading:detail.querySelector("h3")?.textContent?.trim()??"",text:detail.textContent??"",action:action.textContent?.trim()??"",roadmapSelected:document.querySelector("#notes-tab-roadmap")?.getAttribute("aria-selected")}:null;`,
     ),
   );
@@ -182,15 +228,13 @@ export async function capturePhase26MacosDevEvidence({ fixture, port, startedAt 
   ) {
     throw new Error(`Unexpected bound phase detail: ${JSON.stringify(inspected)}`);
   }
-  await screenshot(port, inspectScreenshot);
+  await webdriver.screenshot(inspectScreenshot);
 
-  await execute(
-    port,
+  await webdriver.execute(
     `const button=[...document.querySelectorAll(".notes-phase-detail button")].find((candidate)=>candidate.textContent?.trim()==="Resume phase");if(!button)throw new Error("Resume phase action is missing");button.click();return true;`,
   );
   const resumed = await waitFor("bound phase Resume", async () => {
-    const dom = await execute(
-      port,
+    const dom = await webdriver.execute(
       `return {dialogOpen:document.querySelector('[role="dialog"]')!==null,planModeText:document.querySelector(".footer-plan")?.textContent??"",planReason:document.querySelector(".plan-logo-reason")?.textContent??"",transcriptText:document.querySelector(".transcript")?.textContent??""};`,
     );
     const audit = readAudit(descriptor.sidecarAudit);
@@ -207,7 +251,7 @@ export async function capturePhase26MacosDevEvidence({ fixture, port, startedAt 
       `Resume did not restore the bound phase reason: ${JSON.stringify(resumed.dom)}`,
     );
   }
-  await screenshot(port, resumeScreenshot);
+  await webdriver.screenshot(resumeScreenshot);
 
   return {
     status: "passed",
@@ -222,6 +266,7 @@ export async function capturePhase26MacosDevEvidence({ fixture, port, startedAt 
     profileRoot: descriptor.profileRoot,
     dataRoots: descriptor.dataRoots,
     toolRoots: descriptor.toolRoots,
+    webdriver: { port: webdriver.port, sessionId: webdriver.sessionId },
     project: descriptor.project,
     initialSessionPath: descriptor.initialSessionPath,
     boundSessionPath: descriptor.boundSessionPath,
@@ -243,12 +288,14 @@ export async function runPhase26MacosDevEvidence() {
     throw new Error("Phase 26 macOS dev evidence must run on an isolated macOS host");
   }
   const startedAt = Date.now();
-  const fixture = preparePhase26MacosDevFixture();
+  const webdriverPort = await availableLoopbackPort();
+  const fixture = preparePhase26MacosDevFixture({ webdriverPort });
   writeGithubOutput(fixture.paths.root);
   const evidencePath = join(fixture.paths.evidence, "evidence.json");
   const cleanupPath = join(fixture.paths.evidence, "cleanup.json");
   const logFd = openSync(fixture.paths.devLog, "a");
   let child = null;
+  let webdriver = null;
   let evidence = null;
   let failure = null;
   let cleanup = {
@@ -280,14 +327,8 @@ export async function runPhase26MacosDevEvidence() {
       join(fixture.paths.evidence, "process.json"),
       `${JSON.stringify({ pid: child.pid, processGroupId: child.pid, command: "pnpm --filter gg-app tauri dev" }, null, 2)}\n`,
     );
-    const port = await Promise.race([
-      waitFor("embedded macOS WebDriver", () => webdriverPort(fixture.paths.devLog), {
-        timeoutMs: 20 * 60_000,
-        intervalMs: 500,
-      }),
-      unexpectedExit,
-    ]);
-    evidence = await capturePhase26MacosDevEvidence({ fixture, port, startedAt });
+    webdriver = await connectWebDriver(webdriverPort, unexpectedExit);
+    evidence = await capturePhase26MacosDevEvidence({ fixture, webdriver, startedAt });
   } catch (error) {
     failure = error;
     writeFileSync(
@@ -307,8 +348,20 @@ export async function runPhase26MacosDevEvidence() {
       )}\n`,
     );
   } finally {
+    let webdriverSessionClosed = false;
+    try {
+      if (webdriver) {
+        await webdriver.close();
+        webdriverSessionClosed = true;
+      }
+    } catch (error) {
+      if (!failure) failure = error;
+    }
     try {
       if (Number.isInteger(child?.pid)) cleanup = await stopFixtureProcessGroup(child.pid);
+      cleanup.webdriverPort = webdriverPort;
+      cleanup.webdriverSessionId = webdriver?.sessionId ?? null;
+      cleanup.webdriverSessionClosed = webdriverSessionClosed;
       cleanup.completedAt = new Date().toISOString();
       cleanup.elapsedMs = Date.now() - startedAt;
       cleanup.ownedPaths = [fixture.paths.root];

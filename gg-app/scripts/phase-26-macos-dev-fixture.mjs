@@ -38,8 +38,12 @@ function sanitizedEnvironment(baseEnvironment, fixtureVariables) {
 export function preparePhase26MacosDevFixture({
   root = mkdtempSync(join(tmpdir(), "gg-app-phase26-macos-")),
   descriptorPath = null,
+  webdriverPort,
   baseEnvironment = process.env,
 } = {}) {
+  if (!Number.isInteger(webdriverPort) || webdriverPort < 1 || webdriverPort > 65_535) {
+    throw new Error("Phase 26 macOS fixture requires an explicit WebDriver port");
+  }
   const resolvedRoot = resolve(root);
   const paths = {
     root: resolvedRoot,
@@ -94,6 +98,7 @@ export function preparePhase26MacosDevFixture({
     GG_PHASE21_SMOKE_PREBOUND: "1",
     GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP: "1",
     GG_PHASE26_MACOS_SMOKE: "1",
+    TAURI_WEBDRIVER_PORT: String(webdriverPort),
   };
   const environment = sanitizedEnvironment(baseEnvironment, fixtureVariables);
   const descriptor = {
@@ -107,6 +112,7 @@ export function preparePhase26MacosDevFixture({
     screenshots: paths.screenshots,
     sidecarAudit: paths.sidecarAudit,
     devLog: paths.devLog,
+    webdriverPort,
     initialSessionPath: scenario.initialSessionPath,
     boundSessionPath: scenario.boundSessionPath,
   };
@@ -130,10 +136,12 @@ function argument(name) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const root = argument("--root");
   const descriptor = argument("--descriptor");
+  const webdriverPort = Number(argument("--webdriver-port"));
   if (root && !isAbsolute(root)) throw new Error("--root must be absolute");
   const fixture = preparePhase26MacosDevFixture({
     ...(root ? { root } : {}),
     ...(descriptor ? { descriptorPath: descriptor } : {}),
+    webdriverPort,
   });
   process.stdout.write(`${JSON.stringify(fixture.descriptor, null, 2)}\n`);
   process.stderr.write(

@@ -810,6 +810,8 @@ fn orphan_killset(snapshot: &[ProcInfo], self_pid: i32, ledger_pgids: &HashSet<i
 /// Pure parser for `ps -eo pid=,ppid=,pgid=,command=` output (one row per
 /// line). Column padding (multiple spaces) is collapsed by `split_whitespace`.
 /// Available on all platforms so the parsing can be unit-tested.
+/// On non-Unix release builds, the parser is intentionally test-only.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn parse_ps_output(stdout: &str) -> Vec<ProcInfo> {
     stdout
         .lines()
@@ -1160,7 +1162,7 @@ fn strip_file_location_suffix(path: &str) -> &str {
         if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
             break;
         }
-        let last_sep = path[..colon].rfind(|c| c == '/' || c == '\\').unwrap_or(0);
+        let last_sep = path[..colon].rfind(['/', '\\']).unwrap_or(0);
         if colon <= last_sep {
             break;
         }
@@ -4669,6 +4671,10 @@ async fn arrange_all(app: tauri::AppHandle) -> Result<(), String> {
 /// `session_path`. No process is killed — only one session in the shared daemon
 /// is swapped. The webview re-runs its ready flow against the new session.
 #[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri command arguments are the stable webview IPC contract"
+)]
 fn select_project(
     webview: WebviewWindow,
     app: tauri::AppHandle,
@@ -5638,6 +5644,10 @@ fn start_pane_session(
     generation
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "launch requires the complete immutable pane target and generation"
+)]
 fn launch_pane_session(
     app: tauri::AppHandle,
     label: String,

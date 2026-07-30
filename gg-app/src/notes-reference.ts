@@ -1,4 +1,17 @@
+import {
+  normalizeCanonicalUrl,
+  NOTES_REFERENCE_METADATA_FIELDS,
+  NOTES_REFERENCE_METADATA_MAX_LENGTH,
+  NOTES_REFERENCE_URL_MAX_LENGTH,
+} from "@kenkaiiii/gg-core/project-notes";
 import type { NotesReference } from "./notes-types";
+export {
+  canonicalReferenceIdentity,
+  normalizeCanonicalUrl,
+  NOTES_REFERENCE_METADATA_FIELDS,
+  NOTES_REFERENCE_METADATA_MAX_LENGTH,
+  NOTES_REFERENCE_URL_MAX_LENGTH,
+} from "@kenkaiiii/gg-core/project-notes";
 
 export type NotesReferenceInput = Omit<NotesReference, "id" | "capturedAt">;
 
@@ -20,20 +33,6 @@ export interface NotesReferenceDraft {
 }
 
 export type NotesReferenceDraftField = keyof NotesReferenceDraft;
-
-export const NOTES_REFERENCE_URL_MAX_LENGTH = 2_048;
-export const NOTES_REFERENCE_METADATA_MAX_LENGTH = 4_096;
-export const NOTES_REFERENCE_METADATA_FIELDS = [
-  "provider",
-  "tool",
-  "owner",
-  "repo",
-  "revision",
-  "path",
-  "query",
-  "anchor",
-  "relevance",
-] as const satisfies readonly NotesReferenceDraftField[];
 
 export type NotesReferenceMetadataField = (typeof NOTES_REFERENCE_METADATA_FIELDS)[number];
 
@@ -209,35 +208,6 @@ export function normalizeNotesReferenceDraft(
       relevance: draft.relevance.trim(),
     },
   };
-}
-
-export function normalizeCanonicalUrl(value: string): string | null {
-  try {
-    const url = new URL(value.trim());
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    if (!url.hostname || url.username || url.password) return null;
-    url.protocol = url.protocol.toLowerCase();
-    url.hostname = url.hostname.toLowerCase();
-    if (
-      (url.protocol === "http:" && url.port === "80") ||
-      (url.protocol === "https:" && url.port === "443")
-    ) {
-      url.port = "";
-    }
-    if (url.pathname === "/") url.pathname = "";
-    else url.pathname = url.pathname.replace(/\/+$/, "");
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return null;
-  }
-}
-
-export function canonicalReferenceIdentity(
-  reference: Pick<NotesReference, "provider" | "canonicalUrl">,
-): string | null {
-  const url = normalizeCanonicalUrl(reference.canonicalUrl);
-  const provider = reference.provider.trim().toLowerCase();
-  return provider && url ? `${provider}\n${url}` : null;
 }
 
 export function referenceRepositoryKey(

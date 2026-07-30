@@ -148,6 +148,9 @@ importers:
       '@kenkaiiii/error-mom':
         specifier: ^0.3.3
         version: 0.3.3
+      '@kenkaiiii/gg-core':
+        specifier: workspace:*
+        version: link:../packages/gg-core
       '@mediapipe/tasks-vision':
         specifier: ^0.10.18
         version: 0.10.35

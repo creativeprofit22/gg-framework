@@ -202,7 +202,17 @@ export async function capturePhase26MacosDevEvidence({ fixture, webdriver, start
   await waitFor("Notes dialog", () =>
     webdriver.execute("return document.querySelector('[role=\"dialog\"]') !== null"),
   );
-  await webdriver.execute('document.querySelector("#notes-tab-roadmap")?.click();return true;');
+  await waitFor("Roadmap tab", () =>
+    webdriver.execute('return document.querySelector("#notes-tab-roadmap") !== null'),
+  );
+  await webdriver.execute(
+    'const tab=document.querySelector("#notes-tab-roadmap");if(!tab)throw new Error("Roadmap tab is missing");tab.click();return true;',
+  );
+  await waitFor("selected Roadmap tab", () =>
+    webdriver.execute(
+      'return document.querySelector("#notes-tab-roadmap")?.getAttribute("aria-selected") === "true"',
+    ),
+  );
   await waitFor("bound phase row", () =>
     webdriver.execute(
       "return document.querySelector('button[aria-label=\"Resume phase: Bound phase\"]') !== null",

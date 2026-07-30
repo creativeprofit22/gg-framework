@@ -105,11 +105,7 @@ describe("project Notes contract", () => {
         version: 3,
         phases: [],
         references: [],
-        tasks: [
-          { id: "legacy-task-1" },
-          { id: "duplicate" },
-          { id: "legacy-task-3" },
-        ],
+        tasks: [{ id: "legacy-task-1" }, { id: "duplicate" }, { id: "legacy-task-3" }],
       },
     });
   });
@@ -215,7 +211,11 @@ describe("project Notes contract", () => {
   });
 
   it.each([
-    ["task", (document: NotesDocumentV3) => Object.assign(document.tasks[0]!, { extra: true }), "tasks[0]"],
+    [
+      "task",
+      (document: NotesDocumentV3) => Object.assign(document.tasks[0]!, { extra: true }),
+      "tasks[0]",
+    ],
     [
       "reference range",
       (document: NotesDocumentV3) => Object.assign(document.references[1]!.range!, { extra: true }),
@@ -319,7 +319,11 @@ describe("project Notes contract", () => {
   it("enforces lifecycle and roadmap chronology", async () => {
     const lifecycle = await fixture();
     lifecycle.phases[0]!.lifecycleEvents[1]!.timestamp = "2026-07-22T00:00:00.000Z";
-    expectError(lifecycle, "phases[0].lifecycleEvents[1].timestamp", "events must be chronological");
+    expectError(
+      lifecycle,
+      "phases[0].lifecycleEvents[1].timestamp",
+      "events must be chronological",
+    );
 
     const roadmap = await fixture();
     roadmap.phases[0]!.roadmapEvents[1]!.timestamp = "2026-07-24T00:00:00.000Z";
@@ -327,38 +331,53 @@ describe("project Notes contract", () => {
   });
 
   it.each([
-    ["failed run", (document: NotesDocumentV3) => {
-      const checkpoint = document.phases[0]!.roadmapEvents.find(
-        (event) => event.type === "implementation-checkpoint",
-      )!;
-      checkpoint.runOutcome = "failed";
-    }],
-    ["incomplete plan", (document: NotesDocumentV3) => {
-      const checkpoint = document.phases[0]!.roadmapEvents.find(
-        (event) => event.type === "implementation-checkpoint",
-      )!;
-      checkpoint.completedPlanSteps = [1, 2];
-    }],
-    ["failed verification", (document: NotesDocumentV3) => {
-      const update = document.phases[0]!.roadmapEvents.find(
-        (event) => event.type === "status-update",
-      )!;
-      update.verification = "failed";
-      update.verificationReason = "Focused verification failed";
-    }],
-    ["unaccepted exception", (document: NotesDocumentV3) => {
-      const update = document.phases[0]!.roadmapEvents.find(
-        (event) => event.type === "status-update",
-      )!;
-      update.verification = "exception-requested";
-      update.verificationReason = "Needs reviewer acceptance";
-    }],
-    ["different verification session", (document: NotesDocumentV3) => {
-      const update = document.phases[0]!.roadmapEvents.find(
-        (event) => event.type === "status-update",
-      )!;
-      update.verificationSession = { sessionId: "other", sessionPath: "/sessions/other.jsonl" };
-    }],
+    [
+      "failed run",
+      (document: NotesDocumentV3) => {
+        const checkpoint = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "implementation-checkpoint",
+        )!;
+        checkpoint.runOutcome = "failed";
+      },
+    ],
+    [
+      "incomplete plan",
+      (document: NotesDocumentV3) => {
+        const checkpoint = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "implementation-checkpoint",
+        )!;
+        checkpoint.completedPlanSteps = [1, 2];
+      },
+    ],
+    [
+      "failed verification",
+      (document: NotesDocumentV3) => {
+        const update = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "status-update",
+        )!;
+        update.verification = "failed";
+        update.verificationReason = "Focused verification failed";
+      },
+    ],
+    [
+      "unaccepted exception",
+      (document: NotesDocumentV3) => {
+        const update = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "status-update",
+        )!;
+        update.verification = "exception-requested";
+        update.verificationReason = "Needs reviewer acceptance";
+      },
+    ],
+    [
+      "different verification session",
+      (document: NotesDocumentV3) => {
+        const update = document.phases[0]!.roadmapEvents.find(
+          (event) => event.type === "status-update",
+        )!;
+        update.verificationSession = { sessionId: "other", sessionPath: "/sessions/other.jsonl" };
+      },
+    ],
   ])("rejects Done when the completion gate has a %s", async (_name, mutate) => {
     const document = await fixture();
     mutate(document);

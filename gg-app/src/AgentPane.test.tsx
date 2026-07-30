@@ -400,10 +400,14 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    const notesButton = await screen.findByRole("button", { name: "Notes" });
-    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(notesButton);
-    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
     fireEvent.click(screen.getByRole("button", { name: "Start phase: Bound phase" }));
     fireEvent.click(screen.getByRole("button", { name: "Start phase" }));
 
@@ -427,8 +431,12 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    const notesButton = await screen.findByRole("button", { name: "Notes" });
-    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
+    await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
     const subscriptions = vi.mocked(pane.subscribe).mock.calls;
     const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
     expect(handleEvent).toBeDefined();
@@ -439,8 +447,8 @@ describe("AgentPane lifecycle", () => {
       }),
     );
 
-    fireEvent.click(notesButton);
-    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
     fireEvent.click(screen.getByRole("button", { name: "Start phase: Bound phase" }));
     const start = screen.getByRole("button", { name: "Start phase" }) as HTMLButtonElement;
     expect(start.disabled).toBe(true);
@@ -469,8 +477,12 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    const notesButton = await screen.findByRole("button", { name: "Notes" });
-    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
+    await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
     const subscriptions = vi.mocked(pane.subscribe).mock.calls;
     const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
     expect(handleEvent).toBeDefined();
@@ -480,8 +492,8 @@ describe("AgentPane lifecycle", () => {
         data: { ...agentState("azure:gpt-test"), mode: "chat", sessionPath: "/current.jsonl" },
       }),
     );
-    fireEvent.click(notesButton);
-    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
     fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
     const resume = screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement;
     expect(resume.disabled).toBe(false);
@@ -519,10 +531,14 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    const notesButton = await screen.findByRole("button", { name: "Notes" });
-    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(notesButton);
-    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
     fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
     fireEvent.click(screen.getByRole("button", { name: "Resume phase" }));
 
@@ -552,10 +568,14 @@ describe("AgentPane lifecycle", () => {
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    const notesButton = await screen.findByRole("button", { name: "Notes" });
-    await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(notesButton);
-    fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+    await screen.findByRole("button", { name: "Notes" });
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
     fireEvent.click(screen.getByRole("button", { name: "Recover phase: Bound phase" }));
     const selectCallsBeforeResume = vi.mocked(pane.selectWorkspace).mock.calls.length;
     fireEvent.click(screen.getByRole("button", { name: "Recover phase" }));
@@ -594,10 +614,14 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} />);
       fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
       fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-      const notesButton = await screen.findByRole("button", { name: "Notes" });
-      await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
-      fireEvent.click(notesButton);
-      fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+      await screen.findByRole("button", { name: "Notes" });
+      await waitFor(() =>
+        expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
+          false,
+        ),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+      fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
       fireEvent.click(screen.getByRole("button", { name: "Recover phase: Bound phase" }));
       const selectCallsBeforeRecovery = vi.mocked(pane.selectWorkspace).mock.calls.length;
       fireEvent.click(screen.getByRole("button", { name: "Recover phase" }));
@@ -632,10 +656,14 @@ describe("AgentPane lifecycle", () => {
       render(<AgentPane client={pane} />);
       fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
       fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-      const notesButton = await screen.findByRole("button", { name: "Notes" });
-      await waitFor(() => expect((notesButton as HTMLButtonElement).disabled).toBe(false));
-      fireEvent.click(notesButton);
-      fireEvent.click(screen.getByRole("tab", { name: "Roadmap" }));
+      await screen.findByRole("button", { name: "Notes" });
+      await waitFor(() =>
+        expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
+          false,
+        ),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+      fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }));
       vi.mocked(pane.waitForReady).mockRejectedValueOnce(new Error(rejectionMessage));
       fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
       fireEvent.click(screen.getByRole("button", { name: "Resume phase" }));

@@ -213,13 +213,13 @@ export async function capturePhase26MacosDevEvidence({ fixture, webdriver, start
       'return document.querySelector("#notes-tab-roadmap")?.getAttribute("aria-selected") === "true"',
     ),
   );
-  await waitFor("bound phase row", () =>
+  await waitFor("bound phase Inspect control", () =>
     webdriver.execute(
-      "return document.querySelector('button[aria-label=\"Resume phase: Bound phase\"]') !== null",
+      "return document.querySelector('button[aria-label=\"Inspect phase: Bound phase\"]') !== null",
     ),
   );
   await webdriver.execute(
-    "document.querySelector('button[aria-label=\"Resume phase: Bound phase\"]')?.click();return true;",
+    "document.querySelector('button[aria-label=\"Inspect phase: Bound phase\"]')?.click();return true;",
   );
 
   const inspected = await waitFor("bound phase detail", () =>

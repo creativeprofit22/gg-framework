@@ -782,4 +782,32 @@ describe("project Notes contract", () => {
     mutate(document);
     expectError(document, "phases[0].roadmapEvents[2]");
   });
+
+  it("rejects Done when matching completion evidence belongs to a prior phase session", async () => {
+    const document = await fixture();
+    document.phases[0]!.session = {
+      sessionId: "replacement-session",
+      sessionPath: "/sessions/replacement.jsonl",
+    };
+
+    expectError(
+      document,
+      "phases[0].roadmapEvents[2]",
+      "Done requires accepted review evidence, a successful complete implementation checkpoint, passed verification or an accepted verification exception, evidence matching the current phase session, and no unmet gates",
+    );
+  });
+
+  it("accepts historical non-Done completion evidence from a prior phase session", async () => {
+    const document = await fixture();
+    const phase = document.phases[0]!;
+    phase.session = {
+      sessionId: "replacement-session",
+      sessionPath: "/sessions/replacement.jsonl",
+    };
+    const review = phase.roadmapEvents.find((event) => event.type === "completion-review")!;
+    review.gateOutcome = "review";
+    review.unmetGateCodes = ["stale-session"];
+
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+  });
 });

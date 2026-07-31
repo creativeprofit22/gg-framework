@@ -1376,6 +1376,7 @@ function validatePhase(
     value.roadmapEvents,
     `${pathPrefix}.roadmapEvents`,
     knownReferenceIds,
+    value.session as NotesSessionLink | null,
   );
 }
 
@@ -1645,6 +1646,7 @@ function validateRoadmapEvents(
   value: unknown,
   pathPrefix: string,
   knownReferenceIds: ReadonlySet<string>,
+  phaseSession: NotesSessionLink | null,
 ): NotesValidationError | null {
   if (!Array.isArray(value)) {
     return validationError(pathPrefix, "expected an append-only event array");
@@ -1977,25 +1979,24 @@ function validateRoadmapEvents(
             latestRejectedReviewIndex &&
           (verificationUpdateIndexes.get(verificationStatusUpdate.id) ?? -1) >
             latestRejectedReviewIndex;
-        const hasSameSessionEvidence =
+        const hasCurrentSessionEvidence =
           implementationCheckpoint !== undefined &&
-          verificationStatusUpdate?.verificationSession !== null &&
-          verificationStatusUpdate?.verificationSession !== undefined &&
-          implementationCheckpoint.session.sessionId ===
-            verificationStatusUpdate.verificationSession.sessionId &&
-          implementationCheckpoint.session.sessionPath ===
-            verificationStatusUpdate.verificationSession.sessionPath;
+          notesSessionLinksEqual(implementationCheckpoint.session, phaseSession) &&
+          notesSessionLinksEqual(
+            verificationStatusUpdate?.verificationSession ?? null,
+            phaseSession,
+          );
         if (
           record.decision !== "accepted" ||
           !hasCompleteSuccessfulImplementation ||
           !hasAcceptedVerification ||
           !hasFreshReviewRoundEvidence ||
-          !hasSameSessionEvidence ||
+          !hasCurrentSessionEvidence ||
           record.unmetGateCodes.length > 0
         ) {
           return validationError(
             eventPath,
-            "Done requires accepted review evidence, a successful complete implementation checkpoint, passed verification or an accepted verification exception, and no unmet gates",
+            "Done requires accepted review evidence, a successful complete implementation checkpoint, passed verification or an accepted verification exception, evidence matching the current phase session, and no unmet gates",
           );
         }
       }

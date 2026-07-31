@@ -4,6 +4,7 @@ import {
 } from "@kenkaiiii/gg-core/project-notes";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { referenceRepositoryLabel, referenceSourceLabel } from "./notes-reference";
+import { NotesPhaseCompletionGates } from "./NotesPhaseCompletionGates";
 import {
   dateToLocalInputValue,
   localDateTimeToIso,
@@ -21,9 +22,7 @@ import type {
   NotesReferenceOperationResult,
   NotesReminderMutationResult,
   NotesRoadmapActor,
-  NotesRoadmapCompletionReview,
   NotesRoadmapEvent,
-  NotesRoadmapImplementationCheckpoint,
   NotesRoadmapMutationResult,
   NotesRoadmapReferenceProposal,
   NotesRoadmapReviewer,
@@ -689,59 +688,6 @@ function PhaseDetail({
   const resumeLink = raceLink ?? phase.session;
   const controlsDisabled = actionDisabled || pending || pendingRoadmapAction !== null;
   const latestReport = latestRoadmapReport(phase);
-  const latestImplementation = latestRoadmapEvent(
-    phase,
-    (event): event is NotesRoadmapImplementationCheckpoint =>
-      event.type === "implementation-checkpoint",
-  );
-  const latestVerification = latestRoadmapEvent(
-    phase,
-    (event): event is NotesRoadmapStatusUpdate =>
-      event.type === "status-update" && event.verification !== null,
-  );
-  const latestCompletionReview = latestRoadmapEvent(
-    phase,
-    (event): event is NotesRoadmapCompletionReview => event.type === "completion-review",
-  );
-  const displayedImplementation = latestCompletionReview
-    ? (phase.roadmapEvents.find(
-        (event): event is NotesRoadmapImplementationCheckpoint =>
-          event.type === "implementation-checkpoint" &&
-          event.id === latestCompletionReview.implementationCheckpointId,
-      ) ?? null)
-    : latestImplementation;
-  const displayedVerification = latestCompletionReview
-    ? (phase.roadmapEvents.find(
-        (event): event is NotesRoadmapStatusUpdate =>
-          event.type === "status-update" &&
-          event.id === latestCompletionReview.verificationStatusUpdateId,
-      ) ?? null)
-    : latestVerification;
-  const latestCompletionReviewIndex = latestCompletionReview
-    ? phase.roadmapEvents.lastIndexOf(latestCompletionReview)
-    : -1;
-  const newerImplementation = latestCompletionReview
-    ? latestRoadmapEventAfter(
-        phase,
-        latestCompletionReviewIndex,
-        (event): event is NotesRoadmapImplementationCheckpoint =>
-          event.type === "implementation-checkpoint",
-      )
-    : null;
-  const newerVerification = latestCompletionReview
-    ? latestRoadmapEventAfter(
-        phase,
-        latestCompletionReviewIndex,
-        (event): event is NotesRoadmapStatusUpdate =>
-          event.type === "status-update" && event.verification !== null,
-      )
-    : null;
-  const acceptedVerificationException =
-    displayedVerification?.verification === "exception-requested" &&
-    latestCompletionReview?.acceptsVerificationException &&
-    latestCompletionReview.verificationStatusUpdateId === displayedVerification.id
-      ? latestCompletionReview
-      : null;
   const pendingProposals = unresolvedRoadmapProposals(phase);
   const latestReportHasPendingManualReview =
     latestReport !== null &&
@@ -1272,156 +1218,7 @@ function PhaseDetail({
         </form>
       </section>
 
-      <section
-        className="notes-completion-gates"
-        aria-labelledby={`notes-completion-gates-${phase.id}`}
-      >
-        <h4 id={`notes-completion-gates-${phase.id}`}>Completion gates</h4>
-        <dl>
-          <div>
-            <dt>Implementation</dt>
-            <dd>
-              {latestCompletionReview && <span>Evidence used by this final review.</span>}
-              {displayedImplementation ? (
-                <>
-                  <strong>
-                    {displayedImplementation.completedPlanSteps.length} of{" "}
-                    {displayedImplementation.planStepTotal} plan steps
-                  </strong>
-                  <span>
-                    Run {implementationOutcomeLabel(displayedImplementation.runOutcome)} by the
-                    bound session.
-                  </span>
-                  <time dateTime={displayedImplementation.timestamp}>
-                    {formatDateTime(displayedImplementation.timestamp)}
-                  </time>
-                </>
-              ) : (
-                <span>
-                  {latestCompletionReview
-                    ? "This final review did not reference implementation evidence."
-                    : "Completion evidence has not been recorded."}
-                </span>
-              )}
-              {newerImplementation && (
-                <div className="notes-completion-unreviewed">
-                  <strong>Newer unreviewed evidence</strong>
-                  <span>
-                    {newerImplementation.completedPlanSteps.length} of{" "}
-                    {newerImplementation.planStepTotal} plan steps; run{" "}
-                    {implementationOutcomeLabel(newerImplementation.runOutcome)} at{" "}
-                    <time dateTime={newerImplementation.timestamp}>
-                      {formatDateTime(newerImplementation.timestamp)}
-                    </time>
-                    . This was not part of the final review.
-                  </span>
-                </div>
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt>Verification</dt>
-            <dd>
-              {latestCompletionReview && <span>Evidence used by this final review.</span>}
-              {displayedVerification?.verification ? (
-                <>
-                  <strong>{verificationLabel(displayedVerification.verification)}</strong>
-                  <span>
-                    Reported by {roadmapActorLabel(displayedVerification.actor)} at{" "}
-                    <time dateTime={displayedVerification.timestamp}>
-                      {formatDateTime(displayedVerification.timestamp)}
-                    </time>
-                    .
-                  </span>
-                  {displayedVerification.verificationReason && (
-                    <span>{displayedVerification.verificationReason}</span>
-                  )}
-                  {displayedVerification.evidence.length > 0 && (
-                    <ul>
-                      {displayedVerification.evidence.map((item, index) => (
-                        <li key={`${displayedVerification.id}-evidence-${index}`}>{item}</li>
-                      ))}
-                    </ul>
-                  )}
-                  {acceptedVerificationException && (
-                    <span>
-                      Exception accepted by{" "}
-                      {roadmapReviewerLabel(acceptedVerificationException.reviewer)} at{" "}
-                      <time dateTime={acceptedVerificationException.timestamp}>
-                        {formatDateTime(acceptedVerificationException.timestamp)}
-                      </time>
-                      .
-                    </span>
-                  )}
-                </>
-              ) : (
-                <span>
-                  {latestCompletionReview
-                    ? "This final review did not reference typed verification."
-                    : "Typed verification has not been recorded."}
-                </span>
-              )}
-              {newerVerification?.verification && (
-                <div className="notes-completion-unreviewed">
-                  <strong>Newer unreviewed evidence</strong>
-                  <span>
-                    {verificationLabel(newerVerification.verification)} reported by{" "}
-                    {roadmapActorLabel(newerVerification.actor)} at{" "}
-                    <time dateTime={newerVerification.timestamp}>
-                      {formatDateTime(newerVerification.timestamp)}
-                    </time>
-                    . This was not part of the final review.
-                  </span>
-                  {newerVerification.verificationReason && (
-                    <span>{newerVerification.verificationReason}</span>
-                  )}
-                  {newerVerification.evidence.length > 0 && (
-                    <ul>
-                      {newerVerification.evidence.map((item, index) => (
-                        <li key={`${newerVerification.id}-evidence-${index}`}>{item}</li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt>Final review</dt>
-            <dd>
-              {latestCompletionReview?.type === "completion-review" ? (
-                <>
-                  <strong>
-                    {latestCompletionReview.decision === "accepted" ? "Accepted" : "Rejected"} by{" "}
-                    {roadmapReviewerLabel(latestCompletionReview.reviewer)}
-                  </strong>
-                  <time dateTime={latestCompletionReview.timestamp}>
-                    {formatDateTime(latestCompletionReview.timestamp)}
-                  </time>
-                  {latestCompletionReview.reason && <span>{latestCompletionReview.reason}</span>}
-                  {latestCompletionReview.unmetGateCodes.length > 0 && (
-                    <ul>
-                      {latestCompletionReview.unmetGateCodes.map((code) => (
-                        <li key={code}>{completionGateRecovery(code)}</li>
-                      ))}
-                    </ul>
-                  )}
-                  {latestCompletionReview.gateOutcome === "manual-override" && (
-                    <span>
-                      The review is recorded, but the user status override remains authoritative.
-                    </span>
-                  )}
-                  {latestCompletionReview.gateOutcome === "done" && phase.archivedAt === null && (
-                    <span>Done is complete. Archiving remains a separate action.</span>
-                  )}
-                </>
-              ) : (
-                <span>Final review has not been recorded.</span>
-              )}
-            </dd>
-          </div>
-        </dl>
-      </section>
+      <NotesPhaseCompletionGates phase={phase} />
 
       <section
         className="notes-roadmap-latest"
@@ -1823,29 +1620,6 @@ function latestRoadmapReport(phase: NotesPhase): NotesRoadmapStatusUpdate | null
   for (let index = phase.roadmapEvents.length - 1; index >= 0; index -= 1) {
     const event = phase.roadmapEvents[index];
     if (event?.type === "status-update") return event;
-  }
-  return null;
-}
-
-function latestRoadmapEvent<T extends NotesRoadmapEvent>(
-  phase: NotesPhase,
-  predicate: (event: NotesRoadmapEvent) => event is T,
-): T | null {
-  for (let index = phase.roadmapEvents.length - 1; index >= 0; index -= 1) {
-    const event = phase.roadmapEvents[index];
-    if (event && predicate(event)) return event;
-  }
-  return null;
-}
-
-function latestRoadmapEventAfter<T extends NotesRoadmapEvent>(
-  phase: NotesPhase,
-  startIndex: number,
-  predicate: (event: NotesRoadmapEvent) => event is T,
-): T | null {
-  for (let index = phase.roadmapEvents.length - 1; index > startIndex; index -= 1) {
-    const event = phase.roadmapEvents[index];
-    if (event && predicate(event)) return event;
   }
   return null;
 }

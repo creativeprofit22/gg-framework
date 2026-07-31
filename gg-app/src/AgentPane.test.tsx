@@ -657,19 +657,20 @@ describe("AgentPane lifecycle", { timeout: 15_000 }, () => {
       render(<AgentPane client={pane} />);
       fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
       fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-      await screen.findByRole("button", { name: "Notes" });
-      await waitFor(() =>
-        expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
-          false,
-        ),
-      );
-      fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+      const notesButton = (await screen.findByRole("button", {
+        name: "Notes",
+      })) as HTMLButtonElement;
+      await screen.findByLabelText("Ready to start");
+      expect(notesButton.disabled).toBe(false);
+      fireEvent.click(notesButton);
       fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
-      vi.mocked(pane.waitForReady).mockRejectedValueOnce(new Error(rejectionMessage));
+      vi.mocked(pane.waitForReady).mockClear().mockRejectedValueOnce(new Error(rejectionMessage));
       fireEvent.click(screen.getByRole("button", { name: "Resume phase: Bound phase" }));
       fireEvent.click(screen.getByRole("button", { name: "Resume phase" }));
 
-      expect(await screen.findByText(rejectionMessage)).toBeTruthy();
+      const alert = await screen.findByRole("alert");
+      expect(alert.textContent).toBe(`Couldn’t resume this phase. ${rejectionMessage}`);
+      expect(pane.waitForReady).toHaveBeenCalledOnce();
       expect(screen.getByRole("dialog")).toBeTruthy();
     },
   );

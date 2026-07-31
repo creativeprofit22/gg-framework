@@ -558,6 +558,15 @@ describe("AgentPane lifecycle", { timeout: 15_000 }, () => {
     });
     const document = roadmapDocument("/placeholder.jsonl");
     document.phases[0]!.session = { sessionId: "bound-session", sessionPath: null };
+    document.tasks.push({
+      id: "notes-hydration-marker",
+      text: "Confirm Notes hydration",
+      status: "todo",
+      createdAt: document.updatedAt,
+      updatedAt: document.updatedAt,
+      completedAt: null,
+      archivedAt: null,
+    });
     vi.mocked(pane.getNotes).mockResolvedValue({
       status: "ok",
       recoveredFromBackup: false,
@@ -566,13 +575,11 @@ describe("AgentPane lifecycle", { timeout: 15_000 }, () => {
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    await screen.findByRole("button", { name: "Notes" });
-    await waitFor(() =>
-      expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
-        false,
-      ),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    const notesButton = (await screen.findByRole("button", {
+      name: "Notes, 1 unfinished task",
+    })) as HTMLButtonElement;
+    expect(notesButton.disabled).toBe(false);
+    fireEvent.click(notesButton);
     fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
     fireEvent.click(screen.getByRole("button", { name: "Recover phase: Bound phase" }));
     const selectCallsBeforeResume = vi.mocked(pane.selectWorkspace).mock.calls.length;
@@ -595,6 +602,15 @@ describe("AgentPane lifecycle", { timeout: 15_000 }, () => {
       const document = roadmapDocument("/placeholder.jsonl");
       document.phases[0]!.status = status;
       document.phases[0]!.session = { sessionId: "bound-session", sessionPath: null };
+      document.tasks.push({
+        id: "notes-hydration-marker",
+        text: "Confirm Notes hydration",
+        status: "todo",
+        createdAt: document.updatedAt,
+        updatedAt: document.updatedAt,
+        completedAt: null,
+        archivedAt: null,
+      });
       vi.mocked(pane.getNotes).mockResolvedValue({
         status: "ok",
         recoveredFromBackup: false,
@@ -612,13 +628,11 @@ describe("AgentPane lifecycle", { timeout: 15_000 }, () => {
       render(<AgentPane client={pane} />);
       fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
       fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-      await screen.findByRole("button", { name: "Notes" });
-      await waitFor(() =>
-        expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
-          false,
-        ),
-      );
-      fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+      const notesButton = (await screen.findByRole("button", {
+        name: "Notes, 1 unfinished task",
+      })) as HTMLButtonElement;
+      expect(notesButton.disabled).toBe(false);
+      fireEvent.click(notesButton);
       fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
       fireEvent.click(screen.getByRole("button", { name: "Recover phase: Bound phase" }));
       const selectCallsBeforeRecovery = vi.mocked(pane.selectWorkspace).mock.calls.length;
@@ -641,13 +655,23 @@ describe("AgentPane lifecycle", { timeout: 15_000 }, () => {
         ...agentState("azure:gpt-test"),
         sessionPath: "/current.jsonl",
       });
+      const document = roadmapDocument("/foreign.jsonl");
+      document.tasks.push({
+        id: "notes-hydration-marker",
+        text: "Confirm Notes hydration",
+        status: "todo",
+        createdAt: document.updatedAt,
+        updatedAt: document.updatedAt,
+        completedAt: null,
+        archivedAt: null,
+      });
       vi.mocked(pane.getNotes).mockResolvedValue({
         status: "ok",
         recoveredFromBackup: false,
         snapshot: {
           projectKey: "/work",
           revision: 1,
-          document: roadmapDocument("/foreign.jsonl"),
+          document,
         },
       });
       vi.mocked(pane.selectWorkspace).mockResolvedValue(2);
@@ -655,9 +679,8 @@ describe("AgentPane lifecycle", { timeout: 15_000 }, () => {
       fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
       fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
       const notesButton = (await screen.findByRole("button", {
-        name: "Notes",
+        name: "Notes, 1 unfinished task",
       })) as HTMLButtonElement;
-      await screen.findByLabelText("Ready to start");
       expect(notesButton.disabled).toBe(false);
       fireEvent.click(notesButton);
       fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));

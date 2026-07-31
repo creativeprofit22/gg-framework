@@ -1,5 +1,6 @@
 import {
   classifyLegacyNotesLifecycleEvent,
+  notesSessionLinksEqual,
   type NotesCompletionGateOutcome,
   type NotesCompletionUnmetGateCode,
   type NotesLifecycleEventKind,
@@ -44,7 +45,7 @@ export function latestVerificationExceptionEventForReview(
   const verification = latestVerificationForReviewRound(phase);
   if (
     verification?.verification !== "exception-requested" ||
-    !sameSession(verification.verificationSession, phase.session)
+    !notesSessionLinksEqual(verification.verificationSession, phase.session)
   ) {
     return null;
   }
@@ -66,7 +67,7 @@ export function evaluatePhaseCompletion({
   const verification = latestVerificationForReviewRound(phase, rejectionIndex);
   const unmet = new Set<NotesCompletionUnmetGateCode>();
 
-  if (!sameSession(phase.session, expectedSession)) unmet.add("stale-session");
+  if (!notesSessionLinksEqual(phase.session, expectedSession)) unmet.add("stale-session");
   if (
     phase.archivedAt !== null ||
     ["not-started", "planning", "cancelled"].includes(phase.status)
@@ -77,7 +78,8 @@ export function evaluatePhaseCompletion({
   if (!implementation) {
     unmet.add("missing-implementation");
   } else {
-    if (!sameSession(implementation.session, expectedSession)) unmet.add("stale-session");
+    if (!notesSessionLinksEqual(implementation.session, expectedSession))
+      unmet.add("stale-session");
     if (implementation.runOutcome !== "succeeded") unmet.add("run-not-successful");
     if (!hasEveryPlanStep(implementation)) unmet.add("incomplete-plan");
   }
@@ -85,7 +87,7 @@ export function evaluatePhaseCompletion({
   if (!verification) {
     unmet.add("missing-verification");
   } else {
-    if (!sameSession(verification.verificationSession, expectedSession)) {
+    if (!notesSessionLinksEqual(verification.verificationSession, expectedSession)) {
       unmet.add("stale-session");
     }
     if (verification.verification === "failed") {
@@ -206,14 +208,6 @@ function latestRoadmapEventAfter<T extends NotesPhase["roadmapEvents"][number]>(
     if (predicate(event)) return event;
   }
   return undefined;
-}
-
-function sameSession(current: NotesSessionLink | null, expected: NotesSessionLink): boolean {
-  return (
-    current !== null &&
-    current.sessionId === expected.sessionId &&
-    current.sessionPath === expected.sessionPath
-  );
 }
 
 function hasEveryPlanStep(checkpoint: NotesRoadmapImplementationCheckpoint): boolean {

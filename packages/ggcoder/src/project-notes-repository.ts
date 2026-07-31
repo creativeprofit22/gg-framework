@@ -17,6 +17,7 @@ import {
   migrateNotesDocumentV3PhaseShape,
   normalizeCanonicalUrl,
   notesPhaseStatusForRoadmapTransition,
+  notesSessionLinksEqual,
   validateNotesCompletionReviewFields,
   validateNotesDocumentV3,
   validateNotesImplementationCheckpointFields,
@@ -519,7 +520,7 @@ function validateGenericSaveEventSuffixes(
         previousPhase.overrides.status !== null &&
         phase.overrides.status === null &&
         previousPhase.status !== "done" &&
-        sameSessionLink(previousPhase.session, pending.expectedSession) &&
+        notesSessionLinksEqual(previousPhase.session, pending.expectedSession) &&
         event.fromStatus === previousPhase.status &&
         event.toStatus === pending.status &&
         event.source === pending.source &&
@@ -597,7 +598,7 @@ function validateGenericSavePendingLifecycleAuthority(
     }
     const appliesPending =
       previousPhase.status !== "done" &&
-      sameSessionLink(previousPhase.session, previousPending.expectedSession);
+      notesSessionLinksEqual(previousPhase.session, previousPending.expectedSession);
     if (!appliesPending) continue;
     if (current.phase.status !== previousPending.status) {
       return validationError(`${pathPrefix}.status`, "status reset must apply the pending target");
@@ -680,18 +681,6 @@ function validateGenericSaveReminderAuthority(
     }
   }
   return null;
-}
-
-function sameSessionLink(
-  current: NotesSessionLink | null,
-  expected: NotesSessionLink | null,
-): boolean {
-  if (expected === null) return current === null;
-  return (
-    current !== null &&
-    current.sessionId === expected.sessionId &&
-    current.sessionPath === expected.sessionPath
-  );
 }
 
 function chronologicalLifecycleTimestamp(phase: NotesPhase, requested: string): string {
@@ -1412,7 +1401,7 @@ export class ProjectNotesRepository {
       }
       if (
         request.expectedSession !== undefined &&
-        !sameSessionLink(currentPhase.session, request.expectedSession)
+        !notesSessionLinksEqual(currentPhase.session, request.expectedSession)
       ) {
         return { status: "stale-session" };
       }
@@ -1561,7 +1550,7 @@ export class ProjectNotesRepository {
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (
         statusRequest.expectedSession !== undefined &&
-        !sameSessionLink(currentPhase.session, statusRequest.expectedSession)
+        !notesSessionLinksEqual(currentPhase.session, statusRequest.expectedSession)
       ) {
         return { status: "stale-session" };
       }
@@ -1643,7 +1632,7 @@ export class ProjectNotesRepository {
         return { status: "duplicate-id-conflict", revision };
       }
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
-      if (!sameSessionLink(currentPhase.session, request.expectedSession)) {
+      if (!notesSessionLinksEqual(currentPhase.session, request.expectedSession)) {
         return { status: "stale-session" };
       }
 
@@ -1708,7 +1697,7 @@ export class ProjectNotesRepository {
         return { status: "duplicate-id-conflict", revision };
       }
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
-      if (!sameSessionLink(currentPhase.session, reviewRequest.expectedSession)) {
+      if (!notesSessionLinksEqual(currentPhase.session, reviewRequest.expectedSession)) {
         return { status: "stale-session" };
       }
 
@@ -1838,7 +1827,7 @@ export class ProjectNotesRepository {
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (
         transition.expectedSession !== undefined &&
-        !sameSessionLink(currentPhase.session, transition.expectedSession)
+        !notesSessionLinksEqual(currentPhase.session, transition.expectedSession)
       ) {
         return { status: "stale-session" };
       }

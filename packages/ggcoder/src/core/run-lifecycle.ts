@@ -88,18 +88,23 @@ export class RunLifecycle {
     }
     if (active.cancelPromise) return active.cancelPromise;
 
-    active.cancelRequested = true;
-    this.setState("cancelling");
-    try {
-      active.abort();
-    } catch {
-      // Settlement remains authoritative even if one abort hook throws.
+    if (!active.cancelRequested) {
+      active.cancelRequested = true;
+      try {
+        active.abort();
+      } catch {
+        // Settlement remains authoritative even if one abort hook throws.
+      }
     }
+    this.setState("cancelling");
 
-    active.cancelPromise = new Promise<CancelResult>((resolve) => {
+    const cancelPromise = new Promise<CancelResult>((resolve) => {
       const timer = setTimeout(
         () => {
-          if (this.active?.generation === active.generation) this.setState("running");
+          if (this.active?.generation === active.generation) {
+            if (active.cancelPromise === cancelPromise) active.cancelPromise = undefined;
+            this.setState("running");
+          }
           resolve({ status: "failed", generation: active.generation, reason: "timeout" });
         },
         Math.max(0, timeoutMs),
@@ -110,7 +115,8 @@ export class RunLifecycle {
         resolve({ status: "cancelled", generation: active.generation });
       });
     });
-    return active.cancelPromise;
+    active.cancelPromise = cancelPromise;
+    return cancelPromise;
   }
 
   private setState(state: RunState): void {

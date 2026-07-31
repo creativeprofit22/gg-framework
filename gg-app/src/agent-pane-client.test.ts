@@ -1,9 +1,10 @@
 import fs from "node:fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { invoke, listeners } = vi.hoisted(() => ({
+const { invoke, listeners, logError } = vi.hoisted(() => ({
   invoke: vi.fn(),
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
+  logError: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
@@ -16,7 +17,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
     }),
   }),
 }));
-vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
+vi.mock("@tauri-apps/plugin-log", () => ({ error: logError, info: vi.fn() }));
 
 import { createPaneAgentClient, getState, NewSessionError, sendPrompt } from "./agent";
 import { PHASE_START_FAILURE_CODES } from "./notes-types";
@@ -60,6 +61,7 @@ const notesSnapshot = { projectKey: "/work", revision: 1, document: notesDocumen
 describe("pane agent client", () => {
   beforeEach(() => {
     invoke.mockReset();
+    logError.mockReset();
     invoke.mockImplementation(async (command: string) => {
       if (command === "agent_pane_status") {
         return { ready: true, error: null, generation: 1, sessionId: "session" };
@@ -197,6 +199,57 @@ describe("pane agent client", () => {
       paneId: "right",
       phaseId: "phase/21",
     });
+  });
+
+  it("routes cancellation to the requested pane and preserves typed failures", async () => {
+    const client = createPaneAgentClient("cancel-owner");
+    const cancelled = { cancelled: true, runState: "idle", drained: "complete" };
+    invoke.mockResolvedValueOnce(cancelled);
+
+    await expect(client.cancel()).resolves.toBe(cancelled);
+    expect(invoke).toHaveBeenLastCalledWith("agent_cancel", { paneId: "cancel-owner" });
+
+    const failure = {
+      error: "cancel_failed",
+      reason: "timeout",
+      runState: "running",
+      message: "agent is still running",
+    };
+    invoke.mockRejectedValueOnce(JSON.stringify(failure));
+
+    await expect(client.cancel()).rejects.toMatchObject({
+      name: "AgentCancelError",
+      failure,
+    });
+    expect(invoke).toHaveBeenLastCalledWith("agent_cancel", { paneId: "cancel-owner" });
+  });
+
+  it("preserves kill-task responses and IPC errors for the requested pane", async () => {
+    const client = createPaneAgentClient("task-owner");
+    invoke
+      .mockResolvedValueOnce({ ok: true, message: "Process task-1 stopped" })
+      .mockResolvedValueOnce({ message: 'No background process with id "stale"' })
+      .mockRejectedValueOnce(new Error("daemon not ready"));
+
+    await expect(client.killTask("task-1")).resolves.toEqual({
+      ok: true,
+      message: "Process task-1 stopped",
+    });
+    await expect(client.killTask("stale")).resolves.toEqual({
+      ok: false,
+      message: 'No background process with id "stale"',
+    });
+    await expect(client.killTask("task-2")).resolves.toEqual({
+      ok: false,
+      message: "daemon not ready",
+    });
+
+    expect(invoke.mock.calls).toEqual([
+      ["agent_kill_task", { paneId: "task-owner", id: "task-1" }],
+      ["agent_kill_task", { paneId: "task-owner", id: "stale" }],
+      ["agent_kill_task", { paneId: "task-owner", id: "task-2" }],
+    ]);
+    expect(logError).toHaveBeenCalledWith("agent_kill_task failed: Error: daemon not ready");
   });
 
   it("strictly validates reminder reserve, claim, and release outcomes", async () => {

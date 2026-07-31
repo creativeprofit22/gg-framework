@@ -55,6 +55,37 @@ describe("RunLifecycle", () => {
     expect(() => lifecycle.begin(() => {})).not.toThrow();
   });
 
+  it("starts a fresh bounded wait after timeout without aborting twice", async () => {
+    const abort = vi.fn();
+    const lifecycle = new RunLifecycle();
+    const lease = lifecycle.begin(abort);
+    const first = lifecycle.cancel(0);
+
+    await expect(first).resolves.toEqual({
+      status: "failed",
+      generation: lease.generation,
+      reason: "timeout",
+    });
+
+    let retryAcknowledged = false;
+    const retry = lifecycle.cancel(1000);
+    void retry.then(() => {
+      retryAcknowledged = true;
+    });
+    expect(retry).not.toBe(first);
+    await Promise.resolve();
+    expect(retryAcknowledged).toBe(false);
+    expect(lifecycle.state).toBe("cancelling");
+    expect(abort).toHaveBeenCalledTimes(1);
+
+    lifecycle.settle(lease.generation);
+    await expect(retry).resolves.toEqual({
+      status: "cancelled",
+      generation: lease.generation,
+    });
+    expect(abort).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores stale generation settlement", async () => {
     const lifecycle = new RunLifecycle();
     const first = lifecycle.begin(() => {});

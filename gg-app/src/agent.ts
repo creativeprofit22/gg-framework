@@ -689,16 +689,6 @@ export function parseCancelFailure(error: unknown): CancelFailure {
   return { error: "cancel_failed", message: text };
 }
 
-export async function cancel(): Promise<CancelResult> {
-  try {
-    return await invoke<CancelResult>("agent_cancel", { paneId: "primary" });
-  } catch (error) {
-    const failure = parseCancelFailure(error);
-    await logError(`agent_cancel failed: ${JSON.stringify(failure)}`);
-    throw new AgentCancelError(failure);
-  }
-}
-
 export async function retryCancelledRoadmapStatus(): Promise<PhaseCancellationPersistenceResult> {
   return invoke<PhaseCancellationPersistenceResult>("agent_cancel_roadmap_status_retry", {
     paneId: "primary",
@@ -1203,18 +1193,6 @@ function killTaskResult(response: KillTaskResponse): KillTaskResult {
     message.startsWith("Failed to stop process") ||
     message.startsWith("No background process with id");
   return { ok: response.ok ?? !inferredFailure, message };
-}
-
-/** Stop a background task by id while preserving sidecar and IPC failure details. */
-export async function killTask(id: string): Promise<KillTaskResult> {
-  try {
-    const response = await invoke<KillTaskResponse>("agent_kill_task", { paneId: "primary", id });
-    return killTaskResult(response);
-  } catch (error) {
-    const message = killTaskFailureMessage(error);
-    await logError(`agent_kill_task failed: ${String(error)}`);
-    return { ok: false, message };
-  }
 }
 
 /** Cycle the reasoning/thinking level to the next supported value (or off). */

@@ -647,51 +647,206 @@ fn sidecar_base(port: u16) -> String {
 /// children (spawned without `detached`, so they share the sidecar's process
 /// group) die with it — no orphans on window-close/project-switch/quit.
 ///
-/// On Unix the daemon is spawned as a process-group leader (see
-/// `spawn_daemon`), so sending signals to `-pid` (negative pid =
-/// the whole group) reaps every descendant in one shot. We SIGTERM the group so
-/// the sidecar's SIGTERM handler can run `session.dispose()`, poll `try_wait()`
-/// for up to ~3s, then SIGKILL the group and `wait()` to reap the direct child
-/// (std `Child` never auto-reaps).
-///
-/// On Windows there is no process-group kill, so we tree-kill via
-/// `taskkill /T /F` (kills the descendant tree), then `wait()` to reap.
-fn terminate_child(mut child: Child) {
-    let pid = child.id() as i32;
-    #[cfg(unix)]
-    unsafe {
-        // Negative pid = signal the entire process group. The sidecar is its
-        // own group leader (pgid == sidecar pid), so this reaches every
-        // non-detached descendant (MCP stdio children, LSP servers).
-        libc::kill(-pid, libc::SIGTERM);
+/// `terminate_child_blocking` is the bounded primitive used during app exit.
+/// `terminate_child` keeps crash/respawn cleanup off the caller's thread.
+const DAEMON_TERMINATION_GRACE: Duration = Duration::from_secs(3);
+#[cfg(any(unix, target_os = "windows"))]
+const DAEMON_FORCE_KILL_WAIT: Duration = Duration::from_secs(1);
+#[cfg(any(unix, target_os = "windows"))]
+const DAEMON_TERMINATION_POLL: Duration = Duration::from_millis(50);
+
+#[cfg(unix)]
+fn unix_process_group_exists(pgid: i32) -> bool {
+    let result = unsafe { libc::kill(-pgid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn reap_direct_child_if_exited(child: &mut Child, reaped: &mut bool) {
+    if *reaped {
+        return;
     }
-    std::thread::spawn(move || {
-        #[cfg(unix)]
-        {
-            for _ in 0..30 {
-                if matches!(child.try_wait(), Ok(Some(_))) {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+    match child.try_wait() {
+        Ok(Some(_)) => *reaped = true,
+        Ok(None) => {}
+        Err(error) => log::warn!("failed to poll daemon child during termination: {error}"),
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_process_group_exit(
+    child: &mut Child,
+    pgid: i32,
+    deadline: std::time::Instant,
+    direct_child_reaped: &mut bool,
+    force_kill: bool,
+) -> bool {
+    loop {
+        reap_direct_child_if_exited(child, direct_child_reaped);
+        if !unix_process_group_exists(pgid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        if force_kill {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
             }
-            // Grace period expired — force-kill the whole group.
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(DAEMON_TERMINATION_POLL.min(remaining));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_taskkill_args(pid: i32) -> [String; 4] {
+    [
+        "/PID".to_string(),
+        pid.to_string(),
+        "/T".to_string(),
+        "/F".to_string(),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_windows_child_exit(child: &mut Child, deadline: std::time::Instant) -> bool {
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("failed to poll child during bounded Windows termination: {error}");
+                return false;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(DAEMON_TERMINATION_POLL.min(remaining));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_windows_child_blocking_with<F>(
+    mut child: Child,
+    grace: Duration,
+    launch_tree_kill: F,
+) -> bool
+where
+    F: FnOnce(i32) -> std::io::Result<Child>,
+{
+    let pid = child.id() as i32;
+    let helper_deadline = std::time::Instant::now() + grace;
+    match launch_tree_kill(pid) {
+        Ok(mut tree_kill) => {
+            if !wait_for_windows_child_exit(&mut tree_kill, helper_deadline) {
+                log::warn!("taskkill for daemon {pid} exceeded its bounded wait");
+                let _ = tree_kill.kill();
+            }
+        }
+        Err(error) => log::warn!("failed to launch taskkill for daemon {pid}: {error}"),
+    }
+
+    // Fall back to the direct child without waiting indefinitely for either
+    // taskkill or the target process to acknowledge termination.
+    let _ = child.kill();
+    let exited = wait_for_windows_child_exit(
+        &mut child,
+        std::time::Instant::now() + DAEMON_FORCE_KILL_WAIT,
+    );
+    if !exited {
+        log::warn!("daemon child {pid} could not be reaped within the Windows termination bound");
+    }
+    exited
+}
+
+fn terminate_child_blocking_with_grace(child: Child, grace: Duration) {
+    #[cfg(not(target_os = "windows"))]
+    let mut child = child;
+    #[cfg(unix)]
+    let pid = child.id() as i32;
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let _ = grace;
+
+    #[cfg(unix)]
+    {
+        // The sidecar is its own process-group leader (pgid == pid). TERM lets
+        // session disposal run, but direct-child exit is not proof that an
+        // MCP/LSP descendant left the group.
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+        let mut direct_child_reaped = false;
+        let group_gone = wait_for_process_group_exit(
+            &mut child,
+            pid,
+            std::time::Instant::now() + grace,
+            &mut direct_child_reaped,
+            false,
+        );
+
+        if !group_gone {
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }
+            if !wait_for_process_group_exit(
+                &mut child,
+                pid,
+                std::time::Instant::now() + DAEMON_FORCE_KILL_WAIT,
+                &mut direct_child_reaped,
+                true,
+            ) {
+                log::warn!("daemon process group {pid} still exists after bounded SIGKILL cleanup");
+            }
         }
-        #[cfg(not(unix))]
-        {
-            // Tree-kill on Windows: /T kills the descendant tree, /F forces it.
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
+
+        reap_direct_child_if_exited(&mut child, &mut direct_child_reaped);
+        if !direct_child_reaped && !unix_process_group_exists(pid) {
+            let _ = child.wait();
+        } else if !direct_child_reaped {
+            log::warn!("daemon child {pid} could not be reaped within the termination bound");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // /T kills the descendant tree and /F forces it. The helper and direct
+        // child are both polled against hard deadlines so app exit stays bounded.
+        let _ = terminate_windows_child_blocking_with(child, grace, |pid| {
+            let args = windows_taskkill_args(pid);
+            Command::new("taskkill")
+                .args(args.iter().map(String::as_str))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status();
-            // Fall back to direct kill if taskkill is unavailable.
-            let _ = child.kill();
-        }
-        let _ = child.wait(); // reap the direct child (avoid zombie)
-    });
+                .spawn()
+        });
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn terminate_child_blocking(child: Child) {
+    terminate_child_blocking_with_grace(child, DAEMON_TERMINATION_GRACE);
+}
+
+fn terminate_child(child: Child) {
+    std::thread::spawn(move || terminate_child_blocking(child));
+}
+
+fn terminate_child_for_exit_with_grace(child: Option<Child>, grace: Duration) {
+    if let Some(child) = child {
+        terminate_child_blocking_with_grace(child, grace);
+    }
+}
+
+fn terminate_child_for_exit(child: Option<Child>) {
+    terminate_child_for_exit_with_grace(child, DAEMON_TERMINATION_GRACE);
 }
 
 // ── Startup orphan sweeper ─────────────────────────────────────────────────
@@ -5504,13 +5659,10 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                     log::info!("daemon exited for Azure configuration refresh — respawning");
                 }
                 *daemon.port.lock().unwrap() = None;
-                if let Some(mut old_child) = daemon.child.lock().unwrap().take() {
-                    match old_child.try_wait() {
-                        Ok(Some(_)) => {
-                            let _ = old_child.wait();
-                        }
-                        _ => terminate_child(old_child),
-                    }
+                if let Some(old_child) = daemon.child.lock().unwrap().take() {
+                    // Direct-child exit does not prove its process group is
+                    // empty; clean the group on the nonblocking crash path too.
+                    terminate_child(old_child);
                 }
                 let mut attempts = daemon.respawn_attempts.lock().unwrap();
                 if planned || started_at.elapsed() >= DAEMON_STABLE_UPTIME {
@@ -6222,12 +6374,11 @@ pub fn run() {
                 app.state::<AppExiting>().0.store(true, Ordering::SeqCst);
                 refresh_live_sessions(app);
                 snapshot_workspace(app);
-                // Terminate the daemon's process group once — reaps every
-                // session's MCP/LSP children in one shot (no orphans).
+                // App exit must not outrun the bounded TERM→KILL sequence: wait
+                // here until the daemon process group is gone or the hard cleanup
+                // bound is reached. Crash/respawn cleanup remains nonblocking.
                 let child = app.state::<Daemon>().child.lock().unwrap().take();
-                if let Some(child) = child {
-                    terminate_child(child);
-                }
+                terminate_child_for_exit(child);
             }
         });
 }
@@ -7278,6 +7429,186 @@ mod tests {
         assert_eq!(frames, vec!["data: a", "data: b", "data: c"]);
         assert!(buf.is_empty());
     }
+
+    // ── daemon process-tree termination tests ────────────────────────────────
+
+    #[cfg(unix)]
+    struct UnixProcessGroupFixture {
+        pgid: i32,
+        pid_file: PathBuf,
+        active: bool,
+    }
+
+    #[cfg(unix)]
+    impl UnixProcessGroupFixture {
+        fn disarm(&mut self) {
+            self.active = false;
+            let _ = std::fs::remove_file(&self.pid_file);
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for UnixProcessGroupFixture {
+        fn drop(&mut self) {
+            if self.active {
+                unsafe {
+                    libc::kill(-self.pgid, libc::SIGKILL);
+                }
+            }
+            let _ = std::fs::remove_file(&self.pid_file);
+        }
+    }
+
+    #[cfg(unix)]
+    fn spawn_term_ignoring_descendant_fixture() -> (Child, UnixProcessGroupFixture, i32) {
+        use std::os::unix::process::CommandExt as _;
+
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pid_file = std::env::temp_dir().join(format!(
+            "gg-app-term-descendant-{}-{nonce}.pid",
+            std::process::id()
+        ));
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/term-ignoring-descendant.sh");
+        let child = Command::new("sh")
+            .arg(script)
+            .arg(&pid_file)
+            .process_group(0)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn TERM-ignoring descendant fixture");
+        let guard = UnixProcessGroupFixture {
+            pgid: child.id() as i32,
+            pid_file: pid_file.clone(),
+            active: true,
+        };
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(raw_pid) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = raw_pid.trim().parse::<i32>() {
+                    return (child, guard, pid);
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "TERM-ignoring descendant fixture did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    fn unix_process_exists(pid: i32) -> bool {
+        let result = unsafe { libc::kill(pid, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    #[cfg(unix)]
+    fn assert_term_ignoring_tree_is_gone_after<F>(terminate: F)
+    where
+        F: FnOnce(Child),
+    {
+        let (child, mut guard, descendant_pid) = spawn_term_ignoring_descendant_fixture();
+        let started_at = std::time::Instant::now();
+        terminate(child);
+        let elapsed = started_at.elapsed();
+
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "cleanup returned before the TERM grace elapsed: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "cleanup exceeded its TERM/KILL bound: {elapsed:?}"
+        );
+        assert!(
+            !unix_process_group_exists(guard.pgid),
+            "daemon process group {} survived cleanup",
+            guard.pgid
+        );
+        assert!(
+            !unix_process_exists(descendant_pid),
+            "TERM-ignoring descendant {descendant_pid} survived cleanup"
+        );
+        guard.disarm();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blocking_termination_kills_descendant_after_group_leader_exits_on_term() {
+        assert_term_ignoring_tree_is_gone_after(|child| {
+            terminate_child_blocking_with_grace(child, Duration::from_millis(200));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_cleanup_waits_for_bounded_process_group_termination() {
+        assert_term_ignoring_tree_is_gone_after(|child| {
+            terminate_child_for_exit_with_grace(Some(child), Duration::from_millis(200));
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_termination_uses_taskkill_tree_force_arguments() {
+        assert_eq!(
+            windows_taskkill_args(4242),
+            [
+                "/PID".to_string(),
+                "4242".to_string(),
+                "/T".to_string(),
+                "/F".to_string(),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    fn spawn_windows_test_sleeper() -> Child {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn Windows termination sleeper")
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_blocking_termination_stays_bounded_when_tree_killer_hangs() {
+        let target = spawn_windows_test_sleeper();
+        let started_at = std::time::Instant::now();
+        let exited =
+            terminate_windows_child_blocking_with(target, Duration::from_millis(100), |_| {
+                Ok(spawn_windows_test_sleeper())
+            });
+        let elapsed = started_at.elapsed();
+
+        assert!(exited, "direct child survived bounded fallback cleanup");
+        assert!(
+            elapsed >= Duration::from_millis(75),
+            "cleanup returned before the helper deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "cleanup exceeded its hard bound: {elapsed:?}"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "POSIX process-group fixture; Windows is covered by taskkill tree-force arguments"]
+    fn unix_term_ignoring_descendant_fixture_is_platform_skipped() {}
 
     // ── orphan_killset classifier tests ──────────────────────────────────────
 

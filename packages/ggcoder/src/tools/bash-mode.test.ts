@@ -28,6 +28,8 @@ interface CommandHarness {
   manager: ProcessManager;
   ops: ToolOperations;
   spawn: ReturnType<typeof vi.fn<ProcessLifecycleAdapter["spawn"]>>;
+  cleanupProcessTree: ReturnType<typeof vi.fn<ProcessLifecycleAdapter["cleanupProcessTree"]>>;
+  killProcessTree: ReturnType<typeof vi.fn<ProcessLifecycleAdapter["killProcessTree"]>>;
   stdinBytes: () => string;
   cleanup: () => Promise<void>;
 }
@@ -65,16 +67,18 @@ async function createHarness(): Promise<CommandHarness> {
     unref: vi.fn(),
   }) as unknown as FakeChildProcess;
   const spawn = vi.fn<ProcessLifecycleAdapter["spawn"]>(() => child);
+  const cleanupProcessTree = vi.fn<ProcessLifecycleAdapter["cleanupProcessTree"]>(async () => {});
+  const killProcessTree = vi.fn<ProcessLifecycleAdapter["killProcessTree"]>();
   const lifecycle: ProcessLifecycleAdapter = {
     spawn,
-    cleanupProcessTree: vi.fn(async () => {}),
-    killProcessTree: vi.fn(),
+    cleanupProcessTree,
+    killProcessTree,
     reapProcessWrapper: vi.fn(),
   };
   const manager = new ProcessManager(lifecycle, undefined, {
     backgroundLogRoot: path.join(logRoot, "background"),
     foregroundLogRoot: path.join(logRoot, "foreground"),
-    createExecutionId: () => "foreground-contract",
+    createExecutionId: () => "deadbeef",
   });
   const ops: ToolOperations = { ...localOperations, process: lifecycle };
 
@@ -83,6 +87,8 @@ async function createHarness(): Promise<CommandHarness> {
     manager,
     ops,
     spawn,
+    cleanupProcessTree,
+    killProcessTree,
     stdinBytes: () => writtenToStdin,
     cleanup: async () => {
       manager.shutdownAll();
@@ -177,6 +183,36 @@ describe("bash explicit command modes", () => {
         await harness.cleanup();
       }
     });
+  });
+
+  it("kills a persistent shell synchronously during process-manager shutdown", async () => {
+    const harness = await createHarness();
+    try {
+      const tool = createBashTool(process.cwd(), harness.manager, harness.ops);
+      const execution = Promise.resolve(
+        tool.execute({ command: "printf managed", persist: true }, toolContext()),
+      );
+
+      await vi.waitFor(() => expect(harness.spawn).toHaveBeenCalledTimes(1));
+      harness.manager.shutdownAll();
+
+      expect(harness.killProcessTree).toHaveBeenCalledOnce();
+      expect(harness.killProcessTree).toHaveBeenCalledWith({
+        pid: 42_424,
+        isExited: expect.any(Function),
+      });
+      expect(harness.cleanupProcessTree).not.toHaveBeenCalled();
+
+      const mutableChild = harness.child as unknown as {
+        exitCode: number | null;
+        signalCode: NodeJS.Signals | null;
+      };
+      mutableChild.signalCode = "SIGTERM";
+      harness.child.emit("exit", null, "SIGTERM");
+      await execution;
+    } finally {
+      await harness.cleanup();
+    }
   });
 
   describe.each(backgroundCommands)("background $commandClass", ({ command }) => {

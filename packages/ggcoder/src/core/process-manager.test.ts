@@ -177,6 +177,31 @@ describe("ProcessManager foreground logs", () => {
     }
   });
 
+  it("retries exclusive file collisions without truncating the existing log", async () => {
+    const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-foreground-collision-"));
+    const occupiedLog = path.join(logRoot, "occupied.log");
+    await fs.writeFile(occupiedLog, "existing output");
+    const createExecutionId = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("occupied")
+      .mockReturnValueOnce("reserved");
+    try {
+      const manager = new ProcessManager(undefined, undefined, {
+        foregroundLogRoot: logRoot,
+        createExecutionId,
+      });
+
+      const handle = await manager.allocateForegroundLog();
+
+      expect(createExecutionId).toHaveBeenCalledTimes(2);
+      expect(handle.executionId).toBe("reserved");
+      await expect(fs.readFile(occupiedLog, "utf8")).resolves.toBe("existing output");
+      await handle.close();
+    } finally {
+      await fs.rm(logRoot, { recursive: true, force: true });
+    }
+  });
+
   it("opens the stream only after file creation and closes it safely exactly once", async () => {
     const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-foreground-stream-"));
     const logStream = new PassThrough();
@@ -574,6 +599,32 @@ describe("ProcessManager retention", () => {
   });
 });
 
+describe("ProcessManager shutdown disposers", () => {
+  it("invokes registered disposers once, isolates failures, and supports unregistering", () => {
+    const manager = new ProcessManager();
+    const first = vi.fn();
+    const failing = vi.fn(() => {
+      throw new Error("shutdown failed");
+    });
+    const last = vi.fn();
+    const unregistered = vi.fn();
+    manager.registerShutdown(first);
+    manager.registerShutdown(failing);
+    manager.registerShutdown(last);
+    const unregister = manager.registerShutdown(unregistered);
+
+    unregister();
+    unregister();
+    expect(() => manager.shutdownAll()).not.toThrow();
+    expect(() => manager.shutdownAll()).not.toThrow();
+
+    expect(first).toHaveBeenCalledOnce();
+    expect(failing).toHaveBeenCalledOnce();
+    expect(last).toHaveBeenCalledOnce();
+    expect(unregistered).not.toHaveBeenCalled();
+  });
+});
+
 describe("ProcessManager lifecycle adapter", () => {
   it("spawns background work through the adapter with piped output", async () => {
     const fake = fakeChild(9876);
@@ -613,6 +664,81 @@ describe("ProcessManager lifecycle adapter", () => {
       expect.objectContaining({ pid: 9876, isExited: expect.any(Function) }),
     );
     expect(createForegroundLogStream).not.toHaveBeenCalled();
+  });
+
+  it("retries colliding background IDs without replacing process owners", async () => {
+    const logRoot = await fs.mkdtemp(path.join(os.tmpdir(), "gg-background-collision-"));
+    const firstFake = fakeChild(1010);
+    const secondFake = fakeChild(2020);
+    const pendingChildren = [firstFake, secondFake];
+    const spawn = vi.fn(() => {
+      const fake = pendingChildren.shift();
+      if (!fake) throw new Error("Unexpected extra spawn");
+      queueMicrotask(() => fake.emitSpawn());
+      return fake.child;
+    });
+    const killProcessTree = vi.fn();
+    const ids = ["shared-owner", "shared-owner", "unique-owner"];
+    const createExecutionId = vi.fn(() => {
+      const id = ids.shift();
+      if (!id) throw new Error("Unexpected extra ID allocation");
+      return id;
+    });
+    const manager = new ProcessManager(lifecycle({ spawn, killProcessTree }), undefined, {
+      backgroundLogRoot: logRoot,
+      createExecutionId,
+    });
+    let childrenClosed = false;
+
+    try {
+      const first = await manager.start("first command", "/workspace");
+      firstFake.stdout.write("first output\n");
+      const second = await manager.start("second command", "/workspace");
+      secondFake.stdout.write("second output\n");
+
+      expect(createExecutionId).toHaveBeenCalledTimes(3);
+      expect(first.id).toBe("shared-owner");
+      expect(second.id).toBe("unique-owner");
+      expect(first.logFile).not.toBe(second.logFile);
+
+      const internals = manager as unknown as {
+        processes: Map<string, BackgroundProcess>;
+        children: Map<string, ChildProcess>;
+        completions: Map<string, Promise<void>>;
+        nativeCloseDeferreds: Map<string, { child: ChildProcess }>;
+      };
+      expect(internals.processes.get(first.id)?.pid).toBe(first.pid);
+      expect(internals.processes.get(second.id)?.pid).toBe(second.pid);
+      expect(internals.children.get(first.id)).toBe(firstFake.child);
+      expect(internals.children.get(second.id)).toBe(secondFake.child);
+      expect(internals.completions.size).toBe(2);
+      expect(internals.nativeCloseDeferreds.get(first.id)?.child).toBe(firstFake.child);
+      expect(internals.nativeCloseDeferreds.get(second.id)?.child).toBe(secondFake.child);
+
+      manager.shutdownAll();
+
+      expect(killProcessTree).toHaveBeenCalledTimes(2);
+      expect(killProcessTree.mock.calls.map(([target]) => target.pid)).toEqual([1010, 2020]);
+
+      firstFake.emitClose(0);
+      secondFake.emitClose(0);
+      childrenClosed = true;
+      await vi.waitFor(async () => {
+        await expect(fs.readFile(first.logFile, "utf8")).resolves.toBe("first output\n");
+        await expect(fs.readFile(second.logFile, "utf8")).resolves.toBe("second output\n");
+      });
+    } finally {
+      if (!childrenClosed) {
+        firstFake.emitClose(0);
+        secondFake.emitClose(0);
+      }
+      await vi.waitFor(() => {
+        expect(
+          (manager as unknown as { activeBackgroundLogs: Set<string> }).activeBackgroundLogs.size,
+        ).toBe(0);
+      });
+      await fs.rm(logRoot, { recursive: true, force: true });
+    }
   });
 
   it("rejects a synchronous spawn throw without tracking a process", async () => {

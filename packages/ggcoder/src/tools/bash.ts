@@ -571,7 +571,7 @@ export function createBashTool(
   shellOpts?: ResolveShellOpts,
 ): AgentTool<typeof BashParams> {
   // Lazily created on the first persist:true call; one session per tool
-  // instance (i.e. per agent session), killed when the process exits.
+  // instance (i.e. per agent session), owned by the shared process manager.
   let sessionShell: PersistentShell | null = null;
   // Shell selection doesn't depend on the command, so resolve ONCE at tool
   // creation and bake the true execution environment into the description —
@@ -623,7 +623,11 @@ export function createBashTool(
       // Persistent session mode — POSIX only; Windows-without-bash falls through
       // to the normal spawn path (cmd.exe fallback) below.
       if (persist && commandMode === "foreground" && !resolveShell(command).isCmdFallback) {
-        sessionShell ??= new PersistentShell(cwd, getSafeToolEnv(), MAX_OUTPUT_BYTES, ops.process);
+        if (!sessionShell) {
+          const shell = new PersistentShell(cwd, getSafeToolEnv(), MAX_OUTPUT_BYTES, ops.process);
+          sessionShell = shell;
+          processManager.registerShutdown(() => shell.killNow());
+        }
         const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
         const execution = await executePersistentCommand({
           command,

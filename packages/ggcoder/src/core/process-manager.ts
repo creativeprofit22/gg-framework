@@ -101,15 +101,27 @@ export class ProcessManager {
   private recordExpiryTimers = new Map<string, NodeJS.Timeout>();
   private activeBackgroundLogs = new Set<string>();
   private openForegroundLogs = new Set<string>();
+  private shutdownDisposers = new Set<() => void>();
   private logSweepPromise: Promise<void> | null = null;
   private lastLogSweepAt: number | null = null;
 
   constructor(
     private readonly lifecycle: ProcessLifecycleAdapter = localProcessLifecycle,
     private readonly createLogStream: (logFile: string) => Writable = (logFile) =>
-      createWriteStream(logFile, { flags: "w" }),
+      createWriteStream(logFile, { flags: "a" }),
     private readonly options: ProcessManagerOptions = {},
   ) {}
+
+  /** Register session-owned cleanup and return an idempotent unregister function. */
+  registerShutdown(dispose: () => void): () => void {
+    this.shutdownDisposers.add(dispose);
+    let registered = true;
+    return () => {
+      if (!registered) return;
+      registered = false;
+      this.shutdownDisposers.delete(dispose);
+    };
+  }
 
   async allocateForegroundLog(): Promise<ForegroundLogHandle> {
     this.pruneExpiredRecords();
@@ -117,21 +129,7 @@ export class ProcessManager {
     const foregroundLogRoot = this.options.foregroundLogRoot ?? FOREGROUND_DIR;
     await fsp.mkdir(foregroundLogRoot, { recursive: true });
 
-    const allocateFile = async (): Promise<{ executionId: string; logPath: string }> => {
-      for (;;) {
-        const executionId = (this.options.createExecutionId ?? crypto.randomUUID)();
-        const logPath = path.join(foregroundLogRoot, `${executionId}.log`);
-        try {
-          const file = await fsp.open(logPath, "wx");
-          await file.close();
-          return { executionId, logPath };
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
-          throw error;
-        }
-      }
-    };
-    const { executionId, logPath } = await allocateFile();
+    const { id: executionId, logPath } = await this.reserveLogFile(foregroundLogRoot);
 
     const streamFactory =
       this.options.createForegroundLogStream ??
@@ -232,8 +230,10 @@ export class ProcessManager {
     const backgroundLogRoot = this.options.backgroundLogRoot ?? BG_DIR;
     await fsp.mkdir(backgroundLogRoot, { recursive: true });
 
-    const id = crypto.randomUUID().slice(0, 8);
-    const logFile = path.join(backgroundLogRoot, `${id}.log`);
+    const { id, logPath: logFile } = await this.reserveLogFile(
+      backgroundLogRoot,
+      (candidateId) => !this.hasBackgroundOwner(candidateId),
+    );
     this.activeBackgroundLogs.add(logFile);
     let logStream: Writable;
     try {
@@ -647,6 +647,15 @@ export class ProcessManager {
   shutdownAll(): void {
     this.pruneExpiredRecords();
     void this.sweepStaleLogs();
+    const shutdownDisposers = Array.from(this.shutdownDisposers);
+    this.shutdownDisposers.clear();
+    for (const dispose of shutdownDisposers) {
+      try {
+        dispose();
+      } catch {
+        // Shutdown is best-effort; one owner must not prevent cleanup of the others.
+      }
+    }
     for (const proc of this.processes.values()) {
       const child = this.children.get(proc.id);
       if (child) {
@@ -752,6 +761,38 @@ export class ProcessManager {
 
   private now(): number {
     return (this.options.now ?? Date.now)();
+  }
+
+  private hasBackgroundOwner(id: string): boolean {
+    return (
+      this.processes.has(id) ||
+      this.children.has(id) ||
+      this.completions.has(id) ||
+      this.nativeCloseDeferreds.has(id) ||
+      this.stopOperations.has(id) ||
+      this.recordExpiryTimers.has(id)
+    );
+  }
+
+  private async reserveLogFile(
+    logRoot: string,
+    isIdAvailable: (id: string) => boolean = () => true,
+  ): Promise<{ id: string; logPath: string }> {
+    const createId = this.options.createExecutionId ?? crypto.randomUUID;
+    for (;;) {
+      const id = createId();
+      if (!isIdAvailable(id)) continue;
+
+      const logPath = path.join(logRoot, `${id}.log`);
+      try {
+        const file = await fsp.open(logPath, "wx");
+        await file.close();
+        return { id, logPath };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw error;
+      }
+    }
   }
 
   private sweepStaleLogs(): Promise<void> {

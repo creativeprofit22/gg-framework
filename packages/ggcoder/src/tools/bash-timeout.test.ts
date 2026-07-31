@@ -1939,6 +1939,34 @@ if (selectedProbe !== undefined) {
     });
   });
 
+  it("kills the persistent session shell when its process manager shuts down", async () => {
+    const manager = testProcessManager();
+    const tool = createBashTool(process.cwd(), manager);
+    let shellPid: number | null = null;
+
+    try {
+      const rawResult = await tool.execute(
+        { command: "printf 'managed-shell\\n'", persist: true },
+        { signal: new AbortController().signal, toolCallId: "bash-persistent-shutdown" },
+      );
+      const diagnostics = structuredBashResult(rawResult).details.bashDiagnostics;
+      shellPid = diagnostics.pid;
+      expect(shellPid).toEqual(expect.any(Number));
+      if (shellPid === null) throw new Error("Persistent shell did not expose a PID");
+      expect(isAlive(shellPid)).toBe(true);
+
+      manager.shutdownAll();
+      await waitForRecordedPidsToExit([
+        { role: "persistent-shell", pid: shellPid, ppid: process.pid },
+      ]);
+      manager.shutdownAll();
+      expect(isAlive(shellPid)).toBe(false);
+    } finally {
+      manager.shutdownAll();
+      if (shellPid !== null && isAlive(shellPid)) terminateSupervisedTree(shellPid);
+    }
+  });
+
   it("returns complete persistent completion and non-zero diagnostics while preserving state", async () => {
     const manager = testProcessManager();
     const tool = createBashTool(process.cwd(), manager);

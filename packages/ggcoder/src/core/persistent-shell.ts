@@ -395,16 +395,38 @@ export class PersistentShell {
     });
   }
 
-  /** Kill the session shell; the next run() starts a fresh one. */
+  /** Gracefully kill the session shell; the next run() starts a fresh one. */
   kill(): void {
-    const childToKill = this.child;
-    this.child = null;
-    this.busy = false;
+    const childToKill = this.takeChild();
     if (childToKill?.pid !== undefined) {
       this.startCleanup({
         pid: childToKill.pid,
         isExited: () => childToKill.exitCode !== null || childToKill.signalCode !== null,
       });
     }
+  }
+
+  /** Immediately kill the session tree from synchronous process-exit hooks. */
+  killNow(): void {
+    const childToKill = this.takeChild();
+    if (childToKill?.pid === undefined) return;
+    try {
+      this.lifecycle.killProcessTree({
+        pid: childToKill.pid,
+        isExited: () => childToKill.exitCode !== null || childToKill.signalCode !== null,
+      });
+    } catch (error) {
+      log("WARN", "bash", "Immediate persistent process-tree cleanup failed", {
+        pid: String(childToKill.pid),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private takeChild(): ChildProcess | null {
+    const childToKill = this.child;
+    this.child = null;
+    this.busy = false;
+    return childToKill;
   }
 }

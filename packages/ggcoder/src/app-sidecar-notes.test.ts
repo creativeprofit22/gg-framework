@@ -3,24 +3,25 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
+import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  createAppSidecarNotesHandler,
-  NOTES_REQUEST_BODY_MAX_BYTES,
-  type AppSidecarNotesSession,
-} from "./app-sidecar-notes.js";
+import { createAppSidecarNotesHandler, NOTES_REQUEST_BODY_MAX_BYTES } from "./app-sidecar-notes.js";
+import { AppSidecarJsonBodyError } from "./app-sidecar-http-json.js";
 import {
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
   ProjectNotesRepository,
   canonicalProjectKey,
   type NotesDocumentV3,
+  type ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
 
 const NOW = "2026-07-25T12:00:00.000Z";
 
-interface FakeSession extends AppSidecarNotesSession {
+interface FakeSession {
+  cwd: string;
   events: Array<{ type: string; data: unknown }>;
+  broadcastNotesChange(snapshot: ProjectNotesSnapshot): void;
 }
 
 let root: string;
@@ -86,6 +87,7 @@ function notes(reference: string): NotesDocumentV3 {
         completedAt: null,
         archivedAt: null,
         overrides: { status: null, referenceIds: null },
+        pendingAutomaticLifecycleTransition: null,
         lifecycleEvents: [],
         roadmapEvents: [],
       },
@@ -104,6 +106,15 @@ function fakeSession(cwd: string): FakeSession {
   };
 }
 
+function onCommittedSnapshot(snapshot: ProjectNotesSnapshot): void {
+  committedSnapshots.push({ projectKey: snapshot.projectKey, revision: snapshot.revision });
+  for (const session of sessions.values()) {
+    if (canonicalProjectKey(session.cwd) === snapshot.projectKey) {
+      session.broadcastNotesChange(snapshot);
+    }
+  }
+}
+
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-sidecar-notes-route-"));
   repository = new ProjectNotesRepository(path.join(root, ".gg"));
@@ -115,15 +126,7 @@ beforeEach(async () => {
   ]);
   const handler = createAppSidecarNotesHandler({
     repository,
-    sessions: { values: () => sessions.values() },
-    onCommittedSnapshot: (snapshot) => {
-      committedSnapshots.push({ projectKey: snapshot.projectKey, revision: snapshot.revision });
-      for (const session of sessions.values()) {
-        if (canonicalProjectKey(session.cwd) === snapshot.projectKey) {
-          session.broadcastNotesChange(snapshot);
-        }
-      }
-    },
+    onCommittedSnapshot,
   });
   server = http.createServer((req, res) => {
     const header = req.headers["x-gg-session"];
@@ -203,6 +206,80 @@ async function chunkedRequest(
     for (const chunk of chunks) clientRequest.write(chunk);
     clientRequest.end();
   });
+}
+
+type SyntheticRequest = PassThrough & http.IncomingMessage;
+
+interface CapturedRouteResponse {
+  status: number;
+  headers: http.OutgoingHttpHeaders | undefined;
+  body: unknown;
+}
+
+function createSyntheticRequest(headers: http.IncomingHttpHeaders = {}): SyntheticRequest {
+  const request = new PassThrough() as SyntheticRequest;
+  request.headers = headers;
+  return request;
+}
+
+function captureRouteResponse(): {
+  response: http.ServerResponse;
+  result: Promise<CapturedRouteResponse>;
+} {
+  let resolve!: (result: CapturedRouteResponse) => void;
+  let status = 0;
+  let headers: http.OutgoingHttpHeaders | undefined;
+  const result = new Promise<CapturedRouteResponse>((settle) => {
+    resolve = settle;
+  });
+  const response = {
+    writeHead(nextStatus: number, nextHeaders?: http.OutgoingHttpHeaders) {
+      status = nextStatus;
+      headers = nextHeaders;
+      return response;
+    },
+    end(chunk?: string | Buffer) {
+      resolve({
+        status,
+        headers,
+        body: chunk === undefined ? undefined : (JSON.parse(chunk.toString()) as unknown),
+      });
+      return response;
+    },
+  } as unknown as http.ServerResponse;
+  return { response, result };
+}
+
+function requestListenerCounts(request: SyntheticRequest): Record<string, number> {
+  return Object.fromEntries(
+    ["data", "end", "error", "aborted", "close"].map((event) => [
+      event,
+      request.listenerCount(event),
+    ]),
+  );
+}
+
+function dispatchSyntheticNotesRequest(headers: http.IncomingHttpHeaders = {}): {
+  request: SyntheticRequest;
+  result: Promise<CapturedRouteResponse>;
+  errors: unknown[];
+} {
+  const errors: unknown[] = [];
+  const handler = createAppSidecarNotesHandler({
+    repository,
+    onCommittedSnapshot,
+    onError: (error) => errors.push(error),
+  });
+  const request = createSyntheticRequest(headers);
+  const captured = captureRouteResponse();
+  expect(
+    handler.handle(request, captured.response, sessions.get("a")!, "/notes/migrate", "POST"),
+  ).toBe(true);
+  return { request, result: captured.result, errors };
+}
+
+async function flushStreamEvents(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 async function readOptionalFile(filePath: string): Promise<string | null> {
@@ -682,6 +759,99 @@ describe("app sidecar Notes routes", () => {
     expect(recovered).toMatchObject({ response: { status: 200 }, body: { status: "ok" } });
   });
 
+  it("accepts a valid migration body exactly at the Notes byte limit", async () => {
+    const json = JSON.stringify({ document: notes("exact byte limit") });
+    expect(Buffer.byteLength(json)).toBeLessThan(NOTES_REQUEST_BODY_MAX_BYTES);
+    const body = json.padEnd(NOTES_REQUEST_BODY_MAX_BYTES, " ");
+
+    const migrated = await request("a", "/notes/migrate", { method: "POST", body });
+
+    expect(Buffer.byteLength(body)).toBe(NOTES_REQUEST_BODY_MAX_BYTES);
+    expect(migrated).toMatchObject({
+      response: { status: 200 },
+      body: { status: "ok", snapshot: { document: { reference: "exact byte limit" } } },
+    });
+  });
+
+  it("maps an aborted Notes body to the route error and cleans every reader listener", async () => {
+    const dispatched = dispatchSyntheticNotesRequest();
+
+    dispatched.request.emit("aborted");
+    dispatched.request.emit("close");
+    const response = await dispatched.result;
+
+    expect(response).toMatchObject({
+      status: 500,
+      headers: { "access-control-allow-origin": "*" },
+      body: { status: "error", message: "notes request failed" },
+    });
+    expect(dispatched.errors).toHaveLength(1);
+    expect(dispatched.errors[0]).toBeInstanceOf(AppSidecarJsonBodyError);
+    expect(dispatched.errors[0]).toMatchObject({ kind: "aborted" });
+    expect(requestListenerCounts(dispatched.request)).toEqual({
+      data: 0,
+      end: 0,
+      error: 0,
+      aborted: 0,
+      close: 0,
+    });
+  });
+
+  it("maps a Notes request stream error to 500 and removes every reader listener", async () => {
+    const dispatched = dispatchSyntheticNotesRequest();
+    const streamError = new Error("synthetic Notes stream failure");
+
+    dispatched.request.emit("error", streamError);
+    const response = await dispatched.result;
+
+    expect(response).toMatchObject({
+      status: 500,
+      body: { status: "error", message: "notes request failed" },
+    });
+    expect(dispatched.errors).toEqual([streamError]);
+    expect(requestListenerCounts(dispatched.request)).toEqual({
+      data: 0,
+      end: 0,
+      error: 0,
+      aborted: 0,
+      close: 0,
+    });
+  });
+
+  it("drains declared and streamed Notes overflow and releases temporary listeners", async () => {
+    const expectedResponse = {
+      status: 413,
+      body: {
+        status: "invalid",
+        error: {
+          path: "$",
+          message: `notes request body exceeds ${NOTES_REQUEST_BODY_MAX_BYTES} bytes`,
+        },
+      },
+    };
+    const declared = dispatchSyntheticNotesRequest({
+      "content-length": String(NOTES_REQUEST_BODY_MAX_BYTES + 1),
+    });
+    declared.request.end("ignored");
+
+    const streamed = dispatchSyntheticNotesRequest();
+    streamed.request.end(Buffer.alloc(NOTES_REQUEST_BODY_MAX_BYTES + 1));
+
+    await expect(declared.result).resolves.toMatchObject(expectedResponse);
+    await expect(streamed.result).resolves.toMatchObject(expectedResponse);
+    await flushStreamEvents();
+    for (const dispatched of [declared, streamed]) {
+      expect(dispatched.request.readableEnded).toBe(true);
+      expect(requestListenerCounts(dispatched.request)).toEqual({
+        data: 0,
+        end: 0,
+        error: 0,
+        aborted: 0,
+        close: 0,
+      });
+    }
+  });
+
   it("rejects declared and chunked oversized save bodies without mutation or fan-out", async () => {
     await request("a", "/notes/migrate", {
       method: "POST",
@@ -809,6 +979,10 @@ describe("app sidecar Notes routes", () => {
         document: notes("winner"),
       },
     });
+    expect(committedSnapshots).toEqual([
+      { projectKey: "c:/work/project", revision: 1 },
+      { projectKey: "c:/work/project", revision: 2 },
+    ]);
   });
 
   it("serializes simultaneous migration behind create-if-absent", async () => {
@@ -831,6 +1005,7 @@ describe("app sidecar Notes routes", () => {
     expect(bodies.filter((body) => body.migrated)).toHaveLength(1);
     expect(bodies.filter((body) => !body.migrated)).toHaveLength(1);
     expect(bodies[0]?.snapshot).toEqual(bodies[1]?.snapshot);
+    expect(committedSnapshots).toEqual([{ projectKey: "c:/work/project", revision: 1 }]);
   });
 
   it("fans committed snapshots to every same-project alias and isolates other projects", async () => {
@@ -845,6 +1020,10 @@ describe("app sidecar Notes routes", () => {
 
     expect(migrated.response.status).toBe(200);
     expect(saved.response.status).toBe(200);
+    expect(committedSnapshots).toEqual([
+      { projectKey: "c:/work/project", revision: 1 },
+      { projectKey: "c:/work/project", revision: 2 },
+    ]);
     expect(sessions.get("a")?.events).toEqual([
       { type: "notes_change", data: expect.objectContaining({ revision: 1 }) },
       { type: "notes_change", data: expect.objectContaining({ revision: 2 }) },

@@ -6,7 +6,8 @@
  *   GET  /state    → { provider, model, cwd, ready }
  *   GET  /events   → text/event-stream of forwarded agent + session events
  *   POST /prompt   → { queued, count } ; runs or queues AgentSession.prompt(text)
- *   POST /cancel   → aborts the in-flight run
+ *   POST /cancel                         → aborts the in-flight run
+ *   POST /cancel/roadmap-status/retry    → retries only the Cancelled Notes record
  *
  * The agent spine (gg-ai → gg-agent → gg-core) and every tool are reused
  * unchanged via AgentSession — this file is only a network seam.
@@ -149,6 +150,10 @@ import {
 } from "./project-notes-repository.js";
 import { launchBoundPhase, type BoundPhaseCandidate } from "./app-sidecar-phase-launch.js";
 import { handlePhaseStartRoute } from "./app-sidecar-phase-route.js";
+import {
+  AppSidecarCancellationPersistence,
+  handleCancellationPersistenceRetryRoute,
+} from "./app-sidecar-cancellation.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import {
   AppSidecarPhaseCompletionCoordinator,
@@ -876,7 +881,6 @@ async function main(): Promise<void> {
   });
   const notes = createAppSidecarNotesHandler({
     repository: notesRepository,
-    sessions,
     onCommittedSnapshot: broadcastNotesSnapshot,
     onError: (error) => {
       captureSidecarError(error, "app-sidecar.notes.request");
@@ -1817,6 +1821,10 @@ async function createSession(
         detail: error instanceof Error ? error.message : String(error),
       });
     },
+  });
+  const cancellationPersistence = new AppSidecarCancellationPersistence({
+    lifecycle: phaseLifecycle,
+    broadcast,
   });
   await session.initialize();
   const phaseCandidates = new AppSidecarPhaseCandidateStore<BoundPhaseCandidate<AgentSession>>();
@@ -3170,7 +3178,7 @@ async function createSession(
     url: string,
     method: string,
   ): void {
-    if (notes.handle(req, res, { cwd, broadcastNotesChange }, url, method)) return;
+    if (notes.handle(req, res, { cwd }, url, method)) return;
     if (reminders.handle(req, res, { id: opts.id, cwd }, url, method)) return;
 
     if (method === "GET" && url === "/state") {
@@ -4409,6 +4417,17 @@ async function createSession(
       return;
     }
 
+    if (
+      handleCancellationPersistenceRetryRoute({
+        method,
+        url,
+        retry: () => cancellationPersistence.retry(),
+        respond: (status, body) => json(res, status, body),
+      })
+    ) {
+      return;
+    }
+
     if (method === "POST" && url === "/cancel") {
       void (async () => {
         // Even between task runs, cancellation stops the sweep. Active provider
@@ -4422,6 +4441,7 @@ async function createSession(
         }
 
         const generation = runLifecycle.generation;
+        const cancelledPhase = phaseLifecycleContext();
         if (!pendingCancelDrain || pendingCancelDrain.generation !== generation) {
           pendingCancelDrain = { generation, text: session.drainQueue() };
           broadcast("queued", { count: 0 });
@@ -4442,13 +4462,19 @@ async function createSession(
           });
           return;
         }
-        if (result.status === "cancelled") {
-          await phaseLifecycle.enqueue({ type: "cancelled" });
-        }
+        const roadmapStatus =
+          result.status === "cancelled"
+            ? await cancellationPersistence.recordConfirmedCancellation(cancelledPhase)
+            : {
+                roadmapStatusSaved: false,
+                roadmapStatusOutcome: "not-pending" as const,
+                roadmapStatusRetryable: false,
+              };
         json(res, 200, {
           cancelled: result.status === "cancelled",
           runState: runLifecycle.state,
           drained,
+          ...roadmapStatus,
         });
       })().catch((error) => {
         captureSidecarError(error, "app-sidecar.run.cancel");

@@ -7,7 +7,6 @@ import type {
   NotesLifecycleEventKind,
   NotesPhase,
   NotesPhaseStatus,
-  NotesRoadmapCompletionReview,
   NotesRoadmapImplementationCheckpoint,
   NotesRoadmapStatusUpdate,
   ProjectNotesCompletionReviewOutcome,
@@ -383,15 +382,4 @@ export class AppSidecarPhaseCompletionCoordinator {
     );
     return queued;
   }
-}
-
-export function completionReviewFromEvent(
-  event: NotesRoadmapCompletionReview,
-): PhaseCompletionReviewDecision {
-  return {
-    reviewer: event.reviewer,
-    decision: event.decision,
-    acceptsVerificationException: event.acceptsVerificationException,
-    reason: event.reason,
-  };
 }

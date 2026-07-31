@@ -1,13 +1,16 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import {
   AppSidecarReminderCoordinator,
   createAppSidecarReminderHandler,
+  REMINDER_REQUEST_BODY_MAX_BYTES,
   selectDueReminder,
   type AppSidecarReminderSession,
   type ReminderClock,
 } from "./app-sidecar-reminders.js";
+import { AppSidecarJsonBodyError } from "./app-sidecar-http-json.js";
 import {
   canonicalProjectKey,
   type NotesDocumentV3,
@@ -75,6 +78,7 @@ function notes(
             : null,
         archivedAt: item.archivedAt ?? null,
         overrides: { status: null, referenceIds: null },
+        pendingAutomaticLifecycleTransition: null,
         lifecycleEvents: [],
         roadmapEvents: [],
       };
@@ -172,6 +176,89 @@ function session(id: string, cwd = PROJECT): AppSidecarReminderSession {
 async function flushAsync(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+type SyntheticRequest = PassThrough & http.IncomingMessage;
+
+interface CapturedRouteResponse {
+  status: number;
+  body: unknown;
+}
+
+function createSyntheticRequest(headers: http.IncomingHttpHeaders = {}): SyntheticRequest {
+  const request = new PassThrough() as SyntheticRequest;
+  request.headers = headers;
+  return request;
+}
+
+function captureRouteResponse(): {
+  response: http.ServerResponse;
+  result: Promise<CapturedRouteResponse>;
+} {
+  let resolve!: (result: CapturedRouteResponse) => void;
+  let status = 0;
+  const result = new Promise<CapturedRouteResponse>((settle) => {
+    resolve = settle;
+  });
+  const response = {
+    writeHead(nextStatus: number) {
+      status = nextStatus;
+      return response;
+    },
+    end(chunk?: string | Buffer) {
+      resolve({
+        status,
+        body: chunk === undefined ? undefined : (JSON.parse(chunk.toString()) as unknown),
+      });
+      return response;
+    },
+  } as unknown as http.ServerResponse;
+  return { response, result };
+}
+
+function requestListenerCounts(request: SyntheticRequest): Record<string, number> {
+  return Object.fromEntries(
+    ["data", "end", "error", "aborted", "close"].map((event) => [
+      event,
+      request.listenerCount(event),
+    ]),
+  );
+}
+
+async function createSyntheticReminderRoute(): Promise<{
+  coordinator: AppSidecarReminderCoordinator;
+  dispatch(headers?: http.IncomingHttpHeaders): {
+    request: SyntheticRequest;
+    result: Promise<CapturedRouteResponse>;
+  };
+  errors: unknown[];
+}> {
+  const coordinator = new AppSidecarReminderCoordinator({
+    repository: new FakeRepository(),
+    clock: new FakeClock(),
+    onReminderDue: () => {},
+    createToken: () => "synthetic-route-lease",
+  });
+  const logicalSession = session("synthetic-route");
+  await coordinator.watchSession(logicalSession);
+  const errors: unknown[] = [];
+  const handler = createAppSidecarReminderHandler(coordinator, (error) => errors.push(error));
+  return {
+    coordinator,
+    errors,
+    dispatch(headers = {}) {
+      const request = createSyntheticRequest(headers);
+      const captured = captureRouteResponse();
+      expect(
+        handler.handle(request, captured.response, logicalSession, "/reminders/reserve", "POST"),
+      ).toBe(true);
+      return { request, result: captured.result };
+    },
+  };
+}
+
+async function flushStreamEvents(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
@@ -504,6 +591,158 @@ describe("app sidecar reminder routes", () => {
     } finally {
       coordinator.dispose();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("drains declared reminder overflow and cleans temporary listeners", async () => {
+    const route = await createSyntheticReminderRoute();
+    try {
+      const dispatched = route.dispatch({
+        "content-length": String(REMINDER_REQUEST_BODY_MAX_BYTES + 1),
+      });
+      dispatched.request.end("ignored");
+
+      await expect(dispatched.result).resolves.toEqual({
+        status: 413,
+        body: {
+          status: "invalid",
+          error: {
+            path: "$",
+            message: `reminder request body exceeds ${REMINDER_REQUEST_BODY_MAX_BYTES} bytes`,
+          },
+        },
+      });
+      await flushStreamEvents();
+      expect(dispatched.request.readableEnded).toBe(true);
+      expect(requestListenerCounts(dispatched.request)).toEqual({
+        data: 0,
+        end: 0,
+        error: 0,
+        aborted: 0,
+        close: 0,
+      });
+      expect(route.errors[0]).toMatchObject({ kind: "too-large" });
+    } finally {
+      route.coordinator.dispose();
+    }
+  });
+
+  it("drains streamed reminder overflow and cleans temporary listeners", async () => {
+    const route = await createSyntheticReminderRoute();
+    try {
+      const dispatched = route.dispatch();
+      dispatched.request.end(Buffer.alloc(REMINDER_REQUEST_BODY_MAX_BYTES + 1));
+
+      await expect(dispatched.result).resolves.toMatchObject({
+        status: 413,
+        body: {
+          status: "invalid",
+          error: {
+            message: `reminder request body exceeds ${REMINDER_REQUEST_BODY_MAX_BYTES} bytes`,
+          },
+        },
+      });
+      await flushStreamEvents();
+      expect(dispatched.request.readableEnded).toBe(true);
+      expect(requestListenerCounts(dispatched.request)).toEqual({
+        data: 0,
+        end: 0,
+        error: 0,
+        aborted: 0,
+        close: 0,
+      });
+      expect(route.errors[0]).toMatchObject({ kind: "too-large" });
+    } finally {
+      route.coordinator.dispose();
+    }
+  });
+
+  it("preserves the reminder route response for malformed JSON", async () => {
+    const route = await createSyntheticReminderRoute();
+    try {
+      const dispatched = route.dispatch();
+      dispatched.request.end("{broken");
+
+      await expect(dispatched.result).resolves.toEqual({
+        status: 400,
+        body: {
+          status: "invalid",
+          error: { path: "$", message: "malformed JSON request body" },
+        },
+      });
+      expect(route.errors[0]).toMatchObject({ kind: "malformed" });
+    } finally {
+      route.coordinator.dispose();
+    }
+  });
+
+  it("maps an aborted reminder body to the route error and cleans every reader listener", async () => {
+    const route = await createSyntheticReminderRoute();
+    try {
+      const dispatched = route.dispatch();
+      dispatched.request.emit("aborted");
+      dispatched.request.emit("close");
+
+      await expect(dispatched.result).resolves.toEqual({
+        status: 500,
+        body: { status: "error", message: "reminder request failed" },
+      });
+      expect(route.errors).toHaveLength(1);
+      expect(route.errors[0]).toBeInstanceOf(AppSidecarJsonBodyError);
+      expect(route.errors[0]).toMatchObject({ kind: "aborted" });
+      expect(requestListenerCounts(dispatched.request)).toEqual({
+        data: 0,
+        end: 0,
+        error: 0,
+        aborted: 0,
+        close: 0,
+      });
+    } finally {
+      route.coordinator.dispose();
+    }
+  });
+
+  it("maps a reminder request stream error to 500 and removes every reader listener", async () => {
+    const route = await createSyntheticReminderRoute();
+    try {
+      const dispatched = route.dispatch();
+      const streamError = new Error("synthetic reminder stream failure");
+      dispatched.request.emit("error", streamError);
+
+      await expect(dispatched.result).resolves.toEqual({
+        status: 500,
+        body: { status: "error", message: "reminder request failed" },
+      });
+      expect(route.errors).toEqual([streamError]);
+      expect(requestListenerCounts(dispatched.request)).toEqual({
+        data: 0,
+        end: 0,
+        error: 0,
+        aborted: 0,
+        close: 0,
+      });
+    } finally {
+      route.coordinator.dispose();
+    }
+  });
+
+  it("accepts a valid reminder body exactly at its byte limit", async () => {
+    const route = await createSyntheticReminderRoute();
+    try {
+      const json = JSON.stringify({ focused: true });
+      const body = json.padEnd(REMINDER_REQUEST_BODY_MAX_BYTES, " ");
+      const dispatched = route.dispatch({
+        "content-length": String(REMINDER_REQUEST_BODY_MAX_BYTES),
+      });
+      dispatched.request.end(body);
+
+      expect(Buffer.byteLength(body)).toBe(REMINDER_REQUEST_BODY_MAX_BYTES);
+      await expect(dispatched.result).resolves.toMatchObject({
+        status: 200,
+        body: { status: "reserved", leaseToken: "synthetic-route-lease" },
+      });
+    } finally {
+      route.coordinator.dispose();
     }
   });
 });

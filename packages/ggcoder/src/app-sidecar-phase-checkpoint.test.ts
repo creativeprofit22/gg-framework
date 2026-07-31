@@ -68,6 +68,7 @@ const successfulOutcome: ProjectNotesPhaseLinkOutcome = {
     completedAt: null,
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
     lifecycleEvents: [],
     roadmapEvents: [],
   },
@@ -100,10 +101,6 @@ function createRepository(
       events.push("notes-link-persisted");
       return outcome;
     }),
-    recordPhaseLifecycleTransition: vi.fn(async () => {
-      events.push("notes-lifecycle-persisted");
-      return successfulOutcome;
-    }),
   };
 }
 
@@ -125,11 +122,15 @@ async function attemptApproval(options: {
       cwd: "/project",
       planPath: "/plans/phase-21.md",
       approvalSource: "user",
+      reconcileLifecycle: async () => {
+        events.push("notes-lifecycle-persisted", "notes-snapshot-broadcast");
+        return { status: "committed", snapshot };
+      },
       prepareFreshSession: async () => {
         events.push("fresh-session-prepared");
         return 3;
       },
-      onSnapshot: () => events.push("notes-snapshot-broadcast"),
+      onSnapshot: () => events.push("unexpected-direct-fan-out"),
     });
     pendingReview = false;
     events.push("approval-reset", "implementation-prompt");
@@ -242,6 +243,116 @@ describe("plan approval checkpoint", () => {
     },
   );
 
+  it.each(["same-status", "done-terminal"] as const)(
+    "completes approval and broadcasts the linked snapshot for lifecycle no-op: %s",
+    async (status) => {
+      const events: string[] = [];
+      const session = createSession(events);
+      const onSnapshot = vi.fn(() => events.push("notes-snapshot-broadcast"));
+
+      await expect(
+        commitPlanApprovalCheckpoint({
+          session,
+          repository: createRepository(events),
+          cwd: "/project",
+          planPath: "/plans/phase-21.md",
+          approvalSource: "user",
+          reconcileLifecycle: async () => {
+            events.push(`notes-lifecycle-${status}`);
+            return { status };
+          },
+          prepareFreshSession: async () => {
+            events.push("fresh-session-prepared");
+            return 3;
+          },
+          onSnapshot,
+        }),
+      ).resolves.toMatchObject({ planTotal: 3 });
+
+      expect(onSnapshot).toHaveBeenCalledWith(snapshot);
+      expect(events).toEqual([
+        "fresh-session-prepared",
+        "notes-link-persisted",
+        "stage-persisted",
+        `notes-lifecycle-${status}`,
+        "notes-snapshot-broadcast",
+      ]);
+    },
+  );
+
+  it("uses the lifecycle fan-out for a persisted manual override target", async () => {
+    const events: string[] = [];
+    const session = createSession(events);
+    const onSnapshot = vi.fn();
+
+    await expect(
+      commitPlanApprovalCheckpoint({
+        session,
+        repository: createRepository(events),
+        cwd: "/project",
+        planPath: "/plans/phase-21.md",
+        approvalSource: "user",
+        reconcileLifecycle: async () => {
+          events.push("notes-lifecycle-manual-override", "notes-snapshot-broadcast");
+          return { status: "manual-override", snapshot };
+        },
+        prepareFreshSession: async () => {
+          events.push("fresh-session-prepared");
+          return 3;
+        },
+        onSnapshot,
+      }),
+    ).resolves.toMatchObject({ planTotal: 3 });
+
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      "fresh-session-prepared",
+      "notes-link-persisted",
+      "stage-persisted",
+      "notes-lifecycle-manual-override",
+      "notes-snapshot-broadcast",
+    ]);
+  });
+
+  it.each([
+    { status: "stale-session", code: "stale-phase-session" },
+    { status: "missing", code: "notes-missing" },
+    { status: "corrupt", code: "notes-corrupt" },
+  ] as const)(
+    "restores pending approval when lifecycle reconciliation returns $status",
+    async ({ status, code }) => {
+      const events: string[] = [];
+      const session = createSession(events);
+
+      await expect(
+        commitPlanApprovalCheckpoint({
+          session,
+          repository: createRepository(events),
+          cwd: "/project",
+          planPath: "/plans/phase-21.md",
+          approvalSource: "user",
+          reconcileLifecycle: async () => {
+            events.push(`notes-lifecycle-${status}`);
+            return { status };
+          },
+          prepareFreshSession: async () => {
+            events.push("fresh-session-prepared");
+            return 3;
+          },
+        }),
+      ).rejects.toMatchObject({ code, phaseId: "phase-21", retryable: true });
+
+      expect(vi.mocked(session.updateActivePhaseStage)).toHaveBeenCalledTimes(2);
+      expect(events).toEqual([
+        "fresh-session-prepared",
+        "notes-link-persisted",
+        "stage-persisted",
+        `notes-lifecycle-${status}`,
+        "stage-persisted",
+      ]);
+    },
+  );
+
   it("restores the pending approval stage when lifecycle persistence fails", async () => {
     const events: string[] = [];
     const session = createSession(events);
@@ -317,7 +428,6 @@ describe("compaction checkpoint", () => {
         events.push("notes-link-started");
         return outcome;
       },
-      recordPhaseLifecycleTransition: async () => successfulOutcome,
     };
 
     const completion = completeCompactionCheckpoint({

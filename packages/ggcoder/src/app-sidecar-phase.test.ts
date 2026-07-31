@@ -2,8 +2,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
+import {
+  AppSidecarCancellationPersistence,
+  handleCancellationPersistenceRetryRoute,
+} from "./app-sidecar-cancellation.js";
 import { commitPlanApprovalCheckpoint } from "./app-sidecar-phase-checkpoint.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import {
@@ -19,6 +23,11 @@ import {
 } from "./app-sidecar-roadmap-tool-host.js";
 import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import {
+  AppSidecarPhaseLifecycleCoordinator,
+  type BoundPhaseLifecycleContext,
+  type PhaseLifecycleRepositoryOutcome,
+} from "./app-sidecar-phase-lifecycle.js";
 import type { ActivePhaseContextV1, ActivePhaseExecutionStage } from "./phase-context.js";
 import {
   ProjectNotesRepository,
@@ -77,6 +86,7 @@ function document(): NotesDocumentV3 {
         completedAt: null,
         archivedAt: null,
         overrides: { status: null, referenceIds: null },
+        pendingAutomaticLifecycleTransition: null,
         lifecycleEvents: [],
         roadmapEvents: [],
       },
@@ -101,6 +111,7 @@ class FakePhaseSession implements BoundPhaseSession {
   promptCalls = 0;
   lastPrompt = "";
   planMode = false;
+  readonly #paneEventListeners = new Set<(event: string) => void>();
 
   constructor(
     sessionNumber: number,
@@ -170,10 +181,42 @@ class FakePhaseSession implements BoundPhaseSession {
     if (!preserveConversation) this.activeContext = undefined;
   }
 
+  onPaneEvent(listener: (event: string) => void): void {
+    this.#paneEventListeners.add(listener);
+  }
+
+  emitPaneEvent(event: string): void {
+    for (const listener of this.#paneEventListeners) listener(event);
+  }
+
   async dispose(): Promise<void> {
     this.disposeCalls += 1;
     this.events.push(`${this.label}-disposed`);
+    this.#paneEventListeners.clear();
   }
+}
+
+function createApprovalLifecycle(
+  repository: ProjectNotesRepository,
+  cwd: string,
+  session: FakePhaseSession,
+  broadcastSnapshot: (snapshot: ProjectNotesSnapshot) => void = () => undefined,
+): AppSidecarPhaseLifecycleCoordinator {
+  return new AppSidecarPhaseLifecycleCoordinator({
+    cwd,
+    repository,
+    getActivePhase: () => {
+      const active = session.getActivePhaseContext();
+      if (!active) return undefined;
+      const state = session.getState();
+      return {
+        phaseId: active.phase.id,
+        session: { sessionId: state.sessionId, sessionPath: state.sessionPath },
+        executionStage: active.executionStage,
+      };
+    },
+    broadcastSnapshot,
+  });
 }
 
 interface FixtureOptions {
@@ -193,11 +236,13 @@ interface FixtureOptions {
 
 class ProductionPhaseFixture {
   readonly events: string[] = [];
+  readonly paneEvents: string[] = [];
   readonly responses: ResponseRecord[] = [];
   readonly broadcasts: Array<{ type: string; data: unknown }> = [];
   readonly candidates = new AppSidecarPhaseCandidateStore<BoundPhaseCandidate<FakePhaseSession>>();
   readonly mutations: AppSidecarSessionMutationCoordinator;
   readonly reconciliations = new AppSidecarRoadmapReconciliationCoordinator();
+  readonly previousSession: FakePhaseSession;
   currentSession: FakePhaseSession;
   createdSessions: FakePhaseSession[] = [];
   createCalls = 0;
@@ -214,7 +259,9 @@ class ProductionPhaseFixture {
     readonly options: FixtureOptions = {},
   ) {
     this.mutations = new AppSidecarSessionMutationCoordinator(() => `operation-${++this.sequence}`);
-    this.currentSession = new FakePhaseSession(0, this.events, {}, "previous");
+    this.previousSession = new FakePhaseSession(0, this.events, {}, "previous");
+    this.currentSession = this.previousSession;
+    this.bindPaneEvents(this.previousSession);
     this.failInitializeCount = options.failInitializeCount ?? 0;
     this.failContextCount = options.failContextCount ?? 0;
     this.failPromptCount = options.failPromptCount ?? 0;
@@ -258,7 +305,10 @@ class ProductionPhaseFixture {
         this.events.push("session-replaced");
         this.currentSession = session;
       },
-      bindSessionEvents: () => this.events.push("events-bound"),
+      bindSessionEvents: (session) => {
+        this.events.push("events-bound");
+        this.bindPaneEvents(session);
+      },
       autopilotEnabled: this.options.autopilotEnabled ?? false,
       broadcastNotesSnapshot: () => this.events.push("notes-fan-out"),
       broadcast: (type, data) => {
@@ -324,6 +374,9 @@ class ProductionPhaseFixture {
     };
   }
 
+  private bindPaneEvents(session: FakePhaseSession): void {
+    session.onPaneEvent((event) => this.paneEvents.push(event));
+  }
   private takeFailure(kind: "initialize" | "context" | "prompt"): boolean {
     const key =
       kind === "initialize"
@@ -409,6 +462,183 @@ function roadmapHost(
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
+});
+
+describe("cancel route phase persistence", () => {
+  const activeCancellation: BoundPhaseLifecycleContext = {
+    phaseId: "phase-21",
+    session: { sessionId: "session-21", sessionPath: "/sessions/session-21.jsonl" },
+    executionStage: "implementing",
+  };
+
+  function cancellationFixture(outcomes: Array<PhaseLifecycleRepositoryOutcome | Error>): {
+    persistence: AppSidecarCancellationPersistence;
+    broadcasts: Array<{ type: string; data: unknown }>;
+    successfulWrites: number;
+  } {
+    const broadcasts: Array<{ type: string; data: unknown }> = [];
+    let successfulWrites = 0;
+    const lifecycle = new AppSidecarPhaseLifecycleCoordinator({
+      cwd: "/project",
+      repository: {
+        recordPhaseLifecycleTransition: vi.fn(async () => {
+          const outcome = outcomes.shift();
+          if (outcome instanceof Error) throw outcome;
+          if (!outcome) throw new Error("missing test outcome");
+          if (outcome.status === "ok") successfulWrites += 1;
+          return outcome;
+        }),
+      },
+      getActivePhase: () => activeCancellation,
+      broadcastSnapshot: vi.fn(),
+    });
+    return {
+      persistence: new AppSidecarCancellationPersistence({
+        lifecycle,
+        broadcast: (type, data) => broadcasts.push({ type, data }),
+        createOperationId: () => "cancel-operation-1",
+      }),
+      broadcasts,
+      get successfulWrites() {
+        return successfulWrites;
+      },
+    };
+  }
+
+  function cancellationSnapshot(): ProjectNotesSnapshot {
+    const notes = document();
+    const phase = notes.phases[0]!;
+    phase.status = "cancelled";
+    phase.completedAt = NOW;
+    phase.session = { ...activeCancellation.session };
+    phase.lifecycleEvents.push({
+      id: "cancel-event-1",
+      fromStatus: "in-progress",
+      toStatus: "cancelled",
+      source: "user",
+      timestamp: NOW,
+      reason: "Phase run cancelled by user",
+      kind: "other",
+    });
+    return { projectKey: "/project", revision: 2, document: notes };
+  }
+
+  it("reports a committed Cancelled record without a partial failure", async () => {
+    const fixture = cancellationFixture([{ status: "ok", snapshot: cancellationSnapshot() }]);
+
+    await expect(
+      fixture.persistence.recordConfirmedCancellation(activeCancellation),
+    ).resolves.toMatchObject({
+      roadmapStatusSaved: true,
+      roadmapStatusOutcome: "committed",
+      roadmapStatusRetryable: false,
+    });
+    expect(fixture.broadcasts).toEqual([]);
+  });
+
+  it.each(["manual-override", "done-terminal"] as const)(
+    "keeps the cancelled run truthful when Project Notes is protected by %s",
+    async (status) => {
+      const fixture = cancellationFixture([
+        status === "manual-override" ? { status, snapshot: cancellationSnapshot() } : { status },
+      ]);
+
+      const response = {
+        cancelled: true,
+        ...(await fixture.persistence.recordConfirmedCancellation(activeCancellation)),
+      };
+      expect(response).toEqual({
+        cancelled: true,
+        roadmapStatusSaved: false,
+        roadmapStatusOutcome: status,
+        roadmapStatusRetryable: false,
+      });
+      expect(fixture.broadcasts).toEqual([]);
+    },
+  );
+
+  it.each(["stale-session", "missing", "corrupt", "phase-not-found", "phase-archived"] as const)(
+    "surfaces %s as a typed cancellation persistence partial failure",
+    async (status) => {
+      const fixture = cancellationFixture([{ status }]);
+
+      const response = {
+        cancelled: true,
+        ...(await fixture.persistence.recordConfirmedCancellation(activeCancellation)),
+      };
+      expect(response).toMatchObject({
+        cancelled: true,
+        roadmapStatusSaved: false,
+        roadmapStatusOutcome: status,
+        roadmapStatusRetryable: true,
+        roadmapStatusFailure: {
+          operationId: "cancel-operation-1",
+          phaseId: "phase-21",
+          code: status,
+          recovery: expect.stringContaining("Project Notes"),
+        },
+      });
+      expect(fixture.broadcasts).toEqual([
+        {
+          type: "phase_cancellation_persistence_failed",
+          data: expect.objectContaining({ code: status, phaseId: "phase-21" }),
+        },
+      ]);
+    },
+  );
+
+  it("surfaces a thrown storage failure while leaving cancellation acknowledged", async () => {
+    const fixture = cancellationFixture([new Error("disk full")]);
+
+    const response = {
+      cancelled: true,
+      ...(await fixture.persistence.recordConfirmedCancellation(activeCancellation)),
+    };
+    expect(response).toMatchObject({
+      cancelled: true,
+      roadmapStatusSaved: false,
+      roadmapStatusOutcome: "storage-failure",
+      roadmapStatusRetryable: true,
+      roadmapStatusFailure: { code: "storage-failure", detail: "disk full" },
+    });
+  });
+
+  it("retries the captured phase through the route and appends exactly one Cancelled event", async () => {
+    const fixture = cancellationFixture([
+      new Error("temporary storage failure"),
+      { status: "ok", snapshot: cancellationSnapshot() },
+    ]);
+    await fixture.persistence.recordConfirmedCancellation(activeCancellation);
+    const response = new Promise<{ status: number; body: unknown }>((resolve) => {
+      expect(
+        handleCancellationPersistenceRetryRoute({
+          method: "POST",
+          url: "/cancel/roadmap-status/retry",
+          retry: () => fixture.persistence.retry(),
+          respond: (status, body) => resolve({ status, body }),
+        }),
+      ).toBe(true);
+    });
+
+    await expect(response).resolves.toMatchObject({
+      status: 200,
+      body: {
+        roadmapStatusSaved: true,
+        roadmapStatusOutcome: "committed",
+        roadmapStatusRetryable: false,
+      },
+    });
+    expect(fixture.successfulWrites).toBe(1);
+    expect(cancellationSnapshot().document.phases[0]!.lifecycleEvents).toHaveLength(1);
+    await expect(fixture.persistence.retry()).resolves.toMatchObject({
+      roadmapStatusOutcome: "not-pending",
+    });
+    expect(fixture.successfulWrites).toBe(1);
+    expect(fixture.broadcasts.at(-1)).toMatchObject({
+      type: "phase_cancellation_persistence_recovered",
+      data: { phaseId: "phase-21", roadmapStatusSaved: true },
+    });
+  });
 });
 
 describe("production launchBoundPhase orchestration", () => {
@@ -501,6 +731,7 @@ describe("production launchBoundPhase orchestration", () => {
     expect(fixture.currentSession.lastPrompt).not.toContain("another phase");
 
     const session = fixture.currentSession;
+    const approvalLifecycle = createApprovalLifecycle(repository, cwd, session);
     await expect(
       commitPlanApprovalCheckpoint({
         session,
@@ -508,6 +739,7 @@ describe("production launchBoundPhase orchestration", () => {
         cwd,
         planPath: "/plans/phase-26-release-gate.md",
         approvalSource: "user",
+        reconcileLifecycle: (signal) => approvalLifecycle.enqueue(signal),
         prepareFreshSession: async () => {
           await session.newSession(true);
           return 3;
@@ -902,6 +1134,68 @@ describe("production launchBoundPhase orchestration", () => {
     expect(loser.events.filter((event) => event === "notes-fan-out")).toHaveLength(0);
   });
 
+  it("retires the previous session after promotion when Plan Mode entry fails", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd, { failEnterPlanMode: true });
+    const previous = fixture.previousSession;
+
+    await expect(fixture.start()).resolves.toMatchObject({
+      status: 500,
+      body: { code: "launch-failed" },
+    });
+
+    const promoted = fixture.createdSessions[0]!;
+    expect(previous.disposeCalls).toBe(1);
+    expect(fixture.currentSession).toBe(promoted);
+    expect(promoted.disposeCalls).toBe(0);
+    expect(fixture.candidates.has("phase-21")).toBe(false);
+    expect(fixture.events.filter((event) => event === "session-replaced")).toHaveLength(1);
+    expect(fixture.events.filter((event) => event === "events-bound")).toHaveLength(1);
+
+    previous.emitPaneEvent("stale-previous-session-event");
+    promoted.emitPaneEvent("promoted-session-event");
+    expect(fixture.paneEvents).toEqual(["promoted-session-event"]);
+
+    expect(await repository.load(cwd)).toMatchObject({
+      status: "ok",
+      snapshot: {
+        document: {
+          phases: [
+            {
+              status: "needs-attention",
+              session: {
+                sessionId: "session-1",
+                sessionPath: "/sessions/session-1.jsonl",
+              },
+              attentionReason: "Phase launch failed. Retry Start phase.",
+            },
+          ],
+        },
+      },
+    });
+
+    await expect(fixture.start()).resolves.toMatchObject({
+      status: 200,
+      body: {
+        status: "already-bound",
+        session: {
+          sessionId: "session-1",
+          sessionPath: "/sessions/session-1.jsonl",
+        },
+      },
+    });
+    expect(fixture.createCalls).toBe(1);
+    expect(fixture.currentSession).toBe(promoted);
+    expect(promoted.promptCalls).toBe(0);
+    expect(promoted.disposeCalls).toBe(0);
+    expect(previous.disposeCalls).toBe(1);
+    expect(fixture.events.filter((event) => event === "session-replaced")).toHaveLength(1);
+
+    await fixture.dispose();
+    expect(promoted.disposeCalls).toBe(1);
+    expect(previous.disposeCalls).toBe(1);
+  });
+
   it("guards post-binding launch failure attention with the committed session", async () => {
     const { repository, cwd } = await setup();
     const attentionGate = deferred();
@@ -964,6 +1258,7 @@ describe("production launchBoundPhase orchestration", () => {
 
       expect(failed).toMatchObject({ status: 500, body: { code: "launch-failed" } });
       expect(fixture.createdSessions[0]?.disposeCalls).toBe(1);
+      expect(fixture.previousSession.disposeCalls).toBe(0);
       expect(fixture.candidates.has("phase-21")).toBe(false);
       expect(fixture.mutations.owner).toBeNull();
       expect(await repository.load(cwd)).toMatchObject({
@@ -993,6 +1288,8 @@ describe("production launchBoundPhase orchestration", () => {
       });
       await fixture.promptSettled;
       expect(fixture.createCalls).toBe(2);
+      expect(fixture.createdSessions[0]?.disposeCalls).toBe(1);
+      expect(fixture.previousSession.disposeCalls).toBe(1);
       expect(fixture.currentSession.promptCalls).toBe(1);
     },
   );
@@ -1199,6 +1496,9 @@ describe("production launchBoundPhase orchestration", () => {
       await fixture.start();
       await fixture.promptSettled;
       const session = fixture.currentSession;
+      const approvalLifecycle = createApprovalLifecycle(repository, cwd, session, () =>
+        fixture.events.push("approval-notes-fan-out"),
+      );
 
       const result = await commitPlanApprovalCheckpoint({
         session,
@@ -1206,12 +1506,13 @@ describe("production launchBoundPhase orchestration", () => {
         cwd,
         planPath: "/plans/phase-21.md",
         approvalSource: approvalSource === "Autopilot" ? "agent" : "user",
+        reconcileLifecycle: (signal) => approvalLifecycle.enqueue(signal),
         prepareFreshSession: async () => {
           fixture.events.push(`${approvalSource}-approval`);
           await session.newSession(true);
           return 3;
         },
-        onSnapshot: () => fixture.events.push("approval-notes-fan-out"),
+        onSnapshot: () => fixture.events.push("unexpected-direct-approval-fan-out"),
       });
 
       expect(result.planTotal).toBe(3);
@@ -1254,6 +1555,72 @@ describe("production launchBoundPhase orchestration", () => {
     },
   );
 
+  it("persists plan approval as the pending automatic target while a user override is active", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    await updatePhase(repository, cwd, (notes) => {
+      const phase = notes.phases[0]!;
+      phase.overrides.status = {
+        value: phase.status,
+        source: "user",
+        updatedAt: phase.updatedAt,
+      };
+    });
+    const session = fixture.currentSession;
+    const snapshots: ProjectNotesSnapshot[] = [];
+    const approvalLifecycle = createApprovalLifecycle(repository, cwd, session, (snapshot) =>
+      snapshots.push(snapshot),
+    );
+
+    await commitPlanApprovalCheckpoint({
+      session,
+      repository,
+      cwd,
+      planPath: "/plans/phase-21.md",
+      approvalSource: "user",
+      reconcileLifecycle: (signal) => approvalLifecycle.enqueue(signal),
+      prepareFreshSession: async () => {
+        await session.newSession(true);
+        return 3;
+      },
+      onSnapshot: () => {
+        throw new Error(
+          "manual override persistence must fan out through lifecycle reconciliation",
+        );
+      },
+    });
+
+    const loaded = await repository.load(cwd);
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: {
+        document: {
+          phases: [
+            {
+              status: "planning",
+              overrides: { status: { value: "planning", source: "user" } },
+              pendingAutomaticLifecycleTransition: {
+                status: "in-progress",
+                source: "user",
+                reason: "Plan approved by user",
+                kind: "approval-resolved",
+                expectedSession: {
+                  sessionId: session.state.sessionId,
+                  sessionPath: session.state.sessionPath,
+                },
+              },
+            },
+          ],
+        },
+      },
+    });
+    expect(snapshots).toHaveLength(1);
+    if (loaded.status !== "ok") throw new Error("Expected pending approval Notes");
+    expect(snapshots[0]).toEqual(loaded.snapshot);
+  });
+
   it("disposes a retained candidate when retry discovers a phase archive", async () => {
     const { repository, cwd } = await setup();
     const fixture = new ProductionPhaseFixture(repository, cwd, { failBindingCount: 1 });
@@ -1294,6 +1661,7 @@ describe("production launchBoundPhase orchestration", () => {
         source: "user",
         timestamp: NOW,
         reason: "Completion review accepted",
+        kind: "other",
       });
     });
     const beforeStart = await repository.load(cwd);

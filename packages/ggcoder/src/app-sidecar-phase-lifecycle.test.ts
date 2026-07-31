@@ -331,7 +331,6 @@ describe("phase lifecycle coordinator", () => {
 
   it.each([
     "same-status",
-    "manual-override",
     "phase-not-found",
     "phase-archived",
     "stale-session",
@@ -348,6 +347,30 @@ describe("phase lifecycle coordinator", () => {
     });
     await expect(coordinator.enqueue({ type: "plan-entered" })).resolves.toEqual({ status });
     expect(broadcastSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("broadcasts a persisted manual-override marker", async () => {
+    const persisted = snapshot(3);
+    const broadcastSnapshot = vi.fn();
+    const coordinator = new AppSidecarPhaseLifecycleCoordinator({
+      cwd: "/project",
+      repository: {
+        recordPhaseLifecycleTransition: async () => ({
+          status: "manual-override",
+          snapshot: persisted,
+        }),
+      },
+      getActivePhase: () => active,
+      broadcastSnapshot,
+    });
+
+    await expect(
+      coordinator.enqueue({ type: "plan-approved", approvalSource: "user" }),
+    ).resolves.toEqual({
+      status: "manual-override",
+      snapshot: persisted,
+    });
+    expect(broadcastSnapshot).toHaveBeenCalledWith(persisted);
   });
 
   it("reports no active phase and ignored signals without touching storage", async () => {

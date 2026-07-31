@@ -214,17 +214,24 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
     dependencies.broadcastNotesSnapshot(outcome.snapshot);
     const previousSession = dependencies.getSession();
     dependencies.replaceSession(candidate.session);
-    dependencies.bindSessionEvents(candidate.session);
-    candidate.session.setIdealReviewSuppressed(dependencies.autopilotEnabled);
-    dependencies.resetSessionState();
-    dependencies.broadcast("session_reset", {
-      operationId: mutation.operationId,
-      phaseId,
-      sessionId: outcome.session.sessionId,
-      sessionPath: outcome.session.sessionPath,
-    });
-    await dependencies.enterPlanMode(`Plan Roadmap phase: ${outcome.phase.title}`);
-    await Promise.resolve(previousSession.dispose()).catch(() => {});
+    let ownsPreviousSession = true;
+    try {
+      dependencies.bindSessionEvents(candidate.session);
+      candidate.session.setIdealReviewSuppressed(dependencies.autopilotEnabled);
+      dependencies.resetSessionState();
+      dependencies.broadcast("session_reset", {
+        operationId: mutation.operationId,
+        phaseId,
+        sessionId: outcome.session.sessionId,
+        sessionPath: outcome.session.sessionPath,
+      });
+      await dependencies.enterPlanMode(`Plan Roadmap phase: ${outcome.phase.title}`);
+    } finally {
+      if (ownsPreviousSession) {
+        ownsPreviousSession = false;
+        await Promise.resolve(previousSession.dispose()).catch(() => {});
+      }
+    }
 
     dependencies.respond(202, {
       status: "accepted",

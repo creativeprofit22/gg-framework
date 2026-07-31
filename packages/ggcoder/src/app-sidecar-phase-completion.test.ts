@@ -92,6 +92,7 @@ function phase(events: NotesRoadmapEvent[] = [checkpoint(), verification()]): No
     completedAt: null,
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
     lifecycleEvents: [
       {
         id: "lifecycle-progress",
@@ -100,6 +101,7 @@ function phase(events: NotesRoadmapEvent[] = [checkpoint(), verification()]): No
         source: "session",
         timestamp: NOW,
         reason: "Implementation started",
+        kind: "other",
       },
       {
         id: "lifecycle-review",
@@ -108,6 +110,7 @@ function phase(events: NotesRoadmapEvent[] = [checkpoint(), verification()]): No
         source: "agent",
         timestamp: LATER,
         reason: "Review started",
+        kind: "other",
       },
     ],
     roadmapEvents: events,
@@ -306,6 +309,7 @@ describe("evaluatePhaseCompletion", () => {
         source: "agent",
         timestamp: LATER,
         reason: "Plan submitted",
+        kind: "approval-opened",
       },
     ];
     expect(evaluate(approval)).toMatchObject({
@@ -323,6 +327,7 @@ describe("evaluatePhaseCompletion", () => {
         source: "agent",
         timestamp: LATER,
         reason: "Question remains",
+        kind: "attention-question-opened",
       },
     ];
     expect(evaluate(attention)).toMatchObject({
@@ -556,6 +561,7 @@ describe("evaluatePhaseCompletion", () => {
       source: "system",
       timestamp: LATER,
       reason: "Already done",
+      kind: "other",
     });
     expect(evaluate(done)).toMatchObject({ gateOutcome: "done-terminal", targetStatus: null });
   });

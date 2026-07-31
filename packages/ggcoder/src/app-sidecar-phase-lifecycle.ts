@@ -43,10 +43,10 @@ export interface BoundPhaseLifecycleContext {
 
 export type PhaseLifecycleRepositoryOutcome =
   | { status: "ok"; snapshot: ProjectNotesSnapshot }
+  | { status: "manual-override"; snapshot: ProjectNotesSnapshot }
   | {
       status:
         | "same-status"
-        | "manual-override"
         | "phase-not-found"
         | "phase-archived"
         | "stale-session"
@@ -68,12 +68,12 @@ export interface PhaseLifecycleRepository {
 
 export type PhaseLifecycleReconcileOutcome =
   | { status: "committed"; snapshot: ProjectNotesSnapshot }
+  | { status: "manual-override"; snapshot: ProjectNotesSnapshot }
   | { status: "ignored" }
   | { status: "no-active-phase" }
   | {
       status:
         | "same-status"
-        | "manual-override"
         | "phase-not-found"
         | "phase-archived"
         | "stale-session"
@@ -264,6 +264,10 @@ export class AppSidecarPhaseLifecycleCoordinator {
         captured.phaseId,
         { ...transition, timestamp, expectedSession: captured.session },
       );
+      if (outcome.status === "manual-override") {
+        this.options.broadcastSnapshot(outcome.snapshot);
+        return outcome;
+      }
       if (outcome.status !== "ok") return outcome;
       this.options.broadcastSnapshot(outcome.snapshot);
       return { status: "committed", snapshot: outcome.snapshot };

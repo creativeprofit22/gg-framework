@@ -118,10 +118,11 @@ export class AppSidecarRoadmapToolHost {
         autopilotEnabled: this.dependencies.projectAutopilot.isEnabled(cwd),
       };
       if (input.final_review !== null) {
-        if (actor === "gg-coder") {
-          return { result: "reviewer-not-authorized", phaseId: input.phase_id };
-        }
-        return this.recordFinalReview(actor, input, statusRequest);
+        return this.recordFinalReview(
+          actor as Exclude<RoadmapStatusActor, "gg-coder">,
+          input,
+          statusRequest,
+        );
       }
       const outcome = await this.dependencies.repository.recordRoadmapStatusUpdate(
         cwd,

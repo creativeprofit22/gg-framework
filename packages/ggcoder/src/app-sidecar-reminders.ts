@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type http from "node:http";
+import {
+  AppSidecarJsonBodyError,
+  isExactRecord,
+  readJsonBody,
+  requestPathname,
+} from "./app-sidecar-http-json.js";
 import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 import {
   isValidNotesReminderDeliveryPair,
@@ -494,7 +500,7 @@ export function createAppSidecarReminderHandler(
         sendJson(res, 405, { status: "invalid", reason: "method-not-allowed" });
         return true;
       }
-      void readJsonBody(req)
+      void readJsonBody(req, REMINDER_REQUEST_BODY_MAX_BYTES)
         .then(async (body) => {
           if (pathname === "/reminders/reserve" && isReserveBody(body)) {
             sendJson(res, 200, await coordinator.reserve(session, body.focused));
@@ -522,11 +528,19 @@ export function createAppSidecarReminderHandler(
         })
         .catch((error) => {
           onError?.(error);
-          const tooLarge = error instanceof ReminderBodyTooLargeError;
-          const malformed = error instanceof ReminderMalformedJsonError;
+          const tooLarge = error instanceof AppSidecarJsonBodyError && error.kind === "too-large";
+          const malformed = error instanceof AppSidecarJsonBodyError && error.kind === "malformed";
           sendJson(res, tooLarge ? 413 : malformed ? 400 : 500, {
             status: tooLarge || malformed ? "invalid" : "error",
-            error: tooLarge || malformed ? { path: "$", message: error.message } : undefined,
+            error:
+              tooLarge || malformed
+                ? {
+                    path: "$",
+                    message: tooLarge
+                      ? `reminder request body exceeds ${REMINDER_REQUEST_BODY_MAX_BYTES} bytes`
+                      : "malformed JSON request body",
+                  }
+                : undefined,
             message: tooLarge || malformed ? undefined : "reminder request failed",
           });
         });
@@ -555,63 +569,11 @@ function isReleaseBody(value: unknown): value is { leaseToken: string } {
   return isExactRecord(value, ["leaseToken"]) && isBoundedString(value.leaseToken, 1, 256);
 }
 
-function isExactRecord(
-  value: unknown,
-  expectedKeys: readonly string[],
-): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const keys = Object.keys(value);
-  return keys.length === expectedKeys.length && expectedKeys.every((key) => keys.includes(key));
-}
-
 function isBoundedString(value: unknown, min: number, max: number): value is string {
   return typeof value === "string" && value.length >= min && value.length <= max;
-}
-
-function requestPathname(requestUrl: string): string {
-  try {
-    return new URL(requestUrl, "http://127.0.0.1").pathname;
-  } catch {
-    return requestUrl;
-  }
-}
-
-async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
-  const declared = req.headers["content-length"];
-  if (typeof declared === "string" && /^\d+$/.test(declared)) {
-    if (BigInt(declared) > BigInt(REMINDER_REQUEST_BODY_MAX_BYTES)) {
-      req.resume();
-      throw new ReminderBodyTooLargeError();
-    }
-  }
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of req) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-    bytes += buffer.byteLength;
-    if (bytes > REMINDER_REQUEST_BODY_MAX_BYTES) throw new ReminderBodyTooLargeError();
-    chunks.push(buffer);
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-  } catch {
-    throw new ReminderMalformedJsonError();
-  }
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify(body));
-}
-
-class ReminderMalformedJsonError extends Error {
-  constructor() {
-    super("malformed JSON request body");
-  }
-}
-
-class ReminderBodyTooLargeError extends Error {
-  constructor() {
-    super(`reminder request body exceeds ${REMINDER_REQUEST_BODY_MAX_BYTES} bytes`);
-  }
 }

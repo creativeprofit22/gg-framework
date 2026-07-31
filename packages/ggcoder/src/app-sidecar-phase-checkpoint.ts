@@ -1,5 +1,4 @@
 import type {
-  ProjectNotesPhaseLifecycleOutcome,
   ProjectNotesPhaseLinkOutcome,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
@@ -61,18 +60,6 @@ export interface PhaseCheckpointRepository {
     phaseId: string,
     session: { sessionId: string; sessionPath: string | null },
   ): Promise<ProjectNotesPhaseLinkOutcome>;
-  recordPhaseLifecycleTransition(
-    cwd: string,
-    phaseId: string,
-    transition: {
-      status: "in-progress";
-      source: "user" | "agent";
-      reason: string;
-      kind: "approval-resolved";
-      timestamp: string;
-      expectedSession: { sessionId: string; sessionPath: string | null };
-    },
-  ): Promise<ProjectNotesPhaseLifecycleOutcome>;
 }
 
 export interface PlanApprovalCheckpointResult {
@@ -150,7 +137,7 @@ export async function commitPlanApprovalCheckpoint(input: {
   cwd: string;
   planPath?: string;
   approvalSource: "user" | "agent";
-  reconcileLifecycle?: (
+  reconcileLifecycle: (
     signal: Extract<PhaseLifecycleSignal, { type: "plan-approved" }>,
   ) => Promise<PhaseLifecycleReconcileOutcome>;
   prepareFreshSession: () => Promise<number>;
@@ -174,60 +161,22 @@ export async function commitPlanApprovalCheckpoint(input: {
   }
 
   try {
-    if (input.reconcileLifecycle) {
-      let reconciled: PhaseLifecycleReconcileOutcome;
-      try {
-        reconciled = await input.reconcileLifecycle({
-          type: "plan-approved",
-          approvalSource: input.approvalSource,
-        });
-      } catch (cause) {
-        throw phaseLifecyclePersistenceError(phaseLink.context.phase.id, cause);
-      }
-      if (reconciled.status === "storage-failure") {
-        throw phaseLifecyclePersistenceError(phaseLink.context.phase.id, reconciled.error);
-      }
-      if (
-        reconciled.status === "same-status" ||
-        reconciled.status === "manual-override" ||
-        reconciled.status === "done-terminal"
-      ) {
-        input.onSnapshot?.(phaseLink.snapshot);
-      } else if (reconciled.status !== "committed") {
-        throw phaseLifecycleReconcileError(phaseLink.context.phase.id, reconciled.status);
-      }
-    } else {
-      let lifecycle: ProjectNotesPhaseLifecycleOutcome;
-      try {
-        lifecycle = await input.repository.recordPhaseLifecycleTransition(
-          input.cwd,
-          phaseLink.context.phase.id,
-          {
-            status: "in-progress",
-            source: input.approvalSource,
-            reason:
-              input.approvalSource === "user"
-                ? "Plan approved by user"
-                : "Plan approved by Autopilot",
-            kind: "approval-resolved",
-            timestamp: new Date().toISOString(),
-            expectedSession: { ...input.session.getState() },
-          },
-        );
-      } catch (cause) {
-        throw phaseLifecyclePersistenceError(phaseLink.context.phase.id, cause);
-      }
-      if (lifecycle.status === "ok") {
-        input.onSnapshot?.(lifecycle.snapshot);
-      } else if (
-        lifecycle.status === "same-status" ||
-        lifecycle.status === "manual-override" ||
-        lifecycle.status === "done-terminal"
-      ) {
-        input.onSnapshot?.(phaseLink.snapshot);
-      } else {
-        throw phaseLifecycleOutcomeError(phaseLink.context.phase.id, lifecycle);
-      }
+    let reconciled: PhaseLifecycleReconcileOutcome;
+    try {
+      reconciled = await input.reconcileLifecycle({
+        type: "plan-approved",
+        approvalSource: input.approvalSource,
+      });
+    } catch (cause) {
+      throw phaseLifecyclePersistenceError(phaseLink.context.phase.id, cause);
+    }
+    if (reconciled.status === "storage-failure") {
+      throw phaseLifecyclePersistenceError(phaseLink.context.phase.id, reconciled.error);
+    }
+    if (reconciled.status === "same-status" || reconciled.status === "done-terminal") {
+      input.onSnapshot?.(phaseLink.snapshot);
+    } else if (reconciled.status !== "committed" && reconciled.status !== "manual-override") {
+      throw phaseLifecycleReconcileError(phaseLink.context.phase.id, reconciled.status);
     }
   } catch (error) {
     try {
@@ -324,53 +273,6 @@ function phaseLifecycleReconcileError(
     phaseId,
     "The approved phase status checkpoint was not committed.",
     "Keep the plan pending, restore the linked phase, then retry approval.",
-  );
-}
-
-function phaseLifecycleOutcomeError(
-  phaseId: string,
-  outcome: Exclude<
-    ProjectNotesPhaseLifecycleOutcome,
-    { status: "ok" | "same-status" | "manual-override" | "done-terminal" }
-  >,
-): PhaseCheckpointError {
-  if (outcome.status === "stale-session") {
-    return new PhaseCheckpointError(
-      "stale-phase-session",
-      phaseId,
-      "The phase is now linked to a different session.",
-      "Resume the latest linked phase session, then retry approval.",
-    );
-  }
-  if (outcome.status === "missing") {
-    return new PhaseCheckpointError(
-      "notes-missing",
-      phaseId,
-      "Project Notes are missing, so the approved phase status was not saved.",
-      "Restore or recreate Project Notes, then retry approval.",
-    );
-  }
-  if (outcome.status === "corrupt") {
-    return new PhaseCheckpointError(
-      "notes-corrupt",
-      phaseId,
-      "Project Notes are corrupt, so the approved phase status was not saved.",
-      "Restore Project Notes from a valid backup, then retry approval.",
-    );
-  }
-  if (outcome.status === "phase-archived") {
-    return new PhaseCheckpointError(
-      "phase-archived",
-      phaseId,
-      "The active phase was archived before its approved status was saved.",
-      "Unarchive or restart the phase, then retry approval.",
-    );
-  }
-  return new PhaseCheckpointError(
-    "phase-not-found",
-    phaseId,
-    "The active phase no longer exists in Project Notes.",
-    "Restore the phase or start it again, then retry approval.",
   );
 }
 

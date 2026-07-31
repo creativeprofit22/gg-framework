@@ -1,28 +1,88 @@
 import fs from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import {
+  NOTES_COMPLETION_GATE_OUTCOMES,
+  NOTES_COMPLETION_UNMET_GATE_CODES,
+  NOTES_IMPLEMENTATION_RUN_OUTCOMES,
+  NOTES_LIFECYCLE_EVENT_SOURCES,
+  NOTES_PHASE_STATUSES,
+  NOTES_ROADMAP_REFERENCE_POLICY_OUTCOMES,
   canonicalProjectKey,
   canonicalReferenceIdentity,
   classifyLegacyNotesLifecycleEvent,
+  isNotesCompletionGateOutcome,
+  isNotesCompletionUnmetGateCode,
   isNotesDocumentV2,
   isNotesDocumentV3,
+  isNotesImplementationRunOutcome,
+  isNotesLifecycleEventSource,
+  isNotesPhaseStatus,
+  isNotesRoadmapReferencePolicyOutcome,
+  isNotesSessionLink,
+  isNullableNotesSessionLink,
   isValidNotesReminderDeliveryPair,
   migrateNotesDocumentV2,
   migrateNotesDocumentV3PhaseShape,
   normalizeCanonicalUrl,
+  notesAutomaticStatusAfterOverrideReset,
   notesPhaseStatusForRoadmapTransition,
   NOTES_REFERENCE_METADATA_FIELDS,
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
+  validateNotesCompletionReviewFields,
   validateNotesDocumentV3,
+  validateNotesImplementationCheckpointFields,
   validateNotesReferenceProjection,
   validateNotesSessionLink,
   type NotesDocumentV2,
   type NotesDocumentV3,
+  type NotesPhase,
+  type NotesPhaseStatus,
+  type NotesRoadmapStatusUpdate,
+  type NotesRoadmapTransition,
+  type NotesRoadmapStatusOutcome,
+  type NotesSessionLink,
 } from "./project-notes.js";
 
 const NOW = "2026-07-25T12:34:56.000Z";
+const CURRENT_SESSION = { sessionId: "session-current", sessionPath: "/sessions/current.jsonl" };
+
+function protectedStatusReport(
+  id: string,
+  transition: NotesRoadmapTransition,
+  statusOutcome: Extract<NotesRoadmapStatusOutcome, "manual-override" | "done-terminal">,
+): NotesRoadmapStatusUpdate {
+  return {
+    type: "status-update",
+    id,
+    actor: "gg-coder",
+    transition,
+    progress: "Protected automatic status report",
+    blocker: transition === "blocked" ? "Waiting for verification" : null,
+    evidence: [],
+    verification: null,
+    verificationReason: null,
+    verificationSession: null,
+    statusOutcome,
+    proposedReferences: [],
+    timestamp: NOW,
+  };
+}
+
+function pendingAutomaticStatus(
+  status: Exclude<NotesPhaseStatus, "not-started" | "done">,
+  expectedSession: NotesSessionLink | null,
+): NotesPhase["pendingAutomaticLifecycleTransition"] {
+  return {
+    status,
+    source: "agent",
+    reason: "Protected lifecycle transition",
+    kind: "other",
+    timestamp: NOW,
+    expectedSession,
+  };
+}
 
 async function fixture(): Promise<NotesDocumentV3> {
   return JSON.parse(
@@ -88,6 +148,134 @@ describe("project Notes contract", () => {
     expect(notesPhaseStatusForRoadmapTransition(transition)).toBe(status);
   });
 
+  it.each([
+    {
+      name: "keeps Done terminal",
+      arrange(phase: NotesPhase) {
+        phase.status = "done";
+        phase.pendingAutomaticLifecycleTransition = pendingAutomaticStatus("review", {
+          ...CURRENT_SESSION,
+        });
+        phase.roadmapEvents = [protectedStatusReport("blocked", "blocked", "manual-override")];
+      },
+      expected: "done",
+    },
+    {
+      name: "applies a pending transition for the matching session",
+      arrange(phase: NotesPhase) {
+        phase.pendingAutomaticLifecycleTransition = pendingAutomaticStatus("review", {
+          ...CURRENT_SESSION,
+        });
+        phase.roadmapEvents = [
+          protectedStatusReport("older-protected", "blocked", "manual-override"),
+        ];
+      },
+      expected: "review",
+    },
+    {
+      name: "ignores a pending transition for a stale session path",
+      arrange(phase: NotesPhase) {
+        phase.status = "planning";
+        phase.pendingAutomaticLifecycleTransition = pendingAutomaticStatus("review", {
+          sessionId: CURRENT_SESSION.sessionId,
+          sessionPath: "/sessions/stale.jsonl",
+        });
+      },
+      expected: "planning",
+    },
+    {
+      name: "uses the latest protected manual report",
+      arrange(phase: NotesPhase) {
+        phase.roadmapEvents = [
+          protectedStatusReport("older-protected", "pending", "manual-override"),
+          protectedStatusReport("latest-protected", "review", "manual-override"),
+          {
+            ...protectedStatusReport("newer-unprotected", "blocked", "manual-override"),
+            statusOutcome: "same-status",
+          },
+        ];
+      },
+      expected: "review",
+    },
+    {
+      name: "uses a protected done-terminal report",
+      arrange(phase: NotesPhase) {
+        phase.roadmapEvents = [protectedStatusReport("done-terminal", "pending", "done-terminal")];
+      },
+      expected: "planning",
+    },
+    {
+      name: "maps a protected blocked transition to Needs attention",
+      arrange(phase: NotesPhase) {
+        phase.roadmapEvents = [protectedStatusReport("blocked", "blocked", "manual-override")];
+      },
+      expected: "needs-attention",
+    },
+    {
+      name: "falls back to the current status",
+      arrange(phase: NotesPhase) {
+        phase.status = "cancelled";
+      },
+      expected: "cancelled",
+    },
+  ] satisfies Array<{
+    name: string;
+    arrange(phase: NotesPhase): void;
+    expected: NotesPhaseStatus;
+  }>)("restores automatic status: $name", async ({ arrange, expected }) => {
+    const document = await fixture();
+    const phase = document.phases[0]!;
+    phase.status = "in-progress";
+    phase.session = { ...CURRENT_SESSION };
+    phase.pendingAutomaticLifecycleTransition = null;
+    phase.roadmapEvents = [];
+    arrange(phase);
+
+    expect(notesAutomaticStatusAfterOverrideReset(phase)).toBe(expected);
+  });
+
+  it.each([
+    [NOTES_PHASE_STATUSES, isNotesPhaseStatus],
+    [NOTES_LIFECYCLE_EVENT_SOURCES, isNotesLifecycleEventSource],
+    [NOTES_IMPLEMENTATION_RUN_OUTCOMES, isNotesImplementationRunOutcome],
+    [NOTES_COMPLETION_GATE_OUTCOMES, isNotesCompletionGateOutcome],
+    [NOTES_COMPLETION_UNMET_GATE_CODES, isNotesCompletionUnmetGateCode],
+    [NOTES_ROADMAP_REFERENCE_POLICY_OUTCOMES, isNotesRoadmapReferencePolicyOutcome],
+  ] as const)("derives every runtime guard from its canonical tuple", (values, guard) => {
+    expect(values.every((value) => guard(value))).toBe(true);
+    expect(guard("not-a-notes-value")).toBe(false);
+  });
+
+  it("shares checkpoint and completion-review field semantics", () => {
+    expect(
+      validateNotesImplementationCheckpointFields({
+        planStepTotal: 3,
+        completedPlanSteps: [1, 3, 2],
+        runOutcome: "succeeded",
+      }),
+    ).toEqual({ field: "completedPlanSteps", code: "invalid-step", index: 2 });
+    expect(
+      validateNotesImplementationCheckpointFields({
+        planStepTotal: 3,
+        completedPlanSteps: [1, 2, 3],
+        runOutcome: "succeeded",
+      }),
+    ).toBeNull();
+    expect(
+      validateNotesCompletionReviewFields({
+        decision: "accepted",
+        evidence: [],
+        reason: null,
+      }),
+    ).toEqual({ field: "evidence", code: "accepted-requires-evidence" });
+    expect(
+      validateNotesCompletionReviewFields({
+        decision: "rejected",
+        evidence: [],
+        reason: "Needs another pass",
+      }),
+    ).toBeNull();
+  });
   it.each([
     ["C:\\Work\\.\\App\\..\\Project\\", "c:/work/project"],
     ["C:/../Project", "c:/project"],
@@ -165,9 +353,23 @@ describe("project Notes contract", () => {
         range: { startLine: 1, endLine: 2 },
       }),
     ).toMatchObject({ path: "reference.path" });
-    expect(
-      validateNotesSessionLink({ sessionId: "session-1", sessionPath: "/session.jsonl" }),
-    ).toBeNull();
+    const completeSession = { sessionId: "session-1", sessionPath: "/session.jsonl" };
+    expect(validateNotesSessionLink(completeSession)).toBeNull();
+    expect(isNotesSessionLink(completeSession)).toBe(true);
+    expect(isNullableNotesSessionLink(completeSession)).toBe(true);
+    expect(isNotesSessionLink(null)).toBe(false);
+    expect(isNullableNotesSessionLink(null)).toBe(true);
+
+    for (const malformed of [
+      { sessionId: "", sessionPath: "/session.jsonl" },
+      { sessionId: "   ", sessionPath: "/session.jsonl" },
+      { sessionId: "session-1", sessionPath: "" },
+      { sessionId: "session-1", sessionPath: " \t " },
+      { ...completeSession, extra: true },
+    ]) {
+      expect(isNotesSessionLink(malformed)).toBe(false);
+      expect(isNullableNotesSessionLink(malformed)).toBe(false);
+    }
     expect(validateNotesSessionLink({ sessionId: "session-1", sessionPath: "" })).toMatchObject({
       path: "session.sessionPath",
     });

@@ -7,12 +7,19 @@ import {
   canonicalProjectKey,
   canonicalReferenceIdentity,
   classifyLegacyNotesLifecycleEvent,
+  isNotesLifecycleEventSource,
+  isNotesPhaseStatus,
+  isNotesReminderDeliveryChannel,
+  isNotesReminderPermission,
+  isNotesRoadmapReviewer,
   isValidNotesReminderDeliveryPair,
   migrateNotesDocumentV2,
   migrateNotesDocumentV3PhaseShape,
   normalizeCanonicalUrl,
   notesPhaseStatusForRoadmapTransition,
+  validateNotesCompletionReviewFields,
   validateNotesDocumentV3,
+  validateNotesImplementationCheckpointFields,
   type NotesDocumentV3,
   type NotesImplementationRunOutcome,
   type NotesLifecycleEventKind,
@@ -22,6 +29,7 @@ import {
   type NotesReference,
   type NotesReminderDeliveryChannel,
   type NotesReminderPermission,
+  type NotesReviewDecision,
   type NotesRoadmapActor,
   type NotesRoadmapCompletionReview,
   type NotesRoadmapImplementationCheckpoint,
@@ -46,7 +54,7 @@ export * from "@kenkaiiii/gg-core/project-notes";
 import {
   evaluatePhaseCompletion,
   type PhaseCompletionEvaluation,
-} from "./app-sidecar-phase-completion.js";
+} from "./project-notes-completion-policy.js";
 
 export interface StoredProjectNotesV1 {
   storeVersion: 1;
@@ -191,7 +199,7 @@ export interface ProjectNotesCompletionReviewRequest {
   phaseId: string;
   expectedSession: NotesSessionLink;
   reviewer: NotesRoadmapReviewer;
-  decision: "accepted" | "rejected";
+  decision: NotesReviewDecision;
   evidence: string[];
   reason: string | null;
   acceptsVerificationException: boolean;
@@ -322,6 +330,13 @@ type CurrentState =
       migratedFromV2: boolean;
     };
 
+type UnavailableCurrentState = Exclude<CurrentState, { status: "ok" }>;
+
+interface CommitDocumentOptions {
+  validationMode: "trusted" | "validated";
+  context: string;
+}
+
 export const NOTES_PHASE_LIFECYCLE_REASON_MAX_LENGTH = 240;
 
 const STORE_DIRECTORY = "project-notes";
@@ -335,39 +350,6 @@ const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set([
   "EPERM",
 ]);
 const ENVELOPE_KEYS = ["storeVersion", "projectKey", "revision", "document"];
-const REMINDER_DELIVERY_CHANNELS = new Set<NotesReminderDeliveryChannel>([
-  "in-app",
-  "native",
-  "in-app-fallback",
-]);
-const REMINDER_PERMISSIONS = new Set<NotesReminderPermission>([
-  "not-required",
-  "granted",
-  "denied",
-  "unavailable",
-]);
-const PHASE_STATUSES = new Set<NotesPhaseStatus>([
-  "not-started",
-  "planning",
-  "waiting-for-approval",
-  "in-progress",
-  "review",
-  "done",
-  "needs-attention",
-  "cancelled",
-]);
-const LIFECYCLE_EVENT_SOURCES = new Set<NotesLifecycleEventSource>([
-  "user",
-  "session",
-  "agent",
-  "system",
-]);
-const IMPLEMENTATION_RUN_OUTCOMES = new Set<NotesImplementationRunOutcome>([
-  "succeeded",
-  "failed",
-  "cancelled",
-  "interrupted",
-]);
 
 export function projectNotesHash(projectKey: string): string {
   return createHash("sha256").update(projectKey, "utf8").digest("hex");
@@ -404,24 +386,6 @@ function validationError(path: string, message: string): NotesValidationError {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
-}
-
-function isBoundedNonEmptyString(value: unknown, maximum: number): value is string {
-  return isNonEmptyString(value) && value.length <= maximum;
-}
-
-function isPositiveInteger(value: unknown): value is number {
-  return Number.isInteger(value) && (value as number) > 0;
-}
-
-function isPhaseStatus(value: unknown): value is NotesPhaseStatus {
-  return typeof value === "string" && PHASE_STATUSES.has(value as NotesPhaseStatus);
-}
-
-function isLifecycleEventSource(value: unknown): value is NotesLifecycleEventSource {
-  return (
-    typeof value === "string" && LIFECYCLE_EVENT_SOURCES.has(value as NotesLifecycleEventSource)
-  );
 }
 
 function validateSession(value: unknown, pathPrefix: string): NotesValidationError | null {
@@ -1002,15 +966,12 @@ function validateImplementationCheckpointRequest(
 ): string | null {
   if (!isNonEmptyString(request.checkpointId)) return "Checkpoint ID is required.";
   if (!isTimestamp(request.timestamp)) return "Checkpoint timestamp is invalid.";
-  if (!isPositiveInteger(request.planStepTotal)) return "Plan step total must be positive.";
-  if (!IMPLEMENTATION_RUN_OUTCOMES.has(request.runOutcome)) return "Run outcome is invalid.";
-  if (!Array.isArray(request.completedPlanSteps)) return "Completed plan steps must be an array.";
-  let previous = 0;
-  for (const step of request.completedPlanSteps) {
-    if (!isPositiveInteger(step) || step > request.planStepTotal || step <= previous) {
-      return "Completed plan steps must be unique, ascending, and within the plan total.";
-    }
-    previous = step;
+  const issue = validateNotesImplementationCheckpointFields(request);
+  if (issue?.code === "not-positive-integer") return "Plan step total must be positive.";
+  if (issue?.code === "unknown-run-outcome") return "Run outcome is invalid.";
+  if (issue?.code === "not-array") return "Completed plan steps must be an array.";
+  if (issue?.code === "invalid-step") {
+    return "Completed plan steps must be unique, ascending, and within the plan total.";
   }
   return validateSession(request.expectedSession, "expectedSession")?.message ?? null;
 }
@@ -1020,26 +981,19 @@ function validateCompletionReviewRequest(
 ): string | null {
   if (!isNonEmptyString(request.reviewId)) return "Review ID is required.";
   if (!isTimestamp(request.timestamp)) return "Review timestamp is invalid.";
-  if (request.reviewer !== "ken" && request.reviewer !== "ken-autopilot") {
+  if (!isNotesRoadmapReviewer(request.reviewer)) {
     return "Only Ken or Autopilot Ken may submit a final review.";
   }
-  if (request.decision !== "accepted" && request.decision !== "rejected") {
-    return "Review decision is invalid.";
-  }
-  if (
-    !Array.isArray(request.evidence) ||
-    request.evidence.length > 20 ||
-    !request.evidence.every((item) => isBoundedNonEmptyString(item, 4_096))
-  ) {
+  const issue = validateNotesCompletionReviewFields(request);
+  if (issue?.code === "unknown-decision") return "Review decision is invalid.";
+  if (issue?.code === "invalid-evidence") {
     return "Review evidence must contain up to 20 bounded items.";
   }
-  if (request.decision === "accepted" && request.evidence.length === 0) {
+  if (issue?.code === "accepted-requires-evidence") {
     return "Accepted reviews require evidence.";
   }
-  if (request.reason !== null && !isBoundedNonEmptyString(request.reason, 1_024)) {
-    return "Review reason must be bounded or null.";
-  }
-  if (request.decision === "rejected" && request.reason === null) {
+  if (issue?.code === "invalid-reason") return "Review reason must be bounded or null.";
+  if (issue?.code === "rejected-requires-reason") {
     return "Rejected reviews require a reason.";
   }
   return validateSession(request.expectedSession, "expectedSession")?.message ?? null;
@@ -1357,13 +1311,13 @@ export class ProjectNotesRepository {
         error: validationError("attemptedAt", "expected an ISO timestamp"),
       };
     }
-    if (!REMINDER_DELIVERY_CHANNELS.has(request.channel)) {
+    if (!isNotesReminderDeliveryChannel(request.channel)) {
       return {
         status: "invalid",
         error: validationError("channel", "unknown delivery channel"),
       };
     }
-    if (!REMINDER_PERMISSIONS.has(request.permission)) {
+    if (!isNotesReminderPermission(request.permission)) {
       return {
         status: "invalid",
         error: validationError("permission", "unknown notification permission"),
@@ -1376,17 +1330,10 @@ export class ProjectNotesRepository {
       };
     }
 
-    const projectKey = canonicalProjectKey(cwd);
-    const paths = this.paths(cwd);
-    await this.ensureDirectory(paths.directory);
-    return this.lock(paths.primary, async () => {
-      const current = await this.readCurrent(paths, projectKey);
-      if (current.status === "missing" || current.status === "corrupt") return current;
-      const phaseIndex = current.envelope.document.phases.findIndex(
-        (phase) => phase.id === request.phaseId,
-      );
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
-      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      const currentPhase = current.document.phases[phaseIndex]!;
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (currentPhase.status === "done" || currentPhase.status === "cancelled") {
         return { status: "phase-inactive" };
@@ -1403,7 +1350,7 @@ export class ProjectNotesRepository {
         return { status: "not-due" };
       }
 
-      const document = structuredClone(current.envelope.document);
+      const document = structuredClone(current.document);
       const phase = document.phases[phaseIndex]!;
       phase.reminder!.lastDelivery = {
         occurrenceKey: request.occurrenceKey,
@@ -1411,18 +1358,10 @@ export class ProjectNotesRepository {
         channel: request.channel,
         permission: request.permission,
       };
-      const validation = validateNotesDocumentV3(document);
-      if (!validation.ok) {
-        throw new Error(`Reminder delivery created invalid Notes: ${validation.error.path}`);
-      }
-      const next: StoredProjectNotesV1 = {
-        storeVersion: 1,
-        projectKey,
-        revision: current.envelope.revision + 1,
-        document: validation.document,
-      };
-      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
-      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Reminder delivery created invalid Notes",
+      });
       return {
         status: "ok",
         snapshot: toSnapshot(next),
@@ -1435,18 +1374,11 @@ export class ProjectNotesRepository {
     cwd: string,
     request: ProjectNotesRoadmapStatusRequest,
   ): Promise<ProjectNotesRoadmapStatusOutcome> {
-    const projectKey = canonicalProjectKey(cwd);
-    const paths = this.paths(cwd);
-    await this.ensureDirectory(paths.directory);
-    return this.lock(paths.primary, async () => {
-      const current = await this.readCurrent(paths, projectKey);
-      if (current.status === "missing" || current.status === "corrupt") return current;
-      const revision = current.envelope.revision;
-      const phaseIndex = current.envelope.document.phases.findIndex(
-        (phase) => phase.id === request.phaseId,
-      );
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
-      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      const currentPhase = current.document.phases[phaseIndex]!;
       const normalizedReferences = request.proposedReferences.map(
         normalizeRoadmapProposedReference,
       );
@@ -1488,7 +1420,7 @@ export class ProjectNotesRepository {
       const referenceError = validateRoadmapProposedReferences(normalizedReferences, timestamp);
       if (referenceError) return { status: "invalid-reference", ...referenceError };
 
-      const document = structuredClone(current.envelope.document);
+      const document = structuredClone(current.document);
       const phase = document.phases[phaseIndex]!;
       const lifecycleOutcome = applyPhaseLifecycleTransition(
         phase,
@@ -1525,14 +1457,10 @@ export class ProjectNotesRepository {
         }
         throw new Error(`Roadmap reconciliation created invalid Notes: ${validation.error.path}`);
       }
-      const next: StoredProjectNotesV1 = {
-        storeVersion: 1,
-        projectKey,
-        revision: revision + 1,
-        document: validation.document,
-      };
-      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
-      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      const next = await this.commitDocument(paths, current, validation.document, {
+        validationMode: "validated",
+        context: "Roadmap reconciliation created invalid Notes",
+      });
       return {
         status: "committed",
         snapshot: toSnapshot(next),
@@ -1560,19 +1488,14 @@ export class ProjectNotesRepository {
         message: "Final reviews require a review status transition.",
       };
     }
-    const projectKey = canonicalProjectKey(cwd);
-    const paths = this.paths(cwd);
-    await this.ensureDirectory(paths.directory);
-    return this.lock(paths.primary, async () => {
-      const current = await this.readCurrent(paths, projectKey);
-      if (current.status === "missing" || current.status === "corrupt") return current;
-      const revision = current.envelope.revision;
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
       const statusRequest = request.statusUpdate;
-      const phaseIndex = current.envelope.document.phases.findIndex(
+      const phaseIndex = current.document.phases.findIndex(
         (phase) => phase.id === statusRequest.phaseId,
       );
       if (phaseIndex < 0) return { status: "phase-not-found" };
-      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      const currentPhase = current.document.phases[phaseIndex]!;
       if (currentPhase.session === null) return { status: "phase-not-bound" };
       const normalizedReferences = statusRequest.proposedReferences.map(
         normalizeRoadmapProposedReference,
@@ -1647,7 +1570,7 @@ export class ProjectNotesRepository {
       const referenceError = validateRoadmapProposedReferences(normalizedReferences, timestamp);
       if (referenceError) return { status: "invalid-reference", ...referenceError };
 
-      const statusDocument = structuredClone(current.envelope.document);
+      const statusDocument = structuredClone(current.document);
       const statusOutcome = "evidence-only" as const;
       const proposals = appendRoadmapStatusEvent(
         statusDocument,
@@ -1681,7 +1604,10 @@ export class ProjectNotesRepository {
           `Final review reconciliation created invalid Notes: ${validation.error.path}`,
         );
       }
-      const next = await this.commitValidatedDocument(paths, current.envelope, validation.document);
+      const next = await this.commitDocument(paths, current, validation.document, {
+        validationMode: "validated",
+        context: "Final review reconciliation created invalid Notes",
+      });
       return {
         status: "committed",
         snapshot: toSnapshot(next),
@@ -1699,18 +1625,11 @@ export class ProjectNotesRepository {
   ): Promise<ProjectNotesImplementationCheckpointOutcome> {
     const invalid = validateImplementationCheckpointRequest(request);
     if (invalid) return { status: "invalid-checkpoint", message: invalid };
-    const projectKey = canonicalProjectKey(cwd);
-    const paths = this.paths(cwd);
-    await this.ensureDirectory(paths.directory);
-    return this.lock(paths.primary, async () => {
-      const current = await this.readCurrent(paths, projectKey);
-      if (current.status === "missing" || current.status === "corrupt") return current;
-      const revision = current.envelope.revision;
-      const phaseIndex = current.envelope.document.phases.findIndex(
-        (phase) => phase.id === request.phaseId,
-      );
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
-      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      const currentPhase = current.document.phases[phaseIndex]!;
       const prior = currentPhase.roadmapEvents.find(
         (event): event is NotesRoadmapImplementationCheckpoint =>
           event.type === "implementation-checkpoint" && event.id === request.checkpointId,
@@ -1728,7 +1647,7 @@ export class ProjectNotesRepository {
         return { status: "stale-session" };
       }
 
-      const document = structuredClone(current.envelope.document);
+      const document = structuredClone(current.document);
       const phase = document.phases[phaseIndex]!;
       const timestamp = chronologicalRoadmapTimestamp(phase, request.timestamp);
       phase.roadmapEvents.push({
@@ -1742,20 +1661,10 @@ export class ProjectNotesRepository {
       });
       phase.updatedAt = timestamp;
       document.updatedAt = timestamp;
-      const validation = validateNotesDocumentV3(document);
-      if (!validation.ok) {
-        throw new Error(
-          `Implementation checkpoint created invalid Notes: ${validation.error.path}`,
-        );
-      }
-      const next: StoredProjectNotesV1 = {
-        storeVersion: 1,
-        projectKey,
-        revision: revision + 1,
-        document: validation.document,
-      };
-      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
-      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Implementation checkpoint created invalid Notes",
+      });
       return {
         status: "committed",
         snapshot: toSnapshot(next),
@@ -1773,18 +1682,13 @@ export class ProjectNotesRepository {
       return { status: "invalid-review", message: normalizedReview.message };
     }
     const reviewRequest = normalizedReview.request;
-    const projectKey = canonicalProjectKey(cwd);
-    const paths = this.paths(cwd);
-    await this.ensureDirectory(paths.directory);
-    return this.lock(paths.primary, async () => {
-      const current = await this.readCurrent(paths, projectKey);
-      if (current.status === "missing" || current.status === "corrupt") return current;
-      const revision = current.envelope.revision;
-      const phaseIndex = current.envelope.document.phases.findIndex(
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex(
         (phase) => phase.id === reviewRequest.phaseId,
       );
       if (phaseIndex < 0) return { status: "phase-not-found" };
-      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      const currentPhase = current.document.phases[phaseIndex]!;
       const prior = currentPhase.roadmapEvents.find(
         (event): event is NotesRoadmapCompletionReview =>
           event.type === "completion-review" && event.id === reviewRequest.reviewId,
@@ -1810,7 +1714,7 @@ export class ProjectNotesRepository {
 
       const timestamp = chronologicalRoadmapTimestamp(currentPhase, reviewRequest.timestamp);
       const appended = buildCompletionReviewAppend(
-        current.envelope.document,
+        current.document,
         phaseIndex,
         reviewRequest,
         timestamp,
@@ -1819,11 +1723,10 @@ export class ProjectNotesRepository {
       if (!appended.ok) {
         return { status: "invalid-review", message: appended.message };
       }
-      const validation = validateNotesDocumentV3(appended.document);
-      if (!validation.ok) {
-        throw new Error(`Completion review created invalid Notes: ${validation.error.path}`);
-      }
-      const next = await this.commitValidatedDocument(paths, current.envelope, validation.document);
+      const next = await this.commitDocument(paths, current, appended.document, {
+        validationMode: "validated",
+        context: "Completion review created invalid Notes",
+      });
       return {
         status: "committed",
         snapshot: toSnapshot(next),
@@ -1838,27 +1741,20 @@ export class ProjectNotesRepository {
     phaseId: string,
     createBinding: (context: FrozenPhaseLaunchContext) => Promise<NotesSessionLink>,
   ): Promise<ProjectNotesPhaseLaunchOutcome> {
-    const projectKey = canonicalProjectKey(cwd);
-    const paths = this.paths(cwd);
-    await this.ensureDirectory(paths.directory);
-    return this.lock(paths.primary, async () => {
-      const current = await this.readCurrent(paths, projectKey);
-      if (current.status === "missing" || current.status === "corrupt") return current;
-      const phaseIndex = current.envelope.document.phases.findIndex(
-        (phase) => phase.id === phaseId,
-      );
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
-      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      const currentPhase = current.document.phases[phaseIndex]!;
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (currentPhase.status === "done") return { status: "done-terminal" };
       const referencesById = new Map(
-        current.envelope.document.references.map((reference) => [reference.id, reference]),
+        current.document.references.map((reference) => [reference.id, reference]),
       );
       const references = currentPhase.referenceIds.map((id) => referencesById.get(id)!);
       if (currentPhase.session && currentPhase.session.sessionPath !== null) {
         return {
           status: "already-bound",
-          snapshot: toSnapshot(current.envelope),
+          snapshot: toSnapshot(current),
           phase: structuredClone(currentPhase),
           references: structuredClone(references),
           session: { ...currentPhase.session },
@@ -1866,7 +1762,7 @@ export class ProjectNotesRepository {
       }
 
       const frozen: FrozenPhaseLaunchContext = {
-        projectKey,
+        projectKey: current.projectKey,
         phase: structuredClone(currentPhase),
         references: structuredClone(references),
       };
@@ -1877,7 +1773,7 @@ export class ProjectNotesRepository {
       ) {
         throw new Error("Phase binding callback returned an invalid session link.");
       }
-      const document = structuredClone(current.envelope.document);
+      const document = structuredClone(current.document);
       const boundPhase = document.phases[phaseIndex]!;
       boundPhase.session = { ...session };
       const timestamp = chronologicalLifecycleTimestamp(boundPhase, new Date().toISOString());
@@ -1894,14 +1790,10 @@ export class ProjectNotesRepository {
       );
       if (transition !== "updated") boundPhase.updatedAt = timestamp;
       document.updatedAt = timestamp;
-      const next: StoredProjectNotesV1 = {
-        storeVersion: 1,
-        projectKey,
-        revision: current.envelope.revision + 1,
-        document,
-      };
-      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
-      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "trusted",
+        context: "Phase launch commit",
+      });
       return {
         status: "accepted",
         snapshot: toSnapshot(next),
@@ -1933,23 +1825,16 @@ export class ProjectNotesRepository {
     phaseId: string,
     transition: ProjectNotesPhaseLifecycleTransition,
   ): Promise<ProjectNotesPhaseLifecycleOutcome> {
-    if (!isPhaseStatus(transition.status) || !isLifecycleEventSource(transition.source)) {
+    if (!isNotesPhaseStatus(transition.status) || !isNotesLifecycleEventSource(transition.source)) {
       throw new Error("Cannot record an invalid automatic phase lifecycle transition.");
     }
     if (!Number.isFinite(Date.parse(transition.timestamp))) {
       throw new Error("Cannot record a phase lifecycle transition with an invalid timestamp.");
     }
-    const projectKey = canonicalProjectKey(cwd);
-    const paths = this.paths(cwd);
-    await this.ensureDirectory(paths.directory);
-    return this.lock(paths.primary, async () => {
-      const current = await this.readCurrent(paths, projectKey);
-      if (current.status === "missing" || current.status === "corrupt") return current;
-      const phaseIndex = current.envelope.document.phases.findIndex(
-        (phase) => phase.id === phaseId,
-      );
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
-      const currentPhase = current.envelope.document.phases[phaseIndex]!;
+      const currentPhase = current.document.phases[phaseIndex]!;
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (
         transition.expectedSession !== undefined &&
@@ -1958,28 +1843,24 @@ export class ProjectNotesRepository {
         return { status: "stale-session" };
       }
       if (currentPhase.overrides.status !== null) {
-        const document = structuredClone(current.envelope.document);
+        const document = structuredClone(current.document);
         const phase = document.phases[phaseIndex]!;
         const timestamp = chronologicalLifecycleTimestamp(phase, transition.timestamp);
         const pending = pendingAutomaticLifecycleTransition(phase, transition, timestamp);
         if (isDeepStrictEqual(phase.pendingAutomaticLifecycleTransition, pending)) {
           return {
             status: "manual-override",
-            snapshot: toSnapshot(current.envelope),
+            snapshot: toSnapshot(current),
             phase: structuredClone(currentPhase),
           };
         }
         phase.pendingAutomaticLifecycleTransition = pending;
         phase.updatedAt = timestamp;
         document.updatedAt = timestamp;
-        const next: StoredProjectNotesV1 = {
-          storeVersion: 1,
-          projectKey,
-          revision: current.envelope.revision + 1,
-          document,
-        };
-        await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
-        await this.atomicWrite(paths.primary, serializeEnvelope(next));
+        const next = await this.commitDocument(paths, current, document, {
+          validationMode: "trusted",
+          context: "Suppressed phase lifecycle commit",
+        });
         return {
           status: "manual-override",
           snapshot: toSnapshot(next),
@@ -1989,19 +1870,15 @@ export class ProjectNotesRepository {
       if (currentPhase.status === "done") return { status: "done-terminal" };
       if (currentPhase.status === transition.status) return { status: "same-status" };
 
-      const document = structuredClone(current.envelope.document);
+      const document = structuredClone(current.document);
       const phase = document.phases[phaseIndex]!;
       const timestamp = chronologicalLifecycleTimestamp(phase, transition.timestamp);
       applyPhaseLifecycleTransition(phase, { ...transition, timestamp }, this.createId);
       document.updatedAt = timestamp;
-      const next: StoredProjectNotesV1 = {
-        storeVersion: 1,
-        projectKey,
-        revision: current.envelope.revision + 1,
-        document,
-      };
-      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
-      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "trusted",
+        context: "Phase lifecycle commit",
+      });
       return {
         status: "ok",
         snapshot: toSnapshot(next),
@@ -2031,44 +1908,56 @@ export class ProjectNotesRepository {
     phaseId: string,
     mutate: (phase: NotesPhase) => void,
   ): Promise<ProjectNotesPhaseLinkOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      mutate(phase);
+      document.updatedAt = new Date().toISOString();
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "trusted",
+        context: "Phase session link commit",
+      });
+      return { status: "ok", snapshot: toSnapshot(next), phase: structuredClone(phase) };
+    });
+  }
+
+  private async withLockedCurrent<T>(
+    cwd: string,
+    operation: (paths: ProjectNotesPaths, current: StoredProjectNotesV1) => Promise<T>,
+  ): Promise<T | UnavailableCurrentState> {
     const projectKey = canonicalProjectKey(cwd);
     const paths = this.paths(cwd);
     await this.ensureDirectory(paths.directory);
     return this.lock(paths.primary, async () => {
       const current = await this.readCurrent(paths, projectKey);
       if (current.status === "missing" || current.status === "corrupt") return current;
-      const phaseIndex = current.envelope.document.phases.findIndex(
-        (phase) => phase.id === phaseId,
-      );
-      if (phaseIndex < 0) return { status: "phase-not-found" };
-      const currentPhase = current.envelope.document.phases[phaseIndex]!;
-      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
-      const document = structuredClone(current.envelope.document);
-      const phase = document.phases[phaseIndex]!;
-      mutate(phase);
-      document.updatedAt = new Date().toISOString();
-      const next: StoredProjectNotesV1 = {
-        storeVersion: 1,
-        projectKey,
-        revision: current.envelope.revision + 1,
-        document,
-      };
-      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
-      await this.atomicWrite(paths.primary, serializeEnvelope(next));
-      return { status: "ok", snapshot: toSnapshot(next), phase: structuredClone(phase) };
+      return operation(paths, current.envelope);
     });
   }
 
-  private async commitValidatedDocument(
+  private async commitDocument(
     paths: ProjectNotesPaths,
     current: StoredProjectNotesV1,
     document: NotesDocumentV3,
+    options: CommitDocumentOptions,
   ): Promise<StoredProjectNotesV1> {
+    let committedDocument = document;
+    if (options.validationMode === "validated") {
+      const validation = validateNotesDocumentV3(document);
+      if (!validation.ok) {
+        throw new Error(`${options.context}: ${validation.error.path}`);
+      }
+      committedDocument = validation.document;
+    }
     const next: StoredProjectNotesV1 = {
       storeVersion: 1,
       projectKey: current.projectKey,
       revision: current.revision + 1,
-      document,
+      document: committedDocument,
     };
     await this.atomicWrite(paths.backup, serializeEnvelope(current));
     await this.atomicWrite(paths.primary, serializeEnvelope(next));

@@ -444,7 +444,10 @@ async function executeRoadmap(
 }
 
 function roadmapHost(
-  repository: Pick<ProjectNotesRepository, "recordRoadmapStatusUpdate">,
+  repository: Pick<
+    ProjectNotesRepository,
+    "recordRoadmapStatusUpdate" | "recordRoadmapFinalReview"
+  >,
   cwd: string,
   reconciliations: AppSidecarRoadmapReconciliationCoordinator,
   projectAutopilot: AppSidecarProjectAutopilotState,
@@ -2133,6 +2136,9 @@ describe("production launchBoundPhase orchestration", () => {
         await updateGate.promise;
         return second.repository.recordRoadmapStatusUpdate(...args);
       },
+      recordRoadmapFinalReview: vi.fn(async () => {
+        throw new Error("Final review is not used by this status-only fixture.");
+      }),
     };
     const updateHost = roadmapHost(
       pausingRepository,
@@ -2169,6 +2175,9 @@ describe("production launchBoundPhase orchestration", () => {
         await gate.promise;
         return repository.recordRoadmapStatusUpdate(...args);
       },
+      recordRoadmapFinalReview: vi.fn(async () => {
+        throw new Error("Final review is not used by this status-only fixture.");
+      }),
     };
     const host = roadmapHost(
       pausingRepository,

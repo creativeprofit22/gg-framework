@@ -5,6 +5,7 @@ import { createRef } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
+import { dateToLocalInputValue } from "./roadmap-reminders";
 import {
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
@@ -603,6 +604,62 @@ describe("ProjectNotes", () => {
     });
   });
 
+  it("keeps the alert active and identifies a resume-stage failure", async () => {
+    const cwd = "/work/reminder-resume-failure";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("reminder resume failure");
+    const selected = phase("resume-failure", "in-progress", true);
+    selected.session = { sessionId: "bound", sessionPath: "/sessions/bound" };
+    document.phases = [selected];
+    client.seed(cwd, document);
+    client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+    const onResumePhase = vi.fn(async () => {
+      throw new Error("Session transport failed.");
+    });
+
+    render(<ProjectNotes cwd={cwd} client={client} onResumePhase={onResumePhase} />);
+    const alert = await screen.findByRole("region", { name: "Phase resume-failure" });
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+
+    await waitFor(() =>
+      expect(alert.textContent).toContain("Couldn’t resume this phase. Session transport failed."),
+    );
+    expect(onResumePhase).toHaveBeenCalledTimes(1);
+    expect(
+      client.snapshots.get(canonicalProjectKey(cwd))?.document.phases[0]?.reminder,
+    ).not.toBeNull();
+  });
+
+  it("reports successful resume separately from typed reminder cleanup failure", async () => {
+    const cwd = "/work/reminder-cleanup-failure";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("reminder cleanup failure");
+    const selected = phase("cleanup-failure", "in-progress", true);
+    selected.session = { sessionId: "bound", sessionPath: "/sessions/bound" };
+    document.phases = [selected];
+    client.seed(cwd, document);
+    client.reserveOutcomes.push(reminderReservation(selected), { status: "none" });
+    client.saveOutcome = {
+      status: "invalid",
+      error: { path: "phases[0].reminder", message: "Invalid reminder mutation" },
+    };
+    const onResumePhase = vi.fn(async () => undefined);
+
+    render(<ProjectNotes cwd={cwd} client={client} onResumePhase={onResumePhase} />);
+    const alert = await screen.findByRole("region", { name: "Phase cleanup-failure" });
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+
+    await waitFor(() =>
+      expect(alert.textContent).toContain(
+        "The phase resumed, but reminder cleanup did not complete. Project Notes rejected the reminder change. Review it and try again.",
+      ),
+    );
+    expect(onResumePhase).toHaveBeenCalledTimes(1);
+    expect(
+      client.snapshots.get(canonicalProjectKey(cwd))?.document.phases[0]?.reminder,
+    ).not.toBeNull();
+  });
+
   it("opens an unbound reminder directly on its Roadmap detail without clearing the schedule", async () => {
     const cwd = "/work/open-reminder";
     const client = new FakeProjectNotesClient(cwd);
@@ -649,6 +706,152 @@ describe("ProjectNotes", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save custom time" }));
     expect(await screen.findByText("Choose a valid future local date and time.")).toBeTruthy();
     expect(custom.value).toBe("2020-01-01T09:00");
+  });
+
+  it("refreshes pristine phase fields and blocks dirty fields after an authoritative edit", async () => {
+    const cwd = "/work/concurrent-phase-draft";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("concurrent phase draft");
+    const selected = phase("concurrent-draft", "planning");
+    initial.phases = [selected];
+    client.seed(cwd, initial);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase(selected.title);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    const refreshed = structuredClone(initial);
+    refreshed.phases[0]!.title = "Authoritative refreshed title";
+    refreshed.phases[0]!.goal = "Authoritative refreshed goal";
+    refreshed.phases[0]!.doneWhen = ["Authoritative refreshed criterion"];
+    refreshed.phases[0]!.updatedAt = "2026-07-15T12:01:00.000Z";
+    act(() => client.publish(cwd, refreshed, 2));
+
+    await waitFor(() =>
+      expect((screen.getByLabelText("Edit phase title") as HTMLInputElement).value).toBe(
+        "Authoritative refreshed title",
+      ),
+    );
+    expect((screen.getByLabelText("Edit goal") as HTMLTextAreaElement).value).toBe(
+      "Authoritative refreshed goal",
+    );
+    expect((screen.getByLabelText("Edit Done when") as HTMLTextAreaElement).value).toBe(
+      "Authoritative refreshed criterion",
+    );
+    expect(screen.queryByText(/This phase changed in another window/)).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Edit phase title"), {
+      target: { value: "Local draft title" },
+    });
+    fireEvent.change(screen.getByLabelText("Edit goal"), {
+      target: { value: "Local draft goal" },
+    });
+    fireEvent.change(screen.getByLabelText("Edit Done when"), {
+      target: { value: "Local draft criterion" },
+    });
+
+    const concurrent = structuredClone(refreshed);
+    concurrent.phases[0]!.title = "Concurrent title";
+    concurrent.phases[0]!.goal = "Concurrent goal";
+    concurrent.phases[0]!.doneWhen = ["Concurrent criterion"];
+    concurrent.phases[0]!.updatedAt = "2026-07-15T12:02:00.000Z";
+    act(() => client.publish(cwd, concurrent, 3));
+
+    expect(await screen.findByText(/This phase changed in another window/)).toBeTruthy();
+    expect((screen.getByLabelText("Edit phase title") as HTMLInputElement).value).toBe(
+      "Local draft title",
+    );
+    expect((screen.getByLabelText("Edit goal") as HTMLTextAreaElement).value).toBe(
+      "Local draft goal",
+    );
+    expect((screen.getByLabelText("Edit Done when") as HTMLTextAreaElement).value).toBe(
+      "Local draft criterion",
+    );
+    expect(
+      (screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(client.snapshots.get(canonicalProjectKey(cwd))?.document.phases[0]).toMatchObject({
+      title: "Concurrent title",
+      goal: "Concurrent goal",
+      doneWhen: ["Concurrent criterion"],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload latest values" }));
+    expect((screen.getByLabelText("Edit phase title") as HTMLInputElement).value).toBe(
+      "Concurrent title",
+    );
+    expect((screen.getByLabelText("Edit goal") as HTMLTextAreaElement).value).toBe(
+      "Concurrent goal",
+    );
+    expect((screen.getByLabelText("Edit Done when") as HTMLTextAreaElement).value).toBe(
+      "Concurrent criterion",
+    );
+    expect(
+      (screen.getByRole("button", { name: "Save changes" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("refreshes pristine reminder fields and blocks dirty scheduling after replacement", async () => {
+    const cwd = "/work/concurrent-reminder-draft";
+    const client = new FakeProjectNotesClient(cwd);
+    const initial = notes("concurrent reminder draft");
+    const selected = phase("concurrent-reminder", "planning", true);
+    initial.phases = [selected];
+    client.seed(cwd, initial);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase(selected.title);
+    const noteInput = screen.getByLabelText("Reminder note (optional)") as HTMLTextAreaElement;
+    const timeInput = screen.getByLabelText("Choose local date and time") as HTMLInputElement;
+    const refreshedDueAt = "2027-08-01T10:30:00.000Z";
+    const refreshed = structuredClone(initial);
+    refreshed.phases[0]!.updatedAt = "2026-07-15T12:01:00.000Z";
+    refreshed.phases[0]!.reminder = {
+      ...refreshed.phases[0]!.reminder!,
+      occurrenceKey: "occurrence-refreshed",
+      note: "Authoritative refreshed note",
+      dueAt: refreshedDueAt,
+    };
+    act(() => client.publish(cwd, refreshed, 2));
+
+    await waitFor(() => expect(noteInput.value).toBe("Authoritative refreshed note"));
+    expect(timeInput.value).toBe(dateToLocalInputValue(new Date(refreshedDueAt)));
+    expect(screen.queryByText(/This reminder changed in another window/)).toBeNull();
+
+    fireEvent.change(noteInput, { target: { value: "Local reminder note" } });
+    fireEvent.change(timeInput, { target: { value: "2027-09-02T09:45" } });
+
+    const concurrentDueAt = "2027-10-03T14:15:00.000Z";
+    const concurrent = structuredClone(refreshed);
+    concurrent.phases[0]!.updatedAt = "2026-07-15T12:02:00.000Z";
+    concurrent.phases[0]!.reminder = {
+      ...concurrent.phases[0]!.reminder!,
+      occurrenceKey: "occurrence-concurrent",
+      note: "Concurrent reminder note",
+      dueAt: concurrentDueAt,
+    };
+    act(() => client.publish(cwd, concurrent, 3));
+
+    expect(await screen.findByText(/This reminder changed in another window/)).toBeTruthy();
+    expect(noteInput.value).toBe("Local reminder note");
+    expect(timeInput.value).toBe("2027-09-02T09:45");
+    expect(
+      (screen.getByRole("button", { name: "Save custom time" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      client.snapshots.get(canonicalProjectKey(cwd))?.document.phases[0]?.reminder,
+    ).toMatchObject({
+      occurrenceKey: "occurrence-concurrent",
+      note: "Concurrent reminder note",
+      dueAt: concurrentDueAt,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Reload latest reminder" }));
+    expect(noteInput.value).toBe("Concurrent reminder note");
+    expect(timeInput.value).toBe(dateToLocalInputValue(new Date(concurrentDueAt)));
+    expect(
+      (screen.getByRole("button", { name: "Save custom time" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
   });
 
   it("updates a mounted Roadmap row and detail when a future reminder becomes due", async () => {

@@ -214,7 +214,6 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
     dependencies.broadcastNotesSnapshot(outcome.snapshot);
     const previousSession = dependencies.getSession();
     dependencies.replaceSession(candidate.session);
-    let ownsPreviousSession = true;
     try {
       dependencies.bindSessionEvents(candidate.session);
       candidate.session.setIdealReviewSuppressed(dependencies.autopilotEnabled);
@@ -227,10 +226,7 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
       });
       await dependencies.enterPlanMode(`Plan Roadmap phase: ${outcome.phase.title}`);
     } finally {
-      if (ownsPreviousSession) {
-        ownsPreviousSession = false;
-        await Promise.resolve(previousSession.dispose()).catch(() => {});
-      }
+      await Promise.resolve(previousSession.dispose()).catch(() => {});
     }
 
     dependencies.respond(202, {

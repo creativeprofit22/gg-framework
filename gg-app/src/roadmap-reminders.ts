@@ -3,6 +3,7 @@ import { error as logError } from "@tauri-apps/plugin-log";
 import { isSoundEnabled } from "./sounds";
 import type {
   NotesClient,
+  NotesReminderMutationResult,
   NotesReminderPermission,
   ProjectNotesSnapshot,
   ReminderClaimOutcome,
@@ -63,6 +64,38 @@ export function localDateTimeToIso(value: string, now: Date): string | null {
 export function dateToLocalInputValue(value: Date): string {
   const pad = (part: number): string => String(part).padStart(2, "0");
   return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`;
+}
+
+export function reminderMutationResultMessage(
+  result: NotesReminderMutationResult,
+  context: "standalone" | "resume-cleanup" = "standalone",
+): string {
+  let message: string;
+  if (result.status === "committed") {
+    message = "Reminder saved.";
+  } else if (result.status === "invalid-time") {
+    message = "Choose a future reminder time.";
+  } else if (result.status === "missing-reminder") {
+    message = "This reminder is no longer scheduled.";
+  } else if (result.status === "stale-occurrence") {
+    message = "This reminder changed in another window. Review the latest reminder.";
+  } else if (
+    result.status === "missing-phase" ||
+    result.status === "archived-phase" ||
+    result.status === "inactive-phase"
+  ) {
+    message = "This phase is no longer eligible for reminders.";
+  } else if (result.reason === "validation") {
+    message = "Project Notes rejected the reminder change. Review it and try again.";
+  } else if (result.reason === "storage") {
+    message = "The reminder change could not be saved to Notes storage. Try again.";
+  } else {
+    message = "Reminder storage is unavailable. Reopen the project and try again.";
+  }
+
+  return context === "resume-cleanup" && result.status !== "committed"
+    ? `The phase resumed, but reminder cleanup did not complete. ${message}`
+    : message;
 }
 
 function isSameLocalDate(left: Date, right: Date): boolean {

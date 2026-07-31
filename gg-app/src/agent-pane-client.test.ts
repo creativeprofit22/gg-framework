@@ -270,12 +270,36 @@ describe("pane agent client", () => {
         note: "Private in-app note",
       },
     } as const;
-    invoke.mockResolvedValueOnce(reserved);
+    const reservedWithoutPath = {
+      ...reserved,
+      phase: {
+        ...reserved.phase,
+        session: { ...reserved.phase.session, sessionPath: null },
+      },
+    } as const;
+    invoke.mockResolvedValueOnce(reserved).mockResolvedValueOnce(reservedWithoutPath);
     await expect(client.reserveReminder(true)).resolves.toBe(reserved);
+    await expect(client.reserveReminder(true)).resolves.toBe(reservedWithoutPath);
 
     for (const invalid of [
       { ...reserved, extra: true },
       { ...reserved, phase: { ...reserved.phase, sourcePrompt: "leak" } },
+      {
+        ...reserved,
+        phase: { ...reserved.phase, session: { ...reserved.phase.session, sessionId: "" } },
+      },
+      {
+        ...reserved,
+        phase: { ...reserved.phase, session: { ...reserved.phase.session, sessionId: "   " } },
+      },
+      {
+        ...reserved,
+        phase: { ...reserved.phase, session: { ...reserved.phase.session, sessionPath: "" } },
+      },
+      {
+        ...reserved,
+        phase: { ...reserved.phase, session: { ...reserved.phase.session, sessionPath: " \t " } },
+      },
       { ...reserved, reminder: { ...reserved.reminder, dueAt: "soon" } },
       { status: "deferred" },
     ]) {
@@ -322,14 +346,26 @@ describe("pane agent client", () => {
       status: "already-bound",
       packageTokenCount: 0,
     } as const;
-    invoke.mockResolvedValueOnce(accepted).mockResolvedValueOnce(alreadyBound);
+    const acceptedWithoutPath = {
+      ...accepted,
+      session: { ...accepted.session, sessionPath: null },
+    } as const;
+    invoke
+      .mockResolvedValueOnce(accepted)
+      .mockResolvedValueOnce(alreadyBound)
+      .mockResolvedValueOnce(acceptedWithoutPath);
     await expect(client.startPhase("phase-21")).resolves.toBe(accepted);
     await expect(client.startPhase("phase-21")).resolves.toBe(alreadyBound);
+    await expect(client.startPhase("phase-21")).resolves.toBe(acceptedWithoutPath);
 
     for (const invalid of [
       { ...accepted, extra: true },
       { ...accepted, packageTokenCount: -1 },
       { ...accepted, session: { sessionId: "session-1" } },
+      { ...accepted, session: { ...accepted.session, sessionId: "" } },
+      { ...accepted, session: { ...accepted.session, sessionId: "   " } },
+      { ...accepted, session: { ...accepted.session, sessionPath: "" } },
+      { ...accepted, session: { ...accepted.session, sessionPath: " \t " } },
       { ...alreadyBound, packageTokenCount: 1 },
       {
         status: "failed",

@@ -1,5 +1,6 @@
 import {
   isNotesDocumentV3,
+  isNullableNotesSessionLink,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
   type NotesDocumentV3,
   type NotesPhase,
@@ -7,7 +8,6 @@ import {
   type NotesReminder,
   type NotesReminderDeliveryChannel,
   type NotesReminderPermission,
-  type NotesSessionLink,
   type NotesValidationError,
   type ProjectNotesCorruptReason,
   type ProjectNotesCorruption,
@@ -217,7 +217,6 @@ export type NotesRoadmapMutationResult =
   | { status: "missing-phase"; phaseId: string }
   | { status: "archived-phase"; phaseId: string }
   | { status: "missing-proposal"; phaseId: string; proposalId: string }
-  | { status: "no-protected-update"; phaseId: string }
   | { status: "failed"; reason: NotesOperationFailureReason };
 
 export type NotesPromptSaveInput =
@@ -317,18 +316,6 @@ export type NotesAuthorityDiagnostic =
   | { kind: "save-failed"; error: unknown }
   | { kind: "fallback-storage"; load: NotesLoadResult; save: NotesSaveResult | null };
 
-function isNotesSessionLink(value: unknown): value is NotesSessionLink {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    hasExactKeys(value as Record<string, unknown>, ["sessionId", "sessionPath"]) &&
-    typeof (value as NotesSessionLink).sessionId === "string" &&
-    ((value as NotesSessionLink).sessionPath === null ||
-      typeof (value as NotesSessionLink).sessionPath === "string")
-  );
-}
-
 export function isProjectNotesSnapshot(value: unknown): value is ProjectNotesSnapshot {
   return (
     isRecord(value) &&
@@ -398,7 +385,7 @@ export function isReminderReserveOutcome(value: unknown): value is ReminderReser
     hasExactKeys(value.phase, ["id", "title", "session"]) &&
     isNonEmptyString(value.phase.id) &&
     typeof value.phase.title === "string" &&
-    (value.phase.session === null || isNotesSessionLink(value.phase.session)) &&
+    isNullableNotesSessionLink(value.phase.session) &&
     isRecord(value.reminder) &&
     hasExactKeys(value.reminder, ["id", "occurrenceKey", "dueAt", "note"]) &&
     isNonEmptyString(value.reminder.id) &&

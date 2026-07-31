@@ -11,12 +11,17 @@ import {
   dateToLocalInputValue,
   laterTodayReminderTime,
   localDateTimeToIso,
+  reminderMutationResultMessage,
   reminderPresetTimes,
   resetReminderPermissionCacheForTests,
   RoadmapReminderDeliveryHost,
   tomorrowReminderTime,
 } from "./roadmap-reminders";
-import type { NotesClient, ReminderReserveOutcome } from "./notes-types";
+import type {
+  NotesClient,
+  NotesReminderMutationResult,
+  ReminderReserveOutcome,
+} from "./notes-types";
 
 const originalTimezone = process.env.TZ;
 
@@ -159,6 +164,55 @@ describe("Roadmap reminder preset calculations", () => {
 
   it("formats exact local input values without UTC drift", () => {
     expect(dateToLocalInputValue(new Date(2027, 0, 2, 9, 5))).toBe("2027-01-02T09:05");
+  });
+});
+
+describe("Roadmap reminder result messaging", () => {
+  it.each([
+    [{ status: "committed", phaseId: "phase-1" }, "Reminder saved."],
+    [{ status: "invalid-time", phaseId: "phase-1" }, "Choose a future reminder time."],
+    [{ status: "missing-reminder", phaseId: "phase-1" }, "This reminder is no longer scheduled."],
+    [
+      {
+        status: "stale-occurrence",
+        phaseId: "phase-1",
+        expectedOccurrenceKey: "old",
+        actualOccurrenceKey: "new",
+      },
+      "This reminder changed in another window. Review the latest reminder.",
+    ],
+    [
+      { status: "inactive-phase", phaseId: "phase-1" },
+      "This phase is no longer eligible for reminders.",
+    ],
+    [
+      { status: "failed", reason: "validation" },
+      "Project Notes rejected the reminder change. Review it and try again.",
+    ],
+    [
+      { status: "failed", reason: "storage" },
+      "The reminder change could not be saved to Notes storage. Try again.",
+    ],
+    [
+      { status: "failed", reason: "unavailable" },
+      "Reminder storage is unavailable. Reopen the project and try again.",
+    ],
+  ] satisfies ReadonlyArray<readonly [NotesReminderMutationResult, string]>)(
+    "maps $0 to typed recovery copy",
+    (result, expected) => {
+      expect(reminderMutationResultMessage(result)).toBe(expected);
+    },
+  );
+
+  it("identifies cleanup as a separate stage after a successful resume", () => {
+    expect(
+      reminderMutationResultMessage(
+        { status: "missing-reminder", phaseId: "phase-1" },
+        "resume-cleanup",
+      ),
+    ).toBe(
+      "The phase resumed, but reminder cleanup did not complete. This reminder is no longer scheduled.",
+    );
   });
 });
 

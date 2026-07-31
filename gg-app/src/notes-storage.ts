@@ -88,7 +88,7 @@ export function parseNotesDocument(raw: string): NotesParseResult {
         migratedFromV2: false,
         migratedArchiveShape: true,
       }
-    : { ok: false, reason: "invalid-shape", error: validated.error };
+    : { ok: false, reason: "invalid-shape", error: migrated.error };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

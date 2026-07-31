@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AppSidecarPhaseCompletionCoordinator,
   autopilotVerdictAcceptsVerificationException,
-  evaluatePhaseCompletion,
   latestVerificationExceptionForReview,
   type PhaseCompletionRepository,
-  type PhaseCompletionReviewDecision,
 } from "./app-sidecar-phase-completion.js";
+import {
+  evaluatePhaseCompletion,
+  type PhaseCompletionReviewDecision,
+} from "./project-notes-completion-policy.js";
 import type {
   NotesPhase,
   NotesRoadmapEvent,

@@ -31,6 +31,15 @@ async function canonicalNotesFixture(): Promise<unknown> {
   ) as unknown;
 }
 
+async function malformedLegacyV3Fixture(): Promise<unknown> {
+  return JSON.parse(
+    await fs.readFile(
+      new URL("../../../fixtures/project-notes-v3-malformed-legacy.json", import.meta.url),
+      "utf8",
+    ),
+  ) as unknown;
+}
+
 function legacyNotes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV2 {
   return {
     version: 2,
@@ -1747,6 +1756,23 @@ describe("project Notes identity and validation", () => {
       expect(await readEnvelope(paths.backup)).toEqual(expectedEnvelope);
     },
   );
+
+  it("returns the shared post-normalization error for malformed legacy v3 Notes", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const fixture = await malformedLegacyV3Fixture();
+
+    expect(validateNotesDocumentV3(fixture)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0]" },
+    });
+    await expect(repository.migrate("/work/malformed-legacy-v3", fixture)).resolves.toEqual({
+      status: "invalid",
+      error: {
+        path: "phases[0].status",
+        message: "unknown phase status",
+      },
+    });
+  });
 
   it("migrates legacy v3 proposal outcomes without inferring override protection", async () => {
     const agentDir = await tempAgentDir();

@@ -1185,6 +1185,50 @@ describe("useProjectNotes sidecar authority", () => {
     });
   });
 
+  it("uses one monotonic timestamp policy for manual and prompt phase creation", async () => {
+    const cwd = "/work/phase-clock-skew";
+    const currentUpdatedAt = "2026-07-25T12:05:00.000Z";
+    const initial = notes("base");
+    initial.updatedAt = currentUpdatedAt;
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const client = server.connect(cwd);
+    const storage = new MemoryStorage();
+    const ids = ["manual-phase", "prompt-phase"];
+    const skewedClock = (): string => NOW;
+    const idFactory = (): string => ids.shift()!;
+    const options = {
+      ...hookOptions(client, storage),
+      clock: skewedClock,
+      idFactory,
+    };
+    const hook = renderHook(() => useProjectNotes(cwd, options));
+    await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
+
+    act(() =>
+      hook.result.current.createPhase({
+        title: "Manual phase",
+        goal: "Keep timestamps monotonic",
+        doneWhen: ["Created"],
+      }),
+    );
+    await waitFor(() => expect(server.snapshots.get(cwd)?.document.phases).toHaveLength(1));
+    await invokeMutation(() =>
+      hook.result.current.savePrompt({
+        kind: "new-draft",
+        title: "Prompt phase",
+        prompt: "Create from prompt",
+      }),
+    );
+
+    const saved = server.snapshots.get(cwd)!.document;
+    expect(saved.updatedAt).toBe(currentUpdatedAt);
+    expect(saved.phases).toMatchObject([
+      { id: "manual-phase", createdAt: currentUpdatedAt, updatedAt: currentUpdatedAt },
+      { id: "prompt-phase", createdAt: currentUpdatedAt, updatedAt: currentUpdatedAt },
+    ]);
+  });
+
   it("updates only an existing phase prompt and refuses a concurrent replacement", async () => {
     const cwd = "/work/project";
     const initial = notes("base");

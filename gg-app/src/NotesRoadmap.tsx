@@ -1,25 +1,35 @@
-import { notesPhaseStatusForRoadmapTransition } from "@kenkaiiii/gg-core/project-notes";
+import {
+  NOTES_PHASE_STATUSES,
+  notesAutomaticStatusAfterOverrideReset,
+} from "@kenkaiiii/gg-core/project-notes";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { referenceRepositoryLabel, referenceSourceLabel } from "./notes-reference";
 import {
   dateToLocalInputValue,
   localDateTimeToIso,
+  reminderMutationResultMessage,
   reminderPresetTimes,
 } from "./roadmap-reminders";
 import type { NotesPhaseInput } from "./useProjectNotes";
 import type {
+  NotesCompletionGateOutcome,
+  NotesCompletionUnmetGateCode,
+  NotesImplementationRunOutcome,
   NotesPhase,
   NotesPhaseStatus,
   NotesReference,
   NotesReferenceOperationResult,
   NotesReminderMutationResult,
+  NotesRoadmapActor,
   NotesRoadmapCompletionReview,
   NotesRoadmapEvent,
   NotesRoadmapImplementationCheckpoint,
   NotesRoadmapMutationResult,
   NotesRoadmapReferenceProposal,
+  NotesRoadmapReviewer,
   NotesRoadmapStatusUpdate,
   NotesSessionLink,
+  NotesVerificationStatus,
   PhaseStartResult,
 } from "./notes-types";
 
@@ -77,16 +87,69 @@ interface ArchiveProps {
   onRestorePhase(id: string): void;
 }
 
-const STATUS_OPTIONS: ReadonlyArray<{ value: NotesPhaseStatus; label: string }> = [
-  { value: "not-started", label: "Not started" },
-  { value: "planning", label: "Planning" },
-  { value: "waiting-for-approval", label: "Waiting for approval" },
-  { value: "in-progress", label: "In progress" },
-  { value: "review", label: "Review" },
-  { value: "done", label: "Done" },
-  { value: "needs-attention", label: "Needs attention" },
-  { value: "cancelled", label: "Cancelled" },
-];
+const STATUS_LABELS = {
+  "not-started": "Not started",
+  planning: "Planning",
+  "waiting-for-approval": "Waiting for approval",
+  "in-progress": "In progress",
+  review: "Review",
+  done: "Done",
+  "needs-attention": "Needs attention",
+  cancelled: "Cancelled",
+} as const satisfies Record<NotesPhaseStatus, string>;
+
+const STATUS_OPTIONS = NOTES_PHASE_STATUSES.map((value) => ({
+  value,
+  label: STATUS_LABELS[value],
+}));
+
+const ROADMAP_ACTOR_LABELS = {
+  "gg-coder": "GG Coder",
+  ken: "Ken",
+  "ken-autopilot": "Autopilot Ken",
+} as const satisfies Record<NotesRoadmapActor, string>;
+
+const ROADMAP_REVIEWER_LABELS = {
+  ken: "Ken",
+  "ken-autopilot": "Autopilot Ken",
+} as const satisfies Record<NotesRoadmapReviewer, string>;
+
+const VERIFICATION_LABELS = {
+  passed: "Passed",
+  failed: "Failed",
+  "exception-requested": "Exception requested",
+} as const satisfies Record<NotesVerificationStatus, string>;
+
+const IMPLEMENTATION_OUTCOME_LABELS = {
+  succeeded: "succeeded",
+  failed: "failed",
+  cancelled: "was cancelled",
+  interrupted: "was interrupted",
+} as const satisfies Record<NotesImplementationRunOutcome, string>;
+
+const COMPLETION_OUTCOME_LABELS = {
+  done: "Done",
+  review: "Review",
+  "needs-attention": "Needs attention",
+  "waiting-for-approval": "Waiting for approval",
+  "manual-override": "Manual override protected",
+  "done-terminal": "Already Done",
+} as const satisfies Record<NotesCompletionGateOutcome, string>;
+
+const COMPLETION_GATE_RECOVERY = {
+  "missing-implementation": "Implementation evidence has not been recorded.",
+  "stale-session": "Completion evidence belongs to a different phase session.",
+  "run-not-successful": "The implementation run did not settle successfully.",
+  "incomplete-plan":
+    "The implementation checkpoint used by this final review does not complete every canonical plan step.",
+  "missing-verification": "Typed verification evidence has not been recorded.",
+  "failed-verification": "The verification used by this final review failed.",
+  "verification-exception-not-accepted":
+    "The verification exception still needs reviewer acceptance.",
+  "unresolved-approval": "Plan approval is still unresolved.",
+  "unresolved-attention": "A question or error still needs attention.",
+  "inactive-phase": "The phase is not active for automatic completion.",
+} as const satisfies Record<NotesCompletionUnmetGateCode, string>;
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
   year: "numeric",
@@ -394,6 +457,138 @@ export function NotesRoadmap({
   );
 }
 
+interface PhaseEditDraft {
+  baseUpdatedAt: string;
+  baseTitle: string;
+  baseGoal: string;
+  baseDoneWhen: string;
+  title: string;
+  goal: string;
+  doneWhen: string;
+  conflict: boolean;
+}
+
+interface ReminderDraft {
+  baseUpdatedAt: string;
+  baseOccurrenceKey: string | null;
+  baseNote: string;
+  baseCustomValue: string;
+  note: string;
+  customValue: string;
+  conflict: boolean;
+}
+
+function createPhaseEditDraft(phase: NotesPhase): PhaseEditDraft {
+  const doneWhen = phase.doneWhen.join("\n");
+  return {
+    baseUpdatedAt: phase.updatedAt,
+    baseTitle: phase.title,
+    baseGoal: phase.goal,
+    baseDoneWhen: doneWhen,
+    title: phase.title,
+    goal: phase.goal,
+    doneWhen,
+    conflict: false,
+  };
+}
+
+function reconcilePhaseEditDraft(
+  current: PhaseEditDraft,
+  phase: NotesPhase,
+  editing: boolean,
+): PhaseEditDraft {
+  if (!editing) return createPhaseEditDraft(phase);
+  const authoritativeDoneWhen = phase.doneWhen.join("\n");
+  if (
+    current.baseUpdatedAt === phase.updatedAt &&
+    current.baseTitle === phase.title &&
+    current.baseGoal === phase.goal &&
+    current.baseDoneWhen === authoritativeDoneWhen
+  ) {
+    return current;
+  }
+
+  const titleDirty = current.title !== current.baseTitle;
+  const goalDirty = current.goal !== current.baseGoal;
+  const doneWhenDirty = current.doneWhen !== current.baseDoneWhen;
+  const conflict =
+    current.conflict ||
+    (titleDirty && current.baseTitle !== phase.title && current.title !== phase.title) ||
+    (goalDirty && current.baseGoal !== phase.goal && current.goal !== phase.goal) ||
+    (doneWhenDirty &&
+      current.baseDoneWhen !== authoritativeDoneWhen &&
+      current.doneWhen !== authoritativeDoneWhen);
+
+  return {
+    baseUpdatedAt: phase.updatedAt,
+    baseTitle: phase.title,
+    baseGoal: phase.goal,
+    baseDoneWhen: authoritativeDoneWhen,
+    title: titleDirty ? current.title : phase.title,
+    goal: goalDirty ? current.goal : phase.goal,
+    doneWhen: doneWhenDirty ? current.doneWhen : authoritativeDoneWhen,
+    conflict,
+  };
+}
+
+function createReminderDraft(phase: NotesPhase, fallbackValue: string): ReminderDraft {
+  const note = phase.reminder?.note ?? "";
+  const customValue = phase.reminder
+    ? dateToLocalInputValue(new Date(phase.reminder.dueAt))
+    : fallbackValue;
+  return {
+    baseUpdatedAt: phase.updatedAt,
+    baseOccurrenceKey: phase.reminder?.occurrenceKey ?? null,
+    baseNote: note,
+    baseCustomValue: customValue,
+    note,
+    customValue,
+    conflict: false,
+  };
+}
+
+function reconcileReminderDraft(
+  current: ReminderDraft,
+  phase: NotesPhase,
+  fallbackValue: string,
+): ReminderDraft {
+  const occurrenceKey = phase.reminder?.occurrenceKey ?? null;
+  const note = phase.reminder?.note ?? "";
+  const customValue = phase.reminder
+    ? dateToLocalInputValue(new Date(phase.reminder.dueAt))
+    : current.baseOccurrenceKey === null
+      ? current.baseCustomValue
+      : fallbackValue;
+  if (
+    current.baseUpdatedAt === phase.updatedAt &&
+    current.baseOccurrenceKey === occurrenceKey &&
+    current.baseNote === note &&
+    current.baseCustomValue === customValue
+  ) {
+    return current;
+  }
+
+  const noteDirty = current.note !== current.baseNote;
+  const customValueDirty = current.customValue !== current.baseCustomValue;
+  const occurrenceChanged = current.baseOccurrenceKey !== occurrenceKey;
+  const conflict =
+    current.conflict ||
+    (noteDirty && (occurrenceChanged || current.baseNote !== note) && current.note !== note) ||
+    (customValueDirty &&
+      (occurrenceChanged || current.baseCustomValue !== customValue) &&
+      current.customValue !== customValue);
+
+  return {
+    baseUpdatedAt: phase.updatedAt,
+    baseOccurrenceKey: occurrenceKey,
+    baseNote: note,
+    baseCustomValue: customValue,
+    note: noteDirty ? current.note : note,
+    customValue: customValueDirty ? current.customValue : customValue,
+    conflict,
+  };
+}
+
 function PhaseDetail({
   phase,
   currentTime,
@@ -470,22 +665,24 @@ function PhaseDetail({
   onActionSuccess(): void;
 }): React.ReactElement {
   const [editing, setEditing] = useState(false);
-  const [title, setTitle] = useState(phase.title);
-  const [goal, setGoal] = useState(phase.goal);
-  const [doneWhen, setDoneWhen] = useState(phase.doneWhen.join("\n"));
+  const [phaseDraft, setPhaseDraft] = useState(() => createPhaseEditDraft(phase));
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState("");
   const [actionStatus, setActionStatus] = useState("");
   const [raceLink, setRaceLink] = useState<NotesSessionLink | null>(null);
   const [pendingRoadmapAction, setPendingRoadmapAction] = useState<string | null>(null);
   const reminderPresets = useMemo(() => reminderPresetTimes(currentTime), [currentTime]);
-  const [reminderNote, setReminderNote] = useState(phase.reminder?.note ?? "");
-  const [customReminderValue, setCustomReminderValue] = useState(() =>
-    dateToLocalInputValue(
-      phase.reminder ? new Date(phase.reminder.dueAt) : reminderPresets.tomorrow,
-    ),
+  const reminderFallbackValue = dateToLocalInputValue(reminderPresets.tomorrow);
+  const [reminderDraft, setReminderDraft] = useState(() =>
+    createReminderDraft(phase, reminderFallbackValue),
   );
   const [customReminderError, setCustomReminderError] = useState("");
+  const effectivePhaseDraft = reconcilePhaseEditDraft(phaseDraft, phase, editing);
+  const effectiveReminderDraft = reconcileReminderDraft(
+    reminderDraft,
+    phase,
+    reminderFallbackValue,
+  );
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const action = primaryAction(phase);
   const effectiveAction = raceLink ? sessionAction(raceLink) : action;
@@ -552,7 +749,7 @@ function PhaseDetail({
       ({ proposal, report }) =>
         report.id === latestReport.id && proposal.policyOutcome === "manual-review",
     );
-  const resumedStatus = latestProtectedStatus(phase);
+  const resumedStatus = notesAutomaticStatusAfterOverrideReset(phase);
   const phaseStartDisabled =
     (effectiveAction === "Start" || effectiveAction === "Recover") &&
     startUnavailableReason !== null;
@@ -560,6 +757,14 @@ function PhaseDetail({
   useEffect(() => {
     if (phase.session) setRaceLink(null);
   }, [phase.session]);
+
+  useEffect(() => {
+    setPhaseDraft((current) => reconcilePhaseEditDraft(current, phase, editing));
+  }, [editing, phase]);
+
+  useEffect(() => {
+    setReminderDraft((current) => reconcileReminderDraft(current, phase, reminderFallbackValue));
+  }, [phase, reminderFallbackValue]);
 
   useEffect(() => {
     if (!pending && actionError) actionButtonRef.current?.focus();
@@ -598,14 +803,26 @@ function PhaseDetail({
           reportActionError(result.message);
         }
       } else if (resumeLink) {
-        await onResumePhase(phase.id, resumeLink);
+        try {
+          await onResumePhase(phase.id, resumeLink);
+        } catch (error) {
+          const detail = error instanceof Error && error.message ? ` ${error.message}` : "";
+          reportActionError(`Couldn’t resume this phase.${detail}`);
+          return;
+        }
+
         if (phase.reminder) {
-          const reminderResult = await onDismissReminder(phase.id, phase.reminder.occurrenceKey);
-          if (reminderResult.status !== "committed") {
+          try {
+            const reminderResult = await onDismissReminder(phase.id, phase.reminder.occurrenceKey);
+            if (reminderResult.status !== "committed") {
+              reportActionError(reminderMutationResultMessage(reminderResult, "resume-cleanup"));
+              return;
+            }
+          } catch (error) {
+            const detail =
+              error instanceof Error && error.message ? error.message : "Try dismissing it again.";
             reportActionError(
-              reminderResult.status === "stale-occurrence"
-                ? `The phase resumed, but reminder cleanup did not complete. ${reminderMutationMessage(reminderResult)}`
-                : "The phase resumed, but its reminder could not be dismissed. Try again.",
+              `The phase resumed, but reminder cleanup did not complete. ${detail}`,
             );
             return;
           }
@@ -668,11 +885,11 @@ function PhaseDetail({
     setActionStatus("Saving reminder…");
     try {
       const result = await operation();
+      const message = reminderMutationResultMessage(result);
       if (result.status === "committed") {
-        setActionStatus("Reminder saved.");
+        setActionStatus(message);
         setCustomReminderError("");
       } else {
-        const message = reminderMutationMessage(result);
         setActionError(message);
         setActionStatus("");
       }
@@ -688,25 +905,49 @@ function PhaseDetail({
   };
 
   const scheduleReminder = (dueAt: Date): void => {
+    if (effectiveReminderDraft.conflict) return;
+    const note = effectiveReminderDraft.note.trim();
+    const customValue = dateToLocalInputValue(dueAt);
+    setReminderDraft({ ...effectiveReminderDraft, note, customValue });
     void runReminderMutation("schedule-reminder", () =>
-      onScheduleReminder(phase.id, { dueAt: dueAt.toISOString(), note: reminderNote }),
+      onScheduleReminder(phase.id, { dueAt: dueAt.toISOString(), note }),
     );
   };
 
   const submitCustomReminder = (): void => {
-    const dueAt = localDateTimeToIso(customReminderValue, new Date());
+    if (effectiveReminderDraft.conflict) return;
+    const dueAt = localDateTimeToIso(effectiveReminderDraft.customValue, new Date());
     if (!dueAt) {
       setCustomReminderError("Choose a valid future local date and time.");
       return;
     }
+    const note = effectiveReminderDraft.note.trim();
+    const customValue = dateToLocalInputValue(new Date(dueAt));
+    setReminderDraft({ ...effectiveReminderDraft, note, customValue });
     setCustomReminderError("");
     void runReminderMutation("custom-reminder", () =>
-      onScheduleReminder(phase.id, { dueAt, note: reminderNote }),
+      onScheduleReminder(phase.id, { dueAt, note }),
     );
   };
 
+  const reloadPhaseDraft = (): void => {
+    setPhaseDraft(createPhaseEditDraft(phase));
+  };
+
+  const reloadReminderDraft = (): void => {
+    setReminderDraft(createReminderDraft(phase, reminderFallbackValue));
+    setCustomReminderError("");
+  };
+
   const finishEdit = (save: boolean): void => {
-    if (save && title.trim()) onEditPhase(phase.id, { title, goal, doneWhen: lines(doneWhen) });
+    if (save) {
+      if (!effectivePhaseDraft.title.trim() || effectivePhaseDraft.conflict) return;
+      onEditPhase(phase.id, {
+        title: effectivePhaseDraft.title,
+        goal: effectivePhaseDraft.goal,
+        doneWhen: lines(effectivePhaseDraft.doneWhen),
+      });
+    }
     setEditing(false);
   };
 
@@ -726,9 +967,7 @@ function PhaseDetail({
                 finishEdit(false);
                 return;
               }
-              setTitle(phase.title);
-              setGoal(phase.goal);
-              setDoneWhen(phase.doneWhen.join("\n"));
+              setPhaseDraft(createPhaseEditDraft(phase));
               setEditing(true);
             }}
           >
@@ -752,11 +991,13 @@ function PhaseDetail({
             <label htmlFor={`notes-phase-edit-title-${phase.id}`}>Edit phase title</label>
             <input
               id={`notes-phase-edit-title-${phase.id}`}
-              value={title}
+              value={effectivePhaseDraft.title}
               autoFocus
               required
               disabled={controlsDisabled}
-              onChange={(event) => setTitle(event.target.value)}
+              onChange={(event) =>
+                setPhaseDraft({ ...effectivePhaseDraft, title: event.target.value })
+              }
               onKeyDown={(event) => {
                 if (event.key !== "Escape") return;
                 event.preventDefault();
@@ -769,24 +1010,45 @@ function PhaseDetail({
             <label htmlFor={`notes-phase-edit-goal-${phase.id}`}>Edit goal</label>
             <textarea
               id={`notes-phase-edit-goal-${phase.id}`}
-              value={goal}
+              value={effectivePhaseDraft.goal}
               disabled={controlsDisabled}
-              onChange={(event) => setGoal(event.target.value)}
+              onChange={(event) =>
+                setPhaseDraft({ ...effectivePhaseDraft, goal: event.target.value })
+              }
             />
           </div>
           <div className="notes-field">
             <label htmlFor={`notes-phase-edit-done-${phase.id}`}>Edit Done when</label>
             <textarea
               id={`notes-phase-edit-done-${phase.id}`}
-              value={doneWhen}
+              value={effectivePhaseDraft.doneWhen}
               disabled={controlsDisabled}
-              onChange={(event) => setDoneWhen(event.target.value)}
+              onChange={(event) =>
+                setPhaseDraft({ ...effectivePhaseDraft, doneWhen: event.target.value })
+              }
             />
           </div>
+          {effectivePhaseDraft.conflict && (
+            <p className="notes-phase-action-error" role="alert">
+              This phase changed in another window. Reload the latest values before saving.
+            </p>
+          )}
           <div className="notes-phase-form-actions">
-            <button type="submit" disabled={!title.trim() || controlsDisabled}>
+            <button
+              type="submit"
+              disabled={
+                !effectivePhaseDraft.title.trim() ||
+                controlsDisabled ||
+                effectivePhaseDraft.conflict
+              }
+            >
               Save changes
             </button>
+            {effectivePhaseDraft.conflict && (
+              <button type="button" disabled={controlsDisabled} onClick={reloadPhaseDraft}>
+                Reload latest values
+              </button>
+            )}
             <button type="button" disabled={controlsDisabled} onClick={() => finishEdit(false)}>
               Cancel edit
             </button>
@@ -930,18 +1192,31 @@ function PhaseDetail({
           <label htmlFor={`notes-reminder-note-${phase.id}`}>Reminder note (optional)</label>
           <textarea
             id={`notes-reminder-note-${phase.id}`}
-            value={reminderNote}
+            value={effectiveReminderDraft.note}
             maxLength={500}
             disabled={controlsDisabled}
-            onChange={(event) => setReminderNote(event.target.value)}
+            onChange={(event) =>
+              setReminderDraft({ ...effectiveReminderDraft, note: event.target.value })
+            }
           />
         </div>
+
+        {effectiveReminderDraft.conflict && (
+          <div>
+            <p className="notes-phase-action-error" role="alert">
+              This reminder changed in another window. Reload the latest reminder before scheduling.
+            </p>
+            <button type="button" disabled={controlsDisabled} onClick={reloadReminderDraft}>
+              Reload latest reminder
+            </button>
+          </div>
+        )}
 
         <div className="notes-reminder-presets" aria-label="Reminder presets">
           {reminderPresets.laterToday && (
             <button
               type="button"
-              disabled={controlsDisabled}
+              disabled={controlsDisabled || effectiveReminderDraft.conflict}
               onClick={() => scheduleReminder(reminderPresets.laterToday!)}
             >
               Later today, {formatTime(reminderPresets.laterToday.toISOString())}
@@ -949,7 +1224,7 @@ function PhaseDetail({
           )}
           <button
             type="button"
-            disabled={controlsDisabled}
+            disabled={controlsDisabled || effectiveReminderDraft.conflict}
             onClick={() => scheduleReminder(reminderPresets.tomorrow)}
           >
             Tomorrow, {formatTime(reminderPresets.tomorrow.toISOString())}
@@ -968,14 +1243,17 @@ function PhaseDetail({
             <input
               id={`notes-reminder-custom-${phase.id}`}
               type="datetime-local"
-              value={customReminderValue}
+              value={effectiveReminderDraft.customValue}
               disabled={controlsDisabled}
               aria-invalid={customReminderError ? "true" : undefined}
               aria-describedby={
                 customReminderError ? `notes-reminder-custom-error-${phase.id}` : undefined
               }
               onChange={(event) => {
-                setCustomReminderValue(event.target.value);
+                setReminderDraft({
+                  ...effectiveReminderDraft,
+                  customValue: event.target.value,
+                });
                 setCustomReminderError("");
               }}
             />
@@ -988,7 +1266,7 @@ function PhaseDetail({
               </p>
             )}
           </div>
-          <button type="submit" disabled={controlsDisabled}>
+          <button type="submit" disabled={controlsDisabled || effectiveReminderDraft.conflict}>
             Save custom time
           </button>
         </form>
@@ -1496,7 +1774,7 @@ export function NotesRoadmapArchive({ phases, onRestorePhase }: ArchiveProps): R
 }
 
 function statusLabel(status: NotesPhaseStatus): string {
-  return STATUS_OPTIONS.find((option) => option.value === status)?.label ?? status;
+  return STATUS_LABELS[status];
 }
 
 function referenceLinkAnnouncement(
@@ -1595,91 +1873,28 @@ function unresolvedRoadmapProposals(
   return pending;
 }
 
-function latestProtectedStatus(phase: NotesPhase): NotesPhaseStatus {
-  if (phase.status === "done") return "done";
-  const pending = phase.pendingAutomaticLifecycleTransition;
-  if (pending && sameSessionLink(phase.session, pending.expectedSession)) return pending.status;
-  for (let index = phase.roadmapEvents.length - 1; index >= 0; index -= 1) {
-    const event = phase.roadmapEvents[index];
-    if (
-      event?.type === "status-update" &&
-      (event.statusOutcome === "manual-override" || event.statusOutcome === "done-terminal")
-    ) {
-      return notesPhaseStatusForRoadmapTransition(event.transition);
-    }
-  }
-  return phase.status;
+function roadmapActorLabel(actor: NotesRoadmapActor): string {
+  return ROADMAP_ACTOR_LABELS[actor];
 }
 
-function sameSessionLink(
-  current: NotesSessionLink | null,
-  expected: NotesSessionLink | null,
-): boolean {
-  if (expected === null) return current === null;
-  return (
-    current !== null &&
-    current.sessionId === expected.sessionId &&
-    current.sessionPath === expected.sessionPath
-  );
+function roadmapReviewerLabel(reviewer: NotesRoadmapReviewer): string {
+  return ROADMAP_REVIEWER_LABELS[reviewer];
 }
 
-function roadmapActorLabel(actor: NotesRoadmapStatusUpdate["actor"]): string {
-  if (actor === "gg-coder") return "GG Coder";
-  if (actor === "ken-autopilot") return "Autopilot Ken";
-  return "Ken";
+function verificationLabel(verification: NotesVerificationStatus): string {
+  return VERIFICATION_LABELS[verification];
 }
 
-function roadmapReviewerLabel(reviewer: "ken" | "ken-autopilot"): string {
-  return reviewer === "ken-autopilot" ? "Autopilot Ken" : "Ken";
+function implementationOutcomeLabel(outcome: NotesImplementationRunOutcome): string {
+  return IMPLEMENTATION_OUTCOME_LABELS[outcome];
 }
 
-function verificationLabel(verification: "passed" | "failed" | "exception-requested"): string {
-  if (verification === "passed") return "Passed";
-  if (verification === "failed") return "Failed";
-  return "Exception requested";
+function completionOutcomeLabel(outcome: NotesCompletionGateOutcome): string {
+  return COMPLETION_OUTCOME_LABELS[outcome];
 }
 
-function implementationOutcomeLabel(
-  outcome: "succeeded" | "failed" | "cancelled" | "interrupted",
-): string {
-  if (outcome === "succeeded") return "succeeded";
-  if (outcome === "failed") return "failed";
-  if (outcome === "cancelled") return "was cancelled";
-  return "was interrupted";
-}
-
-function completionOutcomeLabel(
-  outcome:
-    | "done"
-    | "review"
-    | "needs-attention"
-    | "waiting-for-approval"
-    | "manual-override"
-    | "done-terminal",
-): string {
-  if (outcome === "needs-attention") return "Needs attention";
-  if (outcome === "waiting-for-approval") return "Waiting for approval";
-  if (outcome === "manual-override") return "Manual override protected";
-  if (outcome === "done-terminal") return "Already Done";
-  return statusLabel(outcome);
-}
-
-function completionGateRecovery(code: string): string {
-  const recovery: Record<string, string> = {
-    "missing-implementation": "Implementation evidence has not been recorded.",
-    "stale-session": "Completion evidence belongs to a different phase session.",
-    "run-not-successful": "The implementation run did not settle successfully.",
-    "incomplete-plan":
-      "The implementation checkpoint used by this final review does not complete every canonical plan step.",
-    "missing-verification": "Typed verification evidence has not been recorded.",
-    "failed-verification": "The verification used by this final review failed.",
-    "verification-exception-not-accepted":
-      "The verification exception still needs reviewer acceptance.",
-    "unresolved-approval": "Plan approval is still unresolved.",
-    "unresolved-attention": "A question or error still needs attention.",
-    "inactive-phase": "The phase is not active for automatic completion.",
-  };
-  return recovery[code] ?? `Completion gate remains unmet: ${code}.`;
+function completionGateRecovery(code: NotesCompletionUnmetGateCode): string {
+  return COMPLETION_GATE_RECOVERY[code];
 }
 
 function roadmapProposalLabel(proposal: NotesRoadmapReferenceProposal): string {
@@ -1795,23 +2010,6 @@ function renderActivityItem(item: ActivityItem): React.ReactNode {
   );
 }
 
-function reminderMutationMessage(result: NotesReminderMutationResult): string {
-  if (result.status === "committed") return "Reminder saved.";
-  if (result.status === "invalid-time") return "Choose a future reminder time.";
-  if (result.status === "missing-reminder") return "This reminder is no longer scheduled.";
-  if (result.status === "stale-occurrence") {
-    return "This reminder changed in another window. Review the latest reminder.";
-  }
-  if (
-    result.status === "missing-phase" ||
-    result.status === "archived-phase" ||
-    result.status === "inactive-phase"
-  ) {
-    return "This phase is no longer eligible for reminders.";
-  }
-  return "The reminder could not be saved. Check Notes storage and try again.";
-}
-
 function roadmapMutationMessage(result: NotesRoadmapMutationResult): string {
   if (result.status === "committed") return "Roadmap change saved.";
   if (result.status === "already-decided") return `Proposal was already ${result.decision}.`;
@@ -1824,7 +2022,6 @@ function roadmapMutationMessage(result: NotesRoadmapMutationResult): string {
   if (result.status === "missing-phase" || result.status === "archived-phase") {
     return "The phase is no longer available. Return to the Roadmap and choose an active phase.";
   }
-  if (result.status === "no-protected-update") return "No protected status report is available.";
   return "The Roadmap change could not be saved. Check Notes storage and try again.";
 }
 

@@ -27,27 +27,34 @@ export interface NotesDocumentV2 {
   legacyImportedAt: string | null;
 }
 
-export type NotesPhaseStatus =
-  | "not-started"
-  | "planning"
-  | "waiting-for-approval"
-  | "in-progress"
-  | "review"
-  | "done"
-  | "needs-attention"
-  | "cancelled";
+export const NOTES_PHASE_STATUSES = [
+  "not-started",
+  "planning",
+  "waiting-for-approval",
+  "in-progress",
+  "review",
+  "done",
+  "needs-attention",
+  "cancelled",
+] as const;
 
-export type NotesLifecycleEventSource = "user" | "session" | "agent" | "system";
-export type NotesLifecycleEventKind =
-  | "approval-opened"
-  | "approval-resolved"
-  | "attention-question-opened"
-  | "attention-runtime-opened"
-  | "attention-tool-opened"
-  | "attention-generic-opened"
-  | "attention-implementation-resolved"
-  | "attention-review-resolved"
-  | "other";
+export type NotesPhaseStatus = (typeof NOTES_PHASE_STATUSES)[number];
+
+export const NOTES_LIFECYCLE_EVENT_SOURCES = ["user", "session", "agent", "system"] as const;
+export type NotesLifecycleEventSource = (typeof NOTES_LIFECYCLE_EVENT_SOURCES)[number];
+
+export const NOTES_LIFECYCLE_EVENT_KINDS = [
+  "approval-opened",
+  "approval-resolved",
+  "attention-question-opened",
+  "attention-runtime-opened",
+  "attention-tool-opened",
+  "attention-generic-opened",
+  "attention-implementation-resolved",
+  "attention-review-resolved",
+  "other",
+] as const;
+export type NotesLifecycleEventKind = (typeof NOTES_LIFECYCLE_EVENT_KINDS)[number];
 
 export interface NotesReferenceRange {
   startLine: number;
@@ -80,8 +87,16 @@ export interface NotesSessionLink {
 /** Durable/reference consumers may omit capture provenance but share all source semantics. */
 export type NotesReferenceProjection = Omit<NotesReference, "capturedAt">;
 
-export type NotesReminderDeliveryChannel = "in-app" | "native" | "in-app-fallback";
-export type NotesReminderPermission = "not-required" | "granted" | "denied" | "unavailable";
+export const NOTES_REMINDER_DELIVERY_CHANNELS = ["in-app", "native", "in-app-fallback"] as const;
+export type NotesReminderDeliveryChannel = (typeof NOTES_REMINDER_DELIVERY_CHANNELS)[number];
+
+export const NOTES_REMINDER_PERMISSIONS = [
+  "not-required",
+  "granted",
+  "denied",
+  "unavailable",
+] as const;
+export type NotesReminderPermission = (typeof NOTES_REMINDER_PERMISSIONS)[number];
 
 export interface NotesReminderDelivery {
   occurrenceKey: string;
@@ -139,9 +154,14 @@ export interface NotesLifecycleEvent {
   kind: NotesLifecycleEventKind;
 }
 
-export type NotesRoadmapActor = "gg-coder" | "ken" | "ken-autopilot";
-export type NotesRoadmapReviewer = Exclude<NotesRoadmapActor, "gg-coder">;
-export type NotesRoadmapTransition = "pending" | "in-progress" | "blocked" | "review";
+export const NOTES_ROADMAP_ACTORS = ["gg-coder", "ken", "ken-autopilot"] as const;
+export type NotesRoadmapActor = (typeof NOTES_ROADMAP_ACTORS)[number];
+
+export const NOTES_ROADMAP_REVIEWERS = ["ken", "ken-autopilot"] as const;
+export type NotesRoadmapReviewer = (typeof NOTES_ROADMAP_REVIEWERS)[number];
+
+export const NOTES_ROADMAP_TRANSITIONS = ["pending", "in-progress", "blocked", "review"] as const;
+export type NotesRoadmapTransition = (typeof NOTES_ROADMAP_TRANSITIONS)[number];
 export type NotesRoadmapPhaseStatus = Extract<
   NotesPhaseStatus,
   "planning" | "in-progress" | "needs-attention" | "review"
@@ -160,37 +180,61 @@ export function notesPhaseStatusForRoadmapTransition(
   return NOTES_PHASE_STATUS_BY_ROADMAP_TRANSITION[transition];
 }
 
-export type NotesVerificationStatus = "passed" | "failed" | "exception-requested";
-export type NotesImplementationRunOutcome = "succeeded" | "failed" | "cancelled" | "interrupted";
-export type NotesCompletionGateOutcome =
-  | "done"
-  | "review"
-  | "needs-attention"
-  | "waiting-for-approval"
-  | "manual-override"
-  | "done-terminal";
-export type NotesCompletionUnmetGateCode =
-  | "missing-implementation"
-  | "stale-session"
-  | "run-not-successful"
-  | "incomplete-plan"
-  | "missing-verification"
-  | "failed-verification"
-  | "verification-exception-not-accepted"
-  | "unresolved-approval"
-  | "unresolved-attention"
-  | "inactive-phase";
-export type NotesRoadmapStatusOutcome =
-  | "applied"
-  | "same-status"
-  | "evidence-only"
-  | "manual-override"
-  | "done-terminal";
+export const NOTES_VERIFICATION_STATUSES = ["passed", "failed", "exception-requested"] as const;
+export type NotesVerificationStatus = (typeof NOTES_VERIFICATION_STATUSES)[number];
+
+export const NOTES_IMPLEMENTATION_RUN_OUTCOMES = [
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+] as const;
+export type NotesImplementationRunOutcome = (typeof NOTES_IMPLEMENTATION_RUN_OUTCOMES)[number];
+
+export const NOTES_COMPLETION_GATE_OUTCOMES = [
+  "done",
+  "review",
+  "needs-attention",
+  "waiting-for-approval",
+  "manual-override",
+  "done-terminal",
+] as const;
+export type NotesCompletionGateOutcome = (typeof NOTES_COMPLETION_GATE_OUTCOMES)[number];
+
+export const NOTES_COMPLETION_UNMET_GATE_CODES = [
+  "missing-implementation",
+  "stale-session",
+  "run-not-successful",
+  "incomplete-plan",
+  "missing-verification",
+  "failed-verification",
+  "verification-exception-not-accepted",
+  "unresolved-approval",
+  "unresolved-attention",
+  "inactive-phase",
+] as const;
+export type NotesCompletionUnmetGateCode = (typeof NOTES_COMPLETION_UNMET_GATE_CODES)[number];
+
+export const NOTES_ROADMAP_STATUS_OUTCOMES = [
+  "applied",
+  "same-status",
+  "evidence-only",
+  "manual-override",
+  "done-terminal",
+] as const;
+export type NotesRoadmapStatusOutcome = (typeof NOTES_ROADMAP_STATUS_OUTCOMES)[number];
+
+export const NOTES_ROADMAP_REFERENCE_POLICY_OUTCOMES = [
+  "manual-review",
+  "reference-override-protected",
+  "accepted",
+  "reused",
+] as const;
 export type NotesRoadmapReferencePolicyOutcome =
-  | "manual-review"
-  | "reference-override-protected"
-  | "accepted"
-  | "reused";
+  (typeof NOTES_ROADMAP_REFERENCE_POLICY_OUTCOMES)[number];
+
+export const NOTES_REVIEW_DECISIONS = ["accepted", "rejected"] as const;
+export type NotesReviewDecision = (typeof NOTES_REVIEW_DECISIONS)[number];
 
 export interface NotesRoadmapReferenceProposal extends Omit<NotesReference, "id" | "capturedAt"> {
   id: string;
@@ -219,7 +263,7 @@ export interface NotesRoadmapReferenceDecision {
   type: "reference-decision";
   id: string;
   proposalId: string;
-  decision: "accepted" | "rejected";
+  decision: NotesReviewDecision;
   referenceId: string | null;
   timestamp: string;
 }
@@ -245,7 +289,7 @@ export interface NotesRoadmapCompletionReview {
   type: "completion-review";
   id: string;
   reviewer: NotesRoadmapReviewer;
-  decision: "accepted" | "rejected";
+  decision: NotesReviewDecision;
   evidence: string[];
   reason: string | null;
   implementationCheckpointId: string | null;
@@ -283,6 +327,36 @@ export interface NotesPhase {
   pendingAutomaticLifecycleTransition: NotesPendingAutomaticLifecycleTransition | null;
   lifecycleEvents: NotesLifecycleEvent[];
   roadmapEvents: NotesRoadmapEvent[];
+}
+
+export function notesSessionLinksEqual(
+  left: NotesSessionLink | null,
+  right: NotesSessionLink | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  return left.sessionId === right.sessionId && left.sessionPath === right.sessionPath;
+}
+
+/** Returns the status automatic policy will restore when a manual status override is reset. */
+export function notesAutomaticStatusAfterOverrideReset(phase: NotesPhase): NotesPhaseStatus {
+  if (phase.status === "done") return "done";
+
+  const pending = phase.pendingAutomaticLifecycleTransition;
+  if (pending && notesSessionLinksEqual(phase.session, pending.expectedSession)) {
+    return pending.status;
+  }
+
+  for (let index = phase.roadmapEvents.length - 1; index >= 0; index -= 1) {
+    const event = phase.roadmapEvents[index];
+    if (
+      event?.type === "status-update" &&
+      (event.statusOutcome === "manual-override" || event.statusOutcome === "done-terminal")
+    ) {
+      return notesPhaseStatusForRoadmapTransition(event.transition);
+    }
+  }
+
+  return phase.status;
 }
 
 export interface NotesDocumentV3 {
@@ -383,6 +457,11 @@ function resolveSegments(parts: string[], rooted: boolean): string[] {
 export const NOTES_REFERENCE_URL_MAX_LENGTH = 2_048;
 export const NOTES_REFERENCE_METADATA_MAX_LENGTH = 4_096;
 export const NOTES_REMINDER_NOTE_MAX_LENGTH = 500;
+export const NOTES_ROADMAP_EVIDENCE_MAX_ITEMS = 20;
+export const NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH = 4_096;
+export const NOTES_ROADMAP_REASON_MAX_LENGTH = 1_024;
+export const NOTES_ROADMAP_PROPOSALS_MAX_ITEMS = 20;
+export const NOTES_COMPLETION_UNMET_GATE_CODES_MAX_ITEMS = 20;
 
 export const NOTES_REFERENCE_METADATA_FIELDS = [
   "provider",
@@ -458,17 +537,8 @@ const SESSION_KEYS = ["sessionId", "sessionPath"];
 const LEGACY_REMINDER_KEYS = ["id", "dueAt", "note", "createdAt"];
 const REMINDER_KEYS = ["id", "occurrenceKey", "dueAt", "note", "createdAt", "lastDelivery"];
 const REMINDER_DELIVERY_KEYS = ["occurrenceKey", "attemptedAt", "channel", "permission"];
-const REMINDER_DELIVERY_CHANNELS = new Set<NotesReminderDeliveryChannel>([
-  "in-app",
-  "native",
-  "in-app-fallback",
-]);
-const REMINDER_PERMISSIONS = new Set<NotesReminderPermission>([
-  "not-required",
-  "granted",
-  "denied",
-  "unavailable",
-]);
+const REMINDER_DELIVERY_CHANNELS: ReadonlySet<string> = new Set(NOTES_REMINDER_DELIVERY_CHANNELS);
+const REMINDER_PERMISSIONS: ReadonlySet<string> = new Set(NOTES_REMINDER_PERMISSIONS);
 
 export function isValidNotesReminderDeliveryPair(channel: unknown, permission: unknown): boolean {
   return (
@@ -569,78 +639,185 @@ const LEGACY_ROADMAP_PROPOSAL_KEYS = [
   "referenceId",
 ];
 const ROADMAP_PROPOSAL_KEYS = [...LEGACY_ROADMAP_PROPOSAL_KEYS, "policyOutcome"];
-const PHASE_STATUSES = new Set<NotesPhaseStatus>([
-  "not-started",
-  "planning",
-  "waiting-for-approval",
-  "in-progress",
-  "review",
-  "done",
-  "needs-attention",
-  "cancelled",
-]);
-const LIFECYCLE_EVENT_SOURCES = new Set<NotesLifecycleEventSource>([
-  "user",
-  "session",
-  "agent",
-  "system",
-]);
-const LIFECYCLE_EVENT_KINDS = new Set<NotesLifecycleEventKind>([
-  "approval-opened",
-  "approval-resolved",
-  "attention-question-opened",
-  "attention-runtime-opened",
-  "attention-tool-opened",
-  "attention-generic-opened",
-  "attention-implementation-resolved",
-  "attention-review-resolved",
-  "other",
-]);
-const ROADMAP_ACTORS = new Set<NotesRoadmapActor>(["gg-coder", "ken", "ken-autopilot"]);
-const ROADMAP_TRANSITIONS = new Set<NotesRoadmapTransition>([
-  "pending",
-  "in-progress",
-  "blocked",
-  "review",
-]);
-const ROADMAP_STATUS_OUTCOMES = new Set<NotesRoadmapStatusOutcome>([
-  "applied",
-  "same-status",
-  "evidence-only",
-  "manual-override",
-  "done-terminal",
-]);
-const VERIFICATION_STATUSES = new Set<NotesVerificationStatus>([
-  "passed",
-  "failed",
-  "exception-requested",
-]);
-const IMPLEMENTATION_RUN_OUTCOMES = new Set<NotesImplementationRunOutcome>([
-  "succeeded",
-  "failed",
-  "cancelled",
-  "interrupted",
-]);
-const COMPLETION_GATE_OUTCOMES = new Set<NotesCompletionGateOutcome>([
-  "done",
-  "review",
-  "needs-attention",
-  "waiting-for-approval",
-  "manual-override",
-  "done-terminal",
-]);
-const COMPLETION_UNMET_GATE_CODES = new Set<NotesCompletionUnmetGateCode>([
-  "missing-implementation",
-  "stale-session",
-  "run-not-successful",
-  "incomplete-plan",
-  "missing-verification",
-  "failed-verification",
-  "verification-exception-not-accepted",
-  "unresolved-approval",
-  "unresolved-attention",
-  "inactive-phase",
-]);
+const PHASE_STATUSES: ReadonlySet<string> = new Set(NOTES_PHASE_STATUSES);
+const LIFECYCLE_EVENT_SOURCES: ReadonlySet<string> = new Set(NOTES_LIFECYCLE_EVENT_SOURCES);
+const LIFECYCLE_EVENT_KINDS: ReadonlySet<string> = new Set(NOTES_LIFECYCLE_EVENT_KINDS);
+const ROADMAP_ACTORS: ReadonlySet<string> = new Set(NOTES_ROADMAP_ACTORS);
+const ROADMAP_REVIEWERS: ReadonlySet<string> = new Set(NOTES_ROADMAP_REVIEWERS);
+const ROADMAP_TRANSITIONS: ReadonlySet<string> = new Set(NOTES_ROADMAP_TRANSITIONS);
+const ROADMAP_STATUS_OUTCOMES: ReadonlySet<string> = new Set(NOTES_ROADMAP_STATUS_OUTCOMES);
+const ROADMAP_REFERENCE_POLICY_OUTCOMES: ReadonlySet<string> = new Set(
+  NOTES_ROADMAP_REFERENCE_POLICY_OUTCOMES,
+);
+const VERIFICATION_STATUSES: ReadonlySet<string> = new Set(NOTES_VERIFICATION_STATUSES);
+const IMPLEMENTATION_RUN_OUTCOMES: ReadonlySet<string> = new Set(NOTES_IMPLEMENTATION_RUN_OUTCOMES);
+const COMPLETION_GATE_OUTCOMES: ReadonlySet<string> = new Set(NOTES_COMPLETION_GATE_OUTCOMES);
+const COMPLETION_UNMET_GATE_CODES: ReadonlySet<string> = new Set(NOTES_COMPLETION_UNMET_GATE_CODES);
+const REVIEW_DECISIONS: ReadonlySet<string> = new Set(NOTES_REVIEW_DECISIONS);
+
+export function isNotesReminderDeliveryChannel(
+  value: unknown,
+): value is NotesReminderDeliveryChannel {
+  return typeof value === "string" && REMINDER_DELIVERY_CHANNELS.has(value);
+}
+
+export function isNotesReminderPermission(value: unknown): value is NotesReminderPermission {
+  return typeof value === "string" && REMINDER_PERMISSIONS.has(value);
+}
+
+export function isNotesPhaseStatus(value: unknown): value is NotesPhaseStatus {
+  return typeof value === "string" && PHASE_STATUSES.has(value);
+}
+
+export function isNotesLifecycleEventSource(value: unknown): value is NotesLifecycleEventSource {
+  return typeof value === "string" && LIFECYCLE_EVENT_SOURCES.has(value);
+}
+
+export function isNotesLifecycleEventKind(value: unknown): value is NotesLifecycleEventKind {
+  return typeof value === "string" && LIFECYCLE_EVENT_KINDS.has(value);
+}
+
+export function isNotesRoadmapActor(value: unknown): value is NotesRoadmapActor {
+  return typeof value === "string" && ROADMAP_ACTORS.has(value);
+}
+
+export function isNotesRoadmapReviewer(value: unknown): value is NotesRoadmapReviewer {
+  return typeof value === "string" && ROADMAP_REVIEWERS.has(value);
+}
+
+export function isNotesRoadmapTransition(value: unknown): value is NotesRoadmapTransition {
+  return typeof value === "string" && ROADMAP_TRANSITIONS.has(value);
+}
+
+export function isNotesRoadmapStatusOutcome(value: unknown): value is NotesRoadmapStatusOutcome {
+  return typeof value === "string" && ROADMAP_STATUS_OUTCOMES.has(value);
+}
+
+export function isNotesRoadmapReferencePolicyOutcome(
+  value: unknown,
+): value is NotesRoadmapReferencePolicyOutcome {
+  return typeof value === "string" && ROADMAP_REFERENCE_POLICY_OUTCOMES.has(value);
+}
+
+export function isNotesVerificationStatus(value: unknown): value is NotesVerificationStatus {
+  return typeof value === "string" && VERIFICATION_STATUSES.has(value);
+}
+
+export function isNotesImplementationRunOutcome(
+  value: unknown,
+): value is NotesImplementationRunOutcome {
+  return typeof value === "string" && IMPLEMENTATION_RUN_OUTCOMES.has(value);
+}
+
+export function isNotesCompletionGateOutcome(value: unknown): value is NotesCompletionGateOutcome {
+  return typeof value === "string" && COMPLETION_GATE_OUTCOMES.has(value);
+}
+
+export function isNotesCompletionUnmetGateCode(
+  value: unknown,
+): value is NotesCompletionUnmetGateCode {
+  return typeof value === "string" && COMPLETION_UNMET_GATE_CODES.has(value);
+}
+
+export function isNotesReviewDecision(value: unknown): value is NotesReviewDecision {
+  return typeof value === "string" && REVIEW_DECISIONS.has(value);
+}
+
+export function isValidNotesRoadmapEvidence(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= NOTES_ROADMAP_EVIDENCE_MAX_ITEMS &&
+    value.every((item) => isBoundedNonEmptyString(item, NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH))
+  );
+}
+
+export function isNotesRoadmapTransitionEvidenceSatisfied(
+  transition: unknown,
+  evidence: readonly unknown[],
+): boolean {
+  return transition !== "review" || evidence.length > 0;
+}
+
+export function isNotesVerificationEvidenceSatisfied(
+  verification: unknown,
+  evidence: readonly unknown[],
+): boolean {
+  return verification !== "passed" || evidence.length > 0;
+}
+
+export function isNotesVerificationReasonSatisfied(
+  verification: unknown,
+  reason: unknown,
+): boolean {
+  if (verification === null) return reason === null;
+  if (verification === "passed") return reason === null;
+  if (verification === "failed" || verification === "exception-requested") {
+    return isBoundedNonEmptyString(reason, NOTES_ROADMAP_REASON_MAX_LENGTH);
+  }
+  return false;
+}
+
+export type NotesImplementationCheckpointFieldIssue =
+  | { field: "planStepTotal"; code: "not-positive-integer" }
+  | { field: "completedPlanSteps"; code: "not-array" }
+  | { field: "completedPlanSteps"; code: "invalid-step"; index: number }
+  | { field: "runOutcome"; code: "unknown-run-outcome" };
+
+export function validateNotesImplementationCheckpointFields(fields: {
+  planStepTotal: unknown;
+  completedPlanSteps: unknown;
+  runOutcome: unknown;
+}): NotesImplementationCheckpointFieldIssue | null {
+  if (!isPositiveInteger(fields.planStepTotal)) {
+    return { field: "planStepTotal", code: "not-positive-integer" };
+  }
+  if (!Array.isArray(fields.completedPlanSteps)) {
+    return { field: "completedPlanSteps", code: "not-array" };
+  }
+  let priorStep = 0;
+  for (let index = 0; index < fields.completedPlanSteps.length; index += 1) {
+    const step = fields.completedPlanSteps[index];
+    if (!isPositiveInteger(step) || step > fields.planStepTotal || step <= priorStep) {
+      return { field: "completedPlanSteps", code: "invalid-step", index };
+    }
+    priorStep = step;
+  }
+  if (!isNotesImplementationRunOutcome(fields.runOutcome)) {
+    return { field: "runOutcome", code: "unknown-run-outcome" };
+  }
+  return null;
+}
+
+export type NotesCompletionReviewFieldIssue =
+  | { field: "decision"; code: "unknown-decision" }
+  | { field: "evidence"; code: "invalid-evidence" | "accepted-requires-evidence" }
+  | { field: "reason"; code: "invalid-reason" | "rejected-requires-reason" };
+
+export function validateNotesCompletionReviewFields(fields: {
+  decision: unknown;
+  evidence: unknown;
+  reason: unknown;
+}): NotesCompletionReviewFieldIssue | null {
+  if (!isNotesReviewDecision(fields.decision)) {
+    return { field: "decision", code: "unknown-decision" };
+  }
+  if (!isValidNotesRoadmapEvidence(fields.evidence)) {
+    return { field: "evidence", code: "invalid-evidence" };
+  }
+  if (fields.decision === "accepted" && fields.evidence.length === 0) {
+    return { field: "evidence", code: "accepted-requires-evidence" };
+  }
+  if (
+    fields.reason !== null &&
+    !isBoundedNonEmptyString(fields.reason, NOTES_ROADMAP_REASON_MAX_LENGTH)
+  ) {
+    return { field: "reason", code: "invalid-reason" };
+  }
+  if (fields.decision === "rejected" && fields.reason === null) {
+    return { field: "reason", code: "rejected-requires-reason" };
+  }
+  return null;
+}
 
 export function classifyLegacyNotesLifecycleEvent(event: {
   toStatus: unknown;
@@ -1146,7 +1323,7 @@ function validatePhase(
   if (value.order !== index) {
     return validationError(`${pathPrefix}.order`, `expected ${index} to match array order`);
   }
-  if (!isPhaseStatus(value.status)) {
+  if (!isNotesPhaseStatus(value.status)) {
     return validationError(`${pathPrefix}.status`, "unknown phase status");
   }
   if (typeof value.sourcePrompt !== "string") {
@@ -1239,6 +1416,14 @@ export function validateNotesSessionLink(
   return null;
 }
 
+export function isNotesSessionLink(value: unknown): value is NotesSessionLink {
+  return value !== null && validateNotesSessionLink(value) === null;
+}
+
+export function isNullableNotesSessionLink(value: unknown): value is NotesSessionLink | null {
+  return validateNotesSessionLink(value) === null;
+}
+
 function validateReminder(value: unknown, pathPrefix: string): NotesValidationError | null {
   if (value === null) return null;
   if (!isRecordWithKeys(value, REMINDER_KEYS)) {
@@ -1282,16 +1467,10 @@ function validateReminderDelivery(value: unknown, pathPrefix: string): NotesVali
   if (!isTimestamp(value.attemptedAt)) {
     return validationError(`${pathPrefix}.attemptedAt`, "expected an ISO timestamp");
   }
-  if (
-    typeof value.channel !== "string" ||
-    !REMINDER_DELIVERY_CHANNELS.has(value.channel as NotesReminderDeliveryChannel)
-  ) {
+  if (!isNotesReminderDeliveryChannel(value.channel)) {
     return validationError(`${pathPrefix}.channel`, "unknown delivery channel");
   }
-  if (
-    typeof value.permission !== "string" ||
-    !REMINDER_PERMISSIONS.has(value.permission as NotesReminderPermission)
-  ) {
+  if (!isNotesReminderPermission(value.permission)) {
     return validationError(`${pathPrefix}.permission`, "unknown notification permission");
   }
   if (!isValidNotesReminderDeliveryPair(value.channel, value.permission)) {
@@ -1315,7 +1494,7 @@ function validateOverrides(
     if (!isRecordWithKeys(value.status, STATUS_OVERRIDE_KEYS)) {
       return validationError(`${pathPrefix}.status`, "invalid status override marker");
     }
-    if (!isPhaseStatus(value.status.value)) {
+    if (!isNotesPhaseStatus(value.status.value)) {
       return validationError(`${pathPrefix}.status.value`, "unknown phase status");
     }
     if (value.status.source !== "user") {
@@ -1354,19 +1533,20 @@ function validatePendingAutomaticLifecycleTransition(
   if (!isRecordWithKeys(value, PENDING_AUTOMATIC_LIFECYCLE_TRANSITION_KEYS)) {
     return validationError(pathPrefix, "invalid pending automatic lifecycle transition");
   }
-  if (value.status === "not-started" || value.status === "done" || !isPhaseStatus(value.status)) {
+  if (
+    value.status === "not-started" ||
+    value.status === "done" ||
+    !isNotesPhaseStatus(value.status)
+  ) {
     return validationError(`${pathPrefix}.status`, "unknown automatic phase status");
   }
-  if (!isLifecycleEventSource(value.source)) {
+  if (!isNotesLifecycleEventSource(value.source)) {
     return validationError(`${pathPrefix}.source`, "unknown lifecycle event source");
   }
   if (!isNonEmptyString(value.reason)) {
     return validationError(`${pathPrefix}.reason`, "expected a non-empty string");
   }
-  if (
-    typeof value.kind !== "string" ||
-    !LIFECYCLE_EVENT_KINDS.has(value.kind as NotesLifecycleEventKind)
-  ) {
+  if (!isNotesLifecycleEventKind(value.kind)) {
     return validationError(`${pathPrefix}.kind`, "unknown lifecycle event kind");
   }
   if (
@@ -1412,10 +1592,10 @@ function validateLifecycleEvents(
       return validationError(`${eventPath}.id`, "event ID is required");
     if (ids.has(event.id)) return validationError(`${eventPath}.id`, `duplicate ID: ${event.id}`);
     ids.add(event.id);
-    if (event.fromStatus !== null && !isPhaseStatus(event.fromStatus)) {
+    if (event.fromStatus !== null && !isNotesPhaseStatus(event.fromStatus)) {
       return validationError(`${eventPath}.fromStatus`, "unknown phase status");
     }
-    if (!isPhaseStatus(event.toStatus)) {
+    if (!isNotesPhaseStatus(event.toStatus)) {
       return validationError(`${eventPath}.toStatus`, "unknown phase status");
     }
     if (event.fromStatus === event.toStatus) {
@@ -1424,7 +1604,7 @@ function validateLifecycleEvents(
     if (previousStatus !== undefined && event.fromStatus !== previousStatus) {
       return validationError(`${eventPath}.fromStatus`, `expected ${previousStatus}`);
     }
-    if (!isLifecycleEventSource(event.source)) {
+    if (!isNotesLifecycleEventSource(event.source)) {
       return validationError(`${eventPath}.source`, "unknown lifecycle event source");
     }
     if (!isTimestamp(event.timestamp)) {
@@ -1507,16 +1687,10 @@ function validateRoadmapEvents(
       if (!isRecordWithKeys(record, ROADMAP_STATUS_UPDATE_KEYS)) {
         return validationError(eventPath, "invalid roadmap status update");
       }
-      if (
-        typeof record.actor !== "string" ||
-        !ROADMAP_ACTORS.has(record.actor as NotesRoadmapActor)
-      ) {
+      if (!isNotesRoadmapActor(record.actor)) {
         return validationError(`${eventPath}.actor`, "unknown roadmap actor");
       }
-      if (
-        typeof record.transition !== "string" ||
-        !ROADMAP_TRANSITIONS.has(record.transition as NotesRoadmapTransition)
-      ) {
+      if (!isNotesRoadmapTransition(record.transition)) {
         return validationError(`${eventPath}.transition`, "unknown roadmap transition");
       }
       if (!isBoundedNonEmptyString(record.progress, 4_096)) {
@@ -1532,18 +1706,14 @@ function validateRoadmapEvents(
           "only blocked reports may include a blocker",
         );
       }
-      if (
-        !Array.isArray(record.evidence) ||
-        record.evidence.length > 20 ||
-        !record.evidence.every((item) => isBoundedNonEmptyString(item, 4_096))
-      ) {
+      if (!isValidNotesRoadmapEvidence(record.evidence)) {
         return validationError(`${eventPath}.evidence`, "expected up to 20 bounded evidence items");
       }
-      if (record.transition === "review" && record.evidence.length === 0) {
+      if (!isNotesRoadmapTransitionEvidenceSatisfied(record.transition, record.evidence)) {
         return validationError(`${eventPath}.evidence`, "review reports require evidence");
       }
       if (record.verification === null) {
-        if (record.verificationReason !== null) {
+        if (!isNotesVerificationReasonSatisfied(record.verification, record.verificationReason)) {
           return validationError(
             `${eventPath}.verificationReason`,
             "verification reason requires a verification result",
@@ -1556,26 +1726,25 @@ function validateRoadmapEvents(
           );
         }
       } else {
-        if (
-          typeof record.verification !== "string" ||
-          !VERIFICATION_STATUSES.has(record.verification as NotesVerificationStatus)
-        ) {
+        if (!isNotesVerificationStatus(record.verification)) {
           return validationError(`${eventPath}.verification`, "unknown verification result");
         }
         if (record.verification === "passed") {
-          if (record.evidence.length === 0) {
+          if (!isNotesVerificationEvidenceSatisfied(record.verification, record.evidence)) {
             return validationError(
               `${eventPath}.evidence`,
               "passed verification requires evidence",
             );
           }
-          if (record.verificationReason !== null) {
+          if (!isNotesVerificationReasonSatisfied(record.verification, record.verificationReason)) {
             return validationError(
               `${eventPath}.verificationReason`,
               "passed verification cannot include a failure or exception reason",
             );
           }
-        } else if (!isBoundedNonEmptyString(record.verificationReason, 1_024)) {
+        } else if (
+          !isNotesVerificationReasonSatisfied(record.verification, record.verificationReason)
+        ) {
           return validationError(
             `${eventPath}.verificationReason`,
             "failed or exception verification requires a bounded reason",
@@ -1589,13 +1758,13 @@ function validateRoadmapEvents(
         verificationUpdates.set(record.id, record as unknown as NotesRoadmapStatusUpdate);
         verificationUpdateIndexes.set(record.id, index);
       }
-      if (
-        typeof record.statusOutcome !== "string" ||
-        !ROADMAP_STATUS_OUTCOMES.has(record.statusOutcome as NotesRoadmapStatusOutcome)
-      ) {
+      if (!isNotesRoadmapStatusOutcome(record.statusOutcome)) {
         return validationError(`${eventPath}.statusOutcome`, "unknown status outcome");
       }
-      if (!Array.isArray(record.proposedReferences) || record.proposedReferences.length > 20) {
+      if (
+        !Array.isArray(record.proposedReferences) ||
+        record.proposedReferences.length > NOTES_ROADMAP_PROPOSALS_MAX_ITEMS
+      ) {
         return validationError(`${eventPath}.proposedReferences`, "expected up to 20 proposals");
       }
       for (
@@ -1632,7 +1801,7 @@ function validateRoadmapEvents(
       if (decidedProposalIds.has(record.proposalId)) {
         return validationError(`${eventPath}.proposalId`, "proposal already has a decision");
       }
-      if (record.decision !== "accepted" && record.decision !== "rejected") {
+      if (!isNotesReviewDecision(record.decision)) {
         return validationError(`${eventPath}.decision`, "expected accepted or rejected");
       }
       if (record.decision === "accepted") {
@@ -1672,27 +1841,24 @@ function validateRoadmapEvents(
           sessionError ?? validationError(`${eventPath}.session`, "a bound session is required")
         );
       }
-      if (!isPositiveInteger(record.planStepTotal)) {
+      const checkpointIssue = validateNotesImplementationCheckpointFields({
+        planStepTotal: record.planStepTotal,
+        completedPlanSteps: record.completedPlanSteps,
+        runOutcome: record.runOutcome,
+      });
+      if (checkpointIssue?.code === "not-positive-integer") {
         return validationError(`${eventPath}.planStepTotal`, "expected a positive integer");
       }
-      if (!Array.isArray(record.completedPlanSteps)) {
+      if (checkpointIssue?.code === "not-array") {
         return validationError(`${eventPath}.completedPlanSteps`, "expected a sorted step array");
       }
-      let priorStep = 0;
-      for (let stepIndex = 0; stepIndex < record.completedPlanSteps.length; stepIndex += 1) {
-        const step = record.completedPlanSteps[stepIndex];
-        if (!isPositiveInteger(step) || step > record.planStepTotal || step <= priorStep) {
-          return validationError(
-            `${eventPath}.completedPlanSteps[${stepIndex}]`,
-            "expected unique ascending steps within the plan total",
-          );
-        }
-        priorStep = step;
+      if (checkpointIssue?.code === "invalid-step") {
+        return validationError(
+          `${eventPath}.completedPlanSteps[${checkpointIssue.index}]`,
+          "expected unique ascending steps within the plan total",
+        );
       }
-      if (
-        typeof record.runOutcome !== "string" ||
-        !IMPLEMENTATION_RUN_OUTCOMES.has(record.runOutcome as NotesImplementationRunOutcome)
-      ) {
+      if (checkpointIssue?.code === "unknown-run-outcome") {
         return validationError(`${eventPath}.runOutcome`, "unknown implementation run outcome");
       }
       implementationCheckpoints.set(
@@ -1707,26 +1873,27 @@ function validateRoadmapEvents(
       if (!isRecordWithKeys(record, ROADMAP_COMPLETION_REVIEW_KEYS)) {
         return validationError(eventPath, "invalid completion review");
       }
-      if (record.reviewer !== "ken" && record.reviewer !== "ken-autopilot") {
+      if (!isNotesRoadmapReviewer(record.reviewer)) {
         return validationError(`${eventPath}.reviewer`, "expected Ken or Autopilot Ken");
       }
-      if (record.decision !== "accepted" && record.decision !== "rejected") {
+      const reviewIssue = validateNotesCompletionReviewFields({
+        decision: record.decision,
+        evidence: record.evidence,
+        reason: record.reason,
+      });
+      if (reviewIssue?.code === "unknown-decision") {
         return validationError(`${eventPath}.decision`, "expected accepted or rejected");
       }
-      if (
-        !Array.isArray(record.evidence) ||
-        record.evidence.length > 20 ||
-        !record.evidence.every((item) => isBoundedNonEmptyString(item, 4_096))
-      ) {
+      if (reviewIssue?.code === "invalid-evidence") {
         return validationError(`${eventPath}.evidence`, "expected up to 20 bounded evidence items");
       }
-      if (record.decision === "accepted" && record.evidence.length === 0) {
+      if (reviewIssue?.code === "accepted-requires-evidence") {
         return validationError(`${eventPath}.evidence`, "accepted reviews require evidence");
       }
-      if (record.reason !== null && !isBoundedNonEmptyString(record.reason, 1_024)) {
+      if (reviewIssue?.code === "invalid-reason") {
         return validationError(`${eventPath}.reason`, "expected a bounded reason or null");
       }
-      if (record.decision === "rejected" && record.reason === null) {
+      if (reviewIssue?.code === "rejected-requires-reason") {
         return validationError(`${eventPath}.reason`, "rejected reviews require a reason");
       }
       if (
@@ -1763,23 +1930,19 @@ function validateRoadmapEvents(
           "can only accept a referenced verification exception",
         );
       }
-      if (
-        typeof record.gateOutcome !== "string" ||
-        !COMPLETION_GATE_OUTCOMES.has(record.gateOutcome as NotesCompletionGateOutcome)
-      ) {
+      if (!isNotesCompletionGateOutcome(record.gateOutcome)) {
         return validationError(`${eventPath}.gateOutcome`, "unknown completion gate outcome");
       }
-      if (!Array.isArray(record.unmetGateCodes) || record.unmetGateCodes.length > 20) {
+      if (
+        !Array.isArray(record.unmetGateCodes) ||
+        record.unmetGateCodes.length > NOTES_COMPLETION_UNMET_GATE_CODES_MAX_ITEMS
+      ) {
         return validationError(`${eventPath}.unmetGateCodes`, "expected up to 20 unmet gate codes");
       }
       const unmetCodes = new Set<string>();
       for (let gateIndex = 0; gateIndex < record.unmetGateCodes.length; gateIndex += 1) {
         const gate = record.unmetGateCodes[gateIndex];
-        if (
-          typeof gate !== "string" ||
-          !COMPLETION_UNMET_GATE_CODES.has(gate as NotesCompletionUnmetGateCode) ||
-          unmetCodes.has(gate)
-        ) {
+        if (!isNotesCompletionUnmetGateCode(gate) || unmetCodes.has(gate)) {
           return validationError(
             `${eventPath}.unmetGateCodes[${gateIndex}]`,
             "expected a unique known completion gate code",
@@ -1884,19 +2047,17 @@ function validateRoadmapProposal(
   ) {
     return validationError(`${pathPrefix}.disposition`, "expected pending, accepted, or reused");
   }
-  const expectedDisposition =
-    value.policyOutcome === "manual-review" ||
-    value.policyOutcome === "reference-override-protected"
-      ? "pending"
-      : value.policyOutcome === "accepted" || value.policyOutcome === "reused"
-        ? value.policyOutcome
-        : null;
-  if (expectedDisposition === null) {
+  if (!isNotesRoadmapReferencePolicyOutcome(value.policyOutcome)) {
     return validationError(
       `${pathPrefix}.policyOutcome`,
       "expected manual-review, reference-override-protected, accepted, or reused",
     );
   }
+  const expectedDisposition =
+    value.policyOutcome === "manual-review" ||
+    value.policyOutcome === "reference-override-protected"
+      ? "pending"
+      : value.policyOutcome;
   if (value.disposition !== expectedDisposition) {
     return validationError(`${pathPrefix}.policyOutcome`, "must match the proposal disposition");
   }
@@ -1953,16 +2114,6 @@ function isPositiveInteger(value: unknown): value is number {
 
 function isNullablePositiveInteger(value: unknown): value is number | null {
   return value === null || isPositiveInteger(value);
-}
-
-function isPhaseStatus(value: unknown): value is NotesPhaseStatus {
-  return typeof value === "string" && PHASE_STATUSES.has(value as NotesPhaseStatus);
-}
-
-function isLifecycleEventSource(value: unknown): value is NotesLifecycleEventSource {
-  return (
-    typeof value === "string" && LIFECYCLE_EVENT_SOURCES.has(value as NotesLifecycleEventSource)
-  );
 }
 
 export function normalizeCanonicalUrl(value: string): string | null {

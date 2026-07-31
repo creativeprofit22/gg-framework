@@ -36,8 +36,10 @@ export interface AppSidecarRoadmapToolSession {
 
 export interface AppSidecarRoadmapToolHostDependencies {
   cwd: string;
-  repository: Pick<ProjectNotesRepository, "recordRoadmapStatusUpdate"> &
-    Partial<Pick<ProjectNotesRepository, "recordRoadmapFinalReview">>;
+  repository: Pick<
+    ProjectNotesRepository,
+    "recordRoadmapStatusUpdate" | "recordRoadmapFinalReview"
+  >;
   canSubmitFinalReview?(): boolean;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   projectAutopilot: Pick<AppSidecarProjectAutopilotState, "isEnabled">;
@@ -178,9 +180,6 @@ export class AppSidecarRoadmapToolHost {
     const finalReview = input.final_review!;
     if (this.dependencies.canSubmitFinalReview?.() === false) {
       return { result: "completion-checkpoint-blocked", phaseId: input.phase_id };
-    }
-    if (!this.dependencies.repository.recordRoadmapFinalReview) {
-      return { result: "completion-unavailable", phaseId: input.phase_id };
     }
     const completion = await this.dependencies.repository.recordRoadmapFinalReview(
       this.dependencies.cwd,

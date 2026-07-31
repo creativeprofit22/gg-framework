@@ -24,6 +24,15 @@ async function canonicalNotesFixture(): Promise<unknown> {
   ) as unknown;
 }
 
+async function malformedLegacyV3Fixture(): Promise<unknown> {
+  return JSON.parse(
+    await fs.readFile(
+      new URL("../../fixtures/project-notes-v3-malformed-legacy.json", import.meta.url),
+      "utf8",
+    ),
+  ) as unknown;
+}
+
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
   readonly failingWrites = new Set<string>();
@@ -555,6 +564,23 @@ describe("structured project notes storage", () => {
     expect(loaded.document).toEqual(expected);
     expect(persisted).toEqual(expected);
     expect(restarted.document).toEqual(expected);
+  });
+
+  it("returns the shared post-normalization error for malformed legacy v3 Notes", async () => {
+    const fixture = await malformedLegacyV3Fixture();
+
+    expect(validateNotesDocumentV3(fixture)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0]" },
+    });
+    expect(parseNotesDocument(JSON.stringify(fixture))).toEqual({
+      ok: false,
+      reason: "invalid-shape",
+      error: {
+        path: "phases[0].status",
+        message: "unknown phase status",
+      },
+    });
   });
 
   it("migrates legacy v3 proposal outcomes without inferring override protection", () => {

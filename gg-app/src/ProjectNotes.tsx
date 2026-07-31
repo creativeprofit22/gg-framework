@@ -13,12 +13,17 @@ import {
   getUnfinishedNotesTaskCount,
   isNotesHandoffUnread,
 } from "./notes-status";
-import { RoadmapReminderDeliveryHost, type InAppReminderDelivery } from "./roadmap-reminders";
+import {
+  reminderMutationResultMessage,
+  RoadmapReminderDeliveryHost,
+  type InAppReminderDelivery,
+} from "./roadmap-reminders";
 import { useProjectNotes, type UseProjectNotesResult } from "./useProjectNotes";
 import type {
   NotesClient,
   NotesPromptSaveInput,
   NotesPromptSaveResult,
+  NotesReminderMutationResult,
   NotesSessionLink,
   PhaseStartResult,
 } from "./notes-types";
@@ -217,18 +222,58 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     setReminderError(null);
   };
   const runReminderMutation = async (
-    mutation: () => Promise<{ status: string }>,
-    failureMessage: string,
+    mutation: () => Promise<NotesReminderMutationResult>,
+    unexpectedFailureMessage: string,
   ): Promise<void> => {
     if (!activeReminder || reminderPending) return;
     setReminderPending(true);
     setReminderError(null);
     try {
       const result = await mutation();
-      if (result.status !== "committed") throw new Error(failureMessage);
-      removeActiveReminder();
+      if (result.status === "committed") {
+        removeActiveReminder();
+      } else {
+        setReminderError(reminderMutationResultMessage(result));
+      }
     } catch (error) {
-      setReminderError(error instanceof Error && error.message ? error.message : failureMessage);
+      setReminderError(
+        error instanceof Error && error.message ? error.message : unexpectedFailureMessage,
+      );
+    } finally {
+      setReminderPending(false);
+    }
+  };
+
+  const resumeActiveReminder = async (): Promise<void> => {
+    const resumeLink = activeReminder?.phase.session;
+    if (!activeReminder || !resumeLink || reminderPending) return;
+    const delivery = activeReminder;
+    setReminderPending(true);
+    setReminderError(null);
+    try {
+      try {
+        await onResumePhase(delivery.phase.id, resumeLink);
+      } catch (error) {
+        const detail = error instanceof Error && error.message ? ` ${error.message}` : "";
+        setReminderError(`Couldn’t resume this phase.${detail}`);
+        return;
+      }
+
+      try {
+        const cleanupResult = await dismissPhaseReminder(
+          delivery.phase.id,
+          delivery.reminder.occurrenceKey,
+        );
+        if (cleanupResult.status === "committed") {
+          removeActiveReminder();
+        } else {
+          setReminderError(reminderMutationResultMessage(cleanupResult, "resume-cleanup"));
+        }
+      } catch (error) {
+        const detail =
+          error instanceof Error && error.message ? error.message : "Try dismissing it again.";
+        setReminderError(`The phase resumed, but reminder cleanup did not complete. ${detail}`);
+      }
     } finally {
       setReminderPending(false);
     }
@@ -258,13 +303,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
               error={reminderError}
               onPrimary={() => {
                 if (activeReminder.phase.session) {
-                  void runReminderMutation(async () => {
-                    await onResumePhase(activeReminder.phase.id, activeReminder.phase.session!);
-                    return dismissPhaseReminder(
-                      activeReminder.phase.id,
-                      activeReminder.reminder.occurrenceKey,
-                    );
-                  }, "Couldn’t resume this phase. The reminder is still active.");
+                  void resumeActiveReminder();
                 } else {
                   setModalProjectIdentity(activeProjectIdentity);
                   setRoadmapTargetPhaseId(activeReminder.phase.id);

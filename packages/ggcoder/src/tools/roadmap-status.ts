@@ -1,9 +1,17 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import type {
-  NotesCompletionGateOutcome,
-  NotesCompletionUnmetGateCode,
-  NotesRoadmapStatusOutcome,
+import {
+  NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH,
+  NOTES_ROADMAP_EVIDENCE_MAX_ITEMS,
+  NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
+  NOTES_ROADMAP_REASON_MAX_LENGTH,
+  isNotesRoadmapTransitionEvidenceSatisfied,
+  isNotesVerificationEvidenceSatisfied,
+  validateNotesCompletionReviewFields,
+  type NotesCompletionGateOutcome,
+  type NotesCompletionUnmetGateCode,
+  type NotesRoadmapActor,
+  type NotesRoadmapStatusOutcome,
 } from "@kenkaiiii/gg-core/project-notes";
 import type { ProjectNotesRoadmapProposalOutcome } from "../project-notes-repository.js";
 
@@ -107,16 +115,19 @@ const Evidence = z
   .array(
     z
       .string()
-      .max(4_096)
+      .max(NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH)
       .transform(normalizedText)
       .refine((value) => value.length > 0, "Evidence items must not be empty"),
   )
-  .max(20)
+  .max(NOTES_ROADMAP_EVIDENCE_MAX_ITEMS)
   .default([]);
-const ProposedReferences = z.array(RoadmapReferenceProposalParams).max(20).default([]);
+const ProposedReferences = z
+  .array(RoadmapReferenceProposalParams)
+  .max(NOTES_ROADMAP_PROPOSALS_MAX_ITEMS)
+  .default([]);
 const ReviewReason = z
   .string()
-  .max(1_024)
+  .max(NOTES_ROADMAP_REASON_MAX_LENGTH)
   .transform(normalizedText)
   .refine((value) => value.length > 0, "reason is required");
 const Verification = z
@@ -133,9 +144,7 @@ const FinalReview = z
       .object({
         review_id: StableId,
         decision: z.literal("accepted"),
-        evidence: Evidence.refine((items) => items.length > 0, {
-          message: "accepted reviews require at least one evidence item",
-        }),
+        evidence: Evidence,
         reason: ReviewReason.nullish().transform((value) => value ?? null),
         accepts_verification_exception: z.boolean().default(false),
       })
@@ -145,13 +154,26 @@ const FinalReview = z
         review_id: StableId,
         decision: z.literal("rejected"),
         evidence: Evidence,
-        reason: ReviewReason,
+        reason: ReviewReason.nullish().transform((value) => value ?? null),
         accepts_verification_exception: z.literal(false).default(false),
       })
       .strict(),
   ])
   .nullish()
-  .transform((value) => value ?? null);
+  .transform((value) => value ?? null)
+  .superRefine((review, context) => {
+    if (review === null) return;
+    const issue = validateNotesCompletionReviewFields(review);
+    if (issue?.code === "accepted-requires-evidence") {
+      context.addIssue({
+        code: "custom",
+        path: ["evidence"],
+        message: "accepted reviews require at least one evidence item",
+      });
+    } else if (issue?.code === "rejected-requires-reason") {
+      context.addIssue({ code: "custom", path: ["reason"], message: "reason is required" });
+    }
+  });
 
 const commonFields = {
   update_id: StableId,
@@ -196,14 +218,21 @@ export const RoadmapStatusParams = z
         ...commonFields,
         transition: z.literal("review"),
         blocker: z.never().optional(),
-        evidence: Evidence.refine((items) => items.length > 0, {
-          message: "review reports require at least one evidence item",
-        }),
+        evidence: Evidence,
       })
       .strict(),
   ])
   .superRefine((report, context) => {
-    if (report.verification?.result === "passed" && report.evidence.length === 0) {
+    if (!isNotesRoadmapTransitionEvidenceSatisfied(report.transition, report.evidence)) {
+      context.addIssue({
+        code: "custom",
+        path: ["evidence"],
+        message: "review reports require at least one evidence item",
+      });
+    }
+    if (
+      !isNotesVerificationEvidenceSatisfied(report.verification?.result ?? null, report.evidence)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["evidence"],
@@ -215,7 +244,7 @@ export const RoadmapStatusParams = z
 export type RoadmapStatusInput = z.infer<typeof RoadmapStatusParams>;
 export type RoadmapReferenceProposalInput = z.infer<typeof RoadmapReferenceProposalParams>;
 
-export type RoadmapStatusActor = "gg-coder" | "ken" | "ken-autopilot";
+export type RoadmapStatusActor = NotesRoadmapActor;
 
 export interface RoadmapStatusToolContext {
   actor: RoadmapStatusActor;
@@ -253,7 +282,6 @@ export type RoadmapStatusToolResult =
         | "stale-session"
         | "invalid-reference"
         | "completion-checkpoint-blocked"
-        | "completion-unavailable"
         | "invalid-review";
       phaseId: string;
       revision?: number;

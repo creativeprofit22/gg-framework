@@ -1,3 +1,5 @@
+import { isNotesSessionLink } from "./project-notes.js";
+
 export const PHASE_START_STATUSES = ["accepted", "already-bound", "failed"] as const;
 
 export type PhaseStartStatus = (typeof PHASE_START_STATUSES)[number];
@@ -54,11 +56,7 @@ export function isPhaseStartFailureCode(value: unknown): value is PhaseStartFail
 }
 
 export function isPhaseStartSession(value: unknown): value is PhaseStartSession {
-  if (!isRecord(value) || !hasExactKeys(value, ["sessionId", "sessionPath"])) return false;
-  return (
-    isNonEmptyString(value.sessionId) &&
-    (value.sessionPath === null || typeof value.sessionPath === "string")
-  );
+  return isNotesSessionLink(value);
 }
 
 export function isPhaseStartResult(value: unknown): value is PhaseStartResult {

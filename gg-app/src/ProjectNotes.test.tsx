@@ -86,10 +86,50 @@ function phase(id: string, status: NotesPhaseStatus, withReminder = false): Note
     completedAt: status === "done" || status === "cancelled" ? NOW : null,
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
     lifecycleEvents: [],
     roadmapEvents: [],
   };
 }
+
+type PhaseSessionFixture = "unbound" | "missing-path" | "path-present";
+
+function phaseSession(fixture: PhaseSessionFixture): NotesPhase["session"] {
+  if (fixture === "unbound") return null;
+  return {
+    sessionId: `session-${fixture}`,
+    sessionPath: fixture === "missing-path" ? null : `/sessions/${fixture}.jsonl`,
+  };
+}
+
+const PHASE_ACTION_MATRIX = [
+  ["not-started", "unbound", "Start"],
+  ["not-started", "missing-path", "Recover"],
+  ["not-started", "path-present", "Resume"],
+  ["planning", "unbound", "Start"],
+  ["planning", "missing-path", "Recover"],
+  ["planning", "path-present", "Resume"],
+  ["waiting-for-approval", "unbound", "Start"],
+  ["waiting-for-approval", "missing-path", "Recover"],
+  ["waiting-for-approval", "path-present", "Resume"],
+  ["in-progress", "unbound", "Start"],
+  ["in-progress", "missing-path", "Recover"],
+  ["in-progress", "path-present", "Resume"],
+  ["review", "unbound", "Review"],
+  ["review", "missing-path", "Review"],
+  ["review", "path-present", "Review"],
+  ["done", "unbound", "Review"],
+  ["done", "missing-path", "Review"],
+  ["done", "path-present", "Review"],
+  ["needs-attention", "unbound", "Start"],
+  ["needs-attention", "missing-path", "Recover"],
+  ["needs-attention", "path-present", "Resume"],
+  ["cancelled", "unbound", "Start"],
+  ["cancelled", "missing-path", "Recover"],
+  ["cancelled", "path-present", "Resume"],
+] as const satisfies ReadonlyArray<
+  readonly [NotesPhaseStatus, PhaseSessionFixture, "Start" | "Recover" | "Resume" | "Review"]
+>;
 
 function reminderReservation(selected: NotesPhase): ReminderReserveOutcome {
   if (!selected.reminder) throw new Error("Expected reminder");
@@ -839,7 +879,7 @@ describe("ProjectNotes", () => {
 
     selectNotesTab("Roadmap");
     expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(4);
-    expect(screen.getByRole("button", { name: "Resume phase: Phase planning" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start phase: Phase planning" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Review phase: Phase review" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Review phase: Phase done" })).toBeTruthy();
     expect(screen.queryByText("Selected phase")).toBeNull();
@@ -1453,6 +1493,101 @@ describe("ProjectNotes", () => {
     expect(heading.nextElementSibling?.textContent).toBe(prompt);
   });
 
+  it.each(PHASE_ACTION_MATRIX)(
+    "routes a %s phase with %s linkage through %s",
+    async (status, sessionFixture, expectedAction) => {
+      const cwd = `/work/action-${status}-${sessionFixture}`;
+      const client = new FakeProjectNotesClient(cwd);
+      const document = notes("primary action matrix");
+      const selected = phase(`${status}-${sessionFixture}`, status);
+      selected.session = phaseSession(sessionFixture);
+      document.phases = [selected];
+      client.seed(cwd, document);
+      const onStartPhase = vi.fn().mockResolvedValue({
+        status: "accepted",
+        operationId: "operation-matrix",
+        session: { sessionId: "started", sessionPath: "/sessions/started.jsonl" },
+        packageTokenCount: 1,
+      });
+      const onResumePhase = vi.fn().mockResolvedValue(undefined);
+      render(
+        <ProjectNotes
+          cwd={cwd}
+          client={client}
+          onStartPhase={onStartPhase}
+          onResumePhase={onResumePhase}
+        />,
+      );
+
+      fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+      selectNotesTab("Roadmap");
+      const rowAction = screen.getByRole("button", {
+        name: `${expectedAction} phase: ${selected.title}`,
+      }) as HTMLButtonElement;
+      expect(rowAction.disabled).toBe(false);
+      fireEvent.click(rowAction);
+
+      if (expectedAction === "Review") {
+        expect(screen.getByText("This phase is available for scope review only.")).toBeTruthy();
+        expect(screen.queryByRole("button", { name: /^(Start|Recover|Resume) phase$/ })).toBeNull();
+      } else {
+        const detailAction = screen.getByRole("button", {
+          name: `${expectedAction} phase`,
+        }) as HTMLButtonElement;
+        expect(detailAction.disabled).toBe(false);
+        fireEvent.click(detailAction);
+        if (expectedAction === "Start") {
+          await waitFor(() => expect(onStartPhase).toHaveBeenCalledExactlyOnceWith(selected.id));
+        } else {
+          await waitFor(() =>
+            expect(onResumePhase).toHaveBeenCalledExactlyOnceWith(selected.id, selected.session),
+          );
+        }
+      }
+
+      expect(onStartPhase).toHaveBeenCalledTimes(expectedAction === "Start" ? 1 : 0);
+      expect(onResumePhase).toHaveBeenCalledTimes(
+        expectedAction === "Recover" || expectedAction === "Resume" ? 1 : 0,
+      );
+    },
+  );
+
+  it.each(["unbound", "missing-path", "path-present"] as const)(
+    "keeps a manually cancelled phase review-only with %s linkage",
+    async (sessionFixture) => {
+      const cwd = `/work/manual-cancelled-${sessionFixture}`;
+      const client = new FakeProjectNotesClient(cwd);
+      const document = notes("manual cancellation action");
+      const selected = phase(`manual-cancelled-${sessionFixture}`, "cancelled");
+      selected.session = phaseSession(sessionFixture);
+      selected.overrides.status = { value: "cancelled", source: "user", updatedAt: NOW };
+      document.phases = [selected];
+      client.seed(cwd, document);
+      const onStartPhase = vi.fn();
+      const onResumePhase = vi.fn();
+      render(
+        <ProjectNotes
+          cwd={cwd}
+          client={client}
+          onStartPhase={onStartPhase}
+          onResumePhase={onResumePhase}
+        />,
+      );
+
+      fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+      selectNotesTab("Roadmap");
+      const rowAction = screen.getByRole("button", {
+        name: `Review phase: ${selected.title}`,
+      }) as HTMLButtonElement;
+      expect(rowAction.disabled).toBe(false);
+      fireEvent.click(rowAction);
+      expect(screen.getByText("This phase is available for scope review only.")).toBeTruthy();
+      expect(screen.queryByRole("button", { name: /^(Start|Recover|Resume) phase$/ })).toBeNull();
+      expect(onStartPhase).not.toHaveBeenCalled();
+      expect(onResumePhase).not.toHaveBeenCalled();
+    },
+  );
+
   it("renders authoritative lifecycle labels and recovery actions without losing selection", async () => {
     const cwd = "/work/roadmap-lifecycle";
     const client = new FakeProjectNotesClient(cwd);
@@ -1499,6 +1634,14 @@ describe("ProjectNotes", () => {
           status: { value: "cancelled", source: "user", updatedAt: NOW },
           referenceIds: null,
         },
+        pendingAutomaticLifecycleTransition: {
+          status: "review",
+          source: "agent",
+          reason: "Autopilot review started",
+          kind: "other",
+          timestamp: "2026-07-15T12:01:00.000Z",
+          expectedSession: bound,
+        },
       },
     ];
     client.seed(cwd, populated);
@@ -1509,7 +1652,7 @@ describe("ProjectNotes", () => {
     selectNotesTab("Roadmap");
     const expectedRows = [
       ["Not started phase", "Not started", "Start"],
-      ["Planning phase", "Planning", "Resume"],
+      ["Planning phase", "Planning", "Start"],
       ["Waiting phase", "Waiting for approval", "Resume"],
       ["Progress phase", "In progress", "Resume"],
       ["Review phase", "Review", "Review"],
@@ -1551,7 +1694,7 @@ describe("ProjectNotes", () => {
     const overriddenSelect = screen.getByLabelText("Status override");
     const overriddenHelpId = overriddenSelect.getAttribute("aria-describedby");
     expect(document.getElementById(overriddenHelpId!)?.textContent).toBe(
-      "Automatic lifecycle updates are paused. Resuming will set status to Cancelled.",
+      "Automatic lifecycle updates are paused. Resuming will set status to Review.",
     );
     expect(screen.queryByRole("button", { name: "Resume phase" })).toBeNull();
   });
@@ -1594,7 +1737,7 @@ describe("ProjectNotes", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
     expect(screen.getByRole("button", { name: "Start phase: Alpha" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Resume phase: Beta" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start phase: Beta" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "New phase" }));
     fireEvent.change(screen.getByLabelText("Phase title"), { target: { value: "Gamma" } });

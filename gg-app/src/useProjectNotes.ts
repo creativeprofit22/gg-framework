@@ -1,4 +1,7 @@
-import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
+import {
+  canonicalProjectKey,
+  notesPhaseStatusForRoadmapTransition,
+} from "@kenkaiiii/gg-core/project-notes";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { canonicalReferenceIdentity, type NotesReferenceInput } from "./notes-reference";
 import { isNotesHandoffUnread } from "./notes-status";
@@ -873,6 +876,7 @@ export function useProjectNotes(
             completedAt: null,
             archivedAt: null,
             overrides: { status: null, referenceIds: null },
+            pendingAutomaticLifecycleTransition: null,
             lifecycleEvents: [],
             roadmapEvents: [],
           };
@@ -1688,6 +1692,7 @@ function evaluatePromptSave(
       completedAt: null,
       archivedAt: null,
       overrides: { status: null, referenceIds: null },
+      pendingAutomaticLifecycleTransition: null,
       lifecycleEvents: [],
       roadmapEvents: [],
     };
@@ -1852,6 +1857,11 @@ function evaluateStatusOverrideReset(
       result: { status: "committed", phaseId, resultingStatus: phase.status },
     };
   }
+  const pendingLifecycle =
+    phase.pendingAutomaticLifecycleTransition != null &&
+    sameNotesSessionLink(phase.session, phase.pendingAutomaticLifecycleTransition.expectedSession)
+      ? phase.pendingAutomaticLifecycleTransition
+      : null;
   const latestProtected = [...phase.roadmapEvents]
     .reverse()
     .find(
@@ -1860,9 +1870,12 @@ function evaluateStatusOverrideReset(
         (event.statusOutcome === "manual-override" || event.statusOutcome === "done-terminal"),
     );
   const targetStatus =
-    phase.status === "done" || latestProtected?.type !== "status-update"
+    phase.status === "done"
       ? phase.status
-      : roadmapTransitionPhaseStatus(latestProtected.transition);
+      : (pendingLifecycle?.status ??
+        (latestProtected?.type === "status-update"
+          ? notesPhaseStatusForRoadmapTransition(latestProtected.transition)
+          : phase.status));
   const timestamp = chronologicalRoadmapMutationTimestamp(requestedAt, current.updatedAt, phase);
   const lifecycleEvents = [...phase.lifecycleEvents];
   if (targetStatus !== phase.status) {
@@ -1870,15 +1883,16 @@ function evaluateStatusOverrideReset(
       id: lifecycleId,
       fromStatus: phase.status,
       toStatus: targetStatus,
-      source: "user",
+      source: pendingLifecycle?.source ?? "user",
       timestamp,
-      reason: "Automatic status updates resumed by user",
+      reason: pendingLifecycle?.reason ?? "Automatic status updates resumed by user",
       kind:
-        targetStatus === "waiting-for-approval"
+        pendingLifecycle?.kind ??
+        (targetStatus === "waiting-for-approval"
           ? "approval-opened"
           : targetStatus === "needs-attention"
             ? "attention-generic-opened"
-            : "other",
+            : "other"),
     });
   }
   const phases = [...current.phases];
@@ -1886,14 +1900,22 @@ function evaluateStatusOverrideReset(
     ...phase,
     status: targetStatus,
     attentionReason:
-      latestProtected?.type === "status-update" && latestProtected.transition === "blocked"
-        ? latestProtected.blocker
-        : targetStatus === phase.status
-          ? phase.attentionReason
+      pendingLifecycle?.status === "needs-attention"
+        ? pendingLifecycle.reason
+        : latestProtected?.type === "status-update" && latestProtected.transition === "blocked"
+          ? latestProtected.blocker
+          : targetStatus === phase.status
+            ? phase.attentionReason
+            : null,
+    completedAt:
+      targetStatus === "cancelled"
+        ? (pendingLifecycle?.timestamp ?? phase.completedAt)
+        : targetStatus === "done"
+          ? phase.completedAt
           : null,
-    completedAt: targetStatus === "done" || targetStatus === "cancelled" ? phase.completedAt : null,
     updatedAt: timestamp,
     overrides: { ...phase.overrides, status: null },
+    pendingAutomaticLifecycleTransition: null,
     lifecycleEvents,
     roadmapEvents: [
       ...phase.roadmapEvents,
@@ -1904,6 +1926,18 @@ function evaluateStatusOverrideReset(
     document: { ...current, phases, updatedAt: timestamp },
     result: { status: "committed", phaseId, resultingStatus: targetStatus },
   };
+}
+
+function sameNotesSessionLink(
+  current: NotesPhase["session"],
+  expected: NotesPhase["session"],
+): boolean {
+  if (expected === null) return current === null;
+  return (
+    current !== null &&
+    current.sessionId === expected.sessionId &&
+    current.sessionPath === expected.sessionPath
+  );
 }
 
 function evaluateReferenceOverrideReset(
@@ -1963,15 +1997,6 @@ function roadmapProposalReferenceFields(
   return reference;
 }
 
-function roadmapTransitionPhaseStatus(
-  transition: "pending" | "in-progress" | "blocked" | "review",
-): NotesPhaseStatus {
-  if (transition === "pending") return "planning";
-  if (transition === "in-progress") return "in-progress";
-  if (transition === "blocked") return "needs-attention";
-  return "review";
-}
-
 function chronologicalRoadmapMutationTimestamp(
   requestedAt: string,
   documentUpdatedAt: string,
@@ -1981,6 +2006,7 @@ function chronologicalRoadmapMutationTimestamp(
     requestedAt,
     documentUpdatedAt,
     phase.updatedAt,
+    phase.pendingAutomaticLifecycleTransition?.timestamp,
     phase.lifecycleEvents[phase.lifecycleEvents.length - 1]?.timestamp,
     phase.roadmapEvents[phase.roadmapEvents.length - 1]?.timestamp,
   ]

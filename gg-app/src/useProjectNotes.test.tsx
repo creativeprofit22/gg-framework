@@ -90,9 +90,41 @@ function phase(id: string, order: number): NotesDocumentV3["phases"][number] {
     completedAt: null,
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
     lifecycleEvents: [],
     roadmapEvents: [],
   };
+}
+
+function pendingPlanApprovalDocument(): NotesDocumentV3 {
+  const document = notes("pending plan approval");
+  const selected = phase("phase-planning", 0);
+  selected.status = "planning";
+  selected.session = { sessionId: "session-planning", sessionPath: "/sessions/planning.jsonl" };
+  selected.overrides.status = { value: "planning", source: "user", updatedAt: NOW };
+  selected.pendingAutomaticLifecycleTransition = {
+    status: "in-progress",
+    source: "user",
+    reason: "Plan approved by user",
+    kind: "approval-resolved",
+    timestamp: LATER,
+    expectedSession: { ...selected.session },
+  };
+  selected.updatedAt = LATER;
+  selected.lifecycleEvents = [
+    {
+      id: "planning-started",
+      fromStatus: null,
+      toStatus: "planning",
+      source: "user",
+      timestamp: NOW,
+      reason: "Phase started by user",
+      kind: "other",
+    },
+  ];
+  document.updatedAt = LATER;
+  document.phases = [selected];
+  return document;
 }
 
 function addPendingRoadmapProposal(
@@ -299,6 +331,14 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+async function invokeMutation<T>(mutation: () => Promise<T>): Promise<T> {
+  let result!: T;
+  await act(async () => {
+    result = await mutation();
+  });
+  return result;
 }
 
 const testClock = (): string => LATER;
@@ -1170,25 +1210,34 @@ describe("useProjectNotes sidecar authority", () => {
     firstClient.deferSaves = true;
     secondClient.deferSaves = true;
 
-    const firstSave = first.result.current.savePrompt({
-      kind: "existing-phase",
-      phaseId: "target",
-      prompt: "first replacement",
-      expectedSourcePrompt: "old prompt",
-    });
-    const staleSave = second.result.current.savePrompt({
-      kind: "existing-phase",
-      phaseId: "target",
-      prompt: "stale replacement",
-      expectedSourcePrompt: "old prompt",
+    let firstSave!: ReturnType<typeof first.result.current.savePrompt>;
+    let staleSave!: ReturnType<typeof second.result.current.savePrompt>;
+    await act(async () => {
+      firstSave = first.result.current.savePrompt({
+        kind: "existing-phase",
+        phaseId: "target",
+        prompt: "first replacement",
+        expectedSourcePrompt: "old prompt",
+      });
+      staleSave = second.result.current.savePrompt({
+        kind: "existing-phase",
+        phaseId: "target",
+        prompt: "stale replacement",
+        expectedSourcePrompt: "old prompt",
+      });
     });
     await waitFor(() => expect(firstClient.pendingSaves).toHaveLength(1));
     await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
-    act(() => firstClient.flushNextSave());
-    act(() => secondClient.flushNextSave());
 
-    await expect(firstSave).resolves.toMatchObject({ status: "committed", phaseId: "target" });
-    await expect(staleSave).resolves.toEqual({
+    let firstResult!: Awaited<typeof firstSave>;
+    let staleResult!: Awaited<typeof staleSave>;
+    await act(async () => {
+      firstClient.flushNextSave();
+      secondClient.flushNextSave();
+      [firstResult, staleResult] = await Promise.all([firstSave, staleSave]);
+    });
+    expect(firstResult).toMatchObject({ status: "committed", phaseId: "target" });
+    expect(staleResult).toEqual({
       status: "replacement-conflict",
       phaseId: "target",
       title: "Phase target",
@@ -1222,23 +1271,32 @@ describe("useProjectNotes sidecar authority", () => {
     firstClient.deferSaves = true;
     secondClient.deferSaves = true;
 
-    const firstSave = first.result.current.savePrompt({
-      kind: "new-draft",
-      title: "Winner",
-      prompt: "first",
-    });
-    const secondSave = second.result.current.savePrompt({
-      kind: "new-draft",
-      title: "Duplicate",
-      prompt: "second",
+    let firstSave!: ReturnType<typeof first.result.current.savePrompt>;
+    let secondSave!: ReturnType<typeof second.result.current.savePrompt>;
+    await act(async () => {
+      firstSave = first.result.current.savePrompt({
+        kind: "new-draft",
+        title: "Winner",
+        prompt: "first",
+      });
+      secondSave = second.result.current.savePrompt({
+        kind: "new-draft",
+        title: "Duplicate",
+        prompt: "second",
+      });
     });
     await waitFor(() => expect(firstClient.pendingSaves).toHaveLength(1));
     await waitFor(() => expect(secondClient.pendingSaves).toHaveLength(1));
-    act(() => firstClient.flushNextSave());
-    act(() => secondClient.flushNextSave());
 
-    await expect(firstSave).resolves.toMatchObject({ status: "committed" });
-    await expect(secondSave).resolves.toEqual({
+    let firstResult!: Awaited<typeof firstSave>;
+    let secondResult!: Awaited<typeof secondSave>;
+    await act(async () => {
+      firstClient.flushNextSave();
+      secondClient.flushNextSave();
+      [firstResult, secondResult] = await Promise.all([firstSave, secondSave]);
+    });
+    expect(firstResult).toMatchObject({ status: "committed" });
+    expect(secondResult).toEqual({
       status: "committed",
       phaseId: "same-draft",
       title: "Winner",
@@ -1257,22 +1315,25 @@ describe("useProjectNotes sidecar authority", () => {
     const hook = renderHook(() => useProjectNotes(cwd, options));
     await waitFor(() => expect(hook.result.current.document.phases).toHaveLength(1));
 
-    await expect(
+    const missingResult = await invokeMutation(() =>
       hook.result.current.savePrompt({
         kind: "existing-phase",
         phaseId: "missing",
         prompt: "prompt",
         expectedSourcePrompt: "",
       }),
-    ).resolves.toEqual({ status: "missing-phase", phaseId: "missing" });
-    await expect(
+    );
+    expect(missingResult).toEqual({ status: "missing-phase", phaseId: "missing" });
+
+    const archivedResult = await invokeMutation(() =>
       hook.result.current.savePrompt({
         kind: "existing-phase",
         phaseId: "archived",
         prompt: "prompt",
         expectedSourcePrompt: "",
       }),
-    ).resolves.toEqual({
+    );
+    expect(archivedResult).toEqual({
       status: "archived-phase",
       phaseId: "archived",
       title: "Phase archived",
@@ -1314,9 +1375,10 @@ describe("useProjectNotes sidecar authority", () => {
     const hook = renderHook(() => useProjectNotes(cwd, options));
     await waitFor(() => expect(hook.result.current.document.reference).toBe("base"));
 
-    await expect(
+    const result = await invokeMutation(() =>
       hook.result.current.savePrompt({ kind: "new-draft", title: "Draft", prompt: "prompt" }),
-    ).resolves.toEqual({ status: "failed", reason });
+    );
+    expect(result).toEqual({ status: "failed", reason });
   });
 
   it("maps unavailable and fallback storage failures", async () => {
@@ -1328,13 +1390,14 @@ describe("useProjectNotes sidecar authority", () => {
     const sidecarOptions = hookOptions(client, new MemoryStorage());
     const sidecarHook = renderHook(() => useProjectNotes(cwd, sidecarOptions));
     await waitFor(() => expect(sidecarHook.result.current.document.reference).toBe("base"));
-    await expect(
+    const sidecarResult = await invokeMutation(() =>
       sidecarHook.result.current.savePrompt({
         kind: "new-draft",
         title: "Draft",
         prompt: "prompt",
       }),
-    ).resolves.toEqual({ status: "failed", reason: "unavailable" });
+    );
+    expect(sidecarResult).toEqual({ status: "failed", reason: "unavailable" });
 
     const fallbackOptions: Parameters<typeof useProjectNotes>[1] = {
       repository: {
@@ -1361,13 +1424,14 @@ describe("useProjectNotes sidecar authority", () => {
     };
     const fallbackHook = renderHook(() => useProjectNotes("/work/storage", fallbackOptions));
     await waitFor(() => expect(fallbackHook.result.current.document.reference).toBe("fallback"));
-    await expect(
+    const fallbackResult = await invokeMutation(() =>
       fallbackHook.result.current.savePrompt({
         kind: "new-draft",
         title: "Draft",
         prompt: "prompt",
       }),
-    ).resolves.toEqual({ status: "failed", reason: "storage" });
+    );
+    expect(fallbackResult).toEqual({ status: "failed", reason: "storage" });
   });
 
   it("ignores late responses and callbacks from the previous project", async () => {
@@ -1423,9 +1487,10 @@ describe("useProjectNotes sidecar authority", () => {
       }),
     );
 
-    await expect(
+    const accepted = await invokeMutation(() =>
       hook.result.current.acceptReferenceProposal("phase-roadmap", "proposal-1"),
-    ).resolves.toEqual({
+    );
+    expect(accepted).toEqual({
       status: "committed",
       phaseId: "phase-roadmap",
       referenceId: "existing-ref",
@@ -1447,16 +1512,19 @@ describe("useProjectNotes sidecar authority", () => {
         }),
       ],
     });
-    await expect(
+    const repeatedAcceptance = await invokeMutation(() =>
       hook.result.current.acceptReferenceProposal("phase-roadmap", "proposal-1"),
-    ).resolves.toEqual({
+    );
+    expect(repeatedAcceptance).toEqual({
       status: "already-decided",
       phaseId: "phase-roadmap",
       decision: "accepted",
     });
-    await expect(
+
+    const conflictingRejection = await invokeMutation(() =>
       hook.result.current.rejectReferenceProposal("phase-roadmap", "proposal-1"),
-    ).resolves.toEqual({
+    );
+    expect(conflictingRejection).toEqual({
       status: "decision-conflict",
       phaseId: "phase-roadmap",
       decision: "accepted",
@@ -1475,9 +1543,10 @@ describe("useProjectNotes sidecar authority", () => {
       }),
     );
 
-    await expect(
+    const result = await invokeMutation(() =>
       hook.result.current.acceptReferenceProposal("phase-roadmap", "proposal-1"),
-    ).resolves.toEqual({
+    );
+    expect(result).toEqual({
       status: "committed",
       phaseId: "phase-roadmap",
       referenceId: "generated-2",
@@ -1503,9 +1572,10 @@ describe("useProjectNotes sidecar authority", () => {
       }),
     );
 
-    await expect(
+    const result = await invokeMutation(() =>
       hook.result.current.rejectReferenceProposal("phase-roadmap", "proposal-1"),
-    ).resolves.toEqual({ status: "committed", phaseId: "phase-roadmap" });
+    );
+    expect(result).toEqual({ status: "committed", phaseId: "phase-roadmap" });
     await waitFor(() =>
       expect(hook.result.current.document.phases[0]!.roadmapEvents).toHaveLength(2),
     );
@@ -1595,10 +1665,12 @@ describe("useProjectNotes sidecar authority", () => {
     );
     await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
 
-    const scheduled = await hook.result.current.schedulePhaseReminder("phase-reminder", {
-      dueAt: "2026-07-25T13:00:00.000Z",
-      note: " Review the result ",
-    });
+    const scheduled = await invokeMutation(() =>
+      hook.result.current.schedulePhaseReminder("phase-reminder", {
+        dueAt: "2026-07-25T13:00:00.000Z",
+        note: " Review the result ",
+      }),
+    );
     expect(scheduled).toEqual({
       status: "committed",
       phaseId: "phase-reminder",
@@ -1634,9 +1706,8 @@ describe("useProjectNotes sidecar authority", () => {
       expect(hook.result.current.document.phases[0]!.reminder!.lastDelivery).not.toBeNull(),
     );
 
-    const snoozed = await hook.result.current.snoozePhaseReminder(
-      "phase-reminder",
-      "2026-07-25T14:00:00.000Z",
+    const snoozed = await invokeMutation(() =>
+      hook.result.current.snoozePhaseReminder("phase-reminder", "2026-07-25T14:00:00.000Z"),
     );
     expect(snoozed).toEqual({
       status: "committed",
@@ -1658,7 +1729,9 @@ describe("useProjectNotes sidecar authority", () => {
       },
     });
 
-    const dismissed = await hook.result.current.dismissPhaseReminder("phase-reminder");
+    const dismissed = await invokeMutation(() =>
+      hook.result.current.dismissPhaseReminder("phase-reminder"),
+    );
     expect(dismissed).toEqual({ status: "committed", phaseId: "phase-reminder" });
     await waitFor(() => expect(hook.result.current.document.phases[0]!.reminder).toBeNull());
     expect(hook.result.current.document.phases[0]).toMatchObject({
@@ -1738,7 +1811,7 @@ describe("useProjectNotes sidecar authority", () => {
     await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
 
     let resultPromise!: ReturnType<typeof hook.result.current.schedulePhaseReminder>;
-    act(() => {
+    await act(async () => {
       resultPromise = hook.result.current.schedulePhaseReminder("target", {
         dueAt: "2026-07-25T14:00:00.000Z",
         note: "Queued reminder",
@@ -1757,9 +1830,13 @@ describe("useProjectNotes sidecar authority", () => {
       lastDelivery: null,
     };
     server.snapshots.set(cwd, remote);
-    act(() => client.flushNextSave());
+    let result!: Awaited<typeof resultPromise>;
+    await act(async () => {
+      client.flushNextSave();
+      result = await resultPromise;
+    });
 
-    await expect(resultPromise).resolves.toEqual({
+    expect(result).toEqual({
       status: "failed",
       reason: "validation",
       error: {
@@ -1880,7 +1957,7 @@ describe("useProjectNotes sidecar authority", () => {
     mutationClockCalls = 0;
 
     let resultPromise!: ReturnType<typeof hook.result.current.schedulePhaseReminder>;
-    act(() => {
+    await act(async () => {
       resultPromise = hook.result.current.schedulePhaseReminder("phase-reminder", {
         dueAt: "2026-07-25T12:02:00.000Z",
         note: "Soon",
@@ -1890,9 +1967,13 @@ describe("useProjectNotes sidecar authority", () => {
     expect(mutationClockCalls).toBe(1);
     server.snapshots.set(cwd, { ...server.snapshots.get(cwd)!, revision: 2 });
     now = "2026-07-25T12:03:00.000Z";
-    act(() => client.flushNextSave());
+    let result!: Awaited<typeof resultPromise>;
+    await act(async () => {
+      client.flushNextSave();
+      result = await resultPromise;
+    });
 
-    await expect(resultPromise).resolves.toEqual({
+    expect(result).toEqual({
       status: "invalid-time",
       phaseId: "phase-reminder",
     });
@@ -1947,6 +2028,168 @@ describe("useProjectNotes sidecar authority", () => {
     });
   });
 
+  it("applies a suppressed plan approval immediately when automatic status resumes", async () => {
+    const storage = new MemoryStorage();
+    seed(storage, "/work/pending-plan-approval", pendingPlanApprovalDocument());
+    let id = 0;
+    const hook = renderHook(() =>
+      useProjectNotes("/work/pending-plan-approval", {
+        storage,
+        clock: testClock,
+        idFactory: () => `reset-${++id}`,
+      }),
+    );
+
+    const result = await invokeMutation(() =>
+      hook.result.current.resumeAutomaticStatus("phase-planning"),
+    );
+    expect(result).toEqual({
+      status: "committed",
+      phaseId: "phase-planning",
+      resultingStatus: "in-progress",
+    });
+    await waitFor(() =>
+      expect(hook.result.current.document.phases[0]!.overrides.status).toBeNull(),
+    );
+    const persisted = hook.result.current.document.phases[0]!;
+    expect(persisted).toMatchObject({
+      status: "in-progress",
+      attentionReason: null,
+      pendingAutomaticLifecycleTransition: null,
+      lifecycleEvents: [
+        expect.objectContaining({ id: "planning-started", toStatus: "planning" }),
+        expect.objectContaining({
+          fromStatus: "planning",
+          toStatus: "in-progress",
+          source: "user",
+          reason: "Plan approved by user",
+          kind: "approval-resolved",
+        }),
+      ],
+      roadmapEvents: [expect.objectContaining({ type: "override-reset", field: "status" })],
+    });
+    expect(persisted.lifecycleEvents).toHaveLength(2);
+  });
+
+  it("keeps the suppressed cancellation timestamp when automatic status resumes later", async () => {
+    const storage = new MemoryStorage();
+    const document = pendingPlanApprovalDocument();
+    const selected = document.phases[0]!;
+    selected.pendingAutomaticLifecycleTransition = {
+      status: "cancelled",
+      source: "user",
+      reason: "Phase run cancelled by user",
+      kind: "other",
+      timestamp: LATER,
+      expectedSession: { ...selected.session! },
+    };
+    const resetAt = "2026-07-25T12:02:00.000Z";
+    const resetClock = (): string => resetAt;
+    seed(storage, "/work/pending-cancellation", document);
+    let id = 0;
+    const createId = (): string => `cancel-reset-${++id}`;
+    const hook = renderHook(() =>
+      useProjectNotes("/work/pending-cancellation", {
+        storage,
+        clock: resetClock,
+        idFactory: createId,
+      }),
+    );
+
+    const result = await invokeMutation(() =>
+      hook.result.current.resumeAutomaticStatus("phase-planning"),
+    );
+
+    expect(result).toEqual({
+      status: "committed",
+      phaseId: "phase-planning",
+      resultingStatus: "cancelled",
+    });
+    const persisted = hook.result.current.document.phases[0]!;
+    expect(persisted).toMatchObject({
+      status: "cancelled",
+      completedAt: LATER,
+      pendingAutomaticLifecycleTransition: null,
+      lifecycleEvents: [
+        expect.any(Object),
+        expect.objectContaining({
+          fromStatus: "planning",
+          toStatus: "cancelled",
+          timestamp: resetAt,
+          reason: "Phase run cancelled by user",
+        }),
+      ],
+    });
+  });
+
+  it("replays a status reset onto a newer Reviewing target after a CAS conflict", async () => {
+    const cwd = "/work/pending-status-cas";
+    const server = new FakeNotesServer();
+    const initial = pendingPlanApprovalDocument();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: initial });
+    const client = server.connect(cwd);
+    client.deferSaves = true;
+    const storage = new MemoryStorage();
+    let id = 0;
+    const hook = renderHook(() =>
+      useProjectNotes(cwd, {
+        ...hookOptions(client, storage),
+        idFactory: () => `cas-reset-${++id}`,
+      }),
+    );
+    await waitFor(() => expect(hook.result.current.authorityReady).toBe(true));
+
+    let resultPromise!: ReturnType<typeof hook.result.current.resumeAutomaticStatus>;
+    act(() => {
+      resultPromise = hook.result.current.resumeAutomaticStatus("phase-planning");
+    });
+    await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+    expect(client.pendingSaves[0]!.document.phases[0]!.status).toBe("in-progress");
+
+    const remote = structuredClone(server.snapshots.get(cwd)!);
+    remote.revision = 2;
+    remote.document.updatedAt = "2026-07-25T12:02:00.000Z";
+    remote.document.phases[0]!.updatedAt = "2026-07-25T12:02:00.000Z";
+    remote.document.phases[0]!.pendingAutomaticLifecycleTransition = {
+      status: "review",
+      source: "agent",
+      reason: "Autopilot review started",
+      kind: "other",
+      timestamp: "2026-07-25T12:02:00.000Z",
+      expectedSession: { ...remote.document.phases[0]!.session! },
+    };
+    server.snapshots.set(cwd, remote);
+    act(() => client.flushNextSave());
+    await waitFor(() => expect(client.pendingSaves).toHaveLength(1));
+    expect(client.pendingSaves[0]!.expectedRevision).toBe(2);
+    expect(client.pendingSaves[0]!.document.phases[0]).toMatchObject({
+      status: "review",
+      pendingAutomaticLifecycleTransition: null,
+    });
+
+    act(() => client.flushNextSave());
+    let result!: Awaited<typeof resultPromise>;
+    await act(async () => {
+      result = await resultPromise;
+    });
+    expect(result).toMatchObject({ status: "committed", resultingStatus: "review" });
+    expect(server.snapshots.get(cwd)?.document.phases[0]).toMatchObject({
+      status: "review",
+      overrides: { status: null },
+      pendingAutomaticLifecycleTransition: null,
+      lifecycleEvents: [
+        expect.objectContaining({ toStatus: "planning" }),
+        expect.objectContaining({
+          fromStatus: "planning",
+          toStatus: "review",
+          source: "agent",
+          reason: "Autopilot review started",
+          kind: "other",
+        }),
+      ],
+    });
+  });
+
   it("resumes status from the latest protected report and resets references without changing links", async () => {
     const storage = new MemoryStorage();
     const document = addPendingRoadmapProposal(notes("reset"), {
@@ -1971,12 +2214,19 @@ describe("useProjectNotes sidecar authority", () => {
       }),
     );
 
-    await expect(hook.result.current.resumeAutomaticStatus("phase-roadmap")).resolves.toEqual({
+    const statusResult = await invokeMutation(() =>
+      hook.result.current.resumeAutomaticStatus("phase-roadmap"),
+    );
+    expect(statusResult).toEqual({
       status: "committed",
       phaseId: "phase-roadmap",
       resultingStatus: "needs-attention",
     });
-    await expect(hook.result.current.resumeAutomaticReferences("phase-roadmap")).resolves.toEqual({
+
+    const referencesResult = await invokeMutation(() =>
+      hook.result.current.resumeAutomaticReferences("phase-roadmap"),
+    );
+    expect(referencesResult).toEqual({
       status: "committed",
       phaseId: "phase-roadmap",
     });

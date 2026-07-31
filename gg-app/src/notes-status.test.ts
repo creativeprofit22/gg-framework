@@ -37,6 +37,7 @@ function phase(status: NotesPhaseStatus, withReminder = false): NotesPhase {
     completedAt: status === "done" || status === "cancelled" ? NOW : null,
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
     lifecycleEvents: [],
     roadmapEvents: [],
   };

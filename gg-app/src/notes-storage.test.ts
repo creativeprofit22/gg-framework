@@ -120,6 +120,7 @@ function document(reference: string): NotesDocumentV3 {
         completedAt: null,
         archivedAt: null,
         overrides: { status: null, referenceIds: null },
+        pendingAutomaticLifecycleTransition: null,
         lifecycleEvents: [],
         roadmapEvents: [],
       },
@@ -181,6 +182,39 @@ describe("structured project notes storage", () => {
     const repository = createNotesRepository(new MemoryStorage(), () => NOW);
     repository.save(cwd, parsed.document);
     expect(repository.load(cwd).document).toEqual(parsed.document);
+  });
+
+  it("normalizes legacy v3 lifecycle events without kind before persisting them", () => {
+    const cwd = "/work/legacy-lifecycle-kind";
+    const storage = new MemoryStorage();
+    const legacy = structuredClone(document("legacy lifecycle")) as unknown as {
+      phases: Array<Record<string, unknown>>;
+    };
+    legacy.phases[0]!.status = "planning";
+    legacy.phases[0]!.lifecycleEvents = [
+      {
+        id: "legacy-planning",
+        fromStatus: null,
+        toStatus: "planning",
+        source: "user",
+        timestamp: NOW,
+        reason: "Planning started",
+      },
+    ];
+    storage.setItem(v3NotesKey(cwd), JSON.stringify(legacy));
+
+    expect(validateNotesDocumentV3(legacy)).toMatchObject({
+      ok: false,
+      error: { path: "phases[0].lifecycleEvents[0]" },
+    });
+    const loaded = createNotesRepository(storage, () => NOW).load(cwd);
+
+    expect(loaded.document.phases[0]!.lifecycleEvents).toEqual([
+      expect.objectContaining({ id: "legacy-planning", kind: "other" }),
+    ]);
+    expect(JSON.parse(storage.getItem(v3NotesKey(cwd))!).phases[0].lifecycleEvents).toEqual([
+      expect.objectContaining({ id: "legacy-planning", kind: "other" }),
+    ]);
   });
 
   it("rejects malformed nested delivery evidence and oversized reminder notes", () => {
@@ -805,6 +839,7 @@ describe("structured project notes storage", () => {
                 source: "agent",
                 timestamp: NOW,
                 reason: null,
+                kind: "other",
               },
             ],
           },

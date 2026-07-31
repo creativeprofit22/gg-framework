@@ -3824,6 +3824,11 @@ body {
   padding: 1px 0;
 }
 
+.transcript-error-actions {
+  display: flex;
+  margin-top: 8px;
+}
+
 /* ── Plan review modal (plan_exit: YOUR PLAN + Accept/Feedback/Reject) ── */
 .plan-review {
   position: fixed;

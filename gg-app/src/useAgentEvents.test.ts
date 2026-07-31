@@ -353,6 +353,122 @@ describe("useAgentEvents", () => {
     expect(setRunning).toHaveBeenLastCalledWith(false);
   });
 
+  it("keeps cancellation truthful and exposes a typed Roadmap retry after persistence failure", async () => {
+    const retryCancelledRoadmapStatus = vi.fn().mockResolvedValue({
+      roadmapStatusSaved: true,
+      roadmapStatusOutcome: "committed",
+      roadmapStatusRetryable: false,
+    });
+    const { hook, deps, getItems, getState, setStatus } = setup(() => false, {
+      running: true,
+      runState: "cancelling",
+    });
+    hook.rerender({
+      hookDeps: {
+        ...deps,
+        client: { retryCancelledRoadmapStatus } as unknown as AgentEventsDeps["client"],
+      },
+    });
+
+    act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: true })));
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("phase_cancellation_persistence_failed", {
+          operationId: "cancel-op-1",
+          phaseId: "phase-21",
+          code: "storage-failure",
+          detail: "disk full",
+          recovery: "Free storage, then retry saving the Cancelled status.",
+        }),
+      ),
+    );
+
+    expect(getState()).toMatchObject({ running: false, runState: "idle" });
+    expect(setStatus).toHaveBeenLastCalledWith("cancelled; Roadmap needs attention");
+    expect(getItems()[getItems().length - 1]).toMatchObject({
+      kind: "error",
+      recoveryId: "cancel-op-1",
+      headline: "Run cancelled, but phase phase-21 was not marked Cancelled.",
+      message: "Reason: storage failure. Details: disk full",
+      action: { label: "Retry Roadmap save" },
+    });
+
+    const item = getItems()[getItems().length - 1];
+    if (item?.kind !== "error" || !item.action) throw new Error("Expected retry action");
+    await act(async () => item.action?.run());
+    expect(retryCancelledRoadmapStatus).toHaveBeenCalledOnce();
+  });
+
+  it("updates the existing recovery row when the same cancellation retry fails again", () => {
+    const { hook, getItems } = setup();
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("phase_cancellation_persistence_failed", {
+          operationId: "cancel-op-repeat",
+          phaseId: "phase-23",
+          code: "storage-failure",
+          detail: "disk full",
+          recovery: "Free storage, then retry.",
+        }),
+      ),
+    );
+    const original = getItems()[0];
+
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("phase_cancellation_persistence_failed", {
+          operationId: "cancel-op-repeat",
+          phaseId: "phase-23",
+          code: "stale-session",
+          detail: "phase ownership changed",
+          recovery: "Restore this session as the phase owner, then retry.",
+        }),
+      ),
+    );
+
+    expect(getItems()).toHaveLength(1);
+    expect(getItems()[0]).toMatchObject({
+      kind: "error",
+      id: original?.id,
+      recoveryId: "cancel-op-repeat",
+      message: "Reason: stale session. Details: phase ownership changed",
+      guidance: "Restore this session as the phase owner, then retry.",
+    });
+  });
+
+  it("replaces the partial-failure row after the retry saves one Cancelled record", () => {
+    const { hook, getItems, setStatus } = setup();
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("phase_cancellation_persistence_failed", {
+          operationId: "cancel-op-2",
+          phaseId: "phase-22",
+          code: "stale-session",
+          recovery: "Restore the phase owner, then retry.",
+        }),
+      ),
+    );
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("phase_cancellation_persistence_recovered", {
+          operationId: "cancel-op-2",
+          phaseId: "phase-22",
+          outcome: "committed",
+          roadmapStatusSaved: true,
+        }),
+      ),
+    );
+
+    expect(getItems()).toEqual([
+      {
+        kind: "info",
+        id: 2,
+        text: "Phase phase-22 is now marked Cancelled in Project Notes.",
+      },
+    ]);
+    expect(setStatus).toHaveBeenLastCalledWith("cancelled");
+  });
+
   it("refreshes branch and uncommitted-file count from workspace extras", () => {
     const { hook, getState } = setup();
 

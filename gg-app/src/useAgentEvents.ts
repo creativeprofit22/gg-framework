@@ -16,6 +16,10 @@ import {
   isPhaseCompletionReviewBlockedEvent,
   isPhaseCompletionReviewFailedEvent,
 } from "./phase-completion-events";
+import {
+  isPhaseCancellationPersistenceFailedEvent,
+  isPhaseCancellationPersistenceRecoveredEvent,
+} from "./phase-cancellation-events";
 import { formatTokenCount } from "./ActivityBar";
 import { getBashDiagnostics, type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -266,6 +270,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // bridge. Operation ids make both paths idempotent for user-visible state.
   const appliedSessionResetOperationsRef = useRef<Set<string>>(new Set());
   const appliedPhaseLaunchErrorOperationsRef = useRef<Set<string>>(new Set());
+  const appliedCancellationPersistenceFailuresRef = useRef<Set<string>>(new Set());
 
   // Streaming deltas arrive faster than React can usefully render each one.
   // We buffer chunks in a ref and flush every 100ms — imperceptible for prose
@@ -806,6 +811,82 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           );
           setStatus("cancellation failed; agent still running");
           break;
+        case "phase_cancellation_persistence_failed": {
+          if (!isPhaseCancellationPersistenceFailedEvent(e)) break;
+          const failure = e.data;
+          const repeatedFailure = appliedCancellationPersistenceFailuresRef.current.has(
+            failure.operationId,
+          );
+          appliedCancellationPersistenceFailuresRef.current.add(failure.operationId);
+          setDoneStatus(null);
+          setStatus("cancelled; Roadmap needs attention");
+          const failureItem = {
+            headline: `Run cancelled, but phase ${failure.phaseId} was not marked Cancelled.`,
+            message: [
+              `Reason: ${failure.code.replace(/-/g, " ")}.`,
+              failure.detail?.trim() ? `Details: ${failure.detail.trim()}` : null,
+            ]
+              .filter((part): part is string => part !== null)
+              .join(" "),
+            guidance: failure.recovery,
+            ...(client
+              ? {
+                  action: {
+                    label: "Retry Roadmap save",
+                    run: async () => {
+                      try {
+                        await client.retryCancelledRoadmapStatus();
+                      } catch (error) {
+                        pushItem({
+                          kind: "error",
+                          id: nextId(),
+                          headline: "Roadmap retry could not reach the agent.",
+                          message: error instanceof Error ? error.message : String(error),
+                          guidance: failure.recovery,
+                        });
+                      }
+                    },
+                  },
+                }
+              : {}),
+          };
+          if (repeatedFailure) {
+            setItems((previous) =>
+              previous.map((item) =>
+                item.kind === "error" && item.recoveryId === failure.operationId
+                  ? { ...item, ...failureItem }
+                  : item,
+              ),
+            );
+          } else {
+            pushItem({
+              kind: "error",
+              id: nextId(),
+              recoveryId: failure.operationId,
+              ...failureItem,
+            });
+          }
+          break;
+        }
+        case "phase_cancellation_persistence_recovered": {
+          if (!isPhaseCancellationPersistenceRecoveredEvent(e)) break;
+          const recovered = e.data;
+          appliedCancellationPersistenceFailuresRef.current.delete(recovered.operationId);
+          setItems((previous) => [
+            ...previous.filter(
+              (item) => !(item.kind === "error" && item.recoveryId === recovered.operationId),
+            ),
+            {
+              kind: "info" as const,
+              id: nextId(),
+              text: recovered.roadmapStatusSaved
+                ? `Phase ${recovered.phaseId} is now marked Cancelled in Project Notes.`
+                : `Phase ${recovered.phaseId} kept its protected Roadmap status.`,
+            },
+          ]);
+          setStatus("cancelled");
+          break;
+        }
         case "phase_completion_checkpoint_failed": {
           if (!isPhaseCompletionCheckpointFailedEvent(e)) break;
           const failure = e.data;

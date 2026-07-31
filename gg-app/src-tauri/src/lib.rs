@@ -2507,6 +2507,32 @@ async fn agent_cancel(
     parse_cancel_response(status, body)
 }
 
+/// Proxy: retry only the Project Notes write for an already acknowledged cancellation.
+#[tauri::command]
+async fn agent_cancel_roadmap_status_retry(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}/cancel/roadmap-status/retry",
+            sidecar_base(port)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    parse_cancel_response(status, body)
+}
+
 /// Proxy: ask Ken Kai (the read-only mentor agent). Reply streams back via the
 /// `agent-event` event with `ken_`-prefixed types. Lazily boots Ken's session.
 #[tauri::command]
@@ -5975,6 +6001,7 @@ pub fn run() {
             agent_usage,
             agent_prompt,
             agent_cancel,
+            agent_cancel_roadmap_status_retry,
             agent_ken_prompt,
             agent_ken_cancel,
             agent_autopilot_set,

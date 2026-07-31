@@ -1,3 +1,4 @@
+import { notesPhaseStatusForRoadmapTransition } from "@kenkaiiii/gg-core/project-notes";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { referenceRepositoryLabel, referenceSourceLabel } from "./notes-reference";
 import {
@@ -1534,18 +1535,10 @@ function sessionAction(session: NotesSessionLink): "Resume" | "Recover" {
 }
 
 function primaryAction(phase: NotesPhase): PhasePrimaryAction {
-  if (phase.status === "review" || phase.status === "done") return "Review";
-  if (phase.status === "cancelled") {
-    if (phase.overrides.status !== null) return "Review";
-    return phase.session ? sessionAction(phase.session) : "Start";
-  }
-  if (phase.status === "needs-attention") {
-    return phase.session ? sessionAction(phase.session) : "Start";
-  }
-  if (phase.status !== "not-started" || phase.session !== null) {
-    return phase.session ? sessionAction(phase.session) : "Resume";
-  }
-  return "Start";
+  const reviewOnlyStatus = phase.status === "review" || phase.status === "done";
+  const manuallyCancelled = phase.status === "cancelled" && phase.overrides.status !== null;
+  if (reviewOnlyStatus || manuallyCancelled) return "Review";
+  return phase.session === null ? "Start" : sessionAction(phase.session);
 }
 
 function latestRoadmapReport(phase: NotesPhase): NotesRoadmapStatusUpdate | null {
@@ -1603,20 +1596,31 @@ function unresolvedRoadmapProposals(
 }
 
 function latestProtectedStatus(phase: NotesPhase): NotesPhaseStatus {
+  if (phase.status === "done") return "done";
+  const pending = phase.pendingAutomaticLifecycleTransition;
+  if (pending && sameSessionLink(phase.session, pending.expectedSession)) return pending.status;
   for (let index = phase.roadmapEvents.length - 1; index >= 0; index -= 1) {
     const event = phase.roadmapEvents[index];
     if (
       event?.type === "status-update" &&
       (event.statusOutcome === "manual-override" || event.statusOutcome === "done-terminal")
     ) {
-      if (phase.status === "done") return "done";
-      if (event.transition === "pending") return "planning";
-      if (event.transition === "in-progress") return "in-progress";
-      if (event.transition === "blocked") return "needs-attention";
-      return "review";
+      return notesPhaseStatusForRoadmapTransition(event.transition);
     }
   }
   return phase.status;
+}
+
+function sameSessionLink(
+  current: NotesSessionLink | null,
+  expected: NotesSessionLink | null,
+): boolean {
+  if (expected === null) return current === null;
+  return (
+    current !== null &&
+    current.sessionId === expected.sessionId &&
+    current.sessionPath === expected.sessionPath
+  );
 }
 
 function roadmapActorLabel(actor: NotesRoadmapStatusUpdate["actor"]): string {

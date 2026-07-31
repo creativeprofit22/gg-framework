@@ -47,6 +47,7 @@ export type {
   NotesLifecycleEvent,
   NotesLifecycleEventKind,
   NotesLifecycleEventSource,
+  NotesPendingAutomaticLifecycleTransition,
   NotesPhase,
   NotesPhaseOverrides,
   NotesPhaseStatus,

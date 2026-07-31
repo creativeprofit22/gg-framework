@@ -26,6 +26,8 @@ export type Item =
       headline?: string;
       message?: string;
       guidance?: string;
+      recoveryId?: string;
+      action?: { label: string; run: () => Promise<void> };
     }
   | { kind: "hook"; id: number; hook: HookKind }
   | { kind: "images"; id: number; images: TranscriptImage[]; caption?: string }

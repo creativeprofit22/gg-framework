@@ -244,6 +244,7 @@ function roadmapDocument(sessionPath: string | null = null): NotesDocumentV3 {
         completedAt: null,
         archivedAt: null,
         overrides: { status: null, referenceIds: null },
+        pendingAutomaticLifecycleTransition: null,
         lifecycleEvents: [],
         roadmapEvents: [],
       },

@@ -3177,6 +3177,17 @@ const TranscriptRow = memo(function TranscriptRow({
   item: Item;
   onImageLoad?: () => void;
 }): React.ReactElement | null {
+  const [actionPending, setActionPending] = useState(false);
+  const runItemAction = async (): Promise<void> => {
+    if (item.kind !== "error" || !item.action || actionPending) return;
+    setActionPending(true);
+    try {
+      await item.action.run();
+    } finally {
+      setActionPending(false);
+    }
+  };
+
   switch (item.kind) {
     case "user":
       if (item.kenSent) {
@@ -3323,6 +3334,18 @@ const TranscriptRow = memo(function TranscriptRow({
           <div style={{ color: theme.error, fontWeight: 600 }}>{headline}</div>
           {showMessage && <div style={{ color: theme.textDim }}>{item.message}</div>}
           {item.guidance && <div style={{ color: theme.textDim }}>{item.guidance}</div>}
+          {item.action && (
+            <div className="transcript-error-actions">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={actionPending}
+                onClick={() => void runItemAction()}
+              >
+                {actionPending ? "Retrying..." : item.action.label}
+              </button>
+            </div>
+          )}
         </div>
       );
     }

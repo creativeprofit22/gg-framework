@@ -16,14 +16,7 @@ import {
   isReminderReleaseOutcome,
   isReminderReserveOutcome,
   type NotesClient,
-  type NotesDocumentV3,
   type PhaseStartResult,
-  type ProjectNotesMigrationOutcome,
-  type ProjectNotesReadOutcome,
-  type ProjectNotesSaveOutcome,
-  type ReminderClaimOutcome,
-  type ReminderReleaseOutcome,
-  type ReminderReserveOutcome,
 } from "./notes-types";
 export { isPhaseLaunchErrorEvent } from "./notes-types";
 export type { PhaseLaunchErrorEvent, PhaseLaunchErrorCode } from "./notes-types";
@@ -633,7 +626,35 @@ export async function sendPrompt(
   }
 }
 
-export interface CancelResult {
+export type PhaseCancellationPersistenceOutcome =
+  | "committed"
+  | "same-status"
+  | "manual-override"
+  | "done-terminal"
+  | "no-active-phase"
+  | "phase-not-found"
+  | "phase-archived"
+  | "stale-session"
+  | "missing"
+  | "corrupt"
+  | "storage-failure"
+  | "ignored"
+  | "not-pending";
+
+export interface PhaseCancellationPersistenceResult {
+  roadmapStatusSaved: boolean;
+  roadmapStatusOutcome: PhaseCancellationPersistenceOutcome;
+  roadmapStatusRetryable: boolean;
+  roadmapStatusFailure?: {
+    operationId: string;
+    phaseId: string;
+    code: string;
+    recovery: string;
+    detail?: string;
+  };
+}
+
+export interface CancelResult extends PhaseCancellationPersistenceResult {
   cancelled: boolean;
   runState: "idle" | "running" | "cancelling";
   drained: string;
@@ -676,6 +697,12 @@ export async function cancel(): Promise<CancelResult> {
     await logError(`agent_cancel failed: ${JSON.stringify(failure)}`);
     throw new AgentCancelError(failure);
   }
+}
+
+export async function retryCancelledRoadmapStatus(): Promise<PhaseCancellationPersistenceResult> {
+  return invoke<PhaseCancellationPersistenceResult>("agent_cancel_roadmap_status_retry", {
+    paneId: "primary",
+  });
 }
 
 // ── Ken Kai (mentor agent) ──────────────────────────────────
@@ -1885,16 +1912,6 @@ export interface PaneAgentClient extends NotesClient {
   selectWorkspace(target: PaneSessionTarget, expectedGeneration: number): Promise<number>;
   subscribe(onEvent: (event: SidecarEvent) => void): () => void;
   getState(): Promise<AgentState>;
-  getNotes(): Promise<ProjectNotesReadOutcome>;
-  migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome>;
-  saveNotes(expectedRevision: number, document: NotesDocumentV3): Promise<ProjectNotesSaveOutcome>;
-  reserveReminder(focused: boolean): Promise<ReminderReserveOutcome>;
-  claimReminder(
-    leaseToken: string,
-    channel: "in-app" | "native" | "in-app-fallback",
-    permission: "not-required" | "granted" | "denied",
-  ): Promise<ReminderClaimOutcome>;
-  releaseReminder(leaseToken: string): Promise<ReminderReleaseOutcome>;
   startPhase(phaseId: string): Promise<PhaseStartResult>;
   listMemories(): Promise<MemorySnapshot>;
   deleteMemory(id: string): Promise<MemorySnapshot>;
@@ -1911,6 +1928,7 @@ export interface PaneAgentClient extends NotesClient {
     meta?: PromptMeta,
   ): Promise<PromptSubmissionResult>;
   cancel(): Promise<CancelResult>;
+  retryCancelledRoadmapStatus(): Promise<PhaseCancellationPersistenceResult>;
   sendKenPrompt(text: string): Promise<void>;
   cancelKen(): Promise<void>;
   setAutopilot(enabled: boolean): Promise<boolean>;
@@ -2154,6 +2172,8 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
         throw new AgentCancelError(parseCancelFailure(e));
       }
     },
+    retryCancelledRoadmapStatus: () =>
+      call<PhaseCancellationPersistenceResult>("agent_cancel_roadmap_status_retry"),
     sendKenPrompt: async (text) => {
       await ready();
       await call("agent_ken_prompt", { text });

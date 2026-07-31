@@ -112,6 +112,7 @@ describe("pane agent client", () => {
       count: 0,
     });
     await c.cancel();
+    await c.retryCancelledRoadmapStatus();
     await c.sendKenPrompt("k");
     await c.cancelKen();
     await c.setAutopilot(true);
@@ -155,6 +156,9 @@ describe("pane agent client", () => {
       text: "p",
       attachments: [],
       meta: { kenSent: true },
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_cancel_roadmap_status_retry", {
+      paneId: "right",
     });
     expect(invoke).toHaveBeenCalledWith("agent_kill_task", {
       paneId: "right",
@@ -228,9 +232,16 @@ describe("pane agent client", () => {
       );
     }
 
-    invoke.mockResolvedValueOnce({ status: "not-due" });
-    await expect(client.claimReminder("lease-1", "native", "granted")).resolves.toEqual({
-      status: "not-due",
+    const unavailableClaim = { status: "not-due" } as const;
+    invoke.mockResolvedValueOnce(unavailableClaim);
+    await expect(
+      client.claimReminder("lease-unavailable", "in-app-fallback", "unavailable"),
+    ).resolves.toBe(unavailableClaim);
+    expect(invoke).toHaveBeenLastCalledWith("agent_reminder_claim", {
+      paneId: "right",
+      leaseToken: "lease-unavailable",
+      channel: "in-app-fallback",
+      permission: "unavailable",
     });
     invoke.mockResolvedValueOnce({ status: "not-due", snapshot: notesSnapshot });
     await expect(client.claimReminder("lease-1", "native", "granted")).rejects.toThrow(

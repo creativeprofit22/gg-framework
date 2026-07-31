@@ -401,13 +401,10 @@ describe("AgentPane lifecycle", { timeout: 15_000 }, () => {
     render(<AgentPane client={pane} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
-    await screen.findByRole("button", { name: "Notes" });
-    await waitFor(() =>
-      expect((screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement).disabled).toBe(
-        false,
-      ),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    await screen.findByLabelText("Ready to start");
+    const notesButton = screen.getByRole("button", { name: "Notes" }) as HTMLButtonElement;
+    expect(notesButton.disabled).toBe(false);
+    fireEvent.click(notesButton);
     fireEvent.click(await screen.findByRole("tab", { name: "Roadmap" }, { timeout: 5_000 }));
     fireEvent.click(screen.getByRole("button", { name: "Start phase: Bound phase" }));
     fireEvent.click(screen.getByRole("button", { name: "Start phase" }));

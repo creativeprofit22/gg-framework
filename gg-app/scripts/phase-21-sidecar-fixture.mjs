@@ -49,6 +49,7 @@ function notesDocument() {
         completedAt: null,
         archivedAt: null,
         overrides: { status: null, referenceIds: null },
+        pendingAutomaticLifecycleTransition: null,
         lifecycleEvents: phaseBound
           ? [
               {
@@ -58,6 +59,7 @@ function notesDocument() {
                 source: "session",
                 timestamp: now,
                 reason: "Phase session bound",
+                kind: "other",
               },
             ]
           : [],

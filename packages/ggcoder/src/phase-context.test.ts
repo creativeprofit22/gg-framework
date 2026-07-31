@@ -31,6 +31,7 @@ function phase(overrides: Partial<NotesPhase> = {}): NotesPhase {
     completedAt: null,
     archivedAt: null,
     overrides: { status: null, referenceIds: null },
+    pendingAutomaticLifecycleTransition: null,
     lifecycleEvents: [],
     roadmapEvents: [],
     ...overrides,

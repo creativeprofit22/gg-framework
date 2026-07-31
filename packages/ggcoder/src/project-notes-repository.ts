@@ -11,6 +11,7 @@ import {
   migrateNotesDocumentV2,
   migrateNotesDocumentV3PhaseShape,
   normalizeCanonicalUrl,
+  notesPhaseStatusForRoadmapTransition,
   validateNotesDocumentV3,
   type NotesDocumentV3,
   type NotesImplementationRunOutcome,
@@ -126,9 +127,13 @@ export interface ProjectNotesPhaseLifecycleTransition {
 export type ProjectNotesPhaseLifecycleOutcome =
   | { status: "ok"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
   | {
+      status: "manual-override";
+      snapshot: ProjectNotesSnapshot;
+      phase: NotesPhase;
+    }
+  | {
       status:
         | "same-status"
-        | "manual-override"
         | "phase-not-found"
         | "phase-archived"
         | "stale-session"
@@ -540,10 +545,27 @@ function validateGenericSaveEventSuffixes(
       eventIndex < phase.lifecycleEvents.length;
       eventIndex += 1
     ) {
-      if (phase.lifecycleEvents[eventIndex]!.source !== "user") {
+      const event = phase.lifecycleEvents[eventIndex]!;
+      const pending = previousPhase?.pendingAutomaticLifecycleTransition;
+      const appliesPendingReset =
+        previousPhase !== undefined &&
+        pending !== null &&
+        pending !== undefined &&
+        phase.pendingAutomaticLifecycleTransition === null &&
+        previousPhase.overrides.status !== null &&
+        phase.overrides.status === null &&
+        previousPhase.status !== "done" &&
+        sameSessionLink(previousPhase.session, pending.expectedSession) &&
+        event.fromStatus === previousPhase.status &&
+        event.toStatus === pending.status &&
+        event.source === pending.source &&
+        event.reason === pending.reason &&
+        event.kind === pending.kind &&
+        Date.parse(event.timestamp) >= Date.parse(pending.timestamp);
+      if (event.source !== "user" && !appliesPendingReset) {
         return validationError(
           `phases[${phaseIndex}].lifecycleEvents[${eventIndex}].source`,
-          "generic saves may only append user lifecycle events",
+          "generic saves may only append user lifecycle events or apply a pending automatic transition",
         );
       }
     }
@@ -561,6 +583,92 @@ function validateGenericSaveEventSuffixes(
           "privileged roadmap events require their dedicated authority path",
         );
       }
+    }
+  }
+  return null;
+}
+
+function validateGenericSavePendingLifecycleAuthority(
+  previous: NotesDocumentV3,
+  next: NotesDocumentV3,
+): NotesValidationError | null {
+  const previousById = new Map(previous.phases.map((phase) => [phase.id, phase]));
+  const nextById = new Map(next.phases.map((phase, index) => [phase.id, { phase, index }]));
+  for (const [index, phase] of next.phases.entries()) {
+    if (!previousById.has(phase.id) && phase.pendingAutomaticLifecycleTransition !== null) {
+      return validationError(
+        `phases[${index}].pendingAutomaticLifecycleTransition`,
+        "pending automatic lifecycle state is repository-owned",
+      );
+    }
+  }
+  for (const previousPhase of previous.phases) {
+    const current = nextById.get(previousPhase.id);
+    if (!current) continue;
+    const previousPending = previousPhase.pendingAutomaticLifecycleTransition;
+    const nextPending = current.phase.pendingAutomaticLifecycleTransition;
+    const pathPrefix = `phases[${current.index}].pendingAutomaticLifecycleTransition`;
+    if (previousPending === null) {
+      if (nextPending !== null) {
+        return validationError(pathPrefix, "pending automatic lifecycle state is repository-owned");
+      }
+      continue;
+    }
+    if (isDeepStrictEqual(previousPending, nextPending)) continue;
+    if (nextPending !== null) {
+      return validationError(pathPrefix, "pending automatic lifecycle state is repository-owned");
+    }
+    const appendedRoadmapEvents = current.phase.roadmapEvents.slice(
+      previousPhase.roadmapEvents.length,
+    );
+    const hasStatusReset = appendedRoadmapEvents.some(
+      (event) => event.type === "override-reset" && event.field === "status",
+    );
+    if (
+      previousPhase.overrides.status === null ||
+      current.phase.overrides.status !== null ||
+      !hasStatusReset
+    ) {
+      return validationError(pathPrefix, "can only be cleared by a status override reset");
+    }
+    const appliesPending =
+      previousPhase.status !== "done" &&
+      sameSessionLink(previousPhase.session, previousPending.expectedSession);
+    if (!appliesPending) continue;
+    if (current.phase.status !== previousPending.status) {
+      return validationError(`${pathPrefix}.status`, "status reset must apply the pending target");
+    }
+    const appendedLifecycleEvents = current.phase.lifecycleEvents.slice(
+      previousPhase.lifecycleEvents.length,
+    );
+    if (previousPhase.status === previousPending.status) {
+      if (appendedLifecycleEvents.length !== 0) {
+        return validationError(
+          pathPrefix,
+          "same-status reset cannot append a lifecycle transition",
+        );
+      }
+      continue;
+    }
+    if (appendedLifecycleEvents.length !== 1) {
+      return validationError(
+        pathPrefix,
+        "status reset must append one pending lifecycle transition",
+      );
+    }
+    const event = appendedLifecycleEvents[0]!;
+    if (
+      event.fromStatus !== previousPhase.status ||
+      event.toStatus !== previousPending.status ||
+      event.source !== previousPending.source ||
+      event.reason !== previousPending.reason ||
+      event.kind !== previousPending.kind ||
+      Date.parse(event.timestamp) < Date.parse(previousPending.timestamp)
+    ) {
+      return validationError(
+        pathPrefix,
+        "status reset lifecycle transition must match the pending provenance",
+      );
     }
   }
   return null;
@@ -627,15 +735,43 @@ function chronologicalLifecycleTimestamp(phase: NotesPhase, requested: string): 
   if (!Number.isFinite(requestedTime)) {
     throw new Error("Cannot record a phase lifecycle transition with an invalid timestamp.");
   }
-  const previous = phase.lifecycleEvents.at(-1)?.timestamp;
-  if (!previous) return new Date(requestedTime).toISOString();
-  return new Date(Math.max(requestedTime, Date.parse(previous))).toISOString();
+  const previousTimes = [
+    phase.lifecycleEvents.at(-1)?.timestamp,
+    phase.pendingAutomaticLifecycleTransition?.timestamp,
+  ]
+    .filter((value): value is string => value !== undefined)
+    .map(Date.parse);
+  return new Date(Math.max(requestedTime, ...previousTimes)).toISOString();
 }
 
 function boundedLifecycleReason(reason: string): string {
   const normalized = reason.replace(/\s+/g, " ").trim();
   const fallback = "Phase lifecycle changed.";
   return (normalized || fallback).slice(0, NOTES_PHASE_LIFECYCLE_REASON_MAX_LENGTH).trimEnd();
+}
+
+function pendingAutomaticLifecycleTransition(
+  phase: NotesPhase,
+  transition: ProjectNotesPhaseLifecycleTransition,
+  timestamp: string,
+): NotesPhase["pendingAutomaticLifecycleTransition"] {
+  const reason = boundedLifecycleReason(transition.reason);
+  return {
+    status: transition.status,
+    source: transition.source,
+    reason,
+    kind:
+      transition.kind ??
+      classifyLegacyNotesLifecycleEvent({
+        toStatus: transition.status,
+        source: transition.source,
+        reason,
+      }),
+    timestamp,
+    expectedSession: structuredClone(
+      transition.expectedSession === undefined ? phase.session : transition.expectedSession,
+    ),
+  };
 }
 
 function applyPhaseLifecycleTransition(
@@ -650,6 +786,7 @@ function applyPhaseLifecycleTransition(
   const reason = boundedLifecycleReason(transition.reason);
   const fromStatus = phase.status;
   phase.status = transition.status;
+  phase.pendingAutomaticLifecycleTransition = null;
   phase.attentionReason = transition.status === "needs-attention" ? reason : null;
   phase.completedAt = transition.status === "cancelled" ? transition.timestamp : null;
   phase.updatedAt = transition.timestamp;
@@ -669,19 +806,6 @@ function applyPhaseLifecycleTransition(
       }),
   });
   return "updated";
-}
-
-function roadmapTransitionStatus(transition: NotesRoadmapTransition): NotesAutomaticPhaseStatus {
-  switch (transition) {
-    case "pending":
-      return "planning";
-    case "in-progress":
-      return "in-progress";
-    case "blocked":
-      return "needs-attention";
-    case "review":
-      return "review";
-  }
 }
 
 function roadmapStatusOutcome(
@@ -921,6 +1045,24 @@ function validateCompletionReviewRequest(
   return validateSession(request.expectedSession, "expectedSession")?.message ?? null;
 }
 
+type NormalizedCompletionReviewRequestResult =
+  | { ok: true; request: ProjectNotesCompletionReviewRequest }
+  | { ok: false; message: string };
+
+function normalizeAndValidateCompletionReviewRequest(
+  request: ProjectNotesCompletionReviewRequest,
+): NormalizedCompletionReviewRequestResult {
+  const normalizedRequest: ProjectNotesCompletionReviewRequest = {
+    ...request,
+    reason:
+      typeof request.reason === "string"
+        ? request.reason.replace(/\s+/g, " ").trim()
+        : request.reason,
+  };
+  const invalid = validateCompletionReviewRequest(normalizedRequest);
+  return invalid ? { ok: false, message: invalid } : { ok: true, request: normalizedRequest };
+}
+
 function applyCompletionEvaluation(
   phase: NotesPhase,
   evaluation: PhaseCompletionEvaluation,
@@ -951,6 +1093,67 @@ function applyCompletionEvaluation(
           ? "attention-generic-opened"
           : "other",
   });
+}
+
+type CompletionReviewAppendResult =
+  | {
+      ok: true;
+      document: NotesDocumentV3;
+      phase: NotesPhase;
+      evaluation: PhaseCompletionEvaluation;
+    }
+  | { ok: false; message: string };
+
+function buildCompletionReviewAppend(
+  sourceDocument: NotesDocumentV3,
+  phaseIndex: number,
+  request: ProjectNotesCompletionReviewRequest,
+  timestamp: string,
+  createId: () => string,
+): CompletionReviewAppendResult {
+  const document = structuredClone(sourceDocument);
+  const phase = document.phases[phaseIndex]!;
+  const evaluation = evaluatePhaseCompletion({
+    phase,
+    expectedSession: request.expectedSession,
+    review: {
+      reviewer: request.reviewer,
+      decision: request.decision,
+      acceptsVerificationException: request.acceptsVerificationException,
+      reason: request.reason,
+    },
+  });
+  if (request.acceptsVerificationException) {
+    const verification = phase.roadmapEvents.find(
+      (event): event is NotesRoadmapStatusUpdate =>
+        event.type === "status-update" && event.id === evaluation.verificationStatusUpdateId,
+    );
+    if (verification?.verification !== "exception-requested") {
+      return {
+        ok: false,
+        message: "A review can only accept the latest referenced verification exception.",
+      };
+    }
+  }
+
+  phase.roadmapEvents.push({
+    type: "completion-review",
+    id: request.reviewId,
+    reviewer: request.reviewer,
+    decision: request.decision,
+    evidence: [...request.evidence],
+    reason: request.reason,
+    implementationCheckpointId: evaluation.implementationCheckpointId,
+    verificationStatusUpdateId: evaluation.verificationStatusUpdateId,
+    acceptsVerificationException: request.acceptsVerificationException,
+    gateOutcome: evaluation.gateOutcome,
+    unmetGateCodes: [...evaluation.unmetGateCodes],
+    timestamp,
+  });
+  applyCompletionEvaluation(phase, evaluation, timestamp, createId);
+  phase.updatedAt = timestamp;
+  document.updatedAt = timestamp;
+  return { ok: true, document, phase, evaluation };
 }
 
 function sameRoadmapStatusPayload(
@@ -1107,6 +1310,13 @@ export class ProjectNotesRepository {
         validated.document,
       );
       if (eventAuthorityError) return { status: "invalid", error: eventAuthorityError };
+      const pendingLifecycleAuthorityError = validateGenericSavePendingLifecycleAuthority(
+        current.envelope.document,
+        validated.document,
+      );
+      if (pendingLifecycleAuthorityError) {
+        return { status: "invalid", error: pendingLifecycleAuthorityError };
+      }
       const reminderAuthorityError = validateGenericSaveReminderAuthority(
         current.envelope.document,
         validated.document,
@@ -1283,7 +1493,7 @@ export class ProjectNotesRepository {
       const lifecycleOutcome = applyPhaseLifecycleTransition(
         phase,
         {
-          status: roadmapTransitionStatus(request.transition),
+          status: notesPhaseStatusForRoadmapTransition(request.transition),
           source: "agent",
           reason:
             request.transition === "blocked"
@@ -1371,19 +1581,17 @@ export class ProjectNotesRepository {
         ...statusRequest,
         proposedReferences: normalizedReferences,
       };
-      const reviewRequest: ProjectNotesCompletionReviewRequest = {
+      const normalizedReview = normalizeAndValidateCompletionReviewRequest({
         ...request.review,
         phaseId: statusRequest.phaseId,
         expectedSession: { ...currentPhase.session },
         reviewer,
-        reason:
-          request.review.reason === null
-            ? null
-            : request.review.reason.replace(/\s+/g, " ").trim().slice(0, 1_024),
         timestamp: statusRequest.timestamp,
-      };
-      const invalidReview = validateCompletionReviewRequest(reviewRequest);
-      if (invalidReview) return { status: "invalid-review", message: invalidReview };
+      });
+      if (!normalizedReview.ok) {
+        return { status: "invalid-review", message: normalizedReview.message };
+      }
+      const reviewRequest = normalizedReview.request;
       if (statusRequest.updateId === reviewRequest.reviewId) {
         return { status: "duplicate-id-conflict", revision };
       }
@@ -1439,11 +1647,10 @@ export class ProjectNotesRepository {
       const referenceError = validateRoadmapProposedReferences(normalizedReferences, timestamp);
       if (referenceError) return { status: "invalid-reference", ...referenceError };
 
-      const document = structuredClone(current.envelope.document);
-      const phase = document.phases[phaseIndex]!;
+      const statusDocument = structuredClone(current.envelope.document);
       const statusOutcome = "evidence-only" as const;
       const proposals = appendRoadmapStatusEvent(
-        document,
+        statusDocument,
         phaseIndex,
         statusRequest,
         normalizedReferences,
@@ -1451,47 +1658,17 @@ export class ProjectNotesRepository {
         statusOutcome,
         this.createId,
       );
-      const evaluation = evaluatePhaseCompletion({
-        phase,
-        expectedSession: reviewRequest.expectedSession,
-        review: {
-          reviewer: reviewRequest.reviewer,
-          decision: reviewRequest.decision,
-          acceptsVerificationException: reviewRequest.acceptsVerificationException,
-          reason: reviewRequest.reason,
-        },
-      });
-      if (reviewRequest.acceptsVerificationException) {
-        const verification = phase.roadmapEvents.find(
-          (event): event is NotesRoadmapStatusUpdate =>
-            event.type === "status-update" && event.id === evaluation.verificationStatusUpdateId,
-        );
-        if (verification?.verification !== "exception-requested") {
-          return {
-            status: "invalid-review",
-            message: "A review can only accept the latest referenced verification exception.",
-          };
-        }
-      }
-
-      phase.roadmapEvents.push({
-        type: "completion-review",
-        id: reviewRequest.reviewId,
-        reviewer: reviewRequest.reviewer,
-        decision: reviewRequest.decision,
-        evidence: [...reviewRequest.evidence],
-        reason: reviewRequest.reason,
-        implementationCheckpointId: evaluation.implementationCheckpointId,
-        verificationStatusUpdateId: evaluation.verificationStatusUpdateId,
-        acceptsVerificationException: reviewRequest.acceptsVerificationException,
-        gateOutcome: evaluation.gateOutcome,
-        unmetGateCodes: [...evaluation.unmetGateCodes],
+      const appended = buildCompletionReviewAppend(
+        statusDocument,
+        phaseIndex,
+        reviewRequest,
         timestamp,
-      });
-      applyCompletionEvaluation(phase, evaluation, timestamp, this.createId);
-      phase.updatedAt = timestamp;
-      document.updatedAt = timestamp;
-      const validation = validateNotesDocumentV3(document);
+        this.createId,
+      );
+      if (!appended.ok) {
+        return { status: "invalid-review", message: appended.message };
+      }
+      const validation = validateNotesDocumentV3(appended.document);
       if (!validation.ok) {
         if (validation.error.path.includes("proposedReferences")) {
           return {
@@ -1504,21 +1681,14 @@ export class ProjectNotesRepository {
           `Final review reconciliation created invalid Notes: ${validation.error.path}`,
         );
       }
-      const next: StoredProjectNotesV1 = {
-        storeVersion: 1,
-        projectKey,
-        revision: revision + 1,
-        document: validation.document,
-      };
-      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
-      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      const next = await this.commitValidatedDocument(paths, current.envelope, validation.document);
       return {
         status: "committed",
         snapshot: toSnapshot(next),
-        phase: structuredClone(phase),
+        phase: structuredClone(appended.phase),
         statusOutcome,
         proposals: proposals.map(roadmapProposalOutcome),
-        evaluation,
+        evaluation: appended.evaluation,
       };
     });
   }
@@ -1598,8 +1768,11 @@ export class ProjectNotesRepository {
     cwd: string,
     request: ProjectNotesCompletionReviewRequest,
   ): Promise<ProjectNotesCompletionReviewOutcome> {
-    const invalid = validateCompletionReviewRequest(request);
-    if (invalid) return { status: "invalid-review", message: invalid };
+    const normalizedReview = normalizeAndValidateCompletionReviewRequest(request);
+    if (!normalizedReview.ok) {
+      return { status: "invalid-review", message: normalizedReview.message };
+    }
+    const reviewRequest = normalizedReview.request;
     const projectKey = canonicalProjectKey(cwd);
     const paths = this.paths(cwd);
     await this.ensureDirectory(paths.directory);
@@ -1608,101 +1781,54 @@ export class ProjectNotesRepository {
       if (current.status === "missing" || current.status === "corrupt") return current;
       const revision = current.envelope.revision;
       const phaseIndex = current.envelope.document.phases.findIndex(
-        (phase) => phase.id === request.phaseId,
+        (phase) => phase.id === reviewRequest.phaseId,
       );
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.envelope.document.phases[phaseIndex]!;
       const prior = currentPhase.roadmapEvents.find(
         (event): event is NotesRoadmapCompletionReview =>
-          event.type === "completion-review" && event.id === request.reviewId,
+          event.type === "completion-review" && event.id === reviewRequest.reviewId,
       );
       if (prior) {
-        if (!sameCompletionReviewPayload(prior, request)) {
+        if (!sameCompletionReviewPayload(prior, reviewRequest)) {
           return { status: "duplicate-id-conflict", revision };
         }
         return {
           status: "duplicate",
           revision,
-          phaseId: request.phaseId,
-          evaluation: {
-            gateOutcome: prior.gateOutcome,
-            unmetGateCodes: [...prior.unmetGateCodes],
-            implementationCheckpointId: prior.implementationCheckpointId,
-            verificationStatusUpdateId: prior.verificationStatusUpdateId,
-            targetStatus: null,
-            reason: prior.reason ?? "Final review was already recorded.",
-          },
+          phaseId: reviewRequest.phaseId,
+          evaluation: completionEvaluationFromStoredReview(prior),
         };
       }
-      if (currentPhase.roadmapEvents.some((event) => event.id === request.reviewId)) {
+      if (currentPhase.roadmapEvents.some((event) => event.id === reviewRequest.reviewId)) {
         return { status: "duplicate-id-conflict", revision };
       }
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
-      if (!sameSessionLink(currentPhase.session, request.expectedSession)) {
+      if (!sameSessionLink(currentPhase.session, reviewRequest.expectedSession)) {
         return { status: "stale-session" };
       }
 
-      const document = structuredClone(current.envelope.document);
-      const phase = document.phases[phaseIndex]!;
-      const timestamp = chronologicalRoadmapTimestamp(phase, request.timestamp);
-      const evaluation = evaluatePhaseCompletion({
-        phase,
-        expectedSession: request.expectedSession,
-        review: {
-          reviewer: request.reviewer,
-          decision: request.decision,
-          acceptsVerificationException: request.acceptsVerificationException,
-          reason: request.reason,
-        },
-      });
-      if (request.acceptsVerificationException) {
-        const verification = phase.roadmapEvents.find(
-          (event): event is NotesRoadmapStatusUpdate =>
-            event.type === "status-update" && event.id === evaluation.verificationStatusUpdateId,
-        );
-        if (verification?.verification !== "exception-requested") {
-          return {
-            status: "invalid-review",
-            message: "A review can only accept the latest referenced verification exception.",
-          };
-        }
-      }
-      const reviewReason =
-        request.reason === null ? null : request.reason.replace(/\s+/g, " ").trim().slice(0, 1_024);
-      phase.roadmapEvents.push({
-        type: "completion-review",
-        id: request.reviewId,
-        reviewer: request.reviewer,
-        decision: request.decision,
-        evidence: [...request.evidence],
-        reason: reviewReason,
-        implementationCheckpointId: evaluation.implementationCheckpointId,
-        verificationStatusUpdateId: evaluation.verificationStatusUpdateId,
-        acceptsVerificationException: request.acceptsVerificationException,
-        gateOutcome: evaluation.gateOutcome,
-        unmetGateCodes: [...evaluation.unmetGateCodes],
+      const timestamp = chronologicalRoadmapTimestamp(currentPhase, reviewRequest.timestamp);
+      const appended = buildCompletionReviewAppend(
+        current.envelope.document,
+        phaseIndex,
+        reviewRequest,
         timestamp,
-      });
-      applyCompletionEvaluation(phase, evaluation, timestamp, this.createId);
-      phase.updatedAt = timestamp;
-      document.updatedAt = timestamp;
-      const validation = validateNotesDocumentV3(document);
+        this.createId,
+      );
+      if (!appended.ok) {
+        return { status: "invalid-review", message: appended.message };
+      }
+      const validation = validateNotesDocumentV3(appended.document);
       if (!validation.ok) {
         throw new Error(`Completion review created invalid Notes: ${validation.error.path}`);
       }
-      const next: StoredProjectNotesV1 = {
-        storeVersion: 1,
-        projectKey,
-        revision: revision + 1,
-        document: validation.document,
-      };
-      await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
-      await this.atomicWrite(paths.primary, serializeEnvelope(next));
+      const next = await this.commitValidatedDocument(paths, current.envelope, validation.document);
       return {
         status: "committed",
         snapshot: toSnapshot(next),
-        phase: structuredClone(phase),
-        evaluation,
+        phase: structuredClone(appended.phase),
+        evaluation: appended.evaluation,
       };
     });
   }
@@ -1831,7 +1957,35 @@ export class ProjectNotesRepository {
       ) {
         return { status: "stale-session" };
       }
-      if (currentPhase.overrides.status !== null) return { status: "manual-override" };
+      if (currentPhase.overrides.status !== null) {
+        const document = structuredClone(current.envelope.document);
+        const phase = document.phases[phaseIndex]!;
+        const timestamp = chronologicalLifecycleTimestamp(phase, transition.timestamp);
+        const pending = pendingAutomaticLifecycleTransition(phase, transition, timestamp);
+        if (isDeepStrictEqual(phase.pendingAutomaticLifecycleTransition, pending)) {
+          return {
+            status: "manual-override",
+            snapshot: toSnapshot(current.envelope),
+            phase: structuredClone(currentPhase),
+          };
+        }
+        phase.pendingAutomaticLifecycleTransition = pending;
+        phase.updatedAt = timestamp;
+        document.updatedAt = timestamp;
+        const next: StoredProjectNotesV1 = {
+          storeVersion: 1,
+          projectKey,
+          revision: current.envelope.revision + 1,
+          document,
+        };
+        await this.atomicWrite(paths.backup, serializeEnvelope(current.envelope));
+        await this.atomicWrite(paths.primary, serializeEnvelope(next));
+        return {
+          status: "manual-override",
+          snapshot: toSnapshot(next),
+          phase: structuredClone(phase),
+        };
+      }
       if (currentPhase.status === "done") return { status: "done-terminal" };
       if (currentPhase.status === transition.status) return { status: "same-status" };
 
@@ -1903,6 +2057,22 @@ export class ProjectNotesRepository {
       await this.atomicWrite(paths.primary, serializeEnvelope(next));
       return { status: "ok", snapshot: toSnapshot(next), phase: structuredClone(phase) };
     });
+  }
+
+  private async commitValidatedDocument(
+    paths: ProjectNotesPaths,
+    current: StoredProjectNotesV1,
+    document: NotesDocumentV3,
+  ): Promise<StoredProjectNotesV1> {
+    const next: StoredProjectNotesV1 = {
+      storeVersion: 1,
+      projectKey: current.projectKey,
+      revision: current.revision + 1,
+      document,
+    };
+    await this.atomicWrite(paths.backup, serializeEnvelope(current));
+    await this.atomicWrite(paths.primary, serializeEnvelope(next));
+    return next;
   }
 
   private async ensureDirectory(directory: string): Promise<void> {

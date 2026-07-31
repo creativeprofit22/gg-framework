@@ -10,6 +10,7 @@ import {
   migrateNotesDocumentV2,
   migrateNotesDocumentV3PhaseShape,
   normalizeCanonicalUrl,
+  notesPhaseStatusForRoadmapTransition,
   NOTES_REFERENCE_METADATA_FIELDS,
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
@@ -79,6 +80,15 @@ function expectError(value: unknown, path: string, message?: string): void {
 
 describe("project Notes contract", () => {
   it.each([
+    ["pending", "planning"],
+    ["in-progress", "in-progress"],
+    ["blocked", "needs-attention"],
+    ["review", "review"],
+  ] as const)("maps the %s roadmap transition to %s", (transition, status) => {
+    expect(notesPhaseStatusForRoadmapTransition(transition)).toBe(status);
+  });
+
+  it.each([
     ["C:\\Work\\.\\App\\..\\Project\\", "c:/work/project"],
     ["C:/../Project", "c:/project"],
     ["\\\\Server\\Share\\Folder\\..\\Project", "//server/share/project"],
@@ -98,12 +108,46 @@ describe("project Notes contract", () => {
     expect(canonicalProjectKey("/Work/Project")).not.toBe(canonicalProjectKey("/work/project"));
   });
 
+  it("requires lifecycle event kinds in the current v3 type", () => {
+    type CurrentLifecycleEvent = NotesDocumentV3["phases"][number]["lifecycleEvents"][number];
+    type KindIsRequired = CurrentLifecycleEvent extends { kind: CurrentLifecycleEvent["kind"] }
+      ? true
+      : false;
+    const kindIsRequired: KindIsRequired = true;
+
+    expect(kindIsRequired).toBe(true);
+  });
+
   it("accepts the canonical fixture without cloning or rewriting it", async () => {
     const document = await fixture();
 
     expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
     expect(isNotesDocumentV3(document)).toBe(true);
     expect(migrateNotesDocumentV3PhaseShape(document)).toEqual({ ok: true, document });
+  });
+
+  it("strictly binds pending automatic lifecycle provenance to an active status override", async () => {
+    const withoutOverride = await fixture();
+    withoutOverride.phases[0]!.overrides.status = null;
+    expectError(
+      withoutOverride,
+      "phases[0].pendingAutomaticLifecycleTransition",
+      "requires an active status override",
+    );
+
+    const malformedSession = await fixture();
+    malformedSession.phases[0]!.pendingAutomaticLifecycleTransition!.expectedSession = {
+      sessionId: "session",
+      sessionPath: "",
+    };
+    expectError(
+      malformedSession,
+      "phases[0].pendingAutomaticLifecycleTransition.expectedSession.sessionPath",
+    );
+
+    const incompatibleKind = await fixture();
+    incompatibleKind.phases[0]!.pendingAutomaticLifecycleTransition!.kind = "approval-opened";
+    expectError(incompatibleKind, "phases[0].pendingAutomaticLifecycleTransition.kind");
   });
 
   it("validates reference and session projections with the authoritative semantics", async () => {
@@ -221,7 +265,9 @@ describe("project Notes contract", () => {
     const firstPhase = legacy.phases[0]!;
     const secondPhase = legacy.phases[1]!;
     delete firstPhase.archivedAt;
+    delete firstPhase.pendingAutomaticLifecycleTransition;
     delete secondPhase.archivedAt;
+    delete secondPhase.pendingAutomaticLifecycleTransition;
     delete secondPhase.roadmapEvents;
     for (const phase of legacy.phases) {
       for (const event of phase.lifecycleEvents as Array<Record<string, unknown>>) {
@@ -269,6 +315,7 @@ describe("project Notes contract", () => {
         phases: [
           {
             archivedAt: null,
+            pendingAutomaticLifecycleTransition: null,
             lifecycleEvents: [
               { kind: "other" },
               { kind: "other" },
@@ -289,6 +336,7 @@ describe("project Notes contract", () => {
           },
           {
             archivedAt: null,
+            pendingAutomaticLifecycleTransition: null,
             lifecycleEvents: [{ kind: "other" }, { kind: "other" }],
             roadmapEvents: [],
           },

@@ -118,6 +118,17 @@ export interface NotesPhaseOverrides {
   referenceIds: NotesReferenceIdsOverride | null;
 }
 
+export type NotesAutomaticLifecycleStatus = Exclude<NotesPhaseStatus, "not-started" | "done">;
+
+export interface NotesPendingAutomaticLifecycleTransition {
+  status: NotesAutomaticLifecycleStatus;
+  source: NotesLifecycleEventSource;
+  reason: string;
+  kind: NotesLifecycleEventKind;
+  timestamp: string;
+  expectedSession: NotesSessionLink | null;
+}
+
 export interface NotesLifecycleEvent {
   id: string;
   fromStatus: NotesPhaseStatus | null;
@@ -125,13 +136,30 @@ export interface NotesLifecycleEvent {
   source: NotesLifecycleEventSource;
   timestamp: string;
   reason: string | null;
-  /** Absent only in legacy in-memory records; persistence migration always adds it. */
-  kind?: NotesLifecycleEventKind;
+  kind: NotesLifecycleEventKind;
 }
 
 export type NotesRoadmapActor = "gg-coder" | "ken" | "ken-autopilot";
 export type NotesRoadmapReviewer = Exclude<NotesRoadmapActor, "gg-coder">;
 export type NotesRoadmapTransition = "pending" | "in-progress" | "blocked" | "review";
+export type NotesRoadmapPhaseStatus = Extract<
+  NotesPhaseStatus,
+  "planning" | "in-progress" | "needs-attention" | "review"
+>;
+
+const NOTES_PHASE_STATUS_BY_ROADMAP_TRANSITION = {
+  pending: "planning",
+  "in-progress": "in-progress",
+  blocked: "needs-attention",
+  review: "review",
+} as const satisfies Record<NotesRoadmapTransition, NotesRoadmapPhaseStatus>;
+
+export function notesPhaseStatusForRoadmapTransition(
+  transition: NotesRoadmapTransition,
+): NotesRoadmapPhaseStatus {
+  return NOTES_PHASE_STATUS_BY_ROADMAP_TRANSITION[transition];
+}
+
 export type NotesVerificationStatus = "passed" | "failed" | "exception-requested";
 export type NotesImplementationRunOutcome = "succeeded" | "failed" | "cancelled" | "interrupted";
 export type NotesCompletionGateOutcome =
@@ -252,6 +280,7 @@ export interface NotesPhase {
   completedAt: string | null;
   archivedAt: string | null;
   overrides: NotesPhaseOverrides;
+  pendingAutomaticLifecycleTransition: NotesPendingAutomaticLifecycleTransition | null;
   lifecycleEvents: NotesLifecycleEvent[];
   roadmapEvents: NotesRoadmapEvent[];
 }
@@ -415,11 +444,15 @@ const PHASE_KEYS = [
   "completedAt",
   "archivedAt",
   "overrides",
+  "pendingAutomaticLifecycleTransition",
   "lifecycleEvents",
   "roadmapEvents",
 ];
 const LEGACY_V3_PHASE_REQUIRED_KEYS = PHASE_KEYS.filter(
-  (key) => key !== "archivedAt" && key !== "roadmapEvents",
+  (key) =>
+    key !== "archivedAt" &&
+    key !== "pendingAutomaticLifecycleTransition" &&
+    key !== "roadmapEvents",
 );
 const SESSION_KEYS = ["sessionId", "sessionPath"];
 const LEGACY_REMINDER_KEYS = ["id", "dueAt", "note", "createdAt"];
@@ -447,6 +480,14 @@ export function isValidNotesReminderDeliveryPair(channel: unknown, permission: u
 const OVERRIDES_KEYS = ["status", "referenceIds"];
 const STATUS_OVERRIDE_KEYS = ["value", "source", "updatedAt"];
 const REFERENCE_IDS_OVERRIDE_KEYS = ["value", "source", "updatedAt"];
+const PENDING_AUTOMATIC_LIFECYCLE_TRANSITION_KEYS = [
+  "status",
+  "source",
+  "reason",
+  "kind",
+  "timestamp",
+  "expectedSession",
+];
 const LEGACY_LIFECYCLE_EVENT_KEYS = [
   "id",
   "fromStatus",
@@ -690,6 +731,7 @@ export function isNotesDocumentV3(value: unknown): value is NotesDocumentV3 {
 
 /** Adds missing additive fields to legacy v3 phase, lifecycle, and roadmap records, then validates. */
 export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidationResult {
+  type LegacyNotesLifecycleEventInput = Record<keyof Omit<NotesLifecycleEvent, "kind">, unknown>;
   if (!isRecord(value) || !hasExactKeys(value, DOCUMENT_V3_KEYS) || value.version !== 3) {
     return validateNotesDocumentV3(value);
   }
@@ -703,7 +745,10 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
     const onlyCurrentKeys = keys.every((key) => PHASE_KEYS.includes(key));
     if (!hasRequiredKeys || !onlyCurrentKeys) return phase;
 
-    const missingPhaseFields = !keys.includes("archivedAt") || !keys.includes("roadmapEvents");
+    const missingPhaseFields =
+      !keys.includes("archivedAt") ||
+      !keys.includes("pendingAutomaticLifecycleTransition") ||
+      !keys.includes("roadmapEvents");
     if (missingPhaseFields) migrated = true;
     let reminder = phase.reminder;
     if (isRecord(reminder) && hasExactKeys(reminder, LEGACY_REMINDER_KEYS)) {
@@ -718,6 +763,9 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
       ...phase,
       reminder,
       archivedAt: keys.includes("archivedAt") ? phase.archivedAt : null,
+      pendingAutomaticLifecycleTransition: keys.includes("pendingAutomaticLifecycleTransition")
+        ? phase.pendingAutomaticLifecycleTransition
+        : null,
       lifecycleEvents: phase.lifecycleEvents,
       roadmapEvents: keys.includes("roadmapEvents") ? phase.roadmapEvents : [],
     };
@@ -730,13 +778,14 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
 
     const lifecycleEvents = migratedPhase.lifecycleEvents.map((event) => {
       if (!isRecord(event) || !hasExactKeys(event, LEGACY_LIFECYCLE_EVENT_KEYS)) return event;
+      const legacyEvent = event as LegacyNotesLifecycleEventInput;
       migrated = true;
       return {
-        ...event,
+        ...legacyEvent,
         kind: classifyLegacyNotesLifecycleEvent({
-          toStatus: event.toStatus,
-          source: event.source,
-          reason: event.reason,
+          toStatus: legacyEvent.toStatus,
+          source: legacyEvent.source,
+          reason: legacyEvent.reason,
         }),
       };
     });
@@ -1134,6 +1183,12 @@ function validatePhase(
     knownReferenceIds,
   );
   if (overridesError) return overridesError;
+  const pendingTransitionError = validatePendingAutomaticLifecycleTransition(
+    value.pendingAutomaticLifecycleTransition,
+    `${pathPrefix}.pendingAutomaticLifecycleTransition`,
+    value.overrides,
+  );
+  if (pendingTransitionError) return pendingTransitionError;
   const lifecycleError = validateLifecycleEvents(
     value.lifecycleEvents,
     `${pathPrefix}.lifecycleEvents`,
@@ -1286,6 +1341,53 @@ function validateOverrides(
     if (!isTimestamp(value.referenceIds.updatedAt)) {
       return validationError(`${pathPrefix}.referenceIds.updatedAt`, "expected an ISO timestamp");
     }
+  }
+  return null;
+}
+
+function validatePendingAutomaticLifecycleTransition(
+  value: unknown,
+  pathPrefix: string,
+  overrides: unknown,
+): NotesValidationError | null {
+  if (value === null) return null;
+  if (!isRecordWithKeys(value, PENDING_AUTOMATIC_LIFECYCLE_TRANSITION_KEYS)) {
+    return validationError(pathPrefix, "invalid pending automatic lifecycle transition");
+  }
+  if (value.status === "not-started" || value.status === "done" || !isPhaseStatus(value.status)) {
+    return validationError(`${pathPrefix}.status`, "unknown automatic phase status");
+  }
+  if (!isLifecycleEventSource(value.source)) {
+    return validationError(`${pathPrefix}.source`, "unknown lifecycle event source");
+  }
+  if (!isNonEmptyString(value.reason)) {
+    return validationError(`${pathPrefix}.reason`, "expected a non-empty string");
+  }
+  if (
+    typeof value.kind !== "string" ||
+    !LIFECYCLE_EVENT_KINDS.has(value.kind as NotesLifecycleEventKind)
+  ) {
+    return validationError(`${pathPrefix}.kind`, "unknown lifecycle event kind");
+  }
+  if (
+    !isLifecycleEventKindCompatible(
+      value.kind as NotesLifecycleEventKind,
+      value.status as NotesPhaseStatus,
+      value.source as NotesLifecycleEventSource,
+    )
+  ) {
+    return validationError(`${pathPrefix}.kind`, "kind does not match lifecycle transition");
+  }
+  if (!isTimestamp(value.timestamp)) {
+    return validationError(`${pathPrefix}.timestamp`, "expected an ISO timestamp");
+  }
+  const sessionError = validateNotesSessionLink(
+    value.expectedSession,
+    `${pathPrefix}.expectedSession`,
+  );
+  if (sessionError) return sessionError;
+  if (!isRecord(overrides) || overrides.status === null) {
+    return validationError(pathPrefix, "requires an active status override");
   }
   return null;
 }

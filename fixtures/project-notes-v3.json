@@ -77,6 +77,17 @@
           "updatedAt": "2026-07-25T12:33:00.000Z"
         }
       },
+      "pendingAutomaticLifecycleTransition": {
+        "status": "review",
+        "source": "agent",
+        "reason": "Autopilot review started",
+        "kind": "other",
+        "timestamp": "2026-07-25T12:34:56.000Z",
+        "expectedSession": {
+          "sessionId": "session-phase-16-contract",
+          "sessionPath": "/sessions/phase-16-contract.jsonl"
+        }
+      },
       "lifecycleEvents": [
         {
           "id": "event-schema-planning",
@@ -173,6 +184,7 @@
         "status": null,
         "referenceIds": null
       },
+      "pendingAutomaticLifecycleTransition": null,
       "lifecycleEvents": [
         {
           "id": "event-migration-progress",

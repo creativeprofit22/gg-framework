@@ -1725,6 +1725,11 @@ describe("production launchBoundPhase orchestration", () => {
       { role: "ken-autopilot", names: ["roadmap_status"] },
     ]);
     expect(APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES).toContain("roadmap_status");
+    expect(registrations.flatMap(({ tools }) => tools.map((tool) => tool.rawInputSchema))).toEqual([
+      expect.objectContaining({ type: "object" }),
+      expect.objectContaining({ type: "object" }),
+      expect.objectContaining({ type: "object" }),
+    ]);
     await expect(
       executeRoadmap(registrations[0]!.tools[0]!, roadmapInput("coding-update")),
     ).resolves.toMatchObject({ result: "committed" });

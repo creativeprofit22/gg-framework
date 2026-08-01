@@ -15,6 +15,87 @@ import {
 } from "@kenkaiiii/gg-core/project-notes";
 import type { ProjectNotesRoadmapProposalOutcome } from "../project-notes-repository.js";
 
+type JsonSchema = Record<string, unknown>;
+
+const roadmapReferenceRangeInputSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    start_line: { type: "number", minimum: 1 },
+    end_line: { type: "number", minimum: 1 },
+  },
+  required: ["start_line", "end_line"],
+  additionalProperties: false,
+};
+
+const roadmapReferenceProposalInputSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    provider: { type: "string", maxLength: 4_096 },
+    tool: { type: "string", maxLength: 4_096 },
+    canonical_url: { type: "string", maxLength: 2_048 },
+    owner: { type: "string", maxLength: 4_096 },
+    repo: { type: "string", maxLength: 4_096 },
+    revision: { type: "string", maxLength: 4_096 },
+    path: { type: "string", maxLength: 4_096 },
+    range: roadmapReferenceRangeInputSchema,
+    issue: { type: "number", minimum: 1 },
+    pull_request: { type: "number", minimum: 1 },
+    query: { type: "string", maxLength: 4_096 },
+    anchor: { type: "string", maxLength: 4_096 },
+    relevance: { type: "string", maxLength: 4_096 },
+  },
+  required: ["provider", "canonical_url", "owner", "repo", "relevance"],
+  additionalProperties: false,
+};
+
+const roadmapStatusInputSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    update_id: { type: "string", maxLength: 128 },
+    phase_id: { type: "string", maxLength: 256 },
+    expected_revision: { type: "number", minimum: 0 },
+    progress: { type: "string", maxLength: 4_096 },
+    evidence: {
+      type: "array",
+      items: { type: "string", maxLength: NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH },
+      maxItems: NOTES_ROADMAP_EVIDENCE_MAX_ITEMS,
+    },
+    verification: {
+      type: "object",
+      properties: {
+        result: { enum: ["passed", "failed", "exception-requested"] },
+        reason: { type: "string", maxLength: NOTES_ROADMAP_REASON_MAX_LENGTH },
+      },
+      required: ["result"],
+      additionalProperties: false,
+    },
+    final_review: {
+      type: "object",
+      properties: {
+        review_id: { type: "string", maxLength: 128 },
+        decision: { enum: ["accepted", "rejected"] },
+        evidence: {
+          type: "array",
+          items: { type: "string", maxLength: NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH },
+          maxItems: NOTES_ROADMAP_EVIDENCE_MAX_ITEMS,
+        },
+        reason: { type: "string", maxLength: NOTES_ROADMAP_REASON_MAX_LENGTH },
+        accepts_verification_exception: { type: "boolean" },
+      },
+      required: ["review_id", "decision"],
+      additionalProperties: false,
+    },
+    proposed_references: {
+      type: "array",
+      items: roadmapReferenceProposalInputSchema,
+      maxItems: NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
+    },
+    transition: { enum: ["pending", "in-progress", "blocked", "review"] },
+    blocker: { type: "string", maxLength: 1_024 },
+  },
+  required: ["update_id", "phase_id", "progress", "transition"],
+  additionalProperties: false,
+};
 const normalizedText = (value: string): string => value.replace(/\r\n?/g, "\n").trim();
 const normalizedCoordinate = (value: string): string => value.trim();
 const optionalCoordinate = z
@@ -303,6 +384,7 @@ export function createRoadmapStatusTool(
       "GG Coder may report verification but only Ken or Autopilot Ken may submit final_review; " +
       "the completion gate, not this tool text, decides Done and preserves user overrides.",
     parameters: RoadmapStatusParams,
+    rawInputSchema: roadmapStatusInputSchema,
     executionMode: "sequential",
     async execute(input) {
       return JSON.stringify(await record({ actor, input }));

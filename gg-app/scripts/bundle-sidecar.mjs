@@ -11,8 +11,17 @@
 // its own runner, so copied native binaries match the target.
 import { build } from "esbuild";
 import { createRequire } from "node:module";
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+} from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -65,6 +74,188 @@ const NM_ROOTS = [
   join(repoRoot, "packages", "gg-ai", "node_modules"),
   join(repoRoot, "node_modules"),
 ];
+
+const MIB = 1024 * 1024;
+const CATEGORY_ORDER = [
+  "source-map",
+  "type-declaration",
+  "typescript-source",
+  "native-or-wasm",
+  "runtime-js",
+  "json-or-manifest",
+  "documentation",
+  "test-fixture-benchmark",
+  "license-notice",
+  "other",
+];
+const OPENSRC_BINARIES = new Set([
+  "opensrc-win32-x64.exe",
+  "opensrc-darwin-x64",
+  "opensrc-darwin-arm64",
+  "opensrc-linux-x64",
+  "opensrc-linux-musl-x64",
+  "opensrc-linux-arm64",
+  "opensrc-linux-musl-arm64",
+]);
+
+function portablePath(path) {
+  return path.split(sep).join("/");
+}
+
+/** Deterministically enumerate regular files without following symbolic links. */
+function walkFiles(root) {
+  const files = [];
+  const visit = (dir) => {
+    const names = readdirSync(dir).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    for (const name of names) {
+      const path = join(dir, name);
+      const stat = lstatSync(path);
+      const rel = portablePath(relative(root, path));
+      if (stat.isSymbolicLink()) {
+        throw new Error(`unexpected symbolic link in staged sidecar: ${rel}`);
+      }
+      if (stat.isDirectory()) {
+        visit(path);
+      } else if (stat.isFile()) {
+        files.push({ path, relative: rel, bytes: stat.size });
+      } else {
+        throw new Error(`unexpected non-file entry in staged sidecar: ${rel}`);
+      }
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function packageNameFor(path) {
+  const parts = path.split("/");
+  if (parts[0] === "node_modules" && parts[1]) {
+    return parts[1].startsWith("@") && parts[2] ? `${parts[1]}/${parts[2]}` : parts[1];
+  }
+  if (parts[0] === "skills") return "(skills)";
+  if (path === "app-sidecar.mjs") return "(bundle)";
+  return "(other)";
+}
+
+function categoryFor(path) {
+  const lower = path.toLowerCase();
+  const basename = lower.slice(lower.lastIndexOf("/") + 1);
+  const isLicense =
+    /^(?:licen[cs]es?|copy(?:right|ing)s?|notices?|third[-_ ]?party(?:[-_ ]?(?:notices?|notice[-_ ]?text))?)(?:\.|$)/.test(
+      basename,
+    );
+  if (path.endsWith(".map")) return "source-map";
+  if (/\.d\.(?:ts|mts|cts)$/.test(lower)) return "type-declaration";
+  if (/\.(?:ts|tsx|mts|cts)$/.test(lower)) return "typescript-source";
+  if (/\.(?:node|wasm|dll|exe|so|dylib)$/.test(lower)) return "native-or-wasm";
+  if (/\.(?:js|mjs|cjs|jsx)$/.test(lower)) return "runtime-js";
+  if (lower.endsWith(".json")) return "json-or-manifest";
+  if (
+    !isLicense &&
+    (/\.(?:md|markdown|mdown|mkd)$/.test(lower) ||
+      /^(?:readme|changelog|changes|history)(?:\.|$)/.test(basename))
+  ) {
+    return "documentation";
+  }
+  if (
+    /(?:^|\/)(?:__tests__|tests?|fixtures?|examples?|benchmarks?)(?:\/|$)/.test(lower) ||
+    /(?:^|[._-])(?:test|spec|fixture|example|benchmark)(?:[._-]|$)/.test(basename)
+  ) {
+    return "test-fixture-benchmark";
+  }
+  if (isLicense) return "license-notice";
+  return "other";
+}
+
+function emptySummary() {
+  return { bytes: 0, files: 0 };
+}
+
+function addToMap(map, key, file) {
+  const row = map.get(key) ?? emptySummary();
+  row.bytes += file.bytes;
+  row.files += 1;
+  map.set(key, row);
+}
+
+function inventoryFromFiles(files) {
+  const packages = new Map();
+  const categories = new Map(CATEGORY_ORDER.map((name) => [name, emptySummary()]));
+  let bytes = 0;
+  for (const file of files) {
+    bytes += file.bytes;
+    addToMap(packages, packageNameFor(file.relative), file);
+    addToMap(categories, categoryFor(file.relative), file);
+  }
+  return { bytes, files: files.length, packages, categories, entries: files };
+}
+
+function inventory(root) {
+  return inventoryFromFiles(walkFiles(root));
+}
+
+function formatBytes(bytes) {
+  return `${(bytes / MIB).toFixed(2)} MiB`;
+}
+
+function sortedNames(maps) {
+  const names = new Set(maps.flatMap((map) => [...map.keys()]));
+  return [...names].sort((a, b) => {
+    const bytesA = maps[0].get(a)?.bytes ?? 0;
+    const bytesB = maps[0].get(b)?.bytes ?? 0;
+    return bytesB - bytesA || (a < b ? -1 : a > b ? 1 : 0);
+  });
+}
+
+function renderDimension(label, before, removed, after) {
+  console.log(`\nSidecar ${label} inventory`);
+  console.log("name | before bytes/files | removed bytes/files | after bytes/files");
+  for (const name of sortedNames([before, removed, after])) {
+    const b = before.get(name) ?? emptySummary();
+    const r = removed.get(name) ?? emptySummary();
+    const a = after.get(name) ?? emptySummary();
+    console.log(
+      `${name} | ${formatBytes(b.bytes)} / ${b.files} | ${formatBytes(r.bytes)} / ${r.files} | ${formatBytes(a.bytes)} / ${a.files}`,
+    );
+  }
+}
+
+function renderInventory(before, removed, after) {
+  console.log("\nSidecar total inventory");
+  console.log("stage | bytes | files");
+  for (const [name, value] of [
+    ["before", before],
+    ["removed", removed],
+    ["after", after],
+  ]) {
+    console.log(`${name} | ${formatBytes(value.bytes)} | ${value.files}`);
+  }
+  renderDimension("package", before.packages, removed.packages, after.packages);
+  renderDimension("category", before.categories, removed.categories, after.categories);
+}
+
+function jsonInventory(value) {
+  return sortedNames([value]).map((name) => {
+    const summary = value.get(name);
+    return { name, bytes: summary.bytes, files: summary.files };
+  });
+}
+
+function inventoryJson(before, removed, after) {
+  const serialize = (value) => ({
+    bytes: value.bytes,
+    files: value.files,
+    packages: jsonInventory(value.packages),
+    categories: jsonInventory(value.categories),
+  });
+  return JSON.stringify({
+    platform: process.platform,
+    arch: process.arch,
+    before: serialize(before),
+    removed: serialize(removed),
+    after: serialize(after),
+  });
+}
 
 /** Nearest ancestor directory literally named `node_modules`, or null. */
 function enclosingNodeModules(start) {
@@ -215,6 +406,154 @@ function pruneForeignNativePayloads() {
   console.log(`pruned onnxruntime-node payloads to ${process.platform}/${process.arch}`);
 }
 
+function pruneSourceMaps() {
+  const removed = [];
+  for (const file of walkFiles(outDir)) {
+    if (file.relative.endsWith(".map")) {
+      removed.push(file);
+      rmSync(file.path);
+    }
+  }
+  return removed;
+}
+
+function selectOpenSrcBinary() {
+  if (process.platform === "win32" && process.arch === "x64") {
+    return "opensrc-win32-x64.exe";
+  }
+  if (process.platform === "darwin" && ["x64", "arm64"].includes(process.arch)) {
+    return `opensrc-darwin-${process.arch}`;
+  }
+  if (process.platform === "linux" && ["x64", "arm64"].includes(process.arch)) {
+    const report = process.report?.getReport?.();
+    const usesMusl = !report?.header?.glibcVersionRuntime;
+    return `opensrc-linux-${usesMusl ? "musl-" : ""}${process.arch}`;
+  }
+  throw new Error(
+    `opensrc has no supported binary mapping for ${process.platform}/${process.arch}`,
+  );
+}
+
+function pruneForeignOpenSrcBinaries() {
+  const binDir = join(nodeModulesOut, "opensrc", "bin");
+  const selectedName = selectOpenSrcBinary();
+  const selected = join(binDir, selectedName);
+  if (!existsSync(selected)) {
+    throw new Error(`opensrc expected host binary is missing: ${selectedName}`);
+  }
+
+  const knownFiles = walkFiles(binDir).filter((file) => OPENSRC_BINARIES.has(file.relative));
+  const removed = knownFiles
+    .filter((file) => file.relative !== selectedName)
+    .map((file) => ({
+      ...file,
+      relative: portablePath(relative(outDir, file.path)),
+    }));
+  const keep = join(binDir, `.gg-opensrc-${process.pid}`);
+  cpSync(selected, keep);
+  for (const file of knownFiles) rmSync(file.path);
+  cpSync(keep, selected);
+  rmSync(keep);
+
+  const retained = walkFiles(binDir).filter((file) => OPENSRC_BINARIES.has(file.relative));
+  if (retained.length !== 1 || retained[0].relative !== selectedName) {
+    throw new Error(
+      `opensrc pruning retained ${retained.map((file) => file.relative).join(", ") || "no native executable"}; expected only ${selectedName}`,
+    );
+  }
+  return { removed, selectedName };
+}
+
+function assertPrunedLayout(before, removed, after, selectedOpenSrcBinary) {
+  const errors = [];
+  const fail = (message) => errors.push(message);
+  if (after.bytes !== before.bytes - removed.bytes) {
+    fail(
+      `byte arithmetic failed: after ${after.bytes} != before ${before.bytes} - removed ${removed.bytes}`,
+    );
+  }
+  if (after.files !== before.files - removed.files) {
+    fail(
+      `file arithmetic failed: after ${after.files} != before ${before.files} - removed ${removed.files}`,
+    );
+  }
+
+  const opensrcPrefix = "node_modules/opensrc/bin/";
+  for (const file of removed.entries) {
+    const allowedOpenSrc =
+      file.relative.startsWith(opensrcPrefix) &&
+      OPENSRC_BINARIES.has(file.relative.slice(opensrcPrefix.length));
+    if (!file.relative.endsWith(".map") && !allowedOpenSrc) {
+      fail(`unexpected removed path: ${file.relative}`);
+    }
+  }
+
+  const removedMaps = removed.categories.get("source-map") ?? emptySummary();
+  const retainedMaps = after.categories.get("source-map") ?? emptySummary();
+  if (removedMaps.files < 900) {
+    fail(`removed source-map file threshold failed: ${removedMaps.files} < 900`);
+  }
+  if (removedMaps.bytes < 45 * MIB) {
+    fail(`removed source-map size threshold failed: ${formatBytes(removedMaps.bytes)} < 45.00 MiB`);
+  }
+  if (retainedMaps.files !== 0 || retainedMaps.bytes !== 0) {
+    fail(
+      `retained source-map gate failed: ${retainedMaps.files} files / ${formatBytes(retainedMaps.bytes)}`,
+    );
+  }
+
+  const opensrcNativeFiles = after.entries.filter((file) => {
+    if (!file.relative.startsWith(opensrcPrefix)) return false;
+    return OPENSRC_BINARIES.has(file.relative.slice(opensrcPrefix.length));
+  });
+  if (
+    opensrcNativeFiles.length !== 1 ||
+    opensrcNativeFiles[0].relative !== `${opensrcPrefix}${selectedOpenSrcBinary}`
+  ) {
+    fail(
+      `retained opensrc binary gate failed: expected ${selectedOpenSrcBinary}, found ${opensrcNativeFiles.map((file) => file.relative).join(", ") || "none"}`,
+    );
+  }
+
+  const requiredFiles = [
+    "app-sidecar.mjs",
+    "skills/evidence-led-ui/SKILL.md",
+    "node_modules/sharp/package.json",
+    "node_modules/playwright/package.json",
+    "node_modules/@huggingface/transformers/dist/transformers.node.mjs",
+    "node_modules/unpdf/dist/index.mjs",
+    "node_modules/typescript/lib/tsserver.js",
+    "node_modules/typescript-language-server/lib/cli.mjs",
+    "node_modules/opensrc/bin/opensrc.js",
+    `node_modules/opensrc/bin/${selectedOpenSrcBinary}`,
+    "node_modules/@kenkaiiii/kencode-search/dist/index.js",
+    `node_modules/onnxruntime-node/bin/napi-v3/${process.platform}/${process.arch}`,
+  ];
+  for (const path of requiredFiles) {
+    if (!existsSync(join(outDir, ...path.split("/"))))
+      fail(`required sidecar path missing: ${path}`);
+  }
+
+  const releaseTarget =
+    (process.platform === "win32" && process.arch === "x64") || process.platform === "darwin";
+  if (releaseTarget && removed.bytes < 65 * MIB) {
+    fail(`minimum removed size gate failed: ${formatBytes(removed.bytes)} < 65.00 MiB`);
+  }
+  if (releaseTarget && after.bytes > before.bytes * 0.82) {
+    fail(
+      `relative size gate failed: ${formatBytes(after.bytes)} > 82% of ${formatBytes(before.bytes)}`,
+    );
+  }
+  if (releaseTarget && after.bytes > 285 * MIB) {
+    fail(`absolute size gate failed: ${formatBytes(after.bytes)} > 285.00 MiB`);
+  }
+  if (after.files > before.files - 900) {
+    fail(`file-count gate failed: ${after.files} > ${before.files - 900}`);
+  }
+
+  if (errors.length > 0) throw new Error(`sidecar pruning gates failed:\n- ${errors.join("\n- ")}`);
+}
+
 async function main() {
   if (!existsSync(ggcoderSidecarEntry)) {
     throw new Error(
@@ -257,9 +596,19 @@ async function main() {
     copyPackage(name, ggcoderRequire, ggcoderRoot, copied);
   }
   pruneForeignNativePayloads();
+
+  const before = inventory(outDir);
+  const removedSourceMaps = pruneSourceMaps();
+  const opensrc = pruneForeignOpenSrcBinaries();
+  const removed = inventoryFromFiles([...removedSourceMaps, ...opensrc.removed]);
+  const after = inventory(outDir);
+
   console.log(
     `bundled sidecar → ${outFile}\ncopied ${copied.size} external packages → ${nodeModulesOut}`,
   );
+  renderInventory(before, removed, after);
+  console.log(`GG_SIDECAR_SIZE_JSON=${inventoryJson(before, removed, after)}`);
+  assertPrunedLayout(before, removed, after, opensrc.selectedName);
 }
 
 main().catch((err) => {

@@ -847,16 +847,16 @@ export class AgentSession {
       if (this.opts.allowedTools && mcpWhitelist) {
         servers = servers.filter((s) => mcpWhitelist.includes(s.name));
       }
-      // Seed the catalog from the on-disk cache BEFORE connecting. With
-      // `backgroundMcpConnect` the first turns would otherwise run against an
-      // empty catalog and tool_search would answer "the catalog is empty" for
-      // capabilities that genuinely exist — a wrong answer, not a slow one.
-      await this.seedMcpCatalogFromCache(servers);
-
       const pool = this.opts.sharedMcpPool;
       const sharedServers = pool ? servers.filter((server) => pool.canShare(server)) : [];
       const privateServers = pool ? servers.filter((server) => !pool.canShare(server)) : servers;
-      const connected: AgentTool[] = await this.mcpManager.connectAll(privateServers);
+
+      // Claim shared leases before cached definitions become visible through
+      // tool_search. A background session can promote a cached tool as soon as
+      // seedMcpCatalogFromCache yields; without the lease already registered,
+      // that activation resolves against the session-local manager and bypasses
+      // the daemon pool.
+      const sharedConnections: Promise<AgentTool[]>[] = [];
       for (const server of sharedServers) {
         let lease = this.sharedMcpLeases.get(server.name);
         if (!lease) {
@@ -866,8 +866,16 @@ export class AgentSession {
           });
           this.sharedMcpLeases.set(server.name, lease);
         }
-        connected.push(...(await lease.tools));
+        sharedConnections.push(lease.tools);
       }
+
+      const privateConnection = this.mcpManager.connectAll(privateServers);
+      // Seed the catalog only after every shared manager is routable. With
+      // `backgroundMcpConnect`, this still exposes cached capabilities before
+      // the live connection finishes, but never through the wrong manager.
+      await this.seedMcpCatalogFromCache(servers);
+
+      const connected = (await Promise.all([privateConnection, ...sharedConnections])).flat();
       // Defense-in-depth: even from a whitelisted server, only push tools that
       // pass the allow-list (no-op when there's no allow-list).
       const mcpTools = this.opts.allowedTools

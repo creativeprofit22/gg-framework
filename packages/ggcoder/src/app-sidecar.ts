@@ -2349,6 +2349,7 @@ async function createSession(
       systemPrompt: await buildKenSystemPrompt(cwd),
       allowedTools: KEN_ALLOWED_TOOLS,
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
+      sharedMcpPool,
       transient: true,
       signal: kenAbort.signal,
       // Ken's bursty, spread-out turns (chat) outlast the default 5-min cache
@@ -2418,6 +2419,7 @@ async function createSession(
       systemPrompt: await buildKenAutopilotSystemPrompt(cwd),
       allowedTools: KEN_ALLOWED_TOOLS,
       allowedMcpServers: KEN_ALLOWED_MCP_SERVERS,
+      sharedMcpPool,
       transient: true,
       signal: kenAutoAbort.signal,
       // Autopilot review rounds routinely span the injected GG Coder run

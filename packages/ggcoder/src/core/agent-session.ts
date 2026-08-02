@@ -87,6 +87,7 @@ import { z } from "zod";
 import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
 import type { MCPElicitHandler } from "./mcp/index.js";
 import type { MCPServerConfig } from "./mcp/types.js";
+import type { SharedMcpClientLease, SharedMcpClientPool } from "./mcp/shared-client-pool.js";
 import { DeferredToolCatalog } from "./mcp/deferred-catalog.js";
 import { McpCatalogCache, type CachedTool } from "./mcp/catalog-cache.js";
 import {
@@ -253,6 +254,11 @@ export interface AgentSessionOptions {
    * MCP entirely (its dynamic tool names could never match a fixed allow-list).
    */
   allowedMcpServers?: string[];
+  /**
+   * Optional daemon-scoped owner for shareable read-only MCP processes.
+   * Tool registration and allow-lists remain local to this AgentSession.
+   */
+  sharedMcpPool?: SharedMcpClientPool;
   /**
    * Force 1-h prompt-cache TTL + pre-warm regardless of the user's global
    * `speedProfile` setting. Bursty read-only advisory sessions (the Ken
@@ -443,6 +449,7 @@ export class AgentSession {
     void this.subAgentManager?.interruptAll();
   };
   private mcpManager?: MCPClientManager;
+  private sharedMcpLeases = new Map<string, SharedMcpClientLease>();
   /** Deferred MCP tools awaiting discovery via tool_search (bench A win). */
   private mcpCatalog?: DeferredToolCatalog;
   /** Live (connected) MCP tools by name — the reconcile target for cached stubs. */
@@ -846,7 +853,21 @@ export class AgentSession {
       // capabilities that genuinely exist — a wrong answer, not a slow one.
       await this.seedMcpCatalogFromCache(servers);
 
-      const connected = await this.mcpManager.connectAll(servers);
+      const pool = this.opts.sharedMcpPool;
+      const sharedServers = pool ? servers.filter((server) => pool.canShare(server)) : [];
+      const privateServers = pool ? servers.filter((server) => !pool.canShare(server)) : servers;
+      const connected: AgentTool[] = await this.mcpManager.connectAll(privateServers);
+      for (const server of sharedServers) {
+        let lease = this.sharedMcpLeases.get(server.name);
+        if (!lease) {
+          lease = pool!.acquire(server, {
+            catalogCache: this.mcpCatalogCache,
+            modernProtocol: this.settingsManager.get("mcpModernProtocol"),
+          });
+          this.sharedMcpLeases.set(server.name, lease);
+        }
+        connected.push(...(await lease.tools));
+      }
       // Defense-in-depth: even from a whitelisted server, only push tools that
       // pass the allow-list (no-op when there's no allow-list).
       const mcpTools = this.opts.allowedTools
@@ -920,7 +941,9 @@ export class AgentSession {
           if (this.liveMcpTools.has(toolName)) return undefined;
           const serverName = this.cachedMcpToolServers.get(toolName);
           if (!serverName) return undefined;
-          const outcome = (await this.mcpManager?.whenConnected(serverName)) ?? {
+          const outcome = (await this.mcpManagerForServer(serverName)?.whenConnected(
+            serverName,
+          )) ?? {
             ok: false as const,
             error: "MCP is disabled for this session",
           };
@@ -930,6 +953,10 @@ export class AgentSession {
         },
       ),
     );
+  }
+
+  private mcpManagerForServer(serverName: string): MCPClientManager | undefined {
+    return this.sharedMcpLeases.get(serverName)?.manager ?? this.mcpManager;
   }
 
   /** Append tools, replacing any same-named entry (cached stub → live tool). */
@@ -997,7 +1024,7 @@ export class AgentSession {
       execute: async (args, context) => {
         const live = this.liveMcpTools.get(cached.name);
         if (live) return live.execute(args, context);
-        const outcome = (await this.mcpManager?.whenConnected(serverName)) ?? {
+        const outcome = (await this.mcpManagerForServer(serverName)?.whenConnected(serverName)) ?? {
           ok: false as const,
           error: "MCP is disabled for this session",
         };
@@ -2048,37 +2075,16 @@ export class AgentSession {
         // Remove old MCP tools
         this.tools = this.tools.filter((t) => !t.name.startsWith("mcp__"));
 
-        // Disconnect old MCP servers
-        await this.mcpManager.dispose();
+        // Disconnect private servers and release this session's shared leases.
+        await this.disposeMcpConnections();
 
-        // Connect new MCP servers for the new provider
-        try {
-          let apiKey: string | undefined;
-          if (this.provider === "glm") {
-            try {
-              const glmCreds = await this.authStorage.resolveCredentials("glm");
-              apiKey = glmCreds.accessToken;
-            } catch {
-              // GLM not configured — skip Z.AI MCP servers
-            }
-          }
-          // Use getAllMcpServers so user-configured servers survive the reconnect.
-          const servers = await getAllMcpServers(this.provider, apiKey, this.cwd);
-          const mcpTools = await this.mcpManager.connectAll(servers);
-          // Drop stale MCP tools from both the live set and deferred catalog before
-          // re-adding. Some tools may already have been promoted out of the catalog.
-          this.tools = this.tools.filter((t) => !t.name.startsWith("mcp__"));
-          this.mcpCatalog?.removeWhere((name) => name.startsWith("mcp__"));
-          this.liveMcpTools.clear();
-          this.cachedMcpToolServers.clear();
-          this.addMcpTools(mcpTools);
-        } catch (err) {
-          log(
-            "WARN",
-            "mcp",
-            `MCP reconnection failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
+        // Drop stale MCP tools from both the live set and deferred catalog before
+        // reconnecting through the same shared/private ownership path as startup.
+        this.tools = this.tools.filter((t) => !t.name.startsWith("mcp__"));
+        this.mcpCatalog?.removeWhere((name) => name.startsWith("mcp__"));
+        this.liveMcpTools.clear();
+        this.cachedMcpToolServers.clear();
+        await this.connectMcpServers();
       }
     }
   }
@@ -3150,11 +3156,17 @@ export class AgentSession {
     return this.getPromptCacheKey();
   }
 
+  private async disposeMcpConnections(): Promise<void> {
+    const leases = [...this.sharedMcpLeases.values()];
+    this.sharedMcpLeases.clear();
+    await Promise.all([this.mcpManager?.dispose(), ...leases.map((lease) => lease.release())]);
+  }
+
   async dispose(): Promise<void> {
     this.managerAbortSignal?.removeEventListener("abort", this.managerAbortHandler);
     this.processManager?.shutdownAll();
     this.lspManager?.shutdownAll();
-    await Promise.all([this.subAgentManager?.shutdownAll(), this.mcpManager?.dispose()]);
+    await Promise.all([this.subAgentManager?.shutdownAll(), this.disposeMcpConnections()]);
     await this.extensionLoader.deactivateAll();
     this.setSessionPath("");
     this.eventBus.removeAllListeners();

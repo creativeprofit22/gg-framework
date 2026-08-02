@@ -26,6 +26,7 @@ import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
+import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
 import { RunLifecycle } from "./core/run-lifecycle.js";
 import { RunClaim } from "./core/run-claim.js";
 import {
@@ -874,6 +875,7 @@ async function main(): Promise<void> {
   // request to its window's session via the `x-gg-session` header (and the
   // `?session=` query for the SSE /events stream).
   const sessions = new AppSidecarSessionRouter<SessionContext>();
+  const sharedMcpPool = new SharedMcpClientPool();
   const reloadCoordinator = new AppSidecarReloadCoordinator();
 
   const broadcastAll = (type: string, data: unknown): void => {
@@ -1178,6 +1180,7 @@ async function main(): Promise<void> {
                 roadmapReconciliations,
                 projectAutopilot,
                 broadcastNotesSnapshot,
+                sharedMcpPool,
               },
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
             );
@@ -1280,6 +1283,7 @@ async function main(): Promise<void> {
     progress.dispose();
     reminderCoordinator.dispose();
     await sessions.disposeAll();
+    await sharedMcpPool.dispose();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     process.exit(0);
   }
@@ -1543,6 +1547,7 @@ async function createSession(
     roadmapReconciliations: AppSidecarRoadmapReconciliationCoordinator;
     projectAutopilot: AppSidecarProjectAutopilotState;
     broadcastNotesSnapshot: (snapshot: ProjectNotesSnapshot) => void;
+    sharedMcpPool: SharedMcpClientPool;
   },
   opts: {
     id: string;
@@ -1567,6 +1572,7 @@ async function createSession(
     roadmapReconciliations,
     projectAutopilot,
     broadcastNotesSnapshot,
+    sharedMcpPool,
   } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
@@ -1755,6 +1761,7 @@ async function createSession(
     signal: abort.signal,
     // Keep MCP startup off the readiness path in both modes.
     backgroundMcpConnect: true,
+    sharedMcpPool,
     onMcpElicit: elicitations.onElicit,
     // Keep restore-time auto-compaction off the readiness path too: its summary
     // LLM call (30s timeout) used to freeze waitForReady — and with it the whole

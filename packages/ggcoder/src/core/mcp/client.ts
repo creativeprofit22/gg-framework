@@ -76,6 +76,12 @@ export interface MCPElicitation {
 
 export type MCPElicitHandler = (request: MCPElicitation) => Promise<ElicitResult>;
 
+export interface MCPClientManagerOptions {
+  catalogCache?: McpCatalogCache;
+  modernProtocol?: boolean;
+  onElicit?: MCPElicitHandler;
+}
+
 export class MCPClientManager {
   private servers: ConnectedServer[] = [];
   /**
@@ -110,13 +116,7 @@ export class MCPClientManager {
    */
   private readonly onElicit?: MCPElicitHandler;
 
-  constructor(
-    opts: {
-      catalogCache?: McpCatalogCache;
-      modernProtocol?: boolean;
-      onElicit?: MCPElicitHandler;
-    } = {},
-  ) {
+  constructor(opts: MCPClientManagerOptions = {}) {
     this.catalogCache = opts.catalogCache ?? new McpCatalogCache();
     this.modernProtocol = opts.modernProtocol ?? false;
     this.onElicit = opts.onElicit;

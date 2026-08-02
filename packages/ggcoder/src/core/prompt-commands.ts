@@ -485,7 +485,15 @@ Evidence: kencode-search - pattern seen in X out of Y repos searched
 
 Style preferences and subjective improvements are not valid findings. Only report things backed by clear kencode-search evidence across multiple repos.
 
-If the code aligns well with real-world patterns, say so. That's a good outcome.`,
+After reporting, automatically add every validated finding to the project task list using the \`tasks\` tool. Do not wait for user confirmation.
+
+1. Call the \`tasks\` tool with \`action=list\` before adding anything.
+2. Compare each finding against every existing task by meaning, affected code, and intended correction—not title alone. Do not add a semantic duplicate, including a duplicate of a done or in-progress task.
+3. For each non-duplicate finding, call the \`tasks\` tool with \`action=add\`. Add exactly one task per finding and use a concise title.
+4. Make each task prompt standalone: include the finding type (MISSING, DIVERGENT, or INCOMPLETE), exact file and line, the local implementation, the multi-repo kencode-search evidence, and the concrete correction. The task must be actionable by an agent with no conversation context.
+5. After all task calls, if at least one task was added, output exactly: ${TASKS_ADDED_NOTICE}
+
+If the code aligns well with real-world patterns, say so and do not add tasks. That's a good outcome.`,
   },
   {
     name: "setup-skills",

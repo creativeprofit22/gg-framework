@@ -16,6 +16,21 @@ describe("prompt commands", () => {
     expect(bulletProof?.prompt).not.toContain("Press CTRL + G");
   });
 
+  it("adds validated compare findings as deduplicated standalone tasks", () => {
+    const compare = PROMPT_COMMANDS.find((command) => command.name === "compare");
+
+    expect(compare?.prompt).toContain("After reporting, automatically add every validated finding");
+    expect(compare?.prompt).toContain("`action=list` before adding anything");
+    expect(compare?.prompt).toContain("Do not add a semantic duplicate");
+    expect(compare?.prompt).toContain("including a duplicate of a done or in-progress task");
+    expect(compare?.prompt).toContain("Add exactly one task per finding");
+    expect(compare?.prompt).toContain("finding type (MISSING, DIVERGENT, or INCOMPLETE)");
+    expect(compare?.prompt).toContain("exact file and line");
+    expect(compare?.prompt).toContain("multi-repo kencode-search evidence");
+    expect(compare?.prompt).toContain("concrete correction");
+    expect(compare?.prompt).toContain("Press Ctrl+T to open the task list");
+  });
+
   it("tells commands that name kencode tools how to unlock deferred MCP", () => {
     // `deferredMcpTools` defaults to true, so `mcp__kencode-search__*` sits in
     // the tool_search catalog until promoted. A command that hard-names it must
@@ -47,10 +62,13 @@ describe("prompt commands", () => {
     try {
       const { PROMPT_COMMANDS: appPromptCommands } = await import("./prompt-commands.js");
       const bulletProof = appPromptCommands.find((command) => command.name === "bullet-proof");
+      const compare = appPromptCommands.find((command) => command.name === "compare");
       const init = appPromptCommands.find((command) => command.name === "init");
 
       expect(bulletProof?.prompt).toContain('Click the "Tasks" button');
       expect(bulletProof?.prompt).not.toContain("Ctrl+T");
+      expect(compare?.prompt).toContain('Click the "Tasks" button');
+      expect(compare?.prompt).not.toContain("Ctrl+T");
       expect(init?.prompt).toContain("New Session");
       expect(init?.prompt).toContain('click "+ New"');
       expect(init?.prompt).not.toContain("restart ggcoder");

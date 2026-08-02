@@ -51,12 +51,14 @@ describe("BOM-tolerant instruction parsing", () => {
         `${BOM}---\nname: deploy\ndescription: Ship it\n---\n\nDeploy the app.`,
       );
 
-      const commands = await loadCustomCommands(cwd);
+      const command = (await loadCustomCommands(cwd)).find(({ name }) => name === "deploy");
 
-      expect(commands).toHaveLength(1);
-      expect(commands[0].name).toBe("deploy");
-      expect(commands[0].description).toBe("Ship it");
-      expect(commands[0].prompt).toBe("Deploy the app.");
+      expect(command).toMatchObject({
+        name: "deploy",
+        description: "Ship it",
+        prompt: "Deploy the app.",
+        scope: "project",
+      });
     } finally {
       await fs.rm(cwd, { recursive: true, force: true });
     }

@@ -141,6 +141,7 @@ Plus built-in workflows that ship with the binary:
 /bullet-proof  # Run a defensive security review
 /init          # Generate CLAUDE.md for your project
 /setup-commit  # Generate a /commit command with quality checks
+/setup-tauri-package  # Generate a safe project-scoped Tauri packaging harness
 /setup-skills  # Audit and recommend reusable skills
 ```
 

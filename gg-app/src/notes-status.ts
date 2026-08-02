@@ -4,6 +4,12 @@ export function getUnfinishedNotesTaskCount(document: NotesDocumentV3): number {
   return document.tasks.filter((task) => task.status === "todo" && task.archivedAt === null).length;
 }
 
+export function getSavedPromptCount(document: NotesDocumentV3): number {
+  return document.phases.filter(
+    (phase) => phase.archivedAt === null && phase.sourcePrompt.trim().length > 0,
+  ).length;
+}
+
 export function isNotesHandoffUnread(document: NotesDocumentV3): boolean {
   const { handoff } = document;
   if (handoff.text.trim().length === 0 || handoff.updatedAt === null) return false;

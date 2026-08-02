@@ -3,6 +3,7 @@ import {
   getActiveNotesPhaseCount,
   getActiveNotesReminderCount,
   getDueNotesReminderCount,
+  getSavedPromptCount,
   getUnfinishedNotesTaskCount,
   isNotesHandoffUnread,
 } from "./notes-status";
@@ -84,6 +85,15 @@ describe("Notes status selectors", () => {
 
     expect(getUnfinishedNotesTaskCount(notes)).toBe(1);
     expect(isNotesHandoffUnread(notes)).toBe(true);
+  });
+
+  it("counts non-empty saved prompts only on visible Roadmap phases", () => {
+    const saved = phase("not-started");
+    const empty = { ...phase("planning"), sourcePrompt: "" };
+    const whitespace = { ...phase("review"), sourcePrompt: "   \n" };
+    const archived = { ...phase("in-progress"), archivedAt: NOW };
+
+    expect(getSavedPromptCount(document([saved, empty, whitespace, archived]))).toBe(1);
   });
 
   it("counts every unsettled phase as active", () => {

@@ -10,6 +10,7 @@ import {
   getActiveNotesPhaseCount,
   getActiveNotesReminderCount,
   getDueNotesReminderCount,
+  getSavedPromptCount,
   getUnfinishedNotesTaskCount,
   isNotesHandoffUnread,
 } from "./notes-status";
@@ -119,6 +120,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
   const status = {
     unfinishedCount: getUnfinishedNotesTaskCount(notesDocument),
     dueReminderCount: getDueNotesReminderCount(notesDocument),
+    savedPromptCount: getSavedPromptCount(notesDocument),
     handoffUnread: isNotesHandoffUnread(notesDocument),
   };
   const activePhaseCount = getActiveNotesPhaseCount(notesDocument);

@@ -68,7 +68,7 @@ function phase(id: string, status: NotesPhaseStatus, withReminder = false): Note
     doneWhen: ["Shell evidence passes"],
     order: 0,
     status,
-    sourcePrompt: "Implement Phase 17",
+    sourcePrompt: "",
     referenceIds: [],
     session: null,
     reminder: withReminder
@@ -1659,11 +1659,84 @@ describe("ProjectNotes", () => {
     },
   );
 
-  it("saves an exact prompt through the imperative handle and renders it in phase detail", async () => {
+  it("marks a newly saved prompt draft in the closed Notes count and Roadmap row", async () => {
+    const cwd = "/work/new-prompt-draft";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference"));
+    const actions = createRef<ProjectNotesPromptActions>();
+    render(<ProjectNotes ref={actions} cwd={cwd} client={client} />);
+    await waitFor(() => expect(actions.current).not.toBeNull());
+
+    await act(async () => {
+      await expect(
+        actions.current!.savePrompt({
+          kind: "new-draft",
+          title: "Prompt draft",
+          prompt: "Exact new draft prompt",
+        }),
+      ).resolves.toMatchObject({ status: "committed", title: "Prompt draft" });
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 saved prompt" }));
+    selectNotesTab("Roadmap");
+    const row = screen
+      .getByRole("button", { name: "Inspect phase: Prompt draft" })
+      .closest(".notes-roadmap-row");
+    expect(row?.querySelector(".notes-phase-saved-prompt-marker")?.textContent).toBe(
+      "Saved prompt",
+    );
+  });
+
+  it("does not mark or count empty and whitespace-only source prompts", async () => {
+    const cwd = "/work/empty-saved-prompts";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [
+      { ...phase("empty", "not-started"), sourcePrompt: "" },
+      { ...phase("whitespace", "planning"), sourcePrompt: "  \n" },
+    ];
+    client.seed(cwd, populated);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    expect(screen.queryByText("Saved prompt")).toBeNull();
+    expect(document.querySelectorAll(".notes-phase-saved-prompt-marker")).toHaveLength(0);
+  });
+
+  it("restores saved-prompt count and row marker after an authoritative remount", async () => {
+    const cwd = "/work/reloaded-saved-prompt";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("reference"));
+    const actions = createRef<ProjectNotesPromptActions>();
+    const first = render(<ProjectNotes ref={actions} cwd={cwd} client={client} />);
+    await waitFor(() => expect(actions.current).not.toBeNull());
+    await act(async () => {
+      await actions.current!.savePrompt({
+        kind: "new-draft",
+        title: "Durable prompt",
+        prompt: "Persist this exact prompt",
+      });
+    });
+    first.unmount();
+
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 saved prompt" }));
+    selectNotesTab("Roadmap");
+    const row = screen
+      .getByRole("button", { name: "Inspect phase: Durable prompt" })
+      .closest(".notes-roadmap-row");
+    expect(row?.querySelector(".notes-phase-saved-prompt-marker")?.textContent).toBe(
+      "Saved prompt",
+    );
+  });
+
+  it("marks an existing-phase prompt replacement without changing its reminder", async () => {
     const cwd = "/work/saved-prompt";
     const client = new FakeProjectNotesClient(cwd);
     const populated = notes("reference");
-    populated.phases = [{ ...phase("target", "in-progress"), sourcePrompt: "" }];
+    populated.phases = [{ ...phase("target", "in-progress", true), sourcePrompt: "" }];
+    const reminderBeforeSave = structuredClone(populated.phases[0]!.reminder);
     client.seed(cwd, populated);
     const actions = createRef<ProjectNotesPromptActions>();
     render(<ProjectNotes ref={actions} cwd={cwd} client={client} />);
@@ -1684,13 +1757,18 @@ describe("ProjectNotes", () => {
         }),
       ).resolves.toEqual({ status: "committed", phaseId: "target", title: "Phase target" });
     });
-    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.sourcePrompt).toBe(
-      prompt,
-    );
+    const savedPhase = client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!;
+    expect(savedPhase.sourcePrompt).toBe(prompt);
+    expect(savedPhase.reminder).toEqual(reminderBeforeSave);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Notes, 1 saved prompt" }));
     selectNotesTab("Roadmap");
-    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Phase target" }));
+    const phaseButton = screen.getByRole("button", { name: "Inspect phase: Phase target" });
+    expect(
+      phaseButton.closest(".notes-roadmap-row")?.querySelector(".notes-phase-saved-prompt-marker")
+        ?.textContent,
+    ).toBe("Saved prompt");
+    fireEvent.click(phaseButton);
     const heading = screen.getByRole("heading", { name: "Saved prompt" });
     expect(heading).toBeTruthy();
     expect(heading.nextElementSibling?.textContent).toBe(prompt);

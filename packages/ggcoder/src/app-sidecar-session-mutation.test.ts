@@ -3,11 +3,12 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AppSidecarSessionMutationCoordinator,
   appSidecarSessionBusyConflictBody,
   isAppSidecarSessionBusy,
+  runAppSidecarNewSessionMutation,
   type SessionMutationKind,
 } from "./app-sidecar-session-mutation.js";
 
@@ -173,6 +174,94 @@ async function overlapNewSessionWith(competingPath: "/tasks/run" | "/plan/accept
 }
 
 describe("app-sidecar session mutation routes", () => {
+  it("runs one authoritative new-session mutation and correlates its response and reset", async () => {
+    const mutations = new AppSidecarSessionMutationCoordinator(() => "new-session-42");
+    const resetEvents: Array<{ operationId: string; kind: SessionMutationKind }> = [];
+    const perform = vi.fn(async (mutation: { operationId: string; kind: SessionMutationKind }) => {
+      resetEvents.push(mutation);
+    });
+
+    const result = await runAppSidecarNewSessionMutation({
+      busyState: { running: false, autopilotActive: false, runLifecycleRunning: false },
+      mutations,
+      perform,
+    });
+
+    expect(perform).toHaveBeenCalledOnce();
+    expect(result).toEqual({ status: 200, body: { ok: true, operationId: "new-session-42" } });
+    expect(resetEvents).toEqual([{ operationId: "new-session-42", kind: "new-session" }]);
+    expect(mutations.owner).toBeNull();
+  });
+
+  it.each([
+    ["running", { running: true, autopilotActive: false, runLifecycleRunning: false }],
+    ["Autopilot", { running: false, autopilotActive: true, runLifecycleRunning: false }],
+    ["run lifecycle", { running: false, autopilotActive: false, runLifecycleRunning: true }],
+  ])(
+    "rejects /new-session while %s is busy before acquiring a lease",
+    async (_label, busyState) => {
+      const mutations = new AppSidecarSessionMutationCoordinator(() => "unused");
+      const perform = vi.fn(async () => undefined);
+
+      const result = await runAppSidecarNewSessionMutation({ busyState, mutations, perform });
+
+      expect(result).toEqual({
+        status: 409,
+        body: {
+          error: "session_busy",
+          message: "Cannot start a new session while the current session is active.",
+          state: busyState,
+        },
+      });
+      expect(perform).not.toHaveBeenCalled();
+      expect(mutations.owner).toBeNull();
+    },
+  );
+
+  it("returns the typed owner conflict without running another reset", async () => {
+    const mutations = new AppSidecarSessionMutationCoordinator(() => "existing-operation");
+    const owner = mutations.tryAcquire("phase-start");
+    const perform = vi.fn(async () => undefined);
+
+    const result = await runAppSidecarNewSessionMutation({
+      busyState: { running: false, autopilotActive: false, runLifecycleRunning: false },
+      mutations,
+      perform,
+    });
+
+    expect(result).toEqual({
+      status: 409,
+      body: {
+        error: "session_mutation_in_progress",
+        owner: { operationId: "existing-operation", kind: "phase-start" },
+      },
+    });
+    expect(perform).not.toHaveBeenCalled();
+    owner?.release();
+  });
+
+  it("releases the new-session lease after failure so a retry can succeed", async () => {
+    let sequence = 0;
+    const mutations = new AppSidecarSessionMutationCoordinator(() => `operation-${++sequence}`);
+    const failed = await runAppSidecarNewSessionMutation({
+      busyState: { running: false, autopilotActive: false, runLifecycleRunning: false },
+      mutations,
+      perform: async () => {
+        throw new Error("reset failed");
+      },
+    });
+
+    expect(failed).toMatchObject({ status: 500, body: { error: "reset failed" } });
+    expect(mutations.owner).toBeNull();
+
+    const retried = await runAppSidecarNewSessionMutation({
+      busyState: { running: false, autopilotActive: false, runLifecycleRunning: false },
+      mutations,
+      perform: async () => undefined,
+    });
+    expect(retried).toEqual({ status: 200, body: { ok: true, operationId: "operation-2" } });
+  });
+
   it("phase-start conflicts with every reset producer until its lease releases", () => {
     let sequence = 0;
     const coordinator = new AppSidecarSessionMutationCoordinator(() => `phase-${++sequence}`);

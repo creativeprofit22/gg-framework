@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
-import { useState } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as AgentModule from "./agent";
+import type * as ToastModule from "./toast";
+import type { NotesDocumentV3 } from "./notes-types";
 
 HTMLElement.prototype.scrollTo = vi.fn();
 
@@ -14,6 +16,8 @@ const nativeMocks = vi.hoisted(() => ({
   ),
   modelsChanged: null as null | (() => void),
   modelsUnlisten: vi.fn(),
+  onSessionReset: null as null | ((operationId?: string) => void),
+  toast: vi.fn(),
   readDroppedFileAttachment: vi.fn(async (path: string) => ({
     path,
     name: "file.txt",
@@ -51,11 +55,21 @@ vi.mock("./useAgentEvents", () => ({
   HOOK_PRESENTATION: {},
   useAgentEvents: (deps: {
     handleAutopilotEvent: (event: AgentModule.SidecarEvent) => boolean;
-  }) => ({
-    handleEvent: deps.handleAutopilotEvent,
-    pushItem: vi.fn(),
-    endStreamingText: vi.fn(),
-  }),
+    onSessionReset?: (operationId?: string) => void;
+    setItems: Dispatch<SetStateAction<Item[]>>;
+  }) => {
+    nativeMocks.onSessionReset = deps.onSessionReset ?? null;
+    return {
+      handleEvent: (event: AgentModule.SidecarEvent) => {
+        if (event.type !== "session_reset") return deps.handleAutopilotEvent(event);
+        const data = event.data as { operationId?: unknown };
+        deps.setItems([]);
+        deps.onSessionReset?.(typeof data.operationId === "string" ? data.operationId : undefined);
+      },
+      pushItem: (item: Item) => deps.setItems((current) => [...current, item]),
+      endStreamingText: vi.fn(),
+    };
+  },
 }));
 vi.mock("./HomeScreen", () => ({
   HomeScreen: (props: {
@@ -93,6 +107,10 @@ vi.mock("./build-info", () => ({
   formatBuildIdentity: () => "Supah Coder Local Fork · abc1234",
 }));
 vi.mock("./sounds", () => ({ playSound: vi.fn(), isSoundEnabled: () => true }));
+vi.mock("./toast", async (importOriginal) => ({
+  ...(await importOriginal<typeof ToastModule>()),
+  toast: nativeMocks.toast,
+}));
 vi.mock("./RadioButton", () => ({ RadioButton: () => null }));
 vi.mock("./agent", async (importOriginal) => {
   const actual = await importOriginal<typeof AgentModule>();
@@ -114,7 +132,8 @@ vi.mock("./agent", async (importOriginal) => {
 });
 
 import { AgentPane } from "./AgentPane";
-import type { PaneInputActions, PaneSnapshot } from "./AgentPane";
+import { NewSessionError } from "./agent";
+import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type { AgentState, PaneAgentClient, PaneSessionTarget } from "./agent";
 
 const target: PaneSessionTarget = { mode: "code", cwd: "/work", sessionPath: "/session" };
@@ -125,6 +144,16 @@ const agentState = (model: string): AgentState => ({
   mode: "code",
   running: false,
 });
+const KEN_PROMPT = "Implement the guarded session action\n  Preserve this indentation";
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
 function client(paneId: string, generation: number): PaneAgentClient {
   const empty = vi.fn(async () => []);
   return {
@@ -137,6 +166,16 @@ function client(paneId: string, generation: number): PaneAgentClient {
     status: vi.fn(async () => ({ ready: true, error: null, generation, sessionId: paneId })),
     selectWorkspace: vi.fn(),
     getState: vi.fn(async () => ({ running: false })),
+    getNotes: vi.fn(async () => ({ status: "missing" as const })),
+    migrateNotes: vi.fn(async (document: NotesDocumentV3) => ({
+      status: "ok" as const,
+      migrated: true,
+      snapshot: { projectKey: "/work", revision: 1, document },
+    })),
+    saveNotes: vi.fn(async (expectedRevision: number, document: NotesDocumentV3) => ({
+      status: "ok" as const,
+      snapshot: { projectKey: "/work", revision: expectedRevision + 1, document },
+    })),
     listModels: empty,
     listCommands: empty,
     listTasks: empty,
@@ -148,7 +187,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     deleteJiwa: vi.fn(),
     getSubscriptionUsage: vi.fn(),
     enhancePrompt: vi.fn(),
-    sendPrompt: vi.fn(),
+    sendPrompt: vi.fn(async () => ({ queued: false, count: 0 })),
     cancel: vi.fn(),
     sendKenPrompt: vi.fn(),
     cancelKen: vi.fn(),
@@ -156,7 +195,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     acceptPlan: vi.fn(),
     authOAuthStart: vi.fn(),
     authOAuthCode: vi.fn(),
-    newSession: vi.fn(),
+    newSession: vi.fn(async () => ({ operationId: "operation-1" })),
     getRadioState: vi.fn(),
     setRadio: vi.fn(),
     setRadioVolume: vi.fn(),
@@ -184,11 +223,36 @@ function client(paneId: string, generation: number): PaneAgentClient {
   } as unknown as PaneAgentClient;
 }
 
+async function renderKenPromptPane(
+  pane: PaneAgentClient,
+  running = false,
+): Promise<HTMLButtonElement> {
+  vi.mocked(pane.getState).mockResolvedValue({
+    ...agentState("azure:gpt-test"),
+    running,
+    runState: running ? "running" : "idle",
+  });
+  vi.mocked(pane.listHistory).mockResolvedValue([
+    {
+      role: "assistant",
+      text: `\`\`\`prompt\n${KEN_PROMPT}\n\`\`\``,
+      ken: true,
+    },
+  ] as Awaited<ReturnType<PaneAgentClient["listHistory"]>>);
+  render(<AgentPane client={pane} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+  return (await screen.findByRole("button", { name: "Continue here" })) as HTMLButtonElement;
+}
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   nativeMocks.modelsChanged = null;
   nativeMocks.modelsUnlisten.mockReset();
+  nativeMocks.onSessionReset = null;
+  nativeMocks.toast.mockReset();
+  vi.useRealTimers();
 });
 describe("AgentPane lifecycle", () => {
   it("wires the restored home UI through the pane-scoped catalog client", async () => {
@@ -495,6 +559,153 @@ describe("AgentPane lifecycle", () => {
     expect(nativeMocks.readDroppedFileAttachment).toHaveBeenCalledWith("/dropped/file.txt");
     expect(nativeMocks.onDragDropEvent).not.toHaveBeenCalled();
     expect(nativeMocks.setWindowTitle).not.toHaveBeenCalled();
+  });
+
+  it("continues with the exact hydrated Ken prompt and persists kenSent metadata", async () => {
+    const pane = client("pane-ken-current", 1);
+    const send = await renderKenPromptPane(pane);
+
+    fireEvent.click(send);
+
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith(KEN_PROMPT, [], { kenSent: true }),
+    );
+    expect(pane.sendPrompt).toHaveBeenCalledOnce();
+    expect(document.querySelector(".user-ken-sent")?.textContent).toContain("Sent to");
+  });
+
+  it("queues a Ken current-send during an active run with authoritative queue metadata", async () => {
+    const pane = client("pane-ken-queued", 1);
+    vi.mocked(pane.sendPrompt).mockResolvedValueOnce({ queued: true, count: 2 });
+    const send = await renderKenPromptPane(pane, true);
+
+    fireEvent.click(send);
+
+    await waitFor(() => expect(document.querySelector(".user-ken-sent.queued")).not.toBeNull());
+    expect(pane.sendPrompt).toHaveBeenCalledWith(KEN_PROMPT, [], { kenSent: true });
+    expect(document.querySelector(".queued-pill")?.textContent).toBe("queued");
+  });
+
+  it("waits for the matching fresh-session reset and handles reset-before-response once", async () => {
+    const pane = client("pane-ken-fresh", 1);
+    const creation = deferred<Awaited<ReturnType<PaneAgentClient["newSession"]>>>();
+    vi.mocked(pane.newSession).mockReturnValueOnce(creation.promise);
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    const fresh = screen.getByRole("button", { name: "New session" });
+
+    fireEvent.click(fresh);
+    fireEvent.click(fresh);
+    await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+
+    act(() => nativeMocks.onSessionReset?.("unrelated-operation"));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    act(() => nativeMocks.onSessionReset?.("operation-1"));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+
+    await act(async () => creation.resolve({ operationId: "operation-1" }));
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith(KEN_PROMPT, [], { kenSent: true }),
+    );
+    expect(pane.sendPrompt).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the old prompt card retryable after a known creation rejection", async () => {
+    const pane = client("pane-ken-rejected", 1);
+    vi.mocked(pane.newSession).mockRejectedValueOnce(
+      new NewSessionError("creation-rejected", "HTTP 409", 409),
+    );
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("current session is unchanged");
+    expect(document.querySelector(".ken-prompt-body")?.textContent).toBe(KEN_PROMPT);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(pane.newSession).toHaveBeenCalledTimes(2));
+    act(() => nativeMocks.onSessionReset?.("operation-1"));
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+  });
+
+  it("restores the exact prompt after an ambiguous new-session outcome", async () => {
+    const pane = client("pane-ken-ambiguous", 1);
+    vi.mocked(pane.newSession).mockRejectedValueOnce(
+      new NewSessionError("outcome-unknown", "connection closed"),
+    );
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn’t confirm which session is active");
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("times out without guessing and restores the exact prompt to the composer", async () => {
+    const pane = client("pane-ken-timeout", 1);
+    await renderKenPromptPane(pane);
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8_001);
+    });
+
+    expect(pane.newSession).toHaveBeenCalledOnce();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT);
+    expect(screen.getByRole("alert").textContent).toContain("Couldn’t confirm which session");
+  });
+
+  it("keeps the fresh session authoritative and restores the prompt when its send fails", async () => {
+    const pane = client("pane-ken-post-reset-failure", 1);
+    vi.mocked(pane.sendPrompt).mockRejectedValueOnce(new Error("transport failed"));
+    await renderKenPromptPane(pane);
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+    await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
+
+    act(() => nativeMocks.onSessionReset?.("operation-1"));
+
+    await waitFor(() =>
+      expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT),
+    );
+    expect(screen.getByRole("alert").textContent).toContain("new session opened");
+    expect(screen.getByRole("alert").textContent).toContain("back in the composer");
+    expect(document.querySelector(".user-ken-sent")).toBeNull();
+  });
+
+  it("blocks fresh resets during Autopilot review and shares correlation with the toolbar modal", async () => {
+    const pane = client("pane-ken-autopilot", 1);
+    await renderKenPromptPane(pane);
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    const fresh = screen.getByRole("button", { name: "New session" });
+    const toolbar = screen.getByTitle("Start a new session for this project");
+
+    act(() => handleEvent?.({ type: "autopilot_review_start", data: {} }));
+    await waitFor(() => expect((fresh as HTMLButtonElement).disabled).toBe(true));
+    expect((toolbar as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(fresh);
+    expect(pane.newSession).not.toHaveBeenCalled();
+
+    act(() => handleEvent?.({ type: "autopilot_done", data: {} }));
+    await waitFor(() => expect((toolbar as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(toolbar);
+    fireEvent.click(screen.getByRole("button", { name: "New Session" }));
+    await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
+    act(() => nativeMocks.onSessionReset?.("unrelated-operation"));
+    expect(screen.getByRole("dialog", { name: "New Session" })).toBeTruthy();
+    act(() => nativeMocks.onSessionReset?.("operation-1"));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New Session" })).toBeNull());
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
   it("keeps ordinary @file mentions on file search", async () => {

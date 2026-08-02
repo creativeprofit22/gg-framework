@@ -11,6 +11,7 @@ export interface KenPromptSavePreview {
   prompt: string;
   suggestedTitle: string;
   destinations: KenPromptSaveDestination[];
+  recommendedDestination?: { kind: "new-draft" } | { kind: "existing-phase"; phaseId: string };
 }
 
 export type KenPromptSaveTarget =
@@ -37,6 +38,8 @@ export type KenPromptActionResult =
       action: KenPromptAction["type"];
       message: string;
       recoverPrompt?: string;
+      /** Refreshed authoritative destinations after a stale/conflicting Notes save. */
+      preview?: KenPromptSavePreview;
     };
 
 export interface KenPromptActionDispatcher {

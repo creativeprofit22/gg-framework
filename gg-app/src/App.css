@@ -2824,44 +2824,50 @@ body {
   text-shadow: 0 0 8px color-mix(in srgb, var(--ken) 55%, transparent);
 }
 
-/* Ken's runnable-prompt block: Ken-tinted, with a Send-to-GG-Coder button. */
+/* Ken's completed fenced prompt: neutral card, explicit primary and secondary actions. */
 .markdown .ken-prompt-block {
+  min-width: 0;
   margin: 0.6em 0;
-  /* Neutral card (no pink): a subtle raised surface with the standard border,
-     so the prompt reads as an actionable block without the heavy magenta tint. */
+  overflow: hidden;
+  background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
-  background: var(--surface-1);
-  overflow: hidden;
 }
 .markdown .ken-prompt-body {
   margin: 0;
   padding: 12px 14px;
-  background: transparent;
-  border: none;
-  border-radius: 0;
+  overflow-wrap: anywhere;
   color: var(--text);
   font-family: var(--sans);
   font-size: 0.92em;
   line-height: 1.5;
   white-space: pre-wrap;
-  overflow-wrap: anywhere;
   user-select: text;
-  -webkit-user-select: text;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
 }
-/* Send button: neutral surface, standard border, with the Ken color reserved
-   for the text + icon only (the accent, not the whole button). No pink fill. */
-.markdown .ken-prompt-send {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.markdown .ken-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 6px;
   margin: 0 14px 12px;
-  padding: 5px 11px;
-  font-family: var(--sans);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1;
-  color: var(--ken);
+}
+.markdown .ken-prompt-send,
+.markdown .ken-prompt-more,
+.markdown .ken-prompt-secondary-actions button,
+.markdown .ken-prompt-save-actions button,
+.markdown .ken-prompt-error button {
+  display: inline-flex;
+  min-width: 30px;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  font: 600 12px/1.15 var(--sans);
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-button);
@@ -2869,18 +2875,247 @@ body {
   transition:
     color var(--t-fast),
     border-color var(--t-fast),
-    background var(--t-fast);
+    background-color var(--t-fast);
 }
-.markdown .ken-prompt-send:hover:not(:disabled) {
-  border-color: var(--border-strong);
+.markdown .ken-prompt-send {
+  color: var(--ken);
+}
+.markdown .ken-prompt-send:hover:not(:disabled),
+.markdown .ken-prompt-more:hover:not(:disabled),
+.markdown .ken-prompt-secondary-actions button:hover:not(:disabled),
+.markdown .ken-prompt-save-actions button:hover:not(:disabled),
+.markdown .ken-prompt-error button:hover:not(:disabled) {
+  color: var(--text);
   background: var(--surface-1);
+  border-color: var(--border-strong);
 }
-/* Sent: settles to a quiet confirmed state in success green, no longer the
-   call-to-action Ken accent. */
 .markdown .ken-prompt-send.sent {
   color: var(--success);
   cursor: default;
   opacity: 0.85;
+}
+.markdown .ken-prompt-send:focus-visible,
+.markdown .ken-prompt-more:focus-visible,
+.markdown .ken-prompt-action-panel button:focus-visible,
+.markdown .ken-prompt-action-panel input:focus-visible,
+.markdown .ken-prompt-action-panel select:focus-visible,
+.markdown .ken-prompt-error button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.markdown .ken-prompt-actions button:disabled,
+.markdown .ken-prompt-action-panel button:disabled,
+.markdown .ken-prompt-action-panel input:disabled,
+.markdown .ken-prompt-action-panel select:disabled,
+.markdown .ken-prompt-error button:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+.markdown .ken-prompt-action-panel {
+  min-width: 0;
+  margin: 0 14px 12px;
+  padding: 10px;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+}
+.markdown .ken-prompt-secondary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.markdown .ken-prompt-save-form,
+.markdown .ken-prompt-save-form fieldset {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.markdown .ken-prompt-save-form legend {
+  margin-block-end: 2px;
+  padding: 0;
+  color: var(--text);
+  font: 650 12px/1.35 var(--sans);
+}
+.markdown .ken-prompt-radio {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.markdown .ken-prompt-radio input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+.markdown .ken-prompt-save-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding-inline-start: 22px;
+}
+.markdown .ken-prompt-save-field label,
+.markdown .ken-prompt-preview strong {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.markdown .ken-prompt-save-field input,
+.markdown .ken-prompt-save-field select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 9px;
+  color: var(--text);
+  font: 12px/1.35 var(--sans);
+  background-color: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-input);
+}
+.markdown .ken-prompt-save-field select {
+  padding-inline-end: 32px;
+  background-position: right 10px center;
+}
+.markdown .ken-prompt-destination-preview {
+  margin: 0;
+  padding: 8px 9px;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+}
+.markdown .ken-prompt-preview {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  margin-block-start: 2px;
+}
+.markdown .ken-prompt-preview pre {
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 0;
+  padding: 9px 10px;
+  overflow-x: auto;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font: 12px/1.5 var(--mono);
+  white-space: pre-wrap;
+  user-select: text;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+}
+.markdown .ken-prompt-replacement,
+.markdown .ken-prompt-pending,
+.markdown .ken-prompt-success,
+.markdown .ken-prompt-error {
+  margin: 8px 14px 12px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.markdown .ken-prompt-replacement {
+  margin: 0;
+  color: var(--warning);
+}
+.markdown .ken-prompt-pending {
+  color: var(--text-muted);
+}
+.markdown .ken-prompt-success {
+  color: var(--success);
+}
+.markdown .ken-prompt-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--error);
+}
+.markdown .ken-prompt-error button {
+  min-height: 28px;
+  color: var(--error);
+}
+.markdown .ken-prompt-save-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.markdown .ken-prompt-save-actions button:first-child {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+@media (max-width: 420px) {
+  .markdown .ken-prompt-actions,
+  .markdown .ken-prompt-action-panel,
+  .markdown .ken-prompt-pending,
+  .markdown .ken-prompt-success,
+  .markdown .ken-prompt-error {
+    margin-inline: 10px;
+  }
+  .markdown .ken-prompt-actions,
+  .markdown .ken-prompt-secondary-actions,
+  .markdown .ken-prompt-save-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .markdown .ken-prompt-actions button,
+  .markdown .ken-prompt-secondary-actions button,
+  .markdown .ken-prompt-save-actions button {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+    white-space: normal;
+  }
+  .markdown .ken-prompt-save-field {
+    padding-inline-start: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .markdown .ken-prompt-send,
+  .markdown .ken-prompt-more,
+  .markdown .ken-prompt-secondary-actions button,
+  .markdown .ken-prompt-save-actions button,
+  .markdown .ken-prompt-error button {
+    transition: none;
+  }
+}
+@media (forced-colors: active) {
+  .markdown .ken-prompt-block,
+  .markdown .ken-prompt-action-panel,
+  .markdown .ken-prompt-actions button,
+  .markdown .ken-prompt-action-panel button,
+  .markdown .ken-prompt-action-panel input,
+  .markdown .ken-prompt-action-panel select,
+  .markdown .ken-prompt-destination-preview,
+  .markdown .ken-prompt-preview pre {
+    border-color: CanvasText;
+  }
+  .markdown .ken-prompt-send:focus-visible,
+  .markdown .ken-prompt-more:focus-visible,
+  .markdown .ken-prompt-action-panel button:focus-visible,
+  .markdown .ken-prompt-action-panel input:focus-visible,
+  .markdown .ken-prompt-action-panel select:focus-visible {
+    outline-color: Highlight;
+  }
+  .markdown .ken-prompt-success {
+    color: Highlight;
+  }
+  .markdown .ken-prompt-error,
+  .markdown .ken-prompt-replacement {
+    color: MarkText;
+  }
 }
 .markdown table {
   border-collapse: collapse;
@@ -6303,8 +6538,15 @@ body {
 /* Reconstructed structured Project Notes and Roadmap UI. */
 .notes-status-badge {
   display: inline-flex;
+  min-width: 0;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
+}
+.notes-status-saved-prompt {
+  color: var(--text-muted);
+  font-size: 0.92em;
+  font-weight: 500;
 }
 .notes-status-dot {
   flex: 0 0 auto;
@@ -6647,8 +6889,11 @@ body {
 }
 .notes-roadmap-title {
   grid-area: title;
+  display: flex;
   min-width: 0;
   overflow: hidden;
+  align-items: center;
+  gap: 7px;
   border: 0;
   background: transparent;
   color: var(--text);
@@ -6659,8 +6904,23 @@ body {
   font-weight: 600;
   line-height: 1.35;
   text-align: start;
-  text-overflow: ellipsis;
   white-space: nowrap;
+}
+.notes-roadmap-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.notes-phase-saved-prompt-marker {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.2;
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border));
+  border-radius: 999px;
 }
 .notes-roadmap-title:hover {
   color: var(--primary);
@@ -7973,6 +8233,14 @@ body {
     overflow: visible;
     text-overflow: clip;
     white-space: normal;
+  }
+  .notes-roadmap-title {
+    flex-wrap: wrap;
+  }
+  .notes-roadmap-title-text {
+    flex: 1 1 100%;
+    overflow: visible;
+    text-overflow: clip;
   }
   .notes-phase-count,
   .notes-phase-reminder {

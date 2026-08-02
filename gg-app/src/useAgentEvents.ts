@@ -152,6 +152,8 @@ export interface AgentEventsDeps {
   planReviewPathRef: MutableRefObject<string | null>;
   pendingPlanTotalRef: MutableRefObject<number | null>;
   stickToBottomRef: MutableRefObject<boolean>;
+  /** Notifies session-mutation callers after the reset has been applied locally. */
+  onSessionReset?: (operationId?: string) => void;
 }
 
 export interface AgentEvents {
@@ -196,6 +198,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
+    onSessionReset,
   } = deps;
   const listCommands = client?.listCommands ?? listPrimaryCommands;
   const listModels = client?.listModels ?? listPrimaryModels;
@@ -1092,6 +1095,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           endStreamingText();
           subagentGroupIdRef.current = null;
           subagentGroupByAgentRef.current.clear();
+          onSessionReset?.(typeof d.operationId === "string" ? d.operationId : undefined);
           break;
         case "models_change":
           // The set of usable models changed: local-model discovery landed
@@ -1180,6 +1184,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       planReviewPathRef,
       pendingPlanTotalRef,
       stickToBottomRef,
+      onSessionReset,
     ],
   );
 

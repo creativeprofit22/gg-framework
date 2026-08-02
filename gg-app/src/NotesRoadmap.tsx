@@ -349,7 +349,10 @@ export function NotesRoadmap({
                     disabled={pendingPhaseId !== null}
                     onClick={() => selectPhase(phase.id)}
                   >
-                    {phase.title}
+                    <span className="notes-roadmap-title-text">{phase.title}</span>
+                    {phase.sourcePrompt.trim().length > 0 && (
+                      <span className="notes-phase-saved-prompt-marker">Saved prompt</span>
+                    )}
                   </button>
                   <span className="notes-phase-status">{statusLabel(phase.status)}</span>
                   <span className="notes-phase-count">
@@ -1022,7 +1025,7 @@ function PhaseDetail({
             </div>
           </div>
 
-          {phase.sourcePrompt && (
+          {phase.sourcePrompt.trim().length > 0 && (
             <section
               className="notes-phase-saved-prompt"
               aria-labelledby={`notes-phase-saved-prompt-${phase.id}`}

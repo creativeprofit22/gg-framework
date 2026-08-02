@@ -1,4 +1,13 @@
-import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, memo } from "react";
+import {
+  createElement,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
@@ -34,6 +43,7 @@ import {
   type PromptSegment,
   type PaneAgentClient,
   type PaneSessionTarget,
+  NewSessionError,
 } from "./agent";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { ActivityBar } from "./ActivityBar";
@@ -62,8 +72,13 @@ import { ReferencedFiles, appendReferencedFiles, parseReferencedFiles } from "./
 import { ContextMeter } from "./ContextMeter";
 import { BackgroundTasksButton } from "./BackgroundTasksButton";
 import { TasksModal } from "./TasksModal";
-import { ProjectNotes } from "./ProjectNotes";
-import type { NotesSessionLink, PhaseStartResult } from "./notes-types";
+import { ProjectNotes, type ProjectNotesPromptActions } from "./ProjectNotes";
+import type {
+  NotesPromptSaveResult,
+  NotesSessionLink,
+  NotesValidationError,
+  PhaseStartResult,
+} from "./notes-types";
 import { MemoryModal } from "./MemoryModal";
 import { ShimmerText } from "./ShimmerText";
 import { WakeScreen } from "./WakeScreen";
@@ -95,7 +110,7 @@ import { TitleUsageMeter } from "./TitleUsageMeter";
 import { formatWorkspaceTitle, WorkspaceHeader } from "./WorkspaceHeader";
 import { useProgress } from "./useProgress";
 import { LoginScreen } from "./LoginScreen";
-import { Markdown, PromptSendProvider } from "./Markdown";
+import { KenPromptActionProvider, Markdown } from "./Markdown";
 import { FooterSkeleton, TranscriptSkeleton, Skeleton } from "./Skeleton";
 import { useAppUpdate } from "./update";
 import { formatBuildIdentity } from "./build-info";
@@ -116,9 +131,92 @@ import { EnhanceDissolve } from "./EnhanceDissolve";
 import { toast } from "./toast";
 import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
 import { basename } from "./tool-format";
+import {
+  deriveKenPromptTitle,
+  type KenPromptAction,
+  type KenPromptActionDispatcher,
+  type KenPromptActionResult,
+  type KenPromptSavePreview,
+} from "./ken-prompt-actions";
 import "./App.css";
 
 const BUILD_IDENTITY = formatBuildIdentity();
+const SESSION_RESET_TIMEOUT_MS = 8_000;
+const AUTOPILOT_NEW_SESSION_RETRY_MESSAGE =
+  "Ken is reviewing this session. Wait for the review to finish or cancel it, then try again.";
+const AMBIGUOUS_NEW_SESSION_MESSAGE =
+  "Couldn’t confirm which session is active. Reopen this project before sending the prompt.";
+
+class SessionResetConfirmationTimeoutError extends Error {
+  constructor(readonly operationId: string) {
+    super("Timed out waiting for the matching new-session confirmation.");
+    this.name = "SessionResetConfirmationTimeoutError";
+  }
+}
+
+class LocalSessionMutationBusyError extends Error {
+  constructor() {
+    super("A session change is already in progress.");
+    this.name = "LocalSessionMutationBusyError";
+  }
+}
+
+function isNotesRequestBodyTooLarge(error: NotesValidationError | undefined): boolean {
+  return error?.path === "$" && /^notes request body exceeds \d+ bytes$/.test(error.message.trim());
+}
+
+function notesPromptActionResult(
+  result: NotesPromptSaveResult,
+  latestPreview?: KenPromptSavePreview,
+): KenPromptActionResult {
+  if (result.status === "committed") {
+    return { status: "saved", phaseId: result.phaseId, title: result.title };
+  }
+  if (result.status === "replacement-conflict") {
+    return {
+      status: "failed",
+      action: "commit-save",
+      message: `${result.title} changed in another window. Review the latest destination before replacing it.`,
+      preview: latestPreview,
+    };
+  }
+  if (result.status === "missing-phase") {
+    return {
+      status: "failed",
+      action: "commit-save",
+      message: "That phase was removed in another window. Choose another destination.",
+      preview: latestPreview,
+    };
+  }
+  if (result.status === "archived-phase") {
+    return {
+      status: "failed",
+      action: "commit-save",
+      message: `${result.title} was archived in another window. Restore it or choose another destination.`,
+      preview: latestPreview,
+    };
+  }
+  if (result.reason === "invalid") {
+    const message = isNotesRequestBodyTooLarge(result.error)
+      ? "Project Notes is too large to save. Shorten the saved prompt or Notes document, then try again."
+      : result.error
+        ? `Project Notes rejected this save (${result.error.path}: ${result.error.message}). Review the Notes content and try again.`
+        : "Project Notes rejected this prompt. Review the title and try again.";
+    return { status: "failed", action: "commit-save", message, preview: latestPreview };
+  }
+  const messages = {
+    missing: "Project Notes storage is missing. Reopen the project and try again.",
+    corrupt: "Project Notes are unreadable. Repair or restore project storage first.",
+    unavailable: "Project Notes are unavailable. Check the sidecar and try again.",
+    storage: "Local Notes storage failed. Free space and try again.",
+  } as const;
+  return {
+    status: "failed",
+    action: "commit-save",
+    message: messages[result.reason],
+    preview: latestPreview,
+  };
+}
 
 const DEFAULT_INPUT_PLACEHOLDER = `Type a message, / commands, @ files, ${MENTOR_HANDLE} for help`;
 const INPUT_PLACEHOLDERS = [
@@ -682,6 +780,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     [toolsHidden, setToolsHiddenPersisted],
   );
   const [newSessionBusy, setNewSessionBusy] = useState(false);
+  const sessionMutationLockRef = useRef(false);
+  const kenPromptActionLockRef = useRef(false);
   // Transcript export (the download button in the activity bar). The chosen
   // folder is remembered so the second export lands where the first one did —
   // stored per-machine, not per-project, because that's how people organise
@@ -865,6 +965,18 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const stateRef = useRef<AgentState | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const projectNotesActionsRef = useRef<ProjectNotesPromptActions>(null);
+  const observedSessionResetOperationsRef = useRef<Set<string>>(new Set());
+  const sessionResetOperationWaitersRef = useRef(
+    new Map<
+      string,
+      {
+        resolve(): void;
+        reject(error: Error): void;
+        timeout: ReturnType<typeof setTimeout>;
+      }
+    >(),
+  );
   // NOTE: the build-session event machine's private refs (streaming bubble id,
   // rAF buffer, per-run accumulators, sub-agent / compaction group ids) now live
   // inside the useAgentEvents hook. Only the cross-cutting refs that App's render
@@ -1268,6 +1380,47 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (props.focused) inputRef.current?.focus();
   }, [props.focused]);
 
+  const registerSessionResetOperationWaiter = useCallback((operationId: string) => {
+    if (observedSessionResetOperationsRef.current.delete(operationId)) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (!sessionResetOperationWaitersRef.current.delete(operationId)) return;
+        reject(new SessionResetConfirmationTimeoutError(operationId));
+      }, SESSION_RESET_TIMEOUT_MS);
+      sessionResetOperationWaitersRef.current.set(operationId, { resolve, reject, timeout });
+    });
+  }, []);
+
+  const onAuthoritativeSessionReset = useCallback((operationId?: string) => {
+    if (!operationId) return;
+    const waiter = sessionResetOperationWaitersRef.current.get(operationId);
+    if (waiter) {
+      sessionResetOperationWaitersRef.current.delete(operationId);
+      clearTimeout(waiter.timeout);
+      waiter.resolve();
+      return;
+    }
+    observedSessionResetOperationsRef.current.add(operationId);
+    if (observedSessionResetOperationsRef.current.size > 32) {
+      const oldest = observedSessionResetOperationsRef.current.values().next().value;
+      if (oldest) observedSessionResetOperationsRef.current.delete(oldest);
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      for (const waiter of sessionResetOperationWaitersRef.current.values()) {
+        clearTimeout(waiter.timeout);
+        waiter.reject(new Error("The pane closed before the new session was confirmed."));
+      }
+      sessionResetOperationWaitersRef.current.clear();
+      observedSessionResetOperationsRef.current.clear();
+    },
+    [],
+  );
+
   // Build-session SSE handling + assistant-streaming helpers live in the
   // useAgentEvents hook (mirrors useKenMentor). It owns the event machine's
   // private refs + the streaming helpers; App keeps owning the build-session
@@ -1306,6 +1459,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
+    onSessionReset: onAuthoritativeSessionReset,
   });
 
   // Run the connect/ready flow against the current sidecar and hydrate state,
@@ -1870,20 +2024,231 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const submitTextRef = useRef(submitText);
   submitTextRef.current = submitText;
 
-  // Click handler for the "Send to GG Coder" button on Ken's recommended prompts.
-  // Pushes a shimmering "Sent to GG Coder" user bubble (the full prompt body went
-  // to GG Coder, but the transcript shows the short Ken-colored label, like a
-  // slash command shows `/name`), then sends the prompt to the build session.
-  const sendKenRecommendedPrompt = useCallback(
-    (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed || !readyRef.current) return;
-      stickToBottomRef.current = true;
-      pushItem({ kind: "user", id: nextId(), text: trimmed, kenSent: true });
-      endStreamingText();
-      void sendPrompt(trimmed, [], { kenSent: true }).catch(() => {});
+  const createAuthoritativeNewSession = useCallback(async (): Promise<string> => {
+    if (running) throw new LocalSessionMutationBusyError();
+    if (autopilotReviewing) throw new Error(AUTOPILOT_NEW_SESSION_RETRY_MESSAGE);
+    if (newSessionBusy || sessionMutationLockRef.current) {
+      throw new LocalSessionMutationBusyError();
+    }
+    sessionMutationLockRef.current = true;
+    setNewSessionBusy(true);
+    try {
+      const { operationId } = await newSession();
+      await registerSessionResetOperationWaiter(operationId);
+      return operationId;
+    } finally {
+      sessionMutationLockRef.current = false;
+      setNewSessionBusy(false);
+    }
+  }, [
+    autopilotReviewing,
+    newSession,
+    newSessionBusy,
+    registerSessionResetOperationWaiter,
+    running,
+  ]);
+
+  const restorePromptToComposer = useCallback((prompt: string) => {
+    setInput(prompt);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(prompt.length, prompt.length);
+    });
+  }, []);
+
+  const dispatchKenPromptAction = useCallback(
+    async (action: KenPromptAction): Promise<KenPromptActionResult> => {
+      const prompt = action.prompt;
+      if (!prompt) {
+        return { status: "failed", action: action.type, message: "This prompt is empty." };
+      }
+
+      if (action.type === "send-current") {
+        if (sessionMutationLockRef.current) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "A session change is already in progress.",
+          };
+        }
+        if (kenPromptActionLockRef.current) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "This prompt is already being sent.",
+          };
+        }
+        const disposition = submitDisposition(prompt, readyRef.current, running);
+        if (disposition === "ignore") {
+          return {
+            status: "failed",
+            action: action.type,
+            message: `${PRODUCT_DISPLAY_NAME} is still connecting. Try again in a moment.`,
+          };
+        }
+        kenPromptActionLockRef.current = true;
+        try {
+          const submission = await sendPrompt(prompt, [], { kenSent: true });
+          stickToBottomRef.current = true;
+          setQueuedCount(submission.count);
+          pushItem({
+            kind: "user",
+            id: nextId(),
+            text: prompt,
+            kenSent: true,
+            queued: submission.queued,
+          });
+          if (!submission.queued) endStreamingText();
+          return { status: "sent", session: "current" };
+        } catch {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "Couldn’t send the prompt. Try again.",
+          };
+        } finally {
+          kenPromptActionLockRef.current = false;
+        }
+      }
+
+      if (action.type === "send-fresh") {
+        if (autopilotReviewing) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: AUTOPILOT_NEW_SESSION_RETRY_MESSAGE,
+          };
+        }
+        if (running) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "Wait for the current build to finish before starting a new session.",
+          };
+        }
+        if (kenPromptActionLockRef.current) {
+          return {
+            status: "failed",
+            action: action.type,
+            message: "This prompt action is already in progress.",
+          };
+        }
+        kenPromptActionLockRef.current = true;
+        try {
+          try {
+            await createAuthoritativeNewSession();
+          } catch (error) {
+            if (error instanceof LocalSessionMutationBusyError) {
+              return { status: "failed", action: action.type, message: error.message };
+            }
+            if (error instanceof NewSessionError && error.kind === "creation-rejected") {
+              return {
+                status: "failed",
+                action: action.type,
+                message:
+                  "Couldn’t create a new session. The current session is unchanged; try again.",
+              };
+            }
+            restorePromptToComposer(prompt);
+            return {
+              status: "failed",
+              action: action.type,
+              message: `${AMBIGUOUS_NEW_SESSION_MESSAGE} The exact prompt is in the composer.`,
+              recoverPrompt: prompt,
+            };
+          }
+          try {
+            const submission = await sendPrompt(prompt, [], { kenSent: true });
+            stickToBottomRef.current = true;
+            setQueuedCount(submission.count);
+            pushItem({
+              kind: "user",
+              id: nextId(),
+              text: prompt,
+              kenSent: true,
+              queued: submission.queued,
+            });
+            endStreamingText();
+            return { status: "sent", session: "fresh" };
+          } catch {
+            restorePromptToComposer(prompt);
+            return {
+              status: "failed",
+              action: action.type,
+              message:
+                "The new session opened, but sending failed. The exact prompt is back in the composer.",
+              recoverPrompt: prompt,
+            };
+          }
+        } finally {
+          kenPromptActionLockRef.current = false;
+        }
+      }
+
+      const notesActions = projectNotesActionsRef.current;
+      if (!notesActions) {
+        return {
+          status: "failed",
+          action: action.type,
+          message: "Project Notes are unavailable for this workspace.",
+        };
+      }
+
+      if (action.type === "prepare-save") {
+        return {
+          status: "preview",
+          preview: {
+            prompt,
+            suggestedTitle: deriveKenPromptTitle(prompt),
+            destinations: notesActions.listDestinations(),
+            recommendedDestination: { kind: "new-draft" },
+          },
+        };
+      }
+
+      const saveResult = await notesActions.savePrompt(
+        action.target.kind === "new-draft"
+          ? { kind: "new-draft", title: action.target.title, prompt }
+          : {
+              kind: "existing-phase",
+              phaseId: action.target.phaseId,
+              prompt,
+              expectedSourcePrompt: action.target.expectedSourcePrompt,
+            },
+      );
+      const latestPreview: KenPromptSavePreview = {
+        prompt,
+        suggestedTitle: deriveKenPromptTitle(prompt),
+        destinations: notesActions.listDestinations(),
+        recommendedDestination: { kind: "new-draft" },
+      };
+      return notesPromptActionResult(saveResult, latestPreview);
     },
-    [pushItem, endStreamingText, sendPrompt],
+    [
+      autopilotReviewing,
+      createAuthoritativeNewSession,
+      endStreamingText,
+      pushItem,
+      restorePromptToComposer,
+      running,
+      sendPrompt,
+    ],
+  );
+
+  const kenPromptDispatcher = useMemo<KenPromptActionDispatcher>(
+    () => ({
+      dispatch: dispatchKenPromptAction,
+      blockedReason: (action) => {
+        if (action !== "send-fresh") return null;
+        if (autopilotReviewing) return AUTOPILOT_NEW_SESSION_RETRY_MESSAGE;
+        if (running) return "Wait for the current build to finish before starting a new session.";
+        if (newSessionBusy || sessionMutationLockRef.current) {
+          return "A session change is already in progress.";
+        }
+        return null;
+      },
+    }),
+    [autopilotReviewing, dispatchKenPromptAction, newSessionBusy, running],
   );
 
   // Record a sent prompt for ↑/↓ recall (skips consecutive duplicates, capped).
@@ -2265,18 +2630,26 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     );
   }
 
-  // Start a fresh session on this window's project. Clears the transcript only
-  // after the sidecar confirms (it emits `session_reset`, handled below).
+  // The toolbar and Ken prompt actions share the same correlated reset path.
   async function startNewSession(): Promise<void> {
-    if (newSessionBusy || running) return;
-    setNewSessionBusy(true);
     try {
-      await newSession();
+      await createAuthoritativeNewSession();
       setConfirmNewSession(false);
-    } catch {
-      // Surface nothing extra — agent.ts logged it; keep the modal open.
-    } finally {
-      setNewSessionBusy(false);
+    } catch (error) {
+      if (error instanceof LocalSessionMutationBusyError) {
+        toast(error.message, "error", 7_000);
+        return;
+      }
+      if (error instanceof NewSessionError && error.kind === "creation-rejected") {
+        toast(
+          "Couldn’t create a new session. The current session is unchanged; try again.",
+          "error",
+        );
+        return;
+      }
+      // An ambiguous outcome must not offer a blind retry against an unknown session.
+      setConfirmNewSession(false);
+      toast(AMBIGUOUS_NEW_SESSION_MESSAGE, "error", 7_000);
     }
   }
 
@@ -2590,7 +2963,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           <span className="picker-head-actions">
             <button
               className="btn btn-primary btn-sm"
-              disabled={running}
+              disabled={running || autopilotReviewing || newSessionBusy}
               title="Start a new chat"
               onClick={() => setConfirmNewSession(true)}
             >
@@ -2623,13 +2996,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               />
               <button
                 className="btn btn-primary btn-sm"
-                disabled={running}
+                disabled={running || autopilotReviewing || newSessionBusy}
                 title="Start a new session for this project"
                 onClick={() => setConfirmNewSession(true)}
               >
                 {"+ New"}
               </button>
               <ProjectNotes
+                ref={projectNotesActionsRef}
                 cwd={state?.cwd ?? null}
                 client={client}
                 onStartPhase={startRoadmapPhase}
@@ -2717,11 +3091,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     {`\u273b ${status}`}
                   </div>
                 ))}
-              <PromptSendProvider value={sendKenRecommendedPrompt}>
-                {items.map((it) => (
-                  <TranscriptRow key={it.id} item={it} onImageLoad={maybeScrollToBottom} />
-                ))}
-              </PromptSendProvider>
+              <KenPromptActionProvider value={kenPromptDispatcher}>
+                {items.map((it) =>
+                  createElement(TranscriptRow, {
+                    key: it.id,
+                    item: it,
+                    onImageLoad: maybeScrollToBottom,
+                  }),
+                )}
+              </KenPromptActionProvider>
             </>
           )}
         </div>
@@ -3228,7 +3606,8 @@ const TranscriptRow = memo(function TranscriptRow({
         // Coder" in Ken's color (like a slash command shows `/name`), not the
         // full prompt body. The full body still went to GG Coder.
         return (
-          <div className="user-msg command labelled user-ken-sent">
+          <div className={`user-msg command labelled user-ken-sent${item.queued ? " queued" : ""}`}>
+            {item.queued && <span className="queued-pill">queued</span>}
             <span className="command-shimmer" style={{ color: theme.ken }}>
               Sent to {PRODUCT_DISPLAY_NAME}
             </span>

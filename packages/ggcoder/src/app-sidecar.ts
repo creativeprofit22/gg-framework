@@ -191,7 +191,10 @@ import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import { AppSidecarRoadmapToolHost } from "./app-sidecar-roadmap-tool-host.js";
-import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
+import {
+  AppSidecarSessionMutationCoordinator,
+  runAppSidecarNewSessionMutation,
+} from "./app-sidecar-session-mutation.js";
 import {
   captureSidecarError,
   flushSidecarErrors,
@@ -4534,26 +4537,32 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/new-session") {
-      if (running) {
-        json(res, 409, { error: "cannot start a new session while running" });
-        return;
-      }
-      void session
-        .newSession()
-        .then(async () => {
+      void runAppSidecarNewSessionMutation({
+        busyState: sessionBusyState(),
+        mutations: sessionMutations,
+        perform: async (mutation) => {
+          await session.newSession();
           if (mode === "chat") {
             await session.persistAppMarker("agent_handoff", { chatAgent });
           }
           deactivateApprovedPlan();
           injectedAutopilotPrompts = [];
           clearPendingPlan();
-          broadcast("session_reset", {});
-          json(res, 200, { ok: true });
-        })
-        .catch((err) => {
-          captureSidecarError(err, "app-sidecar.session.new");
-          json(res, 500, { error: err instanceof Error ? err.message : String(err) });
-        });
+          log("INFO", "app-sidecar", "new session accepted", {
+            logicalSessionId: opts.id,
+            operationId: mutation.operationId,
+          });
+          broadcast("session_reset", {
+            operationId: mutation.operationId,
+            kind: mutation.kind,
+          });
+        },
+      }).then((result) => {
+        if (result.status === 500) {
+          captureSidecarError(result.error, "app-sidecar.session.new");
+        }
+        json(res, result.status, result.body);
+      });
       return;
     }
 

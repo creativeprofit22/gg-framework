@@ -35,6 +35,7 @@ const flushSubagents = async (): Promise<void> => {
 function setup(
   handleKenEvent: (e: SidecarEvent) => boolean = () => false,
   initialState: Partial<AgentState> = {},
+  onSessionReset?: AgentEventsDeps["onSessionReset"],
 ) {
   let items: Item[] = [];
   let id = 0;
@@ -110,6 +111,7 @@ function setup(
     planReviewPathRef: { current: null },
     pendingPlanTotalRef: { current: null },
     stickToBottomRef: { current: true },
+    onSessionReset,
   };
 
   const hook = renderHook(() => useAgentEvents(deps));
@@ -304,6 +306,25 @@ describe("useAgentEvents", () => {
 
       expect(getItems().find((it) => it.kind === "user")?.queued).toBe(false);
     });
+  });
+
+  it("reports the correlated reset after clearing the existing transcript", () => {
+    const onSessionReset = vi.fn();
+    const { hook, getItems, pushUserItem } = setup(() => false, {}, onSessionReset);
+    pushUserItem("old session", false);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("session_reset", { operationId: "reset-42" }));
+    });
+
+    expect(getItems()).toEqual([]);
+    expect(onSessionReset).toHaveBeenCalledOnce();
+    expect(onSessionReset).toHaveBeenCalledWith("reset-42");
+
+    act(() => {
+      hook.result.current.handleEvent(ev("session_reset"));
+    });
+    expect(onSessionReset).toHaveBeenLastCalledWith(undefined);
   });
 
   it("removes the notice when compaction is skipped", () => {

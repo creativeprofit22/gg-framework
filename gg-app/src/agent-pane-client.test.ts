@@ -102,6 +102,34 @@ describe("pane agent client", () => {
     });
   });
 
+  it("cancels a Roadmap phase through its phase-specific pane command", async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_phase_cancel") {
+        return {
+          status: "cancelled",
+          phaseId: "phase/21",
+          session: { sessionId: "bound", sessionPath: "/bound.jsonl" },
+        };
+      }
+      return {};
+    });
+    const client = createPaneAgentClient("right");
+
+    await expect(client.cancelPhaseRun("phase/21")).resolves.toMatchObject({
+      status: "cancelled",
+      phaseId: "phase/21",
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_phase_cancel", {
+      paneId: "right",
+      phaseId: "phase/21",
+    });
+
+    invoke.mockResolvedValueOnce({ status: "cancelled", phaseId: "phase/21" });
+    await expect(client.cancelPhaseRun("phase/21")).rejects.toThrow(
+      "invalid phase cancellation response",
+    );
+  });
+
   it("keeps compatibility wrappers explicitly on primary", async () => {
     await getState();
     await sendPrompt("hello");

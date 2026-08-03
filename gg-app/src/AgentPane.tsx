@@ -3048,6 +3048,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 cwd={state?.cwd ?? null}
                 client={client}
                 onStartPhase={startRoadmapPhase}
+                onCancelPhase={(phaseId) => client.cancelPhaseRun(phaseId)}
                 onResumePhase={resumeRoadmapPhase}
                 phaseStartUnavailableReason={
                   state?.mode === "code" ? null : "Roadmap phases can only start in coding mode."

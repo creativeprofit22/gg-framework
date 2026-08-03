@@ -25,6 +25,7 @@ import type {
   NotesPromptSaveInput,
   NotesPromptSaveResult,
   NotesReminderMutationResult,
+  PhaseRunCancellationResult,
   NotesSessionLink,
   PhaseStartResult,
 } from "./notes-types";
@@ -36,6 +37,7 @@ interface Props {
   client: NotesClient;
   openSource?: OpenReferenceUrl;
   onStartPhase?(phaseId: string): Promise<PhaseStartResult>;
+  onCancelPhase?(phaseId: string): Promise<PhaseRunCancellationResult>;
   onResumePhase?(phaseId: string, link: NotesSessionLink): Promise<void>;
   phaseStartUnavailableReason?: string | null;
   phaseActionDisabled?: boolean;
@@ -60,6 +62,9 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     client,
     openSource,
     onStartPhase = async () => {
+      throw new Error("Phase actions are unavailable in this view.");
+    },
+    onCancelPhase = async () => {
       throw new Error("Phase actions are unavailable in this view.");
     },
     onResumePhase = async () => {
@@ -383,6 +388,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onDismissReminder={dismissPhaseReminder}
             openSource={openSource}
             onStartPhase={onStartPhase}
+            onCancelPhase={onCancelPhase}
             onResumePhase={onResumePhase}
             phaseStartUnavailableReason={phaseStartUnavailableReason}
             phaseActionDisabled={phaseActionDisabled}

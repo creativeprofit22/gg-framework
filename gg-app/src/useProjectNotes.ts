@@ -953,31 +953,43 @@ export function useProjectNotes(
       enqueueMutation({
         evaluate: documentMutation((current) =>
           updatePhase(current, id, now, (phase) => {
-            if (phase.archivedAt !== null || phase.status === status) return null;
+            const statusChanged = phase.status !== status;
+            if (phase.archivedAt !== null || (!statusChanged && phase.overrides.status !== null)) {
+              return null;
+            }
             const timestamp = chronologicalTimestamp(now, phase);
             return {
               ...phase,
               status,
-              attentionReason: status === "needs-attention" ? phase.attentionReason : null,
+              attentionReason:
+                statusChanged && status !== "needs-attention" ? null : phase.attentionReason,
               updatedAt: timestamp,
-              completedAt: status === "done" || status === "cancelled" ? timestamp : null,
+              completedAt: statusChanged
+                ? status === "done" || status === "cancelled"
+                  ? timestamp
+                  : null
+                : phase.completedAt,
               overrides: {
                 ...phase.overrides,
                 status: { value: status, source: "user", updatedAt: timestamp },
               },
-              lifecycleEvents: [
-                ...phase.lifecycleEvents,
-                {
-                  id: eventId,
-                  fromStatus: phase.status,
-                  toStatus: status,
-                  source: "user",
-                  timestamp,
-                  reason:
-                    status === "cancelled" ? "Phase cancelled by user" : "Status changed by user",
-                  kind: "other",
-                },
-              ],
+              lifecycleEvents: statusChanged
+                ? [
+                    ...phase.lifecycleEvents,
+                    {
+                      id: eventId,
+                      fromStatus: phase.status,
+                      toStatus: status,
+                      source: "user" as const,
+                      timestamp,
+                      reason:
+                        status === "cancelled"
+                          ? "Phase cancelled by user"
+                          : "Status changed by user",
+                      kind: "other" as const,
+                    },
+                  ]
+                : phase.lifecycleEvents,
             };
           }),
         ),

@@ -1809,6 +1809,71 @@ export class ProjectNotesRepository {
     });
   }
 
+  async recordUserPhaseCancellation(
+    cwd: string,
+    phaseId: string,
+    expectedSession: NotesSessionLink,
+    requestedTimestamp: string,
+  ): Promise<ProjectNotesPhaseLifecycleOutcome> {
+    if (
+      !expectedSession.sessionId.trim() ||
+      (expectedSession.sessionPath !== null && !expectedSession.sessionPath.trim())
+    ) {
+      throw new Error("Cannot cancel a phase with an invalid session link.");
+    }
+    if (!Number.isFinite(Date.parse(requestedTimestamp))) {
+      throw new Error("Cannot cancel a phase with an invalid timestamp.");
+    }
+
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (!notesSessionLinksEqual(currentPhase.session, expectedSession)) {
+        return { status: "stale-session" };
+      }
+      if (currentPhase.status === "done") return { status: "done-terminal" };
+      if (currentPhase.status === "cancelled") {
+        return {
+          status: "ok",
+          snapshot: toSnapshot(current),
+          phase: structuredClone(currentPhase),
+        };
+      }
+
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      const timestamp = chronologicalLifecycleTimestamp(phase, requestedTimestamp);
+      const fromStatus = phase.status;
+      phase.status = "cancelled";
+      phase.attentionReason = null;
+      phase.completedAt = timestamp;
+      phase.updatedAt = timestamp;
+      phase.pendingAutomaticLifecycleTransition = null;
+      phase.overrides.status = { value: "cancelled", source: "user", updatedAt: timestamp };
+      phase.lifecycleEvents.push({
+        id: this.createId(),
+        fromStatus,
+        toStatus: "cancelled",
+        source: "user",
+        timestamp,
+        reason: "Phase run cancelled by user",
+        kind: "other",
+      });
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "trusted",
+        context: "User phase cancellation commit",
+      });
+      return {
+        status: "ok",
+        snapshot: toSnapshot(next),
+        phase: structuredClone(phase),
+      };
+    });
+  }
+
   async recordPhaseLifecycleTransition(
     cwd: string,
     phaseId: string,

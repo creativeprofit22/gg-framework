@@ -6791,6 +6791,7 @@ body {
 .notes-roadmap-primary,
 .notes-phase-detail-heading button,
 .notes-phase-form-actions button,
+.notes-phase-lifecycle-actions button,
 .notes-phase-secondary-actions button,
 .notes-phase-archive button {
   flex: 0 0 auto;
@@ -6810,12 +6811,14 @@ body {
 .notes-roadmap-primary:hover,
 .notes-phase-detail-heading button:hover,
 .notes-phase-form-actions button:hover:not(:disabled),
+.notes-phase-lifecycle-actions button:hover:not(:disabled),
 .notes-phase-secondary-actions button:hover:not(:disabled),
 .notes-phase-archive button:hover {
   filter: brightness(1.18);
   color: var(--text);
 }
 .notes-phase-form-actions button:disabled,
+.notes-phase-lifecycle-actions button:disabled,
 .notes-phase-secondary-actions button:disabled {
   cursor: default;
   opacity: 0.4;
@@ -6833,8 +6836,7 @@ body {
   display: none;
 }
 .notes-phase-form input,
-.notes-phase-form textarea,
-.notes-phase-status-control select {
+.notes-phase-form textarea {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
@@ -6847,14 +6849,10 @@ body {
   line-height: 1.5;
   outline: none;
 }
-.notes-phase-form input,
-.notes-phase-status-control select {
+.notes-phase-form input {
   min-height: 36px;
   padding-block: 7px;
   padding-inline: 10px;
-}
-.notes-phase-status-control select {
-  padding-inline-end: 34px;
 }
 .notes-phase-form textarea {
   display: block;
@@ -6873,6 +6871,7 @@ body {
   overflow-wrap: anywhere;
 }
 .notes-phase-form-actions,
+.notes-phase-lifecycle-actions,
 .notes-phase-secondary-actions {
   display: flex;
   flex-wrap: wrap;
@@ -6994,10 +6993,22 @@ body {
 }
 .notes-phase-status {
   grid-area: status;
+  display: flex;
   justify-self: start;
+  flex-direction: column;
   border-inline-start: 2px solid var(--border-strong);
   padding-inline-start: 7px;
-  font-weight: 600;
+}
+.notes-phase-status strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+.notes-phase-status small {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.25;
 }
 .notes-phase-count {
   grid-area: count;
@@ -7104,13 +7115,38 @@ body {
 }
 .notes-phase-controls {
   display: grid;
-  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
-  align-items: end;
   gap: 14px;
   border-top: 1px solid var(--border);
 }
+.notes-phase-automation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.notes-phase-automation h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+.notes-phase-automation p {
+  margin: 3px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.notes-phase-automation .notes-phase-status-help {
+  color: var(--text-muted);
+}
+.notes-phase-lifecycle-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
 .notes-phase-secondary-actions {
   justify-content: flex-end;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 .notes-phase-archive {
   padding-bottom: 14px;
@@ -8228,7 +8264,6 @@ body {
   .notes-phase-form textarea,
   .notes-reference-form input,
   .notes-reference-form textarea,
-  .notes-phase-status-control select,
   .notes-edit-form input,
   .notes-current-focus input,
   .notes-field textarea {
@@ -8317,7 +8352,13 @@ body {
   .notes-reference-metadata-wide {
     grid-column: auto;
   }
+  .notes-phase-automation {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .notes-phase-lifecycle-actions,
   .notes-phase-secondary-actions {
+    width: 100%;
     justify-content: flex-start;
   }
   .notes-roadmap-proposals > ul > li {
@@ -8365,6 +8406,7 @@ body {
   .notes-phase-execution .notes-roadmap-primary {
     width: 100%;
   }
+  .notes-phase-lifecycle-actions button,
   .notes-phase-secondary-actions button,
   .notes-phase-execution .notes-roadmap-primary,
   .notes-reference-new,
@@ -8374,8 +8416,7 @@ body {
   .notes-reference-delete button,
   .notes-phase-references-empty button,
   .notes-roadmap-proposal-actions button,
-  .notes-phase-references-heading > button,
-  .notes-phase-status-control > button {
+  .notes-phase-references-heading > button {
     min-height: 36px;
   }
   .notes-reference-form-grid,

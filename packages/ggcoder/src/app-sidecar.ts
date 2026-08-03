@@ -27,7 +27,7 @@ import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-a
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
 import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
-import { RunLifecycle } from "./core/run-lifecycle.js";
+import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
 import { RunClaim } from "./core/run-claim.js";
 import {
   CHAT_AGENT_IDS,
@@ -189,6 +189,10 @@ import {
 import { launchBoundPhase, type BoundPhaseCandidate } from "./app-sidecar-phase-launch.js";
 import { handlePhaseStartRoute } from "./app-sidecar-phase-route.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
+import {
+  AppSidecarPhaseCancellationCoordinator,
+  type ActiveOperationCancellationResult,
+} from "./app-sidecar-phase-cancellation.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import { AppSidecarRoadmapToolHost } from "./app-sidecar-roadmap-tool-host.js";
@@ -894,6 +898,11 @@ async function main(): Promise<void> {
       }
     }
   };
+  const phaseCancellations = new AppSidecarPhaseCancellationCoordinator({
+    repository: notesRepository,
+    sessions: () => sessions.values(),
+    broadcastSnapshot: broadcastNotesSnapshot,
+  });
   const reminderCoordinator = new AppSidecarReminderCoordinator({
     repository: notesRepository,
     onReminderDue: (projectKey) => {
@@ -1261,6 +1270,27 @@ async function main(): Promise<void> {
         daemonJson(res, 404, { error: "unknown session" });
         return;
       }
+
+      const phaseCancellationMatch =
+        method === "POST" ? /^\/phases\/([^/]+)\/cancel$/.exec(url) : null;
+      if (phaseCancellationMatch) {
+        let phaseId: string;
+        try {
+          phaseId = decodeURIComponent(phaseCancellationMatch[1] ?? "");
+        } catch {
+          daemonJson(res, 400, { error: "invalid phase id" });
+          return;
+        }
+        void phaseCancellations
+          .cancel(ctx.cwd, phaseId)
+          .then((result) => daemonJson(res, 200, result))
+          .catch((error) => {
+            captureSidecarError(error, "app-sidecar.phase.cancel");
+            daemonJson(res, 500, { error: "phase cancellation failed" });
+          });
+        return;
+      }
+
       ctx.handle(req, res, url, method);
     }, "app-sidecar.http"),
   );
@@ -1510,6 +1540,8 @@ interface SessionContext {
   clients: Set<SseClient>;
   broadcast: (type: string, data: unknown) => void;
   broadcastNotesChange: (snapshot: ProjectNotesSnapshot) => void;
+  getActivePhaseContext: () => ReturnType<AgentSession["getActivePhaseContext"]>;
+  cancelActiveOperation: () => Promise<ActiveOperationCancellationResult>;
   /** Handle one HTTP request for this session. Owns its own 404 fallthrough. */
   handle: (
     req: http.IncomingMessage,
@@ -3011,6 +3043,49 @@ async function createSession(
     res.end(payload);
   }
 
+  async function cancelActiveOperation(): Promise<
+    ActiveOperationCancellationResult & { drained: string; runState: RunState }
+  > {
+    // A task/autopilot sweep remains an active operation between provider runs,
+    // even though RunLifecycle is briefly idle during that gap.
+    const operationWasActive = running || autopilotActive || runLifecycle.running;
+    // Even between task runs, cancellation stops the sweep. Active provider
+    // ownership invokes the full abort hook exactly once through lifecycle.
+    taskRunAll = false;
+    autopilotCancelled = true;
+    if (!runLifecycle.running) {
+      kenAutoAbort.abort();
+      kenAutoAbort = new AbortController();
+      kenAutoSession?.setSignal(kenAutoAbort.signal);
+    }
+
+    const generation = runLifecycle.generation;
+    if (!pendingCancelDrain || pendingCancelDrain.generation !== generation) {
+      pendingCancelDrain = { generation, text: session.drainQueue() };
+      broadcast("queued", { count: 0, messages: [] });
+    }
+    const result = await runLifecycle.cancel(CANCEL_TIMEOUT_MS);
+    const drained = pendingCancelDrain.text;
+    if (result.status === "failed") {
+      broadcast("cancel_failed", {
+        error: "cancel_failed",
+        reason: result.reason,
+        runState: runLifecycle.state,
+      });
+      return {
+        status: "failed",
+        reason: result.reason,
+        runState: runLifecycle.state,
+        drained,
+      };
+    }
+    return {
+      status: result.status === "idle" && operationWasActive ? "cancelled" : result.status,
+      runState: runLifecycle.state,
+      drained,
+    };
+  }
+
   // OPTIONS/CORS preflight is handled at the daemon level before delegation.
   function handle(
     req: http.IncomingMessage,
@@ -4438,52 +4513,32 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/cancel") {
-      void (async () => {
-        // Even between task runs, cancellation stops the sweep. Active provider
-        // ownership invokes the full abort hook exactly once through lifecycle.
-        taskRunAll = false;
-        autopilotCancelled = true;
-        if (!runLifecycle.running) {
-          kenAutoAbort.abort();
-          kenAutoAbort = new AbortController();
-          kenAutoSession?.setSignal(kenAutoAbort.signal);
-        }
-
-        const generation = runLifecycle.generation;
-        if (!pendingCancelDrain || pendingCancelDrain.generation !== generation) {
-          pendingCancelDrain = { generation, text: session.drainQueue() };
-          broadcast("queued", { count: 0, messages: [] });
-        }
-        const result = await runLifecycle.cancel(CANCEL_TIMEOUT_MS);
-        const drained = pendingCancelDrain.text;
-        if (result.status === "failed") {
-          broadcast("cancel_failed", {
+      void cancelActiveOperation()
+        .then((result) => {
+          if (result.status === "failed") {
+            json(res, 504, {
+              error: "cancel_failed",
+              reason: result.reason,
+              runState: result.runState,
+              drained: result.drained,
+            });
+            return;
+          }
+          json(res, 200, {
+            cancelled: result.status === "cancelled",
+            runState: result.runState,
+            drained: result.drained,
+          });
+        })
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.run.cancel");
+          broadcast("cancel_failed", { error: "cancel_failed", runState: runLifecycle.state });
+          json(res, 500, {
             error: "cancel_failed",
-            reason: result.reason,
+            message: error instanceof Error ? error.message : String(error),
             runState: runLifecycle.state,
           });
-          json(res, 504, {
-            error: "cancel_failed",
-            reason: result.reason,
-            runState: runLifecycle.state,
-            drained,
-          });
-          return;
-        }
-        json(res, 200, {
-          cancelled: result.status === "cancelled",
-          runState: runLifecycle.state,
-          drained,
         });
-      })().catch((error) => {
-        captureSidecarError(error, "app-sidecar.run.cancel");
-        broadcast("cancel_failed", { error: "cancel_failed", runState: runLifecycle.state });
-        json(res, 500, {
-          error: "cancel_failed",
-          message: error instanceof Error ? error.message : String(error),
-          runState: runLifecycle.state,
-        });
-      });
       return;
     }
 
@@ -5245,6 +5300,8 @@ async function createSession(
     clients,
     broadcast,
     broadcastNotesChange,
+    getActivePhaseContext: () => session.getActivePhaseContext(),
+    cancelActiveOperation,
     handle,
     dispose,
     isRunning: () => running || autopilotActive || runLifecycle.running,

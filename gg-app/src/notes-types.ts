@@ -29,6 +29,30 @@ export type {
   PhaseStartSession,
   PhaseStartStatus,
 } from "@kenkaiiii/gg-core/phase-start-protocol";
+
+const PHASE_RUN_CANCELLATION_FAILURE_CODES = [
+  "notes-unavailable",
+  "phase-not-found",
+  "phase-not-active",
+  "bound-session-not-running",
+  "bound-session-ambiguous",
+  "cancellation-failed",
+  "notes-update-failed",
+] as const;
+
+export type PhaseRunCancellationResult =
+  | {
+      status: "cancelled";
+      phaseId: string;
+      session: { sessionId: string; sessionPath: string | null };
+    }
+  | {
+      status: "failed";
+      phaseId: string;
+      code: (typeof PHASE_RUN_CANCELLATION_FAILURE_CODES)[number];
+      message: string;
+      operationStopped: boolean;
+    };
 export {
   isNotesDocumentV2,
   isNotesDocumentV3,
@@ -315,6 +339,20 @@ export type NotesAuthorityDiagnostic =
   | { kind: "migration-failed"; error: unknown }
   | { kind: "save-failed"; error: unknown }
   | { kind: "fallback-storage"; load: NotesLoadResult; save: NotesSaveResult | null };
+
+export function isPhaseRunCancellationResult(value: unknown): value is PhaseRunCancellationResult {
+  if (!isRecord(value) || typeof value.phaseId !== "string") return false;
+  if (value.status === "cancelled") {
+    return value.session !== null && isNullableNotesSessionLink(value.session);
+  }
+  return (
+    value.status === "failed" &&
+    typeof value.code === "string" &&
+    PHASE_RUN_CANCELLATION_FAILURE_CODES.some((code) => code === value.code) &&
+    typeof value.message === "string" &&
+    typeof value.operationStopped === "boolean"
+  );
+}
 
 export function isProjectNotesSnapshot(value: unknown): value is ProjectNotesSnapshot {
   return (

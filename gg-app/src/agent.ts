@@ -9,6 +9,7 @@ import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { routePaneEvent, type PaneEventEnvelope } from "./pane-routing";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import {
+  isPhaseRunCancellationResult,
   isPhaseStartResult,
   isProjectNotesMigrationOutcome,
   isProjectNotesReadOutcome,
@@ -17,6 +18,7 @@ import {
   isReminderReleaseOutcome,
   isReminderReserveOutcome,
   type NotesClient,
+  type PhaseRunCancellationResult,
   type PhaseStartResult,
 } from "./notes-types";
 export { isPhaseLaunchErrorEvent } from "./notes-types";
@@ -2149,6 +2151,7 @@ export interface PaneAgentClient extends NotesClient {
   subscribe(onEvent: (event: SidecarEvent) => void): () => void;
   getState(): Promise<AgentState>;
   startPhase(phaseId: string): Promise<PhaseStartResult>;
+  cancelPhaseRun(phaseId: string): Promise<PhaseRunCancellationResult>;
   listMemories(): Promise<MemorySnapshot>;
   deleteMemory(id: string): Promise<MemorySnapshot>;
   listJiwa(): Promise<JiwaSnapshot>;
@@ -2370,6 +2373,13 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async startPhase(phaseId) {
       const outcome = await call<unknown>("agent_phase_start", { phaseId });
       if (!isPhaseStartResult(outcome)) throw new Error("invalid phase start response");
+      return outcome;
+    },
+    async cancelPhaseRun(phaseId) {
+      const outcome = await call<unknown>("agent_phase_cancel", { phaseId });
+      if (!isPhaseRunCancellationResult(outcome)) {
+        throw new Error("invalid phase cancellation response");
+      }
       return outcome;
     },
     listMemories: async () => {

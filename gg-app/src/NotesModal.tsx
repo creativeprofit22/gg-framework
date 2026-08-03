@@ -16,6 +16,7 @@ import type {
   NotesReminderMutationResult,
   NotesRoadmapMutationResult,
   NotesSessionLink,
+  PhaseRunCancellationResult,
   NotesTask,
   PhaseStartResult,
 } from "./notes-types";
@@ -96,6 +97,7 @@ interface Props {
   ): Promise<NotesReminderMutationResult>;
   openSource?: OpenReferenceUrl;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onCancelPhase(phaseId: string): Promise<PhaseRunCancellationResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   phaseStartUnavailableReason: string | null;
   phaseActionDisabled: boolean;
@@ -155,6 +157,7 @@ export function NotesModal({
   onDismissReminder,
   openSource,
   onStartPhase,
+  onCancelPhase,
   onResumePhase,
   phaseStartUnavailableReason,
   phaseActionDisabled,
@@ -331,6 +334,7 @@ export function NotesModal({
                   onSnoozeReminder={onSnoozeReminder}
                   onDismissReminder={onDismissReminder}
                   onStartPhase={onStartPhase}
+                  onCancelPhase={onCancelPhase}
                   onResumePhase={onResumePhase}
                   startUnavailableReason={phaseStartUnavailableReason}
                   actionDisabled={phaseActionDisabled}

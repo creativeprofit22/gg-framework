@@ -1,9 +1,7 @@
-import {
-  NOTES_PHASE_STATUSES,
-  notesAutomaticStatusAfterOverrideReset,
-} from "@kenkaiiii/gg-core/project-notes";
+import { notesAutomaticStatusAfterOverrideReset } from "@kenkaiiii/gg-core/project-notes";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "./brand";
+import { notesLifecyclePresentation } from "./notes-lifecycle-presentation";
 import { referenceRepositoryLabel, referenceSourceLabel } from "./notes-reference";
 import { NotesPhaseCompletionGates } from "./NotesPhaseCompletionGates";
 import {
@@ -19,6 +17,7 @@ import type {
   NotesImplementationRunOutcome,
   NotesPhase,
   NotesPhaseStatus,
+  PhaseRunCancellationResult,
   NotesReference,
   NotesReferenceOperationResult,
   NotesReminderMutationResult,
@@ -76,6 +75,7 @@ interface RoadmapProps {
     expectedOccurrenceKey: string,
   ): Promise<NotesReminderMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onCancelPhase(phaseId: string): Promise<PhaseRunCancellationResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
   actionDisabled: boolean;
@@ -97,11 +97,6 @@ const STATUS_LABELS = {
   "needs-attention": "Needs attention",
   cancelled: "Cancelled",
 } as const satisfies Record<NotesPhaseStatus, string>;
-
-const STATUS_OPTIONS = NOTES_PHASE_STATUSES.map((value) => ({
-  value,
-  label: STATUS_LABELS[value],
-}));
 
 const ROADMAP_ACTOR_LABELS = {
   "gg-coder": PRODUCT_DISPLAY_NAME,
@@ -184,6 +179,7 @@ export function NotesRoadmap({
   onSnoozeReminder,
   onDismissReminder,
   onStartPhase,
+  onCancelPhase,
   onResumePhase,
   startUnavailableReason,
   actionDisabled,
@@ -335,6 +331,8 @@ export function NotesRoadmap({
             {visiblePhases.map((phase) => {
               const selected = phase.id === selectedId;
               const action = primaryAction(phase);
+              const actionLabel = phaseActionLabel(phase, action);
+              const lifecycle = notesLifecyclePresentation(phase);
               return (
                 <li key={phase.id} className={`notes-roadmap-row${selected ? " is-selected" : ""}`}>
                   <button
@@ -354,7 +352,10 @@ export function NotesRoadmap({
                       <span className="notes-phase-saved-prompt-marker">Saved prompt</span>
                     )}
                   </button>
-                  <span className="notes-phase-status">{statusLabel(phase.status)}</span>
+                  <span className="notes-phase-status">
+                    <strong>{lifecycle.state}</strong>
+                    <small>{lifecycle.stage}</small>
+                  </span>
                   <span className="notes-phase-count">
                     {phase.referenceIds.length} {phase.referenceIds.length === 1 ? "ref" : "refs"}
                   </span>
@@ -364,11 +365,11 @@ export function NotesRoadmap({
                   <button
                     type="button"
                     className="notes-roadmap-primary"
-                    aria-label={`${action} phase: ${phase.title}`}
+                    aria-label={`${actionLabel} phase: ${phase.title}`}
                     disabled={pendingPhaseId !== null}
                     onClick={() => selectPhase(phase.id)}
                   >
-                    {action}
+                    {actionLabel}
                   </button>
                 </li>
               );
@@ -395,8 +396,14 @@ export function NotesRoadmap({
               setAnnouncement(`Moved ${selectedPhase.title} ${direction}`);
             }}
             onChangePhaseStatus={(status) => {
+              const pausingAutomation =
+                status === selectedPhase.status && selectedPhase.overrides.status === null;
               onChangePhaseStatus(selectedPhase.id, status);
-              setAnnouncement(`Changed ${selectedPhase.title} to ${statusLabel(status)}`);
+              setAnnouncement(
+                pausingAutomation
+                  ? `Paused automation for ${selectedPhase.title}`
+                  : `Changed ${selectedPhase.title} to ${statusLabel(status)}`,
+              );
             }}
             onArchivePhase={() => {
               const selectedIndex = visiblePhases.findIndex(
@@ -411,9 +418,12 @@ export function NotesRoadmap({
               setSelectedId(null);
               focusAfterRender(focusId);
             }}
-            onCancelPhase={() => {
-              onChangePhaseStatus(selectedPhase.id, "cancelled");
-              setAnnouncement(`Cancelled phase: ${selectedPhase.title}`);
+            onCancelPhase={async () => {
+              const result = await onCancelPhase(selectedPhase.id);
+              if (result.status === "cancelled") {
+                setAnnouncement(`Cancelled run: ${selectedPhase.title}`);
+              }
+              return result;
             }}
             onLinkReference={(referenceId) => {
               const reference = references.find((item) => item.id === referenceId);
@@ -633,7 +643,7 @@ function PhaseDetail({
   onMovePhase(id: string, direction: "up" | "down"): void;
   onChangePhaseStatus(status: NotesPhaseStatus): void;
   onArchivePhase(): void;
-  onCancelPhase(): void;
+  onCancelPhase(): Promise<PhaseRunCancellationResult>;
   onLinkReference(referenceId: string): void;
   onUnlinkReference(referenceId: string): void;
   onCreateReference(): void;
@@ -689,8 +699,10 @@ function PhaseDetail({
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const action = primaryAction(phase);
   const effectiveAction = raceLink ? sessionAction(raceLink) : action;
+  const effectiveActionLabel = phaseActionLabel(phase, effectiveAction);
   const resumeLink = raceLink ?? phase.session;
   const controlsDisabled = actionDisabled || pending || pendingRoadmapAction !== null;
+  const cancellationDisabled = pending || pendingRoadmapAction !== null;
   const latestReport = latestRoadmapReport(phase);
   const pendingProposals = unresolvedRoadmapProposals(phase);
   const latestReportHasPendingManualReview =
@@ -700,6 +712,16 @@ function PhaseDetail({
         report.id === latestReport.id && proposal.policyOutcome === "manual-review",
     );
   const resumedStatus = notesAutomaticStatusAfterOverrideReset(phase);
+  const lifecycle = notesLifecyclePresentation(phase);
+  const resumedLifecycle = notesLifecyclePresentation({ ...phase, status: resumedStatus });
+  const canPauseAutomation =
+    phase.overrides.status === null && phase.status !== "done" && phase.status !== "cancelled";
+  const canCancelRun =
+    phase.session !== null &&
+    (phase.status === "planning" ||
+      phase.status === "waiting-for-approval" ||
+      phase.status === "in-progress" ||
+      phase.status === "review");
   const phaseStartDisabled =
     (effectiveAction === "Start" || effectiveAction === "Recover") &&
     startUnavailableReason !== null;
@@ -817,6 +839,31 @@ function PhaseDetail({
       setActionStatus("");
       setActionError(
         error instanceof Error ? error.message : "The Roadmap change failed. Try again.",
+      );
+    } finally {
+      setPendingRoadmapAction(null);
+      onPendingChange(false);
+    }
+  };
+
+  const runCancellation = async (): Promise<void> => {
+    if (cancellationDisabled) return;
+    setPendingRoadmapAction("cancel-run");
+    onPendingChange(true);
+    setActionError("");
+    setActionStatus("Cancelling the bound agent run…");
+    try {
+      const result = await onCancelPhase();
+      if (result.status === "cancelled") {
+        setActionStatus("Agent run stopped. Notes marked Cancelled.");
+      } else {
+        setActionStatus("");
+        setActionError(result.message);
+      }
+    } catch (error) {
+      setActionStatus("");
+      setActionError(
+        error instanceof Error ? error.message : "The agent run could not be cancelled.",
       );
     } finally {
       setPendingRoadmapAction(null);
@@ -1037,8 +1084,12 @@ function PhaseDetail({
 
           <dl className="notes-phase-metadata">
             <div>
-              <dt>Status</dt>
-              <dd>{statusLabel(phase.status)}</dd>
+              <dt>State</dt>
+              <dd>{lifecycle.state}</dd>
+            </div>
+            <div>
+              <dt>Stage</dt>
+              <dd>{lifecycle.stage}</dd>
             </div>
             <div>
               <dt>References</dt>
@@ -1442,16 +1493,14 @@ function PhaseDetail({
             onClick={() => void runPhaseAction()}
           >
             {pending
-              ? effectiveAction === "Start"
-                ? "Starting…"
-                : effectiveAction === "Recover"
-                  ? "Recovering…"
-                  : "Resuming…"
-              : effectiveAction === "Start"
-                ? "Start phase"
-                : effectiveAction === "Recover"
-                  ? "Recover phase"
-                  : "Resume phase"}
+              ? effectiveActionLabel === "Retry"
+                ? "Retrying…"
+                : effectiveAction === "Start"
+                  ? "Starting…"
+                  : effectiveAction === "Recover"
+                    ? "Recovering…"
+                    : "Resuming…"
+              : `${effectiveActionLabel} phase`}
           </button>
         )}
         <div
@@ -1470,44 +1519,56 @@ function PhaseDetail({
       </section>
 
       <div className="notes-phase-controls">
-        <div className="notes-field notes-phase-status-control">
-          <label htmlFor={`notes-phase-status-${phase.id}`}>Status override</label>
-          <select
-            id={`notes-phase-status-${phase.id}`}
-            value={phase.status}
-            aria-describedby={`notes-phase-status-help-${phase.id}`}
-            disabled={controlsDisabled}
-            onChange={(event) => onChangePhaseStatus(event.target.value as NotesPhaseStatus)}
-          >
-            {STATUS_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-          <p
-            id={`notes-phase-status-help-${phase.id}`}
-            className="notes-field-help notes-phase-status-help"
-          >
-            {phase.overrides.status
-              ? `Automatic lifecycle updates are paused. Resuming will set status to ${statusLabel(resumedStatus)}.`
-              : "Choosing a status pauses automatic lifecycle updates for this phase."}
-          </p>
-          {phase.overrides.status && (
-            <button
-              type="button"
-              disabled={controlsDisabled}
-              aria-describedby={`notes-phase-status-help-${phase.id}`}
-              onClick={() =>
-                void runRoadmapMutation("resume-status", () => onResumeAutomaticStatus(phase.id))
-              }
-            >
-              {pendingRoadmapAction === "resume-status"
-                ? "Resuming…"
-                : `Resume automatic status: ${statusLabel(resumedStatus)}`}
-            </button>
-          )}
-        </div>
+        <section
+          className="notes-phase-automation"
+          aria-labelledby={`notes-phase-automation-${phase.id}`}
+        >
+          <div>
+            <h4 id={`notes-phase-automation-${phase.id}`}>Automation</h4>
+            <p>
+              <strong>{lifecycle.state}</strong>
+              <span aria-hidden="true"> · </span>
+              {lifecycle.stage}
+            </p>
+            {phase.overrides.status && (
+              <p className="notes-phase-status-help">
+                Paused. Resume returns to {resumedLifecycle.state},{" "}
+                {resumedLifecycle.stage.toLocaleLowerCase()}.
+              </p>
+            )}
+          </div>
+          <div className="notes-phase-lifecycle-actions">
+            {canPauseAutomation && (
+              <button
+                type="button"
+                disabled={controlsDisabled}
+                onClick={() => onChangePhaseStatus(phase.status)}
+              >
+                Pause automation
+              </button>
+            )}
+            {phase.overrides.status && (
+              <button
+                type="button"
+                disabled={controlsDisabled}
+                onClick={() =>
+                  void runRoadmapMutation("resume-status", () => onResumeAutomaticStatus(phase.id))
+                }
+              >
+                {pendingRoadmapAction === "resume-status" ? "Resuming…" : "Resume automation"}
+              </button>
+            )}
+            {canCancelRun && (
+              <button
+                type="button"
+                disabled={cancellationDisabled}
+                onClick={() => void runCancellation()}
+              >
+                {pendingRoadmapAction === "cancel-run" ? "Cancelling…" : "Cancel run"}
+              </button>
+            )}
+          </div>
+        </section>
         <div className="notes-phase-secondary-actions">
           <button
             type="button"
@@ -1523,11 +1584,6 @@ function PhaseDetail({
           >
             Move down
           </button>
-          {phase.status !== "cancelled" && (
-            <button type="button" disabled={controlsDisabled} onClick={onCancelPhase}>
-              Cancel phase
-            </button>
-          )}
           <button type="button" disabled={controlsDisabled} onClick={onArchivePhase}>
             Archive phase
           </button>
@@ -1547,24 +1603,29 @@ export function NotesRoadmapArchive({ phases, onRestorePhase }: ArchiveProps): R
         <p className="notes-empty">No archived phases.</p>
       ) : (
         <ul aria-label="Archived roadmap phases">
-          {archivedPhases.map((phase) => (
-            <li key={phase.id}>
-              <span>
-                <strong>{phase.title}</strong>
-                <small>{statusLabel(phase.status)}</small>
-              </span>
-              <button
-                type="button"
-                aria-label={`Restore phase: ${phase.title}`}
-                onClick={() => {
-                  onRestorePhase(phase.id);
-                  setAnnouncement(`Restored phase: ${phase.title}`);
-                }}
-              >
-                Restore
-              </button>
-            </li>
-          ))}
+          {archivedPhases.map((phase) => {
+            const lifecycle = notesLifecyclePresentation(phase);
+            return (
+              <li key={phase.id}>
+                <span>
+                  <strong>{phase.title}</strong>
+                  <small>
+                    {lifecycle.state} · {lifecycle.stage}
+                  </small>
+                </span>
+                <button
+                  type="button"
+                  aria-label={`Restore phase: ${phase.title}`}
+                  onClick={() => {
+                    onRestorePhase(phase.id);
+                    setAnnouncement(`Restored phase: ${phase.title}`);
+                  }}
+                >
+                  Restore
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
       <div className="notes-status" role="status" aria-live="polite" aria-atomic="true">
@@ -1608,6 +1669,16 @@ function referenceLinkAnnouncement(
 }
 
 type PhasePrimaryAction = "Start" | "Resume" | "Recover" | "Review";
+
+function phaseActionLabel(
+  phase: NotesPhase,
+  action: PhasePrimaryAction,
+): "Start" | "Resume" | "Recover" | "Retry" | "Review" {
+  if (action !== "Review" && (phase.status === "needs-attention" || phase.status === "cancelled")) {
+    return "Retry";
+  }
+  return action;
+}
 
 function sessionAction(session: NotesSessionLink): "Resume" | "Recover" {
   return session.sessionPath === null ? "Recover" : "Resume";

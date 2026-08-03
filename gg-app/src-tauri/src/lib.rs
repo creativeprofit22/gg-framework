@@ -1336,6 +1336,10 @@ fn phase_start_path(phase_id: &str) -> String {
     format!("/phases/{}/start", encode_path_segment(phase_id))
 }
 
+fn phase_cancel_path(phase_id: &str) -> String {
+    format!("/phases/{}/cancel", encode_path_segment(phase_id))
+}
+
 fn normalize_phase_start_response(
     status: reqwest::StatusCode,
     body: &str,
@@ -1412,6 +1416,31 @@ async fn agent_phase_start(
     #[cfg(feature = "native-smoke")]
     audit_native_phase_start(&pane_id, &phase_id, status, &result);
     result
+}
+
+/// Proxy: resolve a Roadmap phase's bound live session, stop its operation, then update Notes.
+#[tauri::command]
+async fn agent_phase_cancel(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    phase_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}{}",
+            sidecar_base(port),
+            phase_cancel_path(&phase_id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: create the pane's project Notes repository only when absent.
@@ -6576,6 +6605,7 @@ pub fn run() {
             agent_state,
             agent_notes_get,
             agent_phase_start,
+            agent_phase_cancel,
             agent_notes_migrate,
             agent_notes_save,
             agent_reminder_reserve,
@@ -7010,6 +7040,10 @@ mod tests {
         assert_eq!(
             phase_start_path("phase/21 review"),
             "/phases/phase%2F21%20review/start"
+        );
+        assert_eq!(
+            phase_cancel_path("phase/21 review"),
+            "/phases/phase%2F21%20review/cancel"
         );
         for (status, body) in [
             (

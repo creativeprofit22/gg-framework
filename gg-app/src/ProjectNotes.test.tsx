@@ -122,14 +122,18 @@ const PHASE_ACTION_MATRIX = [
   ["done", "unbound", "Review"],
   ["done", "missing-path", "Review"],
   ["done", "path-present", "Review"],
-  ["needs-attention", "unbound", "Start"],
-  ["needs-attention", "missing-path", "Recover"],
-  ["needs-attention", "path-present", "Resume"],
-  ["cancelled", "unbound", "Start"],
-  ["cancelled", "missing-path", "Recover"],
-  ["cancelled", "path-present", "Resume"],
+  ["needs-attention", "unbound", "Retry"],
+  ["needs-attention", "missing-path", "Retry"],
+  ["needs-attention", "path-present", "Retry"],
+  ["cancelled", "unbound", "Retry"],
+  ["cancelled", "missing-path", "Retry"],
+  ["cancelled", "path-present", "Retry"],
 ] as const satisfies ReadonlyArray<
-  readonly [NotesPhaseStatus, PhaseSessionFixture, "Start" | "Recover" | "Resume" | "Review"]
+  readonly [
+    NotesPhaseStatus,
+    PhaseSessionFixture,
+    "Start" | "Recover" | "Resume" | "Retry" | "Review",
+  ]
 >;
 
 function reminderReservation(selected: NotesPhase): ReminderReserveOutcome {
@@ -1492,7 +1496,9 @@ describe("ProjectNotes", () => {
       true,
     );
     expect((screen.getByRole("button", { name: "Edit" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByLabelText("Status override") as HTMLSelectElement).disabled).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Pause automation" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     expect(
       (screen.getByRole("button", { name: "Archive phase" }) as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -1550,8 +1556,8 @@ describe("ProjectNotes", () => {
     expect(onStartPhase).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
-    fireEvent.click(screen.getByRole("button", { name: "Recover phase: Recover in code" }));
-    const recover = screen.getByRole("button", { name: "Recover phase" }) as HTMLButtonElement;
+    fireEvent.click(screen.getByRole("button", { name: "Retry phase: Recover in code" }));
+    const recover = screen.getByRole("button", { name: "Retry phase" }) as HTMLButtonElement;
     expect(recover.disabled).toBe(true);
     expect(recover.title).toBe("Switch to coding mode to start this phase.");
     fireEvent.click(recover);
@@ -1565,7 +1571,7 @@ describe("ProjectNotes", () => {
     await waitFor(() => expect(onResumePhase).toHaveBeenCalledExactlyOnceWith("resume", bound));
   });
 
-  it("announces retryable failure, returns focus, and turns an already-bound race into Resume", async () => {
+  it("announces retryable failure, returns focus, and preserves Retry through an already-bound race", async () => {
     const cwd = "/work/phase-recovery";
     const client = new FakeProjectNotesClient(cwd);
     const populated = notes("reference");
@@ -1604,9 +1610,9 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
-    fireEvent.click(screen.getByRole("button", { name: "Start phase: Recover phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry phase: Recover phase" }));
     expect(screen.getByText("Needs attention: Previous prompt failed.")).toBeTruthy();
-    const start = screen.getByRole("button", { name: "Start phase" });
+    const start = screen.getByRole("button", { name: "Retry phase" });
     fireEvent.click(start);
     expect((await screen.findByRole("alert")).textContent).toContain(
       "Could not create the phase session. Retry.",
@@ -1617,8 +1623,8 @@ describe("ProjectNotes", () => {
     fireEvent.click(start);
     expect((await screen.findByRole("alert")).textContent).toContain("started in another window");
     expect(screen.queryByText("Starting phase…")).toBeNull();
-    const resume = screen.getByRole("button", { name: "Resume phase" });
-    fireEvent.click(resume);
+    const retry = screen.getByRole("button", { name: "Retry phase" });
+    fireEvent.click(retry);
     await waitFor(() => expect(onResumePhase).toHaveBeenCalledExactlyOnceWith("recover", bound));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
@@ -1649,10 +1655,11 @@ describe("ProjectNotes", () => {
 
       fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
       selectNotesTab("Roadmap");
+      const visibleAction = status === "not-started" ? "Recover" : "Retry";
       fireEvent.click(
-        screen.getByRole("button", { name: `Recover phase: ${statusLabel} recovery` }),
+        screen.getByRole("button", { name: `${visibleAction} phase: ${statusLabel} recovery` }),
       );
-      fireEvent.click(screen.getByRole("button", { name: "Recover phase" }));
+      fireEvent.click(screen.getByRole("button", { name: `${visibleAction} phase` }));
 
       await waitFor(() => expect(onResumePhase).toHaveBeenCalledExactlyOnceWith(status, link));
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -1817,7 +1824,10 @@ describe("ProjectNotes", () => {
         }) as HTMLButtonElement;
         expect(detailAction.disabled).toBe(false);
         fireEvent.click(detailAction);
-        if (expectedAction === "Start") {
+        const startsSession =
+          expectedAction === "Start" ||
+          (expectedAction === "Retry" && sessionFixture === "unbound");
+        if (startsSession) {
           await waitFor(() => expect(onStartPhase).toHaveBeenCalledExactlyOnceWith(selected.id));
         } else {
           await waitFor(() =>
@@ -1826,10 +1836,14 @@ describe("ProjectNotes", () => {
         }
       }
 
-      expect(onStartPhase).toHaveBeenCalledTimes(expectedAction === "Start" ? 1 : 0);
-      expect(onResumePhase).toHaveBeenCalledTimes(
-        expectedAction === "Recover" || expectedAction === "Resume" ? 1 : 0,
-      );
+      const startsSession =
+        expectedAction === "Start" || (expectedAction === "Retry" && sessionFixture === "unbound");
+      const resumesSession =
+        expectedAction === "Recover" ||
+        expectedAction === "Resume" ||
+        (expectedAction === "Retry" && sessionFixture !== "unbound");
+      expect(onStartPhase).toHaveBeenCalledTimes(startsSession ? 1 : 0);
+      expect(onResumePhase).toHaveBeenCalledTimes(resumesSession ? 1 : 0);
     },
   );
 
@@ -1932,30 +1946,28 @@ describe("ProjectNotes", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
     const expectedRows = [
-      ["Not started phase", "Not started", "Start"],
-      ["Planning phase", "Planning", "Start"],
-      ["Waiting phase", "Waiting for approval", "Resume"],
-      ["Progress phase", "In progress", "Resume"],
-      ["Review phase", "Review", "Review"],
-      ["Done phase", "Done", "Review"],
-      ["Attention phase", "Needs attention", "Start"],
-      ["Bound attention phase", "Needs attention", "Resume"],
-      ["Cancelled phase", "Cancelled", "Resume"],
-      ["Manual cancellation", "Cancelled", "Review"],
+      ["Not started phase", "Ready", "Planning", "Start"],
+      ["Planning phase", "Working", "Planning", "Start"],
+      ["Waiting phase", "Needs you", "Planning", "Resume"],
+      ["Progress phase", "Working", "Implementation", "Resume"],
+      ["Review phase", "Working", "Review", "Review"],
+      ["Done phase", "Done", "Verification", "Review"],
+      ["Attention phase", "Needs you", "Implementation", "Retry"],
+      ["Bound attention phase", "Needs you", "Implementation", "Retry"],
+      ["Cancelled phase", "Needs you", "Implementation", "Retry"],
+      ["Manual cancellation", "Needs you", "Implementation", "Review"],
     ] as const;
-    for (const [title, label, action] of expectedRows) {
+    for (const [title, state, stage, action] of expectedRows) {
       const button = screen.getByRole("button", { name: `${action} phase: ${title}` });
-      expect(button.closest("li")?.textContent).toContain(label);
+      expect(button.closest("li")?.textContent).toContain(state);
+      expect(button.closest("li")?.textContent).toContain(stage);
     }
 
-    fireEvent.click(screen.getByRole("button", { name: "Start phase: Attention phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry phase: Attention phase" }));
     expect(screen.getByText(/Needs attention: The provider failed/)).toBeTruthy();
-    const statusSelect = screen.getByLabelText("Status override");
-    const helpId = statusSelect.getAttribute("aria-describedby");
-    expect(helpId).toBeTruthy();
-    expect(document.getElementById(helpId!)?.textContent).toBe(
-      "Choosing a status pauses automatic lifecycle updates for this phase.",
-    );
+    expect(screen.getByRole("button", { name: "Pause automation" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Retry phase: Attention phase" })).toHaveLength(1);
+    expect(screen.queryByRole("combobox")).toBeNull();
 
     const refreshed = structuredClone(populated);
     refreshed.phases[6] = {
@@ -1972,12 +1984,57 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Manual cancellation" }));
-    const overriddenSelect = screen.getByLabelText("Status override");
-    const overriddenHelpId = overriddenSelect.getAttribute("aria-describedby");
-    expect(document.getElementById(overriddenHelpId!)?.textContent).toBe(
-      "Automatic lifecycle updates are paused. Resuming will set status to Review.",
-    );
+    expect(screen.getByText("Paused. Resume returns to Working, review.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Resume automation" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry phase: Manual cancellation" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Resume phase" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume automation" }));
+    await waitFor(() => {
+      const stored = client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[9]!;
+      expect(stored.status).toBe("review");
+      expect(stored.overrides.status).toBeNull();
+      expect(stored.pendingAutomaticLifecycleTransition).toBeNull();
+    });
+  });
+
+  it("retries a recoverable run through the existing phase start transition", async () => {
+    const cwd = "/work/roadmap-retry";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [
+      {
+        ...phase("retry", "needs-attention"),
+        title: "Retry implementation",
+        attentionReason: "The previous run failed.",
+      },
+    ];
+    client.seed(cwd, populated);
+    const onStartPhase = vi.fn().mockResolvedValue({
+      status: "accepted",
+      operationId: "retry-operation",
+      session: { sessionId: "retry-session", sessionPath: "/retry-session.jsonl" },
+      packageTokenCount: 24,
+    });
+    render(
+      <ProjectNotes
+        cwd={cwd}
+        client={client}
+        onStartPhase={onStartPhase}
+        onResumePhase={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    const retry = screen.getByRole("button", { name: "Retry phase: Retry implementation" });
+    expect(
+      screen.getAllByRole("button", { name: "Retry phase: Retry implementation" }),
+    ).toHaveLength(1);
+    fireEvent.click(retry);
+    fireEvent.click(screen.getByRole("button", { name: "Retry phase" }));
+
+    await waitFor(() => expect(onStartPhase).toHaveBeenCalledExactlyOnceWith("retry"));
   });
 
   it("keeps one selected phase open across authoritative snapshots", async () => {
@@ -2004,21 +2061,35 @@ describe("ProjectNotes", () => {
     expect(screen.getByText("Selected phase")).toBeTruthy();
   });
 
-  it("creates, edits, reorders, overrides, cancels, archives, and restores phases", async () => {
+  it("creates, edits, reorders, pauses automation, cancels runs, archives, and restores phases", async () => {
     const cwd = "/work/roadmap-crud";
     const client = new FakeProjectNotesClient(cwd);
     const populated = notes("reference");
     populated.phases = [
       { ...phase("alpha", "not-started"), title: "Alpha", order: 0 },
-      { ...phase("beta", "in-progress"), title: "Beta", order: 1 },
+      {
+        ...phase("beta", "in-progress"),
+        title: "Beta",
+        order: 1,
+        session: { sessionId: "beta-session", sessionPath: "/beta-session.jsonl" },
+      },
     ];
     client.seed(cwd, populated);
-    render(<ProjectNotes cwd={cwd} client={client} />);
+    const onCancelPhase = vi.fn(async (phaseId: string) => {
+      const current = client.snapshots.get(canonicalProjectKey(cwd))!;
+      const updated = structuredClone(current.document);
+      const target = updated.phases.find((candidate) => candidate.id === phaseId)!;
+      target.status = "cancelled";
+      target.completedAt = NOW;
+      client.publish(cwd, updated, current.revision + 1);
+      return { status: "cancelled" as const, phaseId, session: target.session! };
+    });
+    render(<ProjectNotes cwd={cwd} client={client} onCancelPhase={onCancelPhase} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
     expect(screen.getByRole("button", { name: "Start phase: Alpha" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start phase: Beta" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Resume phase: Beta" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "New phase" }));
     fireEvent.change(screen.getByLabelText("Phase title"), { target: { value: "Gamma" } });
@@ -2054,17 +2125,13 @@ describe("ProjectNotes", () => {
       }),
     );
 
-    fireEvent.change(screen.getByLabelText("Status override"), { target: { value: "done" } });
+    fireEvent.click(screen.getByRole("button", { name: "Pause automation" }));
     await waitFor(() => {
       const stored = client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!;
-      expect(stored.status).toBe("done");
-      expect(stored.completedAt).not.toBeNull();
-      expect(stored.overrides.status).toMatchObject({ value: "done", source: "user" });
-      expect(stored.lifecycleEvents[stored.lifecycleEvents.length - 1]).toMatchObject({
-        fromStatus: "not-started",
-        toStatus: "done",
-        source: "user",
-      });
+      expect(stored.status).toBe("not-started");
+      expect(stored.completedAt).toBeNull();
+      expect(stored.overrides.status).toMatchObject({ value: "not-started", source: "user" });
+      expect(stored.lifecycleEvents).toHaveLength(0);
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Beta" }));
@@ -2075,7 +2142,8 @@ describe("ProjectNotes", () => {
       ).toEqual(["Beta", "Alpha edited", "Gamma"]),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Cancel phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    await waitFor(() => expect(onCancelPhase).toHaveBeenCalledExactlyOnceWith("beta"));
     await waitFor(() =>
       expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.status).toBe(
         "cancelled",
@@ -2105,6 +2173,64 @@ describe("ProjectNotes", () => {
     expect(screen.queryByText("Selected phase")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Beta" }));
     expect(screen.getByText("Selected phase")).toBeTruthy();
+  });
+
+  it("shows phase cancellation pending and leaves Notes active when cancellation fails", async () => {
+    const cwd = "/work/roadmap-cancel-failure";
+    const client = new FakeProjectNotesClient(cwd);
+    const populated = notes("reference");
+    populated.phases = [
+      {
+        ...phase("active", "in-progress"),
+        title: "Active phase",
+        session: { sessionId: "active-session", sessionPath: "/active-session.jsonl" },
+      },
+    ];
+    client.seed(cwd, populated);
+    let resolveCancellation!: (result: {
+      status: "failed";
+      phaseId: string;
+      code: "cancellation-failed";
+      message: string;
+      operationStopped: false;
+    }) => void;
+    const cancellation = new Promise<Parameters<typeof resolveCancellation>[0]>((resolve) => {
+      resolveCancellation = resolve;
+    });
+    const onCancelPhase = vi.fn(() => cancellation);
+    render(
+      <ProjectNotes cwd={cwd} client={client} onCancelPhase={onCancelPhase} phaseActionDisabled />,
+    );
+
+    await openRoadmapPhase("Active phase");
+    const cancel = screen.getByRole("button", { name: "Cancel run" }) as HTMLButtonElement;
+    expect(cancel.disabled).toBe(false);
+    fireEvent.click(cancel);
+
+    expect(onCancelPhase).toHaveBeenCalledExactlyOnceWith("active");
+    expect(
+      (screen.getByRole("button", { name: "Cancelling…" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.getByText("Cancelling the bound agent run…")).toBeTruthy();
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.status).toBe(
+      "in-progress",
+    );
+
+    resolveCancellation({
+      status: "failed",
+      phaseId: "active",
+      code: "cancellation-failed",
+      message: "The provider did not acknowledge cancellation. Notes was left unchanged.",
+      operationStopped: false,
+    });
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "The provider did not acknowledge cancellation. Notes was left unchanged.",
+    );
+    expect(client.snapshots.get(canonicalProjectKey(cwd))!.document.phases[0]!.status).toBe(
+      "in-progress",
+    );
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
   });
 
   it("creates, validates, inspects, opens, edits, unlinks, and deletes one shared reference", async () => {

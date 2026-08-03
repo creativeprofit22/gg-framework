@@ -2024,11 +2024,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setInput("");
       setSlashIndex(0);
     }
-    if (!queued) {
-      endStreamingText();
-      planResumePromptRef.current = trimmed;
-    }
-    void sendPrompt(trimmed);
+    if (!queued) endStreamingText();
+    void sendPrompt(trimmed).then((submission) => {
+      if (!submission.queued) planResumePromptRef.current = trimmed;
+    });
   }
 
   // Scheduled prompts fire from a ticker that is set up once, so it can't close
@@ -2108,8 +2107,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         }
         kenPromptActionLockRef.current = true;
         try {
-          if (disposition !== "queue") planResumePromptRef.current = prompt;
           const submission = await sendPrompt(prompt, [], { kenSent: true });
+          if (!submission.queued) planResumePromptRef.current = prompt;
           stickToBottomRef.current = true;
           setQueuedCount(submission.count);
           pushItem({
@@ -2548,12 +2547,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setMentionedPaths([]);
     setEnhancement(null);
     endStreamingText();
-    planResumePromptRef.current = prompt;
     void sendPrompt(
       prompt,
       wire,
       sentEnhancements ? { enhancements: sentEnhancements } : undefined,
-    );
+    ).then((submission) => {
+      if (!submission.queued) planResumePromptRef.current = prompt;
+    });
   }
 
   // ── Attachment intake (paste / attach button / whole-window drag-drop) ──

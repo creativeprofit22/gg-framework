@@ -523,6 +523,47 @@ describe("AgentPane lifecycle", () => {
     expect(screen.queryByRole("region", { name: "Plan approval required" })).toBeNull();
   });
 
+  it("keeps the active approval-resume prompt when later steering is queued", async () => {
+    const pane = client("pane-1", 7);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      { role: "assistant", text: "```prompt\n/commit\n```", ken: true },
+      { role: "assistant", text: "```prompt\nqueued steering\n```", ken: true },
+    ] as Awaited<ReturnType<PaneAgentClient["listHistory"]>>);
+    vi.mocked(pane.sendPrompt)
+      .mockResolvedValueOnce({ queued: false, count: 0 })
+      .mockResolvedValueOnce({ queued: true, count: 1 });
+    vi.mocked(pane.acceptPlan).mockResolvedValue(undefined);
+
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    const continueButtons = await screen.findAllByRole("button", { name: "Continue here" });
+    fireEvent.click(continueButtons[0]!);
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith("/commit", [], { kenSent: true }),
+    );
+    fireEvent.click(continueButtons[1]!);
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith("queued steering", [], { kenSent: true }),
+    );
+    vi.mocked(pane.sendPrompt).mockClear();
+
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    act(() =>
+      handleEvent?.({
+        type: "plan_exit",
+        data: { planPath: "/plans/active-commit.md", content: "## Steps\n1. Commit" },
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("/plans/active-commit.md"));
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith("/commit"));
+    expect(pane.sendPrompt).not.toHaveBeenCalledWith("queued steering");
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it("managed panes restore an existing native session without owning its disposal", async () => {
     const pane = client("pane-1", 7);
     const view = render(

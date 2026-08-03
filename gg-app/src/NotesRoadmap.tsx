@@ -956,6 +956,26 @@ function PhaseDetail({
           <h3 id={`notes-phase-detail-${phase.id}`}>{phase.title}</h3>
         </div>
         <div className="notes-phase-detail-actions">
+          {effectiveAction !== "Review" && (
+            <button
+              ref={actionButtonRef}
+              type="button"
+              className="notes-roadmap-primary"
+              disabled={controlsDisabled || phaseStartDisabled}
+              title={phaseStartDisabled ? startUnavailableReason : undefined}
+              onClick={() => void runPhaseAction()}
+            >
+              {pending
+                ? effectiveActionLabel === "Retry"
+                  ? "Retrying…"
+                  : effectiveAction === "Start"
+                    ? "Starting…"
+                    : effectiveAction === "Recover"
+                      ? "Recovering…"
+                      : "Resuming…"
+                : `${effectiveActionLabel} phase`}
+            </button>
+          )}
           <button
             type="button"
             disabled={controlsDisabled}
@@ -1483,26 +1503,6 @@ function PhaseDetail({
             <p className="notes-phase-attention">Needs attention: {phase.attentionReason}</p>
           )}
         </div>
-        {effectiveAction !== "Review" && (
-          <button
-            ref={actionButtonRef}
-            type="button"
-            className="notes-roadmap-primary"
-            disabled={controlsDisabled || phaseStartDisabled}
-            title={phaseStartDisabled ? startUnavailableReason : undefined}
-            onClick={() => void runPhaseAction()}
-          >
-            {pending
-              ? effectiveActionLabel === "Retry"
-                ? "Retrying…"
-                : effectiveAction === "Start"
-                  ? "Starting…"
-                  : effectiveAction === "Recover"
-                    ? "Recovering…"
-                    : "Resuming…"
-              : `${effectiveActionLabel} phase`}
-          </button>
-        )}
         <div
           className="notes-phase-action-status"
           role="status"

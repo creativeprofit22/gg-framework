@@ -7030,14 +7030,39 @@ body {
   border-radius: var(--radius-card);
   background: var(--surface-2);
 }
+/* Keep unbroken prompts and source coordinates from defining the panel's min-content width. */
+.notes-phase-detail :is(section, details, form, dl, ul, li, div) {
+  min-width: 0;
+}
+
+.notes-phase-detail :is(p, li, dd, small, span, strong, a, code, pre) {
+  overflow-wrap: anywhere;
+}
+
 .notes-phase-detail-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px 14px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--border);
 }
+
+.notes-phase-detail-heading > :first-child {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.notes-phase-detail-actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 0;
+}
+
 .notes-phase-detail-heading h3 {
   margin: 2px 0 0;
   color: var(--text);
@@ -7081,12 +7106,19 @@ body {
 }
 .notes-phase-saved-prompt {
   display: grid;
+  min-width: 0;
   gap: 7px;
   margin: 0;
   padding: 0 14px 14px;
 }
 .notes-phase-saved-prompt h4 {
   margin: 0;
+}
+.notes-phase-saved-prompt pre {
+  max-width: 100%;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .notes-phase-metadata {
   display: grid;
@@ -8403,12 +8435,16 @@ body {
   .notes-phase-secondary-actions {
     justify-content: flex-start;
   }
-  .notes-phase-execution .notes-roadmap-primary {
+  .notes-phase-detail-actions {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+  .notes-phase-detail-actions .notes-roadmap-primary {
     width: 100%;
   }
   .notes-phase-lifecycle-actions button,
   .notes-phase-secondary-actions button,
-  .notes-phase-execution .notes-roadmap-primary,
+  .notes-phase-detail-actions .notes-roadmap-primary,
   .notes-reference-new,
   .notes-reference-form-actions button,
   .notes-reference-detail-actions button,

@@ -1817,12 +1817,17 @@ describe("ProjectNotes", () => {
 
       if (expectedAction === "Review") {
         expect(screen.getByText("This phase is available for scope review only.")).toBeTruthy();
-        expect(screen.queryByRole("button", { name: /^(Start|Recover|Resume) phase$/ })).toBeNull();
+        expect(
+          screen.queryByRole("button", { name: /^(Start|Recover|Resume|Retry) phase$/ }),
+        ).toBeNull();
       } else {
         const detailAction = screen.getByRole("button", {
           name: `${expectedAction} phase`,
         }) as HTMLButtonElement;
         expect(detailAction.disabled).toBe(false);
+        expect(detailAction.closest(".notes-phase-detail-actions")).not.toBeNull();
+        expect(detailAction.closest(".notes-phase-execution")).toBeNull();
+        expect(screen.getAllByRole("button", { name: `${expectedAction} phase` })).toHaveLength(1);
         fireEvent.click(detailAction);
         const startsSession =
           expectedAction === "Start" ||

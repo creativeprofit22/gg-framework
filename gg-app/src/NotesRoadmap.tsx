@@ -3,7 +3,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "./brand";
 import { notesLifecyclePresentation } from "./notes-lifecycle-presentation";
 import { referenceRepositoryLabel, referenceSourceLabel } from "./notes-reference";
-import { NotesPhaseCompletionGates } from "./NotesPhaseCompletionGates";
+import {
+  NotesPhaseCompletionGates,
+  notesCompletionGateOverview,
+} from "./NotesPhaseCompletionGates";
 import {
   dateToLocalInputValue,
   localDateTimeToIso,
@@ -602,6 +605,145 @@ function reconcileReminderDraft(
   };
 }
 
+function PhaseOverview({
+  phase,
+  currentTime,
+  actionLabel,
+  latestReport,
+  pendingProposalCount,
+}: {
+  phase: NotesPhase;
+  currentTime: Date;
+  actionLabel: string;
+  latestReport: NotesRoadmapStatusUpdate | null;
+  pendingProposalCount: number;
+}): React.ReactElement {
+  const lifecycle = notesLifecyclePresentation(phase);
+  const completion = notesCompletionGateOverview(phase);
+  const isManualOverride = phase.overrides.status !== null;
+  const dueAt = phase.reminder ? Date.parse(phase.reminder.dueAt) : null;
+  const reminderState = phase.reminder
+    ? `${dueAt !== null && dueAt <= currentTime.getTime() ? "Due now" : "Scheduled"} · ${formatDateTime(
+        phase.reminder.dueAt,
+      )}`
+    : "None scheduled";
+  const nextAction = phaseNextAction(phase, actionLabel);
+  const reportMeta = latestReport
+    ? `${roadmapActorLabel(latestReport.actor)} · ${formatDateTime(latestReport.timestamp)}`
+    : "No report recorded";
+
+  return (
+    <section
+      className={`notes-phase-overview notes-phase-overview-${completion.tone}`}
+      aria-labelledby={`notes-phase-overview-${phase.id}`}
+    >
+      <div className="notes-phase-overview-heading">
+        <div>
+          <p className="notes-phase-overview-eyebrow">Phase overview</p>
+          <h4 id={`notes-phase-overview-${phase.id}`}>{lifecycle.state}</h4>
+          <p>{lifecycle.stage}</p>
+        </div>
+        <div className="notes-phase-overview-next">
+          <span>Next action</span>
+          <strong>{nextAction}</strong>
+        </div>
+      </div>
+
+      {isManualOverride && (
+        <p className="notes-phase-overview-authority">
+          <span>Manual override</span> User-selected state remains authoritative.
+        </p>
+      )}
+      {phase.status === "needs-attention" && phase.attentionReason && (
+        <p className="notes-phase-overview-blocker">Blocked: {phase.attentionReason}</p>
+      )}
+
+      <div className="notes-phase-overview-completion">
+        <div className="notes-phase-overview-completion-heading">
+          <span>Completion gates</span>
+          <strong className={`notes-phase-overview-tone-${completion.tone}`}>
+            {completion.outcome}
+          </strong>
+        </div>
+        <dl>
+          <div>
+            <dt>Implementation</dt>
+            <dd className={`notes-phase-overview-tone-${completion.implementation.tone}`}>
+              <strong>{completion.implementation.label}</strong>
+              <span title={completion.implementation.detail}>
+                {completion.implementation.detail}
+              </span>
+            </dd>
+          </div>
+          <div>
+            <dt>Verification</dt>
+            <dd className={`notes-phase-overview-tone-${completion.verification.tone}`}>
+              <strong>{completion.verification.label}</strong>
+              {completion.verification.detail && (
+                <span title={completion.verification.detail}>{completion.verification.detail}</span>
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>Final review</dt>
+            <dd className={`notes-phase-overview-tone-${completion.review.tone}`}>
+              <strong>{completion.review.label}</strong>
+              {completion.review.detail && (
+                <span title={completion.review.detail}>{completion.review.detail}</span>
+              )}
+            </dd>
+          </div>
+        </dl>
+        {completion.blocker && (
+          <p className="notes-phase-overview-blocker">Blocked: {completion.blocker}</p>
+        )}
+      </div>
+
+      <dl className="notes-phase-overview-summary">
+        <div>
+          <dt>Latest report</dt>
+          <dd>
+            <strong>{reportMeta}</strong>
+            {latestReport && <span>{latestReport.progress}</span>}
+            {latestReport?.blocker && <span>Blocked: {latestReport.blocker}</span>}
+          </dd>
+        </div>
+        <div>
+          <dt>Reminder</dt>
+          <dd>
+            <strong>{reminderState}</strong>
+            {phase.reminder?.note && <span>{phase.reminder.note}</span>}
+          </dd>
+        </div>
+        <div>
+          <dt>References</dt>
+          <dd>
+            <strong>
+              {phase.referenceIds.length} attached
+              {pendingProposalCount > 0 ? ` · ${pendingProposalCount} pending` : ""}
+            </strong>
+          </dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function phaseNextAction(phase: NotesPhase, actionLabel: string): string {
+  if (actionLabel === "Start") return "Start this phase";
+  if (actionLabel === "Recover") return "Recover the missing session";
+  if (actionLabel === "Resume") return "Resume the linked session";
+  if (actionLabel === "Retry") return "Retry this phase";
+  return phase.status === "done"
+    ? "Review completion; archive when ready"
+    : "Review completion evidence";
+}
+
+function savedPromptPreview(sourcePrompt: string): string {
+  const normalized = sourcePrompt.trim().replace(/\s+/g, " ");
+  return normalized.length > 140 ? `${normalized.slice(0, 137)}…` : normalized;
+}
+
 function PhaseDetail({
   phase,
   currentTime,
@@ -1073,6 +1215,13 @@ function PhaseDetail({
         </form>
       ) : (
         <>
+          <PhaseOverview
+            phase={phase}
+            currentTime={currentTime}
+            actionLabel={effectiveActionLabel}
+            latestReport={latestReport}
+            pendingProposalCount={pendingProposals.length}
+          />
           <div className="notes-phase-content">
             <div>
               <h4>Goal</h4>
@@ -1093,13 +1242,15 @@ function PhaseDetail({
           </div>
 
           {phase.sourcePrompt.trim().length > 0 && (
-            <section
-              className="notes-phase-saved-prompt"
-              aria-labelledby={`notes-phase-saved-prompt-${phase.id}`}
-            >
-              <h4 id={`notes-phase-saved-prompt-${phase.id}`}>Saved prompt</h4>
+            <details className="notes-phase-saved-prompt">
+              <summary>
+                <span>Saved prompt</span>
+                <span className="notes-phase-saved-prompt-preview">
+                  Preview: {savedPromptPreview(phase.sourcePrompt)}
+                </span>
+              </summary>
               <pre>{phase.sourcePrompt}</pre>
-            </section>
+            </details>
           )}
 
           <dl className="notes-phase-metadata">

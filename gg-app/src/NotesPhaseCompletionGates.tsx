@@ -57,6 +57,201 @@ const dateTimeFormatter = new Intl.DateTimeFormat(undefined, {
   timeStyle: "short",
 });
 
+export type NotesCompletionGateTone = "neutral" | "positive" | "warning" | "negative" | "protected";
+
+export interface NotesCompletionGateOverview {
+  implementation: { label: string; detail: string; tone: NotesCompletionGateTone };
+  verification: { label: string; detail: string | null; tone: NotesCompletionGateTone };
+  review: { label: string; detail: string | null; tone: NotesCompletionGateTone };
+  outcome: string;
+  blocker: string | null;
+  tone: NotesCompletionGateTone;
+}
+
+export function notesCompletionGateOverview(phase: NotesPhase): NotesCompletionGateOverview {
+  const latestImplementation = latestRoadmapEvent(
+    phase,
+    (event): event is NotesRoadmapImplementationCheckpoint =>
+      event.type === "implementation-checkpoint",
+  );
+  const latestVerification = latestRoadmapEvent(
+    phase,
+    (event): event is NotesRoadmapStatusUpdate =>
+      event.type === "status-update" && event.verification !== null,
+  );
+  const review = latestRoadmapEvent(
+    phase,
+    (event): event is NotesRoadmapCompletionReview => event.type === "completion-review",
+  );
+  const reviewIndex = review ? phase.roadmapEvents.lastIndexOf(review) : -1;
+  const hasNewerEvidence =
+    review !== null &&
+    latestRoadmapEventAfter(
+      phase,
+      reviewIndex,
+      (event): event is NotesRoadmapImplementationCheckpoint | NotesRoadmapStatusUpdate =>
+        event.type === "implementation-checkpoint" ||
+        (event.type === "status-update" && event.verification !== null),
+    ) !== null;
+  const implementation =
+    review && !hasNewerEvidence
+      ? (phase.roadmapEvents.find(
+          (event): event is NotesRoadmapImplementationCheckpoint =>
+            event.type === "implementation-checkpoint" &&
+            event.id === review.implementationCheckpointId,
+        ) ?? null)
+      : latestImplementation;
+  const verification =
+    review && !hasNewerEvidence
+      ? (phase.roadmapEvents.find(
+          (event): event is NotesRoadmapStatusUpdate =>
+            event.type === "status-update" && event.id === review.verificationStatusUpdateId,
+        ) ?? null)
+      : latestVerification;
+
+  const implementationDetail = implementation
+    ? `${implementation.completedPlanSteps.length} of ${implementation.planStepTotal} plan steps`
+    : "No evidence";
+  const implementationComplete =
+    implementation?.runOutcome === "succeeded" &&
+    implementation.completedPlanSteps.length === implementation.planStepTotal;
+  const implementationFailed = implementation?.runOutcome === "failed";
+  const implementationSummary = implementation
+    ? {
+        label: implementationFailed ? "Failed" : implementationComplete ? "Complete" : "Blocked",
+        detail: implementationDetail,
+        tone: implementationFailed
+          ? ("negative" as const)
+          : implementationComplete
+            ? ("positive" as const)
+            : ("warning" as const),
+      }
+    : { label: "Missing", detail: implementationDetail, tone: "neutral" as const };
+
+  const verificationSummary = verification?.verification
+    ? {
+        label: verificationLabel(verification.verification),
+        detail: verification.verificationReason,
+        tone:
+          verification.verification === "passed"
+            ? ("positive" as const)
+            : verification.verification === "failed"
+              ? ("negative" as const)
+              : ("warning" as const),
+      }
+    : { label: "Missing", detail: null, tone: "neutral" as const };
+
+  const reviewSummary = hasNewerEvidence
+    ? {
+        label: "Review needed",
+        detail: "Newer completion evidence has not been reviewed.",
+        tone: "warning" as const,
+      }
+    : review
+      ? {
+          label: review.decision === "accepted" ? "Accepted" : "Rejected",
+          detail: review.reason,
+          tone:
+            review.gateOutcome === "manual-override"
+              ? ("protected" as const)
+              : review.decision === "accepted"
+                ? ("positive" as const)
+                : ("negative" as const),
+        }
+      : { label: "Missing", detail: null, tone: "neutral" as const };
+
+  if (review?.gateOutcome === "manual-override") {
+    return {
+      implementation: implementationSummary,
+      verification: verificationSummary,
+      review: reviewSummary,
+      outcome: "Manual override protected",
+      blocker:
+        review.reason ??
+        (review.unmetGateCodes[0] ? completionGateRecovery(review.unmetGateCodes[0]) : null) ??
+        "Automatic completion cannot replace the user-selected state.",
+      tone: "protected",
+    };
+  }
+  if (!hasNewerEvidence && review?.decision === "rejected") {
+    return {
+      implementation: implementationSummary,
+      verification: verificationSummary,
+      review: reviewSummary,
+      outcome: "Review rejected",
+      blocker:
+        review.reason ??
+        (review.unmetGateCodes[0] ? completionGateRecovery(review.unmetGateCodes[0]) : null),
+      tone: "negative",
+    };
+  }
+  if (!hasNewerEvidence && review?.decision === "accepted" && review.gateOutcome === "done") {
+    return {
+      implementation: implementationSummary,
+      verification: verificationSummary,
+      review: reviewSummary,
+      outcome: review.acceptsVerificationException ? "Accepted with exception" : "Accepted",
+      blocker: null,
+      tone: "positive",
+    };
+  }
+  if (verification?.verification === "failed") {
+    return {
+      implementation: implementationSummary,
+      verification: verificationSummary,
+      review: reviewSummary,
+      outcome: "Verification failed",
+      blocker: verification.verificationReason ?? "Verification must pass before final review.",
+      tone: "negative",
+    };
+  }
+  if (verification?.verification === "exception-requested") {
+    return {
+      implementation: implementationSummary,
+      verification: verificationSummary,
+      review: reviewSummary,
+      outcome: "Exception pending",
+      blocker:
+        verification.verificationReason ?? "A reviewer must accept the verification exception.",
+      tone: "warning",
+    };
+  }
+  if (implementation && !implementationComplete) {
+    return {
+      implementation: implementationSummary,
+      verification: verificationSummary,
+      review: reviewSummary,
+      outcome: "Completion blocked",
+      blocker: implementationFailed
+        ? "The implementation run failed."
+        : "Complete every canonical plan step before final review.",
+      tone: implementationFailed ? "negative" : "warning",
+    };
+  }
+  if (!implementation || !verification?.verification) {
+    return {
+      implementation: implementationSummary,
+      verification: verificationSummary,
+      review: reviewSummary,
+      outcome: "Evidence missing",
+      blocker: !implementation
+        ? "Record implementation evidence next."
+        : "Record typed verification next.",
+      tone: "neutral",
+    };
+  }
+  return {
+    implementation: implementationSummary,
+    verification: verificationSummary,
+    review: reviewSummary,
+    outcome: "Final review pending",
+    blocker: hasNewerEvidence
+      ? "Newer completion evidence requires another final review."
+      : "A final review decision is still required.",
+    tone: "warning",
+  };
+}
+
 export function NotesPhaseCompletionGates({ phase }: { phase: NotesPhase }): ReactElement {
   const latestImplementation = latestRoadmapEvent(
     phase,

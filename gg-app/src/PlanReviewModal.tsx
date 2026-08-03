@@ -1,30 +1,29 @@
 import { useState } from "react";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
-import { YourPlanLogo } from "./PlanModeLogo";
 import { Markdown } from "./Markdown";
 
 interface Props {
-  /** Plan markdown to review. */
+  /** Plan markdown awaiting approval. */
   content: string;
-  /** True while Autopilot Ken is reviewing this plan himself — shows a small
-   *  indicator above the actions. Buttons stay ENABLED: a manual Accept/
-   *  Feedback/Reject always overrides Ken (the sidecar's generation guard
-   *  discards his stale verdict). */
+  /** True while Autopilot Ken is reviewing this plan himself. */
   kenReviewing?: boolean;
+  /** Locks the resolving controls while approval is crossing the IPC boundary. */
+  busy?: boolean;
   onAccept: () => void;
   onFeedback: (feedback: string) => void;
   onReject: () => void;
 }
 
 /**
- * Full-screen plan review shown on plan_exit (mirrors the ggcoder CLI plan
- * overlay): the amber "YOUR PLAN" banner, the rendered plan markdown, and three
- * actions — Accept (implement), Feedback (revise with notes), Reject (dismiss).
+ * Persistent workflow gate shown inline with the transcript. It stays visible
+ * until the user explicitly approves or dismisses the pending plan, so normal
+ * prompt actions cannot strand the operation behind an invisible modal.
  */
 export function PlanReviewModal({
   content,
   kenReviewing = false,
+  busy = false,
   onAccept,
   onFeedback,
   onReject,
@@ -33,19 +32,30 @@ export function PlanReviewModal({
   const [feedback, setFeedback] = useState("");
 
   return (
-    <div className="plan-review">
-      <div className="plan-review-banner">
-        <YourPlanLogo />
+    <section className="plan-review" aria-label="Plan approval required" aria-busy={busy}>
+      <div className="plan-review-message">
+        <span className="plan-review-icon" aria-hidden="true">
+          {"◆"}
+        </span>
+        <div>
+          <strong>Plan approval required</strong>
+          <p>Approve this plan to resume the operation, or dismiss it to stop here.</p>
+        </div>
       </div>
-      <div className="plan-review-body">
-        <Markdown>{content || "_(plan is empty)_"}</Markdown>
-      </div>
+
+      <details className="plan-review-details">
+        <summary>Review plan</summary>
+        <div className="plan-review-body">
+          <Markdown>{content || "_(plan is empty)_"}</Markdown>
+        </div>
+      </details>
 
       {kenReviewing && (
         <div className="plan-review-ken" style={{ color: theme.ken }}>
-          {MENTOR_DISPLAY_NAME} is reviewing this plan… you can still accept or reject it yourself.
+          {MENTOR_DISPLAY_NAME} is reviewing this plan… you can still decide now.
         </div>
       )}
+
       <div className="plan-review-actions">
         {feedbackMode ? (
           <div className="plan-feedback">
@@ -55,27 +65,34 @@ export function PlanReviewModal({
               placeholder="What should change about this plan?"
               autoFocus
               rows={3}
-              onChange={(e) => setFeedback(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
+              disabled={busy}
+              onChange={(event) => setFeedback(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
                   if (feedback.trim()) onFeedback(feedback.trim());
-                } else if (e.key === "Escape") {
+                } else if (event.key === "Escape") {
                   setFeedbackMode(false);
                 }
               }}
             />
             <div className="plan-feedback-row">
               <span className="plan-feedback-hint" style={{ color: theme.textDim }}>
-                {"\u2318\u23CE to send \u00b7 Esc to cancel"}
+                {"⌘↵ to send · Esc to cancel"}
               </span>
               <span className="plan-feedback-buttons">
-                <button className="btn btn-ghost btn-sm" onClick={() => setFeedbackMode(false)}>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy}
+                  onClick={() => setFeedbackMode(false)}
+                >
                   Cancel
                 </button>
                 <button
+                  type="button"
                   className="btn btn-primary btn-sm"
-                  disabled={!feedback.trim()}
+                  disabled={busy || !feedback.trim()}
                   onClick={() => onFeedback(feedback.trim())}
                 >
                   Send feedback
@@ -85,18 +102,28 @@ export function PlanReviewModal({
           </div>
         ) : (
           <>
-            <button className="btn btn-primary" onClick={onAccept}>
-              Accept
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={onAccept}>
+              {busy ? "Approving…" : "Approve"}
             </button>
-            <button className="btn btn-ghost" onClick={() => setFeedbackMode(true)}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              disabled={busy}
+              onClick={() => setFeedbackMode(true)}
+            >
               Feedback
             </button>
-            <button className="btn btn-ghost plan-reject" onClick={onReject}>
-              Reject
+            <button
+              type="button"
+              className="btn btn-ghost plan-reject"
+              disabled={busy}
+              onClick={onReject}
+            >
+              Dismiss
             </button>
           </>
         )}
       </div>
-    </div>
+    </section>
   );
 }

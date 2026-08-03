@@ -57,10 +57,18 @@ vi.mock("./useAgentEvents", () => ({
     handleAutopilotEvent: (event: AgentModule.SidecarEvent) => boolean;
     onSessionReset?: (operationId?: string) => void;
     setItems: Dispatch<SetStateAction<Item[]>>;
+    setPlanReview: Dispatch<SetStateAction<string | null>>;
+    planReviewPathRef: { current: string | null };
   }) => {
     nativeMocks.onSessionReset = deps.onSessionReset ?? null;
     return {
       handleEvent: (event: AgentModule.SidecarEvent) => {
+        if (event.type === "plan_exit") {
+          const data = event.data as { planPath?: unknown; content?: unknown };
+          deps.planReviewPathRef.current = typeof data.planPath === "string" ? data.planPath : null;
+          deps.setPlanReview(String(data.content ?? ""));
+          return true;
+        }
         if (event.type !== "session_reset") return deps.handleAutopilotEvent(event);
         const data = event.data as { operationId?: unknown };
         deps.setItems([]);
@@ -192,7 +200,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     sendKenPrompt: vi.fn(),
     cancelKen: vi.fn(),
     setAutopilot: vi.fn(),
-    acceptPlan: vi.fn(),
+    acceptPlan: vi.fn(async () => ({ ok: true, planTotal: 0 })),
     authOAuthStart: vi.fn(),
     authOAuthCode: vi.fn(),
     newSession: vi.fn(async () => ({ operationId: "operation-1" })),
@@ -226,6 +234,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
 async function renderKenPromptPane(
   pane: PaneAgentClient,
   running = false,
+  prompt = KEN_PROMPT,
 ): Promise<HTMLButtonElement> {
   vi.mocked(pane.getState).mockResolvedValue({
     ...agentState("azure:gpt-test"),
@@ -235,7 +244,7 @@ async function renderKenPromptPane(
   vi.mocked(pane.listHistory).mockResolvedValue([
     {
       role: "assistant",
-      text: `\`\`\`prompt\n${KEN_PROMPT}\n\`\`\``,
+      text: `\`\`\`prompt\n${prompt}\n\`\`\``,
       ken: true,
     },
   ] as Awaited<ReturnType<PaneAgentClient["listHistory"]>>);
@@ -451,6 +460,69 @@ describe("AgentPane lifecycle", () => {
     );
   });
 
+  it("keeps ordinary plan acceptance on the webview prompt path", async () => {
+    const pane = client("pane-1", 7);
+    vi.mocked(pane.acceptPlan).mockResolvedValue(undefined);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    await waitFor(() =>
+      expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(false),
+    );
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+
+    act(() =>
+      handleEvent?.({
+        type: "plan_exit",
+        data: { planPath: "/plans/ordinary.md", content: "## Steps\n1. Build\n2. Verify" },
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith(
+        "The plan has been approved. Implement it now, following each step in order.",
+      ),
+    );
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds an implemented /commit action at the inline plan gate, then resumes after approval", async () => {
+    const pane = client("pane-1", 7);
+    vi.mocked(pane.acceptPlan).mockResolvedValue(undefined);
+
+    const continueButton = await renderKenPromptPane(pane, false, "/commit");
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    fireEvent.click(continueButton);
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith("/commit", [], { kenSent: true }),
+    );
+    vi.mocked(pane.sendPrompt).mockClear();
+
+    act(() =>
+      handleEvent?.({
+        type: "plan_exit",
+        data: { planPath: "/plans/blocked-commit.md", content: "## Steps\n1. Build\n2. Verify" },
+      }),
+    );
+
+    expect(await screen.findByRole("region", { name: "Plan approval required" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    expect((continueButton as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(true);
+
+    fireEvent.click(continueButton);
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("/plans/blocked-commit.md"));
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith("/commit"));
+    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("region", { name: "Plan approval required" })).toBeNull();
+  });
+
   it("managed panes restore an existing native session without owning its disposal", async () => {
     const pane = client("pane-1", 7);
     const view = render(
@@ -591,7 +663,6 @@ describe("AgentPane lifecycle", () => {
     const creation = deferred<Awaited<ReturnType<PaneAgentClient["newSession"]>>>();
     vi.mocked(pane.newSession).mockReturnValueOnce(creation.promise);
     await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     const fresh = screen.getByRole("button", { name: "New session" });
 
     fireEvent.click(fresh);
@@ -617,7 +688,6 @@ describe("AgentPane lifecycle", () => {
       new NewSessionError("creation-rejected", "HTTP 409", 409),
     );
     await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
 
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
     const alert = await screen.findByRole("alert");
@@ -637,7 +707,6 @@ describe("AgentPane lifecycle", () => {
       new NewSessionError("outcome-unknown", "connection closed"),
     );
     await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
 
     const alert = await screen.findByRole("alert");
@@ -650,7 +719,6 @@ describe("AgentPane lifecycle", () => {
     const pane = client("pane-ken-timeout", 1);
     await renderKenPromptPane(pane);
     vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
 
     await act(async () => {
@@ -667,7 +735,6 @@ describe("AgentPane lifecycle", () => {
     const pane = client("pane-ken-post-reset-failure", 1);
     vi.mocked(pane.sendPrompt).mockRejectedValueOnce(new Error("transport failed"));
     await renderKenPromptPane(pane);
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(screen.getByRole("button", { name: "New session" }));
     await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
 
@@ -686,7 +753,6 @@ describe("AgentPane lifecycle", () => {
     await renderKenPromptPane(pane);
     const subscriptions = vi.mocked(pane.subscribe).mock.calls;
     const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     const fresh = screen.getByRole("button", { name: "New session" });
     const toolbar = screen.getByTitle("Start a new session for this project");
 

@@ -2407,51 +2407,81 @@ body {
   padding: 1px 0;
 }
 
-/* ── Plan review modal (plan_exit: YOUR PLAN + Accept/Feedback/Reject) ── */
+/* ── Pending Plan Mode workflow gate ─────────────────────────────────────── */
 .plan-review {
-  position: fixed;
-  inset: 0;
-  z-index: 120;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg);
+  position: sticky;
+  bottom: 8px;
+  z-index: 4;
+  margin: 12px 0 4px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--surface-1) 96%, transparent);
+  box-shadow: 0 12px 32px color-mix(in srgb, var(--bg) 58%, transparent);
+  overflow: hidden;
+  backdrop-filter: blur(12px);
 }
-.plan-review-banner {
-  flex: 0 0 auto;
-  padding: 40px 24px 12px;
-  border-bottom: 1px solid var(--border);
+.plan-review-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 14px 11px;
+}
+.plan-review-message strong {
+  display: block;
+  color: var(--text);
+  font-size: 14px;
+}
+.plan-review-message p {
+  margin: 3px 0 0;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.plan-review-icon {
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.plan-review-details {
+  border-top: 1px solid var(--border);
+}
+.plan-review-details > summary {
+  padding: 8px 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.plan-review-details > summary:hover {
+  color: var(--text);
 }
 .plan-review-body {
-  flex: 1 1 auto;
+  max-height: min(42vh, 420px);
   overflow-y: auto;
-  padding: 20px 24px;
-  font-size: 15px;
+  padding: 4px 14px 12px;
+  font-size: 14px;
 }
 .plan-review-ken {
-  flex: 0 0 auto;
-  padding: 8px 24px;
-  font-size: 13px;
+  padding: 8px 14px;
+  font-size: 12px;
   border-top: 1px solid var(--border);
-  background: var(--surface-1);
 }
 .plan-review-actions {
-  flex: 0 0 auto;
   display: flex;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
-  padding: 14px 24px;
+  padding: 10px 14px;
   border-top: 1px solid var(--border);
-  background: var(--surface-1);
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
 }
 .plan-reject {
   margin-left: auto;
-  color: var(--error);
-  border-color: color-mix(in srgb, var(--error) 35%, var(--border));
 }
 .plan-reject:hover:not(:disabled) {
   color: var(--error);
-  border-color: var(--error);
-  background: color-mix(in srgb, var(--error) 12%, var(--surface-1));
+  border-color: color-mix(in srgb, var(--error) 55%, var(--border));
+  background: color-mix(in srgb, var(--error) 10%, var(--surface-1));
 }
 .plan-feedback {
   width: 100%;
@@ -2486,6 +2516,29 @@ body {
 .plan-feedback-buttons {
   display: flex;
   gap: 8px;
+}
+
+@media (max-width: 560px) {
+  .plan-review {
+    bottom: 4px;
+    margin-top: 8px;
+  }
+  .plan-review-message {
+    padding: 11px 12px 9px;
+  }
+  .plan-review-actions {
+    padding: 9px 12px;
+  }
+  .plan-review-actions > .btn {
+    flex: 1 1 0;
+    padding-inline: 8px;
+  }
+  .plan-feedback-row {
+    align-items: flex-end;
+  }
+  .plan-feedback-hint {
+    display: none;
+  }
 }
 
 /* ── Plan mode ASCII banner ── */
@@ -2855,8 +2908,7 @@ body {
   margin: 0 14px 12px;
 }
 .markdown .ken-prompt-send,
-.markdown .ken-prompt-more,
-.markdown .ken-prompt-secondary-actions button,
+.markdown .ken-prompt-action,
 .markdown .ken-prompt-save-actions button,
 .markdown .ken-prompt-error button {
   display: inline-flex;
@@ -2878,11 +2930,20 @@ body {
     background-color var(--t-fast);
 }
 .markdown .ken-prompt-send {
-  color: var(--ken);
+  color: var(--bg);
+  background: var(--ken);
+  border-color: var(--ken);
+  box-shadow: 0 1px 6px color-mix(in srgb, var(--ken) 20%, transparent);
 }
-.markdown .ken-prompt-send:hover:not(:disabled),
-.markdown .ken-prompt-more:hover:not(:disabled),
-.markdown .ken-prompt-secondary-actions button:hover:not(:disabled),
+.markdown .ken-prompt-action {
+  flex: 0 1 auto;
+}
+.markdown .ken-prompt-send:hover:not(:disabled) {
+  color: var(--bg);
+  background: color-mix(in srgb, var(--ken) 88%, white);
+  border-color: color-mix(in srgb, var(--ken) 88%, white);
+}
+.markdown .ken-prompt-action:hover:not(:disabled),
 .markdown .ken-prompt-save-actions button:hover:not(:disabled),
 .markdown .ken-prompt-error button:hover:not(:disabled) {
   color: var(--text);
@@ -2895,7 +2956,7 @@ body {
   opacity: 0.85;
 }
 .markdown .ken-prompt-send:focus-visible,
-.markdown .ken-prompt-more:focus-visible,
+.markdown .ken-prompt-action:focus-visible,
 .markdown .ken-prompt-action-panel button:focus-visible,
 .markdown .ken-prompt-action-panel input:focus-visible,
 .markdown .ken-prompt-action-panel select:focus-visible,
@@ -2919,11 +2980,6 @@ body {
   background: var(--surface-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-button);
-}
-.markdown .ken-prompt-secondary-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
 }
 .markdown .ken-prompt-save-form,
 .markdown .ken-prompt-save-form fieldset {
@@ -3065,13 +3121,11 @@ body {
     margin-inline: 10px;
   }
   .markdown .ken-prompt-actions,
-  .markdown .ken-prompt-secondary-actions,
   .markdown .ken-prompt-save-actions {
     display: grid;
     grid-template-columns: 1fr;
   }
   .markdown .ken-prompt-actions button,
-  .markdown .ken-prompt-secondary-actions button,
   .markdown .ken-prompt-save-actions button {
     width: 100%;
     min-width: 0;
@@ -3084,8 +3138,7 @@ body {
 }
 @media (prefers-reduced-motion: reduce) {
   .markdown .ken-prompt-send,
-  .markdown .ken-prompt-more,
-  .markdown .ken-prompt-secondary-actions button,
+  .markdown .ken-prompt-action,
   .markdown .ken-prompt-save-actions button,
   .markdown .ken-prompt-error button {
     transition: none;
@@ -3103,11 +3156,15 @@ body {
     border-color: CanvasText;
   }
   .markdown .ken-prompt-send:focus-visible,
-  .markdown .ken-prompt-more:focus-visible,
+  .markdown .ken-prompt-action:focus-visible,
   .markdown .ken-prompt-action-panel button:focus-visible,
   .markdown .ken-prompt-action-panel input:focus-visible,
   .markdown .ken-prompt-action-panel select:focus-visible {
     outline-color: Highlight;
+  }
+  .markdown .ken-prompt-send {
+    color: ButtonText;
+    background: ButtonFace;
   }
   .markdown .ken-prompt-success {
     color: Highlight;

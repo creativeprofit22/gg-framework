@@ -11,7 +11,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { Check, Copy, CornerDownLeft, FilePlus2, MoreHorizontal, Plus } from "lucide-react";
+import { Check, Copy, CornerDownLeft, FilePlus2, Plus } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { codeLanguage, codeNodeText } from "./markdown-prompt";
 import {
@@ -152,7 +152,6 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
   const ready = useContext(PromptReadyContext);
   const dispatcher = useContext(KenPromptActionContext);
   const panelId = useId();
-  const moreButtonRef = useRef<HTMLButtonElement>(null);
   const continueButtonRef = useRef<HTMLButtonElement>(null);
   const newSessionButtonRef = useRef<HTMLButtonElement>(null);
   const saveButtonRef = useRef<HTMLButtonElement>(null);
@@ -160,7 +159,6 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
   const phaseSelectRef = useRef<HTMLSelectElement>(null);
   const actionLockRef = useRef(false);
   const [continued, setContinued] = useState(false);
-  const [expanded, setExpanded] = useState(false);
   const [pending, setPending] = useState<PendingPromptAction | null>(null);
   const [saveDraft, setSaveDraft] = useState<SaveDraftState | null>(null);
   const [failedAction, setFailedAction] = useState<KenPromptAction | null>(null);
@@ -181,12 +179,11 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
     [saveDraft?.destination],
   );
 
-  const closeActions = useCallback((returnFocus: boolean) => {
-    setExpanded(false);
+  const closeSaveEditor = useCallback((returnFocus: boolean) => {
     setSaveDraft(null);
     setFailedAction(null);
     setError("");
-    if (returnFocus) queueMicrotask(() => moreButtonRef.current?.focus());
+    if (returnFocus) queueMicrotask(() => saveButtonRef.current?.focus());
   }, []);
 
   const runAction = useCallback(
@@ -244,7 +241,6 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
   const sendFresh = useCallback(async () => {
     const result = await runAction({ type: "send-fresh", prompt });
     if (result?.status === "sent") {
-      setExpanded(false);
       setSaveDraft(null);
       setAnnouncement("Started in new session.");
     }
@@ -299,7 +295,6 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
     });
     if (result?.status === "saved") {
       setSaveDraft(null);
-      setExpanded(false);
       setAnnouncement(`Saved to ${result.title}.`);
     }
   }, [prompt, runAction, saveDraft]);
@@ -316,6 +311,7 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
   }, [commitSave, failedAction, prepareSave, saveDraft, sendCurrent, sendFresh]);
 
   const disabled = pending !== null;
+  const currentSessionBlockedReason = dispatcher?.blockedReason?.("send-current") ?? null;
   const freshSessionBlockedReason = dispatcher?.blockedReason?.("send-fresh") ?? null;
   const selectedPhase = saveDraft?.preview.destinations.find(
     (destination) => destination.phaseId === saveDraft.phaseId,
@@ -334,7 +330,8 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
               type="button"
               className={`ken-prompt-send${continued ? " sent" : ""}`}
               onClick={() => void sendCurrent()}
-              disabled={disabled || continued}
+              disabled={disabled || continued || currentSessionBlockedReason !== null}
+              title={currentSessionBlockedReason ?? undefined}
             >
               {continued ? (
                 <Check size={12} aria-hidden="true" />
@@ -344,171 +341,151 @@ function PromptBlock({ body }: { body: string }): React.ReactElement {
               {continued ? "Continued" : "Continue here"}
             </button>
             <button
-              ref={moreButtonRef}
+              ref={newSessionButtonRef}
               type="button"
-              className="ken-prompt-more"
-              aria-expanded={expanded}
-              aria-controls={panelId}
-              disabled={disabled}
-              onClick={() => {
-                setExpanded((current) => !current);
-                setSaveDraft(null);
-                setFailedAction(null);
-                setError("");
-              }}
+              className="ken-prompt-action"
+              onClick={() => void sendFresh()}
+              disabled={disabled || freshSessionBlockedReason !== null}
+              title={freshSessionBlockedReason ?? undefined}
             >
-              <MoreHorizontal size={14} aria-hidden="true" />
-              More actions
+              <Plus size={14} aria-hidden="true" />
+              New session
+            </button>
+            <button
+              ref={saveButtonRef}
+              type="button"
+              className="ken-prompt-action"
+              aria-expanded={saveDraft !== null}
+              aria-controls={`${panelId}-save`}
+              onClick={() => void prepareSave()}
+              disabled={disabled}
+            >
+              <FilePlus2 size={14} aria-hidden="true" />
+              Save to Notes
             </button>
           </div>
 
-          {expanded && (
+          {saveDraft && (
             <div
-              id={panelId}
+              id={`${panelId}-save`}
               className="ken-prompt-action-panel"
               onKeyDown={(event) => {
                 if (event.key !== "Escape") return;
                 event.preventDefault();
                 event.stopPropagation();
-                closeActions(true);
+                closeSaveEditor(true);
               }}
             >
-              {!saveDraft && (
-                <div className="ken-prompt-secondary-actions">
-                  <button
-                    ref={newSessionButtonRef}
-                    type="button"
-                    onClick={() => void sendFresh()}
-                    disabled={disabled || freshSessionBlockedReason !== null}
-                    title={freshSessionBlockedReason ?? undefined}
-                  >
-                    <Plus size={14} aria-hidden="true" />
-                    New session
+              <form
+                className="ken-prompt-save-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void commitSave();
+                }}
+              >
+                <fieldset disabled={disabled}>
+                  <legend>Save to Project Notes</legend>
+                  <label className="ken-prompt-radio">
+                    <input
+                      type="radio"
+                      name={`${panelId}-destination`}
+                      checked={saveDraft.destination === "new-draft"}
+                      onChange={() =>
+                        setSaveDraft((current) =>
+                          current ? { ...current, destination: "new-draft" } : current,
+                        )
+                      }
+                    />
+                    New draft
+                  </label>
+                  <div className="ken-prompt-save-field">
+                    <label htmlFor={`${panelId}-title`}>Draft title</label>
+                    <input
+                      ref={titleInputRef}
+                      id={`${panelId}-title`}
+                      value={saveDraft.title}
+                      maxLength={KEN_PROMPT_TITLE_MAX_LENGTH}
+                      required={saveDraft.destination === "new-draft"}
+                      disabled={saveDraft.destination !== "new-draft" || disabled}
+                      onChange={(event) =>
+                        setSaveDraft((current) =>
+                          current ? { ...current, title: event.target.value } : current,
+                        )
+                      }
+                    />
+                  </div>
+                  <label className="ken-prompt-radio">
+                    <input
+                      type="radio"
+                      name={`${panelId}-destination`}
+                      checked={saveDraft.destination === "existing-phase"}
+                      disabled={saveDraft.preview.destinations.length === 0}
+                      onChange={() =>
+                        setSaveDraft((current) =>
+                          current ? { ...current, destination: "existing-phase" } : current,
+                        )
+                      }
+                    />
+                    Existing phase
+                  </label>
+                  <div className="ken-prompt-save-field">
+                    <label htmlFor={`${panelId}-phase`}>Phase destination</label>
+                    <select
+                      ref={phaseSelectRef}
+                      id={`${panelId}-phase`}
+                      value={saveDraft.phaseId}
+                      disabled={
+                        saveDraft.destination !== "existing-phase" ||
+                        saveDraft.preview.destinations.length === 0 ||
+                        disabled
+                      }
+                      onChange={(event) =>
+                        setSaveDraft((current) =>
+                          current ? { ...current, phaseId: event.target.value } : current,
+                        )
+                      }
+                    >
+                      {saveDraft.preview.destinations.map((destination) => (
+                        <option key={destination.phaseId} value={destination.phaseId}>
+                          {destination.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </fieldset>
+
+                <p className="ken-prompt-destination-preview">
+                  {saveDraft.destination === "new-draft"
+                    ? `New draft: ${saveDraft.title.trim() || "Untitled"}`
+                    : `Phase: ${selectedPhase?.title ?? "Choose a phase"}`}
+                </p>
+                {replacement && (
+                  <p className="ken-prompt-replacement">
+                    This replaces the prompt currently saved in {selectedPhase?.title}.
+                  </p>
+                )}
+                <div className="ken-prompt-preview">
+                  <strong>Prompt preview</strong>
+                  <pre>{saveDraft.preview.prompt}</pre>
+                </div>
+                <div className="ken-prompt-save-actions">
+                  <button type="submit" disabled={disabled}>
+                    {replacement ? "Replace saved prompt" : "Save prompt"}
                   </button>
                   <button
-                    ref={saveButtonRef}
                     type="button"
-                    onClick={() => void prepareSave()}
+                    onClick={() => {
+                      setSaveDraft(null);
+                      setFailedAction(null);
+                      setError("");
+                      queueMicrotask(() => saveButtonRef.current?.focus());
+                    }}
                     disabled={disabled}
                   >
-                    <FilePlus2 size={14} aria-hidden="true" />
-                    Save to Project Notes
+                    Back
                   </button>
                 </div>
-              )}
-
-              {saveDraft && (
-                <form
-                  className="ken-prompt-save-form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void commitSave();
-                  }}
-                >
-                  <fieldset disabled={disabled}>
-                    <legend>Save to Project Notes</legend>
-                    <label className="ken-prompt-radio">
-                      <input
-                        type="radio"
-                        name={`${panelId}-destination`}
-                        checked={saveDraft.destination === "new-draft"}
-                        onChange={() =>
-                          setSaveDraft((current) =>
-                            current ? { ...current, destination: "new-draft" } : current,
-                          )
-                        }
-                      />
-                      New draft
-                    </label>
-                    <div className="ken-prompt-save-field">
-                      <label htmlFor={`${panelId}-title`}>Draft title</label>
-                      <input
-                        ref={titleInputRef}
-                        id={`${panelId}-title`}
-                        value={saveDraft.title}
-                        maxLength={KEN_PROMPT_TITLE_MAX_LENGTH}
-                        required={saveDraft.destination === "new-draft"}
-                        disabled={saveDraft.destination !== "new-draft" || disabled}
-                        onChange={(event) =>
-                          setSaveDraft((current) =>
-                            current ? { ...current, title: event.target.value } : current,
-                          )
-                        }
-                      />
-                    </div>
-                    <label className="ken-prompt-radio">
-                      <input
-                        type="radio"
-                        name={`${panelId}-destination`}
-                        checked={saveDraft.destination === "existing-phase"}
-                        disabled={saveDraft.preview.destinations.length === 0}
-                        onChange={() =>
-                          setSaveDraft((current) =>
-                            current ? { ...current, destination: "existing-phase" } : current,
-                          )
-                        }
-                      />
-                      Existing phase
-                    </label>
-                    <div className="ken-prompt-save-field">
-                      <label htmlFor={`${panelId}-phase`}>Phase destination</label>
-                      <select
-                        ref={phaseSelectRef}
-                        id={`${panelId}-phase`}
-                        value={saveDraft.phaseId}
-                        disabled={
-                          saveDraft.destination !== "existing-phase" ||
-                          saveDraft.preview.destinations.length === 0 ||
-                          disabled
-                        }
-                        onChange={(event) =>
-                          setSaveDraft((current) =>
-                            current ? { ...current, phaseId: event.target.value } : current,
-                          )
-                        }
-                      >
-                        {saveDraft.preview.destinations.map((destination) => (
-                          <option key={destination.phaseId} value={destination.phaseId}>
-                            {destination.title}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </fieldset>
-
-                  <p className="ken-prompt-destination-preview">
-                    {saveDraft.destination === "new-draft"
-                      ? `New draft: ${saveDraft.title.trim() || "Untitled"}`
-                      : `Phase: ${selectedPhase?.title ?? "Choose a phase"}`}
-                  </p>
-                  {replacement && (
-                    <p className="ken-prompt-replacement">
-                      This replaces the prompt currently saved in {selectedPhase?.title}.
-                    </p>
-                  )}
-                  <div className="ken-prompt-preview">
-                    <strong>Prompt preview</strong>
-                    <pre>{saveDraft.preview.prompt}</pre>
-                  </div>
-                  <div className="ken-prompt-save-actions">
-                    <button type="submit" disabled={disabled}>
-                      {replacement ? "Replace saved prompt" : "Save prompt"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSaveDraft(null);
-                        setFailedAction(null);
-                        setError("");
-                        queueMicrotask(() => saveButtonRef.current?.focus());
-                      }}
-                      disabled={disabled}
-                    >
-                      Back
-                    </button>
-                  </div>
-                </form>
-              )}
+              </form>
             </div>
           )}
 

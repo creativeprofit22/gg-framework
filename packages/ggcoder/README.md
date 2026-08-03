@@ -35,10 +35,10 @@ OAuth for Anthropic and OpenAI (log in once, auto-refresh, no key to leak). API 
 
 Every token in the system prompt gets processed on **every single turn**. It's not a one-time cost. It's a tax on every request.
 
-| | **Claude Code / Agent SDK** | **GG Coder** |
-|---|---|---|
-| System prompt size | ~15,000 tokens | **~1,100 tokens** |
-| Ratio | baseline | **~13x smaller** |
+|                    | **Claude Code / Agent SDK** | **GG Coder**      |
+| ------------------ | --------------------------- | ----------------- |
+| System prompt size | ~15,000 tokens              | **~1,100 tokens** |
+| Ratio              | baseline                    | **~13x smaller**  |
 
 ### Why you should care
 
@@ -67,16 +67,16 @@ You can still add your own MCPs if you need them. But start with less. You'll ge
 
 Switch mid-conversation with `/model`. Not locked to anyone.
 
-| Provider | Models | Auth |
-|---|---|---|
-| **Anthropic** | Claude Opus 5, Sonnet 5, Haiku 4.5 | OAuth |
-| **OpenAI** | GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex | OAuth |
-| **Moonshot** | Kimi K3, Kimi K2.7 Code | OAuth or API key |
-| **Z.AI (GLM)** | GLM-5.1, GLM-4.7, GLM-4.7 Flash | API key |
-| **MiniMax** | MiniMax M3 (image + video) | API key |
-| **Xiaomi (MiMo)** | MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 (image + video) | API key |
-| **DeepSeek** | DeepSeek V4 Pro, V4 Flash | API key |
-| **OpenRouter** | Qwen3.6-Plus + multi-provider gateway | API key |
+| Provider          | Models                                                             | Auth             |
+| ----------------- | ------------------------------------------------------------------ | ---------------- |
+| **Anthropic**     | Claude Opus 5, Sonnet 5, Haiku 4.5                                 | OAuth            |
+| **OpenAI**        | GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex                       | OAuth            |
+| **Moonshot**      | Kimi K3, Kimi K2.7 Code                                            | OAuth or API key |
+| **Z.AI (GLM)**    | GLM-5.1, GLM-4.7, GLM-4.7 Flash                                    | API key          |
+| **MiniMax**       | MiniMax M3 (image + video)                                         | API key          |
+| **Xiaomi (MiMo)** | MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 (image + video) | API key          |
+| **DeepSeek**      | DeepSeek V4 Pro, V4 Flash                                          | API key          |
+| **OpenRouter**    | Qwen3.6-Plus + multi-provider gateway                              | API key          |
 
 The same conversation, the same tools, the same project context — only the model changes. Use a strong reasoning model when you need it, swap to a fast cheap one for grunt work, never restart your session.
 
@@ -104,15 +104,15 @@ Run `ggcoder` directly when you're heads-down on one project. Switch to `ggboss`
 
 ## ⌨️ Keybindings
 
-| Key | What it does |
-|---|---|
-| <kbd>Ctrl+T</kbd> | Open the Task pane |
-| <kbd>Ctrl+S</kbd> | Open the Skills pane |
-| <kbd>Shift+Tab</kbd> | Cycle extended thinking (off / low / medium / high / max) |
-| <kbd>Esc</kbd> | Interrupt the agent mid-turn |
-| <kbd>Ctrl+C</kbd> ×2 | Exit |
-| <kbd>↑</kbd> / <kbd>↓</kbd> | Recall previous prompts (when input is empty) |
-| <kbd>Enter</kbd> | Send · <kbd>Shift+Enter</kbd> newline · `/` opens the slash menu |
+| Key                         | What it does                                                     |
+| --------------------------- | ---------------------------------------------------------------- |
+| <kbd>Ctrl+T</kbd>           | Open the Task pane                                               |
+| <kbd>Ctrl+S</kbd>           | Open the Skills pane                                             |
+| <kbd>Shift+Tab</kbd>        | Cycle extended thinking (off / low / medium / high / max)        |
+| <kbd>Esc</kbd>              | Interrupt the agent mid-turn                                     |
+| <kbd>Ctrl+C</kbd> ×2        | Exit                                                             |
+| <kbd>↑</kbd> / <kbd>↓</kbd> | Recall previous prompts (when input is empty)                    |
+| <kbd>Enter</kbd>            | Send · <kbd>Shift+Enter</kbd> newline · `/` opens the slash menu |
 
 ---
 
@@ -120,19 +120,19 @@ Run `ggcoder` directly when you're heads-down on one project. Switch to `ggboss`
 
 Everything runs through slash commands inside the session. Not CLI flags.
 
-| Command | What it does |
-|---|---|
-| `/model` (`/m`) | Switch model on the fly |
-| `/compact` (`/c`) | Compress context when it gets long |
-| `/new` (`/n`) | Start a fresh session in this project |
-| `/session` (`/s`) | Resume a prior session |
-| `/branch` (`/b`) | Branch the current conversation |
-| `/branches` | List branches of the current session |
-| `/rewind` | Restore files and/or conversation to an earlier checkpoint |
-| `/buddy` | Spin up a second model to review the current chat |
-| `/settings` (`/config`) | Open settings |
-| `/help` (`/h`, `/?`) | Show all commands |
-| `/quit` (`/q`, `/exit`) | Exit |
+| Command                 | What it does                                               |
+| ----------------------- | ---------------------------------------------------------- |
+| `/model` (`/m`)         | Switch model on the fly                                    |
+| `/compact` (`/c`)       | Compress context when it gets long                         |
+| `/new` (`/n`)           | Start a fresh session in this project                      |
+| `/session` (`/s`)       | Resume a prior session                                     |
+| `/branch` (`/b`)        | Branch the current conversation                            |
+| `/branches`             | List branches of the current session                       |
+| `/rewind`               | Restore files and/or conversation to an earlier checkpoint |
+| `/buddy`                | Spin up a second model to review the current chat          |
+| `/settings` (`/config`) | Open settings                                              |
+| `/help` (`/h`, `/?`)    | Show all commands                                          |
+| `/quit` (`/q`, `/exit`) | Exit                                                       |
 
 Plus built-in workflows that ship with the binary:
 

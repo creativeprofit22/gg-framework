@@ -527,7 +527,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const hydrateEpochRef = useRef(0);
   const mountedRef = useRef(true);
   const generationRef = useRef(props.generation);
-  generationRef.current = props.generation;
+  // Managed panes acquire their generation internally. Do not erase it on rerenders
+  // merely because their owner does not mirror the optional prop back to us.
+  if (props.generation !== undefined) generationRef.current = props.generation;
   const onGenerationChangeRef = useRef(props.onGenerationChange);
   onGenerationChangeRef.current = props.onGenerationChange;
   const onLifecycleErrorRef = useRef(props.onLifecycleError);
@@ -666,8 +668,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [liveToolFeed, setLiveToolFeed] = useState<LiveToolEntry[]>([]);
   const [tokens, setTokens] = useState(0);
   const [doneStatus, setDoneStatus] = useState<string | null>(null);
-  // Pending plan awaiting review (the markdown). Non-null opens the review modal.
+  // Pending plan awaiting an explicit workflow-gate decision. The gate remains
+  // inline with the transcript until approval, feedback, or dismissal resolves it.
   const [planReview, setPlanReview] = useState<string | null>(null);
+  const [planGateBusy, setPlanGateBusy] = useState(false);
+  // Exact operation that entered Plan Mode. Kept in webview memory only: approval
+  // replays this prompt after the sidecar has accepted the plan.
+  const planResumePromptRef = useRef<string | null>(null);
   // Path of the plan awaiting review, captured from `plan_exit`. Needed on accept
   // to bake the plan's `## Steps` into the agent's system prompt so it emits
   // `[DONE:n]` progress markers (drives the activity bar's Plan Steps widget).
@@ -1992,6 +1999,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // prompt firing on its interval. Those must NOT clear the composer, or a
   // schedule that comes due mid-sentence deletes what the user was typing.
   function submitText(text: string, label?: string, opts?: { keepInput?: boolean }): void {
+    // A pending plan is the only operation that can move this session forward.
+    // Do not let toolbar commands or scheduled prompts silently clear its gate.
+    if (planReview !== null) return;
     const trimmed = text.trim();
     // Mid-run this QUEUES as steering, exactly like a typed message (see
     // submit()): the sidecar injects it into the running loop. Dropping it
@@ -2014,7 +2024,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setInput("");
       setSlashIndex(0);
     }
-    if (!queued) endStreamingText();
+    if (!queued) {
+      endStreamingText();
+      planResumePromptRef.current = trimmed;
+    }
     void sendPrompt(trimmed);
   }
 
@@ -2062,6 +2075,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (!prompt) {
         return { status: "failed", action: action.type, message: "This prompt is empty." };
       }
+      if (planReview !== null && (action.type === "send-current" || action.type === "send-fresh")) {
+        return {
+          status: "failed",
+          action: action.type,
+          message: "Approve or dismiss the pending plan before sending another prompt.",
+        };
+      }
 
       if (action.type === "send-current") {
         if (sessionMutationLockRef.current) {
@@ -2088,6 +2108,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         }
         kenPromptActionLockRef.current = true;
         try {
+          if (disposition !== "queue") planResumePromptRef.current = prompt;
           const submission = await sendPrompt(prompt, [], { kenSent: true });
           stickToBottomRef.current = true;
           setQueuedCount(submission.count);
@@ -2158,6 +2179,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             };
           }
           try {
+            planResumePromptRef.current = prompt;
             const submission = await sendPrompt(prompt, [], { kenSent: true });
             stickToBottomRef.current = true;
             setQueuedCount(submission.count);
@@ -2228,6 +2250,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       autopilotReviewing,
       createAuthoritativeNewSession,
       endStreamingText,
+      planReview,
       pushItem,
       restorePromptToComposer,
       running,
@@ -2239,6 +2262,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     () => ({
       dispatch: dispatchKenPromptAction,
       blockedReason: (action) => {
+        if (planReview !== null && (action === "send-current" || action === "send-fresh")) {
+          return "Approve or dismiss the pending plan before sending another prompt.";
+        }
         if (action !== "send-fresh") return null;
         if (autopilotReviewing) return AUTOPILOT_NEW_SESSION_RETRY_MESSAGE;
         if (running) return "Wait for the current build to finish before starting a new session.";
@@ -2248,7 +2274,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         return null;
       },
     }),
-    [autopilotReviewing, dispatchKenPromptAction, newSessionBusy, running],
+    [autopilotReviewing, dispatchKenPromptAction, newSessionBusy, planReview, running],
   );
 
   // Record a sent prompt for ↑/↓ recall (skips consecutive duplicates, capped).
@@ -2407,7 +2433,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // echoed inline in the user's bubble; all media is sent to the agent.
   function submit(): void {
     const trimmed = input.trim();
-    if (!readyRef.current) return;
+    if (!readyRef.current || planReview !== null) return;
     if (!trimmed && attachments.length === 0 && mentionedPaths.length === 0) return;
 
     // `/schedule` registers a recurring prompt instead of sending anything now.
@@ -2522,6 +2548,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setMentionedPaths([]);
     setEnhancement(null);
     endStreamingText();
+    planResumePromptRef.current = prompt;
     void sendPrompt(
       prompt,
       wire,
@@ -2588,6 +2615,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Each closes the modal, drops a short info line, and drives the agent with
   // the corresponding instruction via the existing prompt path.
   function runPlanPrompt(prompt: string, info: string): void {
+    setPlanGateBusy(false);
     setPlanReview(null);
     if (!readyRef.current || running) return;
     pushItem({ kind: "info", id: nextId(), text: info });
@@ -2608,11 +2636,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // approved plan into the new system prompt, and broadcasts authoritative
     // progress before this request resolves. Do not re-seed from stale modal
     // content after the await: the plan file may already have changed.
-    await acceptPlanIPC(planReviewPathRef.current);
-    runPlanPrompt(
-      "The plan has been approved. Implement it now, following each step in order.",
-      "\u2713 Plan accepted. Implementing.",
-    );
+    setPlanGateBusy(true);
+    try {
+      await acceptPlanIPC(planReviewPathRef.current);
+      const resumePrompt =
+        planResumePromptRef.current ??
+        "The plan has been approved. Implement it now, following each step in order.";
+      planResumePromptRef.current = null;
+      // Resume the exact operation that entered Plan Mode. In the blocked commit
+      // loop this is `/commit`, not a generic implementation instruction.
+      runPlanPrompt(resumePrompt, "\u2713 Plan accepted. Resuming.");
+    } catch {
+      toast("Couldn’t approve the plan. The approval gate is still open.", "error", 7_000);
+    } finally {
+      setPlanGateBusy(false);
+    }
   }
 
   function sendPlanFeedback(feedback: string): void {
@@ -2624,6 +2662,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   function rejectPlan(): void {
+    planResumePromptRef.current = null;
     runPlanPrompt(
       "The plan was rejected and dismissed. Do not implement it. Wait for new instructions.",
       "\u2715 Plan rejected.",
@@ -2737,11 +2776,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (link.sessionPath === null) {
         throw new Error("This phase has no resumable session file.");
       }
-      await client.selectWorkspace(
+      const nextGeneration = await client.selectWorkspace(
         { mode: "code", cwd: currentCwd, sessionPath: link.sessionPath },
         generationRef.current ?? 0,
       );
-      await client.waitForReady();
+      generationRef.current = nextGeneration;
+      onGenerationChangeRef.current?.(nextGeneration);
+      // onProjectChosen owns the single readiness + hydration pass for this session.
       onProjectChosen();
     },
     [autopilotReviewing, client, newSessionBusy, running, startRoadmapPhase],
@@ -3011,7 +3052,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 phaseStartUnavailableReason={
                   state?.mode === "code" ? null : "Roadmap phases can only start in coding mode."
                 }
-                phaseActionDisabled={running || autopilotReviewing || newSessionBusy}
+                phaseActionDisabled={
+                  running || autopilotReviewing || newSessionBusy || planReview !== null
+                }
                 paneFocused={props.focused !== false}
                 windowFocused={windowFocused && props.windowFocused !== false}
               />
@@ -3045,8 +3088,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 commitCommand && (
                   <button
                     className={`btn btn-sm ${hasCommit ? "btn-success" : "btn-ghost"}`}
-                    disabled={running}
-                    title={hasCommit ? "Run /commit" : "Generate a /commit command"}
+                    disabled={running || planReview !== null}
+                    title={
+                      planReview !== null
+                        ? "Approve or dismiss the pending plan first"
+                        : hasCommit
+                          ? "Run /commit"
+                          : "Generate a /commit command"
+                    }
                     onClick={() =>
                       submitText(
                         `/${commitCommand}`,
@@ -3100,6 +3149,16 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   }),
                 )}
               </KenPromptActionProvider>
+              {workspaceMode === "code" && planReview !== null && (
+                <PlanReviewModal
+                  content={planReview}
+                  kenReviewing={autopilotReviewing}
+                  busy={planGateBusy}
+                  onAccept={() => void acceptPlan()}
+                  onFeedback={sendPlanFeedback}
+                  onReject={rejectPlan}
+                />
+              )}
             </>
           )}
         </div>
@@ -3192,7 +3251,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           />
           <button
             className="attach-btn"
-            title="Attach files"
+            title={planReview !== null ? "Resolve the pending plan first" : "Attach files"}
+            disabled={planReview !== null}
             onClick={() => fileInputRef.current?.click()}
           >
             <Paperclip size={16} />
@@ -3230,8 +3290,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               // is invisible, so typing would be silently discarded and Enter would
               // submit the un-enhanced draft mid-animation.
               readOnly={enhanceAnim !== null}
+              disabled={planReview !== null}
               value={input}
-              placeholder={workspaceMode === "chat" ? "Ask anything\u2026" : displayPlaceholder}
+              placeholder={
+                planReview !== null
+                  ? "Approve or dismiss the pending plan to continue…"
+                  : workspaceMode === "chat"
+                    ? "Ask anything…"
+                    : displayPlaceholder
+              }
               onPaste={(e) => {
                 const files = Array.from(e.clipboardData.files);
                 if (files.length > 0) {
@@ -3322,7 +3389,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           <button
             className={`enhance-pill${enhanceHintVisible ? " visible" : ""}${enhancing ? " enhancing" : ""}`}
             title="Enhance prompt — clearer wording + correct terms"
-            disabled={enhancing || !enhanceHintVisible}
+            disabled={planReview !== null || enhancing || !enhanceHintVisible}
             aria-hidden={!enhanceHintVisible}
             onClick={() => void runEnhance()}
           >
@@ -3545,18 +3612,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       {/* Always mounted: an MCP server can ask for input at any moment, in any
           workspace mode, and its tool call stays blocked until we answer. */}
       <McpElicitModal />
-
-      {workspaceMode === "code" && planReview !== null && (
-        <PlanReviewModal
-          content={planReview}
-          // Autopilot Ken reviews submitted plans himself; the indicator tells
-          // the user, but manual Accept/Reject stays live and always wins.
-          kenReviewing={autopilotReviewing}
-          onAccept={acceptPlan}
-          onFeedback={sendPlanFeedback}
-          onReject={rejectPlan}
-        />
-      )}
 
       {workspaceMode === "chat" && showMemories && (
         <MemoryModal onClose={() => setShowMemories(false)} />

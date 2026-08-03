@@ -56,7 +56,9 @@ describe("Ken prompt actions", () => {
       </KenPromptActionProvider>,
     );
     expect(screen.getByRole("button", { name: "Continue here" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "More actions" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New session" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Save to Notes" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "More actions" })).toBeNull();
   });
 
   it("continues with the one normalized prompt while leaving unrelated actions available", async () => {
@@ -76,24 +78,52 @@ describe("Ken prompt actions", () => {
       prompt: "Implement the exact prompt\n  Keep indentation",
     });
     expect(
-      (screen.getByRole("button", { name: "More actions" }) as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "New session" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(
+      (screen.getByRole("button", { name: "Save to Notes" }) as HTMLButtonElement).disabled,
     ).toBe(false);
     expect(screen.getByRole("status").textContent).toBe("Continued here.");
   });
 
-  it("opens keyboard-reachable secondary actions and returns focus on Escape", async () => {
+  it("shows all actions in keyboard order, with Continue here primary", () => {
     const dispatch = vi.fn(async () => ({ status: "sent", session: "fresh" }) as const);
+    const { container } = renderPrompt(dispatch);
+    const actions = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".ken-prompt-actions button"),
+    );
+
+    expect(actions.map((button) => button.textContent)).toEqual([
+      "Continue here",
+      "New session",
+      "Save to Notes",
+    ]);
+    expect(actions[0]?.classList.contains("ken-prompt-send")).toBe(true);
+    expect(actions[1]?.classList.contains("ken-prompt-action")).toBe(true);
+    expect(actions[2]?.classList.contains("ken-prompt-action")).toBe(true);
+  });
+
+  it("closes the save editor on Escape and returns focus to Save to Notes", async () => {
+    const dispatch = vi.fn(
+      async (action: KenPromptAction): Promise<KenPromptActionResult> =>
+        action.type === "prepare-save"
+          ? {
+              status: "preview",
+              preview: { prompt: action.prompt, suggestedTitle: "Draft", destinations: [] },
+            }
+          : { status: "sent", session: "current" },
+    );
     renderPrompt(dispatch);
-    const more = screen.getByRole("button", { name: "More actions" });
+    const save = screen.getByRole("button", { name: "Save to Notes" });
 
-    fireEvent.click(more);
-    expect(more.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByRole("button", { name: "New session" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Save to Project Notes" })).toBeTruthy();
+    fireEvent.click(save);
+    const title = await screen.findByLabelText("Draft title");
+    expect(save.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.keyDown(title, { key: "Escape" });
 
-    fireEvent.keyDown(screen.getByRole("button", { name: "New session" }), { key: "Escape" });
-    await waitFor(() => expect(document.activeElement).toBe(more));
-    expect(more.getAttribute("aria-expanded")).toBe("false");
+    await waitFor(() => expect(document.activeElement).toBe(save));
+    expect(screen.queryByLabelText("Draft title")).toBeNull();
+    expect(save.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("previews new and existing Notes destinations and commits exact guarded text", async () => {
@@ -117,8 +147,7 @@ describe("Ken prompt actions", () => {
     });
     const { container } = renderPrompt(dispatch);
 
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save to Project Notes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save to Notes" }));
 
     expect(await screen.findByText("New draft: Implement the exact prompt")).toBeTruthy();
     expect(container.querySelector(".ken-prompt-preview pre")?.textContent).toBe(
@@ -157,8 +186,7 @@ describe("Ken prompt actions", () => {
     );
     renderPrompt(dispatch);
 
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save to Project Notes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save to Notes" }));
     const title = await screen.findByLabelText("Draft title");
     fireEvent.change(title, { target: { value: " " } });
     fireEvent.click(screen.getByRole("button", { name: "Save prompt" }));
@@ -176,7 +204,6 @@ describe("Ken prompt actions", () => {
       .mockResolvedValueOnce({ status: "sent", session: "fresh" });
     renderPrompt(dispatch);
 
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     const fresh = screen.getByRole("button", { name: "New session" });
     fireEvent.click(fresh);
 
@@ -186,7 +213,10 @@ describe("Ken prompt actions", () => {
       (screen.getByRole("button", { name: "Continue here" }) as HTMLButtonElement).disabled,
     ).toBe(true);
     expect(
-      (screen.getByRole("button", { name: "More actions" }) as HTMLButtonElement).disabled,
+      (screen.getByRole("button", { name: "New session" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByRole("button", { name: "Save to Notes" }) as HTMLButtonElement).disabled,
     ).toBe(true);
 
     await act(async () => {
@@ -208,7 +238,6 @@ describe("Ken prompt actions", () => {
     const dispatch = vi.fn(async () => ({ status: "sent", session: "current" }) as const);
     renderPrompt(dispatch, (action) => (action === "send-fresh" ? "A run is active." : null));
 
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     const fresh = screen.getByRole("button", { name: "New session" }) as HTMLButtonElement;
     expect(fresh.disabled).toBe(true);
     expect(fresh.title).toBe("A run is active.");

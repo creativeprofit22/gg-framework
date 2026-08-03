@@ -945,15 +945,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           planReviewPathRef.current = typeof d.planPath === "string" ? d.planPath : null;
           const content = String(d.content ?? "");
           planReviewContentRef.current = content;
-          // Autopilot owns plan review when enabled. Showing the human overlay
-          // during the few seconds before Ken accepts/rejects is just visual
-          // noise, and users generally cannot act in time anyway. Non-autopilot
-          // stays unchanged: the modal opens for manual Accept/Feedback/Reject.
-          if (stateRef.current?.autopilot) {
-            setPlanReview(null);
-          } else {
-            setPlanReview(content);
-          }
+          // Approval is a blocking workflow gate even while Autopilot is reviewing.
+          // Keep it visible until either Ken or the user explicitly resolves it.
+          setPlanReview(content);
           break;
         }
         case "autopilot_plan_accepted":

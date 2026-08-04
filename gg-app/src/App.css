@@ -6781,8 +6781,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 14px;
+  gap: 12px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--border);
 }
 .notes-roadmap-toolbar h2 {
@@ -6905,7 +6905,7 @@ body {
 }
 .notes-roadmap-workspace.has-detail {
   display: grid;
-  grid-template-columns: minmax(300px, 0.82fr) minmax(0, 1.18fr);
+  grid-template-columns: minmax(260px, 0.68fr) minmax(0, 1.32fr);
   align-items: start;
 }
 .notes-roadmap-workspace.has-detail .notes-roadmap-list {
@@ -6918,8 +6918,8 @@ body {
     "title action"
     "status status"
     "count reminder";
-  gap: 5px 9px;
-  padding-block: 9px;
+  gap: 4px 8px;
+  padding-block: 8px;
 }
 .notes-roadmap-workspace.has-detail .notes-phase-count,
 .notes-roadmap-workspace.has-detail .notes-phase-reminder {
@@ -7031,9 +7031,9 @@ body {
 }
 .notes-phase-detail {
   position: sticky;
-  top: 12px;
+  top: 10px;
   min-width: 0;
-  margin: 12px;
+  margin: 10px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-card);
   background: var(--surface-2);
@@ -7043,7 +7043,7 @@ body {
   min-width: 0;
 }
 
-.notes-phase-detail :is(p, li, dd, small, span, strong, a, code, pre) {
+.notes-phase-detail :is(p, li, dt, dd, small, span, strong, a, code, pre) {
   overflow-wrap: anywhere;
 }
 
@@ -7052,9 +7052,8 @@ body {
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 10px 14px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
+  gap: 8px 12px;
+  padding: 10px 12px 8px;
 }
 
 .notes-phase-detail-heading > :first-child {
@@ -7067,7 +7066,7 @@ body {
   flex: 0 1 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 7px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -7083,13 +7082,14 @@ body {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   min-width: 0;
-  padding: 0 10px;
+  padding-inline: 8px;
   border-bottom: 1px solid var(--border);
 }
 
 .notes-phase-views button {
   min-width: 0;
-  padding: 10px 8px 8px;
+  min-height: 30px;
+  padding: 6px 8px 5px;
   overflow: hidden;
   border: 0;
   border-bottom: 2px solid transparent;
@@ -7116,7 +7116,7 @@ body {
 .notes-phase-view-select {
   display: none;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -7132,7 +7132,7 @@ body {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  height: 36px;
+  height: 34px;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
   background: var(--surface-2);

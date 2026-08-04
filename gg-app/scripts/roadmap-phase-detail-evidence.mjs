@@ -10,7 +10,7 @@ const APP_URL = process.env.GG_APP_URL ?? "http://127.0.0.1:4173";
 const NOW = "2026-08-04T12:00:00.000Z";
 const CWD = "/Users/ken/Projects/roadmap-overflow-audit";
 const PHASE_TITLE =
-  "Eliminate phase detail overflow without changing the existing session behavior";
+  "Lokalisierte Detailphase für zuverlässige Übergaben über sehr lange Arbeitsabläufe hinweg";
 const LONG_TOKEN = "unbroken-content-".repeat(18);
 const LONG_URL = `https://github.com/kenkaiiii/gg-framework/blob/main/gg-app/src/${LONG_TOKEN}/NotesRoadmap.tsx#L100-L240`;
 
@@ -91,11 +91,39 @@ const document = {
   references: [reference],
 };
 
-const notesResponse = {
-  status: "ok",
-  snapshot: { projectKey: CWD, revision: 7, document },
-  recoveredFromBackup: false,
-};
+const detailedPhase = document.phases[0];
+
+function phasesForCount(count) {
+  return Array.from({ length: count }, (_, order) => ({
+    ...detailedPhase,
+    id: `phase-density-${order + 1}`,
+    title:
+      order === 0
+        ? PHASE_TITLE
+        : `Phase ${String(order + 1).padStart(2, "0")} — Internationalisierte Auslieferung mit ausführlichem Arbeitstitel`,
+    goal: `Zuverlässige Übergabe für Teams in Zürich, 東京 und São Paulo — ${LONG_TOKEN}`,
+    doneWhen: [
+      `Die Darstellung bleibt bei langen lokalisierten Inhalten stabil — ${LONG_TOKEN}`,
+      "Tastaturfokus und erzwungene Farben bleiben eindeutig erkennbar",
+    ],
+    order,
+    sourcePrompt: order === 0 ? detailedPhase.sourcePrompt : "",
+    referenceIds: order === 0 ? [reference.id] : [],
+    roadmapEvents: order === 0 ? [report] : [],
+  }));
+}
+
+function notesResponseForCount(count) {
+  return {
+    status: "ok",
+    snapshot: {
+      projectKey: CWD,
+      revision: 7,
+      document: { ...document, phases: phasesForCount(count) },
+    },
+    recoveredFromBackup: false,
+  };
+}
 
 function expectCondition(condition, message, detail) {
   if (condition) return;
@@ -244,7 +272,7 @@ async function collectGeometry(page, viewport) {
   );
 }
 
-async function openPhaseDetail(page) {
+async function openRoadmap(page) {
   const codeButton = page.getByRole("button", { name: "Code", exact: true });
   await codeButton.waitFor();
   await page.waitForFunction(() => {
@@ -258,6 +286,10 @@ async function openPhaseDetail(page) {
   await page.getByText("+ New session", { exact: true }).click();
   await page.getByRole("button", { name: "Notes" }).click();
   await page.getByRole("tab", { name: "Roadmap" }).click();
+}
+
+async function openPhaseDetail(page) {
+  await openRoadmap(page);
   const inspectPhase = page.getByRole("button", { name: `Inspect phase: ${PHASE_TITLE}` });
   await inspectPhase.waitFor({ timeout: 5_000 }).catch(async () => {
     throw new Error(`Phase fixture did not render:\n${await page.locator("body").innerText()}`);
@@ -266,11 +298,13 @@ async function openPhaseDetail(page) {
   await page.getByRole("heading", { name: PHASE_TITLE }).waitFor();
 }
 
-async function captureViewport(browser, viewport) {
+async function createPage(browser, { viewport, phaseCount, forcedColors = "none", scale = 1 }) {
   const context = await browser.newContext({
     viewport,
-    deviceScaleFactor: 1,
+    screen: { width: viewport.width * scale, height: viewport.height * scale },
+    deviceScaleFactor: scale,
     colorScheme: "dark",
+    forcedColors,
     reducedMotion: "reduce",
   });
   const page = await context.newPage();
@@ -280,13 +314,40 @@ async function captureViewport(browser, viewport) {
       agent_state: { ...baseResponses.agent_state, cwd: CWD },
       agent_pane_status: { ready: true, error: null, generation: 1, sessionId: "session-audit" },
       select_project: 2,
-      agent_notes_get: notesResponse,
+      agent_notes_get: notesResponseForCount(phaseCount),
     },
     appVersion: "0.1.0-roadmap-audit",
     updateResponse: null,
     debugEnabled: false,
   });
   await page.goto(APP_URL, { waitUntil: "networkidle" });
+  return { context, page };
+}
+
+async function collectFocusEvidence(locator) {
+  return locator.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return {
+      tagName: element.tagName,
+      label: element.getAttribute("aria-label") ?? element.textContent?.trim() ?? "",
+      focused: document.activeElement === element,
+      focusVisible: element.matches(":focus-visible"),
+      outlineStyle: styles.outlineStyle,
+      outlineWidth: styles.outlineWidth,
+    };
+  });
+}
+
+async function captureDetailScenario(
+  browser,
+  { viewport, evidenceName, forcedColors = "none", scale = 1 },
+) {
+  const { context, page } = await createPage(browser, {
+    viewport,
+    phaseCount: 1,
+    forcedColors,
+    scale,
+  });
   await openPhaseDetail(page);
 
   const details = page.locator(".notes-phase-saved-prompt");
@@ -367,17 +428,30 @@ async function captureViewport(browser, viewport) {
       currentGeometry,
     );
   }
+
   if (usesNativeSelector) {
+    await phaseViewSelector.focus();
+    await page.keyboard.press("Home");
     await phaseViewSelector.selectOption("overview");
   } else {
-    await phaseViewTabs.getByRole("tab", { name: "Overview", exact: true }).click();
+    await phaseViewTabs.getByRole("tab", { name: "More", exact: true }).focus();
+    await page.keyboard.press("Home");
   }
+  const focusTarget = usesNativeSelector
+    ? phaseViewSelector
+    : phaseViewTabs.getByRole("tab", { name: "Overview", exact: true });
+  const focusEvidence = await collectFocusEvidence(focusTarget);
+  expectCondition(
+    focusEvidence.focused && focusEvidence.focusVisible && focusEvidence.outlineStyle !== "none",
+    "Keyboard focus is not visibly retained on the compact phase navigator",
+    focusEvidence,
+  );
   await page.locator("#notes-panel-roadmap").evaluate((element) => {
     element.scrollTop = 0;
   });
 
   const geometry = await collectGeometry(page, viewport);
-  expectCondition(geometry.titleVisible, "Phase title is not visible", geometry);
+  expectCondition(geometry.titleVisible, "Localized phase title is not visible", geometry);
   expectCondition(geometry.documentOverflow <= 1, "Document overflows horizontally", geometry);
   expectCondition(geometry.panelOverflow <= 1, "Notes panel overflows horizontally", geometry);
   expectCondition(geometry.phaseOverflow <= 1, "Phase detail overflows horizontally", geometry);
@@ -405,10 +479,91 @@ async function captureViewport(browser, viewport) {
   );
   expectCondition(geometry.primaryAboveFold, "Primary action is below the fold", geometry);
 
-  const name = `${viewport.width}x${viewport.height}`;
-  await page.screenshot({ path: path.join(OUT_DIR, `${name}.png`), fullPage: false });
+  const forcedColorsActive = await page.evaluate(
+    () => matchMedia("(forced-colors: active)").matches,
+  );
+  expectCondition(
+    forcedColorsActive === (forcedColors === "active"),
+    "Forced-colors emulation does not match the requested scenario",
+    { forcedColors, forcedColorsActive },
+  );
+  await page.screenshot({
+    path: path.join(OUT_DIR, `${evidenceName}.png`),
+    fullPage: false,
+  });
   await context.close();
-  return { ...geometry, expandedGeometry, viewGeometry };
+  return {
+    scenario: evidenceName,
+    phaseCount: 1,
+    scale,
+    forcedColors,
+    ...geometry,
+    expandedGeometry,
+    viewGeometry,
+    focusEvidence,
+  };
+}
+
+async function captureListScenario(browser, { viewport, evidenceName, phaseCount }) {
+  const { context, page } = await createPage(browser, { viewport, phaseCount });
+  await openRoadmap(page);
+
+  const roadmapTab = page.getByRole("tab", { name: "Roadmap" });
+  await roadmapTab.focus();
+  await page.keyboard.press("Tab");
+  const newPhase = page.getByRole("button", { name: "New phase" });
+  let focusTarget = newPhase;
+  if (phaseCount > 0) {
+    await page.keyboard.press("Tab");
+    focusTarget = page.getByRole("button", { name: `Inspect phase: ${PHASE_TITLE}` });
+  }
+  const focusEvidence = await collectFocusEvidence(focusTarget);
+  expectCondition(
+    focusEvidence.focused && focusEvidence.focusVisible && focusEvidence.outlineStyle !== "none",
+    `${phaseCount}-phase Roadmap did not preserve visible keyboard focus`,
+    focusEvidence,
+  );
+
+  const geometry = await page.evaluate(
+    ({ expectedPhaseCount }) => {
+      const panel = document.querySelector("#notes-panel-roadmap");
+      const workspace = document.querySelector(".notes-roadmap-workspace");
+      const rows = [...document.querySelectorAll(".notes-roadmap-row")];
+      if (!(panel instanceof HTMLElement) || !(workspace instanceof HTMLElement)) {
+        throw new Error("Roadmap list geometry targets are missing");
+      }
+      return {
+        documentOverflow:
+          document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        panelOverflow: panel.scrollWidth - panel.clientWidth,
+        workspaceOverflow: workspace.scrollWidth - workspace.clientWidth,
+        rowCount: rows.length,
+        expectedPhaseCount,
+        hasDetail: Boolean(document.querySelector(".notes-phase-detail")),
+        emptyStateVisible: Boolean(document.querySelector(".notes-roadmap-empty")),
+        rowOverflowCount: rows.filter((row) => row.scrollWidth > row.clientWidth + 1).length,
+      };
+    },
+    { expectedPhaseCount: phaseCount },
+  );
+  expectCondition(
+    geometry.rowCount === phaseCount &&
+      geometry.documentOverflow <= 1 &&
+      geometry.panelOverflow <= 1 &&
+      geometry.workspaceOverflow <= 1 &&
+      geometry.rowOverflowCount === 0 &&
+      !geometry.hasDetail &&
+      geometry.emptyStateVisible === (phaseCount === 0),
+    `${phaseCount}-phase Roadmap list failed its presentation contract`,
+    geometry,
+  );
+
+  await page.screenshot({
+    path: path.join(OUT_DIR, `${evidenceName}.png`),
+    fullPage: false,
+  });
+  await context.close();
+  return { scenario: evidenceName, phaseCount, viewport, ...geometry, focusEvidence };
 }
 
 async function main() {
@@ -421,13 +576,48 @@ async function main() {
       { width: 1280, height: 800 },
       { width: 320, height: 800 },
     ]) {
-      results.push(await captureViewport(browser, viewport));
+      const size = `${viewport.width}x${viewport.height}`;
+      results.push(
+        await captureListScenario(browser, {
+          viewport,
+          evidenceName: `0-phases-${size}`,
+          phaseCount: 0,
+        }),
+      );
+      results.push(
+        await captureDetailScenario(browser, {
+          viewport,
+          evidenceName: `1-phase-${size}`,
+        }),
+      );
+      results.push(
+        await captureListScenario(browser, {
+          viewport,
+          evidenceName: `50-phases-${size}`,
+          phaseCount: 50,
+        }),
+      );
     }
+    results.push(
+      await captureDetailScenario(browser, {
+        viewport: { width: 640, height: 800 },
+        evidenceName: "1-phase-1280x800-at-200-percent",
+        scale: 2,
+      }),
+    );
+    results.push(
+      await captureDetailScenario(browser, {
+        viewport: { width: 1280, height: 800 },
+        evidenceName: "1-phase-1280x800-forced-colors",
+        forcedColors: "active",
+      }),
+    );
+
     await writeFile(path.join(OUT_DIR, "geometry.json"), `${JSON.stringify(results, null, 2)}\n`);
-    console.log(`Roadmap phase-detail evidence passed: ${OUT_DIR}`);
+    console.log(`Roadmap Slice 4 evidence passed: ${OUT_DIR}`);
     for (const result of results) {
       console.log(
-        `${result.viewport.width}x${result.viewport.height}: document=${result.documentOverflow}px panel=${result.panelOverflow}px phase=${result.phaseOverflow}px scrollers=${result.verticalScrollers.length} primaryBottom=${Math.round(result.primaryRect.bottom)}px`,
+        `${result.scenario}: phases=${result.phaseCount} document=${result.documentOverflow}px panel=${result.panelOverflow}px focus=${result.focusEvidence.focusVisible ? "visible" : "missing"}`,
       );
     }
   } finally {

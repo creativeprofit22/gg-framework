@@ -45,7 +45,7 @@ describe("narrow-window layout contracts", () => {
       /\.notes-phase-detail :is\(section, details, form, dl, ul, li, div\)\s*\{\s*min-width:\s*0;/,
     );
     expect(appCss).toMatch(
-      /\.notes-phase-detail :is\(p, li, dd, small, span, strong, a, code, pre\)\s*\{\s*overflow-wrap:\s*anywhere;/,
+      /\.notes-phase-detail :is\(p, li, dt, dd, small, span, strong, a, code, pre\)\s*\{\s*overflow-wrap:\s*anywhere;/,
     );
     expect(appCss).toMatch(
       /\.notes-reminder-section input,[\s\S]*?\.notes-reminder-section textarea\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?min-width:\s*0;/,
@@ -72,6 +72,20 @@ describe("narrow-window layout contracts", () => {
     expect(appCss).toMatch(
       /@media \(max-width:\s*560px\)[\s\S]*?\.notes-phase-views\s*\{\s*display:\s*none;[\s\S]*?\.notes-phase-view-select\s*\{\s*display:\s*grid;\s*grid-template-columns:\s*auto minmax\(0,\s*1fr\);/,
     );
+  });
+
+  it("biases the Roadmap workspace toward detail with compact, consistently spaced controls", () => {
+    expect(appCss).toMatch(
+      /\.notes-roadmap-workspace\.has-detail\s*\{[\s\S]*?grid-template-columns:\s*minmax\(260px,\s*0\.68fr\)\s*minmax\(0,\s*1\.32fr\);/,
+    );
+    expect(appCss).toMatch(
+      /\.notes-phase-detail-heading\s*\{[\s\S]*?gap:\s*8px 12px;[\s\S]*?padding:\s*10px 12px 8px;/,
+    );
+    expect(appCss).toMatch(/\.notes-phase-detail-actions\s*\{[\s\S]*?gap:\s*8px;/);
+    expect(appCss).toMatch(
+      /\.notes-phase-views button\s*\{[\s\S]*?min-height:\s*30px;[\s\S]*?padding:\s*6px 8px 5px;/,
+    );
+    expect(appCss).toMatch(/\.notes-phase-view-select\s*\{[\s\S]*?padding:\s*8px 10px;/);
   });
 
   it("lets expanded saved prompts wrap in the Notes panel instead of creating a nested scroller", () => {

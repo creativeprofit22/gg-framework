@@ -447,6 +447,62 @@ describe("useAgentEvents", () => {
     ]);
   });
 
+  it("shows an asynchronous prompt-failed phase error and deduplicates run failed", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+    });
+    expect(getItems()).toEqual([]);
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_launch_error", {
+          operationId: "phase-start-1",
+          phaseId: "phase-1",
+          code: "prompt-failed",
+          message: "The phase prompt failed. Resume the phase to retry.",
+          detail: "provider unavailable",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("error", {
+          headline: "Provider unavailable.",
+          message: "provider unavailable",
+          guidance: "Try again.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "The phase prompt failed. Resume the phase to retry.",
+        message: "provider unavailable",
+      }),
+    ]);
+  });
+
+  it("shows a launch-failed phase error without waiting for a run error", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_launch_error", {
+          operationId: "phase-start-2",
+          phaseId: "phase-2",
+          code: "launch-failed",
+          message: "The phase could not be launched. Review its attention note and retry.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "The phase could not be launched. Review its attention note and retry.",
+      }),
+    ]);
+  });
+
   it("error with a structured payload (headline/message/guidance) pushes a structured error item", () => {
     const { hook, getItems } = setup();
     act(() => {

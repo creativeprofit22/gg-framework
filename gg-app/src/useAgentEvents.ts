@@ -14,6 +14,7 @@ import {
   type SlashCommand,
   type PaneAgentClient,
 } from "./agent";
+import { isPhaseLaunchErrorEvent } from "./notes-types";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -228,6 +229,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     Map<string, { snapshot: SubAgentStatePayload; activities: string[] }>
   >(new Map());
   const subagentFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A prompt-failed phase frame is followed by runAgent's generic provider error.
+  // Remember that ordered pair so the phase-specific recovery message wins once.
+  const pendingPhasePromptFailureRef = useRef<string | null>(null);
   // Transcript id of the in-flight compaction notice, so compaction_end can
   // flip the same row from shimmer → summary instead of pushing a new line.
   const compactionIdRef = useRef<number | null>(null);
@@ -796,7 +800,28 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           );
           setStatus("cancellation failed; agent still running");
           break;
+        case "phase_launch_error": {
+          if (!isPhaseLaunchErrorEvent(e)) break;
+          const phaseError = e.data;
+          if (phaseError.code === "prompt-failed") {
+            pendingPhasePromptFailureRef.current = phaseError.operationId;
+          }
+          pushItem({
+            kind: "error",
+            id: nextId(),
+            headline: phaseError.message,
+            message: phaseError.detail,
+          });
+          break;
+        }
         case "error": {
+          // runAgent emits one generic provider error immediately after the richer
+          // prompt-failed phase frame. Suppress only that ordered duplicate; run_end
+          // clears the marker if an older sidecar never sends the generic frame.
+          if (pendingPhasePromptFailureRef.current !== null) {
+            pendingPhasePromptFailureRef.current = null;
+            break;
+          }
           // Structured payload from the sidecar's broadcastError (headline always
           // present; message/guidance may be omitted for terse capability errors).
           // Fall back to a flat string for any older-shaped frame.
@@ -815,6 +840,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "run_end": {
+          pendingPhasePromptFailureRef.current = null;
           // Flush first so final sub-agent statuses are in place before the
           // aborted-marking pass below reads them.
           flushSubagentSnapshots();

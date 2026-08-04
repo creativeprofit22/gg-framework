@@ -571,6 +571,31 @@ fn register_restore_target(
     targets.insert(label, entry);
 }
 
+fn register_selected_primary_restore_target(
+    targets: &mut HashMap<String, RestoreEntry>,
+    label: &str,
+    pane_id: &str,
+    mode: WorkspaceMode,
+    chat_agent: ChatAgent,
+    cwd: &str,
+    session_path: Option<&str>,
+) -> bool {
+    if pane_id != PRIMARY_PANE_ID {
+        return false;
+    }
+    register_restore_target(
+        targets,
+        label.to_string(),
+        RestoreEntry {
+            mode,
+            chat_agent,
+            cwd: cwd.to_string(),
+            session_path: session_path.map(str::to_string),
+        },
+    );
+    true
+}
+
 fn restore_target(targets: &HashMap<String, RestoreEntry>, label: &str) -> Option<RestoreEntry> {
     targets.get(label).cloned()
 }
@@ -5006,14 +5031,27 @@ async fn select_project(
     }
     let generation = start_pane_session(
         app.clone(),
-        label,
+        label.clone(),
         pane_id.clone(),
         mode,
         chat_agent,
-        PathBuf::from(cwd),
-        session_path,
+        PathBuf::from(&cwd),
+        session_path.clone(),
     );
-    if pane_id == PRIMARY_PANE_ID {
+    let registered_primary_target = {
+        let targets: State<RestoreTargets> = app.state();
+        let mut targets = targets.map.lock().unwrap();
+        register_selected_primary_restore_target(
+            &mut targets,
+            &label,
+            &pane_id,
+            mode,
+            chat_agent,
+            &cwd,
+            session_path.as_deref(),
+        )
+    };
+    if registered_primary_target {
         snapshot_workspace(&app);
     }
     Ok(generation)
@@ -7483,6 +7521,57 @@ mod tests {
     fn daemon_crash_loop_opens_circuit_breaker() {
         assert!(daemon_respawn_delay(0).is_none());
         assert!(daemon_respawn_delay(DAEMON_MAX_RESPAWNS + 1).is_none());
+    }
+
+    #[test]
+    fn selected_primary_restore_target_makes_window_snapshot_eligible() {
+        let mut targets = HashMap::new();
+        assert!(register_selected_primary_restore_target(
+            &mut targets,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Chat,
+            ChatAgent::Research,
+            "/project",
+            Some("/sessions/one.jsonl"),
+        ));
+
+        let target = restore_target(&targets, "main").expect("primary target registered");
+        assert_eq!(target.mode, WorkspaceMode::Chat);
+        assert_eq!(target.chat_agent, ChatAgent::Research);
+        assert_eq!(target.cwd, "/project");
+        assert_eq!(target.session_path.as_deref(), Some("/sessions/one.jsonl"));
+        assert!(keep_for_snapshot(
+            targets.contains_key("main"),
+            Some(Path::new(&target.cwd)),
+        ));
+    }
+
+    #[test]
+    fn selected_non_primary_restore_target_does_not_change_window_persistence() {
+        let existing = RestoreEntry {
+            mode: WorkspaceMode::Code,
+            chat_agent: ChatAgent::General,
+            cwd: "/existing".into(),
+            session_path: None,
+        };
+        let mut targets = HashMap::from([("main".to_string(), existing)]);
+
+        assert!(!register_selected_primary_restore_target(
+            &mut targets,
+            "main",
+            "secondary",
+            WorkspaceMode::Chat,
+            ChatAgent::Research,
+            "/secondary",
+            Some("/sessions/secondary.jsonl"),
+        ));
+
+        let target = restore_target(&targets, "main").expect("existing target preserved");
+        assert_eq!(target.cwd, "/existing");
+        assert_eq!(target.mode, WorkspaceMode::Code);
+        assert_eq!(target.chat_agent, ChatAgent::General);
+        assert!(target.session_path.is_none());
     }
 
     #[test]

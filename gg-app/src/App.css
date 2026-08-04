@@ -7079,6 +7079,87 @@ body {
   overflow-wrap: anywhere;
 }
 
+.notes-phase-views {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  min-width: 0;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.notes-phase-views button {
+  min-width: 0;
+  padding: 10px 8px 8px;
+  overflow: hidden;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-phase-views button:hover {
+  background: color-mix(in srgb, var(--surface-3) 62%, transparent);
+  color: var(--text);
+}
+
+.notes-phase-views button[aria-selected="true"] {
+  border-bottom-color: var(--primary);
+  color: var(--primary);
+}
+
+.notes-phase-view-select {
+  display: none;
+  min-width: 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.notes-phase-view-select label {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.notes-phase-view-select select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+}
+
+.notes-phase-view-panel,
+.notes-phase-view-supplement {
+  min-width: 0;
+}
+
+.notes-phase-view-panel[hidden],
+.notes-phase-view-supplement[hidden] {
+  display: none;
+}
+
+.notes-phase-view-panel > :first-child,
+.notes-phase-view-supplement > :first-child {
+  margin-top: 0;
+}
+
+.notes-phase-view-panel > :last-child,
+.notes-phase-view-supplement > :last-child {
+  margin-bottom: 0;
+}
+
 .notes-phase-overview {
   --notes-phase-overview-accent: var(--text-dim);
   display: grid;
@@ -7405,10 +7486,9 @@ body {
 }
 
 .notes-phase-saved-prompt pre {
-  max-height: 240px;
   margin: 0;
   padding: 12px;
-  overflow: auto;
+  overflow: visible;
   color: var(--text-secondary);
   font:
     11px/1.5 "SFMono-Regular",
@@ -8051,8 +8131,18 @@ body {
 .notes-phase-reference-options li.is-attached {
   border-inline-start: 3px solid var(--primary);
 }
+.notes-phase-reference-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
 .notes-phase-reference-options label {
+  min-width: 0;
   padding: 9px 10px;
+}
+.notes-phase-reference-option > button {
+  margin: 9px 10px 9px 0;
+  white-space: nowrap;
 }
 .notes-phase-reference-options label > span > span {
   color: var(--text-secondary);
@@ -8225,6 +8315,7 @@ body {
 .notes-roadmap-proposal-actions {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .notes-roadmap-history summary {
@@ -8271,6 +8362,14 @@ body {
   border-inline-start: 3px solid var(--warning);
   padding-inline-start: 8px;
   color: var(--text);
+}
+.notes-phase-action-feedback {
+  display: grid;
+  padding-inline: 14px;
+  background: var(--surface-1);
+}
+.notes-phase-action-feedback > :not(:empty) {
+  margin-block: 10px;
 }
 .notes-phase-action-status,
 .notes-phase-action-error {
@@ -8349,6 +8448,7 @@ body {
 
 .notes-reminder-section input,
 .notes-reminder-section textarea {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   border: 1px solid var(--border);
@@ -8603,7 +8703,8 @@ body {
   .notes-persistence-icon {
     color: CanvasText;
   }
-  .notes-tabs button[aria-selected="true"] {
+  .notes-tabs button[aria-selected="true"],
+  .notes-phase-views button[aria-selected="true"] {
     border-bottom-color: Highlight;
     color: Highlight;
   }
@@ -8698,6 +8799,13 @@ body {
   .notes-roadmap-proposal-actions {
     width: 100%;
   }
+  .notes-phase-reference-option {
+    grid-template-columns: 1fr;
+  }
+  .notes-phase-reference-option > button {
+    justify-self: start;
+    margin: 0 10px 9px 35px;
+  }
 
   .notes-phase-overview {
     gap: 10px;
@@ -8756,6 +8864,17 @@ body {
   .roadmap-reminder-alert-actions {
     flex-wrap: wrap;
   }
+  .notes-phase-views {
+    display: none;
+  }
+
+  .notes-phase-view-select {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+  }
+
   .notes-phase-overview-heading {
     grid-template-columns: 1fr;
   }

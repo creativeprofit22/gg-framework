@@ -29,4 +29,61 @@ describe("narrow-window layout contracts", () => {
       /\.model-menu\s*\{[\s\S]*?responsive footer overflow cannot clip[\s\S]*?position:\s*fixed;/,
     );
   });
+
+  it("keeps Roadmap phase detail inside a 320px viewport with one vertical Notes scroller", () => {
+    const viewportWidth = 320;
+    const modalWidth = viewportWidth - 12;
+    const panelRailWidth = modalWidth - 28;
+    const phaseDetailWidth = panelRailWidth - 24;
+
+    expect(phaseDetailWidth).toBe(256);
+    expect(phaseDetailWidth).toBeGreaterThan(0);
+    expect(appCss).toMatch(
+      /\.notes-panel\s*\{[\s\S]*?overflow-x:\s*hidden;[\s\S]*?overflow-y:\s*auto;/,
+    );
+    expect(appCss).toMatch(
+      /\.notes-phase-detail :is\(section, details, form, dl, ul, li, div\)\s*\{\s*min-width:\s*0;/,
+    );
+    expect(appCss).toMatch(
+      /\.notes-phase-detail :is\(p, li, dd, small, span, strong, a, code, pre\)\s*\{\s*overflow-wrap:\s*anywhere;/,
+    );
+    expect(appCss).toMatch(
+      /\.notes-reminder-section input,[\s\S]*?\.notes-reminder-section textarea\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?min-width:\s*0;/,
+    );
+
+    const notesVerticalScrollerSelectors = [
+      ...appCss.matchAll(/([^{}]+)\{[^{}]*overflow-y:\s*auto;/g),
+    ]
+      .map((match) => match[1]?.trim() ?? "")
+      .filter(
+        (selector) =>
+          selector === ".notes-panel" ||
+          selector.includes("notes-roadmap") ||
+          selector.includes("notes-phase"),
+      );
+    expect(notesVerticalScrollerSelectors).toEqual([".notes-panel"]);
+
+    const phaseViewRules = [...appCss.matchAll(/\.notes-phase-view[^{}]*\{([^{}]*)\}/g)]
+      .map((match) => match[1])
+      .join("\n");
+    expect(phaseViewRules).not.toMatch(/overflow-y:\s*(?:auto|scroll)/);
+    expect(appCss).toMatch(/\.notes-phase-view-select\s*\{\s*display:\s*none;/);
+    expect(appCss).toMatch(/\.notes-phase-view-select label\s*\{[\s\S]*?white-space:\s*nowrap;/);
+    expect(appCss).toMatch(
+      /@media \(max-width:\s*560px\)[\s\S]*?\.notes-phase-views\s*\{\s*display:\s*none;[\s\S]*?\.notes-phase-view-select\s*\{\s*display:\s*grid;\s*grid-template-columns:\s*auto minmax\(0,\s*1fr\);/,
+    );
+  });
+
+  it("lets expanded saved prompts wrap in the Notes panel instead of creating a nested scroller", () => {
+    const promptBlock = appCss.match(/\.notes-phase-saved-prompt pre\s*\{([\s\S]*?)\}/)?.[1];
+
+    expect(promptBlock).toBeDefined();
+    expect(promptBlock).toMatch(/overflow:\s*visible;/);
+    expect(promptBlock).toMatch(/overflow-wrap:\s*anywhere;/);
+    expect(promptBlock).toMatch(/white-space:\s*pre-wrap;/);
+    expect(promptBlock).not.toMatch(/max-height:/);
+    expect(appCss).toMatch(
+      /@media \(max-width:\s*560px\)[\s\S]*?\.notes-phase-detail-actions \.notes-roadmap-primary\s*\{\s*width:\s*100%;/,
+    );
+  });
 });

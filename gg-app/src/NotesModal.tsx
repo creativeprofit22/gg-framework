@@ -319,6 +319,7 @@ export function NotesModal({
                   references={references}
                   authorityReady={authorityReady}
                   initialSelectedPhaseId={initialRoadmapPhaseId}
+                  openSource={openSource}
                   onCreatePhase={onCreatePhase}
                   onEditPhase={onEditPhase}
                   onMovePhase={onMovePhase}

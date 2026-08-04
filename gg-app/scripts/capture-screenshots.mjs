@@ -192,7 +192,7 @@ const localModels = {
 };
 
 // Command → canned response. Anything unlisted resolves to null (harmless).
-const responses = {
+export const responses = {
   sidecar_port: 45678,
   agent_state: state,
   agent_progress: progress,
@@ -227,7 +227,7 @@ const responses = {
   },
 };
 
-function initScript(payload) {
+export function initScript(payload) {
   const { responses, appVersion } = payload;
   const callbacks = new Map();
   // event name → set of callback ids registered through `plugin:event|listen`.
@@ -761,4 +761,6 @@ async function main() {
   console.log(`\n${results.length} screenshot(s) → ${outDir}`);
 }
 
-await main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
+}

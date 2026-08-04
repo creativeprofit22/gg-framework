@@ -966,6 +966,8 @@ body {
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
   border-bottom: 1px solid var(--border);
 }
 /* Per-project accent identity. `--project-accent` is set inline per window by
@@ -1133,11 +1135,15 @@ body {
   opacity: 0.45;
 }
 .chat-head-nav {
+  box-sizing: border-box;
   display: flex;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   align-items: center;
   gap: 14px;
-  /* Wrap the action cluster below the back button on narrow windows instead of
-     letting the fixed-width buttons overflow / clip off the right edge. */
+  /* Wrap the action cluster below the back button on narrow panes instead of
+     letting its intrinsic width enlarge the workspace shell. */
   flex-wrap: wrap;
   row-gap: 8px;
   padding: 2px 20px 12px;
@@ -1146,10 +1152,12 @@ body {
   margin-left: auto;
   display: flex;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
   gap: 8px;
-  /* Buttons keep their intrinsic size — never squish the action cluster — but
-     the cluster as a whole may wrap to its own line when the bar is too tight. */
-  flex: 0 0 auto;
+  /* The buttons retain their intrinsic size, while the cluster can shrink to
+     the nav row and wrap locally. justify-content keeps desktop alignment. */
+  flex: 1 1 auto;
   flex-wrap: wrap;
   row-gap: 8px;
   justify-content: flex-end;

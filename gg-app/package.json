@@ -21,8 +21,9 @@
     "installer:art": "node installer/build-art.mjs",
     "bump": "node scripts/bump-version.mjs",
     "evidence:workspace-shell": "node scripts/workspace-shell-evidence.mjs",
-    "test": "pnpm test:parallel && pnpm test:workspace-shell-evidence",
+    "test": "pnpm test:parallel && pnpm test:workspace-narrow && pnpm test:workspace-shell-evidence",
     "test:parallel": "vitest run --exclude scripts/workspace-shell-evidence.test.mjs",
+    "test:workspace-narrow": "node scripts/workspace-narrow-regression.mjs",
     "test:workspace-shell-evidence": "vitest run scripts/workspace-shell-evidence.test.mjs --no-file-parallelism",
     "smoke:packaged": "node scripts/smoke-packaged-windows.mjs",
     "tauri": "tauri"

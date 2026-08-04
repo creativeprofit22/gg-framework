@@ -10,6 +10,38 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
+function isAvailableForModalFocus(element: HTMLElement, dialog: HTMLElement): boolean {
+  let current: HTMLElement | null = element;
+  while (current) {
+    const styles = window.getComputedStyle(current);
+    if (
+      current.hidden ||
+      current.getAttribute("aria-hidden")?.trim().toLowerCase() === "true" ||
+      current.hasAttribute("inert") ||
+      (current as HTMLElement & { inert?: boolean }).inert === true ||
+      styles.display === "none" ||
+      styles.visibility === "hidden" ||
+      styles.visibility === "collapse" ||
+      styles.contentVisibility === "hidden"
+    ) {
+      return false;
+    }
+    if (current === dialog) return true;
+    current = current.parentElement;
+  }
+  return false;
+}
+
+function availableModalElements(dialog: HTMLElement, selector: string): HTMLElement[] {
+  return Array.from(dialog.querySelectorAll<HTMLElement>(selector)).filter((element) =>
+    isAvailableForModalFocus(element, dialog),
+  );
+}
+
+function modalFocusableElements(dialog: HTMLElement): HTMLElement[] {
+  return availableModalElements(dialog, FOCUSABLE_SELECTOR);
+}
+
 /** Reusable centered modal with Escape, focus containment, and focus return. */
 export function Modal({
   title,
@@ -35,11 +67,12 @@ export function Modal({
     const returnFocus =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
-    const initialFocus =
-      dialog?.querySelector<HTMLElement>("[data-modal-initial-focus]") ??
-      dialog?.querySelector<HTMLElement>("[role='tab'][aria-selected='true']") ??
-      dialog?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR) ??
-      dialog;
+    const initialFocus = dialog
+      ? (availableModalElements(dialog, "[data-modal-initial-focus]")[0] ??
+        availableModalElements(dialog, "[role='tab'][aria-selected='true']")[0] ??
+        modalFocusableElements(dialog)[0] ??
+        dialog)
+      : null;
     initialFocus?.focus();
 
     const onKey = (event: KeyboardEvent): void => {
@@ -49,9 +82,7 @@ export function Modal({
         return;
       }
       if (event.key !== "Tab" || !dialog) return;
-      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-        (element) => !element.hidden && element.getAttribute("aria-hidden") !== "true",
-      );
+      const focusable = modalFocusableElements(dialog);
       if (focusable.length === 0) {
         event.preventDefault();
         dialog.focus();

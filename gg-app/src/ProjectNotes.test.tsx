@@ -1119,6 +1119,34 @@ describe("ProjectNotes", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "New phase" }));
   });
 
+  it("contains focus in both directions when inactive Notes panels stay mounted", async () => {
+    const cwd = "/work/focus-containment";
+    const client = new FakeProjectNotesClient(cwd);
+    client.seed(cwd, notes("focus containment"));
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    const opener = await screen.findByRole("button", { name: "Notes" });
+    opener.focus();
+    fireEvent.click(opener);
+
+    const overview = screen.getByRole("tab", { name: "Overview" });
+    const close = screen.getByRole("button", { name: "Close" });
+    const lastVisibleControl = screen.getByLabelText("Handoff notes");
+    expect(screen.getAllByRole("tabpanel", { hidden: true })).toHaveLength(4);
+    expect(document.activeElement).toBe(overview);
+
+    lastVisibleControl.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
+
+    close.focus();
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(lastVisibleControl);
+
+    fireEvent.click(close);
+    await waitFor(() => expect(document.activeElement).toBe(opener));
+  });
+
   it("keeps an incoming Handoff unread until Overview is visible", async () => {
     const cwd = "/work/hidden-handoff";
     const client = new FakeProjectNotesClient(cwd);

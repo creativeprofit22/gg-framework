@@ -576,16 +576,16 @@ describe("useAgentEvents", () => {
     expect(getPlanReview()).toBe("# Plan");
   });
 
-  it("plan_exit hides the human review modal when autopilot is on", () => {
+  it("plan_exit keeps the human review modal available while autopilot reviews", () => {
     const { hook, getPlanReview, deps } = setup(() => false, { autopilot: true });
     act(() => {
       hook.result.current.handleEvent(
         ev("plan_exit", { planPath: "/tmp/p.md", content: "# Plan" }),
       );
     });
-    // The content/path are still stashed for Ken auto-review + auto-accept step
-    // counting, but the human overlay stays hidden while autopilot owns review.
-    expect(getPlanReview()).toBeNull();
+    // Plan approval remains a blocking human-visible gate while Ken reviews;
+    // either Ken or the user can resolve it, and the submitted path stays available.
+    expect(getPlanReview()).toBe("# Plan");
     expect(deps.planReviewPathRef.current).toBe("/tmp/p.md");
   });
 

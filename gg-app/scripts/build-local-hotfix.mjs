@@ -11,6 +11,12 @@ const repoRoot = join(appDir, "..");
 const srcTauri = join(appDir, "src-tauri");
 const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const env = { ...process.env, VITE_GG_LOCAL_PATCHED: "1", VITE_GG_SOURCE_ROOT: repoRoot };
+export const LOCAL_TAURI_CONFIG = {
+  productName: "GG Coder Local Fork",
+  mainBinaryName: "gg-coder-local-fork",
+  identifier: "com.ggcoder.local-fork",
+  bundle: { createUpdaterArtifacts: false },
+};
 
 function run(command, args) {
   console.log(`> ${command} ${args.join(" ")}`);
@@ -84,10 +90,7 @@ function localTauriConfigPath() {
   const configDir = join(repoRoot, ".gg", "local-fixes");
   const configPath = join(configDir, "tauri-local-patched.conf.json");
   mkdirSync(configDir, { recursive: true });
-  writeFileSync(
-    configPath,
-    `${JSON.stringify({ bundle: { createUpdaterArtifacts: false } }, null, 2)}\n`,
-  );
+  writeFileSync(configPath, `${JSON.stringify(LOCAL_TAURI_CONFIG, null, 2)}\n`);
   return configPath;
 }
 

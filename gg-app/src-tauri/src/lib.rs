@@ -30,6 +30,52 @@ fn hide_console(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+fn lifecycle_message_at(event: &str, timestamp_ms: i64, details: &str) -> String {
+    format!("lifecycle event={event} timestamp_ms={timestamp_ms} {details}")
+}
+
+fn lifecycle_message(event: &str, details: &str) -> String {
+    lifecycle_message_at(event, current_unix_millis(), details)
+}
+
+fn install_panic_diagnostics() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| {
+                panic_info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            })
+            .unwrap_or("non-string panic payload");
+        let location = panic_info
+            .location()
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let message = lifecycle_message(
+            "shell_panic",
+            &format!(
+                "shell_pid={} location={location} payload={payload:?}",
+                std::process::id()
+            ),
+        );
+        log::error!("{message}");
+        eprintln!("{message}");
+        previous_hook(panic_info);
+    }));
+}
+
 use base64::Engine as _;
 use futures_util::StreamExt;
 use tauri::{
@@ -699,8 +745,18 @@ fn sidecar_base(port: u16) -> String {
 ///
 /// On Windows there is no process-group kill, so we tree-kill via
 /// `taskkill /T /F` (kills the descendant tree), then `wait()` to reap.
-fn terminate_child(mut child: Child) {
+fn terminate_child(mut child: Child, reason: &'static str) {
     let pid = child.id() as i32;
+    log::info!(
+        "{}",
+        lifecycle_message(
+            "daemon_termination_requested",
+            &format!(
+                "shell_pid={} daemon_pid={pid} reason={reason}",
+                std::process::id()
+            ),
+        )
+    );
     #[cfg(unix)]
     unsafe {
         // Negative pid = signal the entire process group. The sidecar is its
@@ -712,7 +768,17 @@ fn terminate_child(mut child: Child) {
         #[cfg(unix)]
         {
             for _ in 0..30 {
-                if matches!(child.try_wait(), Ok(Some(_))) {
+                if let Ok(Some(status)) = child.try_wait() {
+                    log::info!(
+                        "{}",
+                        lifecycle_message(
+                            "daemon_exit",
+                            &format!(
+                                "shell_pid={} daemon_pid={pid} reason={reason} status={status}",
+                                std::process::id()
+                            ),
+                        )
+                    );
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -733,7 +799,28 @@ fn terminate_child(mut child: Child) {
             // Fall back to direct kill if taskkill is unavailable.
             let _ = child.kill();
         }
-        let _ = child.wait(); // reap the direct child (avoid zombie)
+        match child.wait() {
+            Ok(status) => log::info!(
+                "{}",
+                lifecycle_message(
+                    "daemon_exit",
+                    &format!(
+                        "shell_pid={} daemon_pid={pid} reason={reason} status={status}",
+                        std::process::id()
+                    ),
+                )
+            ),
+            Err(error) => log::error!(
+                "{}",
+                lifecycle_message(
+                    "daemon_exit_wait_failed",
+                    &format!(
+                        "shell_pid={} daemon_pid={pid} reason={reason} error={error}",
+                        std::process::id()
+                    ),
+                )
+            ),
+        }
     });
 }
 
@@ -764,76 +851,76 @@ struct ProcInfo {
     command: String,
 }
 
-/// Command substrings that identify a GG Coder *sidecar* process itself.
-/// `app-sidecar` matches both bundled `app-sidecar.mjs` and dev
-/// `app-sidecar.js`. This is our OWN binary name (fully under our control, not
-/// a third-party MCP name), so it's a safe, stable anchor. MCP children are NOT
-/// matched by name — there are thousands of possible MCP servers and users can
-/// add any of them — they're recognised structurally instead (descendant walk +
-/// process-group lineage; see `orphan_killset`).
+/// Command substring shared by bundled `app-sidecar.mjs` and dev
+/// `app-sidecar.js`. The product-specific `--gg-app-identity=...` argument is
+/// also required before an orphan can be attributed to this app identity.
 const SIDECAR_COMMAND_PATTERNS: &[&str] = &["app-sidecar"];
+const SIDECAR_IDENTITY_ARG_PREFIX: &str = "--gg-app-identity=";
 
-/// Pure (no I/O): given a process-table snapshot, the current app's pid, and the
-/// set of process-group ids belonging to sidecars we have ever spawned (the
-/// ledger — see `read_sidecar_ledger`), return the orphaned sidecar-tree PIDs to
-/// SIGKILL.
-///
-/// A sidecar-tree member is killed when ANY of these hold and it isn't self:
-///
-/// 1. **Orphaned sidecar** — command matches `SIDECAR_COMMAND_PATTERNS` and its
-///    parent is dead (`ppid == 1` or `ppid` absent from the snapshot).
-/// 2. **Descendant of an orphaned sidecar** — transitively reachable via the
-///    ppid tree from a (1) root. Catches MCP/LSP children still linked to a
-///    freshly-dead sidecar that's still in this snapshot.
-/// 3. **Process-group lineage (name-agnostic)** — the process's `pgid` is a
-///    ledgered sidecar group whose *leader is dead* (no live process has
-///    `pid == pgid`). This is the key case: after a crash/force-quit the sidecar
-///    is long gone and its MCP children have reparented to init, but they keep
-///    the sidecar's pgid. Any MCP server, of any name the user added, is caught
-///    here — no whitelist. PID-recycle-safe: a group whose leader is alive is
-///    skipped entirely (either a still-live sidecar, whose children we must NOT
-///    kill, or an unrelated process that recycled the pid).
-///
-/// The current app pid and its live sidecars are never matched — a live
-/// sidecar's parent is the still-running `gg-app`, so its `ppid` is alive, and
-/// its group leader is alive so lineage skips it.
-fn orphan_killset(snapshot: &[ProcInfo], self_pid: i32, ledger_pgids: &HashSet<i32>) -> Vec<i32> {
+fn sidecar_identity_arg(identifier: &str) -> String {
+    format!("{SIDECAR_IDENTITY_ARG_PREFIX}{identifier}")
+}
+
+/// Assign every Tauri product identity its own sidecar log and PID ledger.
+fn runtime_identity_slug(identifier: &str) -> String {
+    let suffix = identifier
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    format!("gg-app-{suffix}")
+}
+
+fn sidecar_log_filename(identifier: &str) -> String {
+    format!("{}-sidecar.log", runtime_identity_slug(identifier))
+}
+
+/// Pure classifier used by runtime identity-scoped orphan cleanup.
+fn orphan_killset_for_identity(
+    snapshot: &[ProcInfo],
+    self_pid: i32,
+    ledger_pgids: &HashSet<i32>,
+    identity_arg: &str,
+) -> Vec<i32> {
     let live_pids: HashSet<i32> = snapshot.iter().map(|p| p.pid).collect();
     let mut parent_children: HashMap<i32, Vec<i32>> = HashMap::new();
     for p in snapshot {
         parent_children.entry(p.ppid).or_default().push(p.pid);
     }
 
-    let matches_sidecar = |cmd: &str| SIDECAR_COMMAND_PATTERNS.iter().any(|pat| cmd.contains(pat));
+    let matches_sidecar = |cmd: &str| {
+        cmd.contains(identity_arg)
+            && SIDECAR_COMMAND_PATTERNS
+                .iter()
+                .any(|pattern| cmd.contains(pattern))
+    };
     let parent_dead = |ppid: i32| ppid == 1 || !live_pids.contains(&ppid);
 
-    // The subset of ledgered sidecar groups whose LEADER is dead. A group whose
-    // leader (pid == pgid) is still alive is skipped: it's either a live sidecar
-    // (its children are in use) or an unrelated process that recycled the pid.
     let dead_leader_groups: HashSet<i32> = ledger_pgids
         .iter()
         .copied()
-        .filter(|&g| g > 1 && !live_pids.contains(&g))
+        .filter(|&group| group > 1 && !live_pids.contains(&group))
         .collect();
 
     let mut killset: HashSet<i32> = HashSet::new();
-
-    // (1) Orphaned sidecars + (3) process-group lineage. Both are single-pass
-    // over the snapshot.
-    for p in snapshot {
-        if p.pid == self_pid {
+    for process in snapshot {
+        if process.pid == self_pid {
             continue;
         }
-        let orphaned_sidecar = matches_sidecar(&p.command) && parent_dead(p.ppid);
-        let orphaned_group_member = p.pgid > 1 && dead_leader_groups.contains(&p.pgid);
+        let orphaned_sidecar = matches_sidecar(&process.command) && parent_dead(process.ppid);
+        let orphaned_group_member = process.pgid > 1 && dead_leader_groups.contains(&process.pgid);
         if orphaned_sidecar || orphaned_group_member {
-            killset.insert(p.pid);
+            killset.insert(process.pid);
         }
     }
 
-    // (2) Descendants: transitively collect children of each root via the map.
-    // Catches freshly-orphaned MCP/LSP trees still linked to a dead sidecar
-    // that remains in this snapshot (its pgid leader still "alive").
     let mut stack: Vec<i32> = killset.iter().copied().collect();
     while let Some(parent) = stack.pop() {
         if let Some(children) = parent_children.get(&parent) {
@@ -848,6 +935,13 @@ fn orphan_killset(snapshot: &[ProcInfo], self_pid: i32, ledger_pgids: &HashSet<i
     let mut result: Vec<i32> = killset.into_iter().collect();
     result.sort_unstable();
     result
+}
+
+/// Backward-compatible generic classifier for unit fixtures that predate the
+/// product marker. Runtime cleanup always calls `orphan_killset_for_identity`
+/// with the exact current Tauri identifier.
+fn orphan_killset(snapshot: &[ProcInfo], self_pid: i32, ledger_pgids: &HashSet<i32>) -> Vec<i32> {
+    orphan_killset_for_identity(snapshot, self_pid, ledger_pgids, "app-sidecar")
 }
 
 /// Pure parser for `ps -eo pid=,ppid=,pgid=,command=` output (one row per
@@ -960,104 +1054,89 @@ fn force_kill_pid(pid: i32) {
         .status();
 }
 
-/// Absolute path to the sidecar PID ledger (`~/.gg/gg-app-sidecars`).
-///
-/// Newline-delimited list of PIDs of every Node sidecar this app has spawned.
-/// Because each sidecar is spawned as a process-group leader (`process_group(0)`
-/// on Unix), its PID equals the pgid shared by all of its MCP/LSP children. So a
-/// ledgered PID doubles as "a GG process-group id", which is how the sweep
-/// recognises a crashed sidecar's children by lineage — no MCP-name whitelist.
-fn sidecar_ledger_path() -> PathBuf {
-    home_dir().join(".gg").join("gg-app-sidecars")
+/// Absolute path to this product identity's sidecar PID ledger.
+fn sidecar_ledger_path(identifier: &str) -> PathBuf {
+    home_dir()
+        .join(".gg")
+        .join(format!("{}-sidecars", runtime_identity_slug(identifier)))
 }
 
-/// Read the ledgered sidecar PIDs (== process-group ids). Missing/garbage file
-/// → empty set (the sweep then degrades to name + descendant matching, exactly
-/// the pre-ledger behaviour). Best-effort, never panics.
-fn read_sidecar_ledger() -> HashSet<i32> {
-    let Ok(contents) = std::fs::read_to_string(sidecar_ledger_path()) else {
+fn read_sidecar_ledger(identifier: &str) -> HashSet<i32> {
+    let Ok(contents) = std::fs::read_to_string(sidecar_ledger_path(identifier)) else {
         return HashSet::new();
     };
     contents
         .lines()
-        .filter_map(|l| l.trim().parse::<i32>().ok())
-        .filter(|&p| p > 1)
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+        .filter(|&pid| pid > 1)
         .collect()
 }
 
-/// Append a freshly-spawned sidecar's PID to the ledger. Called right after
-/// `spawn_daemon` gets a live child. Creates `~/.gg` if needed. Best-effort:
-/// a write failure only means that sidecar's orphans fall back to name matching.
-fn record_sidecar_pid(pid: i32) {
-    let path = sidecar_ledger_path();
+fn record_sidecar_pid(identifier: &str, pid: i32) {
+    let path = sidecar_ledger_path(identifier);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
+    if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
     {
-        let _ = writeln!(f, "{pid}");
+        let _ = writeln!(file, "{pid}");
     }
 }
 
-/// Rewrite the ledger to keep only PIDs whose process group is still live —
-/// i.e. a process with `pid == pgid` exists in the snapshot (a still-running
-/// sidecar, ours or a concurrent instance's). Drops dead groups (their members
-/// were just swept) and pids recycled away, so the file can't grow without
-/// bound. Best-effort.
-fn prune_sidecar_ledger(ledger: &HashSet<i32>, snapshot: &[ProcInfo]) {
-    let live_pids: HashSet<i32> = snapshot.iter().map(|p| p.pid).collect();
+fn prune_sidecar_ledger(identifier: &str, ledger: &HashSet<i32>, snapshot: &[ProcInfo]) {
+    let live_pids: HashSet<i32> = snapshot.iter().map(|process| process.pid).collect();
     let keep: Vec<i32> = ledger
         .iter()
         .copied()
-        .filter(|g| live_pids.contains(g))
+        .filter(|group| live_pids.contains(group))
         .collect();
-    let path = sidecar_ledger_path();
+    let path = sidecar_ledger_path(identifier);
     if keep.is_empty() {
-        // Nothing worth keeping — remove the file so a stale set can't linger.
         let _ = std::fs::remove_file(&path);
         return;
     }
     let body = keep
         .iter()
-        .map(|p| p.to_string())
+        .map(|pid| pid.to_string())
         .collect::<Vec<_>>()
         .join("\n");
     let _ = std::fs::write(&path, format!("{body}\n"));
 }
 
-/// Snapshot the process table, classify orphaned sidecar trees, and force-kill
-/// each. Best-effort + logged; never panics. Runs once at startup before any
-/// sidecar is spawned.
-fn sweep_orphan_sidecars() {
+/// Sweep only orphaned sidecar trees carrying this exact product identity.
+fn sweep_orphan_sidecars(identifier: &str) {
     let Some(snapshot) = process_snapshot() else {
         log::warn!("orphan sweep: process listing unavailable, skipping");
         return;
     };
     let self_pid = std::process::id() as i32;
-    let ledger = read_sidecar_ledger();
-
-    let killset = orphan_killset(&snapshot, self_pid, &ledger);
+    let ledger = read_sidecar_ledger(identifier);
+    let identity_arg = sidecar_identity_arg(identifier);
+    let killset = orphan_killset_for_identity(&snapshot, self_pid, &ledger, &identity_arg);
     if killset.is_empty() {
-        log::info!("orphan sweep: no stale sidecars found");
-        prune_sidecar_ledger(&ledger, &snapshot);
+        log::info!("orphan sweep: no stale sidecars found for {identifier}");
+        prune_sidecar_ledger(identifier, &ledger, &snapshot);
         return;
     }
 
-    log::info!("orphan sweep: killing {} stale process(es)", killset.len());
+    log::info!(
+        "orphan sweep: killing {} stale process(es) for {identifier}",
+        killset.len()
+    );
     for pid in &killset {
-        let cmd = snapshot
+        let command = snapshot
             .iter()
-            .find(|p| &p.pid == pid)
-            .map(|p| p.command.as_str())
+            .find(|process| &process.pid == pid)
+            .map(|process| process.command.as_str())
             .unwrap_or("?");
-        log::info!("orphan sweep: killing pid {pid}: {cmd}");
+        log::info!("orphan sweep: killing pid {pid}: {command}");
         force_kill_pid(*pid);
     }
-    prune_sidecar_ledger(&ledger, &snapshot);
+    prune_sidecar_ledger(identifier, &ledger, &snapshot);
 }
 
 /// The shared daemon port (same for every window). Named `port_for` so the ~35
@@ -6072,14 +6151,30 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     let started_at = std::time::Instant::now();
     let script = resolve_sidecar(&app);
     let node = resolve_node(&app);
-    log::info!("spawning daemon: {} {}", node.display(), script.display());
+    let identifier = app.config().identifier.clone();
+    let identity_arg = sidecar_identity_arg(&identifier);
+    let sidecar_log = sidecar_log_filename(&identifier);
+    log::info!(
+        "{}",
+        lifecycle_message(
+            "daemon_spawn_requested",
+            &format!(
+                "shell_pid={} respawn={is_respawn} identity={identifier} node={} script={}",
+                std::process::id(),
+                node.display(),
+                script.display()
+            ),
+        )
+    );
 
     let mut cmd = Command::new(node);
     hide_console(&mut cmd);
     cmd.arg(&script)
+        .arg(&identity_arg)
         // Port 0 → the OS assigns a free port, reported back via the
         // GG_APP_LISTENING handshake.
         .env("GG_APP_PORT", "0")
+        .env("GG_APP_SIDECAR_LOG_FILE", &sidecar_log)
         .env("ERROR_MOM_RELEASE", env!("CARGO_PKG_VERSION"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -6095,21 +6190,39 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
-        Ok(c) => {
-            // Record the sidecar PID (== its process-group id on Unix, since it's
-            // a group leader). The startup orphan sweep uses this ledger to
-            // recognise this sidecar's MCP/LSP children by lineage if the app is
-            // later crashed/force-quit — works for ANY MCP server, no name list.
-            record_sidecar_pid(c.id() as i32);
-            c
+        Ok(child) => {
+            // The identity-scoped ledger lets orphan cleanup attribute this
+            // daemon tree without touching another installed GG Coder identity.
+            record_sidecar_pid(&identifier, child.id() as i32);
+            child
         }
         Err(e) => {
-            let message = format!("failed to spawn daemon: {e}");
+            let message = format!(
+                "{}",
+                lifecycle_message(
+                    "daemon_spawn_failed",
+                    &format!(
+                        "shell_pid={} respawn={is_respawn} error={e}",
+                        std::process::id()
+                    ),
+                )
+            );
             log::error!("{message}");
             emit_daemon_error(&app, &message);
             return;
         }
     };
+    let daemon_pid = child.id();
+    log::info!(
+        "{}",
+        lifecycle_message(
+            "daemon_start",
+            &format!(
+                "shell_pid={} daemon_pid={daemon_pid} respawn={is_respawn}",
+                std::process::id()
+            ),
+        )
+    );
 
     // Publish the child before starting pipe readers. A process can fail before
     // the reader thread starts; storing first guarantees the crash handler can
@@ -6128,7 +6241,16 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             for line in reader.lines().map_while(Result::ok) {
                 if let Some(rest) = line.strip_prefix("GG_APP_LISTENING ") {
                     if let Ok(port) = rest.trim().parse::<u16>() {
-                        log::info!("daemon listening on port {port}");
+                        log::info!(
+                            "{}",
+                            lifecycle_message(
+                                "daemon_listening",
+                                &format!(
+                                    "shell_pid={} daemon_pid={daemon_pid} port={port}",
+                                    std::process::id()
+                                ),
+                            )
+                        );
                         let daemon = app2.state::<Daemon>();
                         *daemon.port.lock().unwrap() = Some(port);
                         daemon.generation.fetch_add(1, Ordering::SeqCst);
@@ -6148,22 +6270,57 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             // the app isn't quitting, remove the stale port and reap/terminate
             // the exact child before considering a bounded respawn.
             if app2.state::<AppExiting>().0.load(Ordering::SeqCst) {
+                log::info!(
+                    "{}",
+                    lifecycle_message(
+                        "daemon_control_pipe_closed",
+                        &format!(
+                            "shell_pid={} daemon_pid={daemon_pid} reason=shell_exit",
+                            std::process::id()
+                        ),
+                    )
+                );
                 return;
             }
 
-            let attempt = {
+            let (attempt, planned) = {
                 let daemon: State<Daemon> = app2.state();
                 let planned = daemon.planned_reload.swap(false, Ordering::SeqCst);
-                if planned {
-                    log::info!("daemon exited for Azure configuration refresh — respawning");
-                }
+                let termination_reason = if planned {
+                    "configuration_refresh"
+                } else {
+                    "unexpected_control_pipe_close"
+                };
                 *daemon.port.lock().unwrap() = None;
                 if let Some(mut old_child) = daemon.child.lock().unwrap().take() {
                     match old_child.try_wait() {
-                        Ok(Some(_)) => {
+                        Ok(Some(status)) => {
+                            log::info!(
+                                "{}",
+                                lifecycle_message(
+                                    "daemon_exit",
+                                    &format!(
+                                        "shell_pid={} daemon_pid={daemon_pid} reason={termination_reason} status={status}",
+                                        std::process::id()
+                                    ),
+                                )
+                            );
                             let _ = old_child.wait();
                         }
-                        _ => terminate_child(old_child),
+                        Ok(None) => terminate_child(old_child, termination_reason),
+                        Err(error) => {
+                            log::warn!(
+                                "{}",
+                                lifecycle_message(
+                                    "daemon_status_failed",
+                                    &format!(
+                                        "shell_pid={} daemon_pid={daemon_pid} reason={termination_reason} error={error}",
+                                        std::process::id()
+                                    ),
+                                )
+                            );
+                            terminate_child(old_child, termination_reason);
+                        }
                     }
                 }
                 let mut attempts = daemon.respawn_attempts.lock().unwrap();
@@ -6171,7 +6328,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                     *attempts = 0;
                 }
                 *attempts += 1;
-                *attempts
+                (*attempts, planned)
             };
 
             let Some(delay) = daemon_respawn_delay(attempt) else {
@@ -6182,10 +6339,17 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                 return;
             };
 
-            log::warn!(
-                "daemon exited unexpectedly — respawn {attempt}/{DAEMON_MAX_RESPAWNS} in {}s",
-                delay.as_secs()
-            );
+            if planned {
+                log::info!(
+                    "daemon configuration refresh — respawn {attempt}/{DAEMON_MAX_RESPAWNS} in {}s",
+                    delay.as_secs()
+                );
+            } else {
+                log::warn!(
+                    "daemon exited unexpectedly — respawn {attempt}/{DAEMON_MAX_RESPAWNS} in {}s",
+                    delay.as_secs()
+                );
+            }
             std::thread::sleep(delay);
             if !app2.state::<AppExiting>().0.load(Ordering::SeqCst) {
                 clear_runtime_pane_sessions(&app2);
@@ -6586,6 +6750,7 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_panic_diagnostics();
     let builder = tauri::Builder::default();
     #[cfg(all(debug_assertions, target_os = "macos"))]
     let builder = if phase26_macos_smoke_enabled() {
@@ -6729,18 +6894,26 @@ pub fn run() {
             set_remote_active
         ])
         .setup(|app| {
+            log::info!(
+                "{}",
+                lifecycle_message(
+                    "shell_start",
+                    &format!(
+                        "shell_pid={} app_version={}",
+                        std::process::id(),
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                )
+            );
             // Windows-only: track per-window minimized state so restoring one
             // window can restore its siblings (macOS does this natively).
             #[cfg(target_os = "windows")]
             app.manage(MinimizeState::default());
-            // Sweep orphaned sidecars from previous (crashed/force-quit) app
-            // instances BEFORE spawning any new sidecars — they'd otherwise
-            // accumulate forever across launches. Best-effort + logged.
-            // Cross-platform: uses `ps` on Unix, PowerShell CIM on Windows.
-            // The isolated Phase 25 dev fixture must never inspect or terminate
-            // a pre-existing host sidecar.
+            // Sweep only orphaned sidecars from this exact Tauri identity before
+            // spawning a replacement. The isolated Phase 25 dev fixture must
+            // never inspect or terminate a pre-existing host sidecar.
             if !phase25_dev_fixture_enabled() {
-                sweep_orphan_sidecars();
+                sweep_orphan_sidecars(&app.config().identifier);
             }
             // macOS menu-bar / Windows notification-area presence.
             #[cfg(any(target_os = "macos", windows))]
@@ -6888,8 +7061,19 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(|app, event| {
-            if let RunEvent::ExitRequested { .. } = event {
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { code, .. } => {
+                log::info!(
+                    "{}",
+                    lifecycle_message(
+                        "tauri_exit_requested",
+                        &format!(
+                            "shell_pid={} code={}",
+                            std::process::id(),
+                            code.map_or_else(|| "user".to_string(), |code| code.to_string())
+                        ),
+                    )
+                );
                 // Mark the quit BEFORE windows start tearing down, so the
                 // Destroyed handlers preserve the snapshot, then write the final
                 // snapshot (current geometry + each window's live cwd/session).
@@ -6900,9 +7084,16 @@ pub fn run() {
                 // session's MCP/LSP children in one shot (no orphans).
                 let child = app.state::<Daemon>().child.lock().unwrap().take();
                 if let Some(child) = child {
-                    terminate_child(child);
+                    terminate_child(child, "tauri_exit_requested");
                 }
             }
+            RunEvent::Exit => {
+                log::info!(
+                    "{}",
+                    lifecycle_message("shell_exit", &format!("shell_pid={}", std::process::id()),)
+                );
+            }
+            _ => {}
         });
 }
 
@@ -6985,6 +7176,20 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_diagnostic_includes_event_timestamp_and_process_details() {
+        let message = lifecycle_message_at(
+            "daemon_exit",
+            1_754_333_456_789,
+            "shell_pid=42 daemon_pid=99 reason=tauri_exit_requested status=exit code: 0",
+        );
+
+        assert_eq!(
+            message,
+            "lifecycle event=daemon_exit timestamp_ms=1754333456789 shell_pid=42 daemon_pid=99 reason=tauri_exit_requested status=exit code: 0"
+        );
+    }
 
     #[test]
     fn dev_fixture_flags_require_debug_builds_and_exact_opt_in() {
@@ -8057,6 +8262,49 @@ mod tests {
     /// A ledger containing the given sidecar pgids.
     fn ledger(pgids: &[i32]) -> HashSet<i32> {
         pgids.iter().copied().collect()
+    }
+
+    #[test]
+    fn runtime_identity_files_are_product_scoped() {
+        assert_eq!(
+            runtime_identity_slug("com.ggcoder.app"),
+            "gg-app-com-ggcoder-app"
+        );
+        assert_eq!(
+            runtime_identity_slug("com.ggcoder.local-fork"),
+            "gg-app-com-ggcoder-local-fork"
+        );
+        assert_eq!(
+            sidecar_log_filename("com.ggcoder.app"),
+            "gg-app-com-ggcoder-app-sidecar.log"
+        );
+        assert_eq!(
+            sidecar_log_filename("com.ggcoder.local-fork"),
+            "gg-app-com-ggcoder-local-fork-sidecar.log"
+        );
+        assert_ne!(
+            sidecar_ledger_path("com.ggcoder.app"),
+            sidecar_ledger_path("com.ggcoder.local-fork")
+        );
+    }
+
+    #[test]
+    fn orphan_sweep_only_matches_requested_product_identity() {
+        let production_arg = sidecar_identity_arg("com.ggcoder.app");
+        let local_arg = sidecar_identity_arg("com.ggcoder.local-fork");
+        let snapshot = vec![
+            proc(500, 1, &format!("node app-sidecar.mjs {production_arg}")),
+            proc(600, 1, &format!("node app-sidecar.mjs {local_arg}")),
+        ];
+
+        assert_eq!(
+            orphan_killset_for_identity(&snapshot, 100, &no_ledger(), &production_arg),
+            vec![500]
+        );
+        assert_eq!(
+            orphan_killset_for_identity(&snapshot, 100, &no_ledger(), &local_arg),
+            vec![600]
+        );
     }
 
     #[test]

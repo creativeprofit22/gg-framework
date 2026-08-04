@@ -808,11 +808,18 @@ async function main(): Promise<void> {
   const host = "127.0.0.1";
 
   const paths = await ensureAppDirs();
-  // Own log file so the app sidecar never clobbers the interactive CLI's
-  // ~/.gg/debug.log (initLogger truncates on each start).
-  const sidecarLog = path.join(paths.agentDir, "gg-app-sidecar.log");
+  // The shell scopes this filename to its Tauri product identity so production
+  // and local-fork daemons never interleave or race log rotation.
+  const sidecarLogFile = path.basename(
+    process.env.GG_APP_SIDECAR_LOG_FILE?.trim() || "gg-app-sidecar.log",
+  );
+  const sidecarLog = path.join(paths.agentDir, sidecarLogFile);
   initLogger(sidecarLog);
-
+  const shellPid = process.ppid;
+  log("INFO", "app-sidecar", "daemon lifecycle start", {
+    daemonPid: process.pid,
+    shellPid,
+  });
   // The desktop sidecar previously omitted the stream diagnostic hook used by
   // the CLI, leaving device-specific provider stalls impossible to distinguish from
   // event-loop starvation or a broken streaming network path. Keep routine
@@ -1138,7 +1145,7 @@ async function main(): Promise<void> {
           return;
         }
         daemonJson(res, 202, { ok: true });
-        setImmediate(() => void shutdown());
+        setImmediate(() => void shutdown("configuration_refresh"));
         return;
       }
       const releaseMutation = reloadCoordinator.tryAcquireSessionMutation(method);
@@ -1301,11 +1308,18 @@ async function main(): Promise<void> {
     log("INFO", "app-sidecar", "daemon listening", { port: String(addr.port), host });
   });
 
-  const shellPid = process.ppid;
+  type ShutdownReason = "configuration_refresh" | "SIGINT" | "SIGTERM" | "parent_unavailable";
   let shuttingDown = false;
-  async function shutdown(): Promise<void> {
+  let terminationReason: ShutdownReason | "event_loop_exit" = "event_loop_exit";
+  async function shutdown(reason: ShutdownReason): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
+    terminationReason = reason;
+    log("INFO", "app-sidecar", "daemon termination requested", {
+      daemonPid: process.pid,
+      shellPid,
+      reason,
+    });
     clearInterval(parentWatch);
     // Radio playback is app-wide (one stream across all windows), so it stops
     // at the daemon level, not per session.
@@ -1315,11 +1329,24 @@ async function main(): Promise<void> {
     await sessions.disposeAll();
     await sharedMcpPool.dispose();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    log("INFO", "app-sidecar", "daemon shutdown complete", {
+      daemonPid: process.pid,
+      shellPid,
+      reason,
+    });
     process.exit(0);
   }
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
-  process.once("exit", stopRadio);
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.once("exit", (code) => {
+    stopRadio();
+    log("INFO", "app-sidecar", "daemon lifecycle exit", {
+      daemonPid: process.pid,
+      shellPid,
+      reason: terminationReason,
+      exitCode: code,
+    });
+  });
 
   // Tauri can disappear without delivering a signal (force-quit, dev runner
   // teardown, crash). Detect reparenting or a dead shell so the daemon and its
@@ -1333,7 +1360,7 @@ async function main(): Promise<void> {
         parentAlive = (error as NodeJS.ErrnoException).code === "EPERM";
       }
     }
-    if (!parentAlive) void shutdown();
+    if (!parentAlive) void shutdown("parent_unavailable");
   }, 1_000);
   parentWatch.unref?.();
 }
@@ -5309,6 +5336,13 @@ async function createSession(
 }
 
 main().catch(async (err) => {
+  log("ERROR", "app-sidecar", "daemon lifecycle exit", {
+    daemonPid: process.pid,
+    shellPid: process.ppid,
+    reason: "startup_failure",
+    message: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
   captureSidecarError(err, "app-sidecar.main", { severity: "fatal" });
   await flushSidecarErrors();
   const message = err instanceof Error ? err.message : String(err);

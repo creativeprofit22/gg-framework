@@ -30,6 +30,23 @@ afterEach(() => {
 const windowsDescribe = process.platform === "win32" ? describe : describe.skip;
 
 windowsDescribe("detached local installer helper", () => {
+  it("hashes files without relying on Get-FileHash", () => {
+    const root = mkdtempSync(join(tmpdir(), "gg-installer-helper-"));
+    temporaryDirectories.push(root);
+    const fixturePath = join(root, "hash-fixture.bin");
+    const fixtureBytes = Buffer.from("portable SHA-256 fixture", "utf8");
+    writeFileSync(fixturePath, fixtureBytes);
+
+    const result = runPowerShell(
+      `function Get-FileHash { throw 'Get-FileHash must not be called' }; Get-Sha256 -Path ${psLiteral(fixturePath)}`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(
+      createHash("sha256").update(fixtureBytes).digest("hex").toUpperCase(),
+    );
+  });
+
   it("takes the installer path and SHA-256 from latest-installer metadata", () => {
     const root = mkdtempSync(join(tmpdir(), "gg-installer-helper-"));
     temporaryDirectories.push(root);

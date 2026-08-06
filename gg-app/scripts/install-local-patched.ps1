@@ -35,6 +35,20 @@ function Test-PathWithinRoot([string]$Path, [string]$Root) {
   return $fullPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-Sha256([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+      return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+    } finally {
+      $sha256.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Read-VerifiedInstallerMetadata([string]$Path, [string]$AllowedRoot) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     throw "Installer metadata not found: $Path"
@@ -75,7 +89,7 @@ function Read-VerifiedInstallerMetadata([string]$Path, [string]$AllowedRoot) {
     throw "Installer size mismatch: expected=$($metadata.size) actual=$($item.Length)"
   }
 
-  $actualSha256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToUpperInvariant()
+  $actualSha256 = Get-Sha256 -Path $installer
   $normalizedExpected = $expectedSha256.ToUpperInvariant()
   if ($actualSha256 -ne $normalizedExpected) {
     throw "Installer SHA-256 mismatch: expected=$normalizedExpected actual=$actualSha256"

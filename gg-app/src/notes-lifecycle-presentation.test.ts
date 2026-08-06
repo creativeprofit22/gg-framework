@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { NotesPhase, NotesPhaseStatus } from "./notes-types";
 import { notesLifecyclePresentation } from "./notes-lifecycle-presentation";
 
-type PresentablePhase = Pick<NotesPhase, "status" | "lifecycleEvents" | "roadmapEvents">;
+type PresentablePhase = Pick<
+  NotesPhase,
+  "status" | "attentionReason" | "lifecycleEvents" | "roadmapEvents"
+>;
 
 function phase(status: NotesPhaseStatus): PresentablePhase {
-  return { status, lifecycleEvents: [], roadmapEvents: [] };
+  return { status, attentionReason: null, lifecycleEvents: [], roadmapEvents: [] };
 }
 
 describe("notesLifecyclePresentation", () => {
@@ -22,6 +25,50 @@ describe("notesLifecyclePresentation", () => {
     expect(notesLifecyclePresentation(phase(status))).toEqual({ state, stage });
   });
 
+  it("labels only a matching latest blocked report as Blocked", () => {
+    const blocked = phase("needs-attention");
+    blocked.attentionReason =
+      "The release account is missing; the release owner must provide account access.";
+    blocked.roadmapEvents.push({
+      type: "status-update",
+      id: "blocked-report",
+      actor: "gg-coder",
+      transition: "blocked",
+      progress: "Release is blocked by missing account access",
+      blocker: blocked.attentionReason,
+      requiredExternalAction: "Provide release account access",
+      evidence: [],
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
+      statusOutcome: "applied",
+      proposedReferences: [],
+      timestamp: "2026-08-03T08:00:00.000Z",
+    });
+
+    expect(notesLifecyclePresentation(blocked)).toEqual({
+      state: "Blocked",
+      stage: "Implementation",
+    });
+
+    blocked.attentionReason = "An unrelated runtime error needs attention.";
+    expect(notesLifecyclePresentation(blocked).state).toBe("Needs you");
+
+    const blockedReport = blocked.roadmapEvents[0]!;
+    if (blockedReport.type !== "status-update") throw new Error("Expected blocked report");
+    blocked.attentionReason = blockedReport.blocker;
+    blocked.roadmapEvents.push({
+      ...blockedReport,
+      id: "resumed-report",
+      transition: "in-progress",
+      blocker: null,
+      requiredExternalAction: null,
+      progress: "Release work resumed",
+      timestamp: "2026-08-03T08:01:00.000Z",
+    });
+    expect(notesLifecyclePresentation(blocked).state).toBe("Needs you");
+  });
+
   it("shows verification from typed roadmap evidence", () => {
     const reviewing = phase("review");
     reviewing.roadmapEvents.push({
@@ -31,6 +78,7 @@ describe("notesLifecyclePresentation", () => {
       transition: "review",
       progress: "Verification complete",
       blocker: null,
+      requiredExternalAction: null,
       evidence: [],
       verification: "passed",
       verificationReason: null,

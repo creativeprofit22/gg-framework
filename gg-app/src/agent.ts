@@ -7,12 +7,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { routePaneEvent, type PaneEventEnvelope } from "./pane-routing";
+import {
+  isRoadmapPhaseDraft,
+  isRoadmapPhaseDraftApprovalResult,
+  isRoadmapPhaseDraftRejectionResult,
+  type RoadmapPhaseDraft,
+  type RoadmapPhaseDraftApprovalResult,
+  type RoadmapPhaseDraftRejectionResult,
+} from "@kenkaiiii/gg-core/roadmap-workflow";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import {
   isPhaseRunCancellationResult,
   isPhaseStartResult,
   isProjectNotesMigrationOutcome,
   isProjectNotesReadOutcome,
+  isProjectNotesRoadmapBlockerResolutionOutcome,
   isProjectNotesSaveOutcome,
   isReminderClaimOutcome,
   isReminderReleaseOutcome,
@@ -80,6 +89,35 @@ export interface SubAgentStatePayload {
 export interface SidecarEvent {
   type: string;
   data: unknown;
+}
+
+export interface RoadmapPhaseDraftChangeEvent extends SidecarEvent {
+  type: "roadmap_phase_draft_change";
+  data: RoadmapPhaseDraft | null;
+}
+
+export function isRoadmapPhaseDraftChangeEvent(
+  event: SidecarEvent,
+): event is RoadmapPhaseDraftChangeEvent {
+  return (
+    event.type === "roadmap_phase_draft_change" &&
+    (event.data === null || isRoadmapPhaseDraft(event.data))
+  );
+}
+
+function parseRoadmapPhaseDraftPendingResponse(value: unknown): RoadmapPhaseDraft | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("invalid Roadmap draft response");
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    Object.keys(record).length !== 2 ||
+    record.status !== "ok" ||
+    !(record.draft === null || isRoadmapPhaseDraft(record.draft))
+  ) {
+    throw new Error("invalid Roadmap draft response");
+  }
+  return record.draft;
 }
 
 export {
@@ -2152,6 +2190,12 @@ export interface PaneAgentClient extends NotesClient {
   getState(): Promise<AgentState>;
   startPhase(phaseId: string): Promise<PhaseStartResult>;
   cancelPhaseRun(phaseId: string): Promise<PhaseRunCancellationResult>;
+  getRoadmapPhaseDraft(): Promise<RoadmapPhaseDraft | null>;
+  approveRoadmapPhaseDraft(draftId: string): Promise<RoadmapPhaseDraftApprovalResult>;
+  rejectRoadmapPhaseDraft(
+    draftId: string,
+    feedback?: string | null,
+  ): Promise<RoadmapPhaseDraftRejectionResult>;
   listMemories(): Promise<MemorySnapshot>;
   deleteMemory(id: string): Promise<MemorySnapshot>;
   listJiwa(): Promise<JiwaSnapshot>;
@@ -2345,6 +2389,13 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       if (!isProjectNotesSaveOutcome(outcome)) throw new Error("invalid Notes save response");
       return outcome;
     },
+    async resolveRoadmapBlocker(request) {
+      const outcome = await call<unknown>("agent_notes_resolve_roadmap_blocker", { ...request });
+      if (!isProjectNotesRoadmapBlockerResolutionOutcome(outcome)) {
+        throw new Error("invalid Roadmap blocker resolution response");
+      }
+      return outcome;
+    },
     async reserveReminder(focused) {
       const outcome = await call<unknown>("agent_reminder_reserve", { focused });
       if (!isReminderReserveOutcome(outcome)) {
@@ -2379,6 +2430,28 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       const outcome = await call<unknown>("agent_phase_cancel", { phaseId });
       if (!isPhaseRunCancellationResult(outcome)) {
         throw new Error("invalid phase cancellation response");
+      }
+      return outcome;
+    },
+    async getRoadmapPhaseDraft() {
+      return parseRoadmapPhaseDraftPendingResponse(
+        await call<unknown>("agent_roadmap_phase_draft_get"),
+      );
+    },
+    async approveRoadmapPhaseDraft(draftId) {
+      const outcome = await call<unknown>("agent_roadmap_phase_draft_approve", { draftId });
+      if (!isRoadmapPhaseDraftApprovalResult(outcome)) {
+        throw new Error("invalid Roadmap draft approval response");
+      }
+      return outcome;
+    },
+    async rejectRoadmapPhaseDraft(draftId, feedback = null) {
+      const outcome = await call<unknown>("agent_roadmap_phase_draft_reject", {
+        draftId,
+        feedback,
+      });
+      if (!isRoadmapPhaseDraftRejectionResult(outcome)) {
+        throw new Error("invalid Roadmap draft rejection response");
       }
       return outcome;
     },

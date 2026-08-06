@@ -36,12 +36,15 @@ tauri-plugin-dialog = "2"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = "0.4.45"
+unicode-normalization = "0.1.25"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"
 keyring = { version = "=4.1.5", default-features = false, features = ["v1"] }
 atomic-write-file = { version = "=0.3.0", default-features = false }
 tokio = { version = "1", features = ["time"] }
 base64 = "0.22"
+getrandom = "=0.3.4"
 tauri-plugin-notification = "2"
 
 # Updater + process (relaunch) are desktop-only — the updater plugin doesn't

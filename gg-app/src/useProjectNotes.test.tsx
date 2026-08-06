@@ -152,6 +152,7 @@ function addPendingRoadmapProposal(
       transition,
       progress: "Implemented the Roadmap status path",
       blocker: transition === "blocked" ? "Waiting for CI" : null,
+      requiredExternalAction: transition === "blocked" ? "Restore CI access" : null,
       evidence: ["Focused tests passed"],
       verification: null,
       verificationReason: null,
@@ -291,6 +292,32 @@ class FakeNotesClient implements NotesClient {
     return new Promise((resolve) => {
       this.pendingSaves.push({ expectedRevision, document, resolve });
     });
+  }
+
+  async resolveRoadmapBlocker(
+    request: Parameters<NotesClient["resolveRoadmapBlocker"]>[0],
+  ): ReturnType<NotesClient["resolveRoadmapBlocker"]> {
+    const current = this.server.snapshots.get(this.projectKey);
+    if (!current) return { status: "missing" };
+    if (current.revision !== request.expectedRevision) {
+      return { status: "stale-revision", revision: current.revision };
+    }
+    const document = structuredClone(current.document);
+    const phase = document.phases.find((candidate) => candidate.id === request.phaseId);
+    if (!phase) return { status: "phase-not-found" };
+    phase.roadmapEvents.push({
+      type: "blocker-resolution",
+      id: request.resolutionId,
+      blockerUpdateId: request.blockerUpdateId,
+      resolver: request.resolver,
+      timestamp: request.timestamp,
+    });
+    phase.updatedAt = request.timestamp;
+    document.updatedAt = request.timestamp;
+    const snapshot = { projectKey: this.projectKey, revision: current.revision + 1, document };
+    this.server.snapshots.set(this.projectKey, snapshot);
+    this.emit({ type: "notes_change", data: snapshot });
+    return { status: "committed", snapshot, phase };
   }
 
   async reserveReminder() {

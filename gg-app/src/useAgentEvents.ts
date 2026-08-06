@@ -13,7 +13,9 @@ import {
   type QueuedMessage,
   type SlashCommand,
   type PaneAgentClient,
+  isRoadmapPhaseDraftChangeEvent,
 } from "./agent";
+import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { isPhaseLaunchErrorEvent } from "./notes-types";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
@@ -146,6 +148,7 @@ export interface AgentEventsDeps {
   setAttachments: Dispatch<SetStateAction<PendingAttachment[]>>;
   setCommands: Dispatch<SetStateAction<SlashCommand[]>>;
   setModels: Dispatch<SetStateAction<ModelOption[]>>;
+  onRoadmapPhaseDraftChange?: (draft: RoadmapPhaseDraft | null) => void;
 
   stateRef: MutableRefObject<AgentState | null>;
   planDoneRef: MutableRefObject<Set<number>>;
@@ -193,6 +196,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setAttachments,
     setCommands,
     setModels,
+    onRoadmapPhaseDraftChange,
     stateRef,
     planDoneRef,
     planTotalRef,
@@ -486,6 +490,10 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       // Autopilot (auto-review) events are owned by the useAutopilot hook; same
       // early-return so they never touch the build-session handling below.
       if (handleAutopilotEvent(e)) return;
+      if (isRoadmapPhaseDraftChangeEvent(e)) {
+        onRoadmapPhaseDraftChange?.(e.data);
+        return;
+      }
       const d = e.data as Record<string, unknown>;
       switch (e.type) {
         case "ready": {
@@ -1167,6 +1175,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     [
       handleKenEvent,
       handleAutopilotEvent,
+      onRoadmapPhaseDraftChange,
       appendAssistant,
       pushItem,
       finalizeThinking,

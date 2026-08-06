@@ -39,6 +39,7 @@ const report = {
   transition: "review",
   progress: `Implemented narrow-layout containment and verified ${LONG_TOKEN}`,
   blocker: null,
+  requiredExternalAction: null,
   evidence: [`Geometry report ${LONG_TOKEN}`, `Reference inspection ${LONG_URL}`],
   verification: "passed",
   verificationReason: null,
@@ -69,7 +70,7 @@ const document = {
         `Exactly one Notes vertical scroller ${LONG_TOKEN}`,
       ],
       order: 0,
-      status: "in-progress",
+      status: "review",
       sourcePrompt: `Implement only this UI audit slice.\n\n${LONG_TOKEN}\n${LONG_URL}\n`.repeat(5),
       referenceIds: [reference.id],
       session: {
@@ -427,6 +428,12 @@ async function captureDetailScenario(
       `${view} must retain exactly one vertical Roadmap scroll container`,
       currentGeometry,
     );
+    if (view === "Completion") {
+      await page.screenshot({
+        path: path.join(OUT_DIR, `${evidenceName}-verification-handoff.png`),
+        fullPage: false,
+      });
+    }
   }
 
   if (usesNativeSelector) {
@@ -467,17 +474,10 @@ async function captureDetailScenario(
     geometry,
   );
   expectCondition(
-    geometry.primaryActionCount === 1,
-    "Expected exactly one Resume phase action",
+    geometry.primaryActionCount === 0,
+    "Review-ready handoff must not expose a Resume phase action",
     geometry,
   );
-  expectCondition(geometry.primaryInHeader, "Primary action is not in the detail header", geometry);
-  expectCondition(
-    !geometry.primaryInExecution,
-    "Primary action is duplicated in the execution section",
-    geometry,
-  );
-  expectCondition(geometry.primaryAboveFold, "Primary action is below the fold", geometry);
 
   const forcedColorsActive = await page.evaluate(
     () => matchMedia("(forced-colors: active)").matches,

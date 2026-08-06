@@ -617,6 +617,7 @@ describe("structured project notes storage", () => {
       verification: null,
       verificationReason: null,
       verificationSession: null,
+      requiredExternalAction: null,
       proposedReferences: [
         {
           disposition: "pending",
@@ -629,6 +630,7 @@ describe("structured project notes storage", () => {
       verification: null,
       verificationReason: null,
       verificationSession: null,
+      requiredExternalAction: null,
       proposedReferences: [{ policyOutcome: "manual-review" }],
     });
   });
@@ -644,6 +646,7 @@ describe("structured project notes storage", () => {
         transition: "in-progress",
         progress: "Invalid policy report",
         blocker: null,
+        requiredExternalAction: null,
         evidence: [],
         verification: null,
         verificationReason: null,

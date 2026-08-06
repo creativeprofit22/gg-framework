@@ -27,7 +27,10 @@ export function NotesPhaseActivityView(): ReactElement {
           </p>
           <p>{latestReport.progress}</p>
           {latestReport.blocker && (
-            <p className="notes-roadmap-blocker">Blocker: {latestReport.blocker}</p>
+            <div className="notes-roadmap-blocker">
+              <p>Blocker: {latestReport.blocker}</p>
+              <p>Required action: {latestReport.requiredExternalAction}</p>
+            </div>
           )}
           {latestReport.evidence.length > 0 && (
             <div>
@@ -130,7 +133,12 @@ function renderActivityItem(item: ActivityItem): ReactNode {
         <p>
           {event.progress} Status outcome: {event.statusOutcome}.
         </p>
-        {event.blocker && <p>Blocker: {event.blocker}</p>}
+        {event.blocker && (
+          <>
+            <p>Blocker: {event.blocker}</p>
+            <p>Required action: {event.requiredExternalAction}</p>
+          </>
+        )}
         {event.verification && (
           <p>
             Verification: {verificationLabel(event.verification)}
@@ -186,6 +194,14 @@ function renderActivityItem(item: ActivityItem): ReactNode {
             ))}
           </ul>
         )}
+      </>
+    );
+  }
+  if (event.type === "blocker-resolution") {
+    return (
+      <>
+        <strong>User</strong> {timestamp}
+        <p>Blocker marked resolved.</p>
       </>
     );
   }

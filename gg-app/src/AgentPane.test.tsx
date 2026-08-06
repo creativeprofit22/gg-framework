@@ -56,6 +56,7 @@ vi.mock("./useAgentEvents", () => ({
   useAgentEvents: (deps: {
     handleAutopilotEvent: (event: AgentModule.SidecarEvent) => boolean;
     onSessionReset?: (operationId?: string) => void;
+    onRoadmapPhaseDraftChange?: (draft: AgentModule.RoadmapPhaseDraftChangeEvent["data"]) => void;
     setItems: Dispatch<SetStateAction<Item[]>>;
     setPlanReview: Dispatch<SetStateAction<string | null>>;
     planReviewPathRef: { current: string | null };
@@ -63,6 +64,12 @@ vi.mock("./useAgentEvents", () => ({
     nativeMocks.onSessionReset = deps.onSessionReset ?? null;
     return {
       handleEvent: (event: AgentModule.SidecarEvent) => {
+        if (event.type === "roadmap_phase_draft_change") {
+          deps.onRoadmapPhaseDraftChange?.(
+            event.data as AgentModule.RoadmapPhaseDraftChangeEvent["data"],
+          );
+          return true;
+        }
         if (event.type === "plan_exit") {
           const data = event.data as { planPath?: unknown; content?: unknown };
           deps.planReviewPathRef.current = typeof data.planPath === "string" ? data.planPath : null;
@@ -184,6 +191,9 @@ function client(paneId: string, generation: number): PaneAgentClient {
       status: "ok" as const,
       snapshot: { projectKey: "/work", revision: expectedRevision + 1, document },
     })),
+    getRoadmapPhaseDraft: vi.fn(async () => null),
+    approveRoadmapPhaseDraft: vi.fn(),
+    rejectRoadmapPhaseDraft: vi.fn(),
     listModels: empty,
     listCommands: empty,
     listTasks: empty,
@@ -458,6 +468,52 @@ describe("AgentPane lifecycle", () => {
         expect.objectContaining({ paneId: "pane-1", activeWork: false }),
       ),
     );
+  });
+
+  it("shows an approval draft after an unqualified natural-language Roadmap request", async () => {
+    const pane = client("pane-roadmap-intent", 7);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    await waitFor(() => expect(pane.selectWorkspace).toHaveBeenCalled());
+    await waitFor(() => expect(pane.listHistory).toHaveBeenCalled());
+    const input = await screen.findByRole("textbox");
+
+    const request = "Add release hardening to our roadmap.";
+    fireEvent.change(input, { target: { value: request } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith(request, [], undefined));
+
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+    act(() =>
+      handleEvent?.({
+        type: "roadmap_phase_draft_change",
+        data: {
+          id: "draft-intent-proof",
+          projectKey: "/work",
+          basedOnRevision: 8,
+          createdAt: "2026-08-05T12:00:00.000Z",
+          createdBySessionId: "pane-roadmap-intent",
+          summary: "Add release hardening without duplicating existing delivery work.",
+          phases: [
+            {
+              phaseId: "phase-release-hardening",
+              title: "Release hardening",
+              goal: "Prove the release is safe to ship and recover.",
+              doneWhen: ["Critical release checks pass", "Rollback is rehearsed"],
+              sourcePrompt: request,
+            },
+          ],
+          status: "pending",
+        },
+      }),
+    );
+
+    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(screen.getByText("Proposed from Project Notes revision 8")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Release hardening" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Create phase" })).toBeTruthy();
   });
 
   it("keeps ordinary plan acceptance on the webview prompt path", async () => {

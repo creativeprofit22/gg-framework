@@ -5,6 +5,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -124,12 +125,18 @@ import {
 import { recoverPromptLabel } from "./prompt-labels";
 import { playSound } from "./sounds";
 import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
-import { Paperclip, AtSign } from "lucide-react";
+import { Paperclip, AtSign, GitBranch } from "lucide-react";
 import { AttachmentBar } from "./AttachmentBar";
 import { EnhancedSegments } from "./PromptEnhancement";
 import { EnhanceDissolve } from "./EnhanceDissolve";
 import { toast } from "./toast";
 import { fileToPending, toWire, attachmentToPending, type PendingAttachment } from "./attachments";
+import { RoadmapPhaseDraftReviewModal } from "./RoadmapPhaseDraftReviewModal";
+import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
+import {
+  initialRoadmapPhaseDraftState,
+  reduceRoadmapPhaseDraftState,
+} from "./roadmap-phase-draft-state";
 import { basename } from "./tool-format";
 import {
   deriveKenPromptTitle,
@@ -646,6 +653,12 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // alongside the count because the sidecar is the source of truth for both.
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
   const [state, setState] = useState<AgentState | null>(null);
+  const [roadmapDraftState, dispatchRoadmapDraft] = useReducer(
+    reduceRoadmapPhaseDraftState,
+    initialRoadmapPhaseDraftState,
+  );
+  const roadmapDraftEventVersionRef = useRef(roadmapDraftState.eventVersion);
+  roadmapDraftEventVersionRef.current = roadmapDraftState.eventVersion;
   // Transient "KEN IS ON"/"KEN IS OFF" takeover banner shown when Autopilot
   // is toggled. Null = not showing; the banner clears itself via `onDone`
   // once its slide-out animation finishes.
@@ -1428,6 +1441,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     [],
   );
 
+  const onRoadmapPhaseDraftChange = useCallback((draft: RoadmapPhaseDraft | null) => {
+    dispatchRoadmapDraft({ type: "event", draft });
+  }, []);
+
   // Build-session SSE handling + assistant-streaming helpers live in the
   // useAgentEvents hook (mirrors useKenMentor). It owns the event machine's
   // private refs + the streaming helpers; App keeps owning the build-session
@@ -1460,6 +1477,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setAttachments,
     setCommands,
     setModels,
+    onRoadmapPhaseDraftChange,
     stateRef,
     planDoneRef,
     planTotalRef,
@@ -1677,6 +1695,60 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       void unlisten?.();
     };
   }, [client]);
+
+  useEffect(() => {
+    if (!hydrated || workspaceMode !== "code") return;
+    let cancelled = false;
+    const startedAtEventVersion = roadmapDraftEventVersionRef.current;
+    void client
+      .getRoadmapPhaseDraft()
+      .then((draft) => {
+        if (!cancelled) {
+          dispatchRoadmapDraft({ type: "hydrated", draft, startedAtEventVersion });
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          dispatchRoadmapDraft({
+            type: "failed",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client, hydrated, hydrateNonce, workspaceMode]);
+
+  const approveRoadmapDraft = useCallback(() => {
+    const draftId = roadmapDraftState.draft?.id;
+    if (!draftId || roadmapDraftState.decision !== "idle") return;
+    dispatchRoadmapDraft({ type: "decision-started", decision: "approving" });
+    void client
+      .approveRoadmapPhaseDraft(draftId)
+      .then((result) => dispatchRoadmapDraft({ type: "approval-result", result }))
+      .catch((error) =>
+        dispatchRoadmapDraft({
+          type: "failed",
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+  }, [client, roadmapDraftState.decision, roadmapDraftState.draft?.id]);
+
+  const rejectRoadmapDraft = useCallback(() => {
+    const draftId = roadmapDraftState.draft?.id;
+    if (!draftId || roadmapDraftState.decision !== "idle") return;
+    dispatchRoadmapDraft({ type: "decision-started", decision: "rejecting" });
+    void client
+      .rejectRoadmapPhaseDraft(draftId)
+      .then((result) => dispatchRoadmapDraft({ type: "rejection-result", result }))
+      .catch((error) =>
+        dispatchRoadmapDraft({
+          type: "failed",
+          message: error instanceof Error ? error.message : String(error),
+        }),
+      );
+  }, [client, roadmapDraftState.decision, roadmapDraftState.draft?.id]);
 
   useEffect(() => {
     // Only the main window auto-connects to its default project. Secondary
@@ -3059,6 +3131,22 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 paneFocused={props.focused !== false}
                 windowFocused={windowFocused && props.windowFocused !== false}
               />
+              {roadmapDraftState.draft && (
+                <button
+                  type="button"
+                  className="btn btn-sm btn-ghost roadmap-draft-trigger"
+                  onClick={() => dispatchRoadmapDraft({ type: "open" })}
+                  title="Review pending Roadmap draft"
+                  aria-label={`Review Roadmap draft with ${roadmapDraftState.draft.phases.length} proposed ${roadmapDraftState.draft.phases.length === 1 ? "phase" : "phases"}`}
+                  aria-haspopup="dialog"
+                >
+                  <GitBranch size={13} aria-hidden="true" />
+                  <span>Review draft</span>
+                  <span className="roadmap-draft-trigger-count" aria-hidden="true">
+                    {roadmapDraftState.draft.phases.length}
+                  </span>
+                </button>
+              )}
               <button
                 className="btn btn-sm btn-ghost"
                 title="View and run this project's tasks"
@@ -3609,6 +3697,20 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           onClose={() => setConfirmNewSession(false)}
         />
       )}
+
+      <RoadmapPhaseDraftReviewModal
+        draft={roadmapDraftState.draft}
+        open={roadmapDraftState.open}
+        decision={roadmapDraftState.decision}
+        error={roadmapDraftState.error}
+        announcement={roadmapDraftState.announcement}
+        onClose={() => dispatchRoadmapDraft({ type: "dismiss" })}
+        onApprove={approveRoadmapDraft}
+        onReject={rejectRoadmapDraft}
+      />
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+        {!roadmapDraftState.open ? roadmapDraftState.announcement : ""}
+      </div>
 
       {/* Always mounted: an MCP server can ask for input at any moment, in any
           workspace mode, and its tool call stays blocked until we answer. */}

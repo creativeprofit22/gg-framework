@@ -99,6 +99,10 @@ export interface UseProjectNotesResult {
   ): Promise<NotesReferenceOperationResult>;
   acceptReferenceProposal(phaseId: string, proposalId: string): Promise<NotesRoadmapMutationResult>;
   rejectReferenceProposal(phaseId: string, proposalId: string): Promise<NotesRoadmapMutationResult>;
+  resolveRoadmapBlocker(
+    phaseId: string,
+    blockerUpdateId: string,
+  ): Promise<NotesRoadmapMutationResult>;
   resumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
   resumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
   schedulePhaseReminder(
@@ -1262,6 +1266,58 @@ export function useProjectNotes(
     [clock, enqueueRoadmapMutation, idFactory],
   );
 
+  const resolveRoadmapBlocker = useCallback(
+    async (phaseId: string, blockerUpdateId: string): Promise<NotesRoadmapMutationResult> => {
+      const snapshot = authoritativeRef.current;
+      const epoch = epochRef.current;
+      const projectKey = activeCwdRef.current ? canonicalProjectKey(activeCwdRef.current) : null;
+      if (!client || !snapshot || !projectKey || modeRef.current !== "sidecar") {
+        return { status: "failed", reason: "unavailable" };
+      }
+      const phase = snapshot.document.phases.find((candidate) => candidate.id === phaseId);
+      if (!phase) return { status: "missing-phase", phaseId };
+      if (phase.archivedAt !== null) return { status: "archived-phase", phaseId };
+      const request = {
+        resolutionId: idFactory(),
+        phaseId,
+        blockerUpdateId,
+        expectedRevision: snapshot.revision,
+        expectedSession: phase.session ? { ...phase.session } : null,
+        resolver: "user" as const,
+        timestamp: clock(),
+      };
+      try {
+        const outcome = await client.resolveRoadmapBlocker(request);
+        if (
+          epoch !== epochRef.current ||
+          projectKey !== canonicalProjectKey(activeCwdRef.current ?? "")
+        ) {
+          return { status: "failed", reason: "unavailable" };
+        }
+        if (outcome.status === "committed") {
+          adoptSnapshot(outcome.snapshot, projectKey, epoch);
+          return { status: "committed", phaseId };
+        }
+        if (outcome.status === "duplicate" || outcome.status === "already-resolved") {
+          const refreshed = await client.getNotes();
+          if (refreshed.status === "ok") adoptSnapshot(refreshed.snapshot, projectKey, epoch);
+          return { status: "committed", phaseId };
+        }
+        if (outcome.status === "phase-not-found" || outcome.status === "blocker-not-found") {
+          return { status: "missing-phase", phaseId };
+        }
+        if (outcome.status === "phase-archived") return { status: "archived-phase", phaseId };
+        return {
+          status: "failed",
+          reason: outcome.status === "corrupt" ? "corrupt" : "unavailable",
+        };
+      } catch {
+        return { status: "failed", reason: "unavailable" };
+      }
+    },
+    [adoptSnapshot, client, clock, idFactory],
+  );
+
   const resumeAutomaticStatus = useCallback(
     (phaseId: string): Promise<NotesRoadmapMutationResult> => {
       const requestedAt = clock();
@@ -1397,6 +1453,7 @@ export function useProjectNotes(
     unlinkReferenceFromPhase,
     acceptReferenceProposal,
     rejectReferenceProposal,
+    resolveRoadmapBlocker,
     resumeAutomaticStatus,
     resumeAutomaticReferences,
     schedulePhaseReminder,

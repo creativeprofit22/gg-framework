@@ -1,7 +1,7 @@
 import type { ReactElement } from "react";
 import { PRODUCT_DISPLAY_NAME } from "../brand";
 import { useNotesPhaseDetail } from "./NotesPhaseDetailState";
-import { formatDateTime, formatTime } from "./roadmap-presentation";
+import { formatDateTime, formatTime, visibleRoadmapAttentionReason } from "./roadmap-presentation";
 
 export function NotesPhaseReminderView(): ReactElement {
   const {
@@ -192,8 +192,10 @@ export function NotesPhaseMoreControls(): ReactElement {
                   ? "Continue the one coding session already bound to this phase."
                   : "This phase is available for scope review only."}
           </p>
-          {phase.status === "needs-attention" && phase.attentionReason && (
-            <p className="notes-phase-attention">Needs attention: {phase.attentionReason}</p>
+          {visibleRoadmapAttentionReason(phase) && (
+            <p className="notes-phase-attention">
+              Needs attention: {visibleRoadmapAttentionReason(phase)}
+            </p>
           )}
         </div>
       </section>

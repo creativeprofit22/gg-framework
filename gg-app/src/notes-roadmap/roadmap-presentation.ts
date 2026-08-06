@@ -43,6 +43,72 @@ const VERIFICATION_LABELS = {
   "exception-requested": "Exception requested",
 } as const satisfies Record<NotesVerificationStatus, string>;
 
+export interface ManualRoadmapAdvancement {
+  completedPhase: NotesPhase;
+  nextPhase: NotesPhase;
+}
+
+export function selectManualRoadmapAdvancement(
+  phases: readonly NotesPhase[],
+): ManualRoadmapAdvancement | null {
+  const orderedPhases = phases
+    .map((phase, documentIndex) => ({ phase, documentIndex }))
+    .sort(
+      (left, right) =>
+        left.phase.order - right.phase.order || left.documentIndex - right.documentIndex,
+    );
+  let newestPhase: NotesPhase | null = null;
+  let newestPhaseIndex = -1;
+  let newestReviewTimestamp = "";
+
+  orderedPhases.forEach(({ phase }, roadmapIndex) => {
+    const latestReview = [...phase.roadmapEvents]
+      .reverse()
+      .find((event) => event.type === "completion-review");
+    if (
+      latestReview?.type === "completion-review" &&
+      (latestReview.timestamp > newestReviewTimestamp ||
+        (latestReview.timestamp === newestReviewTimestamp && roadmapIndex > newestPhaseIndex))
+    ) {
+      newestPhase = phase;
+      newestPhaseIndex = roadmapIndex;
+      newestReviewTimestamp = latestReview.timestamp;
+    }
+  });
+
+  const completedPhase = newestPhase as NotesPhase | null;
+  if (
+    !completedPhase ||
+    completedPhase.archivedAt !== null ||
+    completedPhase.status !== "done" ||
+    completedPhase.overrides.status !== null
+  ) {
+    return null;
+  }
+  const latestReview = [...completedPhase.roadmapEvents]
+    .reverse()
+    .find((event) => event.type === "completion-review");
+  if (
+    latestReview?.type !== "completion-review" ||
+    latestReview.reviewer !== "ken" ||
+    latestReview.decision !== "accepted" ||
+    latestReview.gateOutcome !== "done"
+  ) {
+    return null;
+  }
+  const nextPhase = orderedPhases
+    .slice(newestPhaseIndex + 1)
+    .map(({ phase }) => phase)
+    .find(
+      (phase) =>
+        phase.archivedAt === null &&
+        (phase.status === "not-started" || phase.status === "planning"),
+    );
+  return nextPhase?.session === null && nextPhase.overrides.status === null
+    ? { completedPhase, nextPhase }
+    : null;
+}
+
 const IMPLEMENTATION_OUTCOME_LABELS = {
   succeeded: "succeeded",
   failed: "failed",
@@ -112,12 +178,49 @@ export function primaryAction(phase: NotesPhase): PhasePrimaryAction {
   return phase.session === null ? "Start" : sessionAction(phase.session);
 }
 
-export function latestRoadmapReport(phase: NotesPhase): NotesRoadmapStatusUpdate | null {
+export function latestRoadmapReport(
+  phase: Pick<NotesPhase, "roadmapEvents">,
+): NotesRoadmapStatusUpdate | null {
   for (let index = phase.roadmapEvents.length - 1; index >= 0; index -= 1) {
     const event = phase.roadmapEvents[index];
     if (event?.type === "status-update") return event;
   }
   return null;
+}
+
+export function visibleRoadmapAttentionReason(
+  phase: Pick<NotesPhase, "status" | "attentionReason" | "roadmapEvents">,
+): string | null {
+  if (phase.status !== "needs-attention" || phase.attentionReason === null) return null;
+  const report = latestRoadmapReport(phase);
+  if (
+    report?.transition === "blocked" &&
+    report.blocker === phase.attentionReason &&
+    phase.roadmapEvents.some(
+      (event) => event.type === "blocker-resolution" && event.blockerUpdateId === report.id,
+    )
+  ) {
+    return null;
+  }
+  return phase.attentionReason;
+}
+
+export function activeRoadmapBlocker(
+  phase: Pick<NotesPhase, "status" | "attentionReason" | "roadmapEvents">,
+): NotesRoadmapStatusUpdate | null {
+  const attentionReason = visibleRoadmapAttentionReason(phase);
+  if (attentionReason === null) return null;
+  const report = latestRoadmapReport(phase);
+  if (
+    !report ||
+    report.transition !== "blocked" ||
+    !report.blocker ||
+    !report.requiredExternalAction ||
+    report.blocker !== attentionReason
+  ) {
+    return null;
+  }
+  return report;
 }
 
 export function unresolvedRoadmapProposals(

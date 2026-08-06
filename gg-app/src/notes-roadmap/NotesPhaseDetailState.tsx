@@ -69,6 +69,10 @@ export interface NotesPhaseDetailProps {
     phaseId: string,
     proposalId: string,
   ): Promise<NotesRoadmapMutationResult>;
+  onResolveRoadmapBlocker(
+    phaseId: string,
+    blockerUpdateId: string,
+  ): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onScheduleReminder(

@@ -1,6 +1,7 @@
 import type { NotesPhase, NotesPhaseStatus } from "./notes-types";
+import { activeRoadmapBlocker } from "./notes-roadmap/roadmap-presentation";
 
-export type NotesLifecycleState = "Ready" | "Working" | "Needs you" | "Done";
+export type NotesLifecycleState = "Ready" | "Working" | "Needs you" | "Blocked" | "Done";
 export type NotesLifecycleStage = "Planning" | "Implementation" | "Review" | "Verification";
 
 export interface NotesLifecyclePresentation {
@@ -8,21 +9,29 @@ export interface NotesLifecyclePresentation {
   stage: NotesLifecycleStage;
 }
 
-type PresentablePhase = Pick<NotesPhase, "status" | "lifecycleEvents" | "roadmapEvents">;
+type PresentablePhase = Pick<
+  NotesPhase,
+  "status" | "attentionReason" | "lifecycleEvents" | "roadmapEvents"
+>;
 
 export function notesLifecyclePresentation(phase: PresentablePhase): NotesLifecyclePresentation {
   return {
-    state: lifecycleState(phase.status),
+    state: lifecycleState(phase),
     stage: lifecycleStage(phase),
   };
 }
 
-function lifecycleState(status: NotesPhaseStatus): NotesLifecycleState {
-  if (status === "not-started") return "Ready";
-  if (status === "waiting-for-approval" || status === "needs-attention" || status === "cancelled") {
+function lifecycleState(phase: PresentablePhase): NotesLifecycleState {
+  if (phase.status === "not-started") return "Ready";
+  if (activeRoadmapBlocker(phase)) return "Blocked";
+  if (
+    phase.status === "waiting-for-approval" ||
+    phase.status === "needs-attention" ||
+    phase.status === "cancelled"
+  ) {
     return "Needs you";
   }
-  if (status === "done") return "Done";
+  if (phase.status === "done") return "Done";
   return "Working";
 }
 

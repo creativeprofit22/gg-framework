@@ -80,6 +80,10 @@ interface Props {
     phaseId: string,
     proposalId: string,
   ): Promise<NotesRoadmapMutationResult>;
+  onResolveRoadmapBlocker(
+    phaseId: string,
+    blockerUpdateId: string,
+  ): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onScheduleReminder(
@@ -150,6 +154,7 @@ export function NotesModal({
   onUnlinkReferenceFromPhase,
   onAcceptReferenceProposal,
   onRejectReferenceProposal,
+  onResolveRoadmapBlocker,
   onResumeAutomaticStatus,
   onResumeAutomaticReferences,
   onScheduleReminder,
@@ -329,6 +334,7 @@ export function NotesModal({
                   onUnlinkReferenceFromPhase={onUnlinkReferenceFromPhase}
                   onAcceptReferenceProposal={onAcceptReferenceProposal}
                   onRejectReferenceProposal={onRejectReferenceProposal}
+                  onResolveRoadmapBlocker={onResolveRoadmapBlocker}
                   onResumeAutomaticStatus={onResumeAutomaticStatus}
                   onResumeAutomaticReferences={onResumeAutomaticReferences}
                   onScheduleReminder={onScheduleReminder}

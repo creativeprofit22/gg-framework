@@ -113,6 +113,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     unlinkReferenceFromPhase,
     acceptReferenceProposal,
     rejectReferenceProposal,
+    resolveRoadmapBlocker,
     resumeAutomaticStatus,
     resumeAutomaticReferences,
     schedulePhaseReminder,
@@ -381,6 +382,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onUnlinkReferenceFromPhase={unlinkReferenceFromPhase}
             onAcceptReferenceProposal={acceptReferenceProposal}
             onRejectReferenceProposal={rejectReferenceProposal}
+            onResolveRoadmapBlocker={resolveRoadmapBlocker}
             onResumeAutomaticStatus={resumeAutomaticStatus}
             onResumeAutomaticReferences={resumeAutomaticReferences}
             onScheduleReminder={schedulePhaseReminder}

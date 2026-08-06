@@ -8,6 +8,7 @@ import {
   type NotesReminder,
   type NotesReminderDeliveryChannel,
   type NotesReminderPermission,
+  type NotesSessionLink,
   type NotesValidationError,
   type ProjectNotesCorruptReason,
   type ProjectNotesCorruption,
@@ -83,6 +84,7 @@ export type {
   NotesReminderDeliveryChannel,
   NotesReminderPermission,
   NotesRoadmapActor,
+  NotesRoadmapBlockerResolution,
   NotesRoadmapCompletionReview,
   NotesRoadmapEvent,
   NotesRoadmapImplementationCheckpoint,
@@ -318,10 +320,33 @@ export type ReminderReleaseOutcome =
   | { status: "released" }
   | { status: "invalid-lease" | "expired-lease" | "wrong-session" };
 
+export interface ProjectNotesRoadmapBlockerResolutionRequest {
+  resolutionId: string;
+  phaseId: string;
+  blockerUpdateId: string;
+  expectedRevision: number;
+  expectedSession: NotesSessionLink | null;
+  resolver: "user";
+  timestamp: string;
+}
+
+export type ProjectNotesRoadmapBlockerResolutionOutcome =
+  | { status: "committed"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
+  | { status: "duplicate" | "already-resolved"; revision: number; phaseId: string }
+  | { status: "duplicate-id-conflict" | "stale-revision"; revision: number }
+  | {
+      status: "phase-not-found" | "phase-archived" | "stale-session" | "blocker-not-found";
+    }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
 export interface NotesClient {
   getNotes(): Promise<ProjectNotesReadOutcome>;
   migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome>;
   saveNotes(expectedRevision: number, document: NotesDocumentV3): Promise<ProjectNotesSaveOutcome>;
+  resolveRoadmapBlocker(
+    request: ProjectNotesRoadmapBlockerResolutionRequest,
+  ): Promise<ProjectNotesRoadmapBlockerResolutionOutcome>;
   reserveReminder(focused: boolean): Promise<ReminderReserveOutcome>;
   claimReminder(
     leaseToken: string,
@@ -388,6 +413,37 @@ export function isProjectNotesMigrationOutcome(
     typeof value.migrated === "boolean" &&
     isProjectNotesSnapshot(value.snapshot)
   );
+}
+
+export function isProjectNotesRoadmapBlockerResolutionOutcome(
+  value: unknown,
+): value is ProjectNotesRoadmapBlockerResolutionOutcome {
+  if (!isRecord(value) || typeof value.status !== "string") return false;
+  if (value.status === "committed") {
+    return (
+      isProjectNotesSnapshot(value.snapshot) &&
+      isRecord(value.phase) &&
+      typeof value.phase.id === "string"
+    );
+  }
+  if (value.status === "duplicate" || value.status === "already-resolved") {
+    return (
+      Number.isInteger(value.revision) &&
+      (value.revision as number) >= 0 &&
+      typeof value.phaseId === "string"
+    );
+  }
+  if (value.status === "duplicate-id-conflict" || value.status === "stale-revision") {
+    return Number.isInteger(value.revision) && (value.revision as number) >= 0;
+  }
+  if (value.status === "corrupt") return isCorruption(value);
+  return [
+    "phase-not-found",
+    "phase-archived",
+    "stale-session",
+    "blocker-not-found",
+    "missing",
+  ].includes(value.status);
 }
 
 export function isProjectNotesSaveOutcome(value: unknown): value is ProjectNotesSaveOutcome {

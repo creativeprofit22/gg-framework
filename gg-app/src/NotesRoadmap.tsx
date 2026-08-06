@@ -5,11 +5,14 @@ import { referenceSourceLabel } from "./notes-reference";
 import { NotesPhaseDetail } from "./notes-roadmap/NotesPhaseDetail";
 import type { NotesPhaseDetailProps } from "./notes-roadmap/NotesPhaseDetailState";
 import {
+  activeRoadmapBlocker,
   lines,
   phaseActionLabel,
   primaryAction,
   referenceLinkAnnouncement,
   reminderRowLabel,
+  roadmapMutationMessage,
+  selectManualRoadmapAdvancement,
   statusLabel,
 } from "./notes-roadmap/roadmap-presentation";
 import type { NotesPhaseInput } from "./useProjectNotes";
@@ -52,6 +55,10 @@ interface RoadmapProps {
   onRejectReferenceProposal(
     phaseId: string,
     proposalId: string,
+  ): Promise<NotesRoadmapMutationResult>;
+  onResolveRoadmapBlocker(
+    phaseId: string,
+    blockerUpdateId: string,
   ): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticStatus(phaseId: string): Promise<NotesRoadmapMutationResult>;
   onResumeAutomaticReferences(phaseId: string): Promise<NotesRoadmapMutationResult>;
@@ -99,6 +106,7 @@ export function NotesRoadmap({
   onCreateReference,
   onAcceptReferenceProposal,
   onRejectReferenceProposal,
+  onResolveRoadmapBlocker,
   onResumeAutomaticStatus,
   onResumeAutomaticReferences,
   onScheduleReminder,
@@ -125,6 +133,8 @@ export function NotesRoadmap({
   const newPhaseButtonRef = useRef<HTMLButtonElement>(null);
   const phaseTitleRefs = useRef(new Map<string, HTMLButtonElement>());
   const selectedPhase = visiblePhases.find((phase) => phase.id === selectedId) ?? null;
+  const manualAdvancement = useMemo(() => selectManualRoadmapAdvancement(phases), [phases]);
+  const [nextPhaseStatus, setNextPhaseStatus] = useState("");
 
   useEffect(() => {
     if (selectedId !== null && !selectedPhase) setSelectedId(null);
@@ -175,6 +185,40 @@ export function NotesRoadmap({
     const phaseId = selectedId;
     setSelectedId(null);
     focusAfterRender(phaseId);
+  };
+
+  const startNextPhase = async (): Promise<void> => {
+    if (
+      !manualAdvancement ||
+      pendingPhaseId !== null ||
+      actionDisabled ||
+      startUnavailableReason !== null
+    ) {
+      return;
+    }
+    const nextPhase = manualAdvancement.nextPhase;
+    setPendingPhaseId(nextPhase.id);
+    setNextPhaseStatus("Starting the next phase…");
+    try {
+      const result = await onStartPhase(nextPhase.id);
+      if (result.status === "accepted") {
+        setNextPhaseStatus("Next phase started. Opening its planning session.");
+        setAnnouncement(`Started next phase: ${nextPhase.title}`);
+        onActionSuccess();
+        return;
+      }
+      setNextPhaseStatus(
+        result.status === "already-bound"
+          ? "The next phase already started in another window."
+          : result.message,
+      );
+    } catch (error) {
+      setNextPhaseStatus(
+        error instanceof Error ? error.message : "The next phase could not be started. Try again.",
+      );
+    } finally {
+      setPendingPhaseId(null);
+    }
   };
 
   const selectedPhaseDetailProps: NotesPhaseDetailProps | null = selectedPhase
@@ -244,6 +288,15 @@ export function NotesRoadmap({
         onCreateReference,
         onAcceptReferenceProposal,
         onRejectReferenceProposal,
+        onResolveRoadmapBlocker: async (phaseId, blockerUpdateId) => {
+          const result = await onResolveRoadmapBlocker(phaseId, blockerUpdateId);
+          setAnnouncement(
+            result.status === "committed"
+              ? `Resolved blocker for ${selectedPhase.title}`
+              : roadmapMutationMessage(result),
+          );
+          return result;
+        },
         onResumeAutomaticStatus,
         onResumeAutomaticReferences,
         onScheduleReminder,
@@ -333,6 +386,35 @@ export function NotesRoadmap({
         </div>
       </form>
 
+      {manualAdvancement && (
+        <section className="notes-roadmap-next-phase" aria-labelledby="notes-next-phase-title">
+          <div>
+            <p className="notes-roadmap-next-phase-kicker">Phase complete</p>
+            <h3 id="notes-next-phase-title">Ready for {manualAdvancement.nextPhase.title}</h3>
+            <p>
+              {manualAdvancement.completedPhase.title} is Done. Start the next Roadmap phase when
+              you’re ready.
+            </p>
+            {nextPhaseStatus && (
+              <p className="notes-roadmap-next-phase-status" role="status">
+                {nextPhaseStatus}
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            className="notes-roadmap-primary"
+            disabled={pendingPhaseId !== null || actionDisabled || startUnavailableReason !== null}
+            title={startUnavailableReason ?? undefined}
+            onClick={() => void startNextPhase()}
+          >
+            {pendingPhaseId === manualAdvancement.nextPhase.id
+              ? "Starting next phase…"
+              : "Start next phase"}
+          </button>
+        </section>
+      )}
+
       <div className={`notes-roadmap-workspace${selectedPhase ? " has-detail" : ""}`}>
         {visiblePhases.length === 0 ? (
           <div className="notes-roadmap-empty">
@@ -346,8 +428,12 @@ export function NotesRoadmap({
               const action = primaryAction(phase);
               const actionLabel = phaseActionLabel(phase, action);
               const lifecycle = notesLifecyclePresentation(phase);
+              const blocker = activeRoadmapBlocker(phase);
               return (
-                <li key={phase.id} className={`notes-roadmap-row${selected ? " is-selected" : ""}`}>
+                <li
+                  key={phase.id}
+                  className={`notes-roadmap-row${selected ? " is-selected" : ""}${blocker ? " is-blocked" : ""}`}
+                >
                   <button
                     ref={(element) => {
                       if (element) phaseTitleRefs.current.set(phase.id, element);

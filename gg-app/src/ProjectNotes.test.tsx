@@ -178,6 +178,7 @@ function verificationReport(
     transition: verification === "failed" ? "blocked" : "review",
     progress: "Verification evidence recorded.",
     blocker: verification === "failed" ? reason : null,
+    requiredExternalAction: verification === "failed" ? "Review the verification failure" : null,
     evidence: verification === "passed" ? ["pnpm test passed", "pnpm build passed"] : [],
     verification,
     verificationReason: reason,
@@ -185,6 +186,28 @@ function verificationReport(
     statusOutcome: "same-status",
     proposedReferences: [],
     timestamp: "2026-07-15T12:01:00.000Z",
+  };
+}
+
+function blockedReport(
+  blocker: string,
+  id = "blocked-report-ui",
+): Extract<NotesRoadmapEvent, { type: "status-update" }> {
+  return {
+    type: "status-update",
+    id,
+    actor: "gg-coder",
+    transition: "blocked",
+    progress: "Work cannot continue until the requested access is provided.",
+    blocker,
+    requiredExternalAction: "Grant the production deploy role",
+    evidence: [],
+    verification: null,
+    verificationReason: null,
+    verificationSession: null,
+    statusOutcome: "applied",
+    proposedReferences: [],
+    timestamp: NOW,
   };
 }
 
@@ -318,6 +341,33 @@ class FakeProjectNotesClient implements NotesClient {
     this.snapshots.set(projectKey, snapshot);
     this.emit(snapshot);
     return { status: "ok", snapshot };
+  }
+
+  async resolveRoadmapBlocker(
+    request: Parameters<NotesClient["resolveRoadmapBlocker"]>[0],
+  ): ReturnType<NotesClient["resolveRoadmapBlocker"]> {
+    const projectKey = canonicalProjectKey(this.cwd);
+    const current = this.snapshots.get(projectKey);
+    if (!current) return { status: "missing" };
+    if (current.revision !== request.expectedRevision) {
+      return { status: "stale-revision", revision: current.revision };
+    }
+    const document = structuredClone(current.document);
+    const phase = document.phases.find((candidate) => candidate.id === request.phaseId);
+    if (!phase) return { status: "phase-not-found" };
+    phase.roadmapEvents.push({
+      type: "blocker-resolution",
+      id: request.resolutionId,
+      blockerUpdateId: request.blockerUpdateId,
+      resolver: request.resolver,
+      timestamp: request.timestamp,
+    });
+    phase.updatedAt = request.timestamp;
+    document.updatedAt = request.timestamp;
+    const snapshot = { projectKey, revision: current.revision + 1, document };
+    this.snapshots.set(projectKey, snapshot);
+    this.emit(snapshot);
+    return { status: "committed", snapshot, phase };
   }
 
   async reserveReminder(focused: boolean) {
@@ -1227,6 +1277,7 @@ describe("ProjectNotes", () => {
         transition: "blocked",
         progress: "Repository reconciliation is implemented.",
         blocker: "The release build is still running.",
+        requiredExternalAction: "Wait for the release build to complete.",
         evidence: ["Focused repository tests passed."],
         verification: null,
         verificationReason: null,
@@ -1378,6 +1429,7 @@ describe("ProjectNotes", () => {
         transition: "pending",
         progress: "A reference needs review.",
         blocker: null,
+        requiredExternalAction: null,
         evidence: [],
         verification: null,
         verificationReason: null,
@@ -1446,6 +1498,7 @@ describe("ProjectNotes", () => {
         transition: "in-progress",
         progress: "A follow-up report requested more implementation work.",
         blocker: null,
+        requiredExternalAction: null,
         evidence: [],
         verification: null,
         verificationReason: null,
@@ -1473,6 +1526,63 @@ describe("ProjectNotes", () => {
     ).toBe(false);
   });
 
+  it("offers the next eligible phase after a manual Done review and starts only on action", async () => {
+    const cwd = "/work/manual-next-phase";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("manual next phase");
+    const completed = phase("completed", "done");
+    completed.title = "Completed foundation";
+    completed.roadmapEvents = [completionReview({ reviewer: "ken" })];
+    const archived = phase("archived", "not-started");
+    archived.order = 1;
+    archived.archivedAt = NOW;
+    const alreadyDone = phase("already-done", "done");
+    alreadyDone.order = 2;
+    const next = phase("next", "planning");
+    next.title = "Ship the integration";
+    next.order = 3;
+    document.phases = [completed, archived, alreadyDone, next];
+    client.seed(cwd, document);
+    const onStartPhase = vi.fn(async () => ({
+      status: "accepted" as const,
+      operationId: "operation-next",
+      session: { sessionId: "session-next", sessionPath: "/sessions/next.jsonl" },
+      packageTokenCount: 42,
+    }));
+    render(<ProjectNotes cwd={cwd} client={client} onStartPhase={onStartPhase} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+
+    const advancement = screen.getByRole("region", { name: "Ready for Ship the integration" });
+    expect(advancement.textContent).toContain("Completed foundation is Done");
+    expect(onStartPhase).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Start next phase" }));
+
+    expect(onStartPhase).toHaveBeenCalledExactlyOnceWith("next");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("does not show a manual next-phase action for an Autopilot completion", async () => {
+    const cwd = "/work/autopilot-next-phase";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("autopilot next phase");
+    const completed = phase("autopilot-completed", "done");
+    completed.roadmapEvents = [completionReview({ reviewer: "ken-autopilot" })];
+    const next = phase("autopilot-next", "not-started");
+    next.order = 1;
+    document.phases = [completed, next];
+    client.seed(cwd, document);
+    const onStartPhase = vi.fn();
+    render(<ProjectNotes cwd={cwd} client={client} onStartPhase={onStartPhase} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+
+    expect(screen.queryByRole("button", { name: "Start next phase" })).toBeNull();
+    expect(onStartPhase).not.toHaveBeenCalled();
+  });
+
   it("renders empty completion gates before the latest report", async () => {
     const cwd = "/work/completion-empty";
     const client = new FakeProjectNotesClient(cwd);
@@ -1491,6 +1601,29 @@ describe("ProjectNotes", () => {
     expect(gates?.textContent).toContain("Final review has not been recorded.");
     selectPhaseView("Activity");
     expect(screen.getByRole("heading", { name: "Latest report" })).toBeTruthy();
+  });
+
+  it("shows ordered completion evidence when the phase is ready for Ken review", async () => {
+    const cwd = "/work/completion-review-ready";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("review-ready completion evidence");
+    const selected = phase("completion-review-ready", "review");
+    selected.doneWhen = ["Focused tests pass", "Package build passes"];
+    selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
+    selected.roadmapEvents = [verificationReport("passed")];
+    document.phases = [selected];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase(selected.title);
+    selectPhaseView("Completion");
+
+    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
+    expect(gates?.textContent).toContain("Ready for Supah review");
+    expect(gates?.textContent).toContain("Focused tests pass");
+    expect(gates?.textContent).toContain("pnpm test passed");
+    expect(gates?.textContent).toContain("Package build passes");
+    expect(gates?.textContent).toContain("pnpm build passed");
   });
 
   it("explains partial implementation, failed verification, and rejected review", async () => {
@@ -1605,8 +1738,8 @@ describe("ProjectNotes", () => {
 
     const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
     const gateRows = gates?.querySelectorAll("dl > div");
-    const implementationGate = gateRows?.item(0);
-    const verificationGate = gateRows?.item(1);
+    const implementationGate = gateRows?.item(1);
+    const verificationGate = gateRows?.item(2);
 
     expect(implementationGate?.textContent).toContain("Evidence used by this final review.");
     expect(implementationGate?.textContent).toContain("1 of 2 plan steps");
@@ -2364,6 +2497,63 @@ describe("ProjectNotes", () => {
     },
   );
 
+  it("shows and resolves only the active semantic blocker", async () => {
+    const cwd = "/work/roadmap-active-blocker";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("active blocker");
+    const blocker = "The deployment account is unavailable.";
+    const requiredExternalAction = "Grant the production deploy role";
+    const selected = phase("blocked", "needs-attention");
+    selected.title = "Blocked deployment";
+    selected.attentionReason = blocker;
+    selected.roadmapEvents = [blockedReport(blocker)];
+    document.phases = [selected];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    const inspectButton = screen.getByRole("button", {
+      name: "Inspect phase: Blocked deployment",
+    });
+    expect(inspectButton.closest("li")?.classList.contains("is-blocked")).toBe(true);
+    expect(inspectButton.closest("li")?.textContent).toContain("Blocked");
+    fireEvent.click(inspectButton);
+
+    const alert = screen.getByRole("alert", { name: "Blocked" });
+    expect(alert.textContent).toContain("Reason:");
+    expect(alert.textContent).toContain(blocker);
+    expect(alert.textContent).toContain("Required action:");
+    expect(alert.textContent).toContain(requiredExternalAction);
+    fireEvent.click(screen.getByRole("button", { name: "Mark resolved" }));
+
+    await waitFor(() => expect(screen.queryByRole("alert", { name: "Blocked" })).toBeNull());
+    const snapshot = client.snapshots.get(canonicalProjectKey(cwd))!;
+    expect(snapshot.document.phases[0]).toMatchObject({
+      status: "needs-attention",
+      attentionReason: blocker,
+      overrides: { status: null },
+      roadmapEvents: [
+        expect.objectContaining({ id: "blocked-report-ui" }),
+        expect.objectContaining({
+          type: "blocker-resolution",
+          blockerUpdateId: "blocked-report-ui",
+          resolver: "user",
+        }),
+      ],
+    });
+    expect(
+      screen
+        .getByRole("button", { name: "Inspect phase: Blocked deployment" })
+        .closest("li")
+        ?.classList.contains("is-blocked"),
+    ).toBe(false);
+    expect(
+      screen.getByRole("button", { name: "Inspect phase: Blocked deployment" }).closest("li")
+        ?.textContent,
+    ).toContain("Needs you");
+  });
+
   it("renders authoritative lifecycle labels and recovery actions without losing selection", async () => {
     const cwd = "/work/roadmap-lifecycle";
     const client = new FakeProjectNotesClient(cwd);
@@ -2446,7 +2636,7 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Retry phase: Attention phase" }));
     selectPhaseView("More");
-    expect(screen.getByText(/Needs attention: The provider failed/)).toBeTruthy();
+    expect(screen.getAllByText(/Needs attention: The provider failed/).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Pause automation" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Retry phase: Attention phase" })).toBeNull();
     expect(screen.getAllByRole("combobox")).toEqual([screen.getByLabelText("Phase view")]);
@@ -2590,7 +2780,7 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Alpha" }));
     expect(screen.getByText("Verify the Notes shell")).toBeTruthy();
-    expect(screen.getByText("Shell evidence passes")).toBeTruthy();
+    expect(screen.getAllByText("Shell evidence passes").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByLabelText("Edit phase title"), {
       target: { value: "Alpha edited" },

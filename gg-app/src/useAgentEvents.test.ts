@@ -13,6 +13,8 @@ vi.mock("./sounds", () => ({ playSound: vi.fn() }));
 vi.mock("./agent", () => ({
   listCommands: vi.fn().mockResolvedValue([]),
   listModels: vi.fn().mockResolvedValue([]),
+  isRoadmapPhaseDraftChangeEvent: (event: SidecarEvent) =>
+    event.type === "roadmap_phase_draft_change",
 }));
 
 import { listModels } from "./agent";
@@ -36,6 +38,7 @@ function setup(
   handleKenEvent: (e: SidecarEvent) => boolean = () => false,
   initialState: Partial<AgentState> = {},
   onSessionReset?: AgentEventsDeps["onSessionReset"],
+  onRoadmapPhaseDraftChange?: AgentEventsDeps["onRoadmapPhaseDraftChange"],
 ) {
   let items: Item[] = [];
   let id = 0;
@@ -105,6 +108,7 @@ function setup(
     setAttachments: noop as unknown as AgentEventsDeps["setAttachments"],
     setCommands: noop as unknown as AgentEventsDeps["setCommands"],
     setModels,
+    onRoadmapPhaseDraftChange,
     stateRef,
     planDoneRef: { current: new Set<number>() },
     planTotalRef: { current: 0 },
@@ -133,6 +137,17 @@ function setup(
 
 describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("forwards a validated Roadmap draft event without touching transcript state", () => {
+    const onDraft = vi.fn();
+    const { hook, getItems } = setup(() => false, {}, undefined, onDraft);
+    const draft = { id: "draft-1", basedOnRevision: 3 };
+
+    act(() => hook.result.current.handleEvent(ev("roadmap_phase_draft_change", draft)));
+
+    expect(onDraft).toHaveBeenCalledWith(draft);
+    expect(getItems()).toEqual([]);
+  });
 
   describe("queued pill lifecycle", () => {
     it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {

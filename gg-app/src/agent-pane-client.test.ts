@@ -102,6 +102,59 @@ describe("pane agent client", () => {
     });
   });
 
+  it("validates and routes Roadmap draft decisions through pane-scoped commands", async () => {
+    const draft = {
+      id: "draft-1",
+      projectKey: "/work",
+      basedOnRevision: 3,
+      createdAt: "2026-08-05T12:00:00.000Z",
+      createdBySessionId: "session-1",
+      summary: "Create one peer phase",
+      phases: [
+        {
+          phaseId: "phase-1",
+          title: "Approval UI",
+          goal: "Require an explicit decision.",
+          doneWhen: ["The proposal is readable"],
+          sourcePrompt: "Implement the approval UI only.",
+        },
+      ],
+      status: "pending",
+    };
+    invoke.mockImplementation(async (command: string) => {
+      if (command === "agent_roadmap_phase_draft_get") return { status: "ok", draft };
+      if (command === "agent_roadmap_phase_draft_approve") {
+        return { status: "created", revision: 4, phaseIds: ["phase-1"] };
+      }
+      if (command === "agent_roadmap_phase_draft_reject") return { status: "rejected" };
+      return {};
+    });
+    const client = createPaneAgentClient("right");
+
+    await expect(client.getRoadmapPhaseDraft()).resolves.toEqual(draft);
+    await expect(client.approveRoadmapPhaseDraft("draft/1")).resolves.toMatchObject({
+      status: "created",
+      revision: 4,
+    });
+    await expect(client.rejectRoadmapPhaseDraft("draft/1", "Wrong scope")).resolves.toEqual({
+      status: "rejected",
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_roadmap_phase_draft_approve", {
+      paneId: "right",
+      draftId: "draft/1",
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_roadmap_phase_draft_reject", {
+      paneId: "right",
+      draftId: "draft/1",
+      feedback: "Wrong scope",
+    });
+
+    invoke.mockResolvedValueOnce({ status: "created", revision: 4, phaseIds: [] });
+    await expect(client.approveRoadmapPhaseDraft("draft/1")).rejects.toThrow(
+      "invalid Roadmap draft approval response",
+    );
+  });
+
   it("cancels a Roadmap phase through its phase-specific pane command", async () => {
     invoke.mockImplementation(async (command: string) => {
       if (command === "agent_phase_cancel") {

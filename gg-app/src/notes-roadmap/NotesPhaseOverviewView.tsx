@@ -4,11 +4,13 @@ import { notesCompletionGateOverview } from "../NotesPhaseCompletionGates";
 import type { NotesPhase, NotesRoadmapStatusUpdate } from "../notes-types";
 import { useNotesPhaseDetail } from "./NotesPhaseDetailState";
 import {
+  activeRoadmapBlocker,
   formatDate,
   formatDateTime,
   phaseNextAction,
   roadmapActorLabel,
   savedPromptPreview,
+  visibleRoadmapAttentionReason,
 } from "./roadmap-presentation";
 
 export function NotesPhaseOverviewView(): ReactElement {
@@ -22,11 +24,14 @@ export function NotesPhaseOverviewView(): ReactElement {
     latestReport,
     pendingProposals,
     lifecycle,
+    onResolveRoadmapBlocker,
+    runRoadmapMutation,
     updatePhaseDraft,
     reloadPhaseDraft,
     cancelEdit,
     saveEdit,
   } = useNotesPhaseDetail();
+  const activeBlocker = activeRoadmapBlocker(phase);
 
   if (editing) {
     return (
@@ -106,6 +111,31 @@ export function NotesPhaseOverviewView(): ReactElement {
         latestReport={latestReport}
         pendingProposalCount={pendingProposals.length}
       />
+      {activeBlocker && (
+        <section
+          className="notes-phase-blocker-alert"
+          role="alert"
+          aria-labelledby={`notes-phase-blocker-title-${phase.id}`}
+        >
+          <div className="notes-phase-blocker-copy">
+            <strong id={`notes-phase-blocker-title-${phase.id}`}>Blocked</strong>
+            <p>Reason: {activeBlocker.blocker}</p>
+            <p>Required action: {activeBlocker.requiredExternalAction}</p>
+          </div>
+          <button
+            type="button"
+            className="notes-phase-blocker-resolve"
+            disabled={controlsDisabled}
+            onClick={() => {
+              void runRoadmapMutation(`resolve-blocker:${activeBlocker.id}`, () =>
+                onResolveRoadmapBlocker(phase.id, activeBlocker.id),
+              );
+            }}
+          >
+            Mark resolved
+          </button>
+        </section>
+      )}
       <div className="notes-phase-content">
         <div>
           <h4>Goal</h4>
@@ -226,8 +256,10 @@ function PhaseOverview({
           <span>Manual override</span> User-selected state remains authoritative.
         </p>
       )}
-      {phase.status === "needs-attention" && phase.attentionReason && (
-        <p className="notes-phase-overview-blocker">Blocked: {phase.attentionReason}</p>
+      {visibleRoadmapAttentionReason(phase) && !activeRoadmapBlocker(phase) && (
+        <p className="notes-phase-overview-blocker">
+          Needs attention: {visibleRoadmapAttentionReason(phase)}
+        </p>
       )}
 
       <div className="notes-phase-overview-completion">
@@ -277,7 +309,6 @@ function PhaseOverview({
           <dd>
             <strong>{reportMeta}</strong>
             {latestReport && <span>{latestReport.progress}</span>}
-            {latestReport?.blocker && <span>Blocked: {latestReport.blocker}</span>}
           </dd>
         </div>
         <div>

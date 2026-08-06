@@ -306,6 +306,20 @@ export function NotesPhaseCompletionGates({ phase }: { phase: NotesPhase }): Rea
     latestCompletionReview.verificationStatusUpdateId === displayedVerification.id
       ? latestCompletionReview
       : null;
+  const handoffVerification = latestRoadmapEvent(
+    phase,
+    (event): event is NotesRoadmapStatusUpdate =>
+      event.type === "status-update" && event.actor === "gg-coder" && event.verification !== null,
+  );
+  const criterionEvidence = phase.doneWhen.map((criterion, index) => ({
+    criterion,
+    evidence: handoffVerification?.evidence[index] ?? null,
+  }));
+  const reviewReady =
+    phase.status === "review" &&
+    handoffVerification?.transition === "review" &&
+    handoffVerification.verification === "passed" &&
+    handoffVerification.evidence.length === phase.doneWhen.length;
 
   return (
     <section
@@ -314,6 +328,32 @@ export function NotesPhaseCompletionGates({ phase }: { phase: NotesPhase }): Rea
     >
       <h4 id={`notes-completion-gates-${phase.id}`}>Completion gates</h4>
       <dl>
+        <div className={reviewReady ? "notes-review-readiness is-ready" : "notes-review-readiness"}>
+          <dt>Review readiness</dt>
+          <dd>
+            <strong>
+              {reviewReady ? `Ready for ${MENTOR_DISPLAY_NAME} review` : "Not ready for review"}
+            </strong>
+            <span>
+              {reviewReady
+                ? "Every Done when criterion has passed verification evidence. GG Coder has stopped at the handoff."
+                : handoffVerification?.verification === "failed"
+                  ? (handoffVerification.verificationReason ??
+                    "Verification failed; the phase remains in progress.")
+                  : "Passed verification and one evidence item per Done when criterion are required before review."}
+            </span>
+            {criterionEvidence.length > 0 && (
+              <ul className="notes-review-readiness-evidence">
+                {criterionEvidence.map(({ criterion, evidence }, index) => (
+                  <li key={`${index}-${criterion}`}>
+                    <span>{criterion}</span>
+                    <strong>{evidence ?? "Evidence missing"}</strong>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </dd>
+        </div>
         <div>
           <dt>Implementation</dt>
           <dd>

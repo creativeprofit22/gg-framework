@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
+use unicode_normalization::UnicodeNormalization;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -92,6 +93,9 @@ use tauri_plugin_opener::OpenerExt;
 struct Daemon {
     /// The daemon child process (process-group leader). `None` until spawned.
     child: Mutex<Option<Child>>,
+    /// High-entropy bootstrap credential used only to mint logical sessions.
+    /// It never crosses the native IPC boundary into the webview.
+    auth_token: Mutex<Option<String>>,
     /// The daemon's HTTP port, learned from its `GG_APP_LISTENING` handshake.
     /// `None` until ready; reset to `None` across a crash-respawn.
     port: Mutex<Option<u16>>,
@@ -1383,7 +1387,22 @@ fn normalize_notes_response(
         .get("status")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|value| {
-            matches!(value, "ok" | "missing" | "corrupt" | "conflict" | "invalid")
+            matches!(
+                value,
+                "ok" | "missing"
+                    | "corrupt"
+                    | "conflict"
+                    | "invalid"
+                    | "committed"
+                    | "duplicate"
+                    | "already-resolved"
+                    | "duplicate-id-conflict"
+                    | "stale-revision"
+                    | "stale-session"
+                    | "phase-not-found"
+                    | "phase-archived"
+                    | "blocker-not-found"
+            )
         });
     if status.is_success() || typed_outcome {
         return Ok(body);
@@ -1442,6 +1461,286 @@ fn phase_start_path(phase_id: &str) -> String {
 
 fn phase_cancel_path(phase_id: &str) -> String {
     format!("/phases/{}/cancel", encode_path_segment(phase_id))
+}
+
+fn roadmap_phase_draft_approve_path(draft_id: &str) -> String {
+    format!(
+        "/roadmap/phase-drafts/{}/approve",
+        encode_path_segment(draft_id)
+    )
+}
+
+fn roadmap_phase_draft_reject_path(draft_id: &str) -> String {
+    format!(
+        "/roadmap/phase-drafts/{}/reject",
+        encode_path_segment(draft_id)
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RoadmapPhaseDraftResponseKind {
+    Get,
+    Approve,
+    Reject,
+}
+
+fn is_non_negative_integer(value: Option<&serde_json::Value>) -> bool {
+    value.and_then(serde_json::Value::as_u64).is_some()
+}
+
+fn is_non_empty_string(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| !candidate.is_empty())
+}
+
+const ROADMAP_PHASE_DRAFT_KEYS: [&str; 8] = [
+    "id",
+    "projectKey",
+    "basedOnRevision",
+    "createdAt",
+    "createdBySessionId",
+    "summary",
+    "phases",
+    "status",
+];
+const ROADMAP_DRAFT_PHASE_KEYS: [&str; 5] =
+    ["phaseId", "title", "goal", "doneWhen", "sourcePrompt"];
+const ROADMAP_PROPOSED_PHASES_MAX_ITEMS: usize = 20;
+const ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS: usize = 20;
+
+fn has_exact_keys(object: &serde_json::Map<String, serde_json::Value>, expected: &[&str]) -> bool {
+    object.len() == expected.len() && expected.iter().all(|key| object.contains_key(*key))
+}
+
+fn normalized_bounded_string(
+    value: Option<&serde_json::Value>,
+    max_length: usize,
+) -> Option<String> {
+    let candidate = value?.as_str()?;
+    let normalized_nfc = candidate.nfc().collect::<String>();
+    let normalized_lines = normalized_nfc.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalized_lines.trim();
+    let length = normalized.chars().count();
+    (1..=max_length)
+        .contains(&length)
+        .then(|| normalized.to_string())
+}
+
+fn is_roadmap_draft_phase(value: &serde_json::Value) -> Option<String> {
+    let object = value.as_object()?;
+    if !has_exact_keys(object, &ROADMAP_DRAFT_PHASE_KEYS) {
+        return None;
+    }
+
+    let phase_id = normalized_bounded_string(object.get("phaseId"), 512)?;
+    normalized_bounded_string(object.get("title"), 200)?;
+    normalized_bounded_string(object.get("goal"), 4_096)?;
+    normalized_bounded_string(object.get("sourcePrompt"), 16_384)?;
+
+    let done_when = object.get("doneWhen")?.as_array()?;
+    if !(1..=ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS).contains(&done_when.len()) {
+        return None;
+    }
+    let mut criteria = HashSet::new();
+    for criterion in done_when {
+        let normalized = normalized_bounded_string(Some(criterion), 1_024)?;
+        if !criteria.insert(normalized) {
+            return None;
+        }
+    }
+
+    Some(phase_id)
+}
+
+fn is_roadmap_phase_draft(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if !has_exact_keys(object, &ROADMAP_PHASE_DRAFT_KEYS)
+        || !matches!(
+            object.get("status").and_then(serde_json::Value::as_str),
+            Some("pending" | "stale")
+        )
+        || normalized_bounded_string(object.get("id"), 512).is_none()
+        || normalized_bounded_string(object.get("projectKey"), 4_096).is_none()
+        || !is_non_negative_integer(object.get("basedOnRevision"))
+        || !object
+            .get("createdAt")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok())
+        || normalized_bounded_string(object.get("createdBySessionId"), 512).is_none()
+        || normalized_bounded_string(object.get("summary"), 4_096).is_none()
+    {
+        return false;
+    }
+
+    let Some(phases) = object.get("phases").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if !(1..=ROADMAP_PROPOSED_PHASES_MAX_ITEMS).contains(&phases.len()) {
+        return false;
+    }
+
+    let mut phase_ids = HashSet::new();
+    phases.iter().all(|phase| {
+        is_roadmap_draft_phase(phase).is_some_and(|phase_id| phase_ids.insert(phase_id))
+    })
+}
+
+fn is_roadmap_phase_draft_get_outcome(value: &serde_json::Value, outcome: &str) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    outcome == "ok"
+        && has_exact_keys(object, &["status", "draft"])
+        && object.get("status").and_then(serde_json::Value::as_str) == Some("ok")
+        && object
+            .get("draft")
+            .is_some_and(|draft| draft.is_null() || is_roadmap_phase_draft(draft))
+}
+
+fn has_decision(value: &serde_json::Value) -> bool {
+    matches!(
+        value.get("decision").and_then(serde_json::Value::as_str),
+        Some("approved" | "rejected")
+    )
+}
+
+fn is_roadmap_phase_draft_approval_outcome(value: &serde_json::Value, outcome: &str) -> bool {
+    match outcome {
+        "created" => {
+            is_non_negative_integer(value.get("revision"))
+                && value
+                    .get("phaseIds")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|ids| {
+                        !ids.is_empty()
+                            && ids
+                                .iter()
+                                .all(|id| id.as_str().is_some_and(|id| !id.is_empty()))
+                    })
+        }
+        "already-decided" => has_decision(value),
+        "stale-revision" => {
+            is_non_negative_integer(value.get("expectedRevision"))
+                && is_non_negative_integer(value.get("currentRevision"))
+        }
+        "invalid-proposal" | "storage-failed" => is_non_empty_string(value.get("message")),
+        "proposal-not-found"
+        | "proposal-project-mismatch"
+        | "reconciliation-in-progress"
+        | "notes-missing"
+        | "notes-corrupt" => true,
+        _ => false,
+    }
+}
+
+fn is_roadmap_phase_draft_rejection_outcome(value: &serde_json::Value, outcome: &str) -> bool {
+    match outcome {
+        "rejected" | "proposal-not-found" | "proposal-project-mismatch" => true,
+        "already-decided" => has_decision(value),
+        _ => false,
+    }
+}
+
+fn normalize_roadmap_phase_draft_response(
+    status: reqwest::StatusCode,
+    body: &str,
+    kind: RoadmapPhaseDraftResponseKind,
+) -> Result<serde_json::Value, String> {
+    let value = serde_json::from_str::<serde_json::Value>(body)
+        .map_err(|_| "invalid roadmap phase-draft response".to_string())?;
+    let outcome = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let typed = match kind {
+        RoadmapPhaseDraftResponseKind::Get => is_roadmap_phase_draft_get_outcome(&value, outcome),
+        RoadmapPhaseDraftResponseKind::Approve => {
+            is_roadmap_phase_draft_approval_outcome(&value, outcome)
+        }
+        RoadmapPhaseDraftResponseKind::Reject => {
+            is_roadmap_phase_draft_rejection_outcome(&value, outcome)
+        }
+    };
+    if typed {
+        Ok(value)
+    } else if status.is_success() {
+        Err("invalid roadmap phase-draft response".to_string())
+    } else {
+        Err(sidecar_error_text(status, body))
+    }
+}
+
+const ROADMAP_DRAFT_FEEDBACK_MAX_CHARS: usize = 4_096;
+const ROADMAP_DRAFT_AUDIT_FIELD_MAX_CHARS: usize = 128;
+
+fn normalize_roadmap_draft_feedback(feedback: Option<String>) -> Result<Option<String>, String> {
+    let Some(feedback) = feedback else {
+        return Ok(None);
+    };
+    let normalized = feedback.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalized.trim().to_string();
+    let length = normalized.chars().count();
+    if length == 0 {
+        return Ok(None);
+    }
+    if length > ROADMAP_DRAFT_FEEDBACK_MAX_CHARS {
+        return Err(format!(
+            "feedback must contain at most {ROADMAP_DRAFT_FEEDBACK_MAX_CHARS} normalized characters"
+        ));
+    }
+    Ok(Some(normalized))
+}
+
+fn bounded_roadmap_draft_audit_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{FFFD}'
+            } else {
+                character
+            }
+        })
+        .take(ROADMAP_DRAFT_AUDIT_FIELD_MAX_CHARS)
+        .collect()
+}
+
+fn audit_roadmap_phase_draft_proxy(
+    action: &str,
+    pane_id: &str,
+    draft_id: Option<&str>,
+    http_status: reqwest::StatusCode,
+    result: &Result<serde_json::Value, String>,
+) {
+    let outcome = result
+        .as_ref()
+        .ok()
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("invalid-response");
+    log::info!(
+        "roadmap_phase_draft_proxy action={} pane_id={} draft_id={} http_status={} authenticated=true outcome={}",
+        bounded_roadmap_draft_audit_field(action),
+        bounded_roadmap_draft_audit_field(pane_id),
+        bounded_roadmap_draft_audit_field(draft_id.unwrap_or("-")),
+        http_status.as_u16(),
+        bounded_roadmap_draft_audit_field(outcome),
+    );
+}
+
+async fn roadmap_phase_draft_response(
+    response: reqwest::Response,
+    kind: RoadmapPhaseDraftResponseKind,
+) -> (reqwest::StatusCode, Result<serde_json::Value, String>) {
+    let status = response.status();
+    let result = match response.text().await {
+        Ok(body) => normalize_roadmap_phase_draft_response(status, &body, kind),
+        Err(_) => Err("invalid roadmap phase-draft response".to_string()),
+    };
+    (status, result)
 }
 
 fn normalize_phase_start_response(
@@ -1547,6 +1846,90 @@ async fn agent_phase_cancel(
     parse_sidecar_json_response(status, &body)
 }
 
+/// Proxy: load the authenticated pane's current pending Roadmap phase draft.
+#[tauri::command]
+async fn agent_roadmap_phase_draft_get(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .get(format!(
+            "{}/roadmap/phase-drafts/pending",
+            sidecar_base(port)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let (status, result) =
+        roadmap_phase_draft_response(response, RoadmapPhaseDraftResponseKind::Get).await;
+    audit_roadmap_phase_draft_proxy("get", &pane_id, None, status, &result);
+    result
+}
+
+/// Proxy: approve exactly the stored Roadmap phase draft, without accepting phase content.
+#[tauri::command]
+async fn agent_roadmap_phase_draft_approve(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    draft_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}{}",
+            sidecar_base(port),
+            roadmap_phase_draft_approve_path(&draft_id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        // Deliberately no JSON body: approval can only identify an existing draft.
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let (status, result) =
+        roadmap_phase_draft_response(response, RoadmapPhaseDraftResponseKind::Approve).await;
+    audit_roadmap_phase_draft_proxy("approve", &pane_id, Some(&draft_id), status, &result);
+    result
+}
+
+/// Proxy: reject exactly the stored Roadmap phase draft with optional bounded feedback.
+#[tauri::command]
+async fn agent_roadmap_phase_draft_reject(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    draft_id: String,
+    feedback: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let feedback = normalize_roadmap_draft_feedback(feedback)?;
+    let body = match feedback {
+        Some(feedback) => serde_json::json!({ "feedback": feedback }),
+        None => serde_json::json!({}),
+    };
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}{}",
+            sidecar_base(port),
+            roadmap_phase_draft_reject_path(&draft_id)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let (status, result) =
+        roadmap_phase_draft_response(response, RoadmapPhaseDraftResponseKind::Reject).await;
+    audit_roadmap_phase_draft_proxy("reject", &pane_id, Some(&draft_id), status, &result);
+    result
+}
+
 /// Proxy: create the pane's project Notes repository only when absent.
 #[tauri::command]
 async fn agent_notes_migrate(
@@ -1561,6 +1944,43 @@ async fn agent_notes_migrate(
         .post(format!("{}/notes/migrate", sidecar_base(port)))
         .header("x-gg-session", &gg_sid)
         .json(&serde_json::json!({ "document": document }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
+/// Proxy: persist a typed resolution for one Roadmap blocker report.
+#[tauri::command]
+async fn agent_notes_resolve_roadmap_blocker(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    resolution_id: String,
+    phase_id: String,
+    blocker_update_id: String,
+    expected_revision: u64,
+    expected_session: serde_json::Value,
+    resolver: String,
+    timestamp: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!(
+            "{}/notes/roadmap/blocker-resolution",
+            sidecar_base(port)
+        ))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({
+            "resolutionId": resolution_id,
+            "phaseId": phase_id,
+            "blockerUpdateId": blocker_update_id,
+            "expectedRevision": expected_revision,
+            "expectedSession": expected_session,
+            "resolver": resolver,
+            "timestamp": timestamp,
+        }))
         .send()
         .await
         .map_err(|error| error.to_string())?;
@@ -6118,6 +6538,12 @@ fn pick_cwd(
 const DAEMON_STABLE_UPTIME: std::time::Duration = std::time::Duration::from_secs(60);
 const DAEMON_MAX_RESPAWNS: u32 = 5;
 
+fn generate_daemon_auth_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("failed to generate daemon authentication token: {error}"))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
 /// Exponential crash-loop backoff: 1s, 2s, 4s, 8s, 16s, then stop.
 /// A hard retry budget prevents a broken sidecar/signature/configuration from
 /// turning the desktop shell into an unbounded process-spawn and disk-write loop.
@@ -6154,6 +6580,14 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     let identifier = app.config().identifier.clone();
     let identity_arg = sidecar_identity_arg(&identifier);
     let sidecar_log = sidecar_log_filename(&identifier);
+    let auth_token = match generate_daemon_auth_token() {
+        Ok(token) => token,
+        Err(message) => {
+            log::error!("{message}");
+            emit_daemon_error(&app, &message);
+            return;
+        }
+    };
     log::info!(
         "{}",
         lifecycle_message(
@@ -6174,6 +6608,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         // Port 0 → the OS assigns a free port, reported back via the
         // GG_APP_LISTENING handshake.
         .env("GG_APP_PORT", "0")
+        .env("GG_APP_AUTH_TOKEN", &auth_token)
         .env("GG_APP_SIDECAR_LOG_FILE", &sidecar_log)
         .env("ERROR_MOM_RELEASE", env!("CARGO_PKG_VERSION"))
         .stdout(Stdio::piped())
@@ -6232,6 +6667,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     {
         let daemon: State<Daemon> = app.state();
         *daemon.child.lock().unwrap() = Some(child);
+        *daemon.auth_token.lock().unwrap() = Some(auth_token);
     }
 
     if let Some(stdout) = stdout {
@@ -6292,6 +6728,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                     "unexpected_control_pipe_close"
                 };
                 *daemon.port.lock().unwrap() = None;
+                *daemon.auth_token.lock().unwrap() = None;
                 if let Some(mut old_child) = daemon.child.lock().unwrap().take() {
                     match old_child.try_wait() {
                         Ok(Some(status)) => {
@@ -6390,8 +6827,8 @@ fn parse_daemon_create_session_response(
         .ok_or_else(|| "agent daemon response did not include a session id".to_string())
 }
 
-/// POST /session to the daemon for `cwd` (+ optional resume `session_path`);
-/// returns the new session id or the daemon's concrete rejection reason.
+/// Authenticated POST /session to the daemon for `cwd` (+ optional resume
+/// `session_path`); returns the new session id or the daemon's concrete rejection reason.
 async fn daemon_create_session(
     app: &tauri::AppHandle,
     port: u16,
@@ -6401,6 +6838,13 @@ async fn daemon_create_session(
     session_path: Option<&str>,
 ) -> Result<String, String> {
     let client = app.state::<reqwest::Client>().inner().clone();
+    let auth_token = app
+        .state::<Daemon>()
+        .auth_token
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "agent daemon authentication is not ready".to_string())?;
     let body = serde_json::json!({
         "mode": mode,
         "chatAgent": chat_agent,
@@ -6409,6 +6853,7 @@ async fn daemon_create_session(
     });
     let response = client
         .post(format!("{}/session", sidecar_base(port)))
+        .header("x-gg-daemon-token", auth_token)
         .json(&body)
         .send()
         .await
@@ -6809,7 +7254,11 @@ pub fn run() {
             agent_notes_get,
             agent_phase_start,
             agent_phase_cancel,
+            agent_roadmap_phase_draft_get,
+            agent_roadmap_phase_draft_approve,
+            agent_roadmap_phase_draft_reject,
             agent_notes_migrate,
+            agent_notes_resolve_roadmap_blocker,
             agent_notes_save,
             agent_reminder_reserve,
             agent_reminder_claim,
@@ -7319,6 +7768,210 @@ mod tests {
             ),
             Err("unknown".to_string())
         );
+    }
+
+    #[test]
+    fn roadmap_phase_draft_proxy_encodes_opaque_draft_ids() {
+        assert_eq!(
+            roadmap_phase_draft_approve_path("draft/one review?雪"),
+            "/roadmap/phase-drafts/draft%2Fone%20review%3F%E9%9B%AA/approve"
+        );
+        assert_eq!(
+            roadmap_phase_draft_reject_path("draft/one review?雪"),
+            "/roadmap/phase-drafts/draft%2Fone%20review%3F%E9%9B%AA/reject"
+        );
+    }
+
+    #[test]
+    fn roadmap_phase_draft_feedback_is_normalized_and_bounded() {
+        assert_eq!(
+            normalize_roadmap_draft_feedback(Some("  first\r\nsecond\r  ".to_string())),
+            Ok(Some("first\nsecond".to_string()))
+        );
+        assert_eq!(normalize_roadmap_draft_feedback(None), Ok(None));
+        assert_eq!(
+            normalize_roadmap_draft_feedback(Some("  ".to_string())),
+            Ok(None)
+        );
+        assert!(normalize_roadmap_draft_feedback(Some(
+            "x".repeat(ROADMAP_DRAFT_FEEDBACK_MAX_CHARS + 1)
+        ))
+        .is_err());
+
+        let audited = bounded_roadmap_draft_audit_field(&format!(
+            "{}\nproposal content",
+            "x".repeat(ROADMAP_DRAFT_AUDIT_FIELD_MAX_CHARS)
+        ));
+        assert_eq!(audited.chars().count(), ROADMAP_DRAFT_AUDIT_FIELD_MAX_CHARS);
+        assert!(!audited.contains("proposal content"));
+        assert!(!audited.contains('\n'));
+    }
+
+    #[test]
+    fn roadmap_phase_draft_proxy_preserves_typed_http_outcomes() {
+        let cases = [
+            (
+                reqwest::StatusCode::OK,
+                r#"{"status":"created","revision":2,"phaseIds":["phase-1"]}"#,
+                "created",
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                r#"{"status":"proposal-not-found"}"#,
+                "proposal-not-found",
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                r#"{"status":"stale-revision","expectedRevision":1,"currentRevision":2}"#,
+                "stale-revision",
+            ),
+            (
+                reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+                r#"{"status":"invalid-proposal","message":"invalid phase"}"#,
+                "invalid-proposal",
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"status":"storage-failed","message":"write failed"}"#,
+                "storage-failed",
+            ),
+        ];
+
+        for (http_status, body, outcome) in cases {
+            let value = normalize_roadmap_phase_draft_response(
+                http_status,
+                body,
+                RoadmapPhaseDraftResponseKind::Approve,
+            )
+            .unwrap();
+            assert_eq!(
+                value.get("status").and_then(serde_json::Value::as_str),
+                Some(outcome)
+            );
+        }
+
+        assert!(normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"status":"proposal-not-found"}"#,
+            RoadmapPhaseDraftResponseKind::Get,
+        )
+        .is_err());
+
+        let conflict = normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"status":"already-decided","decision":"approved"}"#,
+            RoadmapPhaseDraftResponseKind::Reject,
+        )
+        .unwrap();
+        assert_eq!(conflict["status"], "already-decided");
+    }
+
+    #[test]
+    fn roadmap_phase_draft_proxy_validates_success_and_malformed_bodies() {
+        let pending = serde_json::json!({
+            "status": "ok",
+            "draft": {
+                "id": "draft-1",
+                "projectKey": "/work/project",
+                "basedOnRevision": 1,
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "createdBySessionId": "session-1",
+                "summary": "Two phases",
+                "phases": [{
+                    "phaseId": "phase-1",
+                    "title": "Implement validation",
+                    "goal": "Keep the native boundary aligned with the shared contract.",
+                    "doneWhen": ["Complete drafts pass", "Malformed drafts fail"],
+                    "sourcePrompt": "Validate pending Roadmap phase drafts.",
+                }],
+                "status": "pending",
+            },
+        });
+        assert!(normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK,
+            &pending.to_string(),
+            RoadmapPhaseDraftResponseKind::Get,
+        )
+        .is_ok());
+        assert!(normalize_roadmap_phase_draft_response(
+            reqwest::StatusCode::OK,
+            r#"{"status":"ok","draft":null}"#,
+            RoadmapPhaseDraftResponseKind::Get,
+        )
+        .is_ok());
+
+        let mut incomplete_phase = pending.clone();
+        incomplete_phase["draft"]["phases"][0] = serde_json::json!({ "phaseId": "phase-1" });
+
+        let mut extra_envelope_field = pending.clone();
+        extra_envelope_field["extra"] = serde_json::json!(true);
+
+        let mut extra_draft_field = pending.clone();
+        extra_draft_field["draft"]["extra"] = serde_json::json!(true);
+
+        let mut extra_phase_field = pending.clone();
+        extra_phase_field["draft"]["phases"][0]["extra"] = serde_json::json!(true);
+
+        let mut invalid_timestamp = pending.clone();
+        invalid_timestamp["draft"]["createdAt"] = serde_json::json!("not-a-timestamp");
+
+        let mut duplicate_phase_ids = pending.clone();
+        let duplicate_phase = duplicate_phase_ids["draft"]["phases"][0].clone();
+        duplicate_phase_ids["draft"]["phases"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate_phase);
+
+        let mut blank_normalized_text = pending.clone();
+        blank_normalized_text["draft"]["phases"][0]["title"] = serde_json::json!(" \r\n ");
+
+        let mut oversized_summary = pending.clone();
+        oversized_summary["draft"]["summary"] = serde_json::json!("x".repeat(4_097));
+
+        let mut duplicate_normalized_criteria = pending.clone();
+        duplicate_normalized_criteria["draft"]["phases"][0]["doneWhen"] =
+            serde_json::json!(["criterion", " criterion "]);
+
+        let direct_draft = pending["draft"].clone();
+        for malformed in [
+            incomplete_phase,
+            extra_envelope_field,
+            extra_draft_field,
+            extra_phase_field,
+            invalid_timestamp,
+            duplicate_phase_ids,
+            blank_normalized_text,
+            oversized_summary,
+            duplicate_normalized_criteria,
+            direct_draft,
+        ] {
+            assert_eq!(
+                normalize_roadmap_phase_draft_response(
+                    reqwest::StatusCode::OK,
+                    &malformed.to_string(),
+                    RoadmapPhaseDraftResponseKind::Get,
+                ),
+                Err("invalid roadmap phase-draft response".to_string())
+            );
+        }
+
+        for (status, body) in [
+            (reqwest::StatusCode::OK, "not json"),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "<html>failed</html>",
+            ),
+            (reqwest::StatusCode::OK, r#"{"status":"created"}"#),
+        ] {
+            assert_eq!(
+                normalize_roadmap_phase_draft_response(
+                    status,
+                    body,
+                    RoadmapPhaseDraftResponseKind::Approve,
+                ),
+                Err("invalid roadmap phase-draft response".to_string())
+            );
+        }
     }
 
     #[test]

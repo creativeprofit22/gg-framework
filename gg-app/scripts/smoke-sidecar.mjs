@@ -17,6 +17,7 @@ const srcTauri = join(here, "..", "src-tauri");
 const binDir = join(srcTauri, "binaries");
 const sidecar = join(srcTauri, "sidecar", "app-sidecar.mjs");
 const evidenceSkill = join(srcTauri, "sidecar", "skills", "evidence-led-ui", "SKILL.md");
+const daemonAuthToken = "gg-app-sidecar-smoke-bootstrap-token";
 
 function fail(msg) {
   console.error(`SMOKE FAIL: ${msg}`);
@@ -140,7 +141,12 @@ async function main() {
   smokeOpenSrc(node);
 
   const child = spawn(node, [sidecar], {
-    env: { ...process.env, GG_APP_PORT: "0", GG_APP_CWD: process.cwd() },
+    env: {
+      ...process.env,
+      GG_APP_PORT: "0",
+      GG_APP_CWD: process.cwd(),
+      GG_APP_AUTH_TOKEN: daemonAuthToken,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -204,7 +210,10 @@ async function main() {
   try {
     const mk = await fetch(`http://127.0.0.1:${port}/session`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-gg-daemon-token": daemonAuthToken,
+      },
       body: JSON.stringify({ cwd: process.cwd() }),
     });
     if (mk.status !== 200) {

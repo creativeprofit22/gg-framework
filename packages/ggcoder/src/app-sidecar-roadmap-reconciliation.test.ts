@@ -16,6 +16,19 @@ describe("AppSidecarRoadmapReconciliationCoordinator", () => {
     });
   });
 
+  it("serializes phase creation with every same-project reconciliation kind", () => {
+    const coordinator = new AppSidecarRoadmapReconciliationCoordinator(() => "phase-create-1");
+    const lease = coordinator.tryAcquire("/work/project", "phase-create");
+
+    expect(lease).toMatchObject({ kind: "phase-create", operationId: "phase-create-1" });
+    expect(coordinator.tryAcquire("/work/project", "phase-start")).toBeNull();
+    expect(coordinator.tryAcquire("/work/project", "status-update")).toBeNull();
+    expect(coordinator.tryAcquire("/work/project", "implementation-checkpoint")).toBeNull();
+    expect(coordinator.tryAcquire("/work/project", "completion-review")).toBeNull();
+    lease!.release();
+    expect(coordinator.tryAcquire("/work/project", "phase-create")).not.toBeNull();
+  });
+
   it("allows different projects in parallel", () => {
     let sequence = 0;
     const coordinator = new AppSidecarRoadmapReconciliationCoordinator(

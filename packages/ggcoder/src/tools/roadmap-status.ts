@@ -91,7 +91,18 @@ const roadmapStatusInputSchema: JsonSchema = {
       maxItems: NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
     },
     transition: { enum: ["pending", "in-progress", "blocked", "review"] },
-    blocker: { type: "string", maxLength: 1_024 },
+    blocker: {
+      type: "string",
+      maxLength: 1_024,
+      description:
+        "Required only for a blocked transition. State only the concrete reason work cannot continue. Do not report recoverable or transient tool failures as blockers.",
+    },
+    required_external_action: {
+      type: "string",
+      maxLength: 1_024,
+      description:
+        "Required only for a blocked transition. State the exact decision or action required from a person or external actor before work can continue.",
+    },
   },
   required: ["update_id", "phase_id", "progress", "transition"],
   additionalProperties: false,
@@ -274,6 +285,7 @@ export const RoadmapStatusParams = z
         ...commonFields,
         transition: z.literal("pending"),
         blocker: z.never().optional(),
+        required_external_action: z.never().optional(),
       })
       .strict(),
     z
@@ -281,6 +293,7 @@ export const RoadmapStatusParams = z
         ...commonFields,
         transition: z.literal("in-progress"),
         blocker: z.never().optional(),
+        required_external_action: z.never().optional(),
       })
       .strict(),
     z
@@ -292,6 +305,14 @@ export const RoadmapStatusParams = z
           .max(1_024)
           .transform(normalizedText)
           .refine((value) => value.length > 0, "blocker is required for blocked reports"),
+        required_external_action: z
+          .string()
+          .max(1_024)
+          .transform(normalizedText)
+          .refine(
+            (value) => value.length > 0,
+            "required_external_action is required for blocked reports",
+          ),
       })
       .strict(),
     z
@@ -299,6 +320,7 @@ export const RoadmapStatusParams = z
         ...commonFields,
         transition: z.literal("review"),
         blocker: z.never().optional(),
+        required_external_action: z.never().optional(),
         evidence: Evidence,
       })
       .strict(),
@@ -362,6 +384,7 @@ export type RoadmapStatusToolResult =
         | "phase-archived"
         | "stale-session"
         | "invalid-reference"
+        | "verification-incomplete"
         | "completion-checkpoint-blocked"
         | "invalid-review";
       phaseId: string;
@@ -378,10 +401,12 @@ export function createRoadmapStatusTool(
   return {
     name: "roadmap_status",
     description:
-      "Append one bounded Roadmap progress, blocker, typed verification, final-review decision, and structured-reference report. " +
-      "Report meaningful milestones promptly, one call at a time. Cite actual checks in evidence, " +
+      "Append one bounded Roadmap progress, blocker, required external action, typed verification, final-review decision, and structured-reference report. " +
+      "Report transition: blocked only when work cannot continue without a concrete external decision or action; blocker states why work cannot continue, required_external_action states exactly what a person or external actor must do or decide, and recoverable or transient tool failures are not blockers. " +
+      "Send a fresh in-progress report after blocked work actually resumes. Report meaningful milestones promptly, one call at a time. Cite actual checks in evidence, " +
       "reuse IDs only when retrying the same report, and avoid repeating an unchanged report. " +
-      "GG Coder may report verification but only Ken or Autopilot Ken may submit final_review; " +
+      "GG Coder may transition an active phase to review only with verification.result=passed and exactly one evidence item per Done when criterion, in criterion order. " +
+      "Failed or incomplete verification stays in-progress (or blocked only for a concrete external dependency). Only Ken or Autopilot Ken may submit final_review; " +
       "the completion gate, not this tool text, decides Done and preserves user overrides.",
     parameters: RoadmapStatusParams,
     rawInputSchema: roadmapStatusInputSchema,

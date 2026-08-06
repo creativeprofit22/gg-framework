@@ -20,9 +20,23 @@ describe("roadmap_status provider schema", () => {
       type: "object",
       properties: {
         transition: { enum: ["pending", "in-progress", "blocked", "review"] },
+        blocker: {
+          type: "string",
+          description: expect.stringContaining("concrete reason work cannot continue"),
+        },
+        required_external_action: {
+          type: "string",
+          description: expect.stringContaining(
+            "exact decision or action required from a person or external actor",
+          ),
+        },
       },
       required: ["update_id", "phase_id", "progress", "transition"],
     });
+    expect(
+      (exportedSchema().properties as Record<string, { description?: string }>).blocker
+        ?.description,
+    ).toContain("Do not report recoverable or transient tool failures as blockers");
 
     expect(
       tool.parameters.parse({

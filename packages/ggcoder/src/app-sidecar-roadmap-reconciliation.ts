@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 
 export type RoadmapReconciliationKind =
+  | "phase-create"
   | "phase-start"
   | "status-update"
   | "implementation-checkpoint"
@@ -17,7 +18,7 @@ export interface RoadmapReconciliationLease extends RoadmapReconciliationOwner {
   release(): void;
 }
 
-/** Daemon-shared fail-fast lease for launch, status, and completion intent on one project. */
+/** Daemon-shared fail-fast lease for phase creation, launch, status, and completion intent. */
 export class AppSidecarRoadmapReconciliationCoordinator {
   private readonly owners = new Map<string, RoadmapReconciliationOwner>();
 

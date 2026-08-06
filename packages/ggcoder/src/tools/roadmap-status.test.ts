@@ -26,13 +26,43 @@ describe("RoadmapStatusParams", () => {
     });
   });
 
-  it("requires a blocker only for blocked reports", () => {
+  it("requires separate nonblank reason and external action only for blocked reports", () => {
     expect(() => RoadmapStatusParams.parse({ ...base, transition: "blocked" })).toThrow();
-    expect(
-      RoadmapStatusParams.parse({ ...base, transition: "blocked", blocker: " Waiting on CI " }),
-    ).toMatchObject({ blocker: "Waiting on CI" });
     expect(() =>
-      RoadmapStatusParams.parse({ ...base, transition: "pending", blocker: "not allowed" }),
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "blocked",
+        blocker: "Access is unavailable",
+      }),
+    ).toThrow();
+    expect(() =>
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "blocked",
+        blocker: "Access is unavailable",
+        required_external_action: "   ",
+      }),
+    ).toThrow();
+    expect(
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "blocked",
+        blocker: " Access is unavailable. ",
+        required_external_action: " Grant this session repository access. ",
+      }),
+    ).toMatchObject({
+      blocker: "Access is unavailable.",
+      required_external_action: "Grant this session repository access.",
+    });
+    expect(() =>
+      RoadmapStatusParams.parse({
+        ...base,
+        transition: "pending",
+        required_external_action: "not allowed",
+      }),
+    ).toThrow();
+    expect(() =>
+      RoadmapStatusParams.parse({ ...base, transition: "in-progress", blocker: "not allowed" }),
     ).toThrow();
   });
 
@@ -76,6 +106,7 @@ describe("RoadmapStatusParams", () => {
         ...base,
         transition: "blocked",
         blocker: "Tests failed",
+        required_external_action: "Decide whether to accept the failed verification",
         verification: { result: "failed", reason: " Typecheck failed " },
       }).verification,
     ).toEqual({ result: "failed", reason: "Typecheck failed" });
@@ -190,5 +221,11 @@ describe("createRoadmapStatusTool", () => {
     );
     expect(record).toHaveBeenCalledWith({ actor: "ken", input });
     expect(tool.name).toBe("roadmap_status");
+    expect(tool.description).toContain("blocker states why work cannot continue");
+    expect(tool.description).toContain(
+      "required_external_action states exactly what a person or external actor must do or decide",
+    );
+    expect(tool.description).toContain("recoverable or transient tool failures are not blockers");
+    expect(tool.description).toContain("fresh in-progress report");
   });
 });

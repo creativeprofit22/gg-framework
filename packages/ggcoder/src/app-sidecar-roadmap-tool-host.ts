@@ -32,6 +32,7 @@ export const APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES = [
 export interface AppSidecarRoadmapToolSession {
   getActivePhaseContext(): ActivePhaseContextV1 | undefined;
   getState(): { sessionId: string; sessionPath: string | null };
+  updateActivePhaseStage?(executionStage: "implementing" | "reviewing"): Promise<unknown>;
 }
 
 export interface AppSidecarRoadmapToolHostDependencies {
@@ -40,13 +41,20 @@ export interface AppSidecarRoadmapToolHostDependencies {
     ProjectNotesRepository,
     "recordRoadmapStatusUpdate" | "recordRoadmapFinalReview"
   >;
-  canSubmitFinalReview?(): boolean;
+  canSubmitFinalReview?(actor: Exclude<RoadmapStatusActor, "gg-coder">): boolean;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   projectAutopilot: Pick<AppSidecarProjectAutopilotState, "isEnabled">;
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
   now?: () => string;
+  onFinalReview?(attempt: AppSidecarFinalReviewAttempt): void;
   onNonCommit?(metadata: { result: string; phaseId: string; updateId: string }): void;
   onError?(error: unknown, metadata: { phaseId: string; updateId: string }): void;
+}
+
+export interface AppSidecarFinalReviewAttempt {
+  actor: Exclude<RoadmapStatusActor, "gg-coder">;
+  input: RoadmapStatusInput;
+  result: RoadmapStatusToolResult;
 }
 
 const ACTOR_BY_ROLE: Record<AppSidecarRoadmapSessionRole, RoadmapStatusActor> = {
@@ -108,6 +116,8 @@ export class AppSidecarRoadmapToolHost {
         transition: input.transition,
         progress: input.progress,
         blocker: input.transition === "blocked" ? input.blocker : null,
+        requiredExternalAction:
+          input.transition === "blocked" ? input.required_external_action : null,
         evidence: [...input.evidence],
         verification: input.verification?.result ?? null,
         verificationReason:
@@ -120,17 +130,23 @@ export class AppSidecarRoadmapToolHost {
         autopilotEnabled: this.dependencies.projectAutopilot.isEnabled(cwd),
       };
       if (input.final_review !== null) {
-        return this.recordFinalReview(
-          actor as Exclude<RoadmapStatusActor, "gg-coder">,
-          input,
-          statusRequest,
-        );
+        const reviewActor = actor as Exclude<RoadmapStatusActor, "gg-coder">;
+        const result = await this.recordFinalReview(reviewActor, input, statusRequest);
+        this.dependencies.onFinalReview?.({ actor: reviewActor, input, result });
+        return result;
       }
       const outcome = await this.dependencies.repository.recordRoadmapStatusUpdate(
         cwd,
         statusRequest,
       );
       if (outcome.status === "committed" || outcome.status === "duplicate") {
+        if (
+          actor === "gg-coder" &&
+          input.transition === "review" &&
+          outcome.phase.status === "review"
+        ) {
+          await getOwningSession?.().updateActivePhaseStage?.("reviewing");
+        }
         if (outcome.status === "committed") {
           this.dependencies.broadcastNotesSnapshot(outcome.snapshot);
         }
@@ -159,7 +175,9 @@ export class AppSidecarRoadmapToolHost {
         ...("revision" in outcome ? { revision: outcome.revision } : {}),
         ...(outcome.status === "invalid-reference"
           ? { path: outcome.path, message: outcome.message }
-          : {}),
+          : outcome.status === "verification-incomplete"
+            ? { message: outcome.message }
+            : {}),
       };
     } catch (error) {
       this.dependencies.onError?.(error, {
@@ -178,7 +196,7 @@ export class AppSidecarRoadmapToolHost {
     statusUpdate: Parameters<ProjectNotesRepository["recordRoadmapFinalReview"]>[1]["statusUpdate"],
   ): Promise<RoadmapStatusToolResult> {
     const finalReview = input.final_review!;
-    if (this.dependencies.canSubmitFinalReview?.() === false) {
+    if (this.dependencies.canSubmitFinalReview?.(actor) === false) {
       return { result: "completion-checkpoint-blocked", phaseId: input.phase_id };
     }
     const completion = await this.dependencies.repository.recordRoadmapFinalReview(

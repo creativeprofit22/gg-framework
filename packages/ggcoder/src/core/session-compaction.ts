@@ -1,6 +1,13 @@
 import crypto from "node:crypto";
 import type { Message, Provider } from "@kenkaiiii/gg-ai";
-import type { SessionManager, MessageEntry } from "./session-manager.js";
+import { getHistoryMessageVisibility } from "./session-history.js";
+import type { SessionManager, MessageEntry, LabelEntry } from "./session-manager.js";
+
+/** Stable identity for one compaction source, including internal provenance. */
+export function sourceFingerprint(messages: readonly Message[]): string {
+  const source = messages.filter((message) => message.role !== "system");
+  return crypto.createHash("sha256").update(JSON.stringify(source)).digest("hex");
+}
 
 export async function appendMessagesToSession(
   sessionManager: SessionManager,
@@ -29,15 +36,41 @@ export async function createCompactedSessionCheckpoint(
     provider: Provider;
     model: string;
     messages: readonly Message[];
+    conversationId?: string;
+    generation?: number;
+    parentSessionId?: string;
+    sourceFingerprint?: string;
+    retainedMessageCount?: number;
+    preview?: string;
+    title?: string;
   },
 ): Promise<{ path: string; id: string }> {
-  const session = await sessionManager.create(options.cwd, options.provider, options.model);
+  const session = await sessionManager.create(options.cwd, options.provider, options.model, {
+    conversationId: options.conversationId,
+    generation: options.generation,
+    parentSessionId: options.parentSessionId,
+    sourceFingerprint: options.sourceFingerprint,
+    retainedMessageCount: options.retainedMessageCount,
+    preview: options.preview ?? options.title,
+  });
   await appendMessagesToSession(sessionManager, session.path, options.messages, 0);
+  if (options.title) {
+    const titleEntry: LabelEntry = {
+      type: "label",
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      label: options.title,
+    };
+    await sessionManager.appendEntry(session.path, titleEntry);
+  }
   return { path: session.path, id: session.id };
 }
 
 export function getRestoredMessagesForDisplay(messages: readonly Message[]): Message[] {
-  return messages.filter((msg) => msg.role !== "system");
+  return messages.filter(
+    (message) => message.role !== "system" && getHistoryMessageVisibility(message) !== "hidden",
+  );
 }
 
 export function formatRestoreInfoText(originalCount: number, restoredCount: number): string {

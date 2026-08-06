@@ -30,7 +30,10 @@ export function createFindTool(cwd: string): AgentTool<typeof FindParams> {
       const ig = ignore.default();
       ig.add(ignorePatterns);
 
-      const entries = await fg.default(pattern, {
+      // fast-glob (picomatch) treats "\" as an ESCAPE character, never a path
+      // separator — so a Windows-shaped pattern like `src\**\*.ts` silently
+      // matches nothing. Glob syntax is always forward-slash.
+      const entries = await fg.default(pattern.replace(/\\/g, "/"), {
         cwd: dir,
         dot: false,
         onlyFiles: true,

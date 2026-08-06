@@ -2,8 +2,8 @@
 // BUNDLED daemon, wait for the GG_APP_LISTENING handshake, create a session
 // (POST /session), hit /state for that session, then terminate and assert a
 // clean shutdown. Proves the per-platform runtime + single-file bundle + copied
-// native deps (sharp) actually load on this OS, AND that the shared-daemon
-// session protocol works in the bundle.
+// native deps (sharp) actually load on this OS, bundled default skills are
+// present, AND the shared-daemon session protocol works in the bundle.
 //
 // Run AFTER `stage:node` + `bundle:sidecar`. Exits non-zero on any failure so
 // it can gate CI.
@@ -16,6 +16,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const srcTauri = join(here, "..", "src-tauri");
 const binDir = join(srcTauri, "binaries");
 const sidecar = join(srcTauri, "sidecar", "app-sidecar.mjs");
+const evidenceSkill = join(srcTauri, "sidecar", "skills", "evidence-led-ui", "SKILL.md");
+const daemonAuthToken = "gg-app-sidecar-smoke-bootstrap-token";
 
 function fail(msg) {
   console.error(`SMOKE FAIL: ${msg}`);
@@ -39,13 +41,112 @@ function nodeBin() {
   return "";
 }
 
+/**
+ * The bundled kencode-search MCP server must START from the copied
+ * node_modules tree. It's spawned as a stdio child (never imported), so the
+ * main bundle-load check can't catch a broken copy — v0.14.x shipped a
+ * kencode-search whose MCP SDK dep tree was incomplete (pnpm symlink +
+ * exports-map stub in bundle-sidecar's packageRoot) and it crashed on every
+ * spawn with "Connection closed". This gate makes that class of bug fail CI.
+ */
+async function smokeKencode(node) {
+  const bin = join(
+    srcTauri,
+    "sidecar",
+    "node_modules",
+    "@kenkaiiii",
+    "kencode-search",
+    "dist",
+    "index.js",
+  );
+  if (!existsSync(bin)) fail(`bundled kencode-search missing: ${bin}`);
+  const ok = await new Promise((resolve) => {
+    const child = spawn(node, [bin], { stdio: ["pipe", "pipe", "pipe"] });
+    let err = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      // Must have printed "ready" — a silently-hung child is a failure too.
+      resolve(/ready/.test(err));
+    }, 8000);
+    child.stderr.on("data", (d) => {
+      err += d.toString();
+      if (/ready/.test(err)) {
+        clearTimeout(timer);
+        child.kill("SIGKILL");
+        resolve(true);
+      }
+    });
+    child.on("exit", () => {
+      clearTimeout(timer);
+      if (!/ready/.test(err)) {
+        process.stderr.write(err);
+        resolve(false);
+      }
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.stdin.end();
+  });
+  if (!ok) fail("bundled kencode-search failed to start (broken dependency copy?)");
+  console.log("smoke: bundled kencode-search starts cleanly");
+}
+
+/**
+ * TS/JS diagnostics resolve these packages by physical path and spawn the
+ * language server with the bundled Node runtime. A bundle-load smoke cannot
+ * detect their absence because neither package is imported by the sidecar.
+ */
+function smokeTypescriptLanguageServer(node) {
+  const languageServer = join(
+    srcTauri,
+    "sidecar",
+    "node_modules",
+    "typescript-language-server",
+    "lib",
+    "cli.mjs",
+  );
+  const tsserver = join(srcTauri, "sidecar", "node_modules", "typescript", "lib", "tsserver.js");
+  if (!existsSync(languageServer))
+    fail(`bundled TypeScript language server missing: ${languageServer}`);
+  if (!existsSync(tsserver)) fail(`bundled tsserver missing: ${tsserver}`);
+
+  const version = execFileSync(node, [languageServer, "--version"], { encoding: "utf8" }).trim();
+  if (!/^\d+\.\d+\.\d+/.test(version)) {
+    fail(`bundled TypeScript language server returned invalid version: ${version}`);
+  }
+  console.log(`smoke: bundled TypeScript language server starts cleanly (${version})`);
+}
+
+/** source_path also spawns a copied CLI that esbuild cannot discover. */
+function smokeOpenSrc(node) {
+  const bin = join(srcTauri, "sidecar", "node_modules", "opensrc", "bin", "opensrc.js");
+  if (!existsSync(bin)) fail(`bundled opensrc missing: ${bin}`);
+  const help = execFileSync(node, [bin, "--help"], { encoding: "utf8" });
+  if (!help.includes("Fetch source code for packages")) {
+    fail("bundled opensrc did not return its CLI help");
+  }
+  console.log("smoke: bundled opensrc starts cleanly");
+}
+
 async function main() {
   if (!existsSync(sidecar)) fail(`bundled sidecar missing: ${sidecar}`);
+  if (!existsSync(evidenceSkill)) fail(`bundled evidence-led-ui skill missing: ${evidenceSkill}`);
   const node = nodeBin();
   console.log(`smoke: ${node} ${sidecar}`);
 
+  await smokeKencode(node);
+  smokeTypescriptLanguageServer(node);
+  smokeOpenSrc(node);
+
   const child = spawn(node, [sidecar], {
-    env: { ...process.env, GG_APP_PORT: "0", GG_APP_CWD: process.cwd() },
+    env: {
+      ...process.env,
+      GG_APP_PORT: "0",
+      GG_APP_CWD: process.cwd(),
+      GG_APP_AUTH_TOKEN: daemonAuthToken,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -109,7 +210,10 @@ async function main() {
   try {
     const mk = await fetch(`http://127.0.0.1:${port}/session`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "x-gg-daemon-token": daemonAuthToken,
+      },
       body: JSON.stringify({ cwd: process.cwd() }),
     });
     if (mk.status !== 200) {

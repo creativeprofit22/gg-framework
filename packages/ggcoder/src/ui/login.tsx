@@ -32,12 +32,25 @@ const PROVIDERS: { label: string; value: Provider; description: string }[] = [
   {
     label: "Anthropic",
     value: "anthropic",
-    description: "Claude Opus 4.8, Fable 5, Sonnet 5, Haiku 4.5",
+    description: "Claude Fable 5, Opus 5, Sonnet 5, Haiku 4.5",
   },
-  { label: "OpenAI", value: "openai", description: "GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex" },
-  { label: "Gemini", value: "gemini", description: "Gemini 3.1 Flash Lite Preview" },
-  { label: "Moonshot", value: "moonshot", description: "Kimi K2.7 · OAuth or API key" },
-  { label: "Z.AI (GLM)", value: "glm", description: "GLM-5.1, GLM-4.7, GLM-4.7 Flash" },
+  {
+    label: "OpenAI",
+    value: "openai",
+    description: "GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna, GPT-5.5",
+  },
+  {
+    label: "Gemini",
+    value: "gemini",
+    description: "Gemini 3.1 Flash Lite, Gemini 3.5 Flash, Gemini 3.1 Pro (Preview)",
+  },
+  { label: "xAI (Grok)", value: "xai", description: "Grok 4.5" },
+  {
+    label: "Moonshot",
+    value: "moonshot",
+    description: "Kimi K3, K2.7 Code · OAuth or API key",
+  },
+  { label: "Z.AI (GLM)", value: "glm", description: "GLM-5.2, GLM-5.1, GLM-4.7, GLM-4.7 Flash" },
   { label: "MiniMax", value: "minimax", description: "MiniMax M3" },
   {
     label: "Xiaomi (MiMo)",
@@ -45,8 +58,8 @@ const PROVIDERS: { label: string; value: Provider; description: string }[] = [
     description: "MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 · Token Plan or API Credits",
   },
   { label: "DeepSeek", value: "deepseek", description: "DeepSeek V4 Pro, V4 Flash" },
-  { label: "OpenRouter", value: "openrouter", description: "Qwen3.6-Plus, multi-provider gateway" },
   { label: "Sakana (Fugu)", value: "sakana", description: "Fugu, Fugu Ultra" },
+  { label: "OpenRouter", value: "openrouter", description: "Multi-provider gateway" },
 ];
 
 function renderScreen(selectedIndex: number): string {

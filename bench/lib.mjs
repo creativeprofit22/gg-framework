@@ -51,7 +51,10 @@ export async function measuredTurn({ messages, tools, maxTokens = 80, promptCach
       ttftMs = Date.now() - t0;
     }
     if (ev.type === "text_delta") text += ev.text;
-    if (ev.type === "toolcall_end" && ev.toolCall) toolCalls.push(ev.toolCall);
+    // gg-ai emits `toolcall_done` with { id, name, args } inline. This listened
+    // for a `toolcall_end` event that does not exist, so `toolCalls` was always
+    // empty and any bench measuring tool use silently reported zero.
+    if (ev.type === "toolcall_done") toolCalls.push({ id: ev.id, name: ev.name, args: ev.args });
   }
   const resp = await s;
   return { ttftMs, totalMs: Date.now() - t0, text, usage: resp.usage ?? {}, toolCalls, response: resp };

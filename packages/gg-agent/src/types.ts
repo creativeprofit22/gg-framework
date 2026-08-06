@@ -39,6 +39,13 @@ export interface AgentTool<T extends z.ZodType = z.ZodType> extends Tool {
    * batch runs in source order so stateful mutations cannot race each other.
    */
   executionMode?: ToolExecutionMode;
+  /**
+   * Overrides the loop's default per-tool timeout. A tool that owns a longer
+   * internal budget than the default must declare it here, or the loop cancels
+   * it first and the tool's own timeout — with its specific, actionable error
+   * message — becomes unreachable.
+   */
+  timeoutMs?: number;
   execute: (
     args: z.infer<T>,
     context: ToolContext,
@@ -79,11 +86,43 @@ export interface AgentToolCallEndEvent {
   durationMs: number;
 }
 
+export interface AgentTurnTiming {
+  /** Logical turn start, before context transforms or provider retries. Unix epoch milliseconds. */
+  startedAt: number;
+  /** First provider event, or full-response arrival for non-streaming fallback. */
+  firstProviderEventAt?: number;
+  /** Successful provider response completion. Unix epoch milliseconds. */
+  completedAt: number;
+  /** Time spent awaiting provider attempts, including failed attempts but excluding retry backoff. */
+  providerDurationMs: number;
+  /** Time from logical turn start to the first provider event. */
+  ttftMs?: number;
+  /** Output tokens divided by total provider duration. Omitted when no rate is measurable. */
+  outputTokensPerSecond?: number;
+}
+
 export interface AgentTurnEndEvent {
   type: "turn_end";
   turn: number;
   stopReason: StopReason;
   usage: Usage;
+  timing: AgentTurnTiming;
+}
+
+/**
+ * A safe point between steps: the assistant message and every tool result for
+ * this turn are now in the message array, and no provider call is in flight.
+ *
+ * Hosts that persist a transcript flush here. Without it a crash mid-run loses
+ * the WHOLE turn — including tool results whose side effects already landed on
+ * disk — because the only flush happens after the loop returns.
+ *
+ * Yielded immediately after tool results are appended, so it pairs with
+ * `turn_end` (which covers the assistant half) to cover every message.
+ */
+export interface AgentCheckpointEvent {
+  type: "checkpoint";
+  turn: number;
 }
 
 export interface AgentDoneEvent {
@@ -105,6 +144,36 @@ export interface AgentMaxTurnsEvent {
   maxTurns: number;
 }
 
+/**
+ * Emitted when the loop was about to stop on an exhausted turn budget but the
+ * host granted an extension instead. The effective budget is raised and the
+ * loop continues with a continuation prompt, so this is NOT terminal — unlike
+ * `max_turns`, which still fires if the extended budget is also spent.
+ */
+export interface AgentTurnBudgetExtendedEvent {
+  type: "turn_budget_extended";
+  /** Turn number at which the budget was exhausted. */
+  turn: number;
+  /** New effective `maxTurns` after the extension. */
+  grantedTurns: number;
+  /** 1-based extension count for this run. */
+  extension: number;
+}
+
+/**
+ * Warning signal emitted when a turn ended on a non-clean stop reason —
+ * `max_tokens` (output clipped at the model's output-token limit), `refusal`,
+ * or a provider-reported `error` stop. Distinguishes a truncated/degraded
+ * completion from a clean one so hosts can warn the user instead of silently
+ * presenting incomplete output as done.
+ */
+export interface AgentTruncatedEvent {
+  type: "truncated";
+  reason: "max_tokens" | "refusal" | "provider_error";
+  /** True when the loop injected a continuation and will keep going. */
+  continued: boolean;
+}
+
 export interface AgentRetryEvent {
   type: "retry";
   reason:
@@ -114,7 +183,8 @@ export interface AgentRetryEvent {
     | "empty_response"
     | "stream_stall"
     | "overflow_compact"
-    | "tool_argument_glitch";
+    | "tool_argument_glitch"
+    | "runaway_toolcall";
   attempt: number;
   maxAttempts: number;
   delayMs: number;
@@ -180,11 +250,23 @@ export type AgentEvent =
   | AgentFollowUpMessageEvent
   | AgentRetryEvent
   | AgentTurnEndEvent
+  | AgentCheckpointEvent
   | AgentDoneEvent
   | AgentMaxTurnsEvent
+  | AgentTurnBudgetExtendedEvent
+  | AgentTruncatedEvent
   | AgentErrorEvent;
 
 // ── Agent Options ───────────────────────────────────────────
+
+export interface TransformContextOptions {
+  /** Force a transform after the provider reports context overflow. */
+  force?: boolean;
+  /** Latest successful provider usage, anchored at its assistant message. */
+  usage?: Usage;
+  /** Messages appended after that usage sample and not yet seen by the provider. */
+  pendingMessages: Message[];
+}
 
 export interface AgentOptions {
   provider: StreamOptions["provider"];
@@ -194,7 +276,15 @@ export interface AgentOptions {
   priorMessages?: Message[];
   tools?: AgentTool[];
   serverTools?: ServerToolDefinition[];
+  /** Control whether tools may/must be called, or select a named tool when supported. */
+  toolChoice?: StreamOptions["toolChoice"];
   maxTurns?: number;
+  /**
+   * How many times `onTurnBudgetExhausted` may grant extra turns in one run.
+   * Each grant raises the effective budget by the original `maxTurns`.
+   * Default: 2. Set 0 to disable extensions entirely.
+   */
+  maxTurnExtensions?: number;
   maxTokens?: number;
   temperature?: number;
   thinking?: StreamOptions["thinking"];
@@ -202,6 +292,7 @@ export interface AgentOptions {
   baseUrl?: string;
   signal?: AbortSignal;
   accountId?: string;
+  transportSessionId?: StreamOptions["transportSessionId"];
   projectId?: StreamOptions["projectId"];
   cacheRetention?: StreamOptions["cacheRetention"];
   /** Stable per-session cache routing key for providers that support it. */
@@ -227,6 +318,10 @@ export interface AgentOptions {
   clearToolUses?: boolean;
   /** Max characters for a single tool result. Results exceeding this are truncated with a notice. */
   maxToolResultChars?: number;
+  /** Aggregate budget for ALL tool results in one assistant turn. Protects
+   *  against parallel fan-outs injecting huge uncached context in one turn;
+   *  the largest results are trimmed (water-filling) with a re-run notice. */
+  maxTurnToolResultChars?: number;
   /** Max consecutive pause_turn continuations before stopping (default: 5).
    *  Prevents infinite loops when server-side tools keep pausing. */
   maxContinuations?: number;
@@ -235,12 +330,14 @@ export interface AgentOptions {
    * the messages array (e.g. compaction, truncation). Return the same array
    * for no-op, or a new array to replace the conversation context.
    *
+   * The latest provider usage is authoritative for the history through its
+   * assistant response. `pendingMessages` contains context appended afterward.
    * When `options.force` is true, the caller should compact unconditionally
    * (e.g. after a context overflow error from the API).
    */
   transformContext?: (
     messages: Message[],
-    options?: { force?: boolean },
+    options: TransformContextOptions,
   ) => Message[] | Promise<Message[]>;
   /**
    * Polled after tool execution completes each turn. Returns user messages
@@ -257,6 +354,18 @@ export interface AgentOptions {
    * on read.
    */
   getFollowUpMessages?: () => Promise<Message[] | null> | Message[] | null;
+  /**
+   * Consulted when a tool-running turn exhausts the turn budget mid-task,
+   * before the loop emits the terminal `max_turns` event. Return true to grant
+   * another `maxTurns` worth of turns; false (the default when unset) keeps
+   * today's hard cut-off. Hosts should only grant on evidence of progress —
+   * extending a spinning agent just buys it more tokens to spin with.
+   */
+  onTurnBudgetExhausted?: (ctx: {
+    turn: number;
+    maxTurns: number;
+    extension: number;
+  }) => Promise<boolean> | boolean;
 }
 
 // ── Agent Result ────────────────────────────────────────────

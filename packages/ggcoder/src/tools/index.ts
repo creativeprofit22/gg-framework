@@ -1,4 +1,6 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import { SubAgentManager, type SubAgentSnapshot } from "../core/subagent-manager.js";
 import { ProcessManager } from "../core/process-manager.js";
 import { LspManager } from "../core/lsp/manager.js";
 import { createReadTool } from "./read.js";
@@ -11,6 +13,7 @@ import { createGrepTool } from "./grep.js";
 import { createSearchCodeTool } from "./search-code.js";
 import { createLsTool } from "./ls.js";
 import { createSubAgentTool } from "./subagent.js";
+import { createSubAgentControlTools } from "./subagent-control.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWebSearchTool } from "./web-search.js";
 import { createSourcePathTool } from "./source-path.js";
@@ -18,6 +21,7 @@ import { createTaskOutputTool } from "./task-output.js";
 import { createTaskStopTool } from "./task-stop.js";
 import { createTaskSendTool } from "./task-send.js";
 import { createTasksTool } from "./tasks.js";
+
 import { createSkillTool } from "./skill.js";
 import { createScreenshotTool } from "./screenshot.js";
 import { createGenerateImageTool, type GenerateImageAuth } from "./generate-image.js";
@@ -25,13 +29,16 @@ import { createEnterPlanTool } from "./enter-plan.js";
 import { createExitPlanTool } from "./exit-plan.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import type { ReadTracker } from "./read-tracker.js";
+import type { WriteGuardSettings } from "../core/workspace-guard.js";
+import type { GetNetworkPolicy } from "../core/network-guard.js";
 import type { AgentDefinition } from "../core/agents.js";
 import type { Skill } from "../core/skills.js";
+import type { AgentNotificationQueue } from "../core/agent-notifications.js";
 
 export interface CreateToolsOptions {
   agents?: AgentDefinition[];
   skills?: Skill[];
-  provider?: string;
+  provider?: Provider;
   model?: string;
   /** Custom I/O operations for remote execution (SSH, Docker, etc.). Defaults to local filesystem. */
   operations?: ToolOperations;
@@ -61,8 +68,15 @@ export interface CreateToolsOptions {
    */
   getCacheKey?: () => string | undefined;
   /** Current parent provider/model, evaluated lazily when spawning a sub-agent. */
-  getProvider?: () => string;
+  getProvider?: () => Provider;
   getModel?: () => string;
+  getThinkingLevel?: () => ThinkingLevel | undefined;
+  getBaseUrl?: () => string | undefined;
+  /** Optional per-model subagent concurrency cap (subagentMaxPerModel). */
+  getMaxPerModel?: () => number | undefined;
+  onSubAgentState?: (snapshot: SubAgentSnapshot) => void;
+  /** Persistent child workers omit every subagent tool to enforce one-level fan-out. */
+  disableSubagents?: boolean;
   /**
    * Append LSP diagnostics to edit/write results (default true). Servers are
    * resolved from the project/PATH only and spawn lazily on the first edit of
@@ -76,6 +90,23 @@ export interface CreateToolsOptions {
    * chat provider. Omitted by callers that don't want image generation.
    */
   authStorage?: GenerateImageAuth & { hasProviderAuth(provider: string): Promise<boolean> };
+  /**
+   * Lazily read the workspace write-guard settings (allowOutsideWorkspaceWrites).
+   * When omitted, writes are allowed under cwd, the OS tmpdir, and ~/.gg only.
+   */
+  getWriteGuardSettings?: () => WriteGuardSettings | undefined;
+  /**
+   * Lazily read the network egress policy (networkMode / networkAllow).
+   * When omitted, no network restriction is applied.
+   */
+  getNetworkPolicy?: GetNetworkPolicy;
+  /**
+   * Push queue for out-of-band notifications (child completions, background
+   * process progress). When provided, producers enqueue here and the session
+   * drains it into steering, so the agent learns about them without spending a
+   * turn polling.
+   */
+  notifications?: AgentNotificationQueue;
 }
 
 export interface CreateToolsResult {
@@ -97,6 +128,7 @@ export interface CreateToolsResult {
    * `shutdownAll()` into their exit/cleanup paths alongside processManager.
    */
   lspManager?: LspManager;
+  subAgentManager?: SubAgentManager;
 }
 
 export async function createTools(
@@ -104,8 +136,10 @@ export async function createTools(
   opts?: CreateToolsOptions,
 ): Promise<CreateToolsResult> {
   const readFiles: ReadTracker = new Map();
-  const processManager = new ProcessManager();
   const ops = opts?.operations ?? localOperations;
+  const processManager = new ProcessManager(ops.process, undefined, {
+    notifications: opts?.notifications,
+  });
   const planModeRef = opts?.planModeRef;
 
   // LSP diagnostics only make sense against the local filesystem — remote
@@ -133,6 +167,7 @@ export async function createTools(
       opts?.onFileMutated,
       opts?.onPreFileMutation,
       getDiagnostics,
+      opts?.getWriteGuardSettings,
     ),
     createEditTool(
       cwd,
@@ -142,14 +177,15 @@ export async function createTools(
       opts?.onFileMutated,
       opts?.onPreFileMutation,
       getDiagnostics,
+      opts?.getWriteGuardSettings,
     ),
-    createBashTool(cwd, processManager, ops, planModeRef),
+    createBashTool(cwd, processManager, ops, planModeRef, undefined, opts?.getNetworkPolicy),
     createFindTool(cwd),
     createGrepTool(cwd, ops),
     createSearchCodeTool(cwd, ops),
     createLsTool(cwd, ops),
     createSourcePathTool(cwd),
-    createWebFetchTool(),
+    createWebFetchTool(opts?.getNetworkPolicy),
     createTaskOutputTool(processManager),
     createTaskSendTool(processManager),
     createTaskStopTool(processManager),
@@ -159,10 +195,17 @@ export async function createTools(
 
   // Add web search tool for providers without reliable native web search
   if (opts?.provider && opts.provider !== "anthropic") {
-    tools.push(createWebSearchTool());
+    tools.push(createWebSearchTool(opts?.getNetworkPolicy));
   }
 
-  if (opts?.agents && opts.agents.length > 0 && opts.provider && opts.model) {
+  let subAgentManager: SubAgentManager | undefined;
+  if (
+    !opts?.disableSubagents &&
+    opts?.agents &&
+    opts.agents.length > 0 &&
+    opts.provider &&
+    opts.model
+  ) {
     tools.push(
       createSubAgentTool(
         cwd,
@@ -173,6 +216,19 @@ export async function createTools(
         planModeRef,
       ),
     );
+    subAgentManager = new SubAgentManager({
+      cwd,
+      agents: opts.agents,
+      getProvider: () => opts.getProvider?.() ?? opts.provider!,
+      getModel: () => opts.getModel?.() ?? opts.model!,
+      getThinkingLevel: () => opts.getThinkingLevel?.(),
+      getCacheKey: opts.getCacheKey,
+      getBaseUrl: opts.getBaseUrl,
+      getMaxPerModel: () => opts.getMaxPerModel?.(),
+      onState: opts.onSubAgentState,
+      notifications: opts.notifications,
+    });
+    tools.push(...createSubAgentControlTools(subAgentManager, planModeRef));
   }
 
   if (opts?.skills && opts.skills.length > 0) {
@@ -203,7 +259,7 @@ export async function createTools(
   const rebuildReadTool = (model: string): AgentTool =>
     createReadTool(cwd, readFiles, ops, opts?.onFileRead, getVideoByteLimit(model));
 
-  return { tools, processManager, rebuildReadTool, lspManager };
+  return { tools, processManager, rebuildReadTool, lspManager, subAgentManager };
 }
 
 export { createReadTool } from "./read.js";
@@ -228,4 +284,10 @@ export { createEnterPlanTool } from "./enter-plan.js";
 export { createExitPlanTool } from "./exit-plan.js";
 export { ProcessManager } from "../core/process-manager.js";
 export { LspManager } from "../core/lsp/manager.js";
-export { localOperations, type ToolOperations } from "./operations.js";
+export {
+  localOperations,
+  localProcessLifecycle,
+  type ProcessLifecycleAdapter,
+  type SpawnProcessOptions,
+  type ToolOperations,
+} from "./operations.js";

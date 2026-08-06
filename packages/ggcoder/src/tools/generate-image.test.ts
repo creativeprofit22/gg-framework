@@ -162,6 +162,25 @@ describe("generate_image — generation (no image input)", () => {
     expect(details!.imagePreviews!.length).toBe(1);
   });
 
+  it("generates multiple images without sending unsupported tool n", async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => makeImageSSEResponse([TINY_PNG_B64]));
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const { createGenerateImageTool } = await import("./generate-image.js");
+    const tool = createGenerateImageTool(tmpDir, fakeAuth());
+    const result = await tool.execute({ prompt: "two icons", n: 2 }, ctx());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [, init] of fetchMock.mock.calls) {
+      const body = JSON.parse(init?.body as string);
+      expect(body.tools[0].n).toBeUndefined();
+    }
+    expect(isStructured(result)).toBe(true);
+    if (!isStructured(result)) return;
+    const details = result.details as { imagePreviews?: unknown[] };
+    expect(details.imagePreviews).toHaveLength(2);
+  });
+
   it("saves the image to out_path when provided", async () => {
     globalThis.fetch = vi
       .fn()

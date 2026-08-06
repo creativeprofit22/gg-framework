@@ -36,9 +36,76 @@ async function loadSharp(): Promise<SharpFn> {
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 /** Max width (px) for inline terminal-graphics previews so scrollback stays small. */
 const PREVIEW_MAX_WIDTH = 480;
-/** Anthropic's hard per-dimension cap for many-image requests. Exceeding this
- *  in either dimension causes a 400 even if the byte size is fine. */
-const MAX_IMAGE_DIMENSION = 2000;
+/**
+ * Visual token budget — vision encoders tile an image into fixed-size patches
+ * and charge per patch, so pixels beyond the budget are re-scaled away by the
+ * provider *after* we paid to upload them. Bounding here instead means fewer
+ * bytes on the wire and fewer image tokens billed, with no loss of detail the
+ * model would have seen anyway.
+ *
+ * `VISUAL_PATCH_PX` is the encoder's patch edge; `VISUAL_MAX_PATCHES` the patch
+ * budget; `VISUAL_MAX_EDGE` the hard per-side cap (a 3000x400 panorama is well
+ * inside the patch budget but still gets downscaled on the long edge).
+ */
+const VISUAL_PATCH_PX = 28;
+const VISUAL_MAX_PATCHES = 1568;
+const VISUAL_MAX_EDGE = 1568;
+
+/**
+ * Does a `width x height` image fit the visual token budget — both per-side
+ * cap and total patch count?
+ *
+ * Patch count is measured as continuous area (`w*h / patch^2`) rather than
+ * `ceil(w/patch) * ceil(h/patch)`: the encoder resizes to a patch-aligned grid
+ * before tiling, so area is what actually determines the token cost.
+ */
+export function fitsVisualBudget(width: number, height: number): boolean {
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return false;
+  if (width <= 0 || height <= 0) return true;
+  if (width > VISUAL_MAX_EDGE || height > VISUAL_MAX_EDGE) return false;
+  return (width * height) / (VISUAL_PATCH_PX * VISUAL_PATCH_PX) <= VISUAL_MAX_PATCHES;
+}
+
+/**
+ * Largest aspect-preserving size that still satisfies {@link fitsVisualBudget}.
+ * Returns the input untouched when it already fits (so ordinary screenshots are
+ * never re-encoded).
+ *
+ * Binary-searches the long edge because the short edge is rounded to whole
+ * pixels — the closed-form area scale can overshoot the budget by a patch or
+ * two once that rounding is applied.
+ */
+export function boundedSize(width: number, height: number): { width: number; height: number } {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) {
+    return { width, height };
+  }
+  if (fitsVisualBudget(width, height)) return { width, height };
+
+  const landscape = width >= height;
+  const longEdge = landscape ? width : height;
+  const shortEdge = landscape ? height : width;
+  const ratio = shortEdge / longEdge;
+  const project = (edge: number): { width: number; height: number } => {
+    const long = Math.max(1, Math.round(edge));
+    const short = Math.max(1, Math.round(long * ratio));
+    return landscape ? { width: long, height: short } : { width: short, height: long };
+  };
+
+  let lo = 1;
+  let hi = Math.floor(Math.min(longEdge, VISUAL_MAX_EDGE));
+  let best = project(1);
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const candidate = project(mid);
+    if (fitsVisualBudget(candidate.width, candidate.height)) {
+      best = candidate;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
 
 export const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 export const VIDEO_EXTENSIONS = new Set([".mp4", ".mov", ".webm", ".avi", ".mkv"]);
@@ -361,9 +428,10 @@ export async function validateVisionImage(buffer: Buffer): Promise<string | null
 }
 
 /**
- * Downscale an image buffer so it fits within both MAX_IMAGE_DIMENSION per side
- * (Anthropic's hard pixel cap for many-image requests) and MAX_IMAGE_BYTES.
- * Preserves format (PNG→PNG, JPEG→JPEG, etc.) and aspect ratio.
+ * Downscale an image buffer so it fits within both the visual token budget
+ * ({@link boundedSize}) and MAX_IMAGE_BYTES. Preserves format (PNG→PNG,
+ * JPEG→JPEG, etc.) and aspect ratio — a lossless PNG screenshot of UI stays a
+ * lossless PNG with its alpha channel intact.
  */
 export async function shrinkToFit(
   buffer: Buffer,
@@ -373,7 +441,8 @@ export async function shrinkToFit(
   const meta = await sharp(buffer).metadata();
   const origW = meta.width ?? 4096;
   const origH = meta.height ?? 4096;
-  const exceedsDim = origW > MAX_IMAGE_DIMENSION || origH > MAX_IMAGE_DIMENSION;
+  const bounded = boundedSize(origW, origH);
+  const exceedsDim = bounded.width !== origW || bounded.height !== origH;
 
   // Trust the buffer over the caller-supplied mediaType: if a file was named
   // foo.png but is actually a JPEG, sharp tells the truth and Anthropic
@@ -399,14 +468,13 @@ export async function shrinkToFit(
   let outFormat = formatMap[mediaType] ?? "png";
   let outMediaType = mediaType === "image/bmp" ? "image/png" : mediaType;
 
-  // Compute the initial target dimensions: fit within MAX_IMAGE_DIMENSION,
-  // preserving aspect ratio. Sharp's fit: "inside" does the same math but we
-  // want explicit width/height so we can shrink them further in the byte loop.
-  const scale = exceedsDim ? Math.min(MAX_IMAGE_DIMENSION / origW, MAX_IMAGE_DIMENSION / origH) : 1;
-  let width = Math.max(1, Math.round(origW * scale));
-  let height = Math.max(1, Math.round(origH * scale));
+  // Initial target dimensions come from the visual token budget. Explicit
+  // width/height (rather than leaning on sharp's fit: "inside") so the byte
+  // loop below can shrink them further.
+  let width = bounded.width;
+  let height = bounded.height;
 
-  // Encode at the dimension-capped size first — often this is already under
+  // Encode at the budget-capped size first — often this is already under
   // MAX_IMAGE_BYTES and we're done.
   {
     const first = await sharp(buffer)

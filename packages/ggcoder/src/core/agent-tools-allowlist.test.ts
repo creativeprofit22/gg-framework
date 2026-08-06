@@ -4,9 +4,11 @@ import { parseAgentFile } from "./agents.js";
 import { createTools } from "../tools/index.js";
 
 // Mirror of AgentSession.isToolAllowed (private): with an allow-list, a tool
-// passes only when its exact name is listed (MCP server whitelisting is a
-// separate opt-in the subagent path doesn't use). Kept in lockstep with the
-// real filter so this test tracks production behavior.
+// passes only when its exact name is listed. MCP tools are the one exception —
+// they pass when their `mcp__<server>__*` server is in `allowedMcpServers`,
+// which the subagent path derives from the agent's own `tools:` frontmatter
+// (see `mcpServersForAgent`). This helper covers the non-MCP names only, and is
+// kept in lockstep with the real filter so this test tracks production behavior.
 function filterToAllowed(toolNames: string[], allowed: string[] | undefined): string[] {
   if (!allowed || allowed.length === 0) return toolNames;
   return toolNames.filter((name) => allowed.includes(name));

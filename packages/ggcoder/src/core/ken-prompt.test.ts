@@ -105,6 +105,24 @@ describe("buildKenSystemPrompt — chat mode unaffected", () => {
   });
 });
 
+describe("UI guidance alignment", () => {
+  it("reviews UI through the matching skill and evidence without wholesale copying", async () => {
+    for (const prompt of [
+      await buildKenSystemPrompt(TEST_CWD),
+      await buildKenAutopilotSystemPrompt(TEST_CWD),
+    ]) {
+      expect(prompt).toContain("UI: evidence over imitation");
+      expect(prompt).toContain("use an invoked matching UI skill as specialized guidance");
+      expect(prompt).toContain("explicitly shows that the skill was available and applicable");
+      expect(prompt).toContain("existing components and tokens");
+      expect(prompt).toContain("rendered desktop and mobile output");
+      expect(prompt).toContain("References are evidence, not templates to clone");
+      expect(prompt).not.toContain("copy proven winners");
+      expect(prompt).not.toContain("pull the actual markup and computed styles");
+    }
+  });
+});
+
 describe("GG Coder capabilities — both modes know what the executor can do", () => {
   it("teaches Ken GG Coder's real toolset in chat AND autopilot", async () => {
     // Ken directs GG Coder, so both prompts must ground his instructions in the

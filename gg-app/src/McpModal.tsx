@@ -176,9 +176,7 @@ export function McpModal({ onClose }: Props): React.ReactElement {
         <ListSkeleton rows={3} />
       ) : visible.length === 0 ? (
         <div className="mcp-empty" style={{ color: theme.textMuted }}>
-          {scope === "global"
-            ? "No global MCP servers configured."
-            : "No project MCP servers configured."}
+          No MCP’s configured.
         </div>
       ) : (
         <div className="mcp-list">
@@ -235,13 +233,7 @@ export function McpModal({ onClose }: Props): React.ReactElement {
       )}
 
       <div className="modal-label" style={{ color: theme.textMuted, marginTop: 4 }}>
-        Add a server
-      </div>
-      <div className="modal-hint" style={{ color: theme.textDim }}>
-        Paste a <code>claude mcp add …</code> or <code>ggcoder mcp add …</code> line.
-        <br />
-        For local servers started with <code>--port</code> (e.g.&nbsp;Playwright MCP), use{" "}
-        <code>--transport sse</code>.
+        Add an MCP
       </div>
       <input
         className="modal-input"

@@ -6,6 +6,7 @@ import {
   listProjects,
   listSessions,
   selectProject,
+  importTranscript,
   getSettings,
   focusWindowByOffset,
   arrangeAllWindows,
@@ -13,11 +14,20 @@ import {
   type RecentSession,
 } from "./agent";
 import { Badge, sourceStyle } from "./Badge";
+import { PRODUCT_DISPLAY_NAME } from "./brand";
 import { ListSkeleton } from "./Skeleton";
 import { BackButton } from "./BackButton";
 import { WindowLayoutButton } from "./WindowLayoutButton";
 import { RadioButton } from "./RadioButton";
 import { NewProjectModal } from "./NewProjectModal";
+
+/**
+ * Does this row point at another tool's transcript rather than a GG Coder
+ * session? Those need an import before they can be opened.
+ */
+function isForeignSession(session: RecentSession): boolean {
+  return session.source === "claude-code" || session.source === "codex";
+}
 
 interface Props {
   /** Called after the agent has been re-pointed at `cwd` (+ optional session). */
@@ -30,6 +40,11 @@ interface Props {
   initialProjectPath?: string | null;
   /** Shown when the picker is reachable from an open project (enables "back"). */
   onClose?: () => void;
+  waitForCatalogReady?: () => Promise<unknown>;
+  discoverProjects?: () => Promise<DiscoveredProject[]>;
+  discoverSessions?: (cwd: string) => Promise<RecentSession[]>;
+  bindProject?: (cwd: string, sessionPath?: string) => Promise<unknown>;
+  showWindowControls?: boolean;
 }
 
 /**
@@ -42,6 +57,11 @@ export function ProjectPicker({
   onChosen,
   initialProjectPath,
   onClose,
+  waitForCatalogReady = waitForReady,
+  discoverProjects = listProjects,
+  discoverSessions = listSessions,
+  bindProject = selectProject,
+  showWindowControls = true,
 }: Props): React.ReactElement {
   const [projects, setProjects] = useState<DiscoveredProject[]>([]);
   const [loading, setLoading] = useState(true);
@@ -49,6 +69,7 @@ export function ProjectPicker({
   const [sessions, setSessions] = useState<RecentSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const [projectsRoot, setProjectsRoot] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [query, setQuery] = useState("");
@@ -92,8 +113,8 @@ export function ProjectPicker({
   useEffect(() => {
     let cancelled = false;
     // The window's sidecar serves project discovery; wait for it before asking.
-    void waitForReady()
-      .then(() => listProjects())
+    void waitForCatalogReady()
+      .then(() => discoverProjects())
       .then((p) => {
         if (cancelled) return;
         setProjects(p);
@@ -116,8 +137,9 @@ export function ProjectPicker({
   function openProject(project: DiscoveredProject): void {
     setSelected(project);
     setSessions([]);
+    setResumeError(null);
     setSessionsLoading(true);
-    void listSessions(project.path).then((s) => {
+    void discoverSessions(project.path).then((s) => {
       setSessions(s);
       setSessionsLoading(false);
     });
@@ -126,11 +148,55 @@ export function ProjectPicker({
   function choose(cwd: string, sessionPath?: string): void {
     if (busy) return;
     setBusy(true);
-    // Re-point this window's agent (respawns the sidecar), then let App re-run
-    // its ready flow against the new sidecar.
-    void selectProject(cwd, sessionPath)
+    setResumeError(null);
+    // Rust now resolves this command only after the daemon session is ready.
+    // A failed resume therefore stays in the picker and shows its real cause.
+    void bindProject(cwd, sessionPath)
       .then(() => onChosen(cwd))
-      .catch(() => setBusy(false));
+      .catch((reason: unknown) => {
+        const message = reason instanceof Error ? reason.message : String(reason);
+        setResumeError(
+          message
+            .replace(/Run ["'`]?ggcoder login["'`]?/gi, "Use AI Providers to sign in")
+            .replace(/ggcoder login/gi, "AI Providers"),
+        );
+        setBusy(false);
+      });
+  }
+
+  /**
+   * Open a session row. A native row resumes directly; a Claude Code / Codex row
+   * is imported into a real GG Coder session first, then opened by its new path.
+   * The import is silent — from the user's side this is just "open that
+   * conversation", which is why there is no separate import affordance.
+   */
+  function chooseSession(cwd: string, session: RecentSession): void {
+    if (busy) return;
+    if (!isForeignSession(session)) {
+      choose(cwd, session.path);
+      return;
+    }
+    setBusy(true);
+    setResumeError(null);
+    void importTranscript(session.path, cwd)
+      .then((result) => {
+        if (!result.ok) {
+          setResumeError(`Could not import that conversation: ${result.error}`);
+          setBusy(false);
+          return;
+        }
+        // Re-enter the normal resume path with the freshly written session.
+        setBusy(false);
+        choose(cwd, result.sessionPath);
+      })
+      .catch((reason: unknown) => {
+        setResumeError(
+          `Could not import that conversation: ${
+            reason instanceof Error ? reason.message : String(reason)
+          }`,
+        );
+        setBusy(false);
+      });
   }
 
   // Open an existing folder from disk as a project. The native folder picker is
@@ -193,8 +259,12 @@ export function ProjectPicker({
               </button>
             </>
           )}
-          <RadioButton />
-          <WindowLayoutButton />
+          {showWindowControls && (
+            <>
+              <RadioButton />
+              <WindowLayoutButton />
+            </>
+          )}
         </span>
       </div>
 
@@ -259,6 +329,11 @@ export function ProjectPicker({
         </div>
       ) : (
         <div className="picker-list">
+          {resumeError && (
+            <div className="picker-error" role="alert">
+              {resumeError}
+            </div>
+          )}
           {sessionsLoading && <ListSkeleton rows={4} />}
           {!sessionsLoading && sessions.length === 0 && (
             <div className="picker-empty">
@@ -279,7 +354,12 @@ export function ProjectPicker({
                   key={s.id}
                   className="picker-item"
                   disabled={busy}
-                  onClick={() => choose(selected.path, s.path)}
+                  onClick={() => chooseSession(selected.path, s)}
+                  title={
+                    isForeignSession(s)
+                      ? `From ${sourceStyle(s.source ?? "").label} — opens as a ${PRODUCT_DISPLAY_NAME} session`
+                      : undefined
+                  }
                 >
                   <span className="picker-row">
                     <span className="picker-name picker-preview" style={{ color: theme.text }}>
@@ -288,6 +368,14 @@ export function ProjectPicker({
                     <Badge>{s.lastActiveDisplay}</Badge>
                   </span>
                   <span className="picker-meta" style={{ color: theme.textMuted }}>
+                    {isForeignSession(s) && (
+                      <span
+                        className="picker-source-tag"
+                        style={{ color: sourceStyle(s.source ?? "").color }}
+                      >
+                        {sourceStyle(s.source ?? "").label}
+                      </span>
+                    )}
                     {`${s.messageCount} msgs`}
                   </span>
                 </button>

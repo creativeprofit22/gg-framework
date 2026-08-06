@@ -7,7 +7,7 @@ import { BINARY_EXTENSIONS } from "./read.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 
 const GrepParams = z.object({
-  pattern: z.string().describe("Search pattern (regex supported)"),
+  pattern: z.string().describe("Search pattern (JavaScript regex; leading (?i) is supported)"),
   path: z.string().optional().describe("File or directory to search (defaults to cwd)"),
   include: z.string().optional().describe("Glob pattern to filter files (e.g. '*.ts')"),
   max_results: z
@@ -24,10 +24,117 @@ const MAX_LINE_LENGTH = 500;
 /** Skip files larger than 10 MB — single-line files (minified JS, data blobs) can OOM readline */
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 const MAX_CANDIDATE_FILES = 10_000;
+/** Wall-clock budget for a single grep call — catastrophic backtracking is count-bounded but not time-bounded */
+const GREP_DEADLINE_MS = 5_000;
+/** Long patterns are almost always mistakes and raise the cost of every pathological shape */
+const MAX_PATTERN_LENGTH = 1_000;
+/** Check the clock every N lines inside a file scan — cheap enough to be free, dense enough to bound one bad line */
+const DEADLINE_CHECK_INTERVAL = 512;
+
+/** Shared wall-clock budget for one grep call. */
+interface Deadline {
+  readonly expiresAt: number;
+  hit: boolean;
+}
+
+function createDeadline(budgetMs = GREP_DEADLINE_MS): Deadline {
+  return { expiresAt: Date.now() + budgetMs, hit: false };
+}
+
+function isExpired(deadline: Deadline): boolean {
+  if (deadline.hit) return true;
+  if (Date.now() >= deadline.expiresAt) {
+    deadline.hit = true;
+    return true;
+  }
+  return false;
+}
+
+const QUANTIFIER_CHARS = new Set(["+", "*", "?"]);
+/** Quantifiers with no upper bound — only these make an outer group explode. */
+const UNBOUNDED_QUANTIFIER_CHARS = new Set(["+", "*"]);
+/** `(?:`, `(?=`, `(?!`, `(?<=`, `(?<!`, `(?<name>` — a group modifier, not a quantifier. */
+const GROUP_MODIFIER = /^\?(?::|=|!|<=|<!|<[^>]*>)/;
+
+/**
+ * Detect a quantified group whose body itself contains a quantifier — `(a+)+`,
+ * `(\w+\s?)*`, `(x*){2,}`. These are the classic catastrophic-backtracking shapes:
+ * a single long line can pin the event loop for minutes. Deliberately narrow —
+ * it rejects the shapes models actually emit by accident, not every slow regex.
+ */
+function findNestedQuantifier(pattern: string): string | undefined {
+  const groupStarts: number[] = [];
+  let inClass = false;
+
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    if (inClass) {
+      if (ch === "]") inClass = false;
+      continue;
+    }
+    if (ch === "[") {
+      inClass = true;
+      continue;
+    }
+    if (ch === "(") {
+      groupStarts.push(i);
+      continue;
+    }
+    if (ch !== ")") continue;
+
+    const start = groupStarts.pop();
+    if (start === undefined) continue;
+
+    const next = pattern[i + 1];
+    // `(...)?` can never backtrack catastrophically — only unbounded outer
+    // quantifiers (`+`, `*`, `{n,}`) can.
+    const quantified =
+      next !== undefined &&
+      (UNBOUNDED_QUANTIFIER_CHARS.has(next) ||
+        (next === "{" && /^\{\d*,\}/.test(pattern.slice(i + 1))));
+    if (!quantified) continue;
+
+    const body = pattern.slice(start + 1, i).replace(GROUP_MODIFIER, "");
+    if (containsQuantifier(body)) {
+      const end = next === "{" ? i + 1 + pattern.slice(i + 1).indexOf("}") + 1 : i + 2;
+      return pattern.slice(start, end);
+    }
+  }
+
+  return undefined;
+}
+
+function containsQuantifier(body: string): boolean {
+  let inClass = false;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    if (inClass) {
+      if (ch === "]") inClass = false;
+      continue;
+    }
+    if (ch === "[") {
+      inClass = true;
+      continue;
+    }
+    if (QUANTIFIER_CHARS.has(ch)) return true;
+    if (ch === "{" && /^\{\d*,\d*\}/.test(body.slice(i))) return true;
+  }
+  return false;
+}
 
 export function createGrepTool(
   cwd: string,
   ops: ToolOperations = localOperations,
+  /** Wall-clock budget for one call. Overridable so tests can trip it without a 5s wait. */
+  deadlineMs: number = GREP_DEADLINE_MS,
 ): AgentTool<typeof GrepParams> {
   return {
     name: "grep",
@@ -38,25 +145,49 @@ export function createGrepTool(
     async execute({ pattern, path: searchPath, include, max_results, case_insensitive }) {
       const dir = searchPath ? resolvePath(cwd, searchPath) : cwd;
       const maxResults = max_results ?? DEFAULT_MAX_RESULTS;
-      const flags = case_insensitive ? "gi" : "g";
+      // Models commonly emit the RE2/PCRE-style leading `(?i)` flag. JavaScript
+      // rejects it as an invalid group, so translate that safe, unambiguous form
+      // to the equivalent RegExp flag while preserving the explicit tool option.
+      const hasInlineCaseInsensitiveFlag = pattern.startsWith("(?i)");
+      const normalizedPattern = hasInlineCaseInsensitiveFlag ? pattern.slice(4) : pattern;
+      const flags = case_insensitive || hasInlineCaseInsensitiveFlag ? "gi" : "g";
+
+      if (pattern.length > MAX_PATTERN_LENGTH) {
+        throw new Error(
+          `Invalid regex pattern: ${pattern.length} characters exceeds the ${MAX_PATTERN_LENGTH}-character limit. ` +
+            `Search for a shorter literal substring and filter the results instead.`,
+        );
+      }
+
+      const nested = findNestedQuantifier(normalizedPattern);
+      if (nested) {
+        throw new Error(
+          `Invalid regex pattern: nested quantifier \`${nested}\` can backtrack catastrophically. ` +
+            `Rewrite it as a literal or an anchored pattern (e.g. \`^\\w+$\` instead of \`(\\w+)+$\`).`,
+        );
+      }
 
       let regex: RegExp;
       try {
-        regex = new RegExp(pattern, flags);
+        regex = new RegExp(normalizedPattern, flags);
       } catch (err) {
         throw new Error(`Invalid regex pattern: ${(err as Error).message}`, { cause: err });
       }
 
+      const deadline = createDeadline(deadlineMs);
+
       // Check if dir is a file
       const stat = await ops.stat(dir);
       if (stat.isFile()) {
-        const results = await searchFile(dir, regex, cwd, maxResults, ops);
-        return formatResults(results, maxResults);
+        const results = await searchFile(dir, regex, cwd, maxResults, ops, deadline);
+        return formatResults(results, maxResults, false, deadline.hit, deadlineMs);
       }
 
       // Enumerate files
       const fg = await import("fast-glob");
-      const globPattern = include ?? "**/*";
+      // Backslashes are picomatch ESCAPES, not separators: a Windows-shaped
+      // `include` (e.g. `src\**\*.ts`) would match nothing.
+      const globPattern = (include ?? "**/*").replace(/\\/g, "/");
       const entries = await fg.default(globPattern, {
         cwd: dir,
         dot: false,
@@ -73,6 +204,7 @@ export function createGrepTool(
       let candidateLimitHit = false;
       for (const item of entries) {
         if (results.length >= maxResults) break;
+        if (isExpired(deadline)) break;
         if (scannedCandidates >= MAX_CANDIDATE_FILES) {
           candidateLimitHit = true;
           break;
@@ -90,11 +222,12 @@ export function createGrepTool(
           cwd,
           maxResults - results.length,
           ops,
+          deadline,
         );
         results.push(...fileResults);
       }
 
-      return formatResults(results, maxResults, candidateLimitHit);
+      return formatResults(results, maxResults, candidateLimitHit, deadline.hit, deadlineMs);
     },
   };
 }
@@ -105,6 +238,7 @@ async function searchFile(
   cwd: string,
   maxResults: number,
   ops: ToolOperations,
+  deadline: Deadline,
 ): Promise<string[]> {
   const results: string[] = [];
   const relPath = path.relative(cwd, filePath);
@@ -129,6 +263,7 @@ async function searchFile(
     try {
       for await (const line of rl) {
         lineNum++;
+        if (lineNum % DEADLINE_CHECK_INTERVAL === 0 && isExpired(deadline)) break;
 
         // Bail out if line contains null bytes (binary file not caught by extension check)
         if (lineNum <= 5 && line.includes("\0")) {
@@ -159,11 +294,24 @@ async function searchFile(
   return results;
 }
 
-function formatResults(results: string[], maxResults: number, candidateLimitHit = false): string {
+function deadlineNotice(deadlineMs: number): string {
+  return `[Stopped after ${deadlineMs / 1000}s — narrow the pattern or pass a narrower path/include]`;
+}
+
+function formatResults(
+  results: string[],
+  maxResults: number,
+  candidateLimitHit = false,
+  deadlineHit = false,
+  deadlineMs = GREP_DEADLINE_MS,
+): string {
   if (results.length === 0) {
-    return candidateLimitHit
-      ? `No matches found. [Stopped after scanning ${MAX_CANDIDATE_FILES} candidate files]`
-      : "No matches found.";
+    let empty = "No matches found.";
+    if (candidateLimitHit) {
+      empty += ` [Stopped after scanning ${MAX_CANDIDATE_FILES} candidate files]`;
+    }
+    if (deadlineHit) empty += ` ${deadlineNotice(deadlineMs)}`;
+    return empty;
   }
 
   let output = results.join("\n");
@@ -174,6 +322,9 @@ function formatResults(results: string[], maxResults: number, candidateLimitHit 
   }
   if (candidateLimitHit) {
     output += `\n[Stopped after scanning ${MAX_CANDIDATE_FILES} candidate files]`;
+  }
+  if (deadlineHit) {
+    output += `\n${deadlineNotice(deadlineMs)}`;
   }
   return output;
 }

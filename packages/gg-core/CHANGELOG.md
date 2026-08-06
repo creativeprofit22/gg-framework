@@ -1,5 +1,391 @@
 # @kenkaiiii/gg-core
 
+## 5.31.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.31.0
+
+## 5.30.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.30.3
+
+## 5.30.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.30.2
+
+## 5.30.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.30.1
+
+## 5.30.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.30.0
+
+## 5.29.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.29.1
+
+## 5.29.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.29.0
+
+## 5.28.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.28.0
+
+## 5.27.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.27.0
+
+## 5.26.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.26.3
+
+## 5.26.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.26.2
+
+## 5.26.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.26.1
+
+## 5.26.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.26.0
+
+## 5.25.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.25.0
+
+## 5.24.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.24.0
+
+## 5.23.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.23.3
+
+## 5.23.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.23.2
+
+## 5.23.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.23.1
+
+## 5.23.0
+
+### Minor Changes
+
+- a6a78c2: Add Claude Opus 5 (`claude-opus-5`, released 2026-07-24) to the model registry — 1M context, 128k output, image input, adaptive thinking with the full effort ladder (low→max, xhigh included), $5/$25 MTok (same price as Opus 4.8). gg-ai treats it as an adaptive-thinking model (no interleaved-thinking beta, xhigh passes through), footers short-name it "Opus" (Opus 4.8 becomes "Opus 4.8"), login/provider descriptions mention it, and gg-boss's default boss model moves from `claude-opus-4-8` to `claude-opus-5`. Opus 4.8 stays registered as a legacy option.
+
+### Patch Changes
+
+- Updated dependencies [a6a78c2]
+  - @kenkaiiii/gg-ai@5.23.0
+
+## 5.22.6
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.6
+
+## 5.22.5
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.5
+
+## 5.22.4
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.4
+
+## 5.22.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.3
+
+## 5.22.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.2
+
+## 5.22.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.22.1
+
+## 5.22.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.0
+
+## 5.21.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.21.0
+
+## 5.20.5
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.5
+
+## 5.20.4
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.4
+
+## 5.20.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.3
+
+## 5.20.2
+
+### Patch Changes
+
+- f4b8ec7: Cap each long-lived process at 10 MB of debug-log writes so noisy production paths cannot grow the active log without bound.
+  - @kenkaiiii/gg-ai@5.20.2
+
+## 5.20.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.1
+
+## 5.20.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.0
+
+## 5.19.6
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.19.6
+
+## 5.19.5
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.19.5
+
+## 5.19.4
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.19.4
+
+## 5.19.3
+
+### Patch Changes
+
+- Updated dependencies [b6e7562]
+  - @kenkaiiii/gg-ai@5.19.3
+
+## 5.19.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.19.2
+
+## 5.19.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.19.1
+
+## 5.19.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.19.0
+
+## 5.18.0
+
+### Minor Changes
+
+- e00de5b: Add Kimi K3 as Moonshot's default model with its 1M-token multimodal registry metadata and endpoint-specific max-effort request handling for both the public API and Kimi Code OAuth. Keep Kimi K2.7 Code available as the dedicated coding alternative.
+
+### Patch Changes
+
+- Updated dependencies [e00de5b]
+  - @kenkaiiii/gg-ai@5.18.0
+
+## 5.17.0
+
+### Minor Changes
+
+- a3916ff: Harden provider error handling, cancellation settlement, review evidence, LSP confidence, route-aware context limits, turn metrics, and durable child-agent recovery.
+
+### Patch Changes
+
+- Updated dependencies [a3916ff]
+  - @kenkaiiii/gg-ai@5.17.0
+
+## 5.16.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.16.0
+
+## 5.15.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.15.1
+
+## 5.15.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.15.0
+
+## 5.14.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.14.0
+
+## 5.13.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.13.3
+
+## 5.13.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.13.2
+
+## 5.13.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.13.1
+
+## 5.13.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.13.0
+
+## 5.12.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.12.0
+
+## 5.11.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.11.0
+
+## 5.10.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.10.1
+
+## 5.10.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.10.0
+
+## 5.9.7
+
+### Patch Changes
+
+- Expose low, medium, high, xhigh, and max reasoning selections for every GPT-5.6 model.
+  - @kenkaiiii/gg-ai@5.9.7
+
+## 5.9.6
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.9.6
+
+## 5.9.5
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.9.5
+
+## 5.9.4
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.9.4
+
+## 5.9.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.9.3
+
+## 5.9.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.9.2
+
+## 5.9.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.9.1
+
 ## 5.9.0
 
 ### Patch Changes

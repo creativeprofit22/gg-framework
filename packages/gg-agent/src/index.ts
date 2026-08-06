@@ -9,6 +9,7 @@ export {
   setStreamDiagnostic,
 } from "./agent-loop.js";
 export type { StreamDiagnosticFn } from "./agent-loop.js";
+export { isLocalBackendUrl } from "./local-backend.js";
 
 // Types
 export type {
@@ -28,10 +29,12 @@ export type {
   AgentSteeringMessageEvent,
   AgentFollowUpMessageEvent,
   AgentRetryEvent,
+  AgentTurnTiming,
   AgentTurnEndEvent,
   AgentDoneEvent,
   AgentErrorEvent,
   AgentEvent,
+  TransformContextOptions,
   AgentOptions,
   AgentResult,
 } from "./types.js";

@@ -15,11 +15,17 @@ import { useEffect, useRef, useState } from "react";
 
 // Sequential lines, typed one at a time on the same row (each replaces the
 // prior). The last entry is the resting invitation and never gets cleared.
-const LINES = [
+const CODE_LINES = [
   "Wake up\u2026",
   "The codebase has you.",
   "Follow the commit history.",
   "Talk to me. Let\u2019s start coding.",
+] as const;
+
+const CHAT_LINES = [
+  "Take a breath\u2026",
+  "What\u2019s on your mind?",
+  "Talk to me. I\u2019m listening.",
 ] as const;
 
 const TYPE_MS = 55; // per-character type speed
@@ -115,9 +121,10 @@ function MatrixRain(): React.ReactElement {
   return <canvas ref={canvasRef} className="wake-rain" aria-hidden="true" />;
 }
 
-export function WakeScreen(): React.ReactElement {
+export function WakeScreen({ chat = false }: { chat?: boolean }): React.ReactElement {
   const reduced = prefersReducedMotion();
-  const [text, setText] = useState(reduced ? LINES[LINES.length - 1] : "");
+  const lines = chat ? CHAT_LINES : CODE_LINES;
+  const [text, setText] = useState(reduced ? lines[lines.length - 1] : "");
   const [done, setDone] = useState(reduced);
 
   useEffect(() => {
@@ -129,11 +136,11 @@ export function WakeScreen(): React.ReactElement {
     let pos = 0;
     let phase: Phase = "typing";
 
-    const isLast = () => line === LINES.length - 1;
+    const isLast = () => line === lines.length - 1;
 
     function tick() {
       if (cancelled) return;
-      const full = LINES[line];
+      const full = lines[line];
 
       if (phase === "typing") {
         pos++;
@@ -174,7 +181,7 @@ export function WakeScreen(): React.ReactElement {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [reduced]);
+  }, [lines, reduced]);
 
   return (
     <div className="wake-screen transcript-reveal" aria-label="Ready to start">

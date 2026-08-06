@@ -1,3 +1,4 @@
+import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
 
 /**
@@ -14,12 +15,13 @@ export function Badge({
   color?: string;
 }): React.ReactElement {
   const style = color
-    ? { color, backgroundColor: `${color}22`, borderColor: `${color}55` }
-    : {
-        color: theme.textSecondary,
-        backgroundColor: theme.surface1,
-        borderColor: theme.border,
-      };
+    ? {
+        color,
+        background: `linear-gradient(180deg, ${color}38 0%, ${color}18 100%)`,
+        borderColor: `${color}66`,
+        boxShadow: "0 1px 2px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2)",
+      }
+    : undefined;
   return (
     <span className="badge" style={style}>
       {children}
@@ -29,10 +31,10 @@ export function Badge({
 
 /** Project source → display label + accent color. One home so badges stay consistent. */
 const SOURCE_STYLES: Record<string, { label: string; color: string }> = {
-  ggcoder: { label: "gg-coder", color: theme.primary }, // blue
+  ggcoder: { label: PRODUCT_DISPLAY_NAME, color: theme.primary }, // blue
   "claude-code": { label: "Claude Code", color: "#d97757" }, // Anthropic clay
   codex: { label: "Codex", color: "#aeb6c2" }, // neutral silver
-  ken: { label: "Ken Kai", color: theme.ken }, // orchid/magenta mentor
+  ken: { label: MENTOR_DISPLAY_NAME, color: theme.ken }, // orchid/magenta mentor
 };
 
 export function sourceStyle(source: string): { label: string; color: string } {

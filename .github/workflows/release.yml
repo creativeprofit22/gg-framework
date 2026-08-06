@@ -57,13 +57,13 @@ jobs:
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22.x
           cache: pnpm
@@ -82,10 +82,25 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
+      - name: Generated-output audit
+        shell: bash
+        run: |
+          node --test scripts/audit-generated.test.mjs
+          node scripts/audit-generated.mjs --inspect
+
+      # shell: bash is load-bearing on the windows-latest leg. The default shell
+      # there is PowerShell, which does NOT abort a multi-line script when an
+      # intermediate command exits non-zero — only the LAST line decides the
+      # step's outcome. Without this a failing gg-ai, gg-agent, or gg-core build
+      # is silently swallowed by ggcoder's build succeeding after it, and we SHIP
+      # an installer built from stale or missing artifacts. The same bug hid 72
+      # failing tests in ci.yml.
       - name: Build framework packages
+        shell: bash
         run: |
           pnpm --filter @kenkaiiii/gg-ai build
           pnpm --filter @kenkaiiii/gg-agent build
+          pnpm --filter @kenkaiiii/gg-core build
           pnpm --filter @kenkaiiii/ggcoder build
 
       - name: Stage node runtime + bundle sidecar

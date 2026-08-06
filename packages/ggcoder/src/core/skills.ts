@@ -1,11 +1,23 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { stripBom } from "../utils/text.js";
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const BUNDLED_SKILLS_DIRS = [
+  // Single-file desktop sidecar: resources live beside app-sidecar.mjs.
+  path.resolve(MODULE_DIR, "skills"),
+  // Source and npm CLI: assets live beside src/ and dist/.
+  path.resolve(MODULE_DIR, "../../assets/skills"),
+];
 
 export interface Skill {
   name: string;
   description: string;
   content: string;
   source: string;
+  /** Directory used to resolve references linked from the skill content. */
+  root?: string;
 }
 
 /**
@@ -15,20 +27,30 @@ export async function discoverSkills(options: {
   globalSkillsDir: string;
   projectDir?: string;
 }): Promise<Skill[]> {
-  const skills: Skill[] = [];
+  const skillsByName = new Map<string, Skill>();
+  const addSkills = (skills: Skill[]): void => {
+    for (const skill of skills) skillsByName.set(skill.name.toLowerCase(), skill);
+  };
 
-  // Global skills: ~/.gg/skills/*.md
-  const globalSkills = await loadSkillsFromDir(options.globalSkillsDir, "global");
-  skills.push(...globalSkills);
+  // Bundled defaults ship with GG Coder. Global and project definitions with
+  // the same name override them, preserving user control.
+  addSkills(await loadBundledSkills());
+  addSkills(await loadSkillsFromDir(options.globalSkillsDir, "global"));
 
-  // Project skills: {cwd}/.gg/skills/*.md
   if (options.projectDir) {
     const projectSkillsDir = path.join(options.projectDir, ".gg", "skills");
-    const projectSkills = await loadSkillsFromDir(projectSkillsDir, "project");
-    skills.push(...projectSkills);
+    addSkills(await loadSkillsFromDir(projectSkillsDir, "project"));
   }
 
-  return skills;
+  return [...skillsByName.values()];
+}
+
+async function loadBundledSkills(): Promise<Skill[]> {
+  for (const dir of BUNDLED_SKILLS_DIRS) {
+    const skills = await loadSkillsFromDir(dir, "bundled");
+    if (skills.length > 0) return skills;
+  }
+  return [];
 }
 
 async function loadSkillsFromDir(dir: string, source: string): Promise<Skill[]> {
@@ -50,6 +72,7 @@ async function loadSkillsFromDir(dir: string, source: string): Promise<Skill[]> 
         const content = await fs.readFile(entryPath, "utf-8");
         const skill = parseSkillFile(content, source);
         if (!skill.name) skill.name = path.basename(entry.name, ".md");
+        skill.root = dir;
         skills.push(skill);
       } catch {
         // Skip unreadable files
@@ -64,6 +87,7 @@ async function loadSkillsFromDir(dir: string, source: string): Promise<Skill[]> 
         const content = await fs.readFile(skillFile, "utf-8");
         const skill = parseSkillFile(content, source);
         if (!skill.name) skill.name = entry.name;
+        skill.root = entryPath;
         skills.push(skill);
       } catch {
         // No SKILL.md — skip
@@ -78,7 +102,9 @@ async function loadSkillsFromDir(dir: string, source: string): Promise<Skill[]> 
  * Parse a skill file with optional frontmatter.
  * Supports simple key: value frontmatter between --- delimiters.
  */
-export function parseSkillFile(raw: string, source: string): Skill {
+export function parseSkillFile(rawInput: string, source: string): Skill {
+  // A BOM before `---` would otherwise silently kill frontmatter parsing.
+  const raw = stripBom(rawInput);
   let name = "";
   let description = "";
   let content = raw;
@@ -117,7 +143,9 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 
   return (
     `## Skills\n\n` +
-    `The following skills are available. Use the **skill** tool to invoke a skill when needed:\n\n` +
+    `Before acting, compare the user's request with every skill description below. ` +
+    `When the request matches a skill's stated scope, invoke that skill with the **skill** tool before making decisions or edits. ` +
+    `Respect explicit exclusions in the description. Matching skill instructions specialize this prompt but do not override project or file/module rules.\n\n` +
     list
   );
 }

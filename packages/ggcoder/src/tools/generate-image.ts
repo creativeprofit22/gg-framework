@@ -140,7 +140,6 @@ export function createGenerateImageTool(
         };
         if (args.size) imageTool.size = args.size;
         if (args.quality) imageTool.quality = args.quality;
-        if (args.n) imageTool.n = args.n;
         if (args.background) imageTool.background = args.background;
 
         // Build the input content — prompt text, optionally with a reference image.
@@ -176,13 +175,25 @@ export function createGenerateImageTool(
         // Call the Codex responses endpoint (same one our Codex streaming
         // provider uses) with the image_generation built-in tool. ChatGPT OAuth
         // tokens work here, unlike api.openai.com/v1/images/*.
-        const imageBuffers = await callImageGeneration(
-          inputContent,
-          imageTool,
-          token,
-          accountId,
-          context.signal,
-        );
+        // The Responses image tool does not accept an `n` property. Generate
+        // multiple images with separate requests and merge the results instead.
+        const requestedCount = args.n ?? 1;
+        const imageBuffers: Buffer[] = [];
+        for (
+          let index = 0;
+          index < requestedCount && imageBuffers.length < requestedCount;
+          index++
+        ) {
+          const generated = await callImageGeneration(
+            inputContent,
+            imageTool,
+            token,
+            accountId,
+            context.signal,
+          );
+          imageBuffers.push(...generated.slice(0, requestedCount - imageBuffers.length));
+          if (generated.length === 0) break;
+        }
 
         if (imageBuffers.length === 0) {
           return "Image generation returned no results. The prompt may have been blocked by content moderation.";

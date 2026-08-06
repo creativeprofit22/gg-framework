@@ -313,6 +313,31 @@ describe("createWebFetchTool", () => {
     expect(result).toContain("Hello PDF World");
   });
 
+  it("keeps the existing 25 MB allowance for PDF responses", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const fixturePath = fileURLToPath(new URL("./__fixtures__/sample.pdf", import.meta.url));
+    const bytes = await readFile(fixturePath);
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(bytes, {
+          status: 200,
+          headers: {
+            "content-type": "application/pdf",
+            "content-length": String(6 * 1024 * 1024),
+          },
+        }),
+    ) as typeof fetch;
+
+    const result = await createWebFetchTool().execute(
+      { url: "https://example.com/file.pdf" },
+      context(),
+    );
+
+    expect(result).toContain("Hello PDF World");
+    expect(result).not.toContain("response too large");
+  });
+
   it("prefers a site's llms.txt for doc-ish pages and skips scraping the page", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -336,7 +361,9 @@ describe("createWebFetchTool", () => {
 
     expect(result).toContain("[llms.txt for docs.example.com]");
     expect(result).toContain("curated llms.txt content");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).not.toContain(
+      "https://docs.example.com/reference/api",
+    );
   });
 
   it("follows safe redirects while probing llms resources", async () => {
@@ -535,6 +562,243 @@ describe("createWebFetchTool", () => {
     );
 
     expect(result).toContain("Direct");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns bounded raw HTML for an explicit html format and sends format headers", async () => {
+    const html = `<html><body><nav>Keep raw nav</nav><main><h1>Raw page</h1></main></body></html>`;
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(html, { status: 200, headers: { "content-type": "text/html" } }),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const result = await createWebFetchTool().execute(
+      { url: "https://example.com/docs", format: "html", max_length: 60 },
+      context(),
+    );
+
+    expect(result).toContain("<html>");
+    expect(result).toContain("Keep raw nav");
+    expect(result).toContain("[Content truncated]");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const headers = fetchMock.mock.calls[0][1]?.headers as Record<string, string>;
+    expect(headers.Accept).toContain("text/html");
+    expect(headers["Accept-Language"]).toBe("en-US,en;q=0.9");
+  });
+
+  it("rejects an oversized declared content length before collecting the body", async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++;
+        controller.enqueue(new TextEncoder().encode("body"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(stream, {
+          status: 200,
+          headers: { "content-length": String(5 * 1024 * 1024 + 1) },
+        }),
+    ) as typeof fetch;
+
+    const result = await createWebFetchTool().execute(
+      { url: "https://example.com/large", prefer_llms_txt: false },
+      context(),
+    );
+
+    expect(result).toContain("response too large");
+    expect(cancelled).toBe(true);
+    expect(pulls).toBeLessThanOrEqual(1);
+  });
+
+  it("cancels a streamed response as soon as it crosses 5 MB", async () => {
+    let cancelled = false;
+    let emitted = 0;
+    const chunk = new Uint8Array(1024 * 1024);
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        emitted++;
+        controller.enqueue(chunk);
+        if (emitted > 8) controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    globalThis.fetch = vi.fn(async () => new Response(stream, { status: 200 })) as typeof fetch;
+
+    const result = await createWebFetchTool().execute(
+      { url: "https://example.com/stream", prefer_llms_txt: false },
+      context(),
+    );
+
+    expect(result).toContain("response too large");
+    expect(cancelled).toBe(true);
+    expect(emitted).toBeLessThanOrEqual(7);
+  });
+
+  it("sniffs HTML without a useful content type for text and markdown formats", async () => {
+    const html = `<html><head><title>Sniffed</title></head><body><article><h1>Sniffed page</h1><p>Useful body.</p></article></body></html>`;
+    globalThis.fetch = vi.fn(async () => new Response(html, { status: 200 })) as typeof fetch;
+    const tool = createWebFetchTool();
+
+    const text = await tool.execute(
+      { url: "https://example.com/sniff-text", format: "text", prefer_llms_txt: false },
+      context(),
+    );
+    const markdown = await tool.execute(
+      { url: "https://example.com/sniff-markdown", format: "markdown", prefer_llms_txt: false },
+      context(),
+    );
+
+    expect(text).toContain("Sniffed page");
+    expect(text).not.toContain("<html>");
+    expect(markdown).toContain("Sniffed");
+    expect(markdown).not.toContain("<html>");
+  });
+
+  it("retries a Cloudflare challenge once with the honest user-agent", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("challenge", {
+          status: 403,
+          headers: { "cf-mitigated": "challenge" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const result = await createWebFetchTool().execute(
+      { url: "https://example.com/challenge", format: "text", prefer_llms_txt: false },
+      context(),
+    );
+
+    expect(result).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstHeaders = fetchMock.mock.calls[0][1]?.headers as Record<string, string>;
+    const retryHeaders = fetchMock.mock.calls[1][1]?.headers as Record<string, string>;
+    expect(firstHeaders["User-Agent"]).toContain("Mozilla");
+    expect(retryHeaders["User-Agent"]).toContain("ggcoder/1.0");
+  });
+
+  it("probes curated documents concurrently but preserves candidate priority", async () => {
+    let resolveHighest!: (response: Response) => void;
+    const highest = new Promise<Response>((resolve) => {
+      resolveHighest = resolve;
+    });
+    const started: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      started.push(url);
+      if (url === "https://docs.example.com/llms.txt") return await highest;
+      return new Response("# Lower Priority\n\n" + "Lower priority docs. ".repeat(10), {
+        status: 200,
+        headers: { "content-type": "text/markdown" },
+      });
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const pending = createWebFetchTool().execute(
+      { url: "https://docs.example.com/api", format: "markdown" },
+      context(),
+    );
+    await vi.waitFor(() => expect(started.length).toBeGreaterThanOrEqual(3));
+    resolveHighest(
+      new Response("# Highest Priority\n\n" + "Highest priority docs. ".repeat(10), {
+        status: 200,
+        headers: { "content-type": "text/markdown" },
+      }),
+    );
+
+    const result = await pending;
+    expect(result).toContain("Highest Priority");
+    expect(result).not.toContain("Lower Priority");
+  });
+
+  it("bounds curated probes with a per-probe timeout signal", async () => {
+    const originalTimeout = AbortSignal.timeout;
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((milliseconds: number) =>
+      milliseconds === 3_000
+        ? AbortSignal.abort(new Error("probe timeout"))
+        : originalTimeout(milliseconds),
+    );
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("llms") || String(input).endsWith(".md")) {
+        if (init?.signal?.aborted) throw init.signal.reason;
+        return new Response("unexpected", { status: 200 });
+      }
+      return new Response("<html><body><main>Fallback page</main></body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+    }) as typeof fetch;
+
+    const result = await createWebFetchTool().execute(
+      { url: "https://docs.example.com/api", format: "text" },
+      context(),
+    );
+
+    expect(result).toContain("Fallback page");
+  });
+});
+
+describe("web_fetch network allowlist", () => {
+  const allowlist = () => ({ mode: "allowlist" as const, allow: ["docs.example.com"] });
+
+  it("is a no-op when the policy is off", async () => {
+    globalThis.fetch = vi.fn(
+      async () => new Response("<html><body><p>ok</p></body></html>", { status: 200 }),
+    ) as typeof fetch;
+
+    const result = await createWebFetchTool(() => ({ mode: "off", allow: [] })).execute(
+      { url: "https://anything.example/page" },
+      context(),
+    );
+    expect(result).not.toContain("network allowlist");
+  });
+
+  it("blocks a disallowed initial URL before any request", async () => {
+    const fetchMock = vi.fn(async () => new Response("nope", { status: 200 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await createWebFetchTool(allowlist).execute(
+      { url: "https://evil.example/page" },
+      context(),
+    );
+
+    expect(result).toContain("network allowlist");
+    expect(result).toContain("evil.example");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("blocks a disallowed redirect target", async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("https://docs.example.com")) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://evil.example/payload" },
+        });
+      }
+      return new Response("<html><body><p>secret</p></body></html>", { status: 200 });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await createWebFetchTool(allowlist).execute(
+      { url: "https://docs.example.com/start", prefer_llms_txt: false },
+      context(),
+    );
+
+    expect(result).toContain("network allowlist");
+    expect(result).toContain("evil.example");
+    // The first hop happened; the redirect target was never requested.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

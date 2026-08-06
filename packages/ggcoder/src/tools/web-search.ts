@@ -1,5 +1,8 @@
+import { parseHTML } from "linkedom";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { log } from "../core/logger.js";
+import { checkUrlPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 
 const USER_AGENTS = [
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -23,10 +26,13 @@ const RATE_LIMIT_PATTERNS = [
   "challenge-form",
 ];
 
-type SearchEngine = "DuckDuckGo" | "DuckDuckGoLite" | "Brave" | "Bing" | "Google";
+export type SearchEngine = "DuckDuckGo" | "DuckDuckGoLite" | "Brave" | "Bing" | "Google";
 const ENGINES: SearchEngine[] = ["DuckDuckGo", "DuckDuckGoLite", "Brave", "Bing", "Google"];
 
 type TimeRange = "day" | "week" | "month" | "year";
+const ENGINE_ATTEMPT_TIMEOUT_MS = 8_000;
+const SEARCH_CACHE_TTL_MS = 60_000;
+const SEARCH_CACHE_MAX_ENTRIES = 100;
 
 interface SearchFilters {
   includeDomains: string[];
@@ -294,6 +300,38 @@ function resultHost(rawURL: string): string | null {
   }
 }
 
+const RELEVANCE_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "current",
+  "for",
+  "latest",
+  "of",
+  "official",
+  "the",
+  "to",
+]);
+
+function relevanceTokens(text: string): Set<string> {
+  return new Set(
+    (text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter(
+      (token) => token.length > 1 && !RELEVANCE_STOP_WORDS.has(token),
+    ),
+  );
+}
+
+/** Reject localized/bot-fallback pages that match only a generic query word. */
+export function isSearchResultRelevant(result: SearchResult, query: string): boolean {
+  const queryTokens = relevanceTokens(query);
+  if (queryTokens.size === 0) return true;
+  const resultTokens = relevanceTokens(`${result.title} ${result.snippet} ${result.url}`);
+  let matches = 0;
+  for (const token of queryTokens) if (resultTokens.has(token)) matches += 1;
+  const requiredMatches = queryTokens.size >= 3 ? 2 : 1;
+  return matches >= requiredMatches;
+}
+
 function passesDomainFilters(result: SearchResult, filters: SearchFilters): boolean {
   const host = resultHost(result.url);
   if (filters.includeDomains.length > 0) {
@@ -328,6 +366,7 @@ function filterSearchResults(
     }
 
     const normalizedResult = { ...result, url: canonicalUrl };
+    if (!isSearchResultRelevant(normalizedResult, query)) continue;
     if (isSpammySearchResult(normalizedResult, query)) {
       stats.spam++;
       continue;
@@ -408,14 +447,16 @@ function buildRequest(engine: SearchEngine, query: string, filters: SearchFilter
       headers.Accept = "text/html";
       break;
     case "Bing":
-      url = `https://www.bing.com/search?q=${encoded}`;
+      // Pin language/market so an IP-localized fallback cannot silently replace
+      // the query with generic regional results.
+      url = `https://www.bing.com/search?q=${encoded}&setlang=en-US&cc=US`;
       if (time && BING_FILTER[time]) {
         url += `&filters=${encodeURIComponent(BING_FILTER[time] as string)}`;
       }
       headers.Accept = "text/html";
       break;
     case "Google":
-      url = `https://www.google.com/search?q=${encoded}&hl=en`;
+      url = `https://www.google.com/search?q=${encoded}&hl=en&gl=us`;
       if (time) url += `&tbs=qdr:${GOOGLE_QDR[time]}`;
       break;
   }
@@ -431,15 +472,13 @@ async function fetchWithRetry(
   signal: AbortSignal,
   method = "GET",
   body?: string,
-  maxRetries = 3,
+  maxAttempts = 2,
 ): Promise<{ data: string; statusCode: number }> {
   let lastError: Error = new Error("No attempts made");
 
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) {
-      const baseDelay = Math.pow(2, attempt - 1) * 1000;
-      const jitter = 1 + Math.random() * 0.5;
-      await new Promise((r) => setTimeout(r, baseDelay * jitter));
+      await abortableDelay(250 * 2 ** (attempt - 1), signal);
     }
 
     try {
@@ -447,16 +486,52 @@ async function fetchWithRetry(
         method,
         headers,
         ...(body ? { body } : {}),
-        signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
+        signal,
       });
       const text = await response.text();
       return { data: text, statusCode: response.status };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+      if (signal.aborted) throw lastError;
     }
   }
 
   throw lastError;
+}
+
+function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timeout);
+      reject(signal.reason);
+    };
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function awaitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 // ── Rate limit detection ─────────────────────────────────
@@ -667,46 +742,235 @@ function parseGoogleResults(html: string): SearchResult[] {
 
 // ── Search cascade ───────────────────────────────────────
 
+function domText(element: Element | null): string {
+  return element?.textContent?.replace(/\s+/g, " ").trim() ?? "";
+}
+
+function parseDOMResults(engine: SearchEngine, html: string): SearchResult[] {
+  const { document } = parseHTML(html);
+  const selectors: Record<SearchEngine, { links: string; block: string; snippet: string }> = {
+    DuckDuckGo: { links: "a.result__a", block: ".result", snippet: ".result__snippet" },
+    DuckDuckGoLite: {
+      links: "a.result-link, a.result__a",
+      block: "tr, .result",
+      snippet: ".result-snippet, .result__snippet",
+    },
+    Brave: { links: "a.result-header", block: ".snippet", snippet: ".snippet-description" },
+    Bing: { links: "li.b_algo h2 a", block: "li.b_algo", snippet: ".b_caption p, p" },
+    Google: {
+      links: "a:has(h3)",
+      block: ".g, [data-hveid]",
+      snippet: ".VwiC3b, .yDYNvb, [data-sncf]",
+    },
+  };
+  const config = selectors[engine];
+  const results: SearchResult[] = [];
+
+  for (const link of document.querySelectorAll(config.links)) {
+    const block = link.closest(config.block);
+    if (block && isSponsoredBlock(block.outerHTML)) continue;
+    const rawURL = link.getAttribute("href") ?? "";
+    const transformedURL =
+      engine === "DuckDuckGo" || engine === "DuckDuckGoLite"
+        ? unwrapDDGRedirect(rawURL)
+        : engine === "Bing"
+          ? unwrapBingRedirect(rawURL)
+          : engine === "Google"
+            ? unwrapGoogleRedirect(rawURL)
+            : rawURL;
+    const url = canonicalSearchResultUrl(transformedURL) ?? transformedURL;
+    const title = domText(link.querySelector("h3")) || domText(link);
+    const siblingSnippet = link.nextElementSibling?.matches(config.snippet)
+      ? link.nextElementSibling
+      : null;
+    const snippet = domText(block?.querySelector(config.snippet) ?? siblingSnippet);
+    if (url && title) results.push({ title, url, snippet });
+  }
+
+  return results;
+}
+
+function parseRegexResults(engine: SearchEngine, html: string): SearchResult[] {
+  switch (engine) {
+    case "DuckDuckGo":
+    case "DuckDuckGoLite":
+      return parseDDGResults(html);
+    case "Brave":
+      return parseBraveResults(html);
+    case "Bing":
+      return parseBingResults(html);
+    case "Google":
+      return parseGoogleResults(html);
+  }
+}
+
+export function parseSearchResults(engine: SearchEngine, html: string): SearchResult[] {
+  try {
+    const domResults = parseDOMResults(engine, html);
+    if (domResults.length > 0) return domResults;
+  } catch (error) {
+    log("WARN", "web-search", "DOM parser failed; using regex fallback", {
+      engine,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return parseRegexResults(engine, html);
+}
+
+interface SearchResponse {
+  results: SearchResult[];
+  engine: SearchEngine;
+  stats: FilterStats;
+}
+
+interface CachedSearch {
+  expiresAt: number;
+  value: SearchResponse;
+}
+
+const searchCache = new Map<string, CachedSearch>();
+const searchesInFlight = new Map<string, Promise<SearchResponse>>();
+
+function searchCacheKey(query: string, maxResults: number, filters: SearchFilters): string {
+  return JSON.stringify({
+    query: query.trim().replace(/\s+/g, " ").toLowerCase(),
+    maxResults,
+    includeDomains: [...filters.includeDomains].sort(),
+    excludeDomains: [...filters.excludeDomains].sort(),
+    timeRange: filters.timeRange ?? null,
+  });
+}
+
+function pruneSearchCache(now: number): void {
+  for (const [key, entry] of searchCache) {
+    if (entry.expiresAt <= now) searchCache.delete(key);
+  }
+  while (searchCache.size >= SEARCH_CACHE_MAX_ENTRIES) {
+    const oldestKey = searchCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    searchCache.delete(oldestKey);
+  }
+}
+
+export function resetWebSearchCache(): void {
+  searchCache.clear();
+  searchesInFlight.clear();
+}
+
 async function performSearch(
   query: string,
   maxResults: number,
   filters: SearchFilters,
   signal: AbortSignal,
-): Promise<{ results: SearchResult[]; engine: SearchEngine; stats: FilterStats }> {
+  getNetworkPolicy?: GetNetworkPolicy,
+): Promise<SearchResponse> {
+  const unavailableEngines: SearchEngine[] = [];
+
   for (const engine of ENGINES) {
+    const startedAt = Date.now();
     try {
       const { url, headers, method, body } = buildRequest(engine, query, filters);
-      const { data: html, statusCode } = await fetchWithRetry(url, headers, signal, method, body);
+      // Enforce the egress allowlist per engine — a blocked engine is simply
+      // skipped, exactly like an unavailable one.
+      const blocked = checkUrlPolicy(url, getNetworkPolicy);
+      if (blocked) {
+        unavailableEngines.push(engine);
+        log("DEBUG", "web-search", "Search engine blocked by network allowlist", { engine });
+        continue;
+      }
+      const attemptSignal = AbortSignal.any([
+        signal,
+        AbortSignal.timeout(ENGINE_ATTEMPT_TIMEOUT_MS),
+      ]);
+      const { data: html, statusCode } = await fetchWithRetry(
+        url,
+        headers,
+        attemptSignal,
+        method,
+        body,
+      );
 
-      if (isRateLimited(statusCode, html)) continue;
-
-      let results: SearchResult[];
-      switch (engine) {
-        case "DuckDuckGo":
-        case "DuckDuckGoLite":
-          results = parseDDGResults(html);
-          break;
-        case "Brave":
-          results = parseBraveResults(html);
-          break;
-        case "Bing":
-          results = parseBingResults(html);
-          break;
-        case "Google":
-          results = parseGoogleResults(html);
-          break;
+      if (isRateLimited(statusCode, html)) {
+        unavailableEngines.push(engine);
+        // A blocked fallback is expected on public search pages. Keep each
+        // attempt in DEBUG and emit one actionable WARN only when every engine
+        // is unavailable; otherwise successful searches flood the app log.
+        log("DEBUG", "web-search", "Search engine unavailable", {
+          engine,
+          status: String(statusCode),
+          reason: "rate-limited",
+          duration: `${Date.now() - startedAt}ms`,
+        });
+        continue;
       }
 
+      const results = parseSearchResults(engine, html);
       const filteredResults = filterSearchResults(results, maxResults, filters, query);
+      log("INFO", "web-search", "Search engine attempt completed", {
+        engine,
+        status: String(statusCode),
+        parser: results.length > 0 ? "dom-or-regex" : "none",
+        results: String(filteredResults.results.length),
+        duration: `${Date.now() - startedAt}ms`,
+      });
       if (filteredResults.results.length > 0) {
         return { results: filteredResults.results, engine, stats: filteredResults.stats };
       }
-    } catch {
-      // try next engine
+    } catch (error) {
+      unavailableEngines.push(engine);
+      log("DEBUG", "web-search", "Search engine attempt failed", {
+        engine,
+        error: error instanceof Error ? error.message : String(error),
+        duration: `${Date.now() - startedAt}ms`,
+      });
+      if (signal.aborted) throw error;
     }
   }
 
+  if (unavailableEngines.length === ENGINES.length) {
+    log("WARN", "web-search", "All search engines unavailable", {
+      engines: unavailableEngines.join(","),
+    });
+  }
   return { results: [], engine: "DuckDuckGo", stats: emptyFilterStats() };
+}
+
+async function cachedSearch(
+  query: string,
+  maxResults: number,
+  filters: SearchFilters,
+  callerSignal: AbortSignal,
+  getNetworkPolicy?: GetNetworkPolicy,
+): Promise<SearchResponse> {
+  const key = searchCacheKey(query, maxResults, filters);
+  const now = Date.now();
+  pruneSearchCache(now);
+  const cached = searchCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    searchCache.delete(key);
+    searchCache.set(key, cached);
+    log("INFO", "web-search", "Search cache hit");
+    return cached.value;
+  }
+
+  let pending = searchesInFlight.get(key);
+  if (!pending) {
+    const sharedSignal = AbortSignal.timeout(ENGINES.length * ENGINE_ATTEMPT_TIMEOUT_MS);
+    pending = performSearch(query, maxResults, filters, sharedSignal, getNetworkPolicy)
+      .then((value) => {
+        if (value.results.length > 0) {
+          pruneSearchCache(Date.now());
+          searchCache.set(key, { expiresAt: Date.now() + SEARCH_CACHE_TTL_MS, value });
+        }
+        return value;
+      })
+      .finally(() => searchesInFlight.delete(key));
+    searchesInFlight.set(key, pending);
+  } else {
+    log("INFO", "web-search", "Coalesced in-flight search");
+  }
+
+  return await awaitWithSignal(pending, callerSignal);
 }
 
 // ── Tool definition ──────────────────────────────────────
@@ -753,7 +1017,9 @@ function statsFooter(stats: FilterStats): string {
   return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
 }
 
-export function createWebSearchTool(): AgentTool<typeof parameters> {
+export function createWebSearchTool(
+  getNetworkPolicy?: GetNetworkPolicy,
+): AgentTool<typeof parameters> {
   return {
     name: "web_search",
     description:
@@ -770,14 +1036,24 @@ export function createWebSearchTool(): AgentTool<typeof parameters> {
         ...(args.time_range ? { timeRange: args.time_range } : {}),
       };
 
-      const { results, engine, stats } = await performSearch(
+      const { results, engine, stats } = await cachedSearch(
         args.query,
         maxResults,
         filters,
         context.signal,
+        getNetworkPolicy,
       );
 
       if (results.length === 0) {
+        const policy = getNetworkPolicy?.();
+        if (policy?.mode === "allowlist") {
+          const allowed = policy.allow.length > 0 ? policy.allow.join(", ") : "(none)";
+          return (
+            `No search results: every search engine host is blocked by the network allowlist ` +
+            `(allowed: ${allowed}), or the engines returned nothing. Ask the user to add a ` +
+            `search engine host to the networkAllow setting.`
+          );
+        }
         return `No search results found for: "${args.query}". All search engines were unavailable or returned no results.`;
       }
 

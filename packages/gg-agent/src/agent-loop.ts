@@ -11,6 +11,7 @@ import {
   type ContentPart,
   type AssistantMessage,
   isHardBillingMessage,
+  redactValue,
 } from "@kenkaiiii/gg-ai";
 import type {
   AgentEvent,
@@ -21,8 +22,11 @@ import type {
   ToolExecuteResult,
   StructuredToolResult,
 } from "./types.js";
+import { isLocalBackendUrl } from "./local-backend.js";
 
 const DEFAULT_MAX_TURNS = 300;
+/** Per-tool cancellation ceiling; a tool may raise it via `timeoutMs`. */
+const DEFAULT_TOOL_TIMEOUT_MS = 300_000;
 
 /**
  * Lightweight stream diagnostic callback. When set, the agent loop calls this
@@ -256,12 +260,14 @@ export function classifyOverload(
     statusCode === 502 ||
     statusCode === 503 ||
     statusCode === 504 ||
+    statusCode === 507 ||
     msg.includes("api_error") ||
     msg.includes("server_error") ||
     msg.includes("internal server error") ||
     msg.includes("bad gateway") ||
     msg.includes("service unavailable") ||
-    msg.includes("gateway timeout")
+    msg.includes("gateway timeout") ||
+    msg.includes("exceeded request buffer limit while retrying upstream")
   ) {
     return "provider_error";
   }
@@ -340,6 +346,26 @@ export function isTransportFailure(err: unknown): boolean {
 }
 
 /**
+ * Continuation injected when the host grants extra turns instead of letting the
+ * run stop mid-task.
+ *
+ * Deliberately carries NO copy of the original request. An earlier version
+ * echoed up to 600 chars of it, which was pure waste: the text was read out of
+ * the very `messages` array being sent, so the model already had it verbatim.
+ * Worse, after a compaction the first user message is the compaction summary,
+ * so the "original request" echo would have quoted the summary back instead.
+ * The instruction below is the only part that is not already in context.
+ */
+function turnBudgetContinuationPrompt(): string {
+  return (
+    "[You reached the turn limit for this segment but the work is not finished, " +
+    "so you have been granted more turns. Before continuing, state in one or two " +
+    "sentences what is already done and what remains, then keep going from there " +
+    "\u2014 do not restart work that is already complete.]"
+  );
+}
+
+/**
  * Promise-returning sleep that rejects with AbortError if `signal` fires.
  * Used by retry backoffs so ESC/Ctrl+C cancel immediately instead of having
  * to wait out the full delay (up to 30s per overload retry × 10 retries).
@@ -367,6 +393,11 @@ export async function* agentLoop(
   options: AgentOptions,
 ): AsyncGenerator<AgentEvent, AgentResult> {
   const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
+  // Raised in place by a granted turn-budget extension. The while-condition and
+  // the mid-task cut-off check both read this, never the base `maxTurns`.
+  let effectiveMaxTurns = maxTurns;
+  const maxTurnExtensions = Math.max(0, options.maxTurnExtensions ?? 2);
+  let turnExtensions = 0;
   const maxContinuations = options.maxContinuations ?? 5;
   // Rebuilt each turn: hosts may push tools onto the live `options.tools`
   // array mid-run (background MCP connect, tool_search promotion) — the
@@ -375,6 +406,8 @@ export async function* agentLoop(
   let toolMap = new Map<string, AgentTool>((options.tools ?? []).map((t) => [t.name, t]));
 
   const totalUsage: Usage = { inputTokens: 0, outputTokens: 0 };
+  let latestProviderUsage: Usage | undefined;
+  let usageAnchorIndex: number | undefined;
   let turn = 0;
   // Set when a turn executes tools and completes but the turn budget is now
   // exhausted — the loop is about to stop mid-task. Drives the terminal
@@ -388,6 +421,7 @@ export async function* agentLoop(
   let overloadRetries = 0;
   let emptyResponseRetries = 0;
   let stallRetries = 0;
+  let runawayToolcallRetries = 0;
   let overflowCompactionAttempts = 0;
   let toolResultTruncationAttempted = false;
   const invalidToolArgumentCounts = new Map<string, number>();
@@ -404,6 +438,8 @@ export async function* agentLoop(
   const MAX_OVERLOAD_RETRIES = 10;
   const MAX_EMPTY_RESPONSE_RETRIES = 2;
   const MAX_STALL_RETRIES = 5;
+  const MAX_RUNAWAY_TOOLCALL_RETRIES = 2;
+  const RUNAWAY_TOOLCALL_RETRY_DELAY_MS = 1_000;
   const MAX_OVERFLOW_COMPACTIONS = 2;
   // After this many streaming stalls in a row, switch to non-streaming mode
   // for the remaining stall retries. Keeps the first two retries fast (the
@@ -417,6 +453,16 @@ export async function* agentLoop(
     "[Your previous response was cut off by a connection failure. The text " +
     "above is what was already delivered to the user. Continue exactly from " +
     "where it stopped — do not repeat or restart it.]";
+  // Bounded auto-continue after the model hits its output-token limit
+  // (stopReason "max_tokens" with no tool calls). The assistant partial is
+  // already in history, so the continuation resumes exactly where the output
+  // was clipped — no replay, no double-billing.
+  const MAX_OUTPUT_CONTINUATIONS = 2;
+  const MAX_TOKENS_CONTINUATION_PROMPT =
+    "[Your previous response hit the output-token limit and was cut off. The " +
+    "text above is what was already delivered to the user. Continue exactly " +
+    "from where it stopped — do not repeat or restart it.]";
+  let maxTokensContinuations = 0;
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
   const STREAM_FIRST_EVENT_TIMEOUT_MS = 45_000; // 45s to get first event (Opus thinks long)
@@ -445,35 +491,48 @@ export async function* agentLoop(
   // unreachability doesn't cause multi-minute hangs, but not so aggressively
   // that slow-but-healthy backends get killed.
   const NON_STREAMING_HARD_TIMEOUT_MS = 300_000; // 5min for full non-streaming response
-  // Sakana Fugu is a multi-agent system that reasons silently server-side and
-  // emits NO reasoning/thinking deltas over the wire -- so its pre-output phase
-  // looks like dead air to the stall detector and never earns the thinking-model
-  // timeout extension. Give it a reasoning-sized budget BEFORE the first event so
-  // heavy fugu-ultra turns don't trip the 45s first-event / 90s hard caps, get
-  // aborted, and fall back to non-streaming (which dumps the whole reply at once,
-  // exactly the abruptness we're avoiding). Sakana's own Codex config bumps the
-  // idle timeout to 2h for the same reason. Once output starts flowing, the
-  // normal mid-stream idle/hard timeouts take over unchanged.
-  const isSakana = options.provider === "sakana";
-  const firstEventTimeoutMs = isSakana
-    ? STREAM_THINKING_IDLE_TIMEOUT_MS // 5min before first token
-    : STREAM_FIRST_EVENT_TIMEOUT_MS; // 45s
-  const initialHardTimeoutMs = isSakana
-    ? STREAM_THINKING_HARD_TIMEOUT_MS // 10min absolute cap before output
-    : STREAM_HARD_TIMEOUT_MS; // 90s
+  // Some providers reason silently server-side and emit no reasoning deltas, so
+  // their pre-output phase looks like dead air and never earns the dynamic
+  // thinking timeout extension below. This is always true for Sakana Fugu and
+  // for first-party OpenAI reasoning requests (the UI can show Thinking while
+  // Chat Completions exposes no reasoning_content). Give those calls a
+  // reasoning-sized budget before the first visible event. Without it, slower
+  // accounts or network paths repeatedly trip the 45s first-event / 90s hard
+  // caps even though the model is still working. Once output starts flowing,
+  // the normal mid-stream timeout takes over.
+  const usesSilentReasoningBudget =
+    options.provider === "sakana" || (options.provider === "openai" && options.thinking != null);
+  // A local backend (llama.cpp, vLLM, Ollama, LM Studio) can prefill a large
+  // prompt for minutes before its first token. Aborting there guarantees a
+  // retry that prefills from cold again, so the first-event watchdog is off for
+  // loopback hosts entirely — the 90s inter-event timer still arms as soon as
+  // the first event lands, and the caller's abort signal is untouched.
+  const localBackend = isLocalBackendUrl(options.baseUrl);
+  const firstEventTimeoutMs = localBackend
+    ? Number.POSITIVE_INFINITY
+    : usesSilentReasoningBudget
+      ? STREAM_THINKING_IDLE_TIMEOUT_MS // 5min before first visible token
+      : STREAM_FIRST_EVENT_TIMEOUT_MS; // 45s
+  const initialHardTimeoutMs =
+    localBackend || usesSilentReasoningBudget
+      ? STREAM_THINKING_HARD_TIMEOUT_MS // 10min absolute cap before output
+      : STREAM_HARD_TIMEOUT_MS; // 90s
   // Runaway tool-call circuit breaker. When a model glitches mid-tool-call it
-  // can emit tens of thousands of toolcall_delta events without ever closing,
-  // burning the entire stall-retry budget (~25 min) on what is clearly a
-  // non-recoverable model error. Cap accumulated arg chars and event count;
-  // exceeding either is a hard, non-retriable failure. Thresholds are generous
-  // enough to allow legitimate large file writes through `write`.
+  // can emit tens of thousands of toolcall_delta events without ever closing.
+  // Cap accumulated arg chars and event count so one bad stream cannot hang the
+  // run indefinitely. The loop automatically replays the untouched turn twice;
+  // only repeated failures surface to the user.
   const MAX_TOOLCALL_DELTA_CHARS = 1_000_000; // 1 MB of accumulated tool-call args
   const MAX_TOOLCALL_DELTA_EVENTS = 20_000; // 20k delta events in one stream
+  let logicalTurnStartedAt = 0;
+  let firstProviderEventAt: number | undefined;
+  let providerDurationMs = 0;
 
   try {
-    while (turn < maxTurns) {
+    while (turn < effectiveMaxTurns) {
       options.signal?.throwIfAborted();
       turn++;
+      if (logicalTurnStartedAt === 0) logicalTurnStartedAt = Date.now();
       toolMap = new Map((options.tools ?? []).map((t) => [t.name, t]));
 
       // Estimate message payload size for diagnostics.
@@ -497,6 +556,10 @@ export async function* agentLoop(
           chars: msgChars,
           provider: options.provider,
           model: options.model,
+          thinking: options.thinking ?? "off",
+          firstEventTimeoutMs,
+          initialHardTimeoutMs,
+          localBackend,
         });
       }
 
@@ -515,7 +578,12 @@ export async function* agentLoop(
       // ── Mid-loop context transform (compaction / truncation) ──
       if (options.transformContext) {
         diag("transform_start");
-        const transformed = await options.transformContext(messages);
+        const pendingMessages =
+          usageAnchorIndex === undefined ? [] : messages.slice(usageAnchorIndex + 1);
+        const transformed = await options.transformContext(messages, {
+          usage: latestProviderUsage,
+          pendingMessages,
+        });
         if (transformed !== messages) {
           diag("transform_compacted", {
             before: messages.length,
@@ -523,6 +591,8 @@ export async function* agentLoop(
           });
           messages.length = 0;
           messages.push(...transformed);
+          latestProviderUsage = undefined;
+          usageAnchorIndex = undefined;
         }
         diag("transform_end");
       }
@@ -538,6 +608,7 @@ export async function* agentLoop(
       let idleTimer: ReturnType<typeof setTimeout> | null = null;
       let hardTimer: ReturnType<typeof setTimeout> | null = null;
       let idleTimedOut = false;
+      let providerAttemptStartedAt: number | undefined;
 
       // Stream event counters — declared here so timeout callbacks can access them
       let streamEventCount = 0;
@@ -586,6 +657,8 @@ export async function* agentLoop(
           : hasReceivedThinking
             ? STREAM_THINKING_IDLE_TIMEOUT_MS
             : firstEventTimeoutMs;
+        // An infinite budget means "no watchdog" — never arm a timer for it.
+        if (!Number.isFinite(timeoutMs)) return;
         idleTimer = setTimeout(() => {
           diag("idle_timeout_fired", {
             events: streamEventCount,
@@ -624,12 +697,14 @@ export async function* agentLoop(
       try {
         diag("stream_call", { nonStreaming: useNonStreamingFallback });
         streamCallStart = Date.now();
+        providerAttemptStartedAt = streamCallStart;
         const result = stream({
           provider: options.provider,
           model: options.model,
           messages,
           tools: options.tools,
           serverTools: options.serverTools,
+          toolChoice: options.toolChoice,
           webSearch: options.webSearch,
           maxTokens: options.maxTokens,
           temperature: options.temperature,
@@ -638,6 +713,7 @@ export async function* agentLoop(
           baseUrl: options.baseUrl,
           signal: streamController.signal,
           accountId: options.accountId,
+          transportSessionId: options.transportSessionId,
           projectId: options.projectId,
           cacheRetention: options.cacheRetention,
           promptCacheKey: options.promptCacheKey,
@@ -679,6 +755,7 @@ export async function* agentLoop(
           }
 
           streamEventCount++;
+          if (firstProviderEventAt === undefined) firstProviderEventAt = pullTime;
           eventTypeCounts[event.type] = (eventTypeCounts[event.type] ?? 0) + 1;
           lastEventType = event.type;
 
@@ -801,6 +878,7 @@ export async function* agentLoop(
           eventTypes: eventTypeCounts,
         });
         response = await result.response;
+        if (firstProviderEventAt === undefined) firstProviderEventAt = Date.now();
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         diag("stream_error", {
@@ -874,10 +952,18 @@ export async function* agentLoop(
               ...overflowDetails,
             });
             try {
-              const compacted = await options.transformContext(messages, { force: true });
+              const pendingMessages =
+                usageAnchorIndex === undefined ? [] : messages.slice(usageAnchorIndex + 1);
+              const compacted = await options.transformContext(messages, {
+                force: true,
+                usage: latestProviderUsage,
+                pendingMessages,
+              });
               if (compacted !== messages && compacted.length < messages.length) {
                 messages.length = 0;
                 messages.push(...compacted);
+                latestProviderUsage = undefined;
+                usageAnchorIndex = undefined;
                 diag("overflow_compact_success", {
                   attempt: overflowCompactionAttempts,
                   messages: messages.length,
@@ -948,16 +1034,39 @@ export async function* agentLoop(
         // Both are transport failures — retry with exponential backoff and flip
         // to non-streaming mode after STALL_RETRIES_BEFORE_NON_STREAMING attempts,
         // since broken SSE often recovers when replayed as plain HTTP.
-        // Runaway tool-call: the model never closed a tool-call block and
-        // blew past the size/count caps. Retrying just reproduces the loop,
-        // so surface a clear error and stop. Checked before the abort branch
-        // since we ourselves aborted the stream to break the runaway.
+        // Runaway tool-call: the model never closed a tool-call block and blew
+        // past the size/count caps. The partial call was never added to message
+        // history, so replay the untouched turn automatically — exactly what a
+        // manual "continue" fixed, without forcing the user to intervene.
         if (runawayDetected) {
           diag("runaway_toolcall_aborted", {
             ...runawayDetected,
             provider: options.provider,
             model: options.model,
           });
+          if (runawayToolcallRetries < MAX_RUNAWAY_TOOLCALL_RETRIES) {
+            runawayToolcallRetries++;
+            const delayMs = RUNAWAY_TOOLCALL_RETRY_DELAY_MS * runawayToolcallRetries;
+            diag("retry", {
+              reason: "runaway_toolcall",
+              attempt: runawayToolcallRetries,
+              maxAttempts: MAX_RUNAWAY_TOOLCALL_RETRIES,
+              delayMs,
+              ...runawayDetected,
+            });
+            yield {
+              type: "retry" as const,
+              reason: "runaway_toolcall" as const,
+              attempt: runawayToolcallRetries,
+              maxAttempts: MAX_RUNAWAY_TOOLCALL_RETRIES,
+              delayMs,
+              silent: true,
+            };
+            await abortableSleep(delayMs, options.signal);
+            turn--; // The aborted provider attempt does not consume a turn.
+            continue;
+          }
+
           const detail =
             runawayDetected.kind === "chars"
               ? `${(runawayDetected.chars / 1024).toFixed(0)} KB of tool-call arguments`
@@ -965,9 +1074,8 @@ export async function* agentLoop(
           yield {
             type: "error" as const,
             error: new Error(
-              `The model glitched mid-tool-call and produced ${detail} without closing the call. ` +
-                `This is usually an upstream model bug — try the same request again or switch models. ` +
-                `Your conversation is preserved.`,
+              `The model repeatedly failed to close a tool call after ${MAX_RUNAWAY_TOOLCALL_RETRIES} automatic retries ` +
+                `(${detail}). Switch models and retry; your conversation is preserved.`,
             ),
           };
           break;
@@ -1006,7 +1114,15 @@ export async function* agentLoop(
               role: "assistant" as const,
               content: [{ type: "text" as const, text: attemptText }],
             });
-            messages.push({ role: "user" as const, content: PARTIAL_CONTINUATION_PROMPT });
+            messages.push({
+              role: "user" as const,
+              content: PARTIAL_CONTINUATION_PROMPT,
+              provenance: {
+                source: "runtime" as const,
+                kind: "continuation" as const,
+                visibility: "hidden" as const,
+              },
+            });
             preservedChars = attemptText.length;
           }
           diag("retry", {
@@ -1034,16 +1150,34 @@ export async function* agentLoop(
         // Stream stall retries exhausted — surface a clear error so the UI
         // can distinguish "gave up after stalls" from "completed normally".
         if (transportFailure) {
+          const cause = malformed
+            ? "malformed_stream"
+            : socketDrop
+              ? "socket_drop"
+              : "stream_stall";
           diag("stall_exhausted", {
             stallRetries: MAX_STALL_RETRIES,
             provider: options.provider,
             model: options.model,
+            cause,
+            nonStreaming: useNonStreamingFallback,
+            events: streamEventCount,
+            eventTypes: eventTypeCounts,
+            lastEventType,
+            sinceLastEventMs: Date.now() - lastEventTime,
+            attemptDurationMs: Date.now() - streamCallStart,
+            maxConsumerLagMs,
           });
           yield {
             type: "error" as const,
-            error: new Error(
-              `The API provider's stream stalled ${MAX_STALL_RETRIES} times — the provider may be experiencing capacity issues. ` +
-                `Your conversation is preserved. Send another message to retry.`,
+            error: new GGAIError(
+              `The connection to the API provider stopped responding after ${MAX_STALL_RETRIES} automatic retries. ` +
+                `Your conversation is preserved.`,
+              {
+                source: "network",
+                hint: "Retry once. If it keeps happening on this device, disable any VPN or proxy and allow GG Coder through firewall or antivirus web protection.",
+                cause: err,
+              },
             ),
           };
           break;
@@ -1083,6 +1217,9 @@ export async function* agentLoop(
         });
         throw err;
       } finally {
+        if (providerAttemptStartedAt !== undefined) {
+          providerDurationMs += Date.now() - providerAttemptStartedAt;
+        }
         if (idleTimer) clearTimeout(idleTimer);
         if (hardTimer) clearTimeout(hardTimer);
         options.signal?.removeEventListener("abort", forwardAbort);
@@ -1090,18 +1227,21 @@ export async function* agentLoop(
 
       overloadRetries = 0;
       stallRetries = 0;
+      runawayToolcallRetries = 0;
 
       // Detect empty/degenerate responses — the API occasionally returns 0 tokens
       // with no content, or "thinks" without producing actionable output.
       // Reasoning models (MiMo, DeepSeek) may report outputTokens > 0 from
       // thinking alone while producing no text or tool calls — still a dud.
-      const contentArr = Array.isArray(response.message.content) ? response.message.content : null;
+      const content = response.message.content;
+      const contentArr = Array.isArray(content) ? content : null;
       const hasActionableContent =
-        response.message.content !== "" &&
-        contentArr !== null &&
-        contentArr.some(
-          (p) => p.type === "text" || p.type === "tool_call" || p.type === "server_tool_call",
-        );
+        (typeof content === "string" && content.trim().length > 0) ||
+        (contentArr !== null &&
+          contentArr.some(
+            (part) =>
+              part.type === "text" || part.type === "tool_call" || part.type === "server_tool_call",
+          ));
       if (!hasActionableContent) {
         if (emptyResponseRetries < MAX_EMPTY_RESPONSE_RETRIES) {
           emptyResponseRetries++;
@@ -1144,14 +1284,40 @@ export async function* agentLoop(
         totalUsage.cacheWrite = (totalUsage.cacheWrite ?? 0) + response.usage.cacheWrite;
       }
 
-      // Append assistant message to conversation
+      // Append assistant message and anchor the provider's authoritative usage
+      // at that exact history position. Later tool/user messages stay pending
+      // until the next provider request observes them.
       messages.push(response.message);
+      latestProviderUsage = response.usage;
+      usageAnchorIndex = messages.length - 1;
+
+      const completedAt = Date.now();
+      const outputTokensPerSecond =
+        providerDurationMs > 0 && response.usage.outputTokens > 0
+          ? response.usage.outputTokens / (providerDurationMs / 1_000)
+          : undefined;
+      const timing = {
+        startedAt: logicalTurnStartedAt,
+        ...(firstProviderEventAt !== undefined
+          ? {
+              firstProviderEventAt,
+              ttftMs: Math.max(0, firstProviderEventAt - logicalTurnStartedAt),
+            }
+          : {}),
+        completedAt,
+        providerDurationMs,
+        ...(outputTokensPerSecond !== undefined ? { outputTokensPerSecond } : {}),
+      };
+      logicalTurnStartedAt = 0;
+      firstProviderEventAt = undefined;
+      providerDurationMs = 0;
 
       yield {
         type: "turn_end" as const,
         turn,
         stopReason: response.stopReason,
         usage: response.usage,
+        timing,
       };
 
       // Server-side tool hit iteration limit — re-send to continue.
@@ -1173,6 +1339,42 @@ export async function* agentLoop(
       // Check content (not just stopReason) because some providers (e.g. GLM)
       // return finish_reason="stop" even when tool calls are present.
       if (response.stopReason !== "tool_use" && allToolCalls.length === 0) {
+        // Honest terminal states: a max_tokens / refusal / error stop with no
+        // tool calls is NOT a clean completion. For max_tokens, auto-continue
+        // a bounded number of times; otherwise warn and preserve the
+        // conversation (hosts render the incomplete-output warning).
+        if (response.stopReason === "max_tokens") {
+          if (maxTokensContinuations < MAX_OUTPUT_CONTINUATIONS) {
+            maxTokensContinuations++;
+            diag("max_tokens_continuation", {
+              attempt: maxTokensContinuations,
+              maxAttempts: MAX_OUTPUT_CONTINUATIONS,
+              provider: options.provider,
+              model: options.model,
+            });
+            yield { type: "truncated" as const, reason: "max_tokens" as const, continued: true };
+            messages.push({
+              role: "user" as const,
+              content: MAX_TOKENS_CONTINUATION_PROMPT,
+              provenance: {
+                source: "runtime" as const,
+                kind: "continuation" as const,
+                visibility: "hidden" as const,
+              },
+            });
+            continue;
+          }
+          yield { type: "truncated" as const, reason: "max_tokens" as const, continued: false };
+        } else if (response.stopReason === "refusal" || response.stopReason === "error") {
+          yield {
+            type: "truncated" as const,
+            reason:
+              response.stopReason === "refusal"
+                ? ("refusal" as const)
+                : ("provider_error" as const),
+            continued: false,
+          };
+        }
         // Check for queued steering messages — if present, inject and continue
         // the loop instead of returning (follow-up pattern).
         if (options.getSteeringMessages) {
@@ -1239,6 +1441,7 @@ export async function* agentLoop(
       const executionOptions: ToolBatchExecutionOptions = {
         signal: options.signal,
         maxToolResultChars: options.maxToolResultChars,
+        maxTurnToolResultChars: options.maxTurnToolResultChars,
         toolMap,
         invalidToolArgumentCounts,
         markFatalToolArgumentError,
@@ -1250,6 +1453,11 @@ export async function* agentLoop(
         ? yield* executeToolCallsMixed(toolCalls, toolResults, executionOptions)
         : yield* executeToolCallsParallel(toolCalls, toolResults, executionOptions);
       messages.push({ role: "tool", content: executionResult.toolResults });
+      // The step is complete and durable-able: assistant message + every tool
+      // result are in `messages`, and the tools' side effects have already hit
+      // the filesystem. Hosts flush here so a crash before the next provider
+      // call cannot lose work that already happened.
+      yield { type: "checkpoint" as const, turn };
       const toolsAborted = executionResult.aborted;
 
       if (fatalToolArgumentError) {
@@ -1293,10 +1501,54 @@ export async function* agentLoop(
       }
 
       // This turn ran tools and wants to continue, but the budget is spent —
-      // the while-condition will now end the loop mid-task. Flag it so the
-      // fall-through below emits an explicit cut-off signal.
-      if (turn >= maxTurns) {
-        hitMaxTurns = true;
+      // the while-condition will now end the loop mid-task. Offer the host a
+      // bounded extension first (same shape as the max_tokens continuation
+      // above); only flag the hard cut-off if it declines or the cap is spent.
+      if (turn >= effectiveMaxTurns) {
+        let extended = false;
+        if (options.onTurnBudgetExhausted && turnExtensions < maxTurnExtensions) {
+          const extension = turnExtensions + 1;
+          let granted = false;
+          try {
+            granted = await options.onTurnBudgetExhausted({
+              turn,
+              maxTurns: effectiveMaxTurns,
+              extension,
+            });
+          } catch {
+            granted = false;
+          }
+          if (granted) {
+            turnExtensions = extension;
+            effectiveMaxTurns += maxTurns;
+            extended = true;
+            diag("turn_budget_extended", {
+              turn,
+              grantedTurns: effectiveMaxTurns,
+              extension,
+              provider: options.provider,
+              model: options.model,
+            });
+            yield {
+              type: "turn_budget_extended" as const,
+              turn,
+              grantedTurns: effectiveMaxTurns,
+              extension,
+            };
+            messages.push({
+              role: "user" as const,
+              content: turnBudgetContinuationPrompt(),
+              provenance: {
+                source: "runtime" as const,
+                kind: "continuation" as const,
+                visibility: "hidden" as const,
+              },
+            });
+          }
+        }
+        if (!extended) {
+          hitMaxTurns = true;
+        }
       }
     }
   } finally {
@@ -1323,14 +1575,15 @@ export async function* agentLoop(
   if (hitMaxTurns) {
     diag("max_turns_reached", {
       turn,
-      maxTurns,
+      maxTurns: effectiveMaxTurns,
+      extensions: turnExtensions,
       provider: options.provider,
       model: options.model,
     });
     yield {
       type: "max_turns" as const,
       totalTurns: turn,
-      maxTurns,
+      maxTurns: effectiveMaxTurns,
     };
   }
 
@@ -1356,6 +1609,7 @@ interface ToolExecutionRecord {
 interface ToolBatchExecutionOptions {
   signal?: AbortSignal;
   maxToolResultChars?: number;
+  maxTurnToolResultChars?: number;
   toolMap: Map<string, AgentTool>;
   invalidToolArgumentCounts: Map<string, number>;
   /**
@@ -1412,12 +1666,15 @@ async function executeSingleToolCall(
   } else {
     try {
       const parsed = tool.parameters.parse(toolCall.args);
-      // Per-tool timeout: combine the caller's signal with a 5-minute
-      // timeout so no single tool can block the agent loop indefinitely.
+      // Per-tool timeout: combine the caller's signal with a 5-minute default
+      // so no single tool can block the agent loop indefinitely.
       // When the caller has no signal, AbortSignal.timeout is used alone.
       // AbortSignal.any() merges them — either firing aborts the tool.
+      // A tool with a longer internal budget declares `timeoutMs`; without
+      // that, this default preempts the tool's own timeout and replaces its
+      // specific error with a generic cancellation.
       const callerSignal = options.signal;
-      const toolTimeout = AbortSignal.timeout(300_000);
+      const toolTimeout = AbortSignal.timeout(tool.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS);
       const ctx: ToolContext = {
         signal: callerSignal ? AbortSignal.any([callerSignal, toolTimeout]) : toolTimeout,
         toolCallId: toolCall.id,
@@ -1431,8 +1688,8 @@ async function executeSingleToolCall(
       };
       const raw = await tool.execute(parsed, ctx);
       const normalized = normalizeToolResult(raw);
-      resultContent = normalized.content;
-      details = normalized.details;
+      resultContent = redactValue(normalized.content);
+      details = redactValue(normalized.details);
       for (const key of options.invalidToolArgumentCounts.keys()) {
         if (key.startsWith(`${toolCall.name}:`)) options.invalidToolArgumentCounts.delete(key);
       }
@@ -1479,10 +1736,15 @@ async function executeSingleToolCall(
           );
         }
       } else {
-        resultContent = err instanceof Error ? err.message : String(err);
+        resultContent = redactValue(err instanceof Error ? err.message : String(err));
       }
     }
   }
+
+  // All tool output crosses both an event boundary and the provider-context
+  // boundary below. Sanitize every branch, including unknown/validation errors.
+  resultContent = redactValue(resultContent);
+  details = redactValue(details);
 
   const durationMs = Date.now() - startTime;
 
@@ -1596,6 +1858,7 @@ async function* executeToolCallsMixed(
 
   const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById);
   capToolResults(toolResults, options.maxToolResultChars);
+  capTurnToolResults(toolResults, options.maxTurnToolResultChars);
   return { toolResults, aborted };
 }
 
@@ -1643,6 +1906,7 @@ async function* executeToolCallsParallel(
 
   const toolResults = buildToolResults(initialToolResults, toolCalls, resultsById);
   capToolResults(toolResults, options.maxToolResultChars);
+  capTurnToolResults(toolResults, options.maxTurnToolResultChars);
   return { toolResults, aborted };
 }
 
@@ -1673,19 +1937,84 @@ function buildToolResults(
   return toolResults;
 }
 
-function capToolResults(toolResults: ToolResult[], maxToolResultChars: number | undefined): void {
+export function capToolResults(
+  toolResults: ToolResult[],
+  maxToolResultChars: number | undefined,
+): void {
   if (!maxToolResultChars) return;
   const hardMax = 400_000; // absolute ceiling regardless of context window
   const max = Math.min(maxToolResultChars, hardMax);
   for (const toolResult of toolResults) {
     if (typeof toolResult.content !== "string" || toolResult.content.length <= max) continue;
+    const originalChars = toolResult.content.length;
     // Keep 70% head + 30% tail to preserve errors/diagnostics at the end.
     const headChars = Math.floor(max * 0.7);
     const tailChars = max - headChars;
     const head = toolResult.content.slice(0, headChars);
     const tail = toolResult.content.slice(-tailChars);
-    const omitted = toolResult.content.length - headChars - tailChars;
+    const omitted = originalChars - headChars - tailChars;
     toolResult.content = head + `\n\n[... ${omitted} characters omitted ...]\n\n` + tail;
+    // Mark the divergence: the model + persistent transcript now hold this
+    // trimmed content, but the tool_call_end event already carried the full one.
+    toolResult.capped = {
+      originalChars,
+      keptChars: toolResult.content.length,
+      scope: "per-result",
+    };
+  }
+}
+
+/**
+ * Aggregate per-turn budget across every tool result in one assistant turn.
+ * A single result is bounded by per-tool truncation and `maxToolResultChars`,
+ * but a wide parallel fan-out (8+ reads/bash calls) can still inject 100k+
+ * uncached tokens in one turn. Water-filling: small results keep their full
+ * size; only the largest results share what remains of the budget.
+ */
+export function capTurnToolResults(
+  toolResults: ToolResult[],
+  maxTurnToolResultChars: number | undefined,
+): void {
+  if (!maxTurnToolResultChars) return;
+  const textResults = toolResults.filter(
+    (toolResult): toolResult is ToolResult & { content: string } =>
+      typeof toolResult.content === "string",
+  );
+  const total = textResults.reduce((sum, toolResult) => sum + toolResult.content.length, 0);
+  if (total <= maxTurnToolResultChars) return;
+
+  // Water-filling allocation: process results smallest-first; each takes
+  // min(own size, fair share of what's left), releasing unused budget to the
+  // larger results behind it.
+  const bySize = [...textResults].sort((a, b) => a.content.length - b.content.length);
+  let remaining = maxTurnToolResultChars;
+  let left = bySize.length;
+  for (const toolResult of bySize) {
+    const fairShare = Math.floor(remaining / left);
+    left--;
+    if (toolResult.content.length <= fairShare) {
+      remaining -= toolResult.content.length;
+      continue;
+    }
+    remaining -= fairShare;
+    const originalChars = toolResult.content.length;
+    // Keep 70% head + 30% tail so errors/diagnostics at the end survive.
+    const headChars = Math.floor(fairShare * 0.7);
+    const tailChars = fairShare - headChars;
+    const omitted = originalChars - fairShare;
+    toolResult.content =
+      toolResult.content.slice(0, headChars) +
+      `\n\n[... ${omitted} characters trimmed: this turn's combined tool results exceeded the ` +
+      `per-turn budget. Re-run this call alone with narrower filters or offset/limit if you ` +
+      `need the omitted content ...]\n\n` +
+      (tailChars > 0 ? toolResult.content.slice(-tailChars) : "");
+    // Mark the divergence (per-turn budget). Preserve an existing per-result
+    // marker's originalChars so the full pre-any-trim size stays visible.
+    toolResult.capped = {
+      originalChars: toolResult.capped?.originalChars ?? originalChars,
+      keptChars: toolResult.content.length,
+      scope: "per-turn",
+    };
   }
 }
 

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import { resolvePath } from "./path-utils.js";
+import { resolvePath, toPosixPath } from "./path-utils.js";
 import { truncateTail } from "./truncate.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import { chunkFile, bm25Rank, type Chunk } from "../core/code-retrieval.js";
@@ -67,13 +67,15 @@ export function createSearchCodeTool(
         } catch {
           continue; // unreadable file — skip
         }
-        // Use the cwd-relative path so headers are stable regardless of `path` scope.
-        const rel = path.relative(cwd, abs);
+        // cwd-relative so headers are stable regardless of `path` scope, and
+        // forward-slashed so the `file:line → symbol` headers the model reads
+        // (and echoes back into read/edit calls) are identical on every OS.
+        const rel = toPosixPath(path.relative(cwd, abs));
         for (const chunk of chunkFile(rel, source)) chunks.push(chunk);
       }
 
       if (chunks.length === 0) {
-        return `No top-level symbols found in ${files.length} TS/JS file(s) under ${path.relative(cwd, dir) || "."}.`;
+        return `No top-level symbols found in ${files.length} TS/JS file(s) under ${toPosixPath(path.relative(cwd, dir)) || "."}.`;
       }
 
       const ranked = bm25Rank(query, chunks, maxResults);

@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
 import { extractToMarkdown } from "./html-extract.js";
 import { extractPdfText, PdfExtractorUnavailable } from "./pdf-extract.js";
+import { checkUrlPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
 
 /**
  * Block requests to private/internal network addresses to prevent SSRF.
@@ -165,15 +166,18 @@ export function htmlToCleanText(html: string): string {
 // ── Fetch configuration ──────────────────────────────────────
 
 const MAX_REDIRECTS = 5;
-const MAX_PDF_BYTES = 25 * 1024 * 1024; // refuse PDFs larger than ~25 MB
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const MAX_URLS = 10;
 const MAX_CONCURRENCY = 5;
 const PER_URL_MIN_BUDGET = 1000;
+const REQUEST_TIMEOUT_MS = 30_000;
+const PROBE_TIMEOUT_MS = 3_000;
+const PROBE_CONCURRENCY = 3;
 
-const FETCH_HEADERS: Record<string, string> = {
-  "User-Agent": "Mozilla/5.0 (compatible; GGCoder/1.0)",
-  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-};
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const HONEST_USER_AGENT = "ggcoder/1.0 (+https://github.com/KenKaiii/gg-coder)";
 
 const DOC_PATH_PATTERNS = [/\/docs?\b/i, /\/reference\b/i, /\/api\b/i, /\/guide/i, /\/learn\b/i];
 const DOC_ROOT_SEGMENTS = new Set(["docs", "doc", "reference", "api", "guide", "learn"]);
@@ -194,6 +198,8 @@ interface FetchOptions {
   maxLength: number;
   format: FetchFormat;
   preferLlmsTxt: boolean;
+  /** Network allowlist policy, read lazily (undefined = unrestricted). */
+  getNetworkPolicy?: GetNetworkPolicy;
 }
 
 interface RawResponse {
@@ -214,15 +220,52 @@ type FetchOneResult = { ok: true; response: RawResponse } | { ok: false; error: 
  * signal is honored throughout. Returns the final non-redirect response or an
  * error string describing why the fetch could not complete.
  */
-async function fetchOne(url: string, signal: AbortSignal): Promise<FetchOneResult> {
+function headersForFormat(format: FetchFormat, honestUserAgent = false): Record<string, string> {
+  const accept =
+    format === "html"
+      ? "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"
+      : format === "markdown"
+        ? "text/markdown,text/plain;q=0.9,text/html;q=0.8,*/*;q=0.5"
+        : "text/plain,text/html;q=0.9,*/*;q=0.5";
+  return {
+    "User-Agent": honestUserAgent ? HONEST_USER_AGENT : BROWSER_USER_AGENT,
+    Accept: accept,
+    "Accept-Language": "en-US,en;q=0.9",
+  };
+}
+
+async function requestHop(
+  url: string,
+  signal: AbortSignal,
+  format: FetchFormat,
+  honestUserAgent = false,
+): Promise<Response> {
+  return await fetch(url, {
+    headers: headersForFormat(format, honestUserAgent),
+    redirect: "manual",
+    signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+  });
+}
+
+async function fetchOne(
+  url: string,
+  signal: AbortSignal,
+  format: FetchFormat,
+  getNetworkPolicy?: GetNetworkPolicy,
+): Promise<FetchOneResult> {
   let currentUrl = url;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const response = await fetch(currentUrl, {
-      headers: FETCH_HEADERS,
-      redirect: "manual",
-      signal: AbortSignal.any([signal, AbortSignal.timeout(30000)]),
-    });
+    // Every hop — the initial request and each redirect target — is checked, so
+    // a redirect can never carry the fetch to a disallowed host.
+    const blocked = checkUrlPolicy(currentUrl, getNetworkPolicy);
+    if (blocked) return { ok: false, error: `Error: ${blocked}` };
+
+    let response = await requestHop(currentUrl, signal, format);
+    if (response.status === 403 && response.headers.get("cf-mitigated") === "challenge") {
+      response.body?.cancel().catch(() => undefined);
+      response = await requestHop(currentUrl, signal, format, true);
+    }
 
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
@@ -244,13 +287,28 @@ async function fetchOne(url: string, signal: AbortSignal): Promise<FetchOneResul
     }
 
     const contentLengthHeader = response.headers.get("content-length");
+    const contentLength = contentLengthHeader ? Number(contentLengthHeader) : null;
+    const contentType = response.headers.get("content-type") ?? "";
+    const responseByteLimit = byteLimitForResponse(contentType, currentUrl);
+    if (
+      contentLength !== null &&
+      Number.isFinite(contentLength) &&
+      contentLength > responseByteLimit
+    ) {
+      response.body?.cancel().catch(() => undefined);
+      return {
+        ok: false,
+        error: `Error: response too large (${contentLength} bytes; limit ${responseByteLimit}).`,
+      };
+    }
     return {
       ok: true,
       response: {
         status: response.status,
         statusText: response.statusText,
-        contentType: response.headers.get("content-type") ?? "",
-        contentLength: contentLengthHeader ? Number(contentLengthHeader) : null,
+        contentType,
+        contentLength:
+          contentLength !== null && Number.isFinite(contentLength) ? contentLength : null,
         body: response,
         finalUrl: currentUrl,
       },
@@ -260,9 +318,48 @@ async function fetchOne(url: string, signal: AbortSignal): Promise<FetchOneResul
   return { ok: false, error: `Error: too many redirects (>${MAX_REDIRECTS})` };
 }
 
+export async function readBoundedBody(
+  response: Response,
+  maxBytes = MAX_RESPONSE_BYTES,
+): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel("response too large");
+        throw new Error(`response too large (${totalBytes} bytes; limit ${maxBytes})`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
 function truncate(content: string, maxLength: number): string {
   if (content.length <= maxLength) return content;
   return content.slice(0, maxLength) + "\n\n[Content truncated]";
+}
+
+function byteLimitForResponse(contentType: string, url: string): number {
+  const path = url.toLowerCase().split("?")[0];
+  return contentType.includes("application/pdf") || path.endsWith(".pdf")
+    ? MAX_PDF_BYTES
+    : MAX_RESPONSE_BYTES;
 }
 
 function looksLikePdf(contentType: string, url: string, head: Uint8Array): boolean {
@@ -304,7 +401,17 @@ async function processHtmlOrText(
   text: string,
   opts: FetchOptions,
 ): Promise<string> {
-  const isHtml = response.contentType.includes("html");
+  const prefix = text.trimStart().slice(0, 512);
+  const genericContentType =
+    !response.contentType ||
+    /application\/octet-stream|binary\/octet-stream|text\/plain/i.test(response.contentType);
+  const isHtml =
+    response.contentType.includes("html") ||
+    (genericContentType && /^(?:<!doctype\s+html|<html\b|<head\b|<body\b)/i.test(prefix));
+
+  if (opts.format === "html") {
+    return truncate(text, opts.maxLength);
+  }
   if (!isHtml) {
     return truncate(text, opts.maxLength);
   }
@@ -313,7 +420,6 @@ async function processHtmlOrText(
     return truncate(htmlToCleanText(text), opts.maxLength);
   }
 
-  // markdown (default) and html both attempt Readability extraction first.
   try {
     const extracted = await extractToMarkdown(text, response.finalUrl);
     if (extracted) {
@@ -321,7 +427,7 @@ async function processHtmlOrText(
       return truncate(heading + extracted.markdown, opts.maxLength);
     }
   } catch {
-    // Extractor unavailable or failed — fall through to the regex path.
+    // Extractor unavailable or failed — fall through to the plain-text path.
   }
 
   return truncate(htmlToCleanText(text), opts.maxLength);
@@ -342,7 +448,7 @@ async function fetchAndProcess(
   }
 
   try {
-    const result = await fetchOne(url, signal);
+    const result = await fetchOne(url, signal, opts.format, opts.getNetworkPolicy);
     if (!result.ok) return result.error;
 
     const { response } = result;
@@ -350,20 +456,22 @@ async function fetchAndProcess(
       return `Error: HTTP ${response.status} ${response.statusText}`;
     }
 
-    const buffer = await response.body.arrayBuffer();
-    const head = new Uint8Array(buffer.slice(0, 4));
+    const bytes = await readBoundedBody(
+      response.body,
+      byteLimitForResponse(response.contentType, response.finalUrl),
+    );
+    const head = bytes.slice(0, 4);
 
     if (looksLikePdf(response.contentType, response.finalUrl, head)) {
-      // Re-wrap the already-read buffer so processPdf can read it again.
       const pdfResponse: RawResponse = {
         ...response,
-        body: new Response(buffer),
-        contentLength: buffer.byteLength,
+        body: new Response(bytes.slice().buffer),
+        contentLength: bytes.byteLength,
       };
       return await processPdf(pdfResponse, opts.maxLength);
     }
 
-    const text = new TextDecoder().decode(buffer);
+    const text = new TextDecoder().decode(bytes);
     return await processHtmlOrText(response, text, opts);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -499,22 +607,26 @@ async function tryLlmsResource(
 
   const limit =
     opts.maxLength >= LONG_LLMS_THRESHOLD ? candidates.length : DEFAULT_LLMS_CANDIDATE_LIMIT;
-  for (const candidate of candidates.slice(0, limit)) {
-    if (isBlockedUrl(candidate.url)) continue;
+  const eligibleCandidates = candidates
+    .slice(0, limit)
+    .filter((candidate) => !isBlockedUrl(candidate.url));
+  const probes = await runPool(eligibleCandidates, PROBE_CONCURRENCY, async (candidate) => {
     try {
-      const result = await fetchOne(candidate.url, signal);
-      if (!result.ok) continue;
+      const probeSignal = AbortSignal.any([signal, AbortSignal.timeout(PROBE_TIMEOUT_MS)]);
+      const result = await fetchOne(candidate.url, probeSignal, "markdown", opts.getNetworkPolicy);
+      if (!result.ok) return null;
       const { response } = result;
-      if (response.status !== 200) continue;
-      const text = await response.body.text();
-      if (!looksLikeMarkdownDocument(text, response.contentType, candidate)) continue;
+      if (response.status !== 200) return null;
+      const bytes = await readBoundedBody(response.body);
+      const text = new TextDecoder().decode(bytes);
+      if (!looksLikeMarkdownDocument(text, response.contentType, candidate)) return null;
       return `[${candidate.label}]\nSource: ${response.finalUrl}\n\n${truncate(text.trim(), opts.maxLength)}`;
     } catch {
-      // Try the next candidate; probes should never block the real fetch.
+      return null;
     }
-  }
+  });
 
-  return null;
+  return probes.find((probe): probe is string => probe !== null) ?? null;
 }
 
 async function fetchWithPreferredDocs(
@@ -522,14 +634,16 @@ async function fetchWithPreferredDocs(
   opts: FetchOptions,
   signal: AbortSignal,
 ): Promise<string> {
-  if (opts.preferLlmsTxt && !isBlockedUrl(url) && isDocish(url)) {
+  if (opts.format !== "html" && opts.preferLlmsTxt && !isBlockedUrl(url) && isDocish(url)) {
     const llms = await tryLlmsResource(url, opts, signal);
     if (llms) return llms;
   }
   return await fetchAndProcess(url, opts, signal);
 }
 
-export function createWebFetchTool(): AgentTool<typeof parameters> {
+export function createWebFetchTool(
+  getNetworkPolicy?: GetNetworkPolicy,
+): AgentTool<typeof parameters> {
   return {
     name: "web_fetch",
     description:
@@ -547,7 +661,12 @@ export function createWebFetchTool(): AgentTool<typeof parameters> {
       if (args.urls && args.urls.length > 0) {
         const urls = args.urls;
         const perUrlBudget = Math.max(PER_URL_MIN_BUDGET, Math.floor(maxLength / urls.length));
-        const opts: FetchOptions = { maxLength: perUrlBudget, format, preferLlmsTxt };
+        const opts: FetchOptions = {
+          maxLength: perUrlBudget,
+          format,
+          preferLlmsTxt,
+          getNetworkPolicy,
+        };
         const sections = await runPool(urls, MAX_CONCURRENCY, (u) =>
           fetchWithPreferredDocs(u, opts, context.signal),
         );
@@ -559,7 +678,7 @@ export function createWebFetchTool(): AgentTool<typeof parameters> {
         return "Error: provide either `url` or `urls`.";
       }
 
-      const opts: FetchOptions = { maxLength, format, preferLlmsTxt };
+      const opts: FetchOptions = { maxLength, format, preferLlmsTxt, getNetworkPolicy };
       return await fetchWithPreferredDocs(url, opts, context.signal);
     },
   };

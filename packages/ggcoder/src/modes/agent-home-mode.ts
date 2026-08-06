@@ -333,7 +333,10 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
 
         const sessionState = state.session.getState();
         const modelInfo = MODELS.find((m) => m.id === sessionState.model);
-        const contextWindow = getContextWindow(sessionState.model);
+        const contextWindow = getContextWindow(sessionState.model, {
+          provider: sessionState.provider,
+          accountId: sessionState.accountId,
+        });
         const contextTokens = estimateConversationTokens(state.session.getMessages());
         const pctRaw = (contextTokens / contextWindow) * 100;
         const contextStr = pctRaw > 0 && pctRaw < 1 ? "<1" : String(Math.round(pctRaw));
@@ -556,8 +559,12 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
 
       const finalText = state.textBuffer.trim() || "Done.";
 
-      const modelId = state.session.getState().model;
-      const contextWindow = getContextWindow(modelId);
+      const sessionState = state.session.getState();
+      const modelId = sessionState.model;
+      const contextWindow = getContextWindow(modelId, {
+        provider: sessionState.provider,
+        accountId: sessionState.accountId,
+      });
       const contextTokens = estimateConversationTokens(state.session.getMessages());
       const contextPctRaw = (contextTokens / contextWindow) * 100;
       const contextStr =

@@ -10,8 +10,14 @@ import type { MutableRefObject } from "react";
 // erased), so the mock just provides that, resolving empty so run_end's command
 // refresh is a no-op.
 vi.mock("./sounds", () => ({ playSound: vi.fn() }));
-vi.mock("./agent", () => ({ listCommands: vi.fn().mockResolvedValue([]) }));
+vi.mock("./agent", () => ({
+  listCommands: vi.fn().mockResolvedValue([]),
+  listModels: vi.fn().mockResolvedValue([]),
+  isRoadmapPhaseDraftChangeEvent: (event: SidecarEvent) =>
+    event.type === "roadmap_phase_draft_change",
+}));
 
+import { listModels } from "./agent";
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
 import type { AgentState, SidecarEvent } from "./agent";
@@ -20,9 +26,19 @@ import type { LiveToolEntry } from "./LiveToolPanel";
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
   ({ type, data }) as SidecarEvent;
 
+// subagent_state snapshots are buffered and flushed on a 150ms timer (burst
+// coalescing). Tests that assert on subagent groups let the flush fire first.
+const flushSubagents = async (): Promise<void> => {
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+};
+
 function setup(
   handleKenEvent: (e: SidecarEvent) => boolean = () => false,
   initialState: Partial<AgentState> = {},
+  onSessionReset?: AgentEventsDeps["onSessionReset"],
+  onRoadmapPhaseDraftChange?: AgentEventsDeps["onRoadmapPhaseDraftChange"],
 ) {
   let items: Item[] = [];
   let id = 0;
@@ -57,6 +73,12 @@ function setup(
     stateRef.current = agentState;
   }) as AgentEventsDeps["setState"];
 
+  let models: unknown[] = [];
+  const setModels = ((u: unknown) => {
+    models =
+      typeof u === "function" ? (u as (p: unknown[]) => unknown[])(models) : (u as unknown[]);
+  }) as unknown as AgentEventsDeps["setModels"];
+
   const noop = (): void => {};
   stateRef.current = agentState;
   const deps: AgentEventsDeps = {
@@ -78,19 +100,22 @@ function setup(
     setThinkingAccumMs: noop as unknown as AgentEventsDeps["setThinkingAccumMs"],
     setPlanTotal: noop as unknown as AgentEventsDeps["setPlanTotal"],
     setPlanDone: noop as unknown as AgentEventsDeps["setPlanDone"],
-    setSessionTitle: noop as unknown as AgentEventsDeps["setSessionTitle"],
     setPlanReview: ((u: string | null | ((p: string | null) => string | null)) => {
       planReview = typeof u === "function" ? u(planReview) : u;
     }) as AgentEventsDeps["setPlanReview"],
     setQueuedCount: noop as unknown as AgentEventsDeps["setQueuedCount"],
+    setQueuedMessages: noop as unknown as AgentEventsDeps["setQueuedMessages"],
     setAttachments: noop as unknown as AgentEventsDeps["setAttachments"],
     setCommands: noop as unknown as AgentEventsDeps["setCommands"],
+    setModels,
+    onRoadmapPhaseDraftChange,
     stateRef,
     planDoneRef: { current: new Set<number>() },
     planTotalRef: { current: 0 },
     planReviewPathRef: { current: null },
     pendingPlanTotalRef: { current: null },
     stickToBottomRef: { current: true },
+    onSessionReset,
   };
 
   const hook = renderHook(() => useAgentEvents(deps));
@@ -98,9 +123,13 @@ function setup(
     hook,
     deps,
     getItems: () => items,
+    pushUserItem: (text: string, queued: boolean): void => {
+      setItems((prev) => [...prev, { kind: "user", id: nextId(), text, queued } as Item]);
+    },
     getLiveToolFeed: () => liveToolFeed,
     getPlanReview: () => planReview,
     getState: () => agentState,
+    getModels: () => models,
     setRunning,
     setTokens,
   };
@@ -108,6 +137,289 @@ function setup(
 
 describe("useAgentEvents", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("forwards a validated Roadmap draft event without touching transcript state", () => {
+    const onDraft = vi.fn();
+    const { hook, getItems } = setup(() => false, {}, undefined, onDraft);
+    const draft = { id: "draft-1", basedOnRevision: 3 };
+
+    act(() => hook.result.current.handleEvent(ev("roadmap_phase_draft_change", draft)));
+
+    expect(onDraft).toHaveBeenCalledWith(draft);
+    expect(getItems()).toEqual([]);
+  });
+
+  describe("queued pill lifecycle", () => {
+    it("clears a bubble's queued pill as soon as the agent consumes it, mid-run", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("first queued", true);
+      pushUserItem("second queued", true);
+
+      // The sidecar acknowledges both enqueues.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 2,
+            messages: [
+              { id: "a", text: "first queued" },
+              { id: "b", text: "second queued" },
+            ],
+          }),
+        );
+      });
+      // The agent drains ONE message at the turn boundary: the sidecar
+      // re-broadcasts queue_drained as `queued` with the remaining list.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "b", text: "second queued" }] }),
+        );
+      });
+
+      const users = getItems().filter((it) => it.kind === "user");
+      expect(users[0]?.queued).toBe(false);
+      // The still-pending one keeps its pill.
+      expect(users[1]?.queued).toBe(true);
+    });
+
+    it("clears the rest once the queue fully drains, still mid-run", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("first queued", true);
+      pushUserItem("second queued", true);
+
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 2,
+            messages: [
+              { id: "a", text: "first queued" },
+              { id: "b", text: "second queued" },
+            ],
+          }),
+        );
+      });
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "b", text: "second queued" }] }),
+        );
+      });
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+
+      expect(
+        getItems()
+          .filter((it) => it.kind === "user")
+          .every((it) => it.queued === false),
+      ).toBe(true);
+    });
+
+    it("keeps the pill while the message is still pending", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("still waiting", true);
+
+      // A fresh enqueue (depth grew) must not clear anything.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "still waiting" }] }),
+        );
+      });
+
+      expect(getItems().find((it) => it.kind === "user")?.queued).toBe(true);
+    });
+
+    it("clears exactly one of two identical queued messages", () => {
+      // Set membership would leave BOTH lit here: the text is still present in
+      // the pending list, so nothing would ever clear until the queue emptied.
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("same text", true);
+      pushUserItem("same text", true);
+
+      // Both acknowledged as queued.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", {
+            count: 2,
+            messages: [
+              { id: "a", text: "same text" },
+              { id: "b", text: "same text" },
+            ],
+          }),
+        );
+      });
+      // One consumed.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "b", text: "same text" }] }),
+        );
+      });
+
+      const users = getItems().filter((it) => it.kind === "user");
+      // FIFO: the older bubble is the one the agent took.
+      expect(users[0]?.queued).toBe(false);
+      expect(users[1]?.queued).toBe(true);
+    });
+
+    it("keeps the pill on a message the sidecar has not acknowledged yet", () => {
+      // The bubble is marked queued optimistically. A queue snapshot that
+      // predates the enqueue must not clear it, because nothing re-sets the flag.
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("first", true);
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "first" }] }),
+        );
+      });
+
+      // User sends a second message; its bubble exists before the sidecar acks.
+      pushUserItem("second", true);
+      // A stale snapshot arrives listing only the first message.
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "first" }] }),
+        );
+      });
+
+      const users = getItems().filter((it) => it.kind === "user");
+      expect(users[1]?.queued).toBe(true);
+    });
+
+    it("forgets acknowledged queue texts on session reset", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("recycled", true);
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "recycled" }] }),
+        );
+      });
+      act(() => {
+        hook.result.current.handleEvent(ev("session_reset"));
+      });
+
+      // Same text queued again in the FRESH session, not yet acked.
+      pushUserItem("recycled", true);
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+
+      expect(getItems().find((it) => it.kind === "user")?.queued).toBe(true);
+    });
+
+    it("leaves already-sent bubbles untouched", () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("sent normally", false);
+
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+
+      expect(getItems().find((it) => it.kind === "user")?.queued).toBe(false);
+    });
+  });
+
+  it("reports the correlated reset after clearing the existing transcript", () => {
+    const onSessionReset = vi.fn();
+    const { hook, getItems, pushUserItem } = setup(() => false, {}, onSessionReset);
+    pushUserItem("old session", false);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("session_reset", { operationId: "reset-42" }));
+    });
+
+    expect(getItems()).toEqual([]);
+    expect(onSessionReset).toHaveBeenCalledOnce();
+    expect(onSessionReset).toHaveBeenCalledWith("reset-42");
+
+    act(() => {
+      hook.result.current.handleEvent(ev("session_reset"));
+    });
+    expect(onSessionReset).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it("removes the notice when compaction is skipped", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("compaction_start", { messageCount: 466 }));
+      hook.result.current.handleEvent(
+        ev("compaction_end", { compacted: false, originalCount: 466, newCount: 466 }),
+      );
+    });
+
+    expect(getItems()).toEqual([]);
+  });
+
+  it("completes the notice when messages were compacted", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("compaction_start", { messageCount: 466 }));
+      hook.result.current.handleEvent(
+        ev("compaction_end", { compacted: true, originalCount: 466, newCount: 42 }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "compaction",
+        status: "done",
+        originalCount: 466,
+        newCount: 42,
+      }),
+    ]);
+  });
+
+  it("keeps the run owned while cancellation is pending", () => {
+    const { hook, getState, setRunning } = setup(() => false, {
+      running: true,
+      runState: "running",
+    });
+    act(() => hook.result.current.handleEvent(ev("run_cancelling", { runState: "cancelling" })));
+    expect(getState()).toMatchObject({ running: true, runState: "cancelling" });
+    expect(setRunning).toHaveBeenLastCalledWith(true);
+  });
+
+  it("restores the running affordance after cancellation failure", () => {
+    const { hook, getState, setRunning } = setup(() => false, {
+      running: true,
+      runState: "cancelling",
+    });
+    act(() => hook.result.current.handleEvent(ev("cancel_failed", { runState: "running" })));
+    expect(getState()).toMatchObject({ running: true, runState: "running" });
+    expect(setRunning).toHaveBeenLastCalledWith(true);
+  });
+
+  it("becomes idle only when the owning run emits run_end", () => {
+    const { hook, getState, setRunning } = setup(() => false, {
+      running: true,
+      runState: "cancelling",
+    });
+    act(() => hook.result.current.handleEvent(ev("run_end", { cancelled: true })));
+    expect(getState()).toMatchObject({ running: false, runState: "idle" });
+    expect(setRunning).toHaveBeenLastCalledWith(false);
+  });
+
+  it("refreshes branch and uncommitted-file count from workspace extras", () => {
+    const { hook, getState } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("extras", { gitBranch: "feature/dirty", isGitRepo: true, gitDirtyFileCount: 4 }),
+      );
+    });
+
+    expect(getState()).toMatchObject({
+      gitBranch: "feature/dirty",
+      isGitRepo: true,
+      gitDirtyFileCount: 4,
+    });
+  });
 
   it("text_delta streams assistant text into a single item", () => {
     const { hook, getItems } = setup();
@@ -128,6 +440,82 @@ describe("useAgentEvents", () => {
     items = getItems();
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "assistant", text: "Hello world" });
+  });
+
+  it("discards the candidate draft before showing the Ideal hook and reviewed final", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unreviewed draft" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: " tail" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "ideal" })]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Reviewed final" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+      expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
+    ]);
+  });
+
+  it("shows an asynchronous prompt-failed phase error and deduplicates run failed", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+    });
+    expect(getItems()).toEqual([]);
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_launch_error", {
+          operationId: "phase-start-1",
+          phaseId: "phase-1",
+          code: "prompt-failed",
+          message: "The phase prompt failed. Resume the phase to retry.",
+          detail: "provider unavailable",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("error", {
+          headline: "Provider unavailable.",
+          message: "provider unavailable",
+          guidance: "Try again.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "The phase prompt failed. Resume the phase to retry.",
+        message: "provider unavailable",
+      }),
+    ]);
+  });
+
+  it("shows a launch-failed phase error without waiting for a run error", () => {
+    const { hook, getItems } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("phase_launch_error", {
+          operationId: "phase-start-2",
+          phaseId: "phase-2",
+          code: "launch-failed",
+          message: "The phase could not be launched. Review its attention note and retry.",
+        }),
+      );
+    });
+
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        headline: "The phase could not be launched. Review its attention note and retry.",
+      }),
+    ]);
   });
 
   it("error with a structured payload (headline/message/guidance) pushes a structured error item", () => {
@@ -193,6 +581,13 @@ describe("useAgentEvents", () => {
     expect(setTokens).toHaveBeenLastCalledWith(15);
   });
 
+  it("updates the active chat agent after a handoff", () => {
+    const { hook, getState } = setup(() => false, { chatAgent: "general" });
+    act(() => {
+      hook.result.current.handleEvent(ev("chat_agent_change", { chatAgent: "therapist" }));
+    });
+    expect(getState()).toMatchObject({ chatAgent: "therapist" });
+  });
   it("delegates ken_ events to handleKenEvent and does not handle them locally", () => {
     const handleKenEvent = vi.fn(() => true);
     const { hook, getItems, setRunning } = setup(handleKenEvent);
@@ -252,16 +647,16 @@ describe("useAgentEvents", () => {
     expect(getPlanReview()).toBe("# Plan");
   });
 
-  it("plan_exit hides the human review modal when autopilot is on", () => {
+  it("plan_exit keeps the human review modal available while autopilot reviews", () => {
     const { hook, getPlanReview, deps } = setup(() => false, { autopilot: true });
     act(() => {
       hook.result.current.handleEvent(
         ev("plan_exit", { planPath: "/tmp/p.md", content: "# Plan" }),
       );
     });
-    // The content/path are still stashed for Ken auto-review + auto-accept step
-    // counting, but the human overlay stays hidden while autopilot owns review.
-    expect(getPlanReview()).toBeNull();
+    // Plan approval remains a blocking human-visible gate while Ken reviews;
+    // either Ken or the user can resolve it, and the submitted path stays available.
+    expect(getPlanReview()).toBe("# Plan");
     expect(deps.planReviewPathRef.current).toBe("/tmp/p.md");
   });
 
@@ -281,6 +676,34 @@ describe("useAgentEvents", () => {
     expect(marker).toMatchObject({ kind: "autopilot", phase: "plan_approved" });
   });
 
+  it("uses sidecar plan progress as the authoritative live-file snapshot", () => {
+    const { hook, deps } = setup();
+    deps.planTotalRef.current = 2;
+    deps.planDoneRef.current = new Set([1]);
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_progress", { total: 4, completed: [1, 2, 4, 99, "3"] }),
+      );
+    });
+
+    expect(deps.planTotalRef.current).toBe(4);
+    expect([...deps.planDoneRef.current]).toEqual([1, 2, 4]);
+  });
+
+  it("seeds an accepted plan from the canonical total on session reset", () => {
+    const { hook, deps } = setup();
+    deps.pendingPlanTotalRef.current = 2;
+
+    act(() => {
+      hook.result.current.handleEvent(ev("session_reset", { planTotal: 5 }));
+    });
+
+    expect(deps.pendingPlanTotalRef.current).toBeNull();
+    expect(deps.planTotalRef.current).toBe(5);
+    expect(deps.planDoneRef.current.size).toBe(0);
+  });
+
   it("autopilot_prompted closes the stale plan modal after Ken asks for revision", () => {
     const { hook, getPlanReview } = setup();
     act(() => {
@@ -297,15 +720,208 @@ describe("useAgentEvents", () => {
     expect(getPlanReview()).toBeNull();
   });
 
-  it("run_end clears running state", () => {
-    const { hook, setRunning } = setup();
+  it("run_end clears completed plan progress and running state", () => {
+    const { hook, deps, setRunning } = setup();
+    deps.planTotalRef.current = 3;
+    deps.planDoneRef.current = new Set([1, 2, 3]);
+
     act(() => {
       hook.result.current.handleEvent(ev("run_start"));
-    });
-    expect(setRunning).toHaveBeenLastCalledWith(true);
-    act(() => {
       hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
     });
+
     expect(setRunning).toHaveBeenLastCalledWith(false);
+    expect(deps.planTotalRef.current).toBe(0);
+    expect(deps.planDoneRef.current.size).toBe(0);
+  });
+
+  it("upserts persistent async agents by agent_id through idle and interrupted states", async () => {
+    const { hook, getItems } = setup();
+    const base = {
+      agent_id: "abcd1234",
+      task_name: "scan auth",
+      started_at: 1,
+      updated_at: 2,
+      elapsed_ms: 10,
+      turn_count: 0,
+      tool_use_count: 0,
+      token_usage: { input: 0, output: 0 },
+    };
+    act(() =>
+      hook.result.current.handleEvent(ev("subagent_state", { ...base, state: "starting" })),
+    );
+    act(() =>
+      hook.result.current.handleEvent(
+        ev("subagent_state", {
+          ...base,
+          state: "completed",
+          elapsed_ms: 30,
+          tool_use_count: 2,
+          token_usage: { input: 10, output: 3, cacheRead: 20, cacheWrite: 5 },
+        }),
+      ),
+    );
+    await flushSubagents();
+    const groups = getItems().filter((item) => item.kind === "subagent_group");
+    expect(groups).toHaveLength(1);
+    const group = groups[0];
+    expect(group?.kind === "subagent_group" ? group.agents : []).toMatchObject([
+      {
+        toolCallId: "abcd1234",
+        status: "idle",
+        async: true,
+        toolUseCount: 2,
+        tokenUsage: { input: 10, output: 3, cacheRead: 20, cacheWrite: 5 },
+      },
+    ]);
+  });
+
+  it("preserves distinct subagent activities coalesced within one flush", async () => {
+    const { hook, getItems } = setup();
+    const base = {
+      agent_id: "abcd1234",
+      task_name: "scan auth",
+      state: "running",
+      started_at: 1,
+      updated_at: 2,
+      elapsed_ms: 10,
+      turn_count: 0,
+      tool_use_count: 1,
+      token_usage: { input: 0, output: 0 },
+    };
+
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("subagent_state", { ...base, current_activity: "Reading auth.ts" }),
+      );
+      hook.result.current.handleEvent(
+        ev("subagent_state", {
+          ...base,
+          tool_use_count: 2,
+          current_activity: "Searching token refresh",
+        }),
+      );
+    });
+    await flushSubagents();
+
+    const group = getItems().find((item) => item.kind === "subagent_group");
+    expect(group?.kind === "subagent_group" ? group.agents[0]?.activities : []).toEqual([
+      "Reading auth.ts",
+      "Searching token refresh",
+    ]);
+  });
+
+  it("keeps late async snapshots attached to their original run group", async () => {
+    const { hook, getItems } = setup();
+    const snapshot = (agentId: string, state: "starting" | "completed") => ({
+      agent_id: agentId,
+      task_name: agentId,
+      state,
+      started_at: 1,
+      updated_at: 2,
+      elapsed_ms: 10,
+      turn_count: 0,
+      tool_use_count: 0,
+      token_usage: { input: 0, output: 0 },
+    });
+
+    act(() => {
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("subagent_state", snapshot("old-agent", "starting")));
+      hook.result.current.handleEvent(ev("run_end", { cancelled: false }));
+      hook.result.current.handleEvent(ev("run_start"));
+      hook.result.current.handleEvent(ev("subagent_state", snapshot("new-agent", "starting")));
+      hook.result.current.handleEvent(ev("subagent_state", snapshot("old-agent", "completed")));
+    });
+    await flushSubagents();
+
+    const groups = getItems().filter((item) => item.kind === "subagent_group");
+    expect(groups).toHaveLength(2);
+    expect(groups[0]?.kind === "subagent_group" ? groups[0].agents : []).toMatchObject([
+      { toolCallId: "old-agent", status: "idle" },
+    ]);
+    expect(groups[1]?.kind === "subagent_group" ? groups[1].agents : []).toMatchObject([
+      { toolCallId: "new-agent", status: "starting" },
+    ]);
+  });
+});
+
+describe("models_change", () => {
+  it("refreshes the picker when local-model discovery lands", async () => {
+    const discovered = [
+      { id: "local/ollama/gemma4:e2b", name: "gemma4:e2b (Ollama)", provider: "local" },
+    ];
+    vi.mocked(listModels).mockResolvedValue(discovered as never);
+    const { hook, getModels } = setup();
+
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    // Without this the boot scan finds the user's models and nothing ever
+    // shows them until the app restarts.
+    expect(listModels).toHaveBeenCalled();
+    expect(getModels()).toEqual(discovered);
+  });
+
+  it("refreshes the picker when a provider is connected", async () => {
+    // Connecting a provider unlocks its models; the sidecar fans models_change
+    // out to every window because ~/.gg/auth.json is shared, not per-session.
+    const unlocked = [
+      { id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" },
+      { id: "gpt-6", name: "GPT-6", provider: "openai" },
+    ];
+    vi.mocked(listModels).mockResolvedValue(unlocked as never);
+    const { hook, getModels } = setup();
+
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    expect(getModels()).toEqual(unlocked);
+  });
+
+  it("keeps the existing list when the refresh itself fails", async () => {
+    const seeded = [{ id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" }];
+    vi.mocked(listModels).mockResolvedValue(seeded as never);
+    const { hook, getModels } = setup();
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+    expect(getModels()).toEqual(seeded);
+
+    // null = the IPC call failed. Wiping the picker on a transient failure
+    // would strand the user with no way to switch models.
+    vi.mocked(listModels).mockResolvedValue(null as never);
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    expect(getModels()).toEqual(seeded);
+  });
+
+  it("clears the picker when the last provider is disconnected", async () => {
+    const seeded = [{ id: "claude-opus-5", name: "Claude Opus 5", provider: "anthropic" }];
+    vi.mocked(listModels).mockResolvedValue(seeded as never);
+    const { hook, getModels } = setup();
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+    expect(getModels()).toEqual(seeded);
+
+    // [] is a real answer, not a failure: every provider is now disconnected.
+    // Leaving the old list up would offer models that can no longer authenticate.
+    vi.mocked(listModels).mockResolvedValue([] as never);
+    await act(async () => {
+      hook.result.current.handleEvent(ev("models_change"));
+      await Promise.resolve();
+    });
+
+    expect(getModels()).toEqual([]);
   });
 });

@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { z } from "zod";
-import { ProviderError } from "@kenkaiiii/gg-ai";
+import { GGAIError, ProviderError } from "@kenkaiiii/gg-ai";
 import {
   agentLoop,
+  capToolResults,
+  capTurnToolResults,
   classifyOverload,
   extractContextOverflowDetails,
   isBillingError,
@@ -11,8 +13,8 @@ import {
   isUsageLimitError,
   serverResetDelayMs,
 } from "./agent-loop.js";
-import type { AgentEvent, AgentResult, AgentTool } from "./types.js";
-import type { Message, StreamOptions } from "@kenkaiiii/gg-ai";
+import type { AgentEvent, AgentResult, AgentTool, TransformContextOptions } from "./types.js";
+import type { Message, StreamOptions, ToolResult, Usage } from "@kenkaiiii/gg-ai";
 
 // ── Mock stream ────────────────────────────────────────────
 
@@ -48,6 +50,22 @@ function mockOkResult(text: string) {
   };
 }
 
+function mockToolCallResult(name: string, usage: Usage, id = "t1") {
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      yield* [];
+    },
+    response: Promise.resolve({
+      message: {
+        role: "assistant" as const,
+        content: [{ type: "tool_call" as const, id, name, args: {} }],
+      },
+      stopReason: "tool_use" as const,
+      usage,
+    }),
+  };
+}
+
 function mockErrorResult(error: Error) {
   const p = Promise.reject(error);
   p.catch(() => {}); // prevent unhandled rejection
@@ -57,6 +75,28 @@ function mockErrorResult(error: Error) {
       throw error;
     },
     response: p,
+  };
+}
+
+function mockRunawayToolCallResult(kind: "events" | "chars") {
+  const error = Object.assign(new Error("aborted runaway tool call"), { name: "AbortError" });
+  const response = Promise.reject(error);
+  response.catch(() => {});
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      const count = kind === "events" ? 20_001 : 1;
+      const argsJson = kind === "chars" ? "x".repeat(1_000_001) : "";
+      for (let index = 0; index < count; index++) {
+        yield {
+          type: "toolcall_delta" as const,
+          id: "runaway",
+          name: "write",
+          argsJson,
+        };
+      }
+      throw error;
+    },
+    response,
   };
 }
 
@@ -175,17 +215,29 @@ describe("isContextOverflow", () => {
 });
 
 describe("classifyOverload", () => {
-  it("classifies provider 5xx and api_error as transient provider errors", () => {
+  it("classifies transient provider 5xx and api_error as provider errors", () => {
     const cases = [
       new ProviderError("anthropic", "api_error: Internal server error", { statusCode: undefined }),
       new ProviderError("anthropic", "Internal server error", { statusCode: 500 }),
       new ProviderError("anthropic", "Bad Gateway", { statusCode: 502 }),
       new ProviderError("anthropic", "Service Unavailable", { statusCode: 503 }),
       new ProviderError("anthropic", "Gateway Timeout", { statusCode: 504 }),
+      new ProviderError("openai", "exceeded request buffer limit while retrying upstream", {
+        statusCode: 507,
+      }),
+      new ProviderError("openai", "exceeded request buffer limit while retrying upstream"),
     ];
 
     for (const error of cases) {
       expect(classifyOverload(error)).toBe("provider_error");
+    }
+  });
+
+  it("does not retry permanent 5xx responses", () => {
+    for (const statusCode of [501, 505, 511]) {
+      expect(
+        classifyOverload(new ProviderError("openai", "Permanent server response", { statusCode })),
+      ).toBeNull();
     }
   });
 
@@ -310,6 +362,38 @@ describe("agentLoop", () => {
     expect(result.totalTurns).toBe(1);
     expect(result.totalUsage.inputTokens).toBe(100);
     expect(result.totalUsage.outputTokens).toBe(50);
+    const turnEnd = events.find((event) => event.type === "turn_end");
+    expect(turnEnd?.type === "turn_end" ? turnEnd.timing : undefined).toMatchObject({
+      startedAt: expect.any(Number),
+      firstProviderEventAt: expect.any(Number),
+      completedAt: expect.any(Number),
+      providerDurationMs: expect.any(Number),
+      ttftMs: expect.any(Number),
+    });
+    if (turnEnd?.type === "turn_end") {
+      expect(turnEnd.timing.completedAt).toBeGreaterThanOrEqual(turnEnd.timing.startedAt);
+      expect(turnEnd.timing.providerDurationMs).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("forwards Codex transport identity separately from prompt cache routing", async () => {
+    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "openai",
+      model: "gpt-5.6-luna",
+      transportSessionId: "transport-session",
+      promptCacheKey: "shared-cache-family",
+      toolChoice: "none",
+    });
+
+    expect(mockStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transportSessionId: "transport-session",
+        promptCacheKey: "shared-cache-family",
+        toolChoice: "none",
+      }),
+    );
   });
 
   it("calls transformContext before each LLM call", async () => {
@@ -329,7 +413,155 @@ describe("agentLoop", () => {
     });
 
     expect(transformContext).toHaveBeenCalledTimes(1);
-    expect(transformContext).toHaveBeenCalledWith(messages);
+    expect(transformContext).toHaveBeenCalledWith(messages, {
+      usage: undefined,
+      pendingMessages: [],
+    });
+  });
+
+  it("passes provider usage and pending tool results to the next transform", async () => {
+    const usage: Usage = {
+      inputTokens: 70,
+      outputTokens: 30,
+      cacheRead: 11,
+      cacheWrite: 7,
+    };
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", usage) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const transformContext = vi.fn((msgs: Message[], _options: TransformContextOptions) => msgs);
+    await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "run the tool" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [
+          {
+            name: "context_probe",
+            description: "returns pending context",
+            parameters: emptyParams,
+            execute: () => "pending tool output",
+          },
+        ],
+        transformContext,
+      },
+    );
+
+    expect(transformContext).toHaveBeenCalledTimes(2);
+    const secondOptions = transformContext.mock.calls[1]![1] as TransformContextOptions;
+    expect(secondOptions.usage).toEqual(usage);
+    expect(secondOptions.pendingMessages).toHaveLength(1);
+    expect(secondOptions.pendingMessages[0]).toMatchObject({ role: "tool" });
+    expect(JSON.stringify(secondOptions.pendingMessages[0]?.content)).toContain(
+      "pending tool output",
+    );
+  });
+
+  it("uses transformed history for the next provider call", async () => {
+    const providerPrompts: Message[][] = [];
+    mockStream
+      .mockImplementationOnce((options: StreamOptions) => {
+        providerPrompts.push(structuredClone(options.messages));
+        return mockToolCallResult("context_probe", {
+          inputTokens: 70,
+          outputTokens: 30,
+        }) as unknown as ReturnType<typeof stream>;
+      })
+      .mockImplementationOnce((options: StreamOptions) => {
+        providerPrompts.push(structuredClone(options.messages));
+        return mockOkResult("done") as unknown as ReturnType<typeof stream>;
+      });
+
+    const compacted: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "compacted history" },
+    ];
+    let transformCall = 0;
+    const transformContext = vi.fn((msgs: Message[]) => {
+      transformCall++;
+      return transformCall === 2 ? compacted : msgs;
+    });
+
+    await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "old history" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [
+          {
+            name: "context_probe",
+            description: "returns context",
+            parameters: emptyParams,
+            execute: () => "large pending result",
+          },
+        ],
+        transformContext,
+      },
+    );
+
+    expect(providerPrompts).toHaveLength(2);
+    expect(providerPrompts[1]).toEqual(compacted);
+  });
+
+  it("clears the usage anchor when a transform replaces history", async () => {
+    const firstUsage: Usage = { inputTokens: 80, outputTokens: 20, cacheRead: 5 };
+    const overflow = new Error("prompt is too long: 250000 tokens > 200000 maximum");
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", firstUsage) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockErrorResult(overflow) as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("recovered") as unknown as ReturnType<typeof stream>);
+
+    let transformCall = 0;
+    const transformContext = vi.fn((msgs: Message[], options: TransformContextOptions) => {
+      transformCall++;
+      if (transformCall === 2) {
+        return [
+          { role: "system" as const, content: "sys" },
+          { role: "user" as const, content: "compacted history" },
+        ];
+      }
+      if (options.force) return msgs.slice(0, 1);
+      return msgs;
+    });
+
+    await collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "old history" },
+      ],
+      {
+        provider: "anthropic",
+        model: "test",
+        tools: [
+          {
+            name: "context_probe",
+            description: "returns context",
+            parameters: emptyParams,
+            execute: () => "pending result",
+          },
+        ],
+        transformContext,
+      },
+    );
+
+    expect((transformContext.mock.calls[1]![1] as TransformContextOptions).usage).toEqual(
+      firstUsage,
+    );
+    const forcedOptions = transformContext.mock.calls.find(
+      (call) => (call[1] as TransformContextOptions).force,
+    )?.[1] as TransformContextOptions;
+    expect(forcedOptions).toEqual({ force: true, usage: undefined, pendingMessages: [] });
   });
 
   it("replaces messages when transformContext returns a new array", async () => {
@@ -714,6 +946,47 @@ describe("agentLoop", () => {
     ).rejects.toThrow("authentication failed");
   });
 
+  it("allows silent OpenAI reasoning to exceed the normal 90-second hard cap", async () => {
+    vi.useFakeTimers();
+
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      const response = makeResponse("Finished reasoning.");
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, 120_000);
+            opts.signal?.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+              },
+              { once: true },
+            );
+          });
+          yield { type: "text_delta" as const, text: "Finished reasoning." };
+        },
+        response: Promise.resolve(response),
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "solve this" },
+      ],
+      { provider: "openai", model: "gpt-test", thinking: "medium" },
+    );
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    expect(mockStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(events.some((event) => event.type === "agent_done")).toBe(true);
+  });
+
   it("flips to non-streaming fallback after repeated stream stalls", async () => {
     vi.useFakeTimers();
 
@@ -772,7 +1045,122 @@ describe("agentLoop", () => {
 
     expect(events.some((e) => e.type === "agent_done")).toBe(true);
     expect(result.totalTurns).toBe(1); // stall retries don't count as turns
+    const turnEnd = events.find((event) => event.type === "turn_end");
+    expect(turnEnd?.type === "turn_end" ? turnEnd.timing.ttftMs : 0).toBeGreaterThanOrEqual(90_000);
+    expect(
+      turnEnd?.type === "turn_end" ? turnEnd.timing.providerDurationMs : 0,
+    ).toBeGreaterThanOrEqual(90_000);
   }, 30_000);
+
+  it("classifies exhausted stalls as a device or network-path failure", async () => {
+    vi.useFakeTimers();
+
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      const abortPromise = new Promise<never>((_, reject) => {
+        opts.signal?.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+      abortPromise.catch(() => {});
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+          await abortPromise;
+        },
+        response: abortPromise,
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    const loopPromise = collectLoop(
+      [
+        { role: "system", content: "sys" },
+        { role: "user", content: "hi" },
+      ],
+      { provider: "openai", model: "test" },
+    );
+
+    // Two streaming attempts time out after 45s; the remaining attempts use
+    // the 5-minute non-streaming cap. Drive every timeout and retry backoff.
+    for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(310_000);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    const terminal = events.find((event) => event.type === "error");
+    expect(terminal?.type).toBe("error");
+    if (terminal?.type !== "error") throw new Error("expected terminal error");
+    expect(terminal.error).toBeInstanceOf(GGAIError);
+    expect((terminal.error as GGAIError).source).toBe("network");
+    expect((terminal.error as GGAIError).hint).toContain("VPN or proxy");
+    expect(terminal.error.message).toContain("after 5 automatic retries");
+  }, 30_000);
+
+  it("automatically replays a turn after a runaway tool-call stream", async () => {
+    vi.useFakeTimers();
+    mockStream
+      .mockReturnValueOnce(
+        mockRunawayToolCallResult("events") as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(
+        mockOkResult("Recovered automatically.") as unknown as ReturnType<typeof stream>,
+      );
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "continue the task" },
+    ];
+    const loopPromise = collectLoop(messages, { provider: "openai", model: "test" });
+    await vi.advanceTimersByTimeAsync(1_100);
+    const { events, result } = await loopPromise;
+    vi.useRealTimers();
+
+    expect(mockStream).toHaveBeenCalledTimes(2);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "retry",
+        reason: "runaway_toolcall",
+        attempt: 1,
+        maxAttempts: 2,
+        delayMs: 1_000,
+        silent: true,
+      }),
+    );
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(events.some((event) => event.type === "agent_done")).toBe(true);
+    expect(result.totalTurns).toBe(1);
+  });
+
+  it("bounds runaway tool-call auto-retries", async () => {
+    vi.useFakeTimers();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      mockStream.mockReturnValueOnce(
+        mockRunawayToolCallResult("chars") as unknown as ReturnType<typeof stream>,
+      );
+    }
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "continue the task" },
+    ];
+    const loopPromise = collectLoop(messages, { provider: "openai", model: "test" });
+    await vi.advanceTimersByTimeAsync(3_100);
+    const { events } = await loopPromise;
+    vi.useRealTimers();
+
+    expect(mockStream).toHaveBeenCalledTimes(3);
+    expect(
+      events.filter((event) => event.type === "retry" && event.reason === "runaway_toolcall"),
+    ).toHaveLength(2);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "error",
+        error: expect.objectContaining({
+          message: expect.stringContaining("after 2 automatic retries"),
+        }),
+      }),
+    );
+  });
 
   it("preserves partial streamed text across a transport-failure retry", async () => {
     vi.useFakeTimers();
@@ -832,7 +1220,10 @@ describe("agentLoop", () => {
     const partialIdx = texts.findIndex((t) => t === partial);
     expect(partialIdx).toBeGreaterThan(-1);
     expect(messages[partialIdx].role).toBe("assistant");
-    expect(messages[partialIdx + 1].role).toBe("user");
+    expect(messages[partialIdx + 1]).toMatchObject({
+      role: "user",
+      provenance: { source: "runtime", kind: "continuation", visibility: "hidden" },
+    });
     expect(texts[partialIdx + 1]).toContain("cut off");
     expect(texts.some((t) => t === "and the second half.")).toBe(true);
   }, 30_000);
@@ -1012,6 +1403,91 @@ describe("agentLoop", () => {
     );
 
     expect(calls).toEqual(["mutate:start", "mutate:end", "read_after"]);
+  });
+
+  it("redacts successful tool output before events and provider context", async () => {
+    const canary = "sk-ant-api03-canarysecret123456";
+    mockStream
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve({
+          message: {
+            role: "assistant" as const,
+            content: [{ type: "tool_call" as const, id: "t1", name: "secret", args: {} }],
+          },
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        }),
+      } as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [
+        {
+          name: "secret",
+          description: "returns a canary",
+          parameters: emptyParams,
+          execute: () => ({ content: `result ${canary}`, details: { apiKey: canary } }),
+        },
+      ],
+    });
+
+    const serializedEvents = JSON.stringify(events);
+    const serializedMessages = JSON.stringify(messages);
+    expect(serializedEvents).not.toContain(canary);
+    expect(serializedMessages).not.toContain(canary);
+    expect(serializedEvents).toContain("[REDACTED]");
+    expect(serializedMessages).toContain("[REDACTED]");
+  });
+
+  it("redacts failed tool output before events and provider context", async () => {
+    const canary = "sk-ant-api03-failuresecret123456";
+    mockStream
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve({
+          message: {
+            role: "assistant" as const,
+            content: [{ type: "tool_call" as const, id: "t1", name: "secret", args: {} }],
+          },
+          stopReason: "tool_use",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        }),
+      } as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [
+        {
+          name: "secret",
+          description: "throws a canary",
+          parameters: emptyParams,
+          execute: () => {
+            throw new Error(`request failed with ${canary}`);
+          },
+        },
+      ],
+    });
+
+    expect(JSON.stringify(events)).not.toContain(canary);
+    expect(JSON.stringify(messages)).not.toContain(canary);
+    expect(JSON.stringify(messages)).toContain("[REDACTED]");
   });
 
   it("stops after repeated invalid tool arguments with non-empty args", async () => {
@@ -1247,4 +1723,526 @@ describe("agentLoop", () => {
     expect(events.some((e) => e.type === "max_turns")).toBe(false);
     expect(events.some((e) => e.type === "agent_done")).toBe(true);
   });
+});
+
+describe("agentLoop turn budget extension", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  const tools = [
+    {
+      name: "test_tool",
+      description: "test",
+      parameters: { parse: () => ({}) } as never,
+      execute: () => "result",
+    },
+  ];
+
+  /** Calls a tool for `toolTurns` turns, then answers cleanly. */
+  function mockToolThenDone(toolTurns: number) {
+    let calls = 0;
+    mockStream.mockImplementation(() => {
+      calls++;
+      const result =
+        calls <= toolTurns
+          ? mockToolCallResult("test_tool", { inputTokens: 1, outputTokens: 1 })
+          : mockOkResult("finished");
+      return result as unknown as ReturnType<typeof stream>;
+    });
+  }
+
+  function baseMessages(): Message[] {
+    return [
+      { role: "system", content: "sys" },
+      { role: "user", content: "do the long thing" },
+    ];
+  }
+
+  it("completes a task that needs more than maxTurns when an extension is granted", async () => {
+    // Needs 4 tool turns + 1 answer turn, but the budget is 2.
+    mockToolThenDone(4);
+    const grants: Array<{ turn: number; maxTurns: number; extension: number }> = [];
+
+    const { events, result } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      tools,
+      onTurnBudgetExhausted: (ctx) => {
+        grants.push(ctx);
+        return true;
+      },
+    });
+
+    expect(grants).toEqual([
+      { turn: 2, maxTurns: 2, extension: 1 },
+      { turn: 4, maxTurns: 4, extension: 2 },
+    ]);
+    const extended = events.filter((e) => e.type === "turn_budget_extended");
+    expect(extended).toEqual([
+      { type: "turn_budget_extended", turn: 2, grantedTurns: 4, extension: 1 },
+      { type: "turn_budget_extended", turn: 4, grantedTurns: 6, extension: 2 },
+    ]);
+    // Finished cleanly inside the extended budget — no cut-off signal.
+    expect(events.some((e) => e.type === "max_turns")).toBe(false);
+    expect(result.totalTurns).toBe(5);
+  });
+
+  it("injects a continuation that never re-sends text already in context", async () => {
+    mockToolThenDone(2);
+    const messages = baseMessages();
+
+    await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      tools,
+      onTurnBudgetExhausted: () => true,
+    });
+
+    const continuation = messages.find(
+      (m) => m.role === "user" && typeof m.content === "string" && m.content.includes("turn limit"),
+    );
+    expect(continuation).toMatchObject({
+      provenance: { source: "runtime", kind: "continuation", visibility: "hidden" },
+    });
+    // The original request is already in `messages`; echoing it back would be
+    // paid-for duplication of tokens the model can already see.
+    expect(continuation!.content).not.toContain("do the long thing");
+    expect(continuation!.content).toContain("do not restart work that is already complete");
+    // Small enough that granting turns is never a meaningful token cost.
+    expect(String(continuation!.content).length).toBeLessThan(400);
+  });
+
+  it("keeps today's max_turns behaviour when the extension is refused", async () => {
+    mockToolThenDone(Number.POSITIVE_INFINITY);
+
+    const { events, result } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 3,
+      tools,
+      onTurnBudgetExhausted: () => false,
+    });
+
+    expect(events.some((e) => e.type === "turn_budget_extended")).toBe(false);
+    const maxTurnsEvents = events.filter((e) => e.type === "max_turns");
+    expect(maxTurnsEvents).toHaveLength(1);
+    expect(maxTurnsEvents[0]).toMatchObject({ totalTurns: 3, maxTurns: 3 });
+    expect(result.totalTurns).toBe(3);
+  });
+
+  it("treats a throwing hook as a refusal", async () => {
+    mockToolThenDone(Number.POSITIVE_INFINITY);
+
+    const { events } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      tools,
+      onTurnBudgetExhausted: () => {
+        throw new Error("host exploded");
+      },
+    });
+
+    expect(events.some((e) => e.type === "turn_budget_extended")).toBe(false);
+    expect(events.filter((e) => e.type === "max_turns")).toHaveLength(1);
+  });
+
+  it("stops at the extension cap and emits max_turns after the last extension", async () => {
+    mockToolThenDone(Number.POSITIVE_INFINITY);
+    let calls = 0;
+
+    const { events, result } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      maxTurnExtensions: 1,
+      tools,
+      onTurnBudgetExhausted: () => {
+        calls++;
+        return true;
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(events.filter((e) => e.type === "turn_budget_extended")).toHaveLength(1);
+    // Cut-off reports the *extended* budget, which is what actually ran out.
+    expect(events.filter((e) => e.type === "max_turns")[0]).toMatchObject({
+      totalTurns: 4,
+      maxTurns: 4,
+    });
+    expect(result.totalTurns).toBe(4);
+
+    // Ordering: every extension precedes the terminal max_turns, which precedes agent_done.
+    const extendIndex = events.findIndex((e) => e.type === "turn_budget_extended");
+    const maxTurnsIndex = events.findIndex((e) => e.type === "max_turns");
+    const doneIndex = events.findIndex((e) => e.type === "agent_done");
+    expect(extendIndex).toBeLessThan(maxTurnsIndex);
+    expect(maxTurnsIndex).toBeLessThan(doneIndex);
+  });
+
+  it("never consults the hook when maxTurnExtensions is 0", async () => {
+    mockToolThenDone(Number.POSITIVE_INFINITY);
+    const hook = vi.fn(() => true);
+
+    const { events } = await collectLoop(baseMessages(), {
+      provider: "anthropic",
+      model: "test",
+      maxTurns: 2,
+      maxTurnExtensions: 0,
+      tools,
+      onTurnBudgetExhausted: hook,
+    });
+
+    expect(hook).not.toHaveBeenCalled();
+    expect(events.filter((e) => e.type === "max_turns")).toHaveLength(1);
+  });
+});
+
+describe("agentLoop truncation handling", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  function mockStopResult(text: string, stopReason: string) {
+    const resp = makeResponse(text, stopReason);
+    const events = text ? [{ type: "text_delta" as const, text }] : [];
+    return {
+      [Symbol.asyncIterator]: async function* () {
+        for (const e of events) yield e;
+      },
+      response: Promise.resolve(resp),
+    };
+  }
+
+  const truncatedEvents = (events: AgentEvent[]) =>
+    events.filter((e): e is Extract<AgentEvent, { type: "truncated" }> => e.type === "truncated");
+
+  it("injects a continuation after a max_tokens stop and resumes the output", async () => {
+    mockStream
+      .mockReturnValueOnce(
+        mockStopResult("first half", "max_tokens") as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(
+        mockStopResult("second half", "end_turn") as unknown as ReturnType<typeof stream>,
+      );
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "go" },
+    ];
+
+    const { events, result } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+    });
+
+    const truncated = truncatedEvents(events);
+    expect(truncated).toEqual([{ type: "truncated", reason: "max_tokens", continued: true }]);
+    expect(events.some((e) => e.type === "agent_done")).toBe(true);
+    expect(result.totalTurns).toBe(2);
+
+    // The continuation user message was injected between the two assistant parts.
+    const continuation = messages.find(
+      (m) =>
+        m.role === "user" &&
+        typeof m.content === "string" &&
+        m.content.includes("output-token limit"),
+    );
+    expect(continuation).toMatchObject({
+      provenance: { source: "runtime", kind: "continuation", visibility: "hidden" },
+    });
+    // Both parts are preserved in history — no replay.
+    const assistantTexts = messages
+      .filter((m) => m.role === "assistant")
+      .map((m) =>
+        Array.isArray(m.content)
+          ? m.content
+              .filter((p): p is { type: "text"; text: string } => p.type === "text")
+              .map((p) => p.text)
+              .join("")
+          : m.content,
+      );
+    expect(assistantTexts).toEqual(["first half", "second half"]);
+  });
+
+  it("stops continuing after two max_tokens continuations and warns", async () => {
+    mockStream.mockReturnValue(
+      mockStopResult("partial", "max_tokens") as unknown as ReturnType<typeof stream>,
+    );
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+    });
+
+    const truncated = truncatedEvents(events);
+    expect(truncated).toEqual([
+      { type: "truncated", reason: "max_tokens", continued: true },
+      { type: "truncated", reason: "max_tokens", continued: true },
+      { type: "truncated", reason: "max_tokens", continued: false },
+    ]);
+    expect(events.some((e) => e.type === "agent_done")).toBe(true);
+  });
+
+  it("emits a provider_error truncated warning on an error stop", async () => {
+    mockStream.mockReturnValueOnce(
+      mockStopResult("degraded", "error") as unknown as ReturnType<typeof stream>,
+    );
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+    });
+
+    const truncated = truncatedEvents(events);
+    expect(truncated).toEqual([{ type: "truncated", reason: "provider_error", continued: false }]);
+    expect(events.some((e) => e.type === "agent_done")).toBe(true);
+  });
+
+  it("emits a refusal truncated warning on a refusal stop", async () => {
+    mockStream.mockReturnValueOnce(
+      mockStopResult("no", "refusal") as unknown as ReturnType<typeof stream>,
+    );
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+    });
+
+    expect(truncatedEvents(events)).toEqual([
+      { type: "truncated", reason: "refusal", continued: false },
+    ]);
+  });
+
+  it("executes tools normally on max_tokens with tool calls — no truncated event", async () => {
+    const toolResp = {
+      [Symbol.asyncIterator]: async function* () {
+        yield* [];
+      },
+      response: Promise.resolve({
+        message: {
+          role: "assistant" as const,
+          content: [{ type: "tool_call" as const, id: "t1", name: "echo", args: {} }],
+        },
+        stopReason: "max_tokens" as const,
+        usage: { inputTokens: 100, outputTokens: 50 },
+      }),
+    };
+    mockStream
+      .mockReturnValueOnce(toolResp as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(
+        mockStopResult("done", "end_turn") as unknown as ReturnType<typeof stream>,
+      );
+
+    const echo: AgentTool = {
+      name: "echo",
+      description: "echo",
+      parameters: emptyParams,
+      execute: vi.fn().mockResolvedValue("ok"),
+    };
+
+    const { events } = await collectLoop([{ role: "user", content: "go" }], {
+      provider: "anthropic",
+      model: "test",
+      tools: [echo],
+    });
+
+    expect(truncatedEvents(events)).toEqual([]);
+    expect(echo.execute).toHaveBeenCalledTimes(1);
+    expect(events.some((e) => e.type === "agent_done")).toBe(true);
+  });
+});
+
+describe("capTurnToolResults", () => {
+  const result = (id: string, content: string) => ({
+    type: "tool_result" as const,
+    toolCallId: id,
+    content,
+  });
+
+  it("leaves results untouched when the turn total fits the budget", () => {
+    const toolResults = [result("a", "x".repeat(400)), result("b", "y".repeat(500))];
+    capTurnToolResults(toolResults, 1_000);
+    expect(toolResults[0].content).toBe("x".repeat(400));
+    expect(toolResults[1].content).toBe("y".repeat(500));
+  });
+
+  it("is a no-op when no budget is configured", () => {
+    const toolResults = [result("a", "x".repeat(5_000))];
+    capTurnToolResults(toolResults, undefined);
+    expect(toolResults[0].content).toBe("x".repeat(5_000));
+  });
+
+  it("trims only the largest results and preserves small ones (water-filling)", () => {
+    const small = result("small", "s".repeat(200));
+    const medium = result("medium", "m".repeat(2_000));
+    const large = result("large", "l".repeat(20_000));
+    const toolResults = [large, small, medium];
+    capTurnToolResults(toolResults, 6_000);
+
+    expect(small.content).toBe("s".repeat(200));
+    expect(medium.content).toBe("m".repeat(2_000));
+    expect(large.content).not.toBe("l".repeat(20_000));
+    expect(large.content).toContain("characters trimmed");
+    expect(large.content).toContain("offset/limit");
+    // Trimmed large result keeps head and tail around the notice.
+    expect(large.content.startsWith("l")).toBe(true);
+    expect(large.content.endsWith("l")).toBe(true);
+    // Total payload (minus notices) respects the budget.
+    const kept = toolResults.reduce(
+      (sum, r) => sum + (r.content as string).replace(/\n\n\[\.\.\..*\.\.\.\]\n\n/s, "").length,
+      0,
+    );
+    expect(kept).toBeLessThanOrEqual(6_000);
+  });
+
+  it("splits the budget across several oversized parallel results", () => {
+    const toolResults = [
+      result("a", "a".repeat(50_000)),
+      result("b", "b".repeat(50_000)),
+      result("c", "c".repeat(50_000)),
+    ];
+    capTurnToolResults(toolResults, 30_000);
+    for (const r of toolResults) {
+      expect((r.content as string).length).toBeLessThan(50_000);
+      expect(r.content).toContain("characters trimmed");
+    }
+  });
+
+  it("ignores structured (non-string) results", () => {
+    const structured = {
+      type: "tool_result" as const,
+      toolCallId: "img",
+      content: [{ type: "text" as const, text: "t".repeat(10_000) }],
+    };
+    const text = result("txt", "x".repeat(10_000));
+    capTurnToolResults([structured, text], 5_000);
+    expect(structured.content[0].text).toBe("t".repeat(10_000));
+    expect(text.content).toContain("characters trimmed");
+  });
+});
+
+// Fix D (baseline #2): capping mutates the model-input/persistent transcript in
+// place while the tool_call_end event already carried the FULL preview. The
+// `capped` marker makes that divergence programmatically visible.
+describe("tool-result cap divergence marker", () => {
+  const result = (id: string, content: string): ToolResult => ({
+    type: "tool_result",
+    toolCallId: id,
+    content,
+  });
+
+  it("marks a per-result cap with original + kept char counts", () => {
+    const r = result("big", "z".repeat(10_000));
+    capToolResults([r], 1_000);
+    expect(r.content).toContain("characters omitted");
+    expect(r.capped).toEqual({
+      originalChars: 10_000,
+      keptChars: (r.content as string).length,
+      scope: "per-result",
+    });
+  });
+
+  it("does not mark a result that fits the per-result budget", () => {
+    const r = result("small", "z".repeat(500));
+    capToolResults([r], 1_000);
+    expect(r.capped).toBeUndefined();
+    expect(r.content).toBe("z".repeat(500));
+  });
+
+  it("marks a per-turn cap with scope 'per-turn'", () => {
+    const large = result("large", "l".repeat(20_000));
+    capTurnToolResults([large], 6_000);
+    expect(large.capped?.scope).toBe("per-turn");
+    expect(large.capped?.originalChars).toBe(20_000);
+    expect(large.capped?.keptChars).toBe((large.content as string).length);
+  });
+
+  it("preserves the true original size when both caps fire in sequence", () => {
+    const r = result("huge", "h".repeat(100_000));
+    capToolResults([r], 50_000); // per-result trim first
+    const afterPerResult = r.capped?.originalChars;
+    capTurnToolResults([r], 5_000); // then per-turn trim
+    expect(afterPerResult).toBe(100_000);
+    // The per-turn marker keeps the FULL pre-any-trim original, not the
+    // already-trimmed intermediate size.
+    expect(r.capped?.originalChars).toBe(100_000);
+    expect(r.capped?.scope).toBe("per-turn");
+  });
+});
+
+describe("local-backend first-event watchdog", () => {
+  beforeEach(() => {
+    mockStream.mockReset();
+  });
+
+  /** A stream that never emits and only settles when its per-attempt signal aborts. */
+  function stallingStream(opts: StreamOptions) {
+    const abortPromise = new Promise<never>((_, reject) => {
+      opts.signal?.addEventListener(
+        "abort",
+        () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+        { once: true },
+      );
+    });
+    abortPromise.catch(() => {});
+    return {
+      [Symbol.asyncIterator]: async function* () {
+        yield* [];
+        await abortPromise;
+      },
+      response: abortPromise,
+    } as unknown as ReturnType<typeof stream>;
+  }
+
+  const messages: Message[] = [
+    { role: "system", content: "sys" },
+    { role: "user", content: "hi" },
+  ];
+
+  it("does not abort a silent local stream past the 45s first-event budget", async () => {
+    vi.useFakeTimers();
+    mockStream.mockImplementation((opts: StreamOptions) => stallingStream(opts));
+
+    const controller = new AbortController();
+    const loopPromise = collectLoop(messages, {
+      provider: "openai",
+      model: "local-model",
+      baseUrl: "http://localhost:8080/v1",
+      signal: controller.signal,
+    }).catch(() => undefined);
+
+    await vi.advanceTimersByTimeAsync(200_000);
+    // Still the single original attempt — no idle abort, no retry.
+    expect(mockStream).toHaveBeenCalledTimes(1);
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await loopPromise;
+    vi.useRealTimers();
+  }, 30_000);
+
+  it("still aborts and retries a silent remote stream", async () => {
+    vi.useFakeTimers();
+    mockStream.mockImplementation((opts: StreamOptions) => stallingStream(opts));
+
+    const controller = new AbortController();
+    const loopPromise = collectLoop(messages, {
+      provider: "openai",
+      model: "remote-model",
+      baseUrl: "https://api.example.com/v1",
+      signal: controller.signal,
+    }).catch(() => undefined);
+
+    await vi.advanceTimersByTimeAsync(200_000);
+    expect(mockStream.mock.calls.length).toBeGreaterThan(1);
+
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await loopPromise;
+    vi.useRealTimers();
+  }, 30_000);
 });

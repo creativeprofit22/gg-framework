@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { streamGemini } from "./gemini.js";
+import { formatError } from "../errors.js";
 
 const originalFetch = globalThis.fetch;
 const originalCodeAssistEndpoint = process.env.CODE_ASSIST_ENDPOINT;
@@ -23,7 +24,7 @@ describe("streamGemini", () => {
     vi.restoreAllMocks();
   });
 
-  it("sends Code Assist requests with tools, tool responses, and thinking", async () => {
+  it("clamps client-only Ultra to high in Code Assist requests", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -63,7 +64,7 @@ describe("streamGemini", () => {
         },
       ],
       toolChoice: "auto",
-      thinking: "high",
+      thinking: "ultra",
       promptCacheKey: "ggcoder:test-session",
     });
 
@@ -340,16 +341,50 @@ describe("streamGemini", () => {
 
     const result = streamGemini({
       provider: "gemini",
-      model: "gemini-3.5-flash",
+      model: "gemini-1.5-flash",
       projectId: "test-project",
       apiKey: "access-token",
       messages: [{ role: "user", content: "hi" }],
     });
 
     await expect(result.response).rejects.toThrow(
-      'Gemini OAuth is configured to use the Gemini Code Assist subscription endpoint only. That endpoint does not currently expose model "gemini-3.5-flash".',
+      'Gemini OAuth is configured to use the Gemini Code Assist subscription endpoint only. That endpoint does not currently expose model "gemini-1.5-flash".',
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces an account-gated 404 as an entitlement error with actionable guidance", async () => {
+    const body = JSON.stringify({
+      error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" },
+    });
+
+    for (const model of ["gemini-3-flash", "gemini-3.1-pro-preview"]) {
+      globalThis.fetch = vi.fn().mockResolvedValue(new Response(body, { status: 404 }));
+      const result = streamGemini({
+        provider: "gemini",
+        model,
+        projectId: "test-project",
+        apiKey: "access-token",
+        messages: [{ role: "user", content: "hi" }],
+      });
+
+      const err = await result.response.then(
+        () => {
+          throw new Error("expected rejection");
+        },
+        (e: unknown) => e,
+      );
+
+      // The clean message names the model and frames it as an entitlement gap,
+      // never the raw "Requested entity was not found" body.
+      const formatted = formatError(err);
+      expect(formatted.message).toMatch(/isn't entitled to/i);
+      expect(formatted.message).toContain(model);
+      expect(formatted.message).not.toMatch(/Requested entity was not found/i);
+      // The guidance line carries the fix.
+      expect(formatted.guidance).toMatch(/Gemini 3\.1 Flash Lite/i);
+      expect(formatted.guidance).toMatch(/Code Assist Standard\/Enterprise/i);
+    }
   });
 
   it("emits thoughts, text, and tool calls from SSE chunks", async () => {

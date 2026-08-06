@@ -1,14 +1,17 @@
-import { mkdtemp, readFile, rm, utimes, readdir } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, readdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   SessionManager,
   KEN_TURN_CUSTOM_KIND,
   AUTOPILOT_MARKER_CUSTOM_KIND,
   APP_MARKER_CUSTOM_KIND,
+  TURN_METRIC_CUSTOM_KIND,
   type SessionEntry,
+  type TurnMetricPayload,
   type CustomEntry,
 } from "./session-manager.js";
 
@@ -33,6 +36,204 @@ function entry(id: string): SessionEntry {
     message: { role: "user", content: "hi" },
   };
 }
+
+describe("SessionManager redaction boundary", () => {
+  it("persists sanitized clones for message and custom success/failure entries", async () => {
+    const dir = await makeTempDir();
+    const file = path.join(dir, "session.jsonl");
+    await writeFile(file, "", "utf-8");
+    const canary = "opaque-session-canary-value-123456";
+    const previous = process.env.GG_SESSION_TEST_SECRET;
+    process.env.GG_SESSION_TEST_SECRET = canary;
+    const manager = new SessionManager(dir);
+    const messageEntry: SessionEntry = {
+      type: "message",
+      id: "message",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      message: { role: "user", content: `use ${canary}` },
+    };
+    const customEntry: CustomEntry = {
+      type: "custom",
+      kind: "test_failure",
+      id: "custom",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: { error: `failed with ${canary}`, accessToken: canary },
+    };
+
+    try {
+      await manager.appendEntry(file, messageEntry);
+      await manager.appendEntry(file, customEntry);
+    } finally {
+      if (previous === undefined) delete process.env.GG_SESSION_TEST_SECRET;
+      else process.env.GG_SESSION_TEST_SECRET = previous;
+    }
+
+    const persisted = await readFile(file, "utf-8");
+    expect(persisted).not.toContain(canary);
+    expect(persisted).toContain("[REDACTED]");
+    expect(messageEntry.message.content).toContain(canary);
+    expect(customEntry.data).toEqual({ error: `failed with ${canary}`, accessToken: canary });
+  });
+});
+
+describe("SessionManager conversation identity", () => {
+  it("preserves checkpoint identity and a bounded display preview", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+
+    const original = await manager.create("/repo", "anthropic", "test-model");
+    const checkpoint = await manager.create("/repo", "anthropic", "test-model", {
+      conversationId: original.header.conversationId,
+      generation: 1,
+      parentSessionId: original.id,
+      preview: `  Original   request ${"x".repeat(100)}  `,
+    });
+    const loadedCheckpoint = await manager.load(checkpoint.path);
+
+    expect(original.header.conversationId).toBe(original.id);
+    expect(checkpoint.id).not.toBe(original.id);
+    expect(checkpoint.header.conversationId).toBe(original.id);
+    expect(loadedCheckpoint.header.conversationId).toBe(original.id);
+    expect(loadedCheckpoint.header.preview).toBe(`Original request ${"x".repeat(63)}`);
+  });
+
+  it("canonicalizes stale physical ids and paths to the highest generation", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const original = await manager.create("/repo", "anthropic", "test-model");
+    const first = await manager.create("/repo", "anthropic", "test-model", {
+      conversationId: original.id,
+      generation: 1,
+      parentSessionId: original.id,
+      sourceFingerprint: "a".repeat(64),
+    });
+    const newest = await manager.create("/repo", "anthropic", "test-model", {
+      conversationId: original.id,
+      generation: 2,
+      parentSessionId: first.id,
+      sourceFingerprint: "b".repeat(64),
+    });
+    await manager.appendEntry(newest.path, entry("latest-message"));
+
+    // Generation wins even if an older checkpoint has a newer filesystem time.
+    const future = new Date(Date.now() + 60_000);
+    await utimes(first.path, future, future);
+
+    expect(await manager.findById("/repo", original.id)).toBe(newest.path);
+    expect(await manager.findById("/repo", first.id)).toBe(newest.path);
+    expect(await manager.resolveCanonicalSession(original.path)).toBe(newest.path);
+    expect((await manager.load(original.path)).header.id).toBe(newest.id);
+    expect(await manager.getMostRecent("/repo")).toBe(newest.path);
+  });
+
+  it("loads ancestry oldest first and stops before corrupt or missing parents", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const original = await manager.create("/original-repo", "anthropic", "test-model");
+    const first = await manager.create("/second-repo", "anthropic", "test-model", {
+      conversationId: original.id,
+      generation: 1,
+      parentSessionId: original.id,
+    });
+    const newest = await manager.create("/third-repo", "anthropic", "test-model", {
+      conversationId: original.id,
+      generation: 2,
+      parentSessionId: first.id,
+    });
+
+    expect(
+      (await manager.loadCheckpointChain(original.path)).map((item) => item.header.id),
+    ).toEqual([original.id, first.id, newest.id]);
+
+    await writeFile(first.path, `${JSON.stringify(first.header)}\nnot-json\n`);
+    expect((await manager.loadCheckpointChain(newest.path)).map((item) => item.header.id)).toEqual([
+      newest.id,
+    ]);
+
+    await rm(first.path);
+    expect((await manager.loadCheckpointChain(newest.path)).map((item) => item.header.id)).toEqual([
+      newest.id,
+    ]);
+  });
+});
+
+describe("SessionManager compaction coordination", () => {
+  it("serializes two independent managers for the same conversation", async () => {
+    const sessionsDir = await makeTempDir();
+    const firstManager = new SessionManager(sessionsDir);
+    const secondManager = new SessionManager(sessionsDir);
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const hold = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = firstManager.withCompactionLease("conversation", undefined, async () => {
+      order.push("first:start");
+      firstStarted();
+      await hold;
+      order.push("first:end");
+    });
+    await started;
+    const second = secondManager.withCompactionLease("conversation", undefined, async () => {
+      order.push("second:start");
+      order.push("second:end");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(order).toEqual(["first:start"]);
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(order).toEqual(["first:start", "first:end", "second:start", "second:end"]);
+  });
+
+  it("recovers a dead-owner lease and ignores coordination storage during discovery", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const conversationId = "dead-owner";
+    const key = crypto.createHash("sha256").update(conversationId).digest("hex");
+    const lockPath = path.join(sessionsDir, ".compaction-coordination", `${key}.lock`);
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(
+      path.join(lockPath, "owner.json"),
+      JSON.stringify({ token: "dead", pid: 2_147_483_647, createdAt: new Date().toISOString() }),
+      "utf-8",
+    );
+
+    await expect(
+      manager.withCompactionLease(conversationId, undefined, async () => "recovered"),
+    ).resolves.toBe("recovered");
+    expect(await manager.listAllSummaries()).toEqual([]);
+  });
+
+  it("recovers an old corrupt lease and round-trips attempt state", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const conversationId = "corrupt-owner";
+    const key = crypto.createHash("sha256").update(conversationId).digest("hex");
+    const lockPath = path.join(sessionsDir, ".compaction-coordination", `${key}.lock`);
+    await mkdir(lockPath, { recursive: true });
+    const old = new Date(Date.now() - 120_000);
+    await utimes(lockPath, old, old);
+
+    await manager.withCompactionLease(conversationId, undefined, async () => undefined);
+    const state = {
+      fingerprint: "a".repeat(64),
+      policyKey: "openai:model:0.85",
+      outcome: "noop" as const,
+      updatedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+    };
+    await manager.writeCompactionAttemptState(conversationId, state);
+    expect(await manager.readCompactionAttemptState(conversationId)).toEqual(state);
+  });
+});
 
 describe("SessionManager persistence failure handling", () => {
   it("appendEntry does not throw when the write fails (e.g. disk full)", async () => {
@@ -277,7 +478,9 @@ describe("SessionManager.getAppMarkers", () => {
       // Missing afterMessageCount → 0; missing/null data → {}.
       autopilotEntry("ok", { version: 1, kind: "task", data: null }, APP_MARKER_CUSTOM_KIND),
     ]);
-    expect(markers).toEqual([{ version: 1, kind: "task", afterMessageCount: 0, data: {} }]);
+    expect(markers).toEqual([
+      { version: 1, kind: "task", afterMessageCount: 0, data: {}, recordedAfterMessageCount: 0 },
+    ]);
   });
 
   it("accepts the compaction kind (persisted N → M counts for the resumed notice)", () => {
@@ -299,10 +502,35 @@ describe("SessionManager.getAppMarkers", () => {
         kind: "compaction",
         afterMessageCount: 3,
         data: { originalCount: 40, newCount: 6 },
+        // File-order position: no message entries precede it in this fixture.
+        recordedAfterMessageCount: 0,
       },
     ]);
   });
 
+  it("accepts the active-agent handoff marker used to restore resumed chats", () => {
+    const markers = manager.getAppMarkers([
+      autopilotEntry(
+        "handoff-1",
+        {
+          version: 1,
+          kind: "agent_handoff",
+          afterMessageCount: 4,
+          data: { chatAgent: "therapist" },
+        },
+        APP_MARKER_CUSTOM_KIND,
+      ),
+    ]);
+    expect(markers).toEqual([
+      {
+        version: 1,
+        kind: "agent_handoff",
+        afterMessageCount: 4,
+        data: { chatAgent: "therapist" },
+        recordedAfterMessageCount: 0,
+      },
+    ]);
+  });
   it("keeps app markers out of the LLM message history on a written file", async () => {
     const sessionsDir = await makeTempDir();
     const manager2 = new SessionManager(sessionsDir);
@@ -320,8 +548,61 @@ describe("SessionManager.getAppMarkers", () => {
     const msgs = manager2.getMessages(loaded.entries, loaded.header.leafId);
     expect(JSON.stringify(msgs)).not.toContain("kenSent");
     expect(manager2.getAppMarkers(loaded.entries)).toEqual([
-      { version: 1, kind: "user_hint", afterMessageCount: 1, data: { kenSent: true } },
+      {
+        version: 1,
+        kind: "user_hint",
+        afterMessageCount: 1,
+        data: { kenSent: true },
+        // One message entry was written before the marker line.
+        recordedAfterMessageCount: 1,
+      },
     ]);
+  });
+});
+
+describe("SessionManager turn metrics", () => {
+  const metric: TurnMetricPayload = {
+    version: 1,
+    turn: 1,
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    stopReason: "end_turn",
+    usage: { inputTokens: 100, outputTokens: 25, cacheRead: 50 },
+    timing: {
+      startedAt: 1_000,
+      firstProviderEventAt: 1_020,
+      completedAt: 1_100,
+      providerDurationMs: 80,
+      ttftMs: 20,
+      outputTokensPerSecond: 312.5,
+    },
+    cost: { status: "unavailable", reason: "No authoritative pricing" },
+  };
+
+  it("persists and reads validated metrics without putting them on the message DAG", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const created = await manager.create("/project", "openai", "gpt-5.6-sol");
+    await manager.appendTurnMetric(created.path, metric);
+    const loaded = await manager.load(created.path);
+
+    expect(manager.getTurnMetrics(loaded.entries)).toEqual([metric]);
+    expect(manager.getMessages(loaded.entries)).toEqual([]);
+  });
+
+  it("ignores malformed legacy metric entries", () => {
+    const manager = new SessionManager("/unused");
+    const entries: SessionEntry[] = [
+      autopilotEntry("bad-version", { ...metric, version: 0 }, TURN_METRIC_CUSTOM_KIND),
+      autopilotEntry(
+        "bad-timing",
+        { ...metric, timing: { ...metric.timing, completedAt: "later" } },
+        TURN_METRIC_CUSTOM_KIND,
+      ),
+      autopilotEntry("valid", metric, TURN_METRIC_CUSTOM_KIND),
+    ];
+
+    expect(manager.getTurnMetrics(entries)).toEqual([metric]);
   });
 });
 
@@ -343,6 +624,26 @@ describe("SessionManager.getMostRecent", () => {
 
     const mostRecent = await manager.getMostRecent(cwd);
     expect(mostRecent).toBe(sessionA.path);
+  });
+
+  it("sorts conversations by activity after selecting each canonical checkpoint", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const cwd = "/proj/cross-conversation-recency";
+
+    const olderConversation = await manager.create(cwd, "anthropic", "test-model");
+    const olderCheckpoint = await manager.create(cwd, "anthropic", "test-model", {
+      conversationId: olderConversation.id,
+      generation: 5,
+      parentSessionId: olderConversation.id,
+    });
+    await manager.appendEntry(olderCheckpoint.path, entry("older checkpoint message"));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const recentConversation = await manager.create(cwd, "anthropic", "test-model");
+    await manager.appendEntry(recentConversation.path, entry("recent conversation message"));
+
+    expect(await manager.getMostRecent(cwd)).toBe(recentConversation.path);
   });
 });
 

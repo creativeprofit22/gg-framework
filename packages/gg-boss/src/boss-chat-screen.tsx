@@ -161,6 +161,7 @@ export function BossChatScreen({
               bossModel={bossModel}
               workerModel={workerModel}
               tokensIn={state.bossInputTokens}
+              contextWindow={boss.getBossContextWindow()}
               exitPending={state.exitPending}
               bossThinkingLevel={state.bossThinkingLevel}
               updatePending={updatePending}

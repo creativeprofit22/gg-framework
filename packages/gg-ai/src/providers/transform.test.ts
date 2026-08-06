@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  clampProviderContextImages,
   downgradeUnsupportedVideos,
   toAnthropicMessages,
   toAnthropicThinking,
   toAnthropicTools,
   toOpenAIMessages,
+  toLocalReasoningEffort,
   toOpenAIReasoningEffort,
 } from "./transform.js";
 import type { Message, Tool } from "../types.js";
@@ -24,6 +26,99 @@ const exampleTools: Tool[] = [
 ];
 
 const MAX_TOKENS = 16_000;
+
+const image = (data: string) => ({ type: "image" as const, mediaType: "image/png", data });
+
+describe("provider image budgeting", () => {
+  it.each([
+    ["anthropic", 90],
+    ["minimax", 90],
+    ["openai", 200],
+    ["gemini", 200],
+    ["openrouter", 90],
+    ["palsu", 5],
+  ] as const)("caps %s context at %i images", (provider, budget) => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: Array.from({ length: budget + 2 }, (_, index) => image(String(index))),
+      },
+    ];
+    const result = clampProviderContextImages(messages, provider, true);
+    const user = result[0];
+    expect(user?.role).toBe("user");
+    expect(
+      user?.role === "user" && Array.isArray(user.content)
+        ? user.content.filter((part) => part.type === "image").length
+        : 0,
+    ).toBe(budget);
+  });
+
+  it("is a no-op while supported context is within budget", () => {
+    const messages: Message[] = [{ role: "user", content: [image("one"), image("two")] }];
+    expect(clampProviderContextImages(messages, "openai", true)).toBe(messages);
+  });
+
+  it("removes oldest user/tool images first and preserves newest attachments", () => {
+    const messages: Message[] = [
+      { role: "user", content: [image("old-user")] },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "t1", content: [image("old-tool")] }],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "new" },
+          image("new-1"),
+          image("new-2"),
+          image("new-3"),
+          image("new-4"),
+          image("new-5"),
+        ],
+      },
+    ];
+
+    const result = clampProviderContextImages(messages, "palsu", true);
+    expect(result[0]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "[image omitted: provider image limit]" }],
+    });
+    expect(result[1]).toEqual({
+      role: "tool",
+      content: [
+        {
+          type: "tool_result",
+          toolCallId: "t1",
+          content: [{ type: "text", text: "[image omitted: provider image limit]" }],
+        },
+      ],
+    });
+    expect(JSON.stringify(result)).toContain("new-1");
+    expect(JSON.stringify(result)).toContain("new-5");
+  });
+
+  it("does not mutate persisted source messages", () => {
+    const messages: Message[] = Array.from({ length: 6 }, (_, index) => ({
+      role: "user" as const,
+      content: [image(`image-${index}`)],
+    }));
+    const before = structuredClone(messages);
+    const result = clampProviderContextImages(messages, "palsu", true);
+    expect(messages).toEqual(before);
+    expect(result).not.toBe(messages);
+    expect(JSON.stringify(result)).not.toContain("image-0");
+    expect(JSON.stringify(result)).toContain("image-5");
+  });
+
+  it("leaves unsupported-image history for the existing downgrade pass", () => {
+    const messages: Message[] = Array.from({ length: 6 }, (_, index) => ({
+      role: "user" as const,
+      content: [image(`image-${index}`)],
+    }));
+    expect(clampProviderContextImages(messages, "palsu", false)).toBe(messages);
+  });
+});
 
 describe("Anthropic transform", () => {
   it("splits system prompt into cached and uncached blocks at the marker", () => {
@@ -399,6 +494,79 @@ describe("Anthropic transform", () => {
       { type: "text", text: "answer" },
     ]);
   });
+
+  // Baseline #20 (empty-parts): Anthropic rejects empty text blocks with a 400
+  // ("text content blocks must be non-empty"). The serializer must never emit one.
+  it("drops a user message whose string content is empty (case A)", () => {
+    const messages: Message[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "text", text: "prev" }] },
+      { role: "user", content: "" },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    // The empty user turn is gone; the real ones survive.
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant"]);
+    expect(out[0]?.content).toBe("hi");
+  });
+
+  it("filters empty text parts from a user content array (case B)", () => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "" },
+          { type: "text", text: "real" },
+        ],
+      },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content).toEqual([{ type: "text", text: "real" }]);
+  });
+
+  it("drops a user message whose only text part is empty", () => {
+    const messages: Message[] = [
+      { role: "user", content: "first" },
+      { role: "assistant", content: [{ type: "text", text: "ack" }] },
+      { role: "user", content: [{ type: "text", text: "" }] },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    expect(out.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  it("drops a settled assistant message with empty string content (case D)", () => {
+    const messages: Message[] = [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "" },
+      { role: "user", content: "next" },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    // The empty assistant turn is dropped; both user turns remain.
+    expect(out.map((m) => m.role)).toEqual(["user", "user"]);
+    expect(out.map((m) => m.content)).toEqual(["hi", "next"]);
+  });
+
+  it("keeps whitespace-only user text intact (API accepts non-empty text)", () => {
+    const messages: Message[] = [{ role: "user", content: [{ type: "text", text: "  \n " }] }];
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content).toEqual([{ type: "text", text: "  \n " }]);
+  });
+
+  it("keeps a non-text user part (image) even with no text", () => {
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "" },
+          { type: "image", mediaType: "image/png", data: "abc" },
+        ],
+      },
+    ];
+    const { messages: out } = toAnthropicMessages(messages);
+    const content = out[0]?.content as unknown as Array<Record<string, unknown>>;
+    expect(content.map((b) => b.type)).toEqual(["image"]);
+  });
 });
 
 describe("OpenAI transform", () => {
@@ -414,14 +582,55 @@ describe("OpenAI transform", () => {
       { role: "user", content: "Hello" },
     ]);
   });
+
+  // Baseline #5: `toolu_*` -> OpenAI must strip the FULL `toolu_` prefix. The old
+  // `slice(5)` left the trailing underscore, producing `call__<id>` (double
+  // underscore; lossy). Pairing must survive: the tool_result references the
+  // same remapped id.
+  it("remaps a toolu_ id to a single-underscore call_ id and preserves pairing", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "toolu_01ABC", name: "bash", args: { cmd: "ls" } }],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "toolu_01ABC", content: "ok" }],
+      },
+    ];
+    const out = toOpenAIMessages(messages) as unknown as Array<Record<string, unknown>>;
+    const assistant = out.find((m) => m.role === "assistant") as {
+      tool_calls: Array<{ id: string }>;
+    };
+    const toolMsg = out.find((m) => m.role === "tool") as { tool_call_id: string };
+    expect(assistant.tool_calls[0]?.id).toBe("call_01ABC");
+    expect(assistant.tool_calls[0]?.id).not.toContain("call__");
+    // Pairing intact: the result points at the identical remapped id.
+    expect(toolMsg.tool_call_id).toBe("call_01ABC");
+  });
+
+  it("passes through non-anthropic tool ids unchanged", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [{ type: "tool_call", id: "call_xyz", name: "bash", args: {} }],
+      },
+    ];
+    const out = toOpenAIMessages(messages) as Array<{ tool_calls?: Array<{ id: string }> }>;
+    expect(out[0]?.tool_calls?.[0]?.id).toBe("call_xyz");
+  });
 });
 
 describe("toAnthropicThinking", () => {
-  it("passes Anthropic adaptive effort levels through for Claude Opus 4.8", () => {
-    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
-      expect(toAnthropicThinking(level, MAX_TOKENS, "claude-opus-4-8").outputConfig).toEqual({
-        effort: level,
-      });
+  // Opus 4.8 is no longer in ggcoder's model picker, but gg-ai is a standalone
+  // library and Anthropic still serves that ID — keep the wire format correct.
+  it("passes Anthropic adaptive effort levels through for Opus 5 (and legacy 4.8)", () => {
+    for (const model of ["claude-opus-5", "claude-opus-4-8"]) {
+      for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+        const result = toAnthropicThinking(level, MAX_TOKENS, model);
+        expect(result.outputConfig).toEqual({ effort: level });
+        expect((result.thinking as { type: string }).type).toBe("adaptive");
+      }
     }
   });
 
@@ -451,7 +660,7 @@ describe("toAnthropicThinking", () => {
     // strictly less than max_tokens. Previously this returned maxTokens +
     // budget (128K), which exceeds the provider's output-token cap.
     const CEILING = 64_000;
-    for (const level of ["low", "medium", "high", "xhigh", "max"] as const) {
+    for (const level of ["low", "medium", "high", "xhigh", "max", "ultra"] as const) {
       const result = toAnthropicThinking(level, CEILING, "claude-haiku-4-5");
       expect(result.maxTokens).toBeLessThanOrEqual(CEILING);
       const budget = (result.thinking as { budget_tokens?: number }).budget_tokens!;
@@ -464,8 +673,9 @@ describe("toAnthropicThinking", () => {
 });
 
 describe("toOpenAIReasoningEffort", () => {
-  it("clamps shared max thinking level to OpenAI's xhigh effort", () => {
+  it("clamps client-only max and ultra levels to OpenAI's xhigh effort", () => {
     expect(toOpenAIReasoningEffort("max", "gpt-5.5")).toBe("xhigh");
+    expect(toOpenAIReasoningEffort("ultra", "gpt-5.6-sol")).toBe("xhigh");
   });
 });
 
@@ -512,5 +722,25 @@ describe("video content transforms", () => {
 
   it("keeps video untouched when the model supports it", () => {
     expect(downgradeUnsupportedVideos(videoMessage, true)).toEqual(videoMessage);
+  });
+});
+
+describe("toLocalReasoningEffort", () => {
+  it("maps every above-high level onto the only top rung local servers know", () => {
+    // Verified against Ollama 0.32: "xhigh" is rejected outright, "max" is not.
+    expect(toLocalReasoningEffort("max")).toBe("max");
+    expect(toLocalReasoningEffort("ultra")).toBe("max");
+    expect(toLocalReasoningEffort("xhigh")).toBe("max");
+  });
+
+  it("passes the three universal levels through untouched", () => {
+    expect(toLocalReasoningEffort("low")).toBe("low");
+    expect(toLocalReasoningEffort("medium")).toBe("medium");
+    expect(toLocalReasoningEffort("high")).toBe("high");
+  });
+
+  it("never emits xhigh, which no local server accepts", () => {
+    const levels = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
+    expect(levels.map((l) => toLocalReasoningEffort(l))).not.toContain("xhigh");
   });
 });

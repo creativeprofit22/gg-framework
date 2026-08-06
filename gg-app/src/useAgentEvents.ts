@@ -1,14 +1,22 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import { theme } from "./theme";
 import {
-  listCommands,
+  listCommands as listPrimaryCommands,
+  listModels as listPrimaryModels,
   type SidecarEvent,
+  type SubAgentStatePayload,
   type AgentState,
   type BackgroundTask,
+  type ModelOption,
   type ProjectTask,
+  type QueuedMessage,
   type SlashCommand,
+  type PaneAgentClient,
+  isRoadmapPhaseDraftChangeEvent,
 } from "./agent";
+import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
+import { isPhaseLaunchErrorEvent } from "./notes-types";
 import { formatTokenCount } from "./ActivityBar";
 import { type LiveToolEntry, LIVE_TOOL_PANEL_ROWS } from "./LiveToolPanel";
 import { type SubAgentLine } from "./SubAgentFeed";
@@ -111,6 +119,7 @@ function pickDoneVerb(toolsUsed: ReadonlySet<string>): string {
  * mirrors the memoized handler reads without re-subscribing.
  */
 export interface AgentEventsDeps {
+  client?: Pick<PaneAgentClient, "listCommands" | "listModels">;
   setItems: Dispatch<SetStateAction<Item[]>>;
   nextId: () => number;
   /** Ken (mentor) event delegate — consulted first; ken events early-return. */
@@ -132,11 +141,14 @@ export interface AgentEventsDeps {
   setThinkingAccumMs: Dispatch<SetStateAction<number>>;
   setPlanTotal: Dispatch<SetStateAction<number>>;
   setPlanDone: Dispatch<SetStateAction<Set<number>>>;
-  setSessionTitle: Dispatch<SetStateAction<string | null>>;
   setPlanReview: Dispatch<SetStateAction<string | null>>;
   setQueuedCount: Dispatch<SetStateAction<number>>;
+  /** Pending queued messages (id + text) for the cancel affordance. */
+  setQueuedMessages: Dispatch<SetStateAction<QueuedMessage[]>>;
   setAttachments: Dispatch<SetStateAction<PendingAttachment[]>>;
   setCommands: Dispatch<SetStateAction<SlashCommand[]>>;
+  setModels: Dispatch<SetStateAction<ModelOption[]>>;
+  onRoadmapPhaseDraftChange?: (draft: RoadmapPhaseDraft | null) => void;
 
   stateRef: MutableRefObject<AgentState | null>;
   planDoneRef: MutableRefObject<Set<number>>;
@@ -144,6 +156,8 @@ export interface AgentEventsDeps {
   planReviewPathRef: MutableRefObject<string | null>;
   pendingPlanTotalRef: MutableRefObject<number | null>;
   stickToBottomRef: MutableRefObject<boolean>;
+  /** Notifies session-mutation callers after the reset has been applied locally. */
+  onSessionReset?: (operationId?: string) => void;
 }
 
 export interface AgentEvents {
@@ -157,6 +171,7 @@ export interface AgentEvents {
 
 export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   const {
+    client,
     setItems,
     nextId,
     handleKenEvent,
@@ -175,27 +190,52 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     setThinkingAccumMs,
     setPlanTotal,
     setPlanDone,
-    setSessionTitle,
     setPlanReview,
     setQueuedCount,
+    setQueuedMessages,
     setAttachments,
     setCommands,
+    setModels,
+    onRoadmapPhaseDraftChange,
     stateRef,
     planDoneRef,
     planTotalRef,
     planReviewPathRef,
     pendingPlanTotalRef,
     stickToBottomRef,
+    onSessionReset,
   } = deps;
+  const listCommands = client?.listCommands ?? listPrimaryCommands;
+  const listModels = client?.listModels ?? listPrimaryModels;
 
   // ── Event-machine private refs (used nowhere outside this hook) ──
   const streamingIdRef = useRef<number | null>(null);
   const pendingChunksRef = useRef<string>("");
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Transcript id of the active sub-agent group for this run (null until the
-  // first subagent spawns). Lets later parallel agents join the same in-chat
-  // feed instead of each opening a fresh block.
+  // first subagent spawns). The per-agent map keeps late async lifecycle events
+  // attached to their original transcript group after a newer run starts.
+  // Queued-message texts the sidecar has actually acknowledged, with the highest
+  // pending count seen for each. A bubble is marked queued optimistically before
+  // that ack arrives, and clearing the flag is one-way, so this gates the clear
+  // to messages we know really entered the queue.
+  const ackedQueueTextsRef = useRef<Map<string, number>>(new Map());
   const subagentGroupIdRef = useRef<number | null>(null);
+  const subagentGroupByAgentRef = useRef<Map<string, number>>(new Map());
+  // subagent_state snapshots arrive per tool/turn event PER AGENT — with
+  // several parallel agents that's a steady burst of full-transcript setItems,
+  // which saturates the main thread and makes scrolling janky mid-run. Buffer
+  // the latest snapshot per agent and flush them together on a short timer:
+  // one batched render per window no matter how many agents are talking. Keep
+  // every distinct activity seen inside the window so coalescing never hides a
+  // quick tool transition.
+  const pendingSubagentRef = useRef<
+    Map<string, { snapshot: SubAgentStatePayload; activities: string[] }>
+  >(new Map());
+  const subagentFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A prompt-failed phase frame is followed by runAgent's generic provider error.
+  // Remember that ordered pair so the phase-specific recovery message wins once.
+  const pendingPhasePromptFailureRef = useRef<string | null>(null);
   // Transcript id of the in-flight compaction notice, so compaction_end can
   // flip the same row from shimmer → summary instead of pushing a new line.
   const compactionIdRef = useRef<number | null>(null);
@@ -210,10 +250,9 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // them for render. Finalizing a span happens outside setState updaters.
   const thinkingStartRef = useRef<number | null>(null);
   const thinkingAccumRef = useRef<number>(0);
-  // Content of the plan currently in the review modal, mirrored from plan_exit.
-  // autopilot_plan_accepted reads it SYNCHRONOUSLY to seed the plan-progress
-  // widget — the planReview state value may not have flushed yet when the
-  // accepted + session_reset frames arrive back-to-back over SSE.
+  // Submitted plan content retained until approval. Current sidecars provide the
+  // canonical live-file count on session_reset; this content supplies the fallback
+  // count when connected to an older sidecar.
   const planReviewContentRef = useRef<string | null>(null);
 
   // Streaming deltas arrive faster than React can usefully render each one.
@@ -279,11 +318,154 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     streamingIdRef.current = null;
   }, [setItems]);
 
+  // Ideal review is a pre-final hook: the no-tool response immediately before
+  // it is an internal draft, not a transcript answer. Drop that active bubble
+  // (including any throttled chunks) before rendering the hook notice, so the
+  // user sees hook → reviewed final response rather than draft → hook → final.
+  const discardStreamingDraft = useCallback(() => {
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    pendingChunksRef.current = "";
+    const current = streamingIdRef.current;
+    streamingIdRef.current = null;
+    if (current !== null) {
+      setItems((prev) =>
+        prev.filter((item) => !(item.kind === "assistant" && item.id === current)),
+      );
+    }
+  }, [setItems]);
+
   const pushItem = useCallback(
     (item: Item) => {
       setItems((prev) => [...prev, item]);
     },
     [setItems],
+  );
+
+  // Apply one sub-agent snapshot to its transcript group (creating the group
+  // on first sight). Called from the buffered flush below — multiple snapshots
+  // flushed in the same tick batch into a single React render.
+  const applySubagentSnapshot = useCallback(
+    (snapshot: SubAgentStatePayload, bufferedActivities: readonly string[]): void => {
+      const status: SubAgentLine["status"] =
+        snapshot.state === "starting"
+          ? "starting"
+          : snapshot.state === "running"
+            ? "running"
+            : snapshot.state === "completed"
+              ? "idle"
+              : snapshot.state === "interrupted"
+                ? "interrupted"
+                : snapshot.state === "closed" && !snapshot.error
+                  ? "done"
+                  : "error";
+      const appendActivities = (existing: readonly string[]): string[] => {
+        const next = [...existing];
+        for (const activity of bufferedActivities) {
+          if (activity !== next[next.length - 1]) next.push(activity);
+        }
+        return next.slice(-12);
+      };
+      const updateAgent = (agent: SubAgentLine): SubAgentLine => ({
+        ...agent,
+        status,
+        toolUseCount: snapshot.tool_use_count,
+        tokenUsage: snapshot.token_usage,
+        durationMs: snapshot.elapsed_ms,
+        activities: appendActivities(agent.activities),
+      });
+      const mappedGroupId = subagentGroupByAgentRef.current.get(snapshot.agent_id);
+      const activeGroupId = subagentGroupIdRef.current;
+      const shouldCreateGroup = mappedGroupId === undefined && activeGroupId === null;
+      const groupId = mappedGroupId ?? activeGroupId ?? nextId();
+      if (mappedGroupId === undefined) {
+        subagentGroupByAgentRef.current.set(snapshot.agent_id, groupId);
+        if (shouldCreateGroup) subagentGroupIdRef.current = groupId;
+      }
+      if (shouldCreateGroup) {
+        pushItem({
+          kind: "subagent_group",
+          id: groupId,
+          agents: [
+            {
+              toolCallId: snapshot.agent_id,
+              agentName: snapshot.task_name,
+              status,
+              async: true,
+              activities: appendActivities([]),
+              toolUseCount: snapshot.tool_use_count,
+              tokenUsage: snapshot.token_usage,
+              durationMs: snapshot.elapsed_ms,
+            },
+          ],
+        });
+      } else {
+        setItems((previous) =>
+          previous.map((item) => {
+            if (item.kind !== "subagent_group" || item.id !== groupId) return item;
+            const found = item.agents.some((agent) => agent.toolCallId === snapshot.agent_id);
+            return {
+              ...item,
+              agents: found
+                ? item.agents.map((agent) =>
+                    agent.toolCallId === snapshot.agent_id ? updateAgent(agent) : agent,
+                  )
+                : [
+                    ...item.agents,
+                    {
+                      toolCallId: snapshot.agent_id,
+                      agentName: snapshot.task_name,
+                      status,
+                      async: true,
+                      activities: appendActivities([]),
+                      toolUseCount: snapshot.tool_use_count,
+                      tokenUsage: snapshot.token_usage,
+                      durationMs: snapshot.elapsed_ms,
+                    },
+                  ],
+            };
+          }),
+        );
+      }
+    },
+    [nextId, pushItem, setItems],
+  );
+
+  const SUBAGENT_FLUSH_MS = 150;
+  // Drain the buffered snapshots synchronously (cancelling any pending timer).
+  // Run boundaries call this so final statuses land before run_end's own
+  // group updates, and so nothing lingers into the next run.
+  const flushSubagentSnapshots = useCallback(() => {
+    if (subagentFlushTimerRef.current !== null) {
+      clearTimeout(subagentFlushTimerRef.current);
+      subagentFlushTimerRef.current = null;
+    }
+    if (pendingSubagentRef.current.size === 0) return;
+    const pending = [...pendingSubagentRef.current.values()];
+    pendingSubagentRef.current.clear();
+    for (const { snapshot, activities } of pending) {
+      applySubagentSnapshot(snapshot, activities);
+    }
+  }, [applySubagentSnapshot]);
+
+  // Drop buffered snapshots WITHOUT applying them (session reset wipes the
+  // transcript — a late flush would recreate a stale group in the fresh one).
+  const dropPendingSubagentSnapshots = useCallback(() => {
+    if (subagentFlushTimerRef.current !== null) {
+      clearTimeout(subagentFlushTimerRef.current);
+      subagentFlushTimerRef.current = null;
+    }
+    pendingSubagentRef.current.clear();
+  }, []);
+
+  // No timer may outlive the hook (window close / project switch).
+  useEffect(
+    () => () => {
+      if (subagentFlushTimerRef.current !== null) clearTimeout(subagentFlushTimerRef.current);
+    },
+    [],
   );
 
   // End the active thinking span (if any), folding its duration into the
@@ -308,15 +490,28 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       // Autopilot (auto-review) events are owned by the useAutopilot hook; same
       // early-return so they never touch the build-session handling below.
       if (handleAutopilotEvent(e)) return;
+      if (isRoadmapPhaseDraftChangeEvent(e)) {
+        onRoadmapPhaseDraftChange?.(e.data);
+        return;
+      }
       const d = e.data as Record<string, unknown>;
       switch (e.type) {
-        case "ready":
-          setState(d as unknown as AgentState);
+        case "ready": {
+          const readyState = d as unknown as AgentState;
+          setState(readyState);
+          setRunning(readyState.running);
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
-          setStatus("ready");
+          setStatus(readyState.runState === "cancelling" ? "cancelling..." : "ready");
           break;
+        }
         case "run_start":
+          // Land any still-buffered sub-agent snapshots on their (previous
+          // run's) group before the active-group pointer resets below.
+          flushSubagentSnapshots();
           setRunning(true);
+          setState((previous) =>
+            previous ? { ...previous, running: true, runState: "running" } : previous,
+          );
           endStreamingText();
           subagentGroupIdRef.current = null;
           compactionIdRef.current = null;
@@ -372,6 +567,21 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           finalizeThinking();
           endStreamingText();
           assistantTextRef.current = "";
+          break;
+        }
+        case "subagent_state": {
+          // Buffer the latest snapshot per agent; flushSubagentSnapshots
+          // applies them together on a short timer (one batched render per
+          // window instead of one full-transcript setItems per event).
+          const snapshot = d as unknown as SubAgentStatePayload;
+          const previous = pendingSubagentRef.current.get(snapshot.agent_id);
+          const activities = previous ? [...previous.activities] : [];
+          const activity = snapshot.current_activity;
+          if (activity && activity !== activities[activities.length - 1]) activities.push(activity);
+          pendingSubagentRef.current.set(snapshot.agent_id, { snapshot, activities });
+          if (subagentFlushTimerRef.current === null) {
+            subagentFlushTimerRef.current = setTimeout(flushSubagentSnapshots, SUBAGENT_FLUSH_MS);
+          }
           break;
         }
         case "tool_call_start": {
@@ -433,7 +643,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
             | {
                 toolUseCount?: number;
                 currentActivity?: string;
-                tokenUsage?: { input: number; output: number };
+                tokenUsage?: SubAgentLine["tokenUsage"];
               }
             | undefined;
           const groupId = subagentGroupIdRef.current;
@@ -470,7 +680,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const groupId = subagentGroupIdRef.current;
           if (groupId !== null) {
             const endDetails = details as
-              | { durationMs?: number; tokenUsage?: { input: number; output: number } }
+              | { durationMs?: number; tokenUsage?: SubAgentLine["tokenUsage"] }
               | undefined;
             const durationMs = endDetails?.durationMs;
             const finalTokens = endDetails?.tokenUsage;
@@ -574,15 +784,52 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           const id = compactionIdRef.current;
           compactionIdRef.current = null;
           setItems((prev) =>
-            prev.map((it) =>
-              it.kind === "compaction" && it.id === id
-                ? { ...it, status: "done" as const, originalCount, newCount }
-                : it,
-            ),
+            d.compacted === false
+              ? prev.filter((it) => !(it.kind === "compaction" && it.id === id))
+              : prev.map((it) =>
+                  it.kind === "compaction" && it.id === id
+                    ? { ...it, status: "done" as const, originalCount, newCount }
+                    : it,
+                ),
           );
           break;
         }
+        case "run_cancelling":
+          setRunning(true);
+          setState((previous) =>
+            previous ? { ...previous, running: true, runState: "cancelling" } : previous,
+          );
+          setStatus("cancelling...");
+          break;
+        case "cancel_failed":
+          setRunning(true);
+          setState((previous) =>
+            previous ? { ...previous, running: true, runState: "running" } : previous,
+          );
+          setStatus("cancellation failed; agent still running");
+          break;
+        case "phase_launch_error": {
+          if (!isPhaseLaunchErrorEvent(e)) break;
+          const phaseError = e.data;
+          if (phaseError.code === "prompt-failed") {
+            pendingPhasePromptFailureRef.current = phaseError.operationId;
+          }
+          pushItem({
+            kind: "error",
+            id: nextId(),
+            headline: phaseError.message,
+            message: phaseError.detail,
+          });
+          break;
+        }
         case "error": {
+          // runAgent emits one generic provider error immediately after the richer
+          // prompt-failed phase frame. Suppress only that ordered duplicate; run_end
+          // clears the marker if an older sidecar never sends the generic frame.
+          if (pendingPhasePromptFailureRef.current !== null) {
+            pendingPhasePromptFailureRef.current = null;
+            break;
+          }
           // Structured payload from the sidecar's broadcastError (headline always
           // present; message/guidance may be omitted for terse capability errors).
           // Fall back to a flat string for any older-shaped frame.
@@ -601,7 +848,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "run_end": {
+          pendingPhasePromptFailureRef.current = null;
+          // Flush first so final sub-agent statuses are in place before the
+          // aborted-marking pass below reads them.
+          flushSubagentSnapshots();
           setRunning(false);
+          setState((previous) =>
+            previous ? { ...previous, running: false, runState: "idle" } : previous,
+          );
           endStreamingText();
           finalizeThinking();
           // The queue drained into this run — un-dim any messages that were
@@ -624,7 +878,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                       ...it,
                       aborted: d.cancelled ? true : it.aborted,
                       agents: it.agents.map((a) =>
-                        a.status === "running"
+                        a.status === "running" && !a.async
                           ? { ...a, status: d.cancelled ? ("error" as const) : ("done" as const) }
                           : a,
                       ),
@@ -633,7 +887,6 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               ),
             );
           }
-          subagentGroupIdRef.current = null;
           if (d.cancelled) {
             setDoneStatus(null);
             setStatus("cancelled");
@@ -668,6 +921,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           break;
         }
         case "model_change":
+        case "chat_agent_change":
           setState((s) => (s ? { ...s, ...(d as Partial<AgentState>) } : s));
           break;
         // Ken's effective model changed — either his pin was set/cleared or he
@@ -691,6 +945,32 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           setState((s) => (s ? { ...s, planMode: true } : s));
           pushItem({ kind: "plan", id: nextId(), reason: String(d.reason ?? "") });
           break;
+        case "plan_progress": {
+          // The sidecar reads the live approved-plan file, so this snapshot
+          // stays accurate even if implementation expands or rewrites `## Steps`.
+          // It is authoritative over the approval-time count and local streamed
+          // marker detection, both of which can be stale between tool calls.
+          const total =
+            typeof d.total === "number" && Number.isFinite(d.total)
+              ? Math.max(0, Math.floor(d.total))
+              : 0;
+          const completed = new Set(
+            Array.isArray(d.completed)
+              ? d.completed.filter(
+                  (step): step is number =>
+                    typeof step === "number" &&
+                    Number.isInteger(step) &&
+                    step >= 1 &&
+                    step <= total,
+                )
+              : [],
+          );
+          planTotalRef.current = total;
+          planDoneRef.current = completed;
+          setPlanTotal(total);
+          setPlanDone(completed);
+          break;
+        }
         case "plan_exit": {
           setState((s) => (s ? { ...s, planMode: false } : s));
           // Always stash the submitted plan: autopilot needs the content to
@@ -699,23 +979,15 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           planReviewPathRef.current = typeof d.planPath === "string" ? d.planPath : null;
           const content = String(d.content ?? "");
           planReviewContentRef.current = content;
-          // Autopilot owns plan review when enabled. Showing the human overlay
-          // during the few seconds before Ken accepts/rejects is just visual
-          // noise, and users generally cannot act in time anyway. Non-autopilot
-          // stays unchanged: the modal opens for manual Accept/Feedback/Reject.
-          if (stateRef.current?.autopilot) {
-            setPlanReview(null);
-          } else {
-            setPlanReview(content);
-          }
+          // Approval is a blocking workflow gate even while Autopilot is reviewing.
+          // Keep it visible until either Ken or the user explicitly resolves it.
+          setPlanReview(content);
           break;
         }
         case "autopilot_plan_accepted":
-          // Autopilot Ken approved the submitted plan (no user in the loop).
-          // Mirrors the manual-accept path: seed the plan-progress widget from
-          // the modal's plan BEFORE the imminent session_reset consumes the
-          // ref, close the modal, and drop the approved marker in the
-          // transcript.
+          // Keep an approval-time fallback for older sidecars, close the review
+          // modal, and render the approved marker. Current sidecars override this
+          // fallback with the canonical live-file count on session_reset.
           pendingPlanTotalRef.current = planReviewContentRef.current
             ? countPlanSteps(planReviewContentRef.current)
             : 0;
@@ -749,32 +1021,96 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         case "tasks_run_done":
           // Run-all sweep finished — nothing to render; the modal reflects it.
           break;
-        case "queued":
+        case "queued": {
           setQueuedCount(Number(d.count ?? 0));
+          // The sidecar sends the full pending list alongside the depth so each
+          // row can offer an individual cancel.
+          const list = Array.isArray(d.messages) ? (d.messages as QueuedMessage[]) : [];
+          setQueuedMessages(list);
+          // This event also fires when the agent CONSUMES queued steering at a
+          // turn boundary (the sidecar re-broadcasts `queue_drained` here), so
+          // drop the pending affordance from bubbles that have left the queue.
+          // Waiting for run_end instead would keep a message marked "queued" for
+          // minutes after the agent already acted on it, which reads as though it
+          // were still waiting and prompts a needless cancel.
+          //
+          // Matching is by COUNT per text, not set membership, because bubbles
+          // carry no queue id: with two identical queued messages and one
+          // consumed, the text is still present and a set test would clear
+          // neither. Comparing counts clears exactly one.
+          const pendingByText = new Map<string, number>();
+          for (const m of list) pendingByText.set(m.text, (pendingByText.get(m.text) ?? 0) + 1);
+
+          // A bubble is marked queued optimistically, before the sidecar acks the
+          // enqueue. Clearing one that has never appeared in a pending list would
+          // be permanent (nothing ever re-sets the flag), so only texts we have
+          // actually seen queued are eligible.
+          for (const [text, count] of pendingByText) {
+            const seen = ackedQueueTextsRef.current.get(text) ?? 0;
+            if (count > seen) ackedQueueTextsRef.current.set(text, count);
+          }
+
+          setItems((prev) => {
+            // How many queued bubbles exist per text, so the number the agent has
+            // taken is (bubbles - still pending).
+            const bubbleCount = new Map<string, number>();
+            for (const it of prev) {
+              if (it.kind !== "user" || !it.queued) continue;
+              if (!ackedQueueTextsRef.current.has(it.text)) continue;
+              bubbleCount.set(it.text, (bubbleCount.get(it.text) ?? 0) + 1);
+            }
+            const toClear = new Map<string, number>();
+            for (const [text, bubbles] of bubbleCount) {
+              const consumed = bubbles - (pendingByText.get(text) ?? 0);
+              if (consumed > 0) toClear.set(text, consumed);
+            }
+            if (toClear.size === 0) return prev;
+
+            // Clear from the FRONT: the queue is FIFO, so the earliest matching
+            // bubble is the one the agent just consumed.
+            return prev.map((it) => {
+              if (it.kind !== "user" || !it.queued) return it;
+              const left = toClear.get(it.text) ?? 0;
+              if (left <= 0) return it;
+              toClear.set(it.text, left - 1);
+              return { ...it, queued: false };
+            });
+          });
           break;
+        }
         case "hook": {
           const kind = String(d.kind ?? "ideal") as HookKind;
           if (kind in HOOK_PRESENTATION) {
-            endStreamingText();
+            if (kind === "ideal") discardStreamingDraft();
+            else endStreamingText();
             pushItem({ kind: "hook", id: nextId(), hook: kind });
           }
           break;
         }
         case "session_reset":
           // Sidecar started a fresh session — clear the transcript + counters.
+          // Buffered sub-agent snapshots are dropped, not flushed: a late
+          // flush would recreate a stale group in the fresh transcript.
+          dropPendingSubagentSnapshots();
+          // The transcript is going away, so acked queue texts from the old
+          // session must not gate clears in the new one.
+          ackedQueueTextsRef.current.clear();
           stickToBottomRef.current = true;
           setItems([]);
           setLiveToolFeed([]);
           setTokens(0);
           setDoneStatus(null);
           setContextTokens(0);
-          setSessionTitle(null);
           setPlanReview(null);
           planReviewContentRef.current = null;
           {
             // On an accept-driven reset, restore the approved plan's step count
             // instead of zeroing it (the widget tracks the implementation run).
-            const carriedTotal = pendingPlanTotalRef.current ?? 0;
+            const eventTotal =
+              typeof d.planTotal === "number" && Number.isFinite(d.planTotal)
+                ? Math.max(0, Math.floor(d.planTotal))
+                : null;
+            const carriedTotal = eventTotal ?? pendingPlanTotalRef.current ?? 0;
             pendingPlanTotalRef.current = null;
             planTotalRef.current = carriedTotal;
             planDoneRef.current = new Set();
@@ -783,14 +1119,27 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           }
           setAttachments([]);
           setQueuedCount(0);
+          setQueuedMessages([]);
           endStreamingText();
           subagentGroupIdRef.current = null;
+          subagentGroupByAgentRef.current.clear();
+          onSessionReset?.(typeof d.operationId === "string" ? d.operationId : undefined);
           break;
-        case "session_title":
-          setSessionTitle(String(d.title ?? "") || null);
+        case "models_change":
+          // The set of usable models changed: local-model discovery landed
+          // (boot scan, manual scan, endpoint added/removed) or a provider was
+          // connected/disconnected. Without this, neither the models found on
+          // the user's machine nor the ones a fresh login unlocks reach the
+          // picker until the session is reopened.
+          //
+          // `null` means the refetch failed — keep what we have. `[]` is a real
+          // answer (the last provider was disconnected) and must clear the picker.
+          void listModels().then((available) => {
+            if (available) setModels(available);
+          });
           break;
         case "extras":
-          // Context window / git branch refresh (model switch, run end).
+          // Context window / git status refresh (model switch, run end).
           setState((s) =>
             s
               ? {
@@ -798,6 +1147,21 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
                   contextWindow: (d.contextWindow as number | undefined) ?? s.contextWindow,
                   gitBranch: (d.gitBranch as string | null | undefined) ?? s.gitBranch,
                   isGitRepo: (d.isGitRepo as boolean | undefined) ?? s.isGitRepo,
+                  gitDirtyFileCount:
+                    (d.gitDirtyFileCount as number | undefined) ?? s.gitDirtyFileCount,
+                  // null is meaningful here (counts unknown → chips hidden), so
+                  // only fall back to the old value when the field is absent.
+                  gitHubIssues:
+                    d.gitHubIssues !== undefined
+                      ? (d.gitHubIssues as number | null)
+                      : s.gitHubIssues,
+                  gitHubPRs:
+                    d.gitHubPRs !== undefined ? (d.gitHubPRs as number | null) : s.gitHubPRs,
+                  gitHubRepoUrl:
+                    d.gitHubRepoUrl !== undefined
+                      ? (d.gitHubRepoUrl as string | null)
+                      : s.gitHubRepoUrl,
+                  additionalRoots: (d.additionalRoots as string[] | undefined) ?? s.additionalRoots,
                 }
               : s,
           );
@@ -811,11 +1175,17 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     [
       handleKenEvent,
       handleAutopilotEvent,
+      onRoadmapPhaseDraftChange,
       appendAssistant,
       pushItem,
       finalizeThinking,
       endStreamingText,
+      discardStreamingDraft,
+      flushSubagentSnapshots,
+      dropPendingSubagentSnapshots,
       nextId,
+      listCommands,
+      listModels,
       setItems,
       setState,
       setTasks,
@@ -831,17 +1201,19 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
       setThinkingAccumMs,
       setPlanTotal,
       setPlanDone,
-      setSessionTitle,
       setPlanReview,
       setQueuedCount,
+      setQueuedMessages,
       setAttachments,
       setCommands,
+      setModels,
       stateRef,
       planDoneRef,
       planTotalRef,
       planReviewPathRef,
       pendingPlanTotalRef,
       stickToBottomRef,
+      onSessionReset,
     ],
   );
 

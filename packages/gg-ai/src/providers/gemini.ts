@@ -24,15 +24,20 @@ const GEMINI_CLI_API_CLIENT = "gemini-cli/0.0.0";
 const CODE_ASSIST_NON_STREAMING_RETRIES = 3;
 const CODE_ASSIST_NON_STREAMING_RETRY_DELAY_MS = 1_000;
 const SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+// Mirrors VALID_GEMINI_MODELS in the official gemini-cli
+// (packages/core/src/config/models.ts). Preview flash-lite went GA and was
+// renamed to `gemini-3.1-flash-lite`; `gemini-3.5-flash` (and its backend alias
+// `gemini-3-flash`) are now served over Code Assist.
 const CODE_ASSIST_SUPPORTED_MODELS = new Set([
   "gemini-3-pro-preview",
   "gemini-3.1-pro-preview",
   "gemini-3.1-pro-preview-customtools",
   "gemini-3-flash-preview",
-  "gemini-3.1-flash-lite-preview",
+  "gemini-3.5-flash",
+  "gemini-3-flash",
+  "gemini-3.1-flash-lite",
   "gemini-2.5-pro",
   "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
   "gemma-4-31b-it",
   "gemma-4-26b-a4b-it",
 ]);
@@ -162,6 +167,38 @@ function getCodeAssistEndpoint(method: string): URL {
 
 function formatUnsupportedModelMessage(model: string): string {
   return `Gemini OAuth is configured to use the Gemini Code Assist subscription endpoint only. That endpoint does not currently expose model "${model}".`;
+}
+
+// Models that exist in the Code Assist catalog but are gated per-account by
+// Google (Code Assist Standard/Enterprise + admin/preview enablement). A 404 on
+// these is an entitlement problem, not a wrong model string — free/personal
+// OAuth accounts routinely can't call them. Explain that instead of echoing the
+// bare "Requested entity was not found" body, which reads like an app bug.
+const ACCOUNT_GATED_MODELS = new Set([
+  "gemini-3-flash",
+  "gemini-3.5-flash",
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-pro-preview-customtools",
+]);
+
+// The user-facing account-gated message is split so the error UI (gg-app + TUI)
+// can render it as `message` (what happened — an entitlement gap, not a bug)
+// plus `hint` (the actionable next step, shown on the dedicated guidance line).
+function accountGatedMessage(model: string): string {
+  return (
+    `Your Google account isn't entitled to "${model}" over Gemini Code Assist OAuth, ` +
+    `so the API reports it as not found. This is an account-access limit, not a ggcoder bug.`
+  );
+}
+
+function accountGatedHint(): string {
+  return (
+    `Newer Gemini models (3.5 Flash, 3.1 Pro Preview) are available only to Code Assist ` +
+    `Standard/Enterprise accounts with preview/GA access enabled by a cloud admin — ` +
+    `free/personal accounts usually can't call them. Switch to Gemini 3.1 Flash Lite ` +
+    `(it works on this account) with /model, or sign in with a Code Assist ` +
+    `Standard/Enterprise account that has preview access.`
+  );
 }
 
 function formatErrorMessage(status: number, body: string, model: string): string {
@@ -377,6 +414,7 @@ function toGemini3ThinkingLevel(
     case "high":
     case "xhigh":
     case "max":
+    case "ultra":
       return "HIGH";
   }
 }
@@ -390,6 +428,7 @@ function toThinkingBudget(level: NonNullable<StreamOptions["thinking"]>): number
     case "high":
     case "xhigh":
     case "max":
+    case "ultra":
       return 8_192;
   }
 }
@@ -569,7 +608,10 @@ async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions):
     if (!response.ok) {
       const text = await response.text().catch(() => "");
       const quota = parseGeminiQuota(response.status, text);
-      let message = formatErrorMessage(response.status, text, options.model);
+      const accountGated = response.status === 404 && ACCOUNT_GATED_MODELS.has(options.model);
+      let message = accountGated
+        ? accountGatedMessage(options.model)
+        : formatErrorMessage(response.status, text, options.model);
       let resetsAt: number | undefined;
       if (quota?.exhausted) {
         // Stamp the canonical phrase the agent loop matches on so this hard
@@ -581,6 +623,7 @@ async function fetchCodeAssist(plan: GeminiRequestPlan, options: StreamOptions):
       throw new ProviderError("gemini", message, {
         statusCode: response.status,
         ...(resetsAt !== undefined ? { resetsAt } : {}),
+        ...(accountGated ? { hint: accountGatedHint() } : {}),
       });
     }
 

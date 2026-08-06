@@ -86,6 +86,7 @@ export class GGBoss {
   private pendingUserMessages = 0;
   private opts: GGBossOptions;
   private authStorage = new AuthStorage();
+  private bossAccountId: string | undefined;
   /** Path to the boss's per-session jsonl log under ~/.gg/boss/sessions/. */
   private sessionPath = "";
   /** Stable id for the current boss conversation, used as a provider cache routing key. */
@@ -175,6 +176,7 @@ export class GGBoss {
     );
 
     const creds = await this.authStorage.resolveCredentials(this.opts.bossProvider);
+    this.bossAccountId = creds.accountId;
     const tools = this.buildToolSet();
 
     // Either resume a prior session (load messages from jsonl), or create a
@@ -324,6 +326,7 @@ export class GGBoss {
   async switchBossModel(provider: Provider, model: string): Promise<void> {
     const tools = this.buildToolSet();
     const creds = await this.authStorage.resolveCredentials(provider);
+    this.bossAccountId = creds.accountId;
     // Capture history minus the system message — Agent re-adds system from options.
     const oldMessages = this.bossAgent.getMessages().filter((m) => m.role !== "system");
 
@@ -351,6 +354,13 @@ export class GGBoss {
     await saveSettings({ bossProvider: provider, bossModel: model, bossThinkingLevel: thinking });
   }
 
+  getBossContextWindow(): number {
+    return getContextWindow(this.opts.bossModel, {
+      provider: this.opts.bossProvider,
+      accountId: this.bossAccountId,
+    });
+  }
+
   /** Swap every worker's model. Workers keep their per-project sessions. */
   async switchWorkerModel(provider: Provider, model: string): Promise<void> {
     await Promise.all([...this.workers.values()].map((w) => w.switchModel(provider, model)));
@@ -371,17 +381,23 @@ export class GGBoss {
   /** Compact only when threshold (default 80%) is exceeded. */
   private async runCompaction(force: boolean): Promise<void> {
     const messages = this.bossAgent.getMessages();
-    const contextWindow = getContextWindow(this.opts.bossModel);
+    const creds = await this.authStorage.resolveCredentials(this.opts.bossProvider);
+    const contextWindow = getContextWindow(this.opts.bossModel, {
+      provider: this.opts.bossProvider,
+      accountId: creds.accountId,
+    });
     const tokens = bossStore.getInputTokens();
     if (!force && !shouldCompact(messages, contextWindow, 0.8, tokens)) return;
 
     bossStore.startCompaction();
     try {
-      const creds = await this.authStorage.resolveCredentials(this.opts.bossProvider);
       const { messages: compactedMessages, result } = await compact(messages, {
         provider: this.opts.bossProvider,
         model: this.opts.bossModel,
         apiKey: creds.accessToken,
+        accountId: creds.accountId,
+        projectId: creds.projectId,
+        baseUrl: creds.baseUrl,
         contextWindow,
         signal: this.ac.signal,
       });

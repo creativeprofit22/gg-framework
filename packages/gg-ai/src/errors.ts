@@ -3,15 +3,15 @@
  *
  * Every error users see should answer one question: "is this me or them?"
  * That answer drives whether they retry, switch model, log in, or report a
- * ggcoder bug. The `FormattedError` shape captures it in plain English:
+ * GG Coder bug. The `FormattedError` shape captures it in plain English:
  *
  *   ✗ OpenAI returned an error.
  *     An error occurred while processing your request...
- *     → This is an OpenAI issue, not ggcoder. Retry — if it persists, check status.openai.com.
+ *     → This is an OpenAI issue, not GG Coder. Retry — if it persists, check status.openai.com.
  *
- *   ✗ ggcoder hit an unexpected error.
+ *   ✗ GG Coder hit an unexpected error.
  *     Cannot read property 'foo' of undefined
- *     → This is a ggcoder bug — please report it.
+ *     → This is a GG Coder bug — please report it.
  */
 
 export type ErrorSource = "provider" | "ggcoder" | "network" | "auth" | "capability";
@@ -130,6 +130,7 @@ export class ProviderError extends GGAIError {
  */
 const PROVIDER_DISPLAY: Record<string, string> = {
   openai: "OpenAI",
+  azure: "Azure OpenAI",
   anthropic: "Anthropic",
   gemini: "Gemini",
   glm: "Z.AI (GLM)",
@@ -137,6 +138,7 @@ const PROVIDER_DISPLAY: Record<string, string> = {
   deepseek: "DeepSeek",
   openrouter: "OpenRouter",
   sakana: "Sakana",
+  xai: "xAI (Grok)",
   xiaomi: "Xiaomi (MiMo)",
   minimax: "MiniMax",
 };
@@ -145,6 +147,7 @@ const PROVIDER_DISPLAY: Record<string, string> = {
 const PROVIDER_STATUS_URL: Record<string, string> = {
   openai: "status.openai.com",
   anthropic: "status.anthropic.com",
+  xai: "status.x.ai",
 };
 
 function providerDisplayName(provider: string): string {
@@ -249,6 +252,26 @@ export function isRawJsonErrorEcho(message: string): boolean {
   }
 }
 
+/**
+ * Detect a raw HTML document returned by a provider edge, proxy, or status page.
+ * SDKs preserve non-JSON response bodies in `err.message`, sometimes prefixed by
+ * the HTTP status. HTML is diagnostic transport debris, not a user-facing error.
+ */
+export function isRawHtmlErrorEcho(message: string): boolean {
+  const withoutStatus = message
+    .trimStart()
+    .replace(/^\d{3}\s+/, "")
+    .trimStart();
+  return /^<!doctype\s+html(?:\s|>)/i.test(withoutStatus) || /^<html(?:\s|>)/i.test(withoutStatus);
+}
+
+/** Clean fallback when an API endpoint returned an HTML page instead of API JSON. */
+export function providerHtmlErrorMessage(statusCode: number | undefined): string {
+  return statusCode
+    ? `The provider returned an HTML error page (HTTP ${statusCode}) instead of an API response.`
+    : "The provider returned an HTML error page instead of an API response.";
+}
+
 /** Clean fallback message when a provider's error body carried no usable text. */
 export function emptyProviderErrorMessage(statusCode: number | undefined): string {
   return statusCode
@@ -259,7 +282,7 @@ export function emptyProviderErrorMessage(statusCode: number | undefined): strin
 export function formatError(err: unknown): FormattedError {
   if (err instanceof ProviderError) {
     const name = providerDisplayName(err.provider);
-    const cleanMessage = cleanProviderMessage(err.message);
+    const cleanMessage = cleanProviderMessage(err.message, err.statusCode);
     if (isMythosAccessError(cleanMessage)) {
       return {
         headline: "Claude Mythos 5 is invitation-only.",
@@ -270,7 +293,7 @@ export function formatError(err: unknown): FormattedError {
         statusCode: err.statusCode,
         ...(err.requestId ? { requestId: err.requestId } : {}),
         guidance:
-          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to claude-fable-5 with /model — same underlying model, generally available.",
+          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5 via the model selector — same underlying model, generally available.",
       };
     }
     if (isUsageLimitError(err)) {
@@ -286,6 +309,11 @@ export function formatError(err: unknown): FormattedError {
         guidance: "Try again once it's back. Your conversation is preserved.",
       };
     }
+    const baseGuidance = err.hint ?? providerGuidance(err.provider, cleanMessage, err.statusCode);
+    const retryGuidance =
+      err.resetsAt && err.resetsAt * 1000 > Date.now()
+        ? ` The provider says to retry after ${formatResetTime(err.resetsAt)}.`
+        : "";
     return {
       headline: `${name} returned an error.`,
       source: "provider",
@@ -293,7 +321,8 @@ export function formatError(err: unknown): FormattedError {
       provider: err.provider,
       statusCode: err.statusCode,
       requestId: err.requestId,
-      guidance: err.hint ?? providerGuidance(err.provider, cleanMessage, err.statusCode),
+      ...(err.resetsAt ? { resetsAt: err.resetsAt } : {}),
+      guidance: `${baseGuidance}${retryGuidance}`,
     };
   }
 
@@ -321,7 +350,7 @@ function finaliseBySource(
         headline: "Network error — couldn't reach the provider.",
         source,
         message,
-        guidance: hint ?? "Check your internet connection. Not a ggcoder issue — retry shortly.",
+        guidance: hint ?? "Check your internet connection. Not a GG Coder issue — retry shortly.",
         ...(requestId ? { requestId } : {}),
       };
     case "auth":
@@ -329,7 +358,7 @@ function finaliseBySource(
         headline: "Authentication issue.",
         source,
         message,
-        guidance: hint ?? "Run `ggcoder login` to refresh your credentials.",
+        guidance: hint ?? "Re-authenticate to refresh your credentials.",
         ...(requestId ? { requestId } : {}),
       };
     case "provider":
@@ -348,16 +377,16 @@ function finaliseBySource(
         message: "",
         guidance:
           hint ??
-          "Only Kimi, Gemini, MiniMax, and MiMo-V2.5 can analyze video. Switch with /model.",
+          "Only Kimi, Gemini, MiniMax, and MiMo-V2.5 can analyze video. Switch to one of those via the model selector.",
         ...(requestId ? { requestId } : {}),
       };
     case "ggcoder":
       return {
-        headline: "ggcoder hit an unexpected error.",
+        headline: "GG Coder hit an unexpected error.",
         source,
         message,
         guidance:
-          hint ?? "This looks like a ggcoder bug — please report it to the developer (see /help).",
+          hint ?? "This looks like a GG Coder bug — please report it to the developer (see /help).",
         ...(requestId ? { requestId } : {}),
       };
   }
@@ -384,8 +413,9 @@ export function formatErrorForDisplay(err: unknown): string {
  * so older ProviderError messages render cleanly under the new headline
  * system without doubling up.
  */
-function cleanProviderMessage(message: string): string {
-  return message.replace(/^\[[^\]]+\]\s*/, "").trim();
+function cleanProviderMessage(message: string, statusCode?: number): string {
+  const clean = message.replace(/^\[[^\]]+\]\s*/, "").trim();
+  return isRawHtmlErrorEcho(clean) ? providerHtmlErrorMessage(statusCode) : clean;
 }
 
 function inferSource(err: Error): ErrorSource {
@@ -416,7 +446,7 @@ function inferSource(err: Error): ErrorSource {
  * Build the action line for a provider error: tells the user whether to
  * retry, switch model, check billing, or whether it's serious enough to
  * report. Always frames the source plainly ("This is an OpenAI issue") so
- * the user knows to NOT report it to the ggcoder dev.
+ * the user knows to NOT report it to the GG Coder dev.
  */
 function providerGuidance(
   provider: string | undefined,
@@ -428,10 +458,10 @@ function providerGuidance(
   const lower = message.toLowerCase();
 
   if (statusCode === 401 || lower.includes("unauthorized") || lower.includes("invalid api key")) {
-    return `Authentication failed with ${name}. Run \`ggcoder login\` to refresh your credentials.`;
+    return `Authentication failed with ${name}. Re-authenticate to refresh your credentials.`;
   }
   if (lower.includes("overloaded") || lower.includes("engine_overloaded")) {
-    return `${name}'s servers are overloaded right now. Retry in a moment — not a ggcoder issue.`;
+    return `${name}'s servers are overloaded right now. Retry in a moment — not a GG Coder issue.`;
   }
   if (
     lower.includes("insufficient balance") ||
@@ -439,16 +469,22 @@ function providerGuidance(
     lower.includes("recharge") ||
     lower.includes("no resource package")
   ) {
-    return `Your ${name} account has a billing or quota issue — check your balance. Not a ggcoder issue.`;
+    return `Your ${name} account has a billing or quota issue — check your balance. Not a GG Coder issue.`;
   }
   if (statusCode === 429 || lower.includes("rate limit") || lower.includes("too many requests")) {
-    return `${name} rate limit hit. Wait a moment then retry — not a ggcoder issue.`;
+    return `${name} rate limit hit. Wait a moment then retry — not a GG Coder issue.`;
   }
   if (statusCode === 502 || lower.includes("bad gateway")) {
-    return `${name} returned a bad gateway. Retry — this is on their side, not ggcoder.`;
+    return `${name} returned a bad gateway. Retry — this is on their side, not GG Coder.`;
   }
   if (statusCode === 503 || lower.includes("service unavailable")) {
-    return `${name} is temporarily unavailable. Retry shortly — not a ggcoder issue.`;
+    return `${name} is temporarily unavailable. Retry shortly — not a GG Coder issue.`;
+  }
+  if (
+    statusCode === 507 ||
+    lower.includes("exceeded request buffer limit while retrying upstream")
+  ) {
+    return `${name}'s proxy could not retry this large request. GG Coder already retried automatically — compact the conversation, then retry.`;
   }
   if (
     statusCode === 500 ||
@@ -456,23 +492,39 @@ function providerGuidance(
     (lower.includes("500") && lower.includes("internal server error"))
   ) {
     return status
-      ? `This is an error from ${name}, not ggcoder. Retry — if it keeps happening, check ${status}.`
-      : `This is an error from ${name}, not ggcoder. Retry — if it keeps happening, try a different model with /model.`;
+      ? `This is an error from ${name}, not GG Coder. Retry — if it keeps happening, check ${status}.`
+      : `This is an error from ${name}, not GG Coder. Retry — if it keeps happening, try a different model via the model selector.`;
   }
   if (lower.includes("timeout") || lower.includes("timed out")) {
-    return `Request to ${name} timed out. Their servers may be slow — retry. Not a ggcoder issue.`;
+    return `Request to ${name} timed out. Their servers may be slow — retry. Not a GG Coder issue.`;
   }
   if (
     lower.includes("does not recognize the requested model") ||
     (lower.includes("model") &&
       (lower.includes("not exist") || lower.includes("not found") || lower.includes("no access")))
   ) {
-    return `${name} doesn't recognise this model on your account. Use /model to switch, or check your subscription tier.`;
+    return `${name} doesn't recognise this model on your account. Switch to a different model via the model selector, or check your subscription tier.`;
   }
   if (lower.includes("context_length_exceeded") || lower.includes("prompt is too long")) {
-    return `Context window for this ${name} model is full. Run /compact to shrink history, or start a new session.`;
+    return `Context window for this ${name} model is full. Compact the conversation to shrink history, or start a new session.`;
+  }
+  if (
+    lower.includes("many-image request") ||
+    (lower.includes("image dimensions") && lower.includes("max allowed size"))
+  ) {
+    return `An image in conversation history exceeds ${name}'s many-image limit. Restart GG Coder so restored images are resized, then retry; if it persists, start a new session.`;
+  }
+  // Anthropic HTTP 413: the request BODY (not the token count) exceeds the
+  // provider's max size. Retrying the same request fails identically — the fix
+  // is to shrink history, same as a context overflow.
+  if (
+    statusCode === 413 ||
+    lower.includes("request_too_large") ||
+    lower.includes("request exceeds the maximum size")
+  ) {
+    return `The request to ${name} is too large. Compact the conversation to shrink history, or start a new session.`;
   }
   return status
-    ? `This is an error from ${name}, not ggcoder. Retry — if it persists, check ${status}.`
-    : `This is an error from ${name}, not ggcoder. Retry — if it persists, try a different model with /model.`;
+    ? `This is an error from ${name}, not GG Coder. Retry — if it persists, check ${status}.`
+    : `This is an error from ${name}, not GG Coder. Retry — if it persists, try a different model via the model selector.`;
 }

@@ -1,5 +1,666 @@
 # @kenkaiiii/ggcoder
 
+## 5.31.0
+
+### Minor Changes
+
+- Advertise built-in and project slash commands to ACP clients when sessions open or load.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.31.0
+- @kenkaiiii/gg-agent@5.31.0
+- @kenkaiiii/gg-core@5.31.0
+
+## 5.30.3
+
+### Patch Changes
+
+- Restore complete compacted-session history in ACP clients without duplicate retained messages or internal replay noise.
+  - @kenkaiiii/gg-ai@5.30.3
+  - @kenkaiiii/gg-agent@5.30.3
+  - @kenkaiiii/gg-core@5.30.3
+
+## 5.30.2
+
+### Patch Changes
+
+- Recover useful subagent findings after timeouts and prevent nested delegation from exhausting child turn budgets.
+  - @kenkaiiii/gg-ai@5.30.2
+  - @kenkaiiii/gg-agent@5.30.2
+  - @kenkaiiii/gg-core@5.30.2
+
+## 5.30.1
+
+### Patch Changes
+
+- Keep long autonomous tool runs lean by pruning stale outputs and oversized completed tool arguments.
+  - @kenkaiiii/gg-ai@5.30.1
+  - @kenkaiiii/gg-agent@5.30.1
+  - @kenkaiiii/gg-core@5.30.1
+
+## 5.30.0
+
+### Minor Changes
+
+- Add ACP session controls and make conversation compaction durable across resumes and concurrent processes.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.30.0
+- @kenkaiiii/gg-agent@5.30.0
+- @kenkaiiii/gg-core@5.30.0
+
+## 5.29.1
+
+### Patch Changes
+
+- Fix sub-agents hanging until their timeout instead of exiting when finished, and stop the Ideal review coverage gate from looping forever on deleted or unreadable files
+  - @kenkaiiii/gg-ai@5.29.1
+  - @kenkaiiii/gg-agent@5.29.1
+  - @kenkaiiii/gg-core@5.29.1
+
+## 5.29.0
+
+### Minor Changes
+
+- Add step-boundary transcript checkpoints and a run journal so crashes preserve completed work, MCP HTTP session recovery with single reconnect-and-replay, server-initiated elicitation support, a visual token budget for image downscaling, and capped backoff for background-process notifications.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.29.0
+- @kenkaiiii/gg-agent@5.29.0
+- @kenkaiiii/gg-core@5.29.0
+
+## 5.28.0
+
+### Minor Changes
+
+- List Claude Code and Codex sessions alongside GG Coder's own for a project, tagged with their source and resumable on open, replacing the `/import` slash command
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.28.0
+- @kenkaiiii/gg-agent@5.28.0
+- @kenkaiiii/gg-core@5.28.0
+
+## 5.27.0
+
+### Minor Changes
+
+- Add `/import` for resuming Claude Code, Codex and Cursor transcripts, gate turn completion on unread background processes, and migrate MCP to SDK v2 with an on-disk tool catalog cache
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.27.0
+- @kenkaiiii/gg-agent@5.27.0
+- @kenkaiiii/gg-core@5.27.0
+
+## 5.26.3
+
+### Patch Changes
+
+- Fix session transcript restore: rebase marker anchors when compaction rewrites a session, heal stale anchors in existing session files, skip duplicate autopilot-injected user bubbles, and restore slash commands from the persisted invocation instead of matching drifted templates
+  - @kenkaiiii/gg-ai@5.26.3
+  - @kenkaiiii/gg-agent@5.26.3
+  - @kenkaiiii/gg-core@5.26.3
+
+## 5.26.2
+
+### Patch Changes
+
+- Fix concurrent prompts starting two runs on the same session, and announce queue depth the moment the agent consumes queued steering.
+  - @kenkaiiii/gg-ai@5.26.2
+  - @kenkaiiii/gg-agent@5.26.2
+  - @kenkaiiii/gg-core@5.26.2
+
+## 5.26.1
+
+### Patch Changes
+
+- Remove the project memory journal: it duplicated what the repo already tells the agent and suppressed real verification.
+  - @kenkaiiii/gg-ai@5.26.1
+  - @kenkaiiii/gg-agent@5.26.1
+  - @kenkaiiii/gg-core@5.26.1
+
+## 5.26.0
+
+### Minor Changes
+
+- Keep long tasks running and carry project history across sessions: the agent loop can now extend an exhausted turn budget when it is still making progress, finished sub-agents and background processes announce themselves instead of needing to be polled, mid-session model switches are recorded as durable replayable state, and compaction writes past-tense project history to `.gg/memory.md` (on by default, `/memory-off` to disable).
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.26.0
+- @kenkaiiii/gg-agent@5.26.0
+- @kenkaiiii/gg-core@5.26.0
+
+## 5.25.0
+
+### Minor Changes
+
+- Add local model support (Ollama, LM Studio, llama.cpp, vLLM) with runtime discovery, capability-gated tool/thinking support, and per-endpoint auth; add `/remove-dir` workspace command; keep the subscription usage meter from blanking on transient provider rate limits.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.25.0
+- @kenkaiiii/gg-agent@5.25.0
+- @kenkaiiii/gg-core@5.25.0
+
+## 5.24.0
+
+### Minor Changes
+
+- Add Markdown chat transcript export, network egress allowlist, multi-root `/add-dir`, and OpenAI-compatible reasoning-field detection
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.24.0
+- @kenkaiiii/gg-agent@5.24.0
+- @kenkaiiii/gg-core@5.24.0
+
+## 5.23.3
+
+### Patch Changes
+
+- 1be7250: Fix Windows compatibility across project discovery, shell execution, MCP and LSP.
+  - **Projects and sessions were invisible on Windows.** Every cwd extractor in
+    project discovery gated on `cwd.startsWith("/")`, so a `C:\…` session header
+    was rejected, discovery fell back to the lossy directory-name decode, and the
+    project silently vanished from the picker. Absolute-path detection is now
+    platform-agnostic (`C:\…`, `\\server\share\…`, `/…`), and both fallback
+    decoders reconstruct real Windows paths.
+  - **Extended-length paths no longer duplicate a project.** A cwd recorded as
+    `\\?\C:\proj` (what Rust's `canonicalize()` produces) is normalized to its
+    plain form on read, matching what `encodeCwd` already did on write.
+  - **`persist` bash mode was completely broken on Windows.** It spawned a bare
+    `bash`, but Git for Windows puts `cmd\` on PATH and `bash.exe` in `bin\`, so
+    the spawn was always ENOENT. It now reuses the resolved shell, and no longer
+    detaches on Windows (which only orphaned the shell past a crash).
+  - **MCP stdio servers configured with `npx` never connected.** The MCP SDK
+    spawns with `shell: false` and Windows' `CreateProcess` ignores `PATHEXT`, so
+    the near-universal `{"command": "npx"}` config failed with an opaque
+    "Connection closed". The command is now resolved across PATH × PATHEXT.
+  - **LSP inline diagnostics never appeared on Windows.** Diagnostics are cached
+    by `file://` URI; ours kept the drive letter's case while servers emit the
+    lowercase form, so every lookup missed and LSP degraded silently.
+  - **Background processes survived cancellation.** `killProcessTree` used a
+    POSIX-only negative pid, leaving a timed-out command's whole descendant tree
+    running. It now uses `taskkill /T /F`, resolved from `SystemRoot` rather than
+    PATH.
+  - `find`/`grep` glob patterns containing backslashes now match (backslash is
+    picomatch's escape character, never a separator).
+  - **Session persistence was broken on Windows.** `syncFile` opened the file
+    read-only (`"r"`) and then called `fsync`, but Windows implements fsync as
+    `FlushFileBuffers`, which requires a handle with WRITE access and fails with
+    `EPERM` on a read-only one. Every durable session write funnels through that
+    helper, so saving sessions, archiving cold sessions and writing redirects all
+    threw. It now opens `"r+"`, and a failed flush is non-fatal (network shares
+    and container overlays can reject fsync outright — losing durability there is
+    acceptable, refusing to save the user's session is not).
+  - @kenkaiiii/gg-ai@5.23.3
+  - @kenkaiiii/gg-agent@5.23.3
+  - @kenkaiiii/gg-core@5.23.3
+
+## 5.23.2
+
+### Patch Changes
+
+- Fix named sub-agents receiving no MCP tools: a session with a `tools:` allow-list skipped MCP entirely unless an MCP whitelist was also set, so an agent listing `mcp__kencode-search__searchCode` silently fell back to training data. The whitelist is now derived from the agent definition and forwarded through every spawn path. Also removes the v5.22.6 seeded `auditor.md`/`skeptic.md` that shadowed the richer bundled agents, with hash-gated cleanup that leaves user-edited files untouched.
+  - @kenkaiiii/gg-ai@5.23.2
+  - @kenkaiiii/gg-agent@5.23.2
+  - @kenkaiiii/gg-core@5.23.2
+
+## 5.23.1
+
+### Patch Changes
+
+- fb85e4f: Fix Claude Opus 5's thinking-level cycle and retire Claude Opus 4.8. `thinking-level.ts` kept its own hardcoded Anthropic regexes, so Opus 5 was not recognised as adaptive and collapsed to a single non-cycling `max` level; it now exposes the full low → medium → high → xhigh → max ladder. Opus 4.8 is removed from the model registry, footers, provider descriptions, and the hardcoded JSON/RPC/sidecar/CLI defaults (all now `claude-opus-5`); gg-ai keeps wire-format support for the `claude-opus-4-8` ID since Anthropic still serves it. Also gave the Sol/Terra policy tests real timeouts so they stop flaking at vitest's 5s default.
+  - @kenkaiiii/gg-ai@5.23.1
+  - @kenkaiiii/gg-agent@5.23.1
+  - @kenkaiiii/gg-core@5.23.1
+
+## 5.23.0
+
+### Minor Changes
+
+- a6a78c2: Add Claude Opus 5 (`claude-opus-5`, released 2026-07-24) to the model registry — 1M context, 128k output, image input, adaptive thinking with the full effort ladder (low→max, xhigh included), $5/$25 MTok (same price as Opus 4.8). gg-ai treats it as an adaptive-thinking model (no interleaved-thinking beta, xhigh passes through), footers short-name it "Opus" (Opus 4.8 becomes "Opus 4.8"), login/provider descriptions mention it, and gg-boss's default boss model moves from `claude-opus-4-8` to `claude-opus-5`. Opus 4.8 stays registered as a legacy option.
+
+### Patch Changes
+
+- Updated dependencies [a6a78c2]
+  - @kenkaiiii/gg-ai@5.23.0
+  - @kenkaiiii/gg-core@5.23.0
+  - @kenkaiiii/gg-agent@5.23.0
+
+## 5.22.6
+
+### Patch Changes
+
+- Remove the retired /setup command and its auto-run/hint UI, fix /bullet-proof refusals with authorized-defensive-review framing plus seeded auditor/skeptic agents and batched skeptic verification, dedupe kencode/source_path guidance out of the Research section, gate the native-web-search claim to Anthropic, and slim the system prompt.
+  - @kenkaiiii/gg-ai@5.22.6
+  - @kenkaiiii/gg-agent@5.22.6
+  - @kenkaiiii/gg-core@5.22.6
+
+## 5.22.5
+
+### Patch Changes
+
+- Proactive OAuth token refresh at a lifetime-scaled threshold. Short-lived tokens (e.g. Kimi's 15-minute access token) now refresh at their halfway point instead of riding to the expiry cliff, eliminating the recurring 401s and the misleading "API Key appears invalid" run failures caused by concurrent-session refresh races. Ported from MoonshotAI/kimi-code's OAuthManager: refresh when within max(300s, lifetime × 0.5) of expiry.
+  - @kenkaiiii/gg-ai@5.22.5
+  - @kenkaiiii/gg-agent@5.22.5
+  - @kenkaiiii/gg-core@5.22.5
+
+## 5.22.4
+
+### Patch Changes
+
+- Fix memory tools killing the turn when the model sends content over the 600-character limit (over-limit input is now an ordinary, actionable tool error instead of a fatal "repeatedly issued invalid arguments" failure), make chat agents save durable memories proactively without being asked, fix false stream stalls for silent OpenAI reasoning, and anchor transcript error markers to persisted messages so resumed errors render at the bottom.
+  - @kenkaiiii/gg-ai@5.22.4
+  - @kenkaiiii/gg-agent@5.22.4
+  - @kenkaiiii/gg-core@5.22.4
+
+## 5.22.3
+
+### Patch Changes
+
+- Automatically recover from runaway tool-call streams and restore bundled TypeScript diagnostics and source inspection in the desktop sidecar.
+  - @kenkaiiii/gg-ai@5.22.3
+  - @kenkaiiii/gg-agent@5.22.3
+  - @kenkaiiii/gg-core@5.22.3
+
+## 5.22.2
+
+### Patch Changes
+
+- Keep live sessions responsive while multiple subagents stream in parallel.
+  - @kenkaiiii/gg-ai@5.22.2
+  - @kenkaiiii/gg-agent@5.22.2
+  - @kenkaiiii/gg-core@5.22.2
+
+## 5.22.1
+
+### Patch Changes
+
+- Reliability fixes from the baseline harness (bench/baseline):
+  - **Truncated-stream guard (gg-ai):** a clean stream close with no terminal event (no `message_stop` / `finish_reason`) now throws a retryable `ProviderError(504)` instead of silently returning partial text as a phantom-complete `end_turn`. Applies to both the Anthropic and OpenAI-compatible providers.
+  - **Sidecar bounds (ggcoder):** inbound HTTP bodies capped at 10 MB (413) via `readCappedBody`; the `~/.gg` progress `fs.watch` handle is now closed on shutdown; the project-file glob search streams and bails after 50k entries. Closes three unbounded-memory/leak paths.
+  - **Cap-divergence marker (gg-agent):** `capToolResults`/`capTurnToolResults` now stamp `ToolResult.capped = { originalChars, keptChars, scope }` when they trim, so the event-transcript vs model-input divergence is programmatically visible. Internal metadata only — never serialized to the provider.
+  - **Empty-part serializer fix (gg-ai):** `toAnthropicMessages` no longer emits empty text parts (user `""`, user `{text:""}`, settled assistant `""`), eliminating live Anthropic 400 "text content blocks must be non-empty" failures.
+  - **Tool-id remap fix (gg-ai):** `remapToolCallId` now strips the full `toolu_` prefix (`slice(6)`), mapping `toolu_01ABC` → clean `call_01ABC` instead of the lossy double-underscore `call__01ABC`.
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.22.1
+  - @kenkaiiii/gg-agent@5.22.1
+  - @kenkaiiii/gg-core@5.22.1
+
+## 5.22.0
+
+### Minor Changes
+
+- Add Kimi (Moonshot) subscription usage tracking — the usage meter now reports Kimi For Coding plan quota (weekly + rate windows) alongside Anthropic and OpenAI.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.22.0
+- @kenkaiiii/gg-agent@5.22.0
+- @kenkaiiii/gg-core@5.22.0
+
+## 5.21.0
+
+### Minor Changes
+
+- Kimi K3 gains its full low/high/max thinking ladder with an endpoint-aware default (high on the Kimi For Coding OAuth endpoint, matching the official CLI's plan-usage profile; max on the public API), thinking can now be fully disabled via the nested toggle, and context compaction no longer blows past the model's window on oversized turns.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.21.0
+- @kenkaiiii/gg-agent@5.21.0
+- @kenkaiiii/gg-core@5.21.0
+
+## 5.20.5
+
+### Patch Changes
+
+- Require generated UIs to meet WCAG 2.2 Level AA and follow ADA-aligned accessibility practices.
+  - @kenkaiiii/gg-ai@5.20.5
+  - @kenkaiiii/gg-agent@5.20.5
+  - @kenkaiiii/gg-core@5.20.5
+
+## 5.20.4
+
+### Patch Changes
+
+- Teach the bundled UI skill to avoid generic soft semantic tint-on-tint treatments.
+  - @kenkaiiii/gg-ai@5.20.4
+  - @kenkaiiii/gg-agent@5.20.4
+  - @kenkaiiii/gg-core@5.20.4
+
+## 5.20.3
+
+### Patch Changes
+
+- Strengthen the bundled UI skill with consistent content rails, control spacing, and pointer focus guidance.
+  - @kenkaiiii/gg-ai@5.20.3
+  - @kenkaiiii/gg-agent@5.20.3
+  - @kenkaiiii/gg-core@5.20.3
+
+## 5.20.2
+
+### Patch Changes
+
+- 5fb6b62: Automatically enforce session retention across desktop, CLI, and chat-agent stores, compress inactive transcripts after seven days, and cap persisted tool output at 40,000 characters. Media is migrated to deduplicated adjacent assets with backward-compatible hydration and archived sessions remain discoverable and resumable through stale saved paths.
+- Updated dependencies [f4b8ec7]
+  - @kenkaiiii/gg-core@5.20.2
+  - @kenkaiiii/gg-ai@5.20.2
+  - @kenkaiiii/gg-agent@5.20.2
+
+## 5.20.1
+
+### Patch Changes
+
+- Show up to 30 recent chat sessions while keeping coding history capped at 5.
+  - @kenkaiiii/gg-ai@5.20.1
+  - @kenkaiiii/gg-agent@5.20.1
+  - @kenkaiiii/gg-core@5.20.1
+
+## 5.20.0
+
+### Minor Changes
+
+- Harden agent completion, loop recovery, workspace writes, project instructions, and subagent concurrency.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.20.0
+- @kenkaiiii/gg-agent@5.20.0
+- @kenkaiiii/gg-core@5.20.0
+
+## 5.19.6
+
+### Patch Changes
+
+- Filter expected usage polling, cancellation, and tool validation failures from desktop error reports.
+  - @kenkaiiii/gg-ai@5.19.6
+  - @kenkaiiii/gg-agent@5.19.6
+  - @kenkaiiii/gg-core@5.19.6
+
+## 5.19.5
+
+### Patch Changes
+
+- Report sidecar, provider, tool, and subagent failures through the desktop Error Mom integration.
+  - @kenkaiiii/gg-ai@5.19.5
+  - @kenkaiiii/gg-agent@5.19.5
+  - @kenkaiiii/gg-core@5.19.5
+
+## 5.19.4
+
+### Patch Changes
+
+- Prevent Anthropic many-image requests from failing by resizing new and restored images to provider-safe dimensions.
+  - @kenkaiiii/gg-ai@5.19.4
+  - @kenkaiiii/gg-agent@5.19.4
+  - @kenkaiiii/gg-core@5.19.4
+
+## 5.19.3
+
+### Patch Changes
+
+- Updated dependencies [b6e7562]
+  - @kenkaiiii/gg-ai@5.19.3
+  - @kenkaiiii/gg-agent@5.19.3
+  - @kenkaiiii/gg-core@5.19.3
+
+## 5.19.2
+
+### Patch Changes
+
+- Reduce long-session token usage with calibrated context estimates and preserve full oversized command output for targeted recovery.
+  - @kenkaiiii/gg-ai@5.19.2
+  - @kenkaiiii/gg-agent@5.19.2
+  - @kenkaiiii/gg-core@5.19.2
+
+## 5.19.1
+
+### Patch Changes
+
+- Cut OpenAI token burn: percentage-only compaction thresholds on authoritative provider usage, a per-turn aggregate tool-result budget that trims parallel fan-out context bombs, cheap stale tool-output pruning (superseded reads and old outputs stubbed before compaction), and autopilot now suppresses the redundant Ideal self-review while Ken owns verification.
+  - @kenkaiiii/gg-ai@5.19.1
+  - @kenkaiiii/gg-agent@5.19.1
+  - @kenkaiiii/gg-core@5.19.1
+
+## 5.19.0
+
+### Minor Changes
+
+- Add Grok 4.5 support and make Kimi prefer OAuth with automatic API-key fallback when plan usage is exhausted.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.19.0
+- @kenkaiiii/gg-agent@5.19.0
+- @kenkaiiii/gg-core@5.19.0
+
+## 5.18.0
+
+### Minor Changes
+
+- e00de5b: Add Kimi K3 as Moonshot's default model with its 1M-token multimodal registry metadata and endpoint-specific max-effort request handling for both the public API and Kimi Code OAuth. Keep Kimi K2.7 Code available as the dedicated coding alternative.
+
+### Patch Changes
+
+- Updated dependencies [e00de5b]
+  - @kenkaiiii/gg-ai@5.18.0
+  - @kenkaiiii/gg-core@5.18.0
+  - @kenkaiiii/gg-agent@5.18.0
+
+## 5.17.0
+
+### Minor Changes
+
+- a3916ff: Harden provider error handling, cancellation settlement, review evidence, LSP confidence, route-aware context limits, turn metrics, and durable child-agent recovery.
+
+### Patch Changes
+
+- Updated dependencies [a3916ff]
+  - @kenkaiiii/gg-ai@5.17.0
+  - @kenkaiiii/gg-agent@5.17.0
+  - @kenkaiiii/gg-core@5.17.0
+
+## 5.16.0
+
+### Minor Changes
+
+- Add persistent Jiwa behavior instructions for GG Chat, with dedicated curation tools and safer loop detection that avoids interrupting healthy progress.
+
+### Patch Changes
+
+- 25601bd: Bundle the evidence-led UI skill for every GG Coder installation, require models to invoke matching skills before acting, honor explicit exclusions and precedence, and align GG Coder and Ken's UI guidance around evidence-led implementation.
+  - @kenkaiiii/gg-ai@5.16.0
+  - @kenkaiiii/gg-agent@5.16.0
+  - @kenkaiiii/gg-core@5.16.0
+
+## 5.15.1
+
+### Patch Changes
+
+- Restore previous coding sessions in the desktop project picker after switching from Chat.
+  - @kenkaiiii/gg-ai@5.15.1
+  - @kenkaiiii/gg-agent@5.15.1
+  - @kenkaiiii/gg-core@5.15.1
+
+## 5.15.0
+
+### Minor Changes
+
+- Make chat-agent delegation switch the active agent in place while preserving conversation history and restoring handoffs across resumed sessions.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.15.0
+- @kenkaiiii/gg-agent@5.15.0
+- @kenkaiiii/gg-core@5.15.0
+
+## 5.14.0
+
+### Minor Changes
+
+- Add specialist chat agents, safer multi-window sessions, hardened web tools, and live provider usage tracking.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.14.0
+- @kenkaiiii/gg-agent@5.14.0
+- @kenkaiiii/gg-core@5.14.0
+
+## 5.13.3
+
+### Patch Changes
+
+- Align OpenAI prompt caching with Codex and improve cache-safe sub-agent routing.
+  - @kenkaiiii/gg-ai@5.13.3
+  - @kenkaiiii/gg-agent@5.13.3
+  - @kenkaiiii/gg-core@5.13.3
+
+## 5.13.2
+
+### Patch Changes
+
+- c0553e1: Bound historical tool-call arguments during compaction and stop retrying timed-out summary requests.
+  - @kenkaiiii/gg-ai@5.13.2
+  - @kenkaiiii/gg-agent@5.13.2
+  - @kenkaiiii/gg-core@5.13.2
+
+## 5.13.1
+
+### Patch Changes
+
+- Keep internet radio playback continuous while changing volume.
+  - @kenkaiiii/gg-ai@5.13.1
+  - @kenkaiiii/gg-agent@5.13.1
+  - @kenkaiiii/gg-core@5.13.1
+
+## 5.13.0
+
+### Minor Changes
+
+- Add parallel specialist orchestration and reliable app-exit radio cleanup.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.13.0
+- @kenkaiiii/gg-agent@5.13.0
+- @kenkaiiii/gg-core@5.13.0
+
+## 5.12.0
+
+### Minor Changes
+
+- Add concurrent async subagent orchestration with steering, follow-up, interruption, lifecycle tracking, and shared-workspace safeguards.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.12.0
+- @kenkaiiii/gg-agent@5.12.0
+- @kenkaiiii/gg-core@5.12.0
+
+## 5.11.0
+
+### Minor Changes
+
+- Add GPT-5.6 Ultra orchestration with proactive parallel subagent delegation.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.11.0
+- @kenkaiiii/gg-agent@5.11.0
+- @kenkaiiii/gg-core@5.11.0
+
+## 5.10.1
+
+### Patch Changes
+
+- Fix GPT-5.6 Sol, Terra, and Luna access through the ChatGPT Codex transport.
+  - @kenkaiiii/gg-ai@5.10.1
+  - @kenkaiiii/gg-agent@5.10.1
+  - @kenkaiiii/gg-core@5.10.1
+
+## 5.10.0
+
+### Minor Changes
+
+- Add OAuth subscription usage snapshots for Anthropic and OpenAI Codex.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.10.0
+- @kenkaiiii/gg-agent@5.10.0
+- @kenkaiiii/gg-core@5.10.0
+
+## 5.9.7
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-core@5.9.7
+  - @kenkaiiii/gg-ai@5.9.7
+  - @kenkaiiii/gg-agent@5.9.7
+
+## 5.9.6
+
+### Patch Changes
+
+- Retry read-only sub-agents on the active parent model when the cheaper model is unavailable.
+  - @kenkaiiii/gg-ai@5.9.6
+  - @kenkaiiii/gg-agent@5.9.6
+  - @kenkaiiii/gg-core@5.9.6
+
+## 5.9.5
+
+### Patch Changes
+
+- Add GPT-5.6 Sol, Terra, and Luna models to the registry; remove GPT-5.4, GPT-5.4 Mini, and GPT-5.3 Codex. Fix provider error hints to reference the model selector instead of CLI-only slash commands so they work in both the desktop app and the CLI.
+  - @kenkaiiii/gg-ai@5.9.5
+  - @kenkaiiii/gg-agent@5.9.5
+  - @kenkaiiii/gg-core@5.9.5
+
+## 5.9.4
+
+### Patch Changes
+
+- Auto-recover from context-overflow errors in the desktop app (request_too_large / 413) by wiring force-compaction + retry into AgentSession, add explicit 413 guidance, and rebrand user-facing error text to "GG Coder".
+  - @kenkaiiii/gg-ai@5.9.4
+  - @kenkaiiii/gg-agent@5.9.4
+  - @kenkaiiii/gg-core@5.9.4
+
+## 5.9.3
+
+### Patch Changes
+
+- Fix Gemini models over Code Assist OAuth: use the GA IDs from gemini-cli (`gemini-3.1-flash-lite`, wire name `gemini-3-flash` for Gemini 3.5 Flash), add Gemini 3.1 Pro (Preview) to the registry, and surface account-gated 404s as a clear entitlement message with actionable guidance instead of a raw provider error body.
+  - @kenkaiiii/gg-ai@5.9.3
+  - @kenkaiiii/gg-agent@5.9.3
+  - @kenkaiiii/gg-core@5.9.3
+
+## 5.9.2
+
+### Patch Changes
+
+- Fix retroactive XP seeding so heavy prior users spread across levels 15-25 instead of all clamping onto level 15. Full credit up to level 15, then diminishing returns beyond, hard-capped at level 25.
+  - @kenkaiiii/gg-ai@5.9.2
+  - @kenkaiiii/gg-agent@5.9.2
+  - @kenkaiiii/gg-core@5.9.2
+
+## 5.9.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.9.1
+  - @kenkaiiii/gg-agent@5.9.1
+  - @kenkaiiii/gg-core@5.9.1
+
 ## 5.9.0
 
 ### Minor Changes

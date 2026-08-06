@@ -112,8 +112,14 @@ function shorten(value: string, max = MAX_DETAIL): string {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-function basename(p: string): string {
-  const parts = p.split("/").filter(Boolean);
+/**
+ * Last path segment, for BOTH separators. The webview has no `node:path`, and
+ * splitting on "/" alone left every Windows path (`C:\repo\src\a.ts`) as one
+ * segment — so tool rows showed the whole absolute path instead of the file
+ * name.
+ */
+export function basename(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? p;
 }
 

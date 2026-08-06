@@ -1,5 +1,12 @@
 export { MCPClientManager } from "./client.js";
-export type { MCPConnectResult, MCPLoginResult } from "./client.js";
+export type {
+  MCPConnectResult,
+  MCPElicitation,
+  MCPElicitHandler,
+  MCPLoginResult,
+} from "./client.js";
+export { createElicitationBridge, MCP_ELICIT_TIMEOUT_MS } from "./elicitation-bridge.js";
+export type { ElicitationBridge, ElicitationPrompt } from "./elicitation-bridge.js";
 export { McpOAuthStore } from "./oauth-store.js";
 export {
   McpOAuthProvider,

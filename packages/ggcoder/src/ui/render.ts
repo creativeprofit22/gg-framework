@@ -5,10 +5,14 @@ import { render, type Instance as InkInstance } from "ink";
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { ProcessManager } from "../core/process-manager.js";
+import type { SubAgentManager } from "../core/subagent-manager.js";
 import type { MCPClientManager } from "../core/mcp/index.js";
 import type { AuthStorage } from "../core/auth-storage.js";
 import type { Skill } from "../core/skills.js";
 import type { CheckpointStore } from "../core/checkpoint-store.js";
+import type { LspManager } from "../core/lsp/manager.js";
+import type { ReviewCoverageTracker } from "../core/ideal-review.js";
+import type { TurnMetricPayload } from "../core/session-manager.js";
 import { App, type CompletedItem, type DoneStatus } from "./App.js";
 import { itemHasImagePreviews } from "./app-items.js";
 import { createTerminalHistoryPrinter } from "./terminal-history.js";
@@ -59,10 +63,14 @@ export interface RenderAppConfig {
     { accessToken: string; accountId?: string; projectId?: string; baseUrl?: string }
   >;
   initialHistory?: CompletedItem[];
+  initialTurnMetrics?: TurnMetricPayload[];
   sessionsDir?: string;
   sessionPath?: string;
   sessionId?: string;
   processManager?: ProcessManager;
+  subAgentManager?: SubAgentManager;
+  lspManager?: LspManager;
+  reviewCoverageTracker?: ReviewCoverageTracker;
   settingsFile?: string;
   mcpManager?: MCPClientManager;
   authStorage?: AuthStorage;
@@ -71,6 +79,7 @@ export interface RenderAppConfig {
   checkpointStore?: CheckpointStore;
   rebuildReadTool?: (model: string) => AgentTool;
   connectInitialMcpTools?: () => Promise<AgentTool[]>;
+  onRuntimeStateChange?: (updates: Partial<RuntimeState>) => void;
   planCallbacks?: {
     onEnterPlan?: (reason?: string) => void | Promise<void>;
     onExitPlan?: (planPath: string) => Promise<string>;
@@ -83,7 +92,7 @@ export interface RenderAppConfig {
  * picks aren't lost when an overlay close, plan accept, etc. tears down
  * the React tree.
  */
-interface RuntimeState {
+export interface RuntimeState {
   model: string;
   provider: Provider;
   thinking?: ThinkingLevel;
@@ -106,6 +115,7 @@ type OverlayKind = "model" | "skills" | "plan" | "theme" | null;
 export interface SessionStore {
   messages: Message[];
   history: CompletedItem[];
+  turnMetrics?: TurnMetricPayload[];
   /** Live, not-yet-flushed rows that must survive overlay/resize remounts. */
   liveItems?: CompletedItem[];
   /** Transient completion footer (e.g. "✻ Mulled it over for 3s") that is still visible. */
@@ -114,8 +124,6 @@ export interface SessionStore {
   planSteps: PlanStep[];
   sessionPath?: string;
   sessionId?: string;
-  sessionTitle?: string;
-  sessionTitleGenerated: boolean;
   /** Which overlay (Skills, Plan, Theme, Model) is open. */
   overlay?: OverlayKind;
   /** Plan overlay auto-expand-newest flag (only meaningful when overlay==='plan'). */
@@ -387,6 +395,7 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
 
   const onRuntimeStateChange = (updates: Partial<RuntimeState>): void => {
     Object.assign(runtimeState, updates);
+    config.onRuntimeStateChange?.(updates);
   };
 
   // Session state — App mirrors its React state here via useEffects, so
@@ -395,14 +404,13 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
   const sessionStore: SessionStore = {
     messages: config.messages,
     history: config.initialHistory ?? [{ kind: "banner", id: "banner" }],
+    turnMetrics: config.initialTurnMetrics ?? [],
     liveItems: [],
     doneStatus: null,
     approvedPlanPath: undefined,
     planSteps: [],
     sessionPath: config.sessionPath,
     sessionId: config.sessionId,
-    sessionTitle: undefined,
-    sessionTitleGenerated: false,
     overlay: null,
     planAutoExpand: false,
     pendingAction: undefined,
@@ -581,6 +589,9 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
             sessionPath: sessionStore.sessionPath,
             sessionId: sessionStore.sessionId,
             processManager: config.processManager,
+            subAgentManager: config.subAgentManager,
+            lspManager: config.lspManager,
+            reviewCoverageTracker: config.reviewCoverageTracker,
             settingsFile: config.settingsFile,
             mcpManager: config.mcpManager,
             authStorage: config.authStorage,
@@ -625,12 +636,11 @@ export async function renderApp(config: RenderAppConfig): Promise<void> {
       // approvedPlanPath + planSteps for the implementation phase).
       terminalHistoryPrinter.clear();
       sessionStore.history = [{ kind: "banner", id: "banner" }];
+      sessionStore.turnMetrics = [];
       sessionStore.liveItems = [];
       sessionStore.doneStatus = null;
       sessionStore.approvedPlanPath = undefined;
       sessionStore.planSteps = [];
-      sessionStore.sessionTitle = undefined;
-      sessionStore.sessionTitleGenerated = false;
     }
     if (options?.messages) sessionStore.messages = options.messages;
     if (options?.history) {

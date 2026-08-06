@@ -1,13 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { XIAOMI_CREDITS_KEY } from "./auth-storage.js";
 import {
   MODELS,
+  type ModelInfo,
+  clearRuntimeModels,
+  getAllModels,
+  getModel,
+  registerRuntimeModels,
   getAuthStorageKey,
   getAuthStorageKeys,
   getContextWindow,
   getDefaultModel,
+  getDefaultThinkingLevel,
   getFastModel,
   getModelsForProvider,
+  getToolResultCharLimit,
   usesOpenAICodexTransport,
 } from "./model-registry.js";
 
@@ -22,8 +29,9 @@ const PROVIDERS = [
   "deepseek",
   "openrouter",
   "sakana",
+  "xai",
 ] as const;
-const THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+const THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
 const COST_TIERS = ["low", "medium", "high"] as const;
 
 describe("model registry invariants", () => {
@@ -65,6 +73,10 @@ describe("model registry invariants", () => {
           model.codexContextWindow,
           `${model.id} codexContextWindow <= contextWindow`,
         ).toBeLessThanOrEqual(model.contextWindow);
+        expect(
+          model.maxOutputTokens,
+          `${model.id} maxOutputTokens <= codexContextWindow`,
+        ).toBeLessThanOrEqual(model.codexContextWindow);
       }
     }
   });
@@ -95,24 +107,51 @@ describe("getFastModel", () => {
     }
   });
 
-  it("picks Haiku for Anthropic and mini for OpenAI", () => {
-    expect(getFastModel("anthropic", "claude-opus-4-8").costTier).toBe("low");
-    expect(getFastModel("openai", "gpt-5.5").id).toBe("gpt-5.4-mini");
+  it("picks Haiku for Anthropic and Luna for OpenAI", () => {
+    expect(getFastModel("anthropic", "claude-opus-5").costTier).toBe("low");
+    expect(getFastModel("openai", "gpt-5.6-sol").id).toBe("gpt-5.6-luna");
   });
 });
 
 describe("model registry context windows", () => {
-  it("uses the public API context window for OpenAI API-key requests", () => {
-    expect(getContextWindow("gpt-5.5", { provider: "openai" })).toBe(1_050_000);
-    expect(getContextWindow("gpt-5.4", { provider: "openai" })).toBe(1_050_000);
+  it.each([
+    ["gpt-5.5", 1_050_000],
+    ["gpt-5.6-sol", 1_050_000],
+    ["gpt-5.6-terra", 1_050_000],
+    ["gpt-5.6-luna", 1_050_000],
+  ] as const)("uses the %s public API context window without an OAuth account", (model, limit) => {
+    expect(getContextWindow(model, { provider: "openai" })).toBe(limit);
   });
 
-  it("uses the Codex product context window for OpenAI OAuth requests", () => {
+  it.each([
+    ["gpt-5.5", 272_000],
+    ["gpt-5.6-sol", 272_000],
+    ["gpt-5.6-terra", 272_000],
+    ["gpt-5.6-luna", 272_000],
+  ] as const)("uses the %s Codex product window for OpenAI OAuth", (model, limit) => {
     const options = { provider: "openai" as const, accountId: "acct_123" };
-
     expect(usesOpenAICodexTransport(options)).toBe(true);
-    expect(getContextWindow("gpt-5.5", options)).toBe(272_000);
-    expect(getContextWindow("gpt-5.4", options)).toBe(272_000);
+    expect(getContextWindow(model, options)).toBe(limit);
+    expect(getToolResultCharLimit(model, options)).toBe(40_000);
+  });
+
+  it("caps custom OpenAI model IDs on Codex transport", () => {
+    expect(
+      getToolResultCharLimit("custom-codex-model", {
+        provider: "openai",
+        accountId: "acct_123",
+      }),
+    ).toBe(40_000);
+  });
+
+  it("keeps the generic tool-output allowance outside Codex OAuth", () => {
+    expect(getToolResultCharLimit("gpt-5.6-sol", { provider: "openai" })).toBeUndefined();
+    expect(
+      getToolResultCharLimit("claude-sonnet-5", {
+        provider: "anthropic",
+        accountId: "acct_123",
+      }),
+    ).toBeUndefined();
   });
 
   it("keeps non-OpenAI providers on their model context windows", () => {
@@ -120,6 +159,44 @@ describe("model registry context windows", () => {
     expect(
       getContextWindow("claude-sonnet-5", { provider: "anthropic", accountId: "acct_123" }),
     ).toBe(1_000_000);
+  });
+
+  it("defaults Moonshot to multimodal K3 while retaining K2.7 Code", () => {
+    expect(getDefaultModel("moonshot")).toMatchObject({
+      id: "kimi-k3",
+      name: "Kimi K3",
+      provider: "moonshot",
+      contextWindow: 1_048_576,
+      maxOutputTokens: 131_072,
+      supportsThinking: true,
+      supportsImages: true,
+      supportsVideo: true,
+      maxThinkingLevel: "max",
+    });
+    expect(getModelsForProvider("moonshot").map((model) => model.id)).toEqual([
+      "kimi-k3",
+      "kimi-k2.7-code",
+    ]);
+    expect(getContextWindow("kimi-k3", { provider: "moonshot" })).toBe(1_048_576);
+  });
+
+  it("starts Kimi K3 at the endpoint's declared default effort, kimi-code-style", () => {
+    // Kimi For Coding OAuth endpoint declares default_effort "high" …
+    expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.kimi.com/coding/v1" })).toBe(
+      "high",
+    );
+    // … the public Moonshot API declares "max" …
+    expect(getDefaultThinkingLevel("kimi-k3", { baseUrl: "https://api.moonshot.ai/v1" })).toBe(
+      "max",
+    );
+    // … and no stored endpoint (e.g. API-key-only auth) means the public API.
+    expect(getDefaultThinkingLevel("kimi-k3")).toBe("max");
+    // Every other model starts at its registry max regardless of endpoint.
+    expect(
+      getDefaultThinkingLevel("kimi-k2.7-code", { baseUrl: "https://api.kimi.com/coding/v1" }),
+    ).toBe("high");
+    expect(getDefaultThinkingLevel("claude-opus-5")).toBe("max");
+    expect(getDefaultThinkingLevel("claude-opus-5")).toBe("max");
   });
 
   it("defaults MiniMax to the multimodal M3 with a 1M context window", () => {
@@ -154,17 +231,78 @@ describe("model registry context windows", () => {
 
   it("registers a Code Assist-supported Gemini default", () => {
     expect(getDefaultModel("gemini")).toMatchObject({
-      id: "gemini-3.1-flash-lite-preview",
-      name: "Gemini 3.1 Flash Lite Preview",
+      id: "gemini-3.1-flash-lite",
+      name: "Gemini 3.1 Flash Lite",
       provider: "gemini",
     });
     expect(getModelsForProvider("gemini").map((model) => model.id)).toEqual([
-      "gemini-3.1-flash-lite-preview",
-      "gemini-3.5-flash",
+      "gemini-3.1-flash-lite",
+      "gemini-3-flash",
+      "gemini-3.1-pro-preview",
     ]);
-    expect(getContextWindow("gemini-3.1-flash-lite-preview", { provider: "gemini" })).toBe(
-      1_048_576,
-    );
-    expect(getContextWindow("gemini-3.5-flash", { provider: "gemini" })).toBe(1_048_576);
+    expect(getContextWindow("gemini-3.1-flash-lite", { provider: "gemini" })).toBe(1_048_576);
+    expect(getContextWindow("gemini-3-flash", { provider: "gemini" })).toBe(1_048_576);
+  });
+});
+
+describe("runtime model registry", () => {
+  const local: ModelInfo = {
+    id: "local/ollama/qwen3-coder:30b",
+    name: "qwen3-coder:30b (Ollama)",
+    provider: "local",
+    contextWindow: 262_144,
+    maxOutputTokens: 4096,
+    supportsThinking: true,
+    supportsImages: false,
+    supportsVideo: false,
+    costTier: "low",
+    maxThinkingLevel: "high",
+    authStorageKeys: ["local:ollama"],
+  };
+
+  afterEach(() => clearRuntimeModels());
+
+  it("makes registered models resolvable exactly like static ones", () => {
+    expect(getModel(local.id)).toBeUndefined();
+
+    registerRuntimeModels([local]);
+
+    expect(getModel(local.id)).toBe(local);
+    expect(getModelsForProvider("local").map((m) => m.id)).toEqual([local.id]);
+    expect(getContextWindow(local.id)).toBe(262_144);
+    expect(getAuthStorageKeys("local", local.id)).toEqual(["local:ollama"]);
+    expect(getAllModels()).toHaveLength(MODELS.length + 1);
+  });
+
+  it("replaces an entry re-registered under the same id", () => {
+    registerRuntimeModels([local]);
+    registerRuntimeModels([{ ...local, contextWindow: 8192 }]);
+
+    expect(getAllModels().filter((m) => m.id === local.id)).toHaveLength(1);
+    expect(getContextWindow(local.id)).toBe(8192);
+  });
+
+  it("clears selectively by predicate and leaves static models alone", () => {
+    registerRuntimeModels([
+      local,
+      { ...local, id: "local/vllm/x", authStorageKeys: ["local:vllm"] },
+    ]);
+
+    clearRuntimeModels((m) => m.authStorageKeys?.[0] === "local:vllm");
+
+    expect(getModelsForProvider("local").map((m) => m.id)).toEqual([local.id]);
+
+    clearRuntimeModels();
+
+    expect(getModelsForProvider("local")).toEqual([]);
+    expect(getAllModels()).toHaveLength(MODELS.length);
+  });
+
+  it("never throws for getDefaultModel('local'), before or after discovery", () => {
+    expect(getDefaultModel("local")).toMatchObject({ provider: "local" });
+
+    registerRuntimeModels([local]);
+
+    expect(getDefaultModel("local")).toBe(local);
   });
 });

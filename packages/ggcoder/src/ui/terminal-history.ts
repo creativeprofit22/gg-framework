@@ -44,7 +44,6 @@ import {
   renderCompacted,
   renderCompacting,
   renderError,
-  renderSetupHint,
   renderStatusLine,
   renderStepDone,
   renderStylePack,
@@ -352,9 +351,7 @@ export function serializeCompletedItemToTerminalHistory(
       );
     }
     case "style_pack":
-      return renderStylePack(item.added, item.showSetupHint, context);
-    case "setup_hint":
-      return renderSetupHint(context);
+      return renderStylePack(item.added, context);
     case "update_notice":
       return renderUpdateNotice(item.text, context);
     case "compacting":
@@ -751,7 +748,12 @@ function renderSubAgentGroup(
   agents: readonly {
     status: "running" | "done" | "error" | "aborted" | string;
     task: string;
-    tokenUsage?: { input: number; output: number };
+    tokenUsage?: {
+      input: number;
+      output: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+    };
     currentActivity?: string;
     result?: string;
     durationMs?: number;
@@ -800,7 +802,12 @@ function renderSubAgentRows(
   agent: {
     status: "running" | "done" | "error" | "aborted" | string;
     task: string;
-    tokenUsage?: { input: number; output: number };
+    tokenUsage?: {
+      input: number;
+      output: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+    };
     currentActivity?: string;
     durationMs?: number;
   },
@@ -821,14 +828,18 @@ function renderSubAgentRows(
         : "";
   const taskLine = `${dim(context, `   ${branch.padEnd(3)}`)}${taskPrefix}${color(agent.status === "done" ? context.theme.success : context.theme.text, taskDisplay, isRunning)}`;
 
-  const totalTokens = agent.tokenUsage ? agent.tokenUsage.input + agent.tokenUsage.output : 0;
+  const freshInput = agent.tokenUsage
+    ? agent.tokenUsage.input + (agent.tokenUsage.cacheWrite ?? 0)
+    : 0;
+  const totalTokens = freshInput + (agent.tokenUsage?.output ?? 0);
+  const cachedTokens = agent.tokenUsage?.cacheRead ?? 0;
   let detail: string;
   if (isRunning) {
     detail = `${color(context.theme.primary, "· ")}${dim(context, agent.currentActivity ?? "Starting…")}`;
   } else if (agent.status === "done") {
     detail = dim(
       context,
-      `${formatCompactTokens(totalTokens)} tokens${agent.durationMs != null ? ` · ${formatDuration(agent.durationMs)}` : ""}`,
+      `${formatCompactTokens(totalTokens)} tokens${cachedTokens > 0 ? ` · ${formatCompactTokens(cachedTokens)} cached` : ""}${agent.durationMs != null ? ` · ${formatDuration(agent.durationMs)}` : ""}`,
     );
   } else {
     detail = color(

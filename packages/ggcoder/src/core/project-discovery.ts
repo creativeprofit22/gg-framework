@@ -4,7 +4,10 @@ import readline from "node:readline";
 import os from "node:os";
 import path from "node:path";
 import { getAppPaths } from "../config.js";
-import { encodeCwd } from "./encode-cwd.js";
+import { encodeCwd, stripExtendedLengthPrefix } from "./encode-cwd.js";
+import { getUserSessionPrompt } from "./session-preview.js";
+import { isSessionPath, openSessionReadStream, resolveSessionPath } from "./session-storage.js";
+import { parseForeignTranscript } from "./foreign-session-import.js";
 
 export type ProjectSource = "ggcoder" | "claude-code" | "codex";
 
@@ -30,28 +33,7 @@ export async function discoverProjects(): Promise<DiscoveredProject[]> {
     discoverCodexProjects(),
   ]);
 
-  const byPath = new Map<string, DiscoveredProject>();
-  for (const p of [...gg, ...cc, ...cx]) {
-    const existing = byPath.get(p.path);
-    if (!existing) {
-      byPath.set(p.path, p);
-      continue;
-    }
-    byPath.set(p.path, {
-      name: existing.name,
-      path: existing.path,
-      lastActiveMs: Math.max(existing.lastActiveMs, p.lastActiveMs),
-      lastActiveDisplay: "", // recomputed below
-      sources: mergeSources(existing.sources, p.sources),
-    });
-  }
-
-  const merged = Array.from(byPath.values()).map((p) => ({
-    ...p,
-    lastActiveDisplay: formatRelativeTime(p.lastActiveMs),
-  }));
-  merged.sort((a, b) => b.lastActiveMs - a.lastActiveMs);
-  return merged;
+  return mergeDiscoveredProjects([...gg, ...cc, ...cx]);
 }
 
 const SOURCE_ORDER: Record<ProjectSource, number> = {
@@ -63,6 +45,76 @@ const SOURCE_ORDER: Record<ProjectSource, number> = {
 function mergeSources(a: ProjectSource[], b: ProjectSource[]): ProjectSource[] {
   const set = new Set<ProjectSource>([...a, ...b]);
   return Array.from(set).sort((x, y) => SOURCE_ORDER[x] - SOURCE_ORDER[y]);
+}
+
+/** Comparison key for resolved project paths; Windows filesystems are case-insensitive. */
+export function discoveryPathKey(projectPath: string, platform = process.platform): string {
+  const resolved = path.resolve(projectPath);
+  return platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/** Merge discovery sources by normalized path, retaining newest activity and all sources. */
+export function mergeDiscoveredProjects(
+  projects: DiscoveredProject[],
+  platform = process.platform,
+): DiscoveredProject[] {
+  const byPath = new Map<string, DiscoveredProject>();
+  for (const project of projects) {
+    const resolvedPath = path.resolve(project.path);
+    const key = discoveryPathKey(resolvedPath, platform);
+    const existing = byPath.get(key);
+    if (!existing) {
+      byPath.set(key, { ...project, path: resolvedPath });
+      continue;
+    }
+    const lastActiveMs = Math.max(existing.lastActiveMs, project.lastActiveMs);
+    byPath.set(key, {
+      ...existing,
+      lastActiveMs,
+      lastActiveDisplay: formatRelativeTime(lastActiveMs),
+      sources: mergeSources(existing.sources, project.sources),
+    });
+  }
+  return Array.from(byPath.values())
+    .map((project) => ({
+      ...project,
+      lastActiveDisplay: formatRelativeTime(project.lastActiveMs),
+    }))
+    .sort((a, b) => b.lastActiveMs - a.lastActiveMs);
+}
+
+/** Discover readable direct child directories under the configured projects root. */
+export async function discoverProjectsRootFolders(
+  projectsRoot: string,
+): Promise<DiscoveredProject[]> {
+  if (!projectsRoot.trim()) return [];
+  const resolvedRoot = path.resolve(projectsRoot);
+  let entries;
+  try {
+    entries = await fs.readdir(resolvedRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const projects: DiscoveredProject[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const projectPath = path.resolve(resolvedRoot, entry.name);
+    try {
+      const stat = await fs.stat(projectPath);
+      if (!stat.isDirectory()) continue;
+      projects.push({
+        name: entry.name,
+        path: projectPath,
+        lastActiveMs: stat.mtimeMs,
+        lastActiveDisplay: formatRelativeTime(stat.mtimeMs),
+        sources: ["ggcoder"],
+      });
+    } catch {
+      // Best effort: a disappearing or unreadable child must not fail discovery.
+    }
+  }
+  return projects;
 }
 
 /**
@@ -86,15 +138,18 @@ async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
   const results: DiscoveredProject[] = [];
   for (const entry of entries) {
     const dir = path.join(sessionsDir, entry);
-    const mtime = await maxJsonlMtime(dir);
+    const mtime = await maxGgcoderSessionMtime(dir);
     if (mtime === null) continue;
 
     const rawCwd =
-      (await readFirstFromJsonlDir(dir, ggcoderCwdExtractor)) ?? fallbackUnderscoreDecode(entry);
+      (await readFirstFromGgcoderDir(dir, ggcoderCwdExtractor)) ?? fallbackUnderscoreDecode(entry);
     if (!rawCwd) continue;
     // Normalize traversal segments (e.g. an agent launched with cwd
-    // `.../src-tauri/../..`) so the basename isn't a stray "..".
-    const cwd = path.resolve(rawCwd);
+    // `.../src-tauri/../..`) so the basename isn't a stray "..", and drop any
+    // Windows extended-length prefix so a session recorded as `\\?\C:\proj`
+    // (what Rust's canonicalize used to hand the sidecar) resolves to the same
+    // project as a plain `C:\proj` instead of listing a prefixed duplicate.
+    const cwd = path.resolve(stripExtendedLengthPrefix(rawCwd));
     if (!(await isDirectory(cwd))) continue;
 
     results.push({
@@ -109,12 +164,36 @@ async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
 }
 
 /**
+ * Is `value` an absolute path on ANY platform?
+ *
+ * `path.isAbsolute` is platform-bound, but a session store is portable: read on
+ * Windows it carries `C:\Users\…` / `\\server\share\…`, on POSIX `/Users/…`.
+ * The old POSIX-only `startsWith("/")` check silently rejected every Windows
+ * cwd header, so discovery fell back to the lossy directory-name decode and
+ * every project/session vanished from the picker on Windows.
+ */
+export function isAbsoluteCwd(value: string): boolean {
+  return path.posix.isAbsolute(value) || path.win32.isAbsolute(value);
+}
+
+/**
  * Best-effort decode of a ggcoder session directory name back to a cwd, used
  * only when the session files carry no `cwd` header. Lossy by design (literal
  * underscores are indistinguishable from separators); the caller still verifies
  * the result is an existing directory.
+ *
+ * `encodeCwd` drops the drive colon (`C:\a\b` → `C_a_b`), so on Windows we
+ * re-attach it for a leading single-letter segment; otherwise a decoded
+ * `/C/a/b` names a directory that never exists and the project disappears.
  */
 function fallbackUnderscoreDecode(entry: string): string {
+  if (process.platform === "win32") {
+    const parts = entry.split("_");
+    if (parts.length > 1 && /^[A-Za-z]$/.test(parts[0]!)) {
+      return `${parts[0]}:\\${parts.slice(1).join("\\")}`;
+    }
+    return entry.replace(/_/g, "\\");
+  }
   return "/" + entry.replace(/_/g, "/");
 }
 
@@ -214,6 +293,13 @@ async function maxJsonlMtime(dir: string): Promise<number | null> {
   return max > 0 ? max : null;
 }
 
+async function maxGgcoderSessionMtime(dir: string): Promise<number | null> {
+  if (!(await isDirectory(dir))) return null;
+  const files = await collectGgcoderSessionFiles(dir, 2);
+  if (files.length === 0) return null;
+  return Math.max(...files.map((file) => file.mtime));
+}
+
 /**
  * Walk `dir` up to `maxDepth` levels deep collecting every .jsonl file. Used
  * for both Claude Code (top-level + `<uuid>/subagents/`) and Codex
@@ -250,12 +336,44 @@ async function collectJsonlFiles(
   }
 }
 
+async function collectGgcoderSessionFiles(
+  dir: string,
+  maxDepth: number,
+): Promise<{ path: string; mtime: number }[]> {
+  const byResolvedPath = new Map<string, { path: string; mtime: number }>();
+  await walk(dir, 0);
+  return [...byResolvedPath.values()];
+
+  async function walk(current: string, depth: number): Promise<void> {
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isFile() && isSessionPath(entry.name)) {
+        try {
+          const resolvedPath = await resolveSessionPath(fullPath);
+          const stat = await fs.stat(resolvedPath);
+          byResolvedPath.set(resolvedPath, { path: resolvedPath, mtime: stat.mtimeMs });
+        } catch {
+          // Ignore malformed redirects, incomplete archives, and raced files.
+        }
+      } else if (entry.isDirectory() && depth < maxDepth && !entry.name.endsWith(".assets")) {
+        await walk(fullPath, depth + 1);
+      }
+    }
+  }
+}
+
 type LineExtractor = (line: string) => string | null;
 
 const claudeCwdExtractor: LineExtractor = (line) => {
   try {
     const parsed = JSON.parse(line) as { cwd?: unknown };
-    if (typeof parsed.cwd === "string" && parsed.cwd.startsWith("/")) return parsed.cwd;
+    if (typeof parsed.cwd === "string" && isAbsoluteCwd(parsed.cwd)) return parsed.cwd;
   } catch {
     // skip malformed
   }
@@ -269,7 +387,7 @@ const claudeCwdExtractor: LineExtractor = (line) => {
 const ggcoderCwdExtractor: LineExtractor = (line) => {
   try {
     const parsed = JSON.parse(line) as { type?: unknown; cwd?: unknown };
-    if (parsed.type === "session" && typeof parsed.cwd === "string" && parsed.cwd.startsWith("/")) {
+    if (parsed.type === "session" && typeof parsed.cwd === "string" && isAbsoluteCwd(parsed.cwd)) {
       return parsed.cwd;
     }
   } catch {
@@ -286,21 +404,20 @@ const codexCwdExtractor: LineExtractor = (line) => {
   try {
     const parsed = JSON.parse(line) as { payload?: { cwd?: unknown } };
     const cwd = parsed.payload?.cwd;
-    if (typeof cwd === "string" && cwd.startsWith("/")) return cwd;
+    if (typeof cwd === "string" && isAbsoluteCwd(cwd)) return cwd;
   } catch {
     // not JSON or unexpected shape; fall through to legacy regex
   }
   // Legacy format (pre-late-2025): cwd embedded as <cwd>...</cwd> inside an
   // <environment_context> user-message string.
   const m = CODEX_CWD_RE.exec(line);
-  if (m && m[1] && m[1].startsWith("/")) return m[1];
+  if (m && m[1] && isAbsoluteCwd(m[1])) return m[1];
   return null;
 };
 
 /**
- * Walk all .jsonl files under `dir` newest-first, returning the first non-null
- * extractor result. Walks two levels deep (matches Claude Code's nested
- * layout).
+ * Walk all plain Claude/Codex JSONL files under `dir` newest-first, returning
+ * the first non-null extractor result.
  */
 async function readFirstFromJsonlDir(
   dir: string,
@@ -312,6 +429,29 @@ async function readFirstFromJsonlDir(
   for (const f of files) {
     const v = await readFirstFromFile(f.path, extractor);
     if (v) return v;
+  }
+  return null;
+}
+
+async function readFirstFromGgcoderDir(
+  dir: string,
+  extractor: LineExtractor,
+): Promise<string | null> {
+  const files = await collectGgcoderSessionFiles(dir, 2);
+  files.sort((a, b) => b.mtime - a.mtime);
+  for (const file of files) {
+    try {
+      const { stream } = await openSessionReadStream(file.path);
+      const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+      let lines = 0;
+      for await (const line of rl) {
+        if (++lines > 200) break;
+        const value = extractor(line);
+        if (value) return value;
+      }
+    } catch {
+      // A corrupt archive must not hide otherwise valid projects in this store.
+    }
   }
   return null;
 }
@@ -357,7 +497,14 @@ function fallbackDashDecode(entry: string): string | null {
   // used when the JSONLs have no cwd events; the caller still verifies the
   // result is an existing directory.
   if (!entry.startsWith("-")) return null;
-  return "/" + entry.slice(1).replace(/-/g, "/");
+  const body = entry.slice(1);
+  if (process.platform === "win32") {
+    // Claude Code on Windows encodes `C:\a\b` as `C--a-b` (drive colon → dash).
+    const drive = /^([A-Za-z])--(.*)$/.exec(body);
+    if (drive) return `${drive[1]}:\\${drive[2]!.replace(/-/g, "\\")}`;
+    return body.replace(/-/g, "\\");
+  }
+  return "/" + body.replace(/-/g, "/");
 }
 
 function formatRelativeTime(ms: number): string {
@@ -381,112 +528,241 @@ function formatRelativeTime(ms: number): string {
 export interface RecentSession {
   /** Session id. */
   id: string;
-  /** Absolute path to the session .jsonl (passed back to reopen it). */
+  /** Absolute resumable path to a plain or gzip GG Coder session. */
   path: string;
-  /** First user message, trimmed to a short preview (may be empty). */
+  /** Legacy saved label, falling back to the first real user prompt. */
   preview: string;
   /** Relative "3h ago" string from last activity. */
   lastActiveDisplay: string;
   messageCount: number;
+  /**
+   * Which store this row came from. Absent means `ggcoder` — a session that is
+   * already resumable as-is. A foreign value means `path` points at that tool's
+   * own transcript, which the host imports before opening.
+   */
+  source?: ProjectSource;
 }
 
 /**
- * List the most recent ggcoder sessions for a project cwd, newest first, each
- * with a short preview built from its first user message. Used by the new-window
- * project picker to offer "resume a session" alongside "new session".
- *
- * Fast path: instead of fully reading every session file in the project (what
- * SessionManager.list does to count messages), sort files by mtime and read
- * only the newest `limit`. Each chosen file is parsed in ONE pass for its
- * header id, message count, last activity, and first user preview. For projects
- * with many/large sessions this is the difference between scanning everything
- * and scanning ~5 files.
+ * List the most recent ggcoder conversations for a project cwd. Compaction
+ * checkpoints share a conversation id, so only the newest resumable checkpoint
+ * is shown. Legacy labels win; otherwise the first real user prompt is used.
  */
-export async function listRecentSessions(cwd: string, limit = 5): Promise<RecentSession[]> {
-  const sessionsDir = getAppPaths().sessionsDir;
+export async function listRecentSessions(
+  cwd: string,
+  limit = 5,
+  sessionsDir = getAppPaths().sessionsDir,
+): Promise<RecentSession[]> {
   const dir = path.join(sessionsDir, encodeCwd(cwd));
-  const files = await collectJsonlFiles(dir, 1);
+  const files = await collectGgcoderSessionFiles(dir, 1);
   if (files.length === 0) return [];
   files.sort((a, b) => b.mtime - a.mtime);
 
   const out: RecentSession[] = [];
+  const seenConversationIds = new Set<string>();
   for (const f of files) {
     if (out.length >= limit) break;
     const parsed = await readSessionSummary(f.path);
-    if (parsed && parsed.messageCount > 0) out.push(parsed);
+    if (!parsed || parsed.messageCount === 0) continue;
+    if (seenConversationIds.has(parsed.conversationId)) continue;
+    seenConversationIds.add(parsed.conversationId);
+    const { conversationId: _conversationId, ...session } = parsed;
+    out.push(session);
   }
   return out;
 }
 
-/** Single-pass parse of one session file: header id + count + activity + preview. */
-async function readSessionSummary(file: string): Promise<RecentSession | null> {
-  return new Promise((resolve) => {
-    const stream = createReadStream(file, { encoding: "utf-8" });
+/**
+ * List the most recent Claude Code and Codex conversations for a project cwd.
+ *
+ * The project picker has always surfaced these stores (`discoverProjects`), so a
+ * project can appear *because* it has Claude Code history — and then show an
+ * empty session list, because that only read GG Coder's own directory. These
+ * rows close that gap: each one points at the foreign transcript, tagged with
+ * its `source`, and the host imports it on click.
+ *
+ * Cheap by construction: a transcript is only opened if its cwd matches, and
+ * both the per-store file walk and the preview read are line-capped.
+ */
+export async function listForeignSessions(
+  cwd: string,
+  limit = 5,
+  homeDir = os.homedir(),
+): Promise<RecentSession[]> {
+  const [claude, codex] = await Promise.all([
+    listClaudeSessions(cwd, limit, homeDir),
+    listCodexSessions(cwd, limit, homeDir),
+  ]);
+  return [...claude, ...codex]
+    .sort((left, right) => right.lastActiveMs - left.lastActiveMs)
+    .slice(0, limit)
+    .map(({ lastActiveMs: _lastActiveMs, ...session }) => session);
+}
+
+/** A foreign row plus the raw mtime the caller sorts on before discarding it. */
+type DatedForeignSession = RecentSession & { lastActiveMs: number };
+
+async function listClaudeSessions(
+  cwd: string,
+  limit: number,
+  homeDir: string,
+): Promise<DatedForeignSession[]> {
+  const projectsDir = path.join(homeDir, ".claude", "projects");
+  if (!(await isDirectory(projectsDir))) return [];
+
+  // Claude's directory encoding is ambiguous (every "/" becomes "-", colliding
+  // with real dashes), so we cannot map cwd → directory. Instead walk the files
+  // newest-first and keep the ones whose recorded cwd matches.
+  const files = await collectJsonlFiles(projectsDir, 3);
+  return collectMatchingForeignSessions(files, cwd, limit, "claude-code", claudeCwdExtractor);
+}
+
+async function listCodexSessions(
+  cwd: string,
+  limit: number,
+  homeDir: string,
+): Promise<DatedForeignSession[]> {
+  const sessionsDir = path.join(homeDir, ".codex", "sessions");
+  if (!(await isDirectory(sessionsDir))) return [];
+  // Layout is YYYY/MM/DD/*.jsonl — depth 4 covers it.
+  const files = await collectJsonlFiles(sessionsDir, 4);
+  return collectMatchingForeignSessions(files, cwd, limit, "codex", codexCwdExtractor);
+}
+
+/**
+ * Newest-first scan for transcripts belonging to `cwd`. Stops as soon as
+ * `limit` matches are found so a large history costs only the files it reads.
+ */
+async function collectMatchingForeignSessions(
+  files: { path: string; mtime: number }[],
+  cwd: string,
+  limit: number,
+  source: ProjectSource,
+  extractor: LineExtractor,
+): Promise<DatedForeignSession[]> {
+  if (files.length === 0) return [];
+  files.sort((left, right) => right.mtime - left.mtime);
+  const target = path.resolve(stripExtendedLengthPrefix(cwd));
+
+  const out: DatedForeignSession[] = [];
+  for (const file of files) {
+    if (out.length >= limit) break;
+    const recorded = await readFirstFromFile(file.path, extractor);
+    if (!recorded) continue;
+    if (path.resolve(stripExtendedLengthPrefix(recorded)) !== target) continue;
+
+    const summary = await readForeignSessionSummary(file.path, source);
+    if (!summary) continue;
+    out.push({
+      ...summary,
+      lastActiveDisplay: formatRelativeTime(file.mtime),
+      lastActiveMs: file.mtime,
+    });
+  }
+  return out;
+}
+
+/**
+ * Preview + message count for a foreign transcript, using the same parsers the
+ * importer uses — so the row's title is exactly the title the imported session
+ * ends up with (notably Cursor's `<user_query>` unwrapping).
+ */
+async function readForeignSessionSummary(
+  file: string,
+  source: ProjectSource,
+): Promise<Omit<RecentSession, "lastActiveDisplay"> | null> {
+  let text: string;
+  try {
+    text = await fs.readFile(file, "utf-8");
+  } catch {
+    return null;
+  }
+  try {
+    const parsed = parseForeignTranscript(text, source === "codex" ? "codex" : "claude");
+    if (parsed.messages.length === 0) return null;
+    return {
+      id: path.basename(file).replace(/\.jsonl$/, ""),
+      path: file,
+      preview: parsed.preview ?? "(no prompt)",
+      messageCount: parsed.messages.length,
+      source,
+    };
+  } catch {
+    // An unreadable transcript is skipped, never surfaced as a broken row.
+    return null;
+  }
+}
+
+interface ParsedRecentSession extends RecentSession {
+  conversationId: string;
+}
+
+/** Single-pass parse of one session file: identity + count + activity + preview. */
+async function readSessionSummary(file: string): Promise<ParsedRecentSession | null> {
+  try {
+    const { path: resolvedPath, stream } = await openSessionReadStream(file);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     let id = "";
+    let conversationId = "";
     let messageCount = 0;
     let lastActivity = "";
+    let headerPreview = "";
     let preview = "";
+    let label = "";
     let valid = false;
-    let done = false;
-    const finish = (): void => {
-      if (done) return;
-      done = true;
-      resolve(
-        valid
-          ? { id, path: file, preview, lastActiveDisplay: rel(lastActivity), messageCount }
-          : null,
-      );
-      rl.close();
-      stream.destroy();
-    };
-    rl.on("line", (line) => {
-      if (done || !line) return;
+
+    for await (const line of rl) {
+      if (!line) continue;
       try {
-        const p = JSON.parse(line) as {
+        const entry = JSON.parse(line) as {
           type?: string;
           id?: string;
+          conversationId?: string;
+          preview?: unknown;
           timestamp?: string;
+          label?: unknown;
           message?: { role?: string; content?: unknown };
         };
         if (!valid) {
-          if (p.type !== "session") return finish(); // not a session file
+          if (entry.type !== "session") return null;
           valid = true;
-          id = p.id ?? "";
-          if (p.timestamp) lastActivity = p.timestamp;
-          return;
+          id = entry.id ?? "";
+          conversationId = entry.conversationId ?? id;
+          if (typeof entry.preview === "string") {
+            headerPreview = entry.preview.replace(/\s+/g, " ").trim().slice(0, 80);
+          }
+          if (entry.timestamp) lastActivity = entry.timestamp;
+          continue;
         }
-        if (p.type === "message") {
-          messageCount++;
-          if (p.timestamp) lastActivity = p.timestamp;
-          if (!preview && p.message?.role === "user") {
-            const text = extractText(p.message.content);
+        if (entry.type === "label" && typeof entry.label === "string" && entry.label.trim()) {
+          label = entry.label.replace(/\s+/g, " ").trim().slice(0, 80);
+        } else if (entry.type === "message") {
+          messageCount += 1;
+          if (entry.timestamp) lastActivity = entry.timestamp;
+          if (!preview && entry.message?.role === "user") {
+            const text = getUserSessionPrompt(entry.message.content);
             if (text) preview = text.replace(/\s+/g, " ").trim().slice(0, 80);
           }
         }
       } catch {
-        // skip malformed line
+        // Skip malformed lines; archive migration preserves them byte-for-byte.
       }
-    });
-    rl.on("close", finish);
-    rl.on("error", finish);
-    stream.on("error", finish);
-  });
+    }
+    return valid
+      ? {
+          id,
+          conversationId: conversationId || id,
+          path: resolvedPath,
+          preview: label || headerPreview || preview,
+          lastActiveDisplay: rel(lastActivity),
+          messageCount,
+        }
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function rel(timestamp: string): string {
   return formatRelativeTime(Date.parse(timestamp) || 0);
-}
-
-function extractText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block && typeof block === "object" && "text" in block) {
-        const t = (block as { text?: unknown }).text;
-        if (typeof t === "string") return t;
-      }
-    }
-  }
-  return "";
 }

@@ -6,6 +6,7 @@ export type Provider =
   | "anthropic"
   | "xiaomi"
   | "openai"
+  | "azure"
   | "gemini"
   | "glm"
   | "moonshot"
@@ -13,11 +14,14 @@ export type Provider =
   | "deepseek"
   | "openrouter"
   | "sakana"
-  | "palsu";
+  | "xai"
+  | "palsu"
+  /** Locally hosted OpenAI-compatible server (Ollama, LM Studio, llama.cpp, vLLM). */
+  | "local";
 
 // ── Thinking ───────────────────────────────────────────────
 
-export type ThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max";
+export type ThinkingLevel = "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 // ── Cache ─────────────────────────────────────────────────
 
@@ -55,7 +59,10 @@ export interface VideoContent {
 
 export interface ToolCall {
   type: "tool_call";
+  /** Public provider call ID used to correlate the tool result. */
   id: string;
+  /** Responses API function-call item ID, replayed independently from the public call ID. */
+  itemId?: string;
   name: string;
   args: Record<string, unknown>;
 }
@@ -67,6 +74,21 @@ export interface ToolResult {
   toolCallId: string;
   content: ToolResultContent;
   isError?: boolean;
+  /**
+   * Set when the agent loop trimmed `content` to fit a per-result or per-turn
+   * budget. The provider (model input) and the persistent transcript both see
+   * the trimmed `content`, but the live `tool_call_end` event carried the FULL
+   * preview — so this marker makes that divergence explicit and reconcilable.
+   * Internal metadata only: it is never serialized onto the provider wire.
+   */
+  capped?: {
+    /** Length of the original, untrimmed string content. */
+    originalChars: number;
+    /** Length of the trimmed content actually sent to the model. */
+    keptChars: number;
+    /** Which budget triggered the trim. */
+    scope: "per-result" | "per-turn";
+  };
 }
 
 export interface ServerToolCall {
@@ -101,22 +123,49 @@ export type ContentPart =
 
 // ── Messages ───────────────────────────────────────────────
 
-export interface SystemMessage {
+export type MessageProvenanceSource = "human" | "agent" | "runtime";
+
+export type MessageProvenanceKind =
+  | "prompt"
+  | "steering"
+  | "notification"
+  | "completion_gate"
+  | "review_follow_up"
+  | "continuation"
+  | "model_switch"
+  | "automation"
+  | "compaction_summary"
+  | "compaction_ack";
+
+export type MessageProvenanceVisibility = "transcript" | "hidden" | "summary";
+
+/** Internal message metadata. `stream()` removes it before provider dispatch. */
+export interface MessageProvenance {
+  source: MessageProvenanceSource;
+  kind: MessageProvenanceKind;
+  visibility: MessageProvenanceVisibility;
+}
+
+interface MessageMetadata {
+  provenance?: MessageProvenance;
+}
+
+export interface SystemMessage extends MessageMetadata {
   role: "system";
   content: string;
 }
 
-export interface UserMessage {
+export interface UserMessage extends MessageMetadata {
   role: "user";
   content: string | (TextContent | ImageContent | VideoContent)[];
 }
 
-export interface AssistantMessage {
+export interface AssistantMessage extends MessageMetadata {
   role: "assistant";
   content: string | ContentPart[];
 }
 
-export interface ToolResultMessage {
+export interface ToolResultMessage extends MessageMetadata {
   role: "tool";
   content: ToolResult[];
 }
@@ -164,7 +213,10 @@ export interface ToolCallDeltaEvent {
 
 export interface ToolCallDoneEvent {
   type: "toolcall_done";
+  /** Public provider call ID used to correlate the tool result. */
   id: string;
+  /** Responses API function-call item ID, when supplied by the provider. */
+  itemId?: string;
   name: string;
   args: Record<string, unknown>;
 }
@@ -260,6 +312,10 @@ export interface StreamOptions {
   serviceTier?: "auto" | "default" | "flex" | "priority";
   /** OpenAI ChatGPT account ID (from OAuth JWT) for codex endpoint */
   accountId?: string;
+  /** Stable conversation identity for Codex transport headers. This is distinct from
+   *  promptCacheKey: sessions with matching prefixes may share a cache key, but must
+   *  retain independent session/thread identities. */
+  transportSessionId?: string;
   /** Google Cloud/Code Assist project ID used by Gemini OAuth transport. */
   projectId?: string;
   /** Enable provider-native web search. Each provider uses its own format:

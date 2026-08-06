@@ -1,29 +1,100 @@
 import os from "node:os";
+import * as zstd from "@bokuweb/zstd-wasm";
 import type {
   ContentPart,
-  ImageContent,
-  Message,
   StreamEvent,
   StreamOptions,
   StreamResponse,
-  Tool,
   ToolCall,
 } from "../types.js";
-import { ProviderError, readHeader } from "../errors.js";
+import {
+  ProviderError,
+  isRawHtmlErrorEcho,
+  providerHtmlErrorMessage,
+  readHeader,
+} from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import { providerDiag } from "../utils/diag.js";
-import { resolveToolSchema } from "../utils/zod-to-json-schema.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
-import {
-  downgradeUnsupportedImages,
-  downgradeUnsupportedVideos,
-  toolResultText,
-} from "./transform.js";
+import { downgradeUnsupportedImages, downgradeUnsupportedVideos } from "./transform.js";
 import { parseToolArguments } from "../utils/json.js";
-import { readSseStream } from "../utils/sse.js";
 import { extractRequestIdFromMessage } from "../utils/request-id.js";
+import {
+  parseEncryptedReasoningPart,
+  parseResponsesSse,
+  serializeEncryptedReasoningItem,
+  serializeResponsesInput,
+  serializeResponsesToolChoice,
+  serializeResponsesTools,
+  type ResponsesInputAdapter,
+  type ResponsesUsagePayload,
+} from "./openai-responses-core.js";
 
 const DEFAULT_BASE_URL = "https://chatgpt.com/backend-api";
+const CODEX_CLIENT_VERSION = "0.144.1";
+// OpenAI's Codex CLI enables zstd request compression by default. Keep tiny
+// synthetic/API requests readable, but compress real agent payloads before they
+// hit the backend's finite Envoy retry buffer.
+const CODEX_REQUEST_COMPRESSION_MIN_BYTES = 16 * 1024;
+
+let zstdInitPromise: Promise<void> | undefined;
+
+interface EncodedCodexRequest {
+  body: BodyInit;
+  compressed: boolean;
+  rawBytes: number;
+  encodedBytes: number;
+}
+
+async function encodeCodexRequest(body: Record<string, unknown>): Promise<EncodedCodexRequest> {
+  const json = JSON.stringify(body);
+  const raw = new TextEncoder().encode(json);
+  if (raw.byteLength < CODEX_REQUEST_COMPRESSION_MIN_BYTES) {
+    return {
+      body: json,
+      compressed: false,
+      rawBytes: raw.byteLength,
+      encodedBytes: raw.byteLength,
+    };
+  }
+
+  try {
+    zstdInitPromise ??= zstd.init();
+    await zstdInitPromise;
+    const compressed = Uint8Array.from(zstd.compress(raw));
+    if (compressed.byteLength >= raw.byteLength) {
+      return {
+        body: json,
+        compressed: false,
+        rawBytes: raw.byteLength,
+        encodedBytes: raw.byteLength,
+      };
+    }
+    return {
+      body: compressed,
+      compressed: true,
+      rawBytes: raw.byteLength,
+      encodedBytes: compressed.byteLength,
+    };
+  } catch (error) {
+    // Compression is an optimization, not a reason to make the provider
+    // unreachable if the WASM asset is missing in an unusual host.
+    providerDiag("codex_request_compression_failed", {
+      error: error instanceof Error ? error.message : String(error),
+      rawBytes: raw.byteLength,
+    });
+    return {
+      body: json,
+      compressed: false,
+      rawBytes: raw.byteLength,
+      encodedBytes: raw.byteLength,
+    };
+  }
+}
+
+function usesResponsesLite(model: string): boolean {
+  return model.startsWith("gpt-5.6-");
+}
 
 function outputTextKey(itemId: string | undefined, contentIndex: number | undefined): string {
   return `${itemId ?? ""}:${contentIndex ?? 0}`;
@@ -44,21 +115,28 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
   // Codex (GPT OAuth) has no video support — always strip video to a placeholder.
   const downgraded = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
-  const { system, input } = toCodexInput(downgraded, { supportsImages: options.supportsImages });
+  const { system, input } = serializeResponsesInput(
+    downgraded,
+    createCodexInputAdapter(options.supportsImages),
+  );
 
+  const responsesLite = usesResponsesLite(options.model);
   const body: Record<string, unknown> = {
     model: options.model,
     store: false,
     stream: true,
     instructions: system,
     input,
-    tool_choice: "auto",
-    parallel_tool_calls: true,
+    tool_choice: serializeResponsesToolChoice(options.toolChoice, options.tools, {
+      transportName: "OpenAI Codex",
+      supportsNamedTool: false,
+    }),
+    parallel_tool_calls: !responsesLite,
     include: ["reasoning.encrypted_content"],
   };
 
   if (options.tools?.length) {
-    body.tools = toCodexTools(options.tools);
+    body.tools = serializeResponsesTools(options.tools, { strict: null });
   }
   // Always set a prompt_cache_key. OpenAI uses this key to route requests
   // with the same prefix to the same cache shard — without it, the codex
@@ -74,8 +152,10 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     body.temperature = options.temperature;
   }
   body.reasoning = {
-    effort: options.thinking ?? "none",
+    // `ultra` is a client orchestration preset, not a Codex API effort.
+    effort: options.thinking === "ultra" ? "max" : (options.thinking ?? "none"),
     summary: "auto",
+    ...(responsesLite ? { context: "all_turns" } : {}),
   };
 
   const headers: Record<string, string> = {
@@ -83,35 +163,50 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     Accept: "text/event-stream",
     Authorization: `Bearer ${options.apiKey}`,
     "OpenAI-Beta": "responses=experimental",
-    originator: "ggcoder",
-    "User-Agent": `ggcoder (${os.platform()} ${os.release()}; ${os.arch()})`,
+    originator: responsesLite ? "codex_cli_rs" : "ggcoder",
+    "User-Agent": responsesLite
+      ? `codex_cli_rs/${CODEX_CLIENT_VERSION}`
+      : `ggcoder (${os.platform()} ${os.release()}; ${os.arch()})`,
+    ...(responsesLite
+      ? {
+          version: CODEX_CLIENT_VERSION,
+          "X-OpenAI-Internal-Codex-Responses-Lite": "true",
+        }
+      : {}),
   };
 
   if (options.accountId) {
     headers["chatgpt-account-id"] = options.accountId;
   }
 
-  // The chatgpt.com codex backend routes prompt cache lookups by header, not
-  // body — `prompt_cache_key` in the body alone never produces a cache hit
-  // here (verified against gpt-5.5 with a 22k-token shared prefix). Pinning
-  // both `session_id` and `x-client-request-id` to the cache scope is what
-  // makes consecutive requests hit the same cache shard.
-  const cacheScopeId = body.prompt_cache_key as string | undefined;
-  if (cacheScopeId) {
-    headers["session_id"] = cacheScopeId;
-    headers["x-client-request-id"] = cacheScopeId;
+  // Match Codex CLI's identity split: prompt_cache_key controls cache routing,
+  // while these headers identify the conversation. Sub-agents may deliberately
+  // share a cache key when their static prefixes match, but each child keeps an
+  // independent transport identity so sticky session state cannot bleed across.
+  if (options.transportSessionId) {
+    const transportSessionId = normalizePromptCacheKey(options.transportSessionId);
+    headers["session_id"] = transportSessionId;
+    headers["x-client-request-id"] = transportSessionId;
   }
+
+  const encodedRequest = await encodeCodexRequest(body);
+  if (encodedRequest.compressed) headers["Content-Encoding"] = "zstd";
+  providerDiag("codex_request_body", {
+    rawBytes: encodedRequest.rawBytes,
+    encodedBytes: encodedRequest.encodedBytes,
+    compressed: encodedRequest.compressed,
+  });
 
   const response = await fetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify(body),
+    body: encodedRequest.body,
     signal: options.signal,
   });
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
-    const parsed = parseCodexErrorBody(text);
+    const parsed = parseCodexErrorBody(text, response.status);
     const message = parsed.message ?? `Codex API returned HTTP ${response.status}.`;
     const requestId =
       parsed.requestId ??
@@ -131,12 +226,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       } else {
         hint =
           "This model is not available through Codex for the authenticated account. " +
-          "Run /model and choose a model listed for OpenAI Codex, or check your Codex model picker/usage limits.";
+          "Switch to a model listed for OpenAI Codex via the model selector, or check your Codex usage limits.";
       }
     } else if (response.status === 404 && text.includes("does not exist")) {
       hint =
         "This model is not in the current OpenAI Codex catalog for this account. " +
-        "Try gpt-5.5, gpt-5.4, gpt-5.4-mini, or gpt-5.3-codex.";
+        "Switch to gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-5.5 via the model selector.";
     }
 
     throw new ProviderError("openai", message, {
@@ -169,6 +264,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheRead = 0;
+  let cacheWrite = 0;
 
   // ── Diagnostic: log the first occurrence of each raw SSE event type with
   // timing, so we can see what Codex sends during the pre-reasoning window
@@ -176,7 +272,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   const diagStart = Date.now();
   const diagSeen = new Set<string>();
 
-  for await (const event of parseSSE(response.body)) {
+  for await (const event of parseResponsesSse(response.body)) {
     const type = event.type as string | undefined;
     if (!type) continue;
 
@@ -380,13 +476,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
           // array). Re-emitting the exact item OpenAI returned is what keeps
           // store:false replay valid — reconstructing a subset risks dropping
           // fields the API echoes back.
-          orderedItems.push({
-            kind: "reasoning",
-            part: {
-              type: "raw",
-              data: { ...item, summary: Array.isArray(item.summary) ? item.summary : [] },
-            },
-          });
+          const part = parseEncryptedReasoningPart(item);
+          if (part) orderedItems.push({ kind: "reasoning", part });
         }
       }
       if (item?.type === "function_call") {
@@ -410,14 +501,11 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     // Response completed
     if (type === "response.completed" || type === "response.done") {
       const resp = event.response as Record<string, unknown> | undefined;
-      const usage = resp?.usage as
-        | (Record<string, number> & {
-            input_tokens_details?: { cached_tokens?: number };
-          })
-        | undefined;
+      const usage = resp?.usage as ResponsesUsagePayload | undefined;
       if (usage) {
         cacheRead = usage.input_tokens_details?.cached_tokens ?? 0;
-        inputTokens = (usage.input_tokens ?? 0) - cacheRead;
+        cacheWrite = usage.input_tokens_details?.cache_write_tokens ?? 0;
+        inputTokens = (usage.input_tokens ?? 0) - cacheRead - cacheWrite;
         outputTokens = usage.output_tokens ?? 0;
       }
     }
@@ -475,27 +563,16 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       content: contentParts.length > 0 ? contentParts : textAccum || "",
     },
     stopReason,
-    usage: { inputTokens, outputTokens, ...(cacheRead > 0 && { cacheRead }) },
+    usage: {
+      inputTokens,
+      outputTokens,
+      ...(cacheRead > 0 && { cacheRead }),
+      ...(cacheWrite > 0 && { cacheWrite }),
+    },
   };
 
   yield { type: "done", stopReason };
   return streamResponse;
-}
-
-// ── SSE Parser ─────────────────────────────────────────────
-
-async function* parseSSE(
-  body: ReadableStream<Uint8Array>,
-): AsyncGenerator<Record<string, unknown>> {
-  for await (const event of readSseStream(body)) {
-    const data = event.data.trim();
-    if (!data || data === "[DONE]") continue;
-    try {
-      yield JSON.parse(data) as Record<string, unknown>;
-    } catch {
-      // skip malformed JSON
-    }
-  }
 }
 
 // ── Message Conversion ─────────────────────────────────────
@@ -523,143 +600,32 @@ function remapCodexId(id: string, idMap: Map<string, string>): string {
   return mapped;
 }
 
-/** A raw content part that holds a Codex encrypted reasoning item for round-trip. */
-function isEncryptedReasoning(
-  data: Record<string, unknown>,
-): data is { type: "reasoning"; id: string; encrypted_content: string; summary?: unknown } {
-  return (
-    data.type === "reasoning" &&
-    typeof data.id === "string" &&
-    typeof data.encrypted_content === "string"
-  );
-}
-
-function toCodexInput(
-  messages: Message[],
-  options?: { supportsImages?: boolean },
-): { system: string | undefined; input: unknown[] } {
-  let system: string | undefined;
-  const input: unknown[] = [];
+function createCodexInputAdapter(supportsImages: boolean | undefined): ResponsesInputAdapter {
   const idMap = new Map<string, string>();
-
-  for (const msg of messages) {
-    if (msg.role === "system") {
-      system = msg.content;
-      continue;
-    }
-
-    if (msg.role === "user") {
-      const content =
-        typeof msg.content === "string"
-          ? [{ type: "input_text", text: msg.content }]
-          : msg.content.map((part) => {
-              if (part.type === "text") return { type: "input_text", text: part.text };
-              return {
-                type: "input_image",
-                detail: "auto",
-                image_url: `data:${part.mediaType};base64,${part.data}`,
-              };
-            });
-      input.push({ role: "user", content });
-      continue;
-    }
-
-    if (msg.role === "assistant") {
-      if (typeof msg.content === "string") {
-        input.push({
-          type: "message",
-          role: "assistant",
-          content: [{ type: "output_text", text: msg.content, annotations: [] }],
-          status: "completed",
-        });
-        continue;
-      }
-
-      for (const part of msg.content) {
-        if (part.type === "raw" && isEncryptedReasoning(part.data)) {
-          // Re-emit the captured reasoning item verbatim in its original
-          // position so it precedes the following function_call (requires
-          // store:false + include reasoning.encrypted_content, both set on the
-          // request).
-          input.push(part.data);
-        } else if (part.type === "text") {
-          input.push({
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: part.text, annotations: [] }],
-            status: "completed",
-          });
-        } else if (part.type === "tool_call") {
-          const [callId, itemId] = part.id.includes("|")
-            ? part.id.split("|", 2)
-            : [part.id, part.id];
-          input.push({
-            type: "function_call",
-            id: remapCodexId(itemId, idMap),
-            call_id: remapCodexId(callId, idMap),
-            name: part.name,
-            arguments: JSON.stringify(part.args),
-          });
-        }
-        // thinking parts (and non-reasoning raw parts) are skipped for codex input
-      }
-      continue;
-    }
-
-    if (msg.role === "tool") {
-      const toolImages: ImageContent[] = [];
-      for (const result of msg.content) {
-        const [callId] = result.toolCallId.includes("|")
-          ? result.toolCallId.split("|", 2)
-          : [result.toolCallId];
-        const text = toolResultText(result.content);
-        input.push({
-          type: "function_call_output",
-          call_id: remapCodexId(callId, idMap),
-          output: text.length > 0 ? text : "(see attached image)",
-        });
-        if (options?.supportsImages !== false && Array.isArray(result.content)) {
-          for (const block of result.content) {
-            if (block.type === "image") toolImages.push(block);
-          }
-        }
-      }
-      if (toolImages.length > 0) {
-        input.push({
-          type: "message",
-          role: "user",
-          content: [
-            { type: "input_text", text: "Attached image(s) from tool result:" },
-            ...toolImages.map((img) => ({
-              type: "input_image",
-              detail: "auto",
-              image_url: `data:${img.mediaType};base64,${img.data}`,
-            })),
-          ],
-        });
-      }
-    }
-  }
-
-  return { system, input };
+  return {
+    encodeToolCallId(id) {
+      const [callId, itemId] = id.includes("|") ? id.split("|", 2) : [id, id];
+      return {
+        callId: remapCodexId(callId, idMap),
+        itemId: remapCodexId(itemId, idMap),
+      };
+    },
+    encodeToolResultId(id) {
+      const [callId] = id.includes("|") ? id.split("|", 2) : [id];
+      return remapCodexId(callId, idMap);
+    },
+    serializeRawAssistantPart: serializeEncryptedReasoningItem,
+    includeToolResultImages: supportsImages !== false,
+  };
 }
 
-// ── Tool Conversion ────────────────────────────────────────
-
-function toCodexTools(tools: Tool[]): unknown[] {
-  return tools.map((tool) => ({
-    type: "function",
-    name: tool.name,
-    description: tool.description,
-    parameters: resolveToolSchema(tool),
-    strict: null,
-  }));
-}
-
-// HTTP error bodies come back as JSON or plain text. Try to extract a clean
-// message string + request_id (and the raw error object) so we never spill the
-// raw JSON into the UI.
-function parseCodexErrorBody(text: string): {
+// HTTP error bodies may be JSON, useful plain text, or an HTML edge/proxy page.
+// Extract a bounded message plus request ID while keeping raw JSON and markup out
+// of every user-facing error path.
+function parseCodexErrorBody(
+  text: string,
+  statusCode: number,
+): {
   message?: string;
   requestId?: string;
   errorObj?: Record<string, unknown>;
@@ -669,10 +635,14 @@ function parseCodexErrorBody(text: string): {
     const parsed = JSON.parse(text) as Record<string, unknown>;
     const error = parsed.error as Record<string, unknown> | undefined;
     const detail = parsed.detail as unknown;
-    const message =
+    const rawMessage =
       (error?.message as string | undefined) ??
       (parsed.message as string | undefined) ??
       (typeof detail === "string" ? detail : undefined);
+    const message =
+      rawMessage && isRawHtmlErrorEcho(rawMessage)
+        ? providerHtmlErrorMessage(statusCode)
+        : rawMessage;
     const requestId =
       (parsed.request_id as string | undefined) ??
       (error?.request_id as string | undefined) ??
@@ -687,10 +657,13 @@ function parseCodexErrorBody(text: string): {
       ...(errorObj ? { errorObj } : {}),
     };
   } catch {
-    // Non-JSON body — return the trimmed text directly, capped so we never
-    // splat a huge HTML error page.
-    const trimmed = text.trim().slice(0, 240);
-    return trimmed ? { message: trimmed } : {};
+    const trimmed = text.trim();
+    if (isRawHtmlErrorEcho(trimmed)) {
+      return { message: providerHtmlErrorMessage(statusCode) };
+    }
+    // Preserve useful plain-text errors, capped to keep accidental proxy output bounded.
+    const bounded = trimmed.slice(0, 240);
+    return bounded ? { message: bounded } : {};
   }
 }
 

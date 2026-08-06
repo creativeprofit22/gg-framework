@@ -10,7 +10,10 @@ async function waitForOutput(
   predicate: (output: string) => boolean,
 ): Promise<string> {
   let combined = "";
-  for (let i = 0; i < 50; i += 1) {
+  // 200 x 100ms = 20s. The old 5s budget was enough on a developer machine but
+  // not on a loaded Windows CI runner, where spawning node and binding a port
+  // is markedly slower — the test failed there on timing, not behavior.
+  for (let i = 0; i < 200; i += 1) {
     const result = await manager.readOutput(id);
     combined += result.output;
     if (predicate(combined)) return combined;
@@ -25,6 +28,14 @@ async function waitForProcessExit(pid: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`Process ${pid} was still alive after shutdown.`);
+}
+
+async function waitForManagerExit(manager: ProcessManager, id: string): Promise<void> {
+  for (let i = 0; i < 50; i += 1) {
+    if (!(await manager.readOutput(id)).isRunning) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Process ${id} remained active in ProcessManager after shutdown.`);
 }
 
 /**
@@ -86,8 +97,12 @@ describe("ProcessManager dev-server lifecycle repro", () => {
     }
   });
 
-  it("uses taskkill for Windows process-tree shutdown fallback", async () => {
-    const taskkill = vi.fn();
+  // Windows has no process groups: signalling the wrapper leaves its whole
+  // descendant tree (the dev server everyone actually wants dead) running. So
+  // stop() force-kills the PID tree with taskkill FIRST, and reports honestly
+  // when the process is still alive after the 5s grace window.
+  it("force-kills the PID tree with taskkill on Windows", async () => {
+    const taskkill = vi.fn().mockReturnValue({ status: 1 });
     manager = new ProcessManager({
       platform: "win32",
       kill: vi.fn(() => {
@@ -102,11 +117,14 @@ describe("ProcessManager dev-server lifecycle repro", () => {
     );
     try {
       const stopped = await manager.stop(started.id);
-      expect(stopped).toBe(`Process ${started.id} already exited`);
-      manager.shutdownAll();
-      expect(taskkill).toHaveBeenCalledWith("taskkill", ["/pid", String(started.pid), "/T", "/F"], {
-        stdio: "ignore",
-      });
+      // The mocked taskkill never really kills the child, so the 5s window
+      // elapses and the user is told the truth instead of "stopped".
+      expect(stopped).toContain("Failed to stop process");
+      expect(taskkill).toHaveBeenCalledWith(
+        expect.stringMatching(/taskkill\.exe$/),
+        ["/PID", String(started.pid), "/T", "/F"],
+        expect.objectContaining({ stdio: "ignore", windowsHide: true }),
+      );
     } finally {
       // This test deliberately mocks `kill` and `spawnSync`, so neither the
       // simulated stop() nor shutdownAll() actually signals the real child
@@ -114,7 +132,8 @@ describe("ProcessManager dev-server lifecycle repro", () => {
       // this suite orphans a live `node -e setInterval` process forever.
       killRealProcessTree(started.pid);
     }
-  });
+    // stop() waits out its full 5s grace window before reporting failure.
+  }, 45_000);
 
   it("starts, reads, and stops a long-running Node HTTP server through the worker background path", async () => {
     manager = new ProcessManager();
@@ -129,14 +148,22 @@ describe("ProcessManager dev-server lifecycle repro", () => {
         `  console.log('DEV_SERVER_READY ' + address.port);\n` +
         `});\n` +
         `const interval = setInterval(() => console.log('DEV_SERVER_TICK'), 250);\n` +
-        `process.on('SIGTERM', () => {\n` +
-        `  console.log('DEV_SERVER_SIGTERM');\n` +
+        `process.stdin.resume();\n` +
+        `process.stdin.on('end', () => {\n` +
+        `  console.log('DEV_SERVER_EOF');\n` +
         `  clearInterval(interval);\n` +
         `  server.close(() => process.exit(0));\n` +
         `});\n`,
     );
 
-    const started = await manager.start(`${process.execPath} ${fixture}`, tmpDir);
+    // Both paths MUST be quoted. Unquoted, bash eats the backslashes in a
+    // Windows path: `C:\hostedtoolcache\…\node.exe` reached the shell as
+    // `C:hostedtoolcache…node.exe` and failed with "command not found". Every
+    // other manager.start call in this file already quotes; this one did not.
+    const started = await manager.start(
+      `${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)}`,
+      tmpDir,
+    );
     expect(started.pid).toBeGreaterThan(0);
     expect(started.logFile).toMatch(/\.log$/);
 
@@ -151,13 +178,15 @@ describe("ProcessManager dev-server lifecycle repro", () => {
     expect(fromStart.output).toContain("DEV_SERVER_READY");
 
     const stopped = await manager.stop(started.id);
-    expect(stopped).toBe(`Process ${started.id} stopped`);
+    expect(stopped).toContain(`Process ${started.id} stopped gracefully via stdin EOF`);
+    expect(stopped).toContain("code=0");
+    expect(stopped).toContain("DEV_SERVER_EOF");
 
     const final = await manager.readOutput(started.id, true);
     expect(final.isRunning).toBe(false);
-    expect(final.exitCode).not.toBeNull();
-    expect(final.output).toContain("DEV_SERVER_SIGTERM");
-  }, 15_000);
+    expect(final.exitCode).toBe(0);
+    expect(final.output).toContain("DEV_SERVER_EOF");
+  }, 45_000);
 
   const posixIt = process.platform === "win32" ? it.skip : it;
 
@@ -193,7 +222,10 @@ describe("ProcessManager dev-server lifecycle repro", () => {
 
       manager.shutdownAll();
 
-      await waitForProcessExit(grandchildPid);
+      await Promise.all([
+        waitForProcessExit(grandchildPid),
+        waitForManagerExit(manager, started.id),
+      ]);
       const final = await manager.readOutput(started.id, true);
       expect(final.isRunning).toBe(false);
       expect(final.output).toContain("PARENT_READY");

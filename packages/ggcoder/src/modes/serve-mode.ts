@@ -270,8 +270,12 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
       const turns = totalTurns === 1 ? "1 turn" : `${totalTurns} turns`;
 
       // Context usage percentage
-      const modelId = session.getState().model;
-      const contextWindow = getContextWindow(modelId);
+      const sessionState = session.getState();
+      const modelId = sessionState.model;
+      const contextWindow = getContextWindow(modelId, {
+        provider: sessionState.provider,
+        accountId: sessionState.accountId,
+      });
       const contextTokens = estimateConversationTokens(session.getMessages());
       const contextPctRaw = (contextTokens / contextWindow) * 100;
       const contextStr =
@@ -478,7 +482,10 @@ export async function startServeMode(options: ServeModeOptions): Promise<ServeCo
 
       const sessionState = state.session.getState();
       const modelInfo = MODELS.find((m) => m.id === sessionState.model);
-      const contextWindow = getContextWindow(sessionState.model);
+      const contextWindow = getContextWindow(sessionState.model, {
+        provider: sessionState.provider,
+        accountId: sessionState.accountId,
+      });
       const contextTokens = estimateConversationTokens(state.session.getMessages());
       const statusPctRaw = (contextTokens / contextWindow) * 100;
       const statusContextStr =

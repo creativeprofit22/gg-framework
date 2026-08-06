@@ -10,9 +10,14 @@ describe("resolvePath", () => {
     expect(result).toBe(path.resolve("/home/user/project", "src/index.ts"));
   });
 
-  it("returns absolute path as-is", () => {
+  it("returns an absolute path without re-rooting it at the cwd", () => {
+    // `/etc/hosts` is absolute on Windows too (drive-rooted), but resolving it
+    // attaches the current drive — `D:\etc\hosts`. The invariant under test is
+    // "not joined onto the cwd", so compare against the platform's own
+    // resolution rather than a POSIX literal.
     const result = resolvePath("/home/user/project", "/etc/hosts");
-    expect(result).toBe("/etc/hosts");
+    expect(result).toBe(path.resolve("/etc/hosts"));
+    expect(result).not.toContain("project");
   });
 
   it("expands ~ to home directory", () => {

@@ -2,10 +2,12 @@ import type { Message, StreamOptions } from "./types.js";
 import { GGAIError, VideoUnsupportedError } from "./errors.js";
 import type { StreamResult } from "./utils/event-stream.js";
 import { streamAnthropic } from "./providers/anthropic.js";
+import { streamAzureOpenAIResponses } from "./providers/azure-openai-responses.js";
 import { streamOpenAI } from "./providers/openai.js";
 import { streamOpenAICodex } from "./providers/openai-codex.js";
 import { streamGemini } from "./providers/gemini.js";
 import { providerRegistry } from "./provider-registry.js";
+import { clampProviderContextImages } from "./providers/transform.js";
 
 /** Z.AI coding API endpoint — the primary endpoint for all GLM models. */
 const GLM_CODING_BASE_URL = "https://api.z.ai/api/coding/paas/v4";
@@ -40,6 +42,10 @@ providerRegistry.register("openai", {
     }
     return streamOpenAI(options);
   },
+});
+
+providerRegistry.register("azure", {
+  stream: (options) => streamAzureOpenAIResponses(options),
 });
 
 providerRegistry.register("gemini", {
@@ -98,6 +104,20 @@ providerRegistry.register("sakana", {
     }),
 });
 
+providerRegistry.register("xai", {
+  // xAI's public API (console.x.ai key) is OpenAI-compatible — ride the Chat
+  // Completions transport like Moonshot/DeepSeek. Grok reasoning models take
+  // top-level `reasoning_effort` (low/medium/high), which the shared thinking
+  // path already sends. xAI's OAuth path exists but only via the Grok CLI's
+  // private Responses proxy (cli-chat-proxy.grok.com) with reverse-engineered
+  // attribution headers and account-tier gating — intentionally not wired.
+  stream: (options) =>
+    streamOpenAI({
+      ...options,
+      baseUrl: options.baseUrl ?? "https://api.x.ai/v1",
+    }),
+});
+
 providerRegistry.register("minimax", {
   stream: (options) =>
     streamAnthropic({
@@ -110,6 +130,38 @@ providerRegistry.register("minimax", {
       clearToolUses: false,
       serverTools: undefined,
     }),
+});
+
+/**
+ * Local model ids are namespaced by endpoint (`local/<endpointId>/<rawId>`) so
+ * the same model name served by two machines stays distinct in the registry.
+ * The server only knows the raw id, so strip the routing prefix here — at the
+ * one place that talks to the wire. Counterpart to gg-core's
+ * `formatLocalModelId`/`parseLocalModelId`.
+ */
+export function localWireModelId(id: string): string {
+  const match = /^local\/[^/]+\/(.+)$/.exec(id);
+  return match?.[1] ?? id;
+}
+
+providerRegistry.register("local", {
+  // Locally hosted OpenAI-compatible servers (Ollama, LM Studio, llama.cpp,
+  // vLLM). There is no default endpoint: the baseUrl comes from the endpoint
+  // credential the discovery layer wrote, so a missing one is a wiring bug, not
+  // something to paper over with a guess at someone else's port.
+  stream: (options) => {
+    if (!options.baseUrl) {
+      throw new GGAIError(
+        "Local provider requires a baseUrl (e.g. http://127.0.0.1:11434/v1). " +
+          "No local endpoint was resolved for this model — re-scan for local models.",
+      );
+    }
+    return streamOpenAI({
+      ...options,
+      model: localWireModelId(options.model),
+      webSearch: false,
+    });
+  },
 });
 
 // ── Public API ─────────────────────────────────────────────
@@ -147,7 +199,26 @@ export function stream(options: StreamOptions): StreamResult {
   if (options.supportsVideo !== true && messagesContainVideo(options.messages)) {
     throw new VideoUnsupportedError();
   }
-  return entry.stream(options);
+  const wireMessages = stripMessageProvenance(options.messages);
+  const messages = clampProviderContextImages(
+    wireMessages,
+    options.provider,
+    options.supportsImages,
+  );
+  return entry.stream(messages === options.messages ? options : { ...options, messages });
+}
+
+/** Clone provenance-bearing messages and remove internal metadata at the provider boundary. */
+function stripMessageProvenance(messages: Message[]): Message[] {
+  let stripped: Message[] | undefined;
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index]!;
+    if (!message.provenance) continue;
+    stripped ??= messages.slice();
+    const { provenance: _provenance, ...wireMessage } = message;
+    stripped[index] = wireMessage as Message;
+  }
+  return stripped ?? messages;
 }
 
 /** True if any message carries a video block, in user content or a tool result. */

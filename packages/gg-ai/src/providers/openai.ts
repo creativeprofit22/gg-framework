@@ -4,6 +4,7 @@ import type {
   StreamEvent,
   StreamOptions,
   StreamResponse,
+  ThinkingLevel,
   ToolCall,
 } from "../types.js";
 import {
@@ -11,7 +12,9 @@ import {
   readHeader,
   isHardBillingMessage,
   isRawJsonErrorEcho,
+  isRawHtmlErrorEcho,
   emptyProviderErrorMessage,
+  providerHtmlErrorMessage,
 } from "../errors.js";
 import { StreamResult } from "../utils/event-stream.js";
 import {
@@ -19,14 +22,37 @@ import {
   downgradeUnsupportedVideos,
   normalizeOpenAIStopReason,
   toOpenAIMessages,
+  toLocalReasoningEffort,
   toOpenAIReasoningEffort,
   toOpenAIToolChoice,
   toOpenAITools,
 } from "./transform.js";
 import { normalizePromptCacheKey } from "./prompt-cache-key.js";
 import { uploadMoonshotVideos } from "./moonshot-video.js";
+import {
+  getReasoningField,
+  readReasoning,
+  reasoningFieldKey,
+  rememberReasoningField,
+} from "./reasoning-field.js";
 import { parseToolArguments } from "../utils/json.js";
 import { getEnvironment } from "../utils/env.js";
+
+// Kimi K3's declared effort rungs (server-validated; anything else 400s).
+// Official alias mapping from Moonshot's K3 third-party-tools docs:
+// ultra/max/xhigh → max, high/medium → high, low → low.
+type KimiK3Effort = "low" | "high" | "max";
+function toKimiK3Effort(level: ThinkingLevel): KimiK3Effort {
+  switch (level) {
+    case "low":
+      return "low";
+    case "medium":
+    case "high":
+      return "high";
+    default: // "xhigh" | "max" | "ultra"
+      return "max";
+  }
+}
 
 // Normalize OpenAI completion usage to the framework convention where
 // inputTokens excludes cache hits (matching Anthropic). Handles vendor-specific
@@ -39,13 +65,19 @@ function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
   inputTokens: number;
   outputTokens: number;
   cacheRead: number;
+  cacheWrite: number;
 } {
   let cacheRead = 0;
+  let cacheWrite = 0;
   const details = usage.prompt_tokens_details;
   if (details?.cached_tokens) {
     cacheRead = details.cached_tokens;
   }
   const usageAny = usage as unknown as Record<string, unknown>;
+  const detailsAny = details as unknown as Record<string, unknown> | undefined;
+  if (typeof detailsAny?.cache_write_tokens === "number") {
+    cacheWrite = detailsAny.cache_write_tokens;
+  }
   if (!cacheRead && typeof usageAny.cached_tokens === "number" && usageAny.cached_tokens > 0) {
     cacheRead = usageAny.cached_tokens as number;
   }
@@ -59,9 +91,10 @@ function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
   // OpenAI's prompt_tokens includes cached tokens; subtract to match
   // Anthropic's convention where inputTokens excludes cache hits.
   return {
-    inputTokens: usage.prompt_tokens - cacheRead,
+    inputTokens: usage.prompt_tokens - cacheRead - cacheWrite,
     outputTokens: usage.completion_tokens,
     cacheRead,
+    cacheWrite,
   };
 }
 
@@ -102,12 +135,32 @@ export function streamOpenAI(options: StreamOptions): StreamResult {
 async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
   const providerName = options.provider ?? "openai";
   const useStreaming = options.streaming !== false;
+  // Endpoints disagree on the reasoning field name; remember what this one
+  // emitted so the echo-back on the next turn uses the same name.
+  const endpointKey = reasoningFieldKey(providerName, options.baseUrl, options.model);
 
   const client = createClient(options);
 
-  // GLM and Moonshot use a custom `thinking` body param instead of `reasoning_effort`
+  // Kimi K3's effort ladder is server-declared as low/high/max on both the
+  // public API (default max) and the Kimi For Coding OAuth endpoint (default
+  // high); unlisted efforts are rejected with a 400, and thinking can be fully
+  // disabled via the nested toggle on either endpoint. The public API takes
+  // top-level `reasoning_effort`; the managed endpoint keeps the official
+  // CLI's nested shape.
+  const isLocal = options.provider === "local";
+  const isKimiK3 = options.provider === "moonshot" && options.model === "kimi-k3";
+  const isManagedKimiK3 =
+    isKimiK3 && options.baseUrl?.replace(/\/+$/, "").endsWith("/coding/v1") === true;
+  // Clamp out-of-ladder levels to the official alias rungs — the session
+  // layer already restricts choices via getSupportedThinkingLevels, this is a
+  // safety net for stale saved settings.
+  const k3Effort = options.thinking ? toKimiK3Effort(options.thinking) : undefined;
+  const isKimiK27 = options.provider === "moonshot" && options.model.startsWith("kimi-k2.7-code");
+  const hasFixedKimiSampling = isKimiK3 || isKimiK27;
   const usesThinkingParam =
-    options.provider === "glm" || options.provider === "moonshot" || options.provider === "xiaomi";
+    options.provider === "glm" ||
+    (options.provider === "moonshot" && !isKimiK3 && !isKimiK27) ||
+    options.provider === "xiaomi";
 
   const downgradedImages = downgradeUnsupportedImages(options.messages, options.supportsImages);
   const downgradedMessages = downgradeUnsupportedVideos(downgradedImages, options.supportsVideo);
@@ -128,8 +181,13 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   }
   const messages = toOpenAIMessages(downgradedMessages, {
     provider: options.provider,
-    thinking: !!options.thinking,
+    // K2.7 preserves reasoning even when the user hides thinking in the UI;
+    // keep assistant tool-call history wire-valid in that display mode. A
+    // disabled K3 must NOT carry placeholder reasoning_content (mirrors the
+    // official CLI: reasoning is preserved only while thinking is enabled).
+    thinking: isKimiK27 || !!options.thinking,
     supportsImages: options.supportsImages,
+    reasoningField: getReasoningField(endpointKey),
   });
 
   // GLM models default to 0.6 temperature when not in thinking mode
@@ -141,10 +199,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     messages,
     stream: useStreaming,
     ...(options.maxTokens ? { max_completion_tokens: options.maxTokens } : {}),
-    ...(effectiveTemp != null && !options.thinking ? { temperature: effectiveTemp } : {}),
-    ...(options.topP != null ? { top_p: options.topP } : {}),
+    ...(effectiveTemp != null && !options.thinking && !hasFixedKimiSampling
+      ? { temperature: effectiveTemp }
+      : {}),
+    ...(options.topP != null && !hasFixedKimiSampling ? { top_p: options.topP } : {}),
     ...(options.stop ? { stop: options.stop } : {}),
-    ...(options.thinking && !usesThinkingParam
+    ...(options.thinking && !usesThinkingParam && !isKimiK3 && !isKimiK27 && !isLocal
       ? { reasoning_effort: toOpenAIReasoningEffort(options.thinking, options.model) }
       : {}),
     ...(options.tools?.length ? { tools: toOpenAITools(options.tools) } : {}),
@@ -166,24 +226,57 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const paramsAny = params as unknown as Record<string, unknown>;
     paramsAny.prompt_cache_key = normalizePromptCacheKey(options.promptCacheKey ?? "ggcoder");
 
-    // Map cacheRetention to OpenAI's prompt_cache_retention param.
-    // "long" → "24h" keeps cached prefixes active up to 24 hours (OpenAI feature).
-    const retention = options.cacheRetention ?? "short";
-    if (retention === "long") {
+    // GPT-5.6 replaced prompt_cache_retention with prompt_cache_options.
+    // Its only supported TTL is 30m; implicit mode preserves automatic latest-
+    // message breakpoints while enabling the newer reliable key+prefix matching.
+    if (options.provider === "openai" && options.model.startsWith("gpt-5.6")) {
+      paramsAny.prompt_cache_options = { mode: "implicit", ttl: "30m" };
+    } else if (!isKimiK3 && (options.cacheRetention ?? "short") === "long") {
+      // K3 caching is automatic and its request schema does not expose a TTL.
       paramsAny.prompt_cache_retention = "24h";
     }
+  }
+
+  // Local endpoints take low/medium/high/max — `max` sits outside the OpenAI
+  // SDK's effort union (same situation as Kimi's), so assign it directly.
+  if (isLocal && options.thinking) {
+    (params as unknown as Record<string, unknown>).reasoning_effort = toLocalReasoningEffort(
+      options.thinking,
+    );
   }
 
   if (options.provider === "openai" && options.serviceTier) {
     (params as unknown as Record<string, unknown>).service_tier = options.serviceTier;
   }
 
-  // Inject custom thinking param for GLM/Moonshot/Xiaomi (not part of OpenAI spec)
+  if (isKimiK3) {
+    const paramsAny = params as unknown as Record<string, unknown>;
+    if (isManagedKimiK3) {
+      // Kimi Code's managed OAuth endpoint keeps the official CLI's Kimi wire
+      // shape: nested effort plus preserved reasoning, or an explicit disabled
+      // toggle when thinking is off.
+      paramsAny.thinking = k3Effort
+        ? { type: "enabled", effort: k3Effort, keep: "all" }
+        : { type: "disabled" };
+    } else if (k3Effort) {
+      // The public K3 API uses top-level reasoning_effort. The OpenAI SDK's
+      // effort union does not know Kimi's `max` value yet.
+      paramsAny.reasoning_effort = k3Effort;
+    } else {
+      // Public K3 has no reasoning_effort "off" — disable via the nested
+      // toggle, the shape the official CLI uses on this endpoint too.
+      paramsAny.thinking = { type: "disabled" };
+    }
+  }
+
+  // Inject the custom toggle for K2.6-era Kimi, GLM, and Xiaomi. Public K3 uses
+  // reasoning_effort, managed K3 has its endpoint-specific block above, and
+  // K2.7 is always-thinking and rejects an explicit disabled toggle.
   if (usesThinkingParam) {
     if (options.thinking) {
       (params as unknown as Record<string, unknown>).thinking = { type: "enabled" };
     } else {
-      // All providers (GLM, Moonshot, Xiaomi MiMo) support explicit disabled.
+      // The providers/models routed through this block support explicit disabled.
       // MiMo is an always-on reasoning model — without { type: "disabled" } it
       // returns reasoning_content and may produce thinking-only responses with
       // no actionable output, causing the agent loop to silently end.
@@ -212,8 +305,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       const completion = (await client.chat.completions.create(params, {
         signal: options.signal ?? undefined,
       })) as OpenAI.ChatCompletion;
-      yield* synthesizeEventsFromCompletion(completion, !!options.thinking);
-      return completionToResponse(completion);
+      yield* synthesizeEventsFromCompletion(completion, !!options.thinking, endpointKey);
+      return completionToResponse(completion, endpointKey);
     } catch (err) {
       throw toError(err, providerName);
     }
@@ -235,6 +328,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheRead = 0;
+  let cacheWrite = 0;
   let finishReason: string | null = null;
   let receivedAnyChunk = false;
 
@@ -244,7 +338,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       const choice = chunk.choices?.[0];
 
       if (chunk.usage) {
-        ({ inputTokens, outputTokens, cacheRead } = extractOpenAIUsage(chunk.usage));
+        ({ inputTokens, outputTokens, cacheRead, cacheWrite } = extractOpenAIUsage(chunk.usage));
       }
 
       if (!choice) continue;
@@ -261,11 +355,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       // messages).  Only yield thinking_delta to the UI when thinking is enabled
       // — reasoning models like MiMo always return reasoning_content even when
       // thinking is "off", which would cause a permanent "Thinking" indicator.
-      const reasoningContent = (delta as Record<string, unknown>).reasoning_content;
-      if (typeof reasoningContent === "string" && reasoningContent) {
-        thinkingAccum += reasoningContent;
+      const reasoning = readReasoning(delta as Record<string, unknown>);
+      if (reasoning) {
+        rememberReasoningField(endpointKey, reasoning.field);
+        thinkingAccum += reasoning.text;
         if (options.thinking) {
-          yield { type: "thinking_delta", text: reasoningContent };
+          yield { type: "thinking_delta", text: reasoning.text };
         }
       }
 
@@ -311,6 +406,21 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     });
   }
 
+  // Silent-partial guard (mirror of anthropic.ts): a complete OpenAI-compatible
+  // stream always ends with a chunk carrying `finish_reason`. The OpenAI SDK does
+  // NOT throw on a clean premature close (the body iterator just ends), so
+  // consuming chunks but never seeing a finish_reason means the stream was
+  // truncated mid-flight. Without this guard, normalizeOpenAIStopReason(null)
+  // maps the missing finish into "end_turn", making a truncated turn look
+  // finished. Throw a 504 so the agent loop treats it as a retryable transport
+  // failure. The partial body rides on `cause` for debugging, never returned.
+  if (finishReason === null) {
+    throw new ProviderError(providerName, "Stream ended before completion (no finish_reason).", {
+      statusCode: 504,
+      cause: { partialText: textAccum, outputTokens },
+    });
+  }
+
   // Finalize thinking content (GLM, Moonshot, Xiaomi reasoning_content)
   // Always include in response for multi-turn round-tripping, even when
   // thinking display is off — toOpenAIMessages sends it as reasoning_content.
@@ -349,7 +459,12 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
       content: contentParts.length > 0 ? contentParts : textAccum || "",
     },
     stopReason,
-    usage: { inputTokens, outputTokens, ...(cacheRead > 0 && { cacheRead }) },
+    usage: {
+      inputTokens,
+      outputTokens,
+      ...(cacheRead > 0 && { cacheRead }),
+      ...(cacheWrite > 0 && { cacheWrite }),
+    },
   };
 
   yield { type: "done", stopReason };
@@ -364,6 +479,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
 function* synthesizeEventsFromCompletion(
   completion: OpenAI.ChatCompletion,
   thinkingEnabled: boolean,
+  endpointKey: string,
 ): Generator<StreamEvent, void> {
   const choice = completion.choices?.[0];
   if (!choice) {
@@ -374,9 +490,10 @@ function* synthesizeEventsFromCompletion(
   const msg = choice.message as unknown as Record<string, unknown>;
 
   // Reasoning / thinking content (GLM, Moonshot, DeepSeek)
-  const reasoning = msg.reasoning_content;
-  if (typeof reasoning === "string" && reasoning && thinkingEnabled) {
-    yield { type: "thinking_delta", text: reasoning };
+  const reasoning = readReasoning(msg);
+  if (reasoning) {
+    rememberReasoningField(endpointKey, reasoning.field);
+    if (thinkingEnabled) yield { type: "thinking_delta", text: reasoning.text };
   }
 
   // Text content
@@ -413,7 +530,10 @@ function* synthesizeEventsFromCompletion(
 }
 
 /** Convert a non-streaming OpenAI ChatCompletion into our StreamResponse shape. */
-function completionToResponse(completion: OpenAI.ChatCompletion): StreamResponse {
+function completionToResponse(
+  completion: OpenAI.ChatCompletion,
+  endpointKey: string,
+): StreamResponse {
   const choice = completion.choices?.[0];
   const contentParts: ContentPart[] = [];
   let textAccum = "";
@@ -422,9 +542,10 @@ function completionToResponse(completion: OpenAI.ChatCompletion): StreamResponse
     const msg = choice.message as unknown as Record<string, unknown>;
 
     // Reasoning content -- always included for multi-turn round-tripping
-    const reasoning = msg.reasoning_content;
-    if (typeof reasoning === "string" && reasoning) {
-      contentParts.push({ type: "thinking", text: reasoning });
+    const reasoning = readReasoning(msg);
+    if (reasoning) {
+      rememberReasoningField(endpointKey, reasoning.field);
+      contentParts.push({ type: "thinking", text: reasoning.text });
     }
 
     if (typeof msg.content === "string" && msg.content) {
@@ -453,8 +574,9 @@ function completionToResponse(completion: OpenAI.ChatCompletion): StreamResponse
   let inputTokens = 0;
   let outputTokens = 0;
   let cacheRead = 0;
+  let cacheWrite = 0;
   if (completion.usage) {
-    ({ inputTokens, outputTokens, cacheRead } = extractOpenAIUsage(completion.usage));
+    ({ inputTokens, outputTokens, cacheRead, cacheWrite } = extractOpenAIUsage(completion.usage));
   }
 
   const stopReason = normalizeOpenAIStopReason(choice?.finish_reason ?? null);
@@ -465,7 +587,12 @@ function completionToResponse(completion: OpenAI.ChatCompletion): StreamResponse
       content: contentParts.length > 0 ? contentParts : textAccum,
     },
     stopReason,
-    usage: { inputTokens, outputTokens, ...(cacheRead > 0 && { cacheRead }) },
+    usage: {
+      inputTokens,
+      outputTokens,
+      ...(cacheRead > 0 && { cacheRead }),
+      ...(cacheWrite > 0 && { cacheWrite }),
+    },
   };
 }
 
@@ -501,12 +628,17 @@ function toError(err: unknown, provider: string = "openai"): ProviderError {
     const bodyMessage =
       typeof body?.message === "string" && body.message.trim() ? body.message.trim() : undefined;
     const modelName = typeof body?.model === "string" ? body.model : "";
-    // When the body has no usable message, the SDK's err.message is a raw
-    // JSON echo of the (often near-empty) error body — swap in a clean fallback
-    // rather than showing that to the user (see isRawJsonErrorEcho).
-    const cleanMessage =
-      bodyMessage ??
-      (isRawJsonErrorEcho(err.message) ? emptyProviderErrorMessage(err.status) : err.message);
+    // The SDK may expose a whole HTML edge/proxy page either as the parsed body
+    // message or as err.message. Preserve the original on `cause`, but never send
+    // transport markup to the user.
+    const messageCandidate = bodyMessage ?? err.message;
+    const cleanMessage = isRawHtmlErrorEcho(messageCandidate)
+      ? providerHtmlErrorMessage(err.status)
+      : bodyMessage
+        ? bodyMessage
+        : isRawJsonErrorEcho(err.message)
+          ? emptyProviderErrorMessage(err.status)
+          : err.message;
 
     let hint: string | undefined;
     if (modelName === "codex-mini-latest" || cleanMessage.includes("codex-mini-latest")) {

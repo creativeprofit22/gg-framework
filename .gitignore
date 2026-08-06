@@ -11,6 +11,12 @@ coverage/
 .env.*
 ~/.gg/
 .gg/
+!/.gg/
+/.gg/*
+!/.gg/commands/
+/.gg/commands/*
+!/.gg/commands/release.md
+!/.gg/commands/cleanup.md
 
 # Scratch / ad-hoc test files
 test_*.mjs
@@ -40,7 +46,8 @@ target/
 # npm
 .npmrc
 
-# gg-editor: generated from src/skills/*.md by scripts/build-skills.mjs (runs in build/check/test)
+# gg-editor: local roadmap and generated skill bundle
+packages/gg-editor/ROADMAP.md
 packages/gg-editor/src/skills.ts
 
 # Goal audit generated evidence
@@ -56,5 +63,15 @@ packages/ggcoder/ideal-sim/
 # prompt-bench scratch sandboxes
 experiments/prompt-bench/.bench-sandbox-*
 
+# Local benchmark experiments and raw samples (may contain provider metadata)
+bench/benchmark-results/
+bench/LATENCY_RESULTS.md
+bench/latency-matrix.ts
+bench/api-benchmark.test.ts
+
 # scratch — top coding agents scan
 top-coding-agents.md
+coding-agent-72h-adoption-report.md
+
+# Local research scratch
+coding-agents.md

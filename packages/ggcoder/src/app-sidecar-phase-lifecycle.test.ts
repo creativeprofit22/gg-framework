@@ -150,14 +150,10 @@ const contract: Array<{
     },
   },
   {
-    name: "tool fails",
+    name: "recoverable tool failure",
     signal: { type: "tool-failed", toolName: "bash", reason: "typecheck failed" },
     stage: "implementing",
-    expected: {
-      status: "needs-attention",
-      source: "agent",
-      reason: "bash failed: typecheck failed",
-    },
+    expected: null,
   },
   {
     name: "runtime fails",
@@ -217,12 +213,6 @@ describe("phase lifecycle signal mapper", () => {
       "attention-question-opened",
     ],
     [
-      "tool blocker opened",
-      { type: "tool-failed", toolName: "bash", reason: "Localized failure" },
-      "implementing",
-      "attention-tool-opened",
-    ],
-    [
       "runtime blocker opened",
       { type: "runtime-error", reason: "Localized runtime error" },
       "implementing",
@@ -252,6 +242,7 @@ describe("phase lifecycle signal mapper", () => {
 
   it.each([
     { type: "run-ended" },
+    { type: "tool-failed", toolName: "bash", reason: "temporary failure" },
     { type: "tool-succeeded" },
     { type: "autopilot-done" },
     { type: "elapsed" },
@@ -395,6 +386,13 @@ describe("phase lifecycle coordinator", () => {
     await expect(activeCoordinator.enqueue({ type: "run-ended" })).resolves.toEqual({
       status: "ignored",
     });
+    await expect(
+      activeCoordinator.enqueue({
+        type: "tool-failed",
+        toolName: "bash",
+        reason: "transient typecheck failure",
+      }),
+    ).resolves.toEqual({ status: "ignored" });
     expect(repository.recordPhaseLifecycleTransition).not.toHaveBeenCalled();
   });
 

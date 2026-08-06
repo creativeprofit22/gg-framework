@@ -139,6 +139,46 @@ describe("buildKenDigest", () => {
     expect(digest).toContain("HUMAN");
   });
 
+  it("includes the bound phase contract and requires structured completion review", () => {
+    const digest = buildKenAutopilotContext({
+      cwd: base.cwd,
+      gitBranch: base.gitBranch,
+      platform: base.platform,
+      messages: [],
+      verificationException: {
+        id: "exception-9",
+        requesterActor: "gg-coder",
+        reason: "External service unavailable",
+        timestamp: "2026-08-05T00:00:00.000Z",
+        evidence: ["service outage recorded"],
+      },
+      boundPhase: {
+        id: "phase-review",
+        revision: 9,
+        goal: "Complete the current phase",
+        completionCriteria: ["tests pass", "review is accepted"],
+        status: "review",
+        latestVerification: {
+          id: "verification-9",
+          result: "passed",
+          reason: null,
+          timestamp: "2026-08-05T00:00:00.000Z",
+          evidence: ["targeted test passed"],
+        },
+      },
+    });
+
+    expect(digest).toContain("## Bound Roadmap phase");
+    expect(digest).toContain('"goal": "Complete the current phase"');
+    expect(digest).toContain('"completionCriteria"');
+    expect(digest).toContain('"status": "review"');
+    expect(digest).toContain("targeted test passed");
+    expect(digest).toContain("MUST call roadmap_status");
+    expect(digest).toContain("final_review.accepts_verification_exception=true");
+    expect(digest).toContain("Do not return a text-only ALL_CLEAR");
+    expect(digest).toContain("completion gate");
+  });
+
   it("autopilot review instruction separates true human decisions from safe implied follow-ups", () => {
     // GG Coder ending with a question/options is HUMAN only when it needs a
     // real user-level decision. Permission to continue safe work implied by the

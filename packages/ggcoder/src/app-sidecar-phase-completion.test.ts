@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AppSidecarPhaseCompletionCoordinator,
+  AppSidecarPhaseImplementationPlanTracker,
   autopilotVerdictAcceptsVerificationException,
+  checkpointSettledPhaseImplementation,
   latestVerificationExceptionForReview,
+  restorePhaseImplementationPlanEvidence,
   type PhaseCompletionRepository,
 } from "./app-sidecar-phase-completion.js";
 import {
@@ -45,6 +48,7 @@ function verification(
     transition: "review" as const,
     progress: "Verification completed",
     blocker: null,
+    requiredExternalAction: null,
     evidence: ["pnpm test passed"],
     verification: result,
     verificationReason: result === "passed" ? null : "Verification could not pass",
@@ -395,6 +399,7 @@ describe("evaluatePhaseCompletion", () => {
   it.each([
     {
       blocker: "approval",
+      requiredExternalAction: "Approve the pending request",
       status: "waiting-for-approval" as const,
       source: "agent" as const,
       reason: "Approval copy may change",
@@ -409,6 +414,7 @@ describe("evaluatePhaseCompletion", () => {
     },
     {
       blocker: "question",
+      requiredExternalAction: "Answer the pending question",
       status: "needs-attention" as const,
       source: "agent" as const,
       reason: "Question copy may change",
@@ -423,6 +429,7 @@ describe("evaluatePhaseCompletion", () => {
     },
     {
       blocker: "runtime error via implementation",
+      requiredExternalAction: "Resolve the external implementation runtime error",
       status: "needs-attention" as const,
       source: "session" as const,
       reason: "Runtime copy may change",
@@ -437,6 +444,7 @@ describe("evaluatePhaseCompletion", () => {
     },
     {
       blocker: "runtime error via review",
+      requiredExternalAction: "Resolve the external review runtime error",
       status: "needs-attention" as const,
       source: "session" as const,
       reason: "Runtime copy may change",
@@ -451,6 +459,7 @@ describe("evaluatePhaseCompletion", () => {
     },
     {
       blocker: "tool failure",
+      requiredExternalAction: "Restore the external tool",
       status: "needs-attention" as const,
       source: "agent" as const,
       reason: "Tool copy has no legacy failure pattern",
@@ -465,6 +474,7 @@ describe("evaluatePhaseCompletion", () => {
     },
     {
       blocker: "generic attention via implementation",
+      requiredExternalAction: "Resolve the external implementation blocker",
       status: "needs-attention" as const,
       source: "system" as const,
       reason: "Generic attention copy may change",
@@ -479,6 +489,7 @@ describe("evaluatePhaseCompletion", () => {
     },
     {
       blocker: "generic attention via review",
+      requiredExternalAction: "Resolve the external review blocker",
       status: "needs-attention" as const,
       source: "system" as const,
       reason: "Generic attention copy may change",
@@ -599,6 +610,103 @@ function snapshot(revision: number): ProjectNotesSnapshot {
 }
 
 describe("AppSidecarPhaseCompletionCoordinator", () => {
+  it("rehydrates durable same-session plan evidence for a correction checkpoint after restart", async () => {
+    const checkpoints: Array<{
+      checkpointId: string;
+      planStepTotal: number;
+      completedPlanSteps: number[];
+    }> = [];
+    const repository: PhaseCompletionRepository = {
+      recordImplementationCheckpoint: vi.fn(async (_cwd, request) => {
+        checkpoints.push(request);
+        return {
+          status: "committed" as const,
+          snapshot: snapshot(checkpoints.length + 1),
+          phase: phase(),
+          evaluation: evaluate(phase()),
+        };
+      }),
+      recordCompletionReview: vi.fn(),
+    };
+    const coordinator = new AppSidecarPhaseCompletionCoordinator({
+      cwd: "/project",
+      repository,
+      broadcastSnapshot: () => undefined,
+    });
+    let tracker = new AppSidecarPhaseImplementationPlanTracker();
+
+    await expect(
+      checkpointSettledPhaseImplementation({
+        coordinator,
+        tracker,
+        checkpointId: "implementation-before-rejection",
+        phaseId: "phase-24",
+        expectedSession: session,
+        currentPlanProgress: { total: 3, completed: [1, 2, 3] },
+        runOutcome: "succeeded",
+        timestamp: NOW,
+      }),
+    ).resolves.toMatchObject({ status: "committed" });
+
+    const persistedPhase = phase();
+    persistedPhase.roadmapEvents.push({
+      type: "implementation-checkpoint",
+      id: "implementation-before-rejection",
+      session,
+      planStepTotal: 3,
+      completedPlanSteps: [1, 2, 3],
+      runOutcome: "succeeded",
+      timestamp: NOW,
+    });
+    tracker = new AppSidecarPhaseImplementationPlanTracker();
+    expect(
+      restorePhaseImplementationPlanEvidence({
+        tracker,
+        phase: persistedPhase,
+        expectedSession: session,
+      }),
+    ).toBe(true);
+
+    await expect(
+      checkpointSettledPhaseImplementation({
+        coordinator,
+        tracker,
+        checkpointId: "implementation-after-rejection",
+        phaseId: "phase-24",
+        expectedSession: session,
+        currentPlanProgress: { total: 0, completed: [] },
+        runOutcome: "succeeded",
+        timestamp: LATER,
+      }),
+    ).resolves.toMatchObject({ status: "committed" });
+
+    expect(checkpoints).toEqual([
+      expect.objectContaining({
+        checkpointId: "implementation-before-rejection",
+        planStepTotal: 3,
+        completedPlanSteps: [1, 2, 3],
+      }),
+      expect.objectContaining({
+        checkpointId: "implementation-after-rejection",
+        planStepTotal: 3,
+        completedPlanSteps: [1, 2, 3],
+      }),
+    ]);
+    await expect(
+      checkpointSettledPhaseImplementation({
+        coordinator,
+        tracker,
+        checkpointId: "wrong-session",
+        phaseId: "phase-24",
+        expectedSession: { sessionId: "replacement", sessionPath: null },
+        currentPlanProgress: { total: 0, completed: [] },
+        runOutcome: "succeeded",
+        timestamp: LATER,
+      }),
+    ).resolves.toBeNull();
+    expect(checkpoints).toHaveLength(2);
+  });
+
   it("serializes checkpoint and review writes, broadcasts commits, and recovers after rejection", async () => {
     const order: string[] = [];
     const repository: PhaseCompletionRepository = {

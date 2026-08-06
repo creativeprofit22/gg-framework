@@ -11,6 +11,17 @@ import {
 import { commitPlanApprovalCheckpoint } from "./app-sidecar-phase-checkpoint.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import {
+  AppSidecarPhaseCompletionCoordinator,
+  AppSidecarPhaseImplementationPlanTracker,
+  checkpointSettledPhaseImplementation,
+  restorePhaseImplementationPlanEvidence,
+} from "./app-sidecar-phase-completion.js";
+import {
+  findPendingAutopilotRoadmapAdvancement,
+  resolvePendingAutopilotRoadmapAdvancement,
+  selectNextEligibleRoadmapPhase,
+} from "./app-sidecar-phase-advancement.js";
+import {
   launchBoundPhase,
   type BoundPhaseCandidate,
   type BoundPhaseSession,
@@ -23,6 +34,8 @@ import {
 } from "./app-sidecar-roadmap-tool-host.js";
 import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import { AppSidecarRoadmapDraftDecisionService } from "./app-sidecar-roadmap-draft-route.js";
+import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import {
   AppSidecarPhaseLifecycleCoordinator,
   type BoundPhaseLifecycleContext,
@@ -430,6 +443,8 @@ function roadmapInput(
     phase_id: "phase-21",
     transition: "in-progress",
     progress: `Progress for ${updateId}`,
+    required_external_action:
+      overrides.transition === "blocked" ? "Complete the required external action" : undefined,
     ...overrides,
   });
 }
@@ -917,6 +932,328 @@ describe("production launchBoundPhase orchestration", () => {
     expect(restarted.events).not.toContain("prompt-started");
     await restarted.dispose();
   });
+
+  it.each(["manual", "autopilot"] as const)(
+    "completes a two-phase Roadmap end to end with %s advancement and rejection restart recovery",
+    async (advancementMode) => {
+      const { repository, cwd, root } = await setup();
+      await updatePhase(repository, cwd, (notes) => {
+        notes.phases = [];
+        notes.references = [];
+      });
+      const baseline = await repository.load(cwd);
+      if (baseline.status !== "ok") throw new Error("Expected Roadmap baseline");
+
+      const ids = ["draft-two-phase", "phase-alpha", "phase-beta"];
+      const drafts = new AppSidecarRoadmapDraftCoordinator({ createId: () => ids.shift()! });
+      const drafted = drafts.create({
+        cwd,
+        sessionId: "roadmap-author",
+        request: {
+          expectedRevision: baseline.snapshot.revision,
+          summary: "Two-phase final integration Roadmap",
+          phases: [
+            {
+              title: "Alpha",
+              goal: "Complete the first integration phase",
+              doneWhen: ["Alpha verification passes"],
+              sourcePrompt: "Plan and implement Alpha",
+            },
+            {
+              title: "Beta",
+              goal: "Complete the second integration phase",
+              doneWhen: ["Beta verification passes"],
+              sourcePrompt: "Plan and implement Beta",
+            },
+          ],
+        },
+      });
+      expect(drafted).toMatchObject({ status: "drafted" });
+      if (drafted.status !== "drafted") throw new Error("Expected pending Roadmap draft");
+
+      const draftDecision = new AppSidecarRoadmapDraftDecisionService({
+        drafts,
+        repository,
+        reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+        onCommittedSnapshot: () => undefined,
+      });
+      await expect(draftDecision.approve(cwd, drafted.draft.id)).resolves.toMatchObject({
+        status: "created",
+        phaseIds: ["phase-alpha", "phase-beta"],
+      });
+
+      const fixture = new ProductionPhaseFixture(repository, cwd, {
+        autopilotEnabled: advancementMode === "autopilot",
+      });
+      let liveRepository = repository;
+      let now = NOW;
+      const createRoadmapHost = (hostRepository: ProjectNotesRepository) => {
+        const autopilot = new AppSidecarProjectAutopilotState();
+        autopilot.set(cwd, advancementMode === "autopilot");
+        return new AppSidecarRoadmapToolHost({
+          cwd,
+          repository: hostRepository,
+          reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+          projectAutopilot: autopilot,
+          broadcastNotesSnapshot: () => undefined,
+          now: () => now,
+        });
+      };
+      let host = createRoadmapHost(liveRepository);
+      const reviewer = advancementMode === "autopilot" ? "ken-autopilot" : "ken";
+
+      const completePhase = async (
+        phaseId: string,
+        options: { blockerAndRejection: boolean },
+      ): Promise<{ reviewId: string; snapshot: ProjectNotesSnapshot }> => {
+        const launched = await fixture.start(phaseId);
+        await fixture.promptSettled;
+        expect(launched).toMatchObject({ status: 202, body: { status: "accepted" } });
+        expect(fixture.currentSession.planMode).toBe(true);
+        expect(fixture.currentSession.lastPrompt).toContain(
+          phaseId === "phase-alpha" ? "Plan and implement Alpha" : "Plan and implement Beta",
+        );
+
+        const session = fixture.currentSession;
+        const approval = createApprovalLifecycle(liveRepository, cwd, session);
+        await expect(
+          commitPlanApprovalCheckpoint({
+            session,
+            repository: liveRepository,
+            cwd,
+            planPath: `/plans/${phaseId}.md`,
+            approvalSource: "user",
+            reconcileLifecycle: (signal) => approval.enqueue(signal),
+            prepareFreshSession: async () => {
+              await session.newSession(true);
+              return 3;
+            },
+          }),
+        ).resolves.toMatchObject({ planTotal: 3, phaseLink: { status: "synchronized" } });
+
+        const approved = await liveRepository.load(cwd);
+        if (approved.status !== "ok") throw new Error("Expected approved phase");
+        const phase = approved.snapshot.document.phases.find(
+          (candidate) => candidate.id === phaseId,
+        )!;
+        const baseTime = Date.parse(phase.lifecycleEvents.at(-1)!.timestamp);
+        let tick = baseTime;
+        const advanceTime = () => {
+          now = new Date((tick += 1_000)).toISOString();
+          return now;
+        };
+
+        if (options.blockerAndRejection) {
+          advanceTime();
+          await expect(
+            executeRoadmap(
+              host.createSessionTools("coding", () => fixture.currentSession)[0]!,
+              roadmapInput(`${phaseId}-blocked`, {
+                phase_id: phaseId,
+                transition: "blocked",
+                progress: `${phaseId} hit a recoverable blocker`,
+                blocker: "Release gate dependency unavailable",
+              }),
+            ),
+          ).resolves.toMatchObject({ result: "committed" });
+          advanceTime();
+          await expect(
+            executeRoadmap(
+              host.createSessionTools("coding", () => fixture.currentSession)[0]!,
+              roadmapInput(`${phaseId}-recovered`, {
+                phase_id: phaseId,
+                transition: "in-progress",
+                progress: `${phaseId} blocker recovered`,
+              }),
+            ),
+          ).resolves.toMatchObject({ result: "committed" });
+        }
+
+        let completion = new AppSidecarPhaseCompletionCoordinator({
+          cwd,
+          repository: liveRepository,
+          broadcastSnapshot: () => undefined,
+        });
+        let implementationPlans = new AppSidecarPhaseImplementationPlanTracker();
+        const checkpoint = `${phaseId}-implementation-1`;
+        await expect(
+          checkpointSettledPhaseImplementation({
+            coordinator: completion,
+            tracker: implementationPlans,
+            checkpointId: checkpoint,
+            phaseId,
+            expectedSession: phase.session!,
+            currentPlanProgress: { total: 3, completed: [1, 2, 3] },
+            runOutcome: "succeeded",
+            timestamp: advanceTime(),
+          }),
+        ).resolves.toMatchObject({ status: "committed" });
+        await expect(
+          executeRoadmap(
+            host.createSessionTools("coding", () => fixture.currentSession)[0]!,
+            roadmapInput(`${phaseId}-verification-1`, {
+              phase_id: phaseId,
+              transition: "review",
+              progress: `${phaseId} verification passed`,
+              evidence: [`${phaseId} focused suite passed`],
+              verification: { result: "passed" },
+            }),
+          ),
+        ).resolves.toMatchObject({ result: "committed" });
+
+        if (options.blockerAndRejection) {
+          advanceTime();
+          await expect(
+            executeRoadmap(
+              host.createSessionTools(reviewer)[0]!,
+              roadmapInput(`${phaseId}-rejected-status`, {
+                phase_id: phaseId,
+                transition: "review",
+                progress: `${phaseId} needs one correction`,
+                evidence: [`${phaseId} reviewer found a release blocker`],
+                final_review: {
+                  review_id: `${phaseId}-rejected-review`,
+                  decision: "rejected",
+                  reason: "Correct the release blocker",
+                },
+              }),
+            ),
+          ).resolves.toMatchObject({
+            result: "completion-review-committed",
+            gateOutcome: "needs-attention",
+          });
+          liveRepository = new ProjectNotesRepository(path.join(root, ".gg"));
+          host = createRoadmapHost(liveRepository);
+          completion = new AppSidecarPhaseCompletionCoordinator({
+            cwd,
+            repository: liveRepository,
+            broadcastSnapshot: () => undefined,
+          });
+          implementationPlans = new AppSidecarPhaseImplementationPlanTracker();
+          const restarted = await liveRepository.load(cwd);
+          if (restarted.status !== "ok") throw new Error("Expected restarted Roadmap");
+          const restartedPhase = restarted.snapshot.document.phases.find(
+            (candidate) => candidate.id === phaseId,
+          );
+          expect(restartedPhase).toBeDefined();
+          expect(
+            restorePhaseImplementationPlanEvidence({
+              tracker: implementationPlans,
+              phase: restartedPhase!,
+              expectedSession: phase.session!,
+            }),
+          ).toBe(true);
+          const restartedLifecycle = new AppSidecarPhaseLifecycleCoordinator({
+            cwd,
+            repository: liveRepository,
+            getActivePhase: () => ({
+              phaseId,
+              session: phase.session!,
+              executionStage: "reviewing",
+            }),
+            broadcastSnapshot: () => undefined,
+          });
+          await expect(
+            restartedLifecycle.enqueue({ type: "implementation-run-started" }),
+          ).resolves.toMatchObject({ status: "committed" });
+          await expect(
+            checkpointSettledPhaseImplementation({
+              coordinator: completion,
+              tracker: implementationPlans,
+              checkpointId: `${phaseId}-implementation-2`,
+              phaseId,
+              expectedSession: phase.session!,
+              currentPlanProgress: { total: 0, completed: [] },
+              runOutcome: "succeeded",
+              timestamp: advanceTime(),
+            }),
+          ).resolves.toMatchObject({ status: "committed" });
+          await expect(
+            executeRoadmap(
+              host.createSessionTools("coding", () => fixture.currentSession)[0]!,
+              roadmapInput(`${phaseId}-verification-2`, {
+                phase_id: phaseId,
+                transition: "review",
+                progress: `${phaseId} correction verified`,
+                evidence: [`${phaseId} correction suite passed`],
+                verification: { result: "passed" },
+              }),
+            ),
+          ).resolves.toMatchObject({ result: "committed" });
+        }
+
+        const reviewId = `${phaseId}-accepted-review`;
+        advanceTime();
+        await expect(
+          executeRoadmap(
+            host.createSessionTools(reviewer)[0]!,
+            roadmapInput(`${phaseId}-accepted-status`, {
+              phase_id: phaseId,
+              transition: "review",
+              progress: `${phaseId} completion accepted`,
+              evidence: [`${phaseId} completion gates passed`],
+              final_review: {
+                review_id: reviewId,
+                decision: "accepted",
+                evidence: [`${reviewer} accepted ${phaseId}`],
+              },
+            }),
+          ),
+        ).resolves.toMatchObject({
+          result: "completion-review-committed",
+          gateOutcome: "done",
+          unmetGateCodes: [],
+        });
+        const completed = await liveRepository.load(cwd);
+        if (completed.status !== "ok") throw new Error("Expected completed phase");
+        expect(
+          completed.snapshot.document.phases.find((candidate) => candidate.id === phaseId),
+        ).toMatchObject({ status: "done" });
+        return { reviewId, snapshot: completed.snapshot };
+      };
+
+      const alpha = await completePhase("phase-alpha", { blockerAndRejection: true });
+      let nextPhase;
+      if (advancementMode === "manual") {
+        nextPhase = selectNextEligibleRoadmapPhase(
+          alpha.snapshot,
+          "phase-alpha",
+          alpha.reviewId,
+          "manual",
+        );
+      } else {
+        const restartedRepository = new ProjectNotesRepository(path.join(root, ".gg"));
+        const restarted = await restartedRepository.load(cwd);
+        if (restarted.status !== "ok") throw new Error("Expected restart recovery snapshot");
+        const pending = findPendingAutopilotRoadmapAdvancement(restarted.snapshot);
+        expect(pending).toMatchObject({
+          completedPhaseId: "phase-alpha",
+          reviewId: alpha.reviewId,
+          nextPhase: { id: "phase-beta" },
+        });
+        nextPhase = resolvePendingAutopilotRoadmapAdvancement(
+          restarted.snapshot,
+          {
+            completedPhaseId: pending!.completedPhaseId,
+            reviewId: pending!.reviewId,
+            revision: restarted.snapshot.revision,
+          },
+          { enabled: true, cancelled: false },
+        );
+      }
+      expect(nextPhase?.id).toBe("phase-beta");
+
+      const beta = await completePhase("phase-beta", { blockerAndRejection: false });
+      expect(
+        selectNextEligibleRoadmapPhase(beta.snapshot, "phase-beta", beta.reviewId, advancementMode),
+      ).toBeNull();
+      expect(findPendingAutopilotRoadmapAdvancement(beta.snapshot)).toBeNull();
+      expect(beta.snapshot.document.phases.map((phase) => phase.status)).toEqual(["done", "done"]);
+      expect(fixture.createCalls).toBe(2);
+      await fixture.dispose();
+    },
+    20_000,
+  );
 
   it.each([
     ["chat mode", { mode: "chat" as const }, "coding-mode-required"],
@@ -1795,6 +2132,7 @@ describe("production launchBoundPhase orchestration", () => {
       transition: "review",
       progress: "Focused checks passed",
       blocker: null,
+      requiredExternalAction: null,
       evidence: ["pnpm test passed"],
       verification: "passed",
       verificationReason: null,
@@ -2064,6 +2402,106 @@ describe("production launchBoundPhase orchestration", () => {
       phaseId: "phase-21",
     });
     expect(snapshots).toEqual([]);
+  });
+
+  it("persists a bound semantic blocker and preserves session guards across host restart", async () => {
+    const { repository, cwd, root } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const blockedInput = roadmapInput("semantic-blocker", {
+      transition: "blocked",
+      blocker: "The deployment account is unavailable.",
+      required_external_action: "Provide a valid deployment account.",
+    });
+    const originalHost = roadmapHost(
+      repository,
+      cwd,
+      fixture.reconciliations,
+      new AppSidecarProjectAutopilotState(),
+      [],
+    );
+    const originalTool = originalHost.createSessionTools(
+      "coding",
+      () => fixture.currentSession,
+    )[0]!;
+
+    await expect(executeRoadmap(originalTool, blockedInput)).resolves.toMatchObject({
+      result: "committed",
+      phaseId: "phase-21",
+      revision: 3,
+      statusOutcome: "applied",
+    });
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 3,
+        document: {
+          phases: [
+            expect.objectContaining({
+              status: "needs-attention",
+              attentionReason: blockedInput.blocker,
+              roadmapEvents: [
+                expect.objectContaining({
+                  id: "semantic-blocker",
+                  transition: "blocked",
+                  blocker: blockedInput.blocker,
+                  requiredExternalAction: blockedInput.required_external_action,
+                }),
+              ],
+            }),
+          ],
+        },
+      },
+    });
+
+    const restartedRepository = new ProjectNotesRepository(path.join(root, ".gg"));
+    const restartedSession = new FakePhaseSession(200, []);
+    restartedSession.state.sessionId = fixture.currentSession.state.sessionId;
+    restartedSession.state.sessionPath = fixture.currentSession.state.sessionPath;
+    restartedSession.activeContext = fixture.currentSession.getActivePhaseContext();
+    const restartedHost = roadmapHost(
+      restartedRepository,
+      cwd,
+      new AppSidecarRoadmapReconciliationCoordinator(),
+      new AppSidecarProjectAutopilotState(),
+      [],
+    );
+    const restartedTool = restartedHost.createSessionTools("coding", () => restartedSession)[0]!;
+    await expect(executeRoadmap(restartedTool, blockedInput)).resolves.toMatchObject({
+      result: "duplicate",
+      revision: 3,
+    });
+
+    const wrongSession = new FakePhaseSession(201, []);
+    wrongSession.activeContext = fixture.currentSession.getActivePhaseContext();
+    const wrongSessionTool = restartedHost.createSessionTools("coding", () => wrongSession)[0]!;
+    await expect(
+      executeRoadmap(wrongSessionTool, roadmapInput("wrong-restarted-session")),
+    ).resolves.toEqual({ result: "stale-session", phaseId: "phase-21" });
+
+    await expect(
+      executeRoadmap(
+        restartedTool,
+        roadmapInput("semantic-blocker-resumed", {
+          transition: "in-progress",
+          progress: "The release owner supplied an account and deployment resumed",
+        }),
+      ),
+    ).resolves.toMatchObject({
+      result: "committed",
+      revision: 4,
+      statusOutcome: "applied",
+    });
+    await expect(restartedRepository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 4,
+        document: {
+          phases: [expect.objectContaining({ status: "in-progress", attentionReason: null })],
+        },
+      },
+    });
   });
 
   it("fans out exactly once for a commit and never for duplicate or conflicting calls", async () => {

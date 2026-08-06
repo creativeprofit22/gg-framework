@@ -128,6 +128,16 @@ describe("active phase context", () => {
       </active-phase-untrusted-data>"
     `);
     expect(rendered.initialPrompt).toContain("Enter Plan Mode for this bound Roadmap phase.");
+    expect(rendered.initialPrompt).toContain(
+      'report transition: "blocked" only when work cannot continue until a person or external actor',
+    );
+    expect(rendered.initialPrompt).toContain(
+      "blocker must state why work cannot continue and required_external_action must state the exact decision or action needed",
+    );
+    expect(rendered.initialPrompt).toContain(
+      "recoverable or transient tool failures are not blockers",
+    );
+    expect(rendered.initialPrompt).toContain('send a fresh transition: "in-progress" report');
     expect(rendered.initialPrompt).not.toContain("other phase");
     expect(rendered.initialPrompt).not.toContain("historical MCP");
   });

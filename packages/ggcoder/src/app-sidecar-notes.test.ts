@@ -359,6 +359,82 @@ describe("app sidecar Notes routes", () => {
     expect([...sessions.values()].flatMap((session) => session.events)).toEqual([]);
   });
 
+  it("persists a guarded Roadmap blocker resolution and broadcasts the committed snapshot", async () => {
+    const document = notes("blocker route");
+    const phase = document.phases[0]!;
+    phase.status = "needs-attention";
+    phase.attentionReason = "Waiting for access";
+    phase.lifecycleEvents.push({
+      id: "lifecycle-blocked-route",
+      fromStatus: "not-started",
+      toStatus: "needs-attention",
+      source: "agent",
+      timestamp: NOW,
+      reason: phase.attentionReason,
+      kind: "other",
+    });
+    phase.roadmapEvents.push({
+      type: "status-update",
+      id: "blocked-route-update",
+      actor: "gg-coder",
+      transition: "blocked",
+      progress: "The release is paused",
+      blocker: phase.attentionReason,
+      requiredExternalAction: "Grant release access",
+      evidence: [],
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
+      statusOutcome: "applied",
+      proposedReferences: [],
+      timestamp: NOW,
+    });
+    await request("a", "/notes/migrate", { method: "POST", body: JSON.stringify({ document }) });
+
+    const result = await request("a", "/notes/roadmap/blocker-resolution", {
+      method: "POST",
+      body: JSON.stringify({
+        resolutionId: "resolution-route-1",
+        phaseId: phase.id,
+        blockerUpdateId: "blocked-route-update",
+        expectedRevision: 1,
+        expectedSession: phase.session,
+        resolver: "user",
+        timestamp: "2026-07-25T12:30:00.000Z",
+      }),
+    });
+
+    expect(result.response.status).toBe(200);
+    expect(result.body).toMatchObject({
+      status: "committed",
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [
+            {
+              status: "needs-attention",
+              roadmapEvents: [
+                expect.objectContaining({ id: "blocked-route-update" }),
+                expect.objectContaining({
+                  type: "blocker-resolution",
+                  blockerUpdateId: "blocked-route-update",
+                  resolver: "user",
+                }),
+              ],
+            },
+          ],
+        },
+      },
+    });
+    expect(committedSnapshots.at(-1)).toEqual({
+      projectKey: canonicalProjectKey("C:\\Work\\Project"),
+      revision: 2,
+    });
+    expect(sessions.get("a")!.events).toHaveLength(2);
+    expect(sessions.get("alias")!.events).toHaveLength(2);
+    expect(sessions.get("other")!.events).toHaveLength(0);
+  });
+
   it("rejects duplicate occurrence keys at the migration route without persisting or broadcasting", async () => {
     const document = notes("duplicate occurrence route");
     document.phases[0]!.reminder = {
@@ -600,6 +676,7 @@ describe("app sidecar Notes routes", () => {
         transition: "review",
         progress: "Claimed verification passed",
         blocker: null,
+        requiredExternalAction: null,
         evidence: ["forged test output"],
         verification: "passed",
         verificationReason: null,

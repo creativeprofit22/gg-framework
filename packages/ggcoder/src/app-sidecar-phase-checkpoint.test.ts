@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   PhaseCheckpointError,
+  commitImplementationRunStart,
   commitPlanApprovalCheckpoint,
   completeCompactionCheckpoint,
   syncActivePhaseSessionLink,
@@ -145,6 +146,7 @@ const rejectedOutcomes: Array<{
   outcome: Exclude<ProjectNotesPhaseLinkOutcome, { status: "ok" }>;
   code: PhaseCheckpointErrorCode;
 }> = [
+  { outcome: { status: "stale-session" }, code: "stale-phase-session" },
   { outcome: { status: "missing" }, code: "notes-missing" },
   {
     outcome: { status: "corrupt", primary: "malformed-json", backup: "invalid-envelope" },
@@ -155,6 +157,68 @@ const rejectedOutcomes: Array<{
 ];
 
 describe("plan approval checkpoint", () => {
+  it("binds the fresh implementation session without transitioning lifecycle on approval", async () => {
+    const events: string[] = [];
+    const session = createSession(events);
+    const repository = createRepository(events);
+
+    const result = await commitPlanApprovalCheckpoint({
+      session,
+      repository,
+      cwd: "/project",
+      planPath: "/plans/phase-21.md",
+      prepareFreshSession: async () => {
+        events.push("fresh-session-prepared");
+        return 3;
+      },
+      onSnapshot: () => events.push("notes-snapshot-broadcast"),
+    });
+
+    expect(result.planTotal).toBe(3);
+    expect(result.phaseLink.status).toBe("synchronized");
+    expect(repository.updatePhaseSessionLink).toHaveBeenCalledWith(
+      "/project",
+      "phase-21",
+      { sessionId: "session-new", sessionPath: "/sessions/new.jsonl" },
+      context.session,
+    );
+    expect(events).toEqual([
+      "fresh-session-prepared",
+      "stage-persisted",
+      "notes-link-persisted",
+      "notes-snapshot-broadcast",
+    ]);
+  });
+
+  it("restores the owning coding session when guarded rebinding fails", async () => {
+    const events: string[] = [];
+    const session = createSession(events);
+    const repository = createRepository(events, { status: "stale-session" });
+
+    await expect(
+      commitPlanApprovalCheckpoint({
+        session,
+        repository,
+        cwd: "/project",
+        planPath: "/plans/phase-21.md",
+        prepareFreshSession: async () => {
+          events.push("fresh-session-prepared");
+          return 3;
+        },
+        restorePreviousSession: async () => {
+          events.push("owning-session-restored");
+        },
+      }),
+    ).rejects.toMatchObject({ code: "stale-phase-session" });
+
+    expect(events).toEqual([
+      "fresh-session-prepared",
+      "stage-persisted",
+      "notes-link-persisted",
+      "owning-session-restored",
+    ]);
+  });
+
   it.each(rejectedOutcomes)(
     "keeps the review recoverable and blocks reset/implementation for $code",
     async ({ outcome, code }) => {
@@ -163,13 +227,17 @@ describe("plan approval checkpoint", () => {
       expect(result.error).toBeInstanceOf(PhaseCheckpointError);
       expect(result.error).toMatchObject({ code, phaseId: "phase-21", retryable: true });
       expect(result.pendingReview).toBe(true);
-      expect(result.events).toEqual(["fresh-session-prepared", "notes-link-persisted"]);
+      expect(result.events).toEqual([
+        "fresh-session-prepared",
+        "stage-persisted",
+        "notes-link-persisted",
+      ]);
       expect(result.events).not.toContain("approval-reset");
       expect(result.events).not.toContain("implementation-prompt");
     },
   );
 
-  it("keeps the review recoverable on the freshly linked session when stage persistence fails", async () => {
+  it("keeps the review recoverable without rebinding when stage persistence fails", async () => {
     const result = await attemptApproval({ stageFailure: new Error("disk full") });
 
     expect(result.error).toMatchObject({
@@ -178,12 +246,8 @@ describe("plan approval checkpoint", () => {
       retryable: true,
     });
     expect(result.pendingReview).toBe(true);
-    expect(result.events).toEqual([
-      "fresh-session-prepared",
-      "notes-link-persisted",
-      "stage-persisted",
-    ]);
-    expect(result.repository.updatePhaseSessionLink).toHaveBeenCalledOnce();
+    expect(result.events).toEqual(["fresh-session-prepared", "stage-persisted"]);
+    expect(result.repository.updatePhaseSessionLink).not.toHaveBeenCalled();
     expect(result.events).not.toContain("approval-reset");
     expect(result.events).not.toContain("implementation-prompt");
   });
@@ -195,8 +259,8 @@ describe("plan approval checkpoint", () => {
     expect(result.pendingReview).toBe(false);
     expect(result.events).toEqual([
       "fresh-session-prepared",
-      "notes-link-persisted",
       "stage-persisted",
+      "notes-link-persisted",
       "notes-lifecycle-persisted",
       "notes-snapshot-broadcast",
       "approval-reset",
@@ -233,8 +297,8 @@ describe("plan approval checkpoint", () => {
       expect(signal).toEqual({ type: "plan-approved", approvalSource });
       expect(events).toEqual([
         "fresh-session-prepared",
-        "notes-link-persisted",
         "stage-persisted",
+        "notes-link-persisted",
         "notes-lifecycle-persisted",
         "notes-snapshot-broadcast",
         "approval-reset",
@@ -272,8 +336,8 @@ describe("plan approval checkpoint", () => {
       expect(onSnapshot).toHaveBeenCalledWith(snapshot);
       expect(events).toEqual([
         "fresh-session-prepared",
-        "notes-link-persisted",
         "stage-persisted",
+        "notes-link-persisted",
         `notes-lifecycle-${status}`,
         "notes-snapshot-broadcast",
       ]);
@@ -307,8 +371,8 @@ describe("plan approval checkpoint", () => {
     expect(onSnapshot).not.toHaveBeenCalled();
     expect(events).toEqual([
       "fresh-session-prepared",
-      "notes-link-persisted",
       "stage-persisted",
+      "notes-link-persisted",
       "notes-lifecycle-manual-override",
       "notes-snapshot-broadcast",
     ]);
@@ -345,8 +409,8 @@ describe("plan approval checkpoint", () => {
       expect(vi.mocked(session.updateActivePhaseStage)).toHaveBeenCalledTimes(2);
       expect(events).toEqual([
         "fresh-session-prepared",
-        "notes-link-persisted",
         "stage-persisted",
+        "notes-link-persisted",
         `notes-lifecycle-${status}`,
         "stage-persisted",
       ]);
@@ -393,8 +457,8 @@ describe("plan approval checkpoint", () => {
     );
     expect(events).toEqual([
       "fresh-session-prepared",
-      "notes-link-persisted",
       "stage-persisted",
+      "notes-link-persisted",
       "notes-lifecycle-failed",
       "stage-persisted",
     ]);
@@ -412,6 +476,62 @@ describe("plan approval checkpoint", () => {
     ]);
     expect(result.session.updateActivePhaseStage).not.toHaveBeenCalled();
     expect(result.repository.updatePhaseSessionLink).not.toHaveBeenCalled();
+  });
+});
+
+describe("implementation run checkpoint", () => {
+  function sessionAtStage(stage: ActivePhaseContextV1["executionStage"]): PhaseCheckpointSession {
+    return {
+      ...createSession([]),
+      getActivePhaseContext: () => ({ ...structuredClone(context), executionStage: stage }),
+    };
+  }
+
+  it("transitions an approved phase only when its implementation run starts", async () => {
+    const reconcileLifecycle = vi.fn(async () => ({ status: "committed", snapshot }) as const);
+
+    const result = await commitImplementationRunStart({
+      session: sessionAtStage("implementing"),
+      reconcileLifecycle,
+    });
+
+    expect(result.status).toBe("committed");
+    expect(reconcileLifecycle).toHaveBeenCalledExactlyOnceWith(
+      { type: "implementation-run-started" },
+      expect.objectContaining({
+        executionStage: "implementing",
+        session: context.session,
+      }),
+    );
+  });
+
+  it("preserves the owning-session guard", async () => {
+    await expect(
+      commitImplementationRunStart({
+        session: sessionAtStage("implementing"),
+        reconcileLifecycle: async () => ({ status: "stale-session" }),
+      }),
+    ).rejects.toMatchObject({ code: "stale-phase-session", phaseId: "phase-21" });
+  });
+
+  it("preserves a user status override while allowing implementation", async () => {
+    await expect(
+      commitImplementationRunStart({
+        session: sessionAtStage("implementing"),
+        reconcileLifecycle: async () => ({ status: "manual-override", snapshot }),
+      }),
+    ).resolves.toMatchObject({ status: "manual-override" });
+  });
+
+  it("does not transition when a planning phase is merely restored or viewed", async () => {
+    const reconcileLifecycle = vi.fn();
+    const restoredSession = sessionAtStage("planning");
+
+    expect(restoredSession.getActivePhaseContext()).toMatchObject({ executionStage: "planning" });
+    await expect(
+      commitImplementationRunStart({ session: restoredSession, reconcileLifecycle }),
+    ).resolves.toEqual({ status: "ignored" });
+    expect(reconcileLifecycle).not.toHaveBeenCalled();
   });
 });
 

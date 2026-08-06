@@ -178,16 +178,8 @@ export function mapPhaseLifecycleSignal(
         reason: boundedReason(signal.reason, "Autopilot needs a user decision"),
         kind: "attention-question-opened",
       };
-    case "tool-failed": {
-      const toolName = boundedReason(signal.toolName, "Unknown tool", 80);
-      const detail = signal.reason ? `: ${signal.reason}` : "";
-      return {
-        status: "needs-attention",
-        source: "agent",
-        reason: boundedReason(`${toolName} failed${detail}`, `${toolName} failed`),
-        kind: "attention-tool-opened",
-      };
-    }
+    case "tool-failed":
+      return null;
     case "runtime-error":
       return {
         status: "needs-attention",

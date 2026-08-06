@@ -131,6 +131,7 @@ import { findUserSessionPrompt, getUserSessionPrompt } from "./session-preview.j
 import { normalizeMessageImages } from "./message-images.js";
 import {
   ACTIVE_PHASE_CONTEXT_KIND,
+  buildActivePhaseVerificationFollowUp,
   parseActivePhaseContext,
   renderActivePhasePackage,
   type ActivePhaseContextV1,
@@ -405,6 +406,7 @@ export class AgentSession {
   private hookFileEditCounts = new Map<string, number>();
   private hookToolCalls = new Map<string, { name: string; args: Record<string, unknown> }>();
   private idealReviewPhase: "idle" | "reviewing" | "complete" = "idle";
+  private activePhaseVerificationInjected = false;
   /** Runtime-only suppression while Ken owns verification in autopilot mode. */
   private idealReviewSuppressed = false;
   private readonly reviewCoverage: ReviewCoverageTracker;
@@ -1102,6 +1104,11 @@ export class AgentSession {
     return (await this.resolveSlashInput(content))?.kind === "template";
   }
 
+  /** True when this input will enter the provider-backed agent loop. */
+  async willStartAgentRun(content: string): Promise<boolean> {
+    return (await this.resolveSlashInput(content))?.kind !== "command";
+  }
+
   /**
    * Process user input. Handles slash commands or runs agent loop.
    */
@@ -1529,7 +1536,28 @@ export class AgentSession {
       return processFollowUp;
     }
 
-    if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return null;
+    const phaseVerificationFollowUp = (): Message[] | null => {
+      const context = this.activePhaseContext;
+      if (
+        !context ||
+        context.executionStage !== "implementing" ||
+        this.activePhaseVerificationInjected
+      ) {
+        return null;
+      }
+      this.activePhaseVerificationInjected = true;
+      return [
+        {
+          role: "user",
+          provenance: { source: "runtime", kind: "review_follow_up", visibility: "hidden" },
+          content: buildActivePhaseVerificationFollowUp(context),
+        },
+      ];
+    };
+    if (this.activePhaseContext?.executionStage === "reviewing") return null;
+    if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) {
+      return phaseVerificationFollowUp();
+    }
 
     if (this.idealReviewPhase === "reviewing") {
       const coverage = this.reviewCoverage.evidence();
@@ -1557,16 +1585,16 @@ export class AgentSession {
         return [buildReviewCoverageEscalationMessage(coverage.missing)];
       }
       this.idealReviewPhase = "complete";
-      return null;
+      return phaseVerificationFollowUp();
     }
-    if (this.idealReviewPhase === "complete") return null;
-    if (!this.settingsManager.get("idealReviewEnabled")) return null;
+    if (this.idealReviewPhase === "complete") return phaseVerificationFollowUp();
+    if (!this.settingsManager.get("idealReviewEnabled")) return phaseVerificationFollowUp();
 
     const decision = evaluateIdealReview(this.hookStats);
     // Test drift fires the review even on a small change the score would skip:
     // a green-but-stale test is exactly what the volume gate sleeps through.
     const driftedFiles = detectTestDrift(this.hookFileEditCounts.keys(), this.cwd).slice(0, 5);
-    if (!decision.shouldReview && driftedFiles.length === 0) return null;
+    if (!decision.shouldReview && driftedFiles.length === 0) return phaseVerificationFollowUp();
 
     this.reviewCoverage.start(this.hookFileEditCounts.keys());
     this.idealReviewPhase = "reviewing";
@@ -2415,6 +2443,13 @@ export class AgentSession {
     this.eventBus.emit("session_start", { sessionId: this.sessionId });
   }
 
+  /** Restore one physical checkpoint without resolving to its conversation tip. */
+  async loadSessionCheckpoint(sessionPath: string): Promise<void> {
+    await this.loadExistingSession(sessionPath, false);
+    if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
+    this.eventBus.emit("session_start", { sessionId: this.sessionId });
+  }
+
   /**
    * Create a branch at a specific point in the conversation.
    * Rewinds the message history to the given entry and sets the leaf
@@ -2493,6 +2528,7 @@ export class AgentSession {
     this.idealReviewSuppressed = suppressed;
     if (suppressed) {
       this.idealReviewPhase = "idle";
+      this.activePhaseVerificationInjected = false;
       this.reviewCoverage.reset();
     }
   }
@@ -3206,12 +3242,13 @@ export class AgentSession {
     this.lastPersistedIndex = this.messages.length;
   }
 
-  private async loadExistingSession(sessionPath: string): Promise<void> {
+  private async loadExistingSession(sessionPath: string, resolveCanonical = true): Promise<void> {
     // A stale physical checkpoint is only an address, not the conversation tip.
     // Resolve every resume—not just over-threshold/deferred compaction resumes—
     // before reading history so the next prompt cannot continue an old branch.
-    const canonicalPath =
-      (await this.sessionManager.resolveCanonicalSession(sessionPath, this.cwd)) ?? sessionPath;
+    const canonicalPath = resolveCanonical
+      ? ((await this.sessionManager.resolveCanonicalSession(sessionPath, this.cwd)) ?? sessionPath)
+      : sessionPath;
     const expectedProjectKey = canonicalProjectKey(this.cwd);
     const loaded = await this.sessionManager.load(canonicalPath, {
       projectKey: expectedProjectKey,

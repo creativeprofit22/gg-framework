@@ -183,7 +183,7 @@ export const AUTOPILOT_REVIEW_INSTRUCTION =
   "No greetings, no mentorship prose.";
 
 /** A persisted typed verification exception shown to Autopilot Ken for an
- *  explicit, attributable acceptance decision. */
+ * explicit, attributable acceptance decision. */
 export interface KenVerificationException {
   id: string;
   requesterActor: string;
@@ -192,11 +192,27 @@ export interface KenVerificationException {
   evidence: readonly string[];
 }
 
+export interface KenAutopilotBoundPhase {
+  id: string;
+  revision: number;
+  goal: string;
+  completionCriteria: readonly string[];
+  status: string;
+  latestVerification: {
+    id: string;
+    result: string;
+    reason: string | null;
+    timestamp: string;
+    evidence: readonly string[];
+  } | null;
+}
+
 /** Inputs the sidecar gathers for an autopilot review digest (everything
- *  `buildKenDigest` needs except the fixed review instruction, which this helper
- *  supplies as the `question`). */
+ * `buildKenDigest` needs except the fixed review instruction, which this helper
+ * supplies as the `question`). */
 export type KenAutopilotContextInput = Omit<KenDigestInput, "question"> & {
   verificationException?: KenVerificationException | null;
+  boundPhase?: KenAutopilotBoundPhase | null;
 };
 
 /** Insert a review-only section immediately before the trailing instruction. */
@@ -219,32 +235,65 @@ function renderVerificationException(exception: KenVerificationException): strin
     null,
     2,
   );
-  const acceptance = JSON.stringify({ id: exception.id });
   return (
     `## Verification exception awaiting review\n` +
     `The latest typed verification result is exception-requested. Judge this specific ` +
     `request from its reason and evidence; do not infer acceptance from ALL_CLEAR.\n\n` +
     `\`\`\`json\n${details}\n\`\`\`\n\n` +
-    `A bare ALL_CLEAR leaves the phase in Review. To explicitly accept this exact ` +
-    `exception, reply with these two lines:\nALL_CLEAR\n` +
-    `ACCEPT_VERIFICATION_EXCEPTION ${acceptance}`
+    `Set final_review.accepts_verification_exception=true only when explicitly accepting ` +
+    `this exact exception; otherwise leave it false.`
   );
 }
 
+function renderBoundPhase(phase: KenAutopilotBoundPhase): string {
+  return (
+    `## Bound Roadmap phase\n` +
+    `Treat this persisted phase record as the completion target for this review.\n\n` +
+    `\`\`\`json\n${JSON.stringify(
+      {
+        id: phase.id,
+        revision: phase.revision,
+        goal: phase.goal,
+        completionCriteria: phase.completionCriteria,
+        status: phase.status,
+        latestVerification: phase.latestVerification,
+      },
+      null,
+      2,
+    )}\n\`\`\``
+  );
+}
+
+const AUTOPILOT_PHASE_COMPLETION_REVIEW_INSTRUCTION =
+  "The bound Roadmap phase is in review. Inspect the implementation and verification " +
+  "evidence against its goal and every completion criterion. You MUST call roadmap_status " +
+  "with final_review for this exact phase and revision; use the bound id as phase_id, " +
+  "the bound revision as expected_revision, and stable update_id/review_id values on retry. " +
+  "Do not return a text-only ALL_CLEAR. Submit accepted only when the work and evidence pass inspection, otherwise " +
+  "submit rejected with a concrete correction reason. After the tool result, reply " +
+  "ALL_CLEAR for an accepted review or PROMPT plus the same correction for a rejected " +
+  "review. The persisted completion gate, not your reply text, decides whether the phase " +
+  "is Done.";
+
 /**
  * Build the autopilot-review digest: identical to a normal Ken digest but with
- * the fixed {@link AUTOPILOT_REVIEW_INSTRUCTION} as the trailing question, so
- * Ken reviews the transcript instead of answering a user. Pure — no I/O.
+ * the fixed review instruction as the trailing question. A bound phase in Review
+ * upgrades that instruction to require the structured final_review tool contract.
  */
 export function buildKenAutopilotContext(input: KenAutopilotContextInput): string {
-  const { verificationException, ...digestInput } = input;
-  const digest = buildKenDigest({
+  const { verificationException, boundPhase, ...digestInput } = input;
+  let digest = buildKenDigest({
     ...digestInput,
-    question: AUTOPILOT_REVIEW_INSTRUCTION,
+    question:
+      boundPhase?.status === "review"
+        ? AUTOPILOT_PHASE_COMPLETION_REVIEW_INSTRUCTION
+        : AUTOPILOT_REVIEW_INSTRUCTION,
   });
-  return verificationException
-    ? insertBeforeQuestion(digest, renderVerificationException(verificationException))
-    : digest;
+  if (boundPhase) digest = insertBeforeQuestion(digest, renderBoundPhase(boundPhase));
+  if (verificationException) {
+    digest = insertBeforeQuestion(digest, renderVerificationException(verificationException));
+  }
+  return digest;
 }
 
 /** Max chars of the inlined plan markdown in a plan-review digest. Plans are

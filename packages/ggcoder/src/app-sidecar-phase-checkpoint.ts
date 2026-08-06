@@ -59,6 +59,7 @@ export interface PhaseCheckpointRepository {
     cwd: string,
     phaseId: string,
     session: { sessionId: string; sessionPath: string | null },
+    expectedPreviousSession?: { sessionId: string; sessionPath: string | null },
   ): Promise<ProjectNotesPhaseLinkOutcome>;
 }
 
@@ -104,6 +105,7 @@ export async function syncActivePhaseSessionLink(input: {
   session: PhaseCheckpointSession;
   repository: PhaseCheckpointRepository;
   cwd: string;
+  expectedPreviousSession?: { sessionId: string; sessionPath: string | null };
   onSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
 }): Promise<ActivePhaseLinkSyncResult> {
   const activePhase = input.session.getActivePhaseContext();
@@ -112,10 +114,15 @@ export async function syncActivePhaseSessionLink(input: {
   let outcome: ProjectNotesPhaseLinkOutcome;
   try {
     const state = input.session.getState();
-    outcome = await input.repository.updatePhaseSessionLink(input.cwd, activePhase.phase.id, {
-      sessionId: state.sessionId,
-      sessionPath: state.sessionPath,
-    });
+    outcome = await input.repository.updatePhaseSessionLink(
+      input.cwd,
+      activePhase.phase.id,
+      {
+        sessionId: state.sessionId,
+        sessionPath: state.sessionPath,
+      },
+      input.expectedPreviousSession,
+    );
   } catch (cause) {
     throw new PhaseCheckpointError(
       "phase-link-persistence-failed",
@@ -136,64 +143,135 @@ export async function commitPlanApprovalCheckpoint(input: {
   repository: PhaseCheckpointRepository;
   cwd: string;
   planPath?: string;
-  approvalSource: "user" | "agent";
-  reconcileLifecycle: (
+  approvalSource?: "user" | "agent";
+  /**
+   * Compatibility hook for older callers that reconcile approval itself.
+   * App-sidecar omits this so the first implementation run owns the
+   * planning → in-progress transition.
+   */
+  reconcileLifecycle?: (
     signal: Extract<PhaseLifecycleSignal, { type: "plan-approved" }>,
   ) => Promise<PhaseLifecycleReconcileOutcome>;
   prepareFreshSession: () => Promise<number>;
+  restorePreviousSession?: () => Promise<void>;
   onSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
 }): Promise<PlanApprovalCheckpointResult> {
+  const previousActivePhase = input.session.getActivePhaseContext();
   const planTotal = await input.prepareFreshSession();
-  const phaseLink = await syncActivePhaseSessionLink({ ...input, onSnapshot: undefined });
-  if (phaseLink.status === "no-active-phase") return { planTotal, phaseLink };
-  const stage = await persistActivePhaseStage({
-    session: input.session,
-    executionStage: "implementing",
-    approvedPlanPath: input.planPath,
-  });
-  if (stage.status === "no-active-phase") {
-    throw new PhaseCheckpointError(
-      "phase-stage-persistence-failed",
-      phaseLink.context.phase.id,
-      "The active phase disappeared before its implementation stage could be saved.",
-      "The plan is still pending. Resume the linked phase, then retry approval.",
-    );
-  }
-
+  let phaseLink: ActivePhaseLinkSyncResult;
   try {
-    let reconciled: PhaseLifecycleReconcileOutcome;
-    try {
-      reconciled = await input.reconcileLifecycle({
-        type: "plan-approved",
-        approvalSource: input.approvalSource,
-      });
-    } catch (cause) {
-      throw phaseLifecyclePersistenceError(phaseLink.context.phase.id, cause);
+    const stage = await persistActivePhaseStage({
+      session: input.session,
+      executionStage: "implementing",
+      approvedPlanPath: input.planPath,
+    });
+    if (stage.status === "no-active-phase") {
+      if (!previousActivePhase) return { planTotal, phaseLink: stage };
+      throw new PhaseCheckpointError(
+        "phase-stage-persistence-failed",
+        previousActivePhase.phase.id,
+        "The active phase disappeared before its implementation stage could be saved.",
+        "The plan is still pending. Resume the linked phase, then retry approval.",
+      );
     }
-    if (reconciled.status === "storage-failure") {
-      throw phaseLifecyclePersistenceError(phaseLink.context.phase.id, reconciled.error);
-    }
-    if (reconciled.status === "same-status" || reconciled.status === "done-terminal") {
-      input.onSnapshot?.(phaseLink.snapshot);
-    } else if (reconciled.status !== "committed" && reconciled.status !== "manual-override") {
-      throw phaseLifecycleReconcileError(phaseLink.context.phase.id, reconciled.status);
-    }
+    phaseLink = await syncActivePhaseSessionLink({
+      ...input,
+      expectedPreviousSession: previousActivePhase?.session,
+      onSnapshot: undefined,
+    });
+    if (phaseLink.status === "no-active-phase") return { planTotal, phaseLink };
   } catch (error) {
-    try {
-      await input.session.updateActivePhaseStage(
-        phaseLink.context.executionStage,
-        phaseLink.context.approvedPlanPath,
-      );
-    } catch (restoreError) {
-      throw new AggregateError(
-        [error, restoreError],
-        "Phase lifecycle persistence failed and the pending approval stage could not be restored",
-        { cause: restoreError },
-      );
+    if (previousActivePhase && input.restorePreviousSession) {
+      try {
+        await input.restorePreviousSession();
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          "Phase approval failed and the owning coding session could not be restored",
+          { cause: restoreError },
+        );
+      }
     }
     throw error;
   }
+
+  if (input.reconcileLifecycle) {
+    try {
+      let reconciled: PhaseLifecycleReconcileOutcome;
+      try {
+        reconciled = await input.reconcileLifecycle({
+          type: "plan-approved",
+          approvalSource: input.approvalSource ?? "user",
+        });
+      } catch (cause) {
+        throw phaseLifecyclePersistenceError(phaseLink.context.phase.id, cause);
+      }
+      if (reconciled.status === "storage-failure") {
+        throw phaseLifecyclePersistenceError(phaseLink.context.phase.id, reconciled.error);
+      }
+      if (reconciled.status === "same-status" || reconciled.status === "done-terminal") {
+        input.onSnapshot?.(phaseLink.snapshot);
+      } else if (reconciled.status !== "committed" && reconciled.status !== "manual-override") {
+        throw phaseLifecycleReconcileError(phaseLink.context.phase.id, reconciled.status);
+      }
+    } catch (error) {
+      try {
+        await input.session.updateActivePhaseStage(
+          previousActivePhase?.executionStage ?? "planning",
+          previousActivePhase?.approvedPlanPath,
+        );
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          "Phase lifecycle persistence failed and the pending approval stage could not be restored",
+          { cause: restoreError },
+        );
+      }
+      throw error;
+    }
+  } else {
+    input.onSnapshot?.(phaseLink.snapshot);
+  }
   return { planTotal, phaseLink };
+}
+
+/**
+ * Commits planning → in-progress at the first provider-backed implementation run.
+ * Loading or viewing a bound phase never calls this checkpoint.
+ */
+export async function commitImplementationRunStart(input: {
+  session: PhaseCheckpointSession;
+  reconcileLifecycle: (
+    signal: Extract<PhaseLifecycleSignal, { type: "implementation-run-started" }>,
+    activePhase: ActivePhaseContextV1,
+  ) => Promise<PhaseLifecycleReconcileOutcome>;
+}): Promise<PhaseLifecycleReconcileOutcome | { status: "ignored" }> {
+  const activePhase = input.session.getActivePhaseContext();
+  if (!activePhase || activePhase.executionStage !== "implementing") {
+    return { status: "ignored" };
+  }
+
+  let reconciled: PhaseLifecycleReconcileOutcome;
+  try {
+    reconciled = await input.reconcileLifecycle(
+      { type: "implementation-run-started" },
+      activePhase,
+    );
+  } catch (cause) {
+    throw phaseLifecyclePersistenceError(activePhase.phase.id, cause);
+  }
+  if (reconciled.status === "storage-failure") {
+    throw phaseLifecyclePersistenceError(activePhase.phase.id, reconciled.error);
+  }
+  if (
+    reconciled.status !== "committed" &&
+    reconciled.status !== "same-status" &&
+    reconciled.status !== "manual-override" &&
+    reconciled.status !== "done-terminal"
+  ) {
+    throw phaseLifecycleReconcileError(activePhase.phase.id, reconciled.status);
+  }
+  return reconciled;
 }
 
 export async function completeCompactionCheckpoint(input: {
@@ -281,6 +359,13 @@ function phaseLinkOutcomeError(
   outcome: Exclude<ProjectNotesPhaseLinkOutcome, { status: "ok" }>,
 ): PhaseCheckpointError {
   switch (outcome.status) {
+    case "stale-session":
+      return new PhaseCheckpointError(
+        "stale-phase-session",
+        phaseId,
+        "The phase was rebound to a different coding session before approval completed.",
+        "Resume the latest linked phase session, then retry approval.",
+      );
     case "missing":
       return new PhaseCheckpointError(
         "notes-missing",

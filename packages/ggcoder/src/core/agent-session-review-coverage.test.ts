@@ -5,6 +5,7 @@ import path from "node:path";
 import type { Message } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "./agent-session.js";
 import type { IdealReviewStats, ReviewCoverageTracker } from "./ideal-review.js";
+import type { ActivePhaseContextV1 } from "../phase-context.js";
 
 interface ReviewInternals {
   settingsManager: { get(key: string): boolean };
@@ -12,6 +13,7 @@ interface ReviewInternals {
   hookFileEditCounts: Map<string, number>;
   reviewCoverage: ReviewCoverageTracker;
   subAgentManager?: { completionGateMessage(): string | undefined };
+  activePhaseContext?: ActivePhaseContextV1;
   getHookFollowUpMessages(): Message[] | null;
 }
 
@@ -163,5 +165,40 @@ describe("AgentSession Ideal review coverage gate", () => {
         provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
       },
     ]);
+  });
+
+  it("steers an implementing active phase through verification exactly once", () => {
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-sonnet-5",
+      cwd: "/project",
+      transient: true,
+      selfCorrectionHooks: false,
+      systemPrompt: "test",
+    });
+    const internal = session as unknown as ReviewInternals;
+    internal.activePhaseContext = {
+      version: 1,
+      projectKey: "/project",
+      phase: {
+        id: "phase-active",
+        title: "Verification handoff",
+        goal: "Verify before review",
+        doneWhen: ["Focused tests pass", "Package build passes"],
+        sourcePrompt: "Implement the phase",
+        status: "in-progress",
+        archivedAt: null,
+      },
+      session: { sessionId: "session-active", sessionPath: "/sessions/active.jsonl" },
+      references: [],
+      executionStage: "implementing",
+    };
+
+    const followUp = internal.getHookFollowUpMessages()?.[0]?.content;
+    expect(followUp).toContain("Run the phase completion checks now");
+    expect(followUp).toContain("1. Focused tests pass");
+    expect(followUp).toContain("2. Package build passes");
+    expect(followUp).toContain("Do not submit final_review");
+    expect(internal.getHookFollowUpMessages()).toBeNull();
   });
 });

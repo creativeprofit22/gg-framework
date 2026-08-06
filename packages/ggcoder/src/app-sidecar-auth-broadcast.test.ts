@@ -25,6 +25,7 @@ let tmpProject: string;
 type Daemon = ChildProcessByStdio<null, Readable, Readable>;
 let daemon: Daemon | undefined;
 let port = 0;
+const daemonAuthToken = "test-daemon-bootstrap-token";
 const openStreams: http.IncomingMessage[] = [];
 
 /** Start the daemon on an ephemeral port and wait for its listening handshake. */
@@ -37,6 +38,7 @@ async function startDaemon(): Promise<void> {
       USERPROFILE: tmpHome,
       GG_APP_CWD: tmpProject,
       GG_APP_PORT: "0",
+      GG_APP_AUTH_TOKEN: daemonAuthToken,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -60,7 +62,7 @@ async function startDaemon(): Promise<void> {
 function request(
   method: string,
   urlPath: string,
-  opts: { session?: string; body?: unknown } = {},
+  opts: { session?: string; body?: unknown; daemonAuth?: boolean } = {},
 ): Promise<{ status: number; json: Record<string, unknown> }> {
   return new Promise((resolve, reject) => {
     const payload = opts.body === undefined ? undefined : JSON.stringify(opts.body);
@@ -73,6 +75,7 @@ function request(
         headers: {
           ...(payload ? { "content-type": "application/json" } : {}),
           ...(opts.session ? { "x-gg-session": opts.session } : {}),
+          ...(opts.daemonAuth ? { "x-gg-daemon-token": daemonAuthToken } : {}),
         },
       },
       (res) => {
@@ -132,6 +135,7 @@ function openEventStream(session: string): Promise<{ types: string[] }> {
 async function createSession(): Promise<string> {
   const res = await request("POST", "/session", {
     body: { mode: "code", cwd: tmpProject },
+    daemonAuth: true,
   });
   expect(res.status).toBe(200);
   return res.json.sessionId as string;
@@ -175,6 +179,18 @@ afterEach(async () => {
   const removeOptions = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 };
   await fs.rm(tmpHome, removeOptions);
   await fs.rm(tmpProject, removeOptions);
+});
+
+describe("daemon session authorization", () => {
+  it("rejects session minting without the native bootstrap credential", async () => {
+    const response = await request("POST", "/session", {
+      body: { mode: "code", cwd: tmpProject },
+    });
+    expect(response).toEqual({
+      status: 401,
+      json: { error: "daemon authentication required" },
+    });
+  });
 });
 
 describe("connecting a provider", () => {

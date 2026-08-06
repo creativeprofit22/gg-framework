@@ -91,8 +91,8 @@ jobs:
       # shell: bash is load-bearing on the windows-latest leg. The default shell
       # there is PowerShell, which does NOT abort a multi-line script when an
       # intermediate command exits non-zero — only the LAST line decides the
-      # step's outcome. Without this a failing gg-ai or gg-agent build is
-      # silently swallowed by ggcoder's build succeeding after it, and we SHIP
+      # step's outcome. Without this a failing gg-ai, gg-agent, or gg-core build
+      # is silently swallowed by ggcoder's build succeeding after it, and we SHIP
       # an installer built from stale or missing artifacts. The same bug hid 72
       # failing tests in ci.yml.
       - name: Build framework packages
@@ -100,6 +100,7 @@ jobs:
         run: |
           pnpm --filter @kenkaiiii/gg-ai build
           pnpm --filter @kenkaiiii/gg-agent build
+          pnpm --filter @kenkaiiii/gg-core build
           pnpm --filter @kenkaiiii/ggcoder build
 
       - name: Stage node runtime + bundle sidecar

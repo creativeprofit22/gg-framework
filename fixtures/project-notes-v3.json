@@ -125,6 +125,7 @@
           "transition": "review",
           "progress": "Verified the shared Notes v3 contract",
           "blocker": null,
+          "requiredExternalAction": null,
           "evidence": ["Backend and app validators accepted the canonical fixture"],
           "verification": "passed",
           "verificationReason": null,

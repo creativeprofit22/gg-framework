@@ -7,35 +7,34 @@ This is the remaining maintenance queue from the scoped Phases 00–26 sweep. Ex
 ## Status
 
 - [x] **P0 — Fix `evidence-only` contract drift.** Commit `0811a66a` added the missing `NotesRoadmapStatusOutcome` member and runtime allow-list entry in `gg-app/src/notes-types.ts`. `gg-app/src/agent-pane-client.test.ts` now proves a valid backend-style final-review snapshot crosses `PaneAgentClient.getNotes()` without rejection.
-- [ ] **P1 — Consolidate the shared Notes schema and validators.**
+- [x] **P1 — Consolidate the shared Notes schema and validators.** Canonical contracts now live in `@kenkaiiii/gg-core`; backend and app compatibility surfaces re-export them.
 - [ ] **P2 — Split oversized implementation files, sequentially.**
 - [ ] **P3 — Remove obsolete Phase 20/25 packaged-smoke code.**
 
-Only P0 is complete.
+P0 and P1 are complete. P2 remains the active maintenance priority; P3 is pending.
 
 ## Required order
 
-1. P1 shared contract consolidation.
-2. P2a repository persistence and mutations split.
-3. P2b `useProjectNotes` split.
-4. P2c `NotesRoadmap` phase-detail split.
-5. P3 obsolete smoke cleanup.
+1. P2a repository persistence and mutations split.
+2. P2b `useProjectNotes` split.
+3. P2c `NotesRoadmap` phase-detail split.
+4. P3 obsolete smoke cleanup.
 
-Each step must be green before the next starts. Keep public behavior and serialized data unchanged throughout P1 and P2.
+Each step must be green before the next starts. Keep public behavior and serialized data unchanged throughout P2.
 
 ## P1 — Shared Notes contract
 
 ### Current files
 
-- `packages/ggcoder/src/project-notes-repository.ts` contains the backend Notes types, constants, migrations, `validateNotesDocumentV3`, nested roadmap validation, persistence, and mutations.
-- `gg-app/src/notes-types.ts` independently mirrors the document/snapshot types, migrations, runtime validators, and app IPC outcome guards.
-- `gg-app/src/notes-storage.ts` owns browser fallback parsing, migration, and storage behavior; it consumes the app validator.
-- `fixtures/project-notes-v3.json` is the cross-boundary canonical document fixture.
-- Contract coverage currently lives in `packages/ggcoder/src/project-notes-repository.test.ts`, `gg-app/src/notes-storage.test.ts`, and `gg-app/src/agent-pane-client.test.ts`.
+- `packages/gg-core/src/project-notes.ts` owns the canonical Notes schema, limits, migrations, and document validator.
+- `packages/gg-core/src/roadmap-workflow.ts` owns shared Roadmap draft and workflow contracts.
+- `packages/ggcoder/src/project-notes-repository.ts` re-exports shared contracts while retaining backend persistence, recovery, and mutations.
+- `gg-app/src/notes-types.ts` re-exports shared contracts while retaining app IPC outcome guards; `gg-app/src/notes-storage.ts` retains browser fallback storage and diagnostics.
+- `fixtures/project-notes-v3.json` remains the cross-boundary canonical document fixture, updated for the explicit blocker-action field; compatibility coverage spans gg-core, ggcoder, and gg-app.
 
 ### Boundary
 
-Create one UI-free source of truth for the shared Notes document types, limits, migrations, and document validator. Both backend persistence and app parsing must consume that source.
+The shared contract consolidation is complete: both backend persistence and app parsing consume the UI-free `@kenkaiiii/gg-core` source of truth.
 
 Keep these concerns outside the shared contract:
 
@@ -44,11 +43,11 @@ Keep these concerns outside the shared contract:
 - browser fallback storage and diagnostics;
 - React state and presentation.
 
-Preserve existing public import surfaces with re-exports where needed. Do not change the v3 wire shape, migration acceptance, exact-key validation, append-only rules, or authority checks.
+Preserve existing public import surfaces with re-exports where needed. Apart from the Roadmap workflow's explicit `requiredExternalAction` addition, P1 preserved the v3 wire shape, migration acceptance, exact-key validation, append-only rules, and authority checks.
 
 ### Verification gate
 
-- The unchanged `fixtures/project-notes-v3.json` passes both backend persistence and app parse/load boundaries.
+- The canonical `fixtures/project-notes-v3.json` passes both backend persistence and app parse/load boundaries.
 - Invalid nested roadmap, reminder, reference, and final-review shapes retain their current error paths and messages.
 - Run:
   - `pnpm --filter @kenkaiiii/ggcoder exec vitest run src/project-notes-repository.test.ts`

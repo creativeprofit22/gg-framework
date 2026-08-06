@@ -34,6 +34,11 @@
       "types": "./dist/phase-start-protocol.d.ts",
       "import": "./dist/phase-start-protocol.js",
       "require": "./dist/phase-start-protocol.cjs"
+    },
+    "./roadmap-workflow": {
+      "types": "./dist/roadmap-workflow.d.ts",
+      "import": "./dist/roadmap-workflow.js",
+      "require": "./dist/roadmap-workflow.cjs"
     }
   },
   "main": "./dist/index.cjs",

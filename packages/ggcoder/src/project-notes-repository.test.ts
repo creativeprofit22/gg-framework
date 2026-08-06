@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import {
   ProjectNotesRepository,
   canonicalProjectKey,
@@ -150,6 +151,29 @@ function notes(reference = "  reference\r\nbytes 😀\n"): NotesDocumentV3 {
         roadmapEvents: [],
       },
     ],
+  };
+}
+
+function approvedPhaseDraft(
+  cwd: string,
+  basedOnRevision: number,
+  phaseIds: string[] = ["approved-phase-1", "approved-phase-2"],
+): RoadmapPhaseDraft {
+  return {
+    id: "draft-1",
+    projectKey: canonicalProjectKey(cwd),
+    basedOnRevision,
+    createdAt: NOW,
+    createdBySessionId: "session-draft",
+    summary: "Create approved peer phases",
+    status: "pending",
+    phases: phaseIds.map((phaseId, index) => ({
+      phaseId,
+      title: `Approved phase ${index + 1}`,
+      goal: `Deliver approved goal ${index + 1}.`,
+      doneWhen: [`Approved criterion ${index + 1} passes`],
+      sourcePrompt: `Implement approved phase ${index + 1} only.`,
+    })),
   };
 }
 
@@ -796,6 +820,18 @@ describe("ProjectNotesRepository phase launch transaction", () => {
         session: { sessionId: "checkpoint" },
       },
     });
+    await expect(
+      repository.updatePhaseSessionLink(
+        cwd,
+        "phase-1",
+        { sessionId: "wrong-owner", sessionPath: "/sessions/wrong.jsonl" },
+        { sessionId: "stale-owner", sessionPath: "/sessions/stale.jsonl" },
+      ),
+    ).resolves.toEqual({ status: "stale-session" });
+    expect(await repository.load(cwd)).toMatchObject({
+      status: "ok",
+      snapshot: { document: { phases: [{ session: { sessionId: "checkpoint" } }] } },
+    });
     const attention = await repository.recordPhaseLaunchAttention(
       cwd,
       "phase-1",
@@ -1071,6 +1107,23 @@ describe("ProjectNotesRepository authoritative lifecycle transitions", () => {
         },
       },
     });
+    if (approved.status !== "manual-override") throw new Error("Expected approval marker");
+    await expect(
+      repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
+        status: "in-progress",
+        source: "user",
+        reason: "Plan approved by user",
+        kind: "approval-resolved",
+        timestamp: "2026-07-25T12:41:30.000Z",
+        expectedSession,
+      }),
+    ).resolves.toMatchObject({
+      status: "manual-override",
+      snapshot: { revision: approved.snapshot.revision },
+      phase: {
+        pendingAutomaticLifecycleTransition: { timestamp: "2026-07-25T12:41:00.000Z" },
+      },
+    });
 
     const reviewing = await repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
       status: "review",
@@ -1224,8 +1277,9 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       transition,
       progress: `Progress for ${transition}`,
       blocker: transition === "blocked" ? "CI is unavailable" : null,
-      evidence: transition === "review" ? ["Focused tests passed"] : [],
-      verification: null,
+      requiredExternalAction: transition === "blocked" ? "Restore CI access" : null,
+      evidence: transition === "review" ? ["Round-trip passes", "Malformed data is rejected"] : [],
+      verification: transition === "review" ? "passed" : null,
       verificationReason: null,
       proposedReferences: [],
       timestamp: NOW,
@@ -1241,6 +1295,265 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       snapshot: { revision: 2 },
     });
     if (outcome.status === "committed") expect(outcome.phase.status).not.toBe("done");
+  });
+
+  it("gates GG Coder review on complete passed evidence and preserves retries and session guards", async () => {
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const cwd = "/work/roadmap-verification-gate";
+    const document = roadmapDocument();
+    const phase = document.phases[0]!;
+    phase.status = "in-progress";
+    phase.doneWhen = ["Focused tests pass", "Package build passes"];
+    await repository.migrate(cwd, document);
+    const expectedSession = {
+      sessionId: "session-roadmap",
+      sessionPath: "/sessions/roadmap.jsonl",
+    };
+
+    const failed = await repository.recordRoadmapStatusUpdate(cwd, {
+      updateId: "verification-failed",
+      phaseId: "phase-1",
+      expectedRevision: 1,
+      actor: "gg-coder",
+      transition: "in-progress",
+      progress: "Focused tests still fail",
+      blocker: null,
+      requiredExternalAction: null,
+      evidence: ["pnpm test: one failure"],
+      verification: "failed",
+      verificationReason: "The focused test command reports one failing assertion.",
+      proposedReferences: [],
+      timestamp: NOW,
+      expectedSession,
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+    });
+    expect(failed).toMatchObject({
+      status: "committed",
+      phase: { status: "in-progress" },
+      snapshot: { revision: 2 },
+    });
+
+    const passingRequest: ProjectNotesRoadmapStatusRequest = {
+      updateId: "verification-passed",
+      phaseId: "phase-1",
+      expectedRevision: 2,
+      actor: "gg-coder",
+      transition: "review",
+      progress: "All completion checks pass",
+      blocker: null,
+      requiredExternalAction: null,
+      evidence: ["pnpm test: passed", "pnpm build: passed"],
+      verification: "passed",
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: "2026-07-25T12:01:00.000Z",
+      expectedSession,
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+    };
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        ...passingRequest,
+        updateId: "verification-missing",
+        evidence: ["pnpm test: passed"],
+      }),
+    ).resolves.toEqual({
+      status: "verification-incomplete",
+      revision: 2,
+      message: expect.stringContaining("missing for 1 completion criterion"),
+    });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        ...passingRequest,
+        updateId: "verification-exception",
+        verification: "exception-requested",
+        verificationReason: "The native runner is unavailable.",
+      }),
+    ).resolves.toEqual({
+      status: "verification-incomplete",
+      revision: 2,
+      message: "Review requires a passed verification result.",
+    });
+
+    const passed = await repository.recordRoadmapStatusUpdate(cwd, passingRequest);
+    expect(passed).toMatchObject({
+      status: "committed",
+      phase: { status: "review" },
+      snapshot: { revision: 3 },
+    });
+    await expect(repository.recordRoadmapStatusUpdate(cwd, passingRequest)).resolves.toMatchObject({
+      status: "duplicate",
+      revision: 3,
+      phase: { status: "review" },
+    });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        ...passingRequest,
+        updateId: "verification-stale-session",
+        expectedRevision: 3,
+        expectedSession: { sessionId: "stale", sessionPath: "/sessions/stale.jsonl" },
+      }),
+    ).resolves.toEqual({ status: "stale-session" });
+  });
+
+  it("persists an explicit blocker, resumes automatically, and protects user resolution", async () => {
+    const agentDir = await tempAgentDir();
+    const repository = new ProjectNotesRepository(agentDir);
+    const cwd = "/work/roadmap-blocker";
+    const expectedSession = {
+      sessionId: "session-roadmap",
+      sessionPath: "/sessions/roadmap.jsonl",
+    };
+    await repository.migrate(cwd, roadmapDocument());
+    const blockedRequest: ProjectNotesRoadmapStatusRequest = {
+      updateId: "blocked-by-access",
+      phaseId: "phase-1",
+      expectedRevision: 1,
+      actor: "gg-coder",
+      transition: "blocked",
+      progress: "Repository access is required before implementation can continue",
+      blocker: "The private repository cannot be read.",
+      requiredExternalAction: "Grant this session read access to the private repository.",
+      evidence: [],
+      verification: null,
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: "2026-07-25T13:00:00.000Z",
+      expectedSession,
+      requireBoundPhase: true,
+      autopilotEnabled: false,
+    };
+
+    await expect(repository.recordRoadmapStatusUpdate(cwd, blockedRequest)).resolves.toMatchObject({
+      status: "committed",
+      statusOutcome: "applied",
+      snapshot: { revision: 2 },
+      phase: {
+        status: "needs-attention",
+        attentionReason: blockedRequest.blocker,
+        roadmapEvents: [
+          expect.objectContaining({
+            id: "blocked-by-access",
+            transition: "blocked",
+            blocker: blockedRequest.blocker,
+            requiredExternalAction: blockedRequest.requiredExternalAction,
+          }),
+        ],
+      },
+    });
+    await expect(repository.recordRoadmapStatusUpdate(cwd, blockedRequest)).resolves.toEqual(
+      expect.objectContaining({ status: "duplicate", revision: 2 }),
+    );
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        ...blockedRequest,
+        progress: "Conflicting retry",
+      }),
+    ).resolves.toEqual({ status: "duplicate-id-conflict", revision: 2 });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        ...blockedRequest,
+        updateId: "stale-blocker",
+      }),
+    ).resolves.toEqual({ status: "stale-revision", revision: 2 });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        ...blockedRequest,
+        updateId: "wrong-session-blocker",
+        expectedRevision: 2,
+        expectedSession: { sessionId: "wrong-session", sessionPath: null },
+      }),
+    ).resolves.toEqual({ status: "stale-session" });
+
+    const restartedRepository = new ProjectNotesRepository(agentDir);
+    await expect(restartedRepository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [
+            expect.objectContaining({
+              status: "needs-attention",
+              attentionReason: blockedRequest.blocker,
+              roadmapEvents: [expect.objectContaining({ id: "blocked-by-access" })],
+            }),
+          ],
+        },
+      },
+    });
+
+    const resumed = await restartedRepository.recordRoadmapStatusUpdate(cwd, {
+      ...blockedRequest,
+      updateId: "access-restored",
+      expectedRevision: 2,
+      transition: "in-progress",
+      progress: "Repository access is restored and implementation resumed",
+      blocker: null,
+      requiredExternalAction: null,
+      timestamp: "2026-07-25T13:01:00.000Z",
+    });
+    expect(resumed).toMatchObject({
+      status: "committed",
+      statusOutcome: "applied",
+      snapshot: { revision: 3 },
+      phase: { status: "in-progress", attentionReason: null },
+    });
+    if (resumed.status !== "committed") throw new Error("Expected automatic blocker resume");
+
+    const reblocked = await restartedRepository.recordRoadmapStatusUpdate(cwd, {
+      ...blockedRequest,
+      updateId: "second-access-blocker",
+      expectedRevision: 3,
+      timestamp: "2026-07-25T13:02:00.000Z",
+    });
+    if (reblocked.status !== "committed") throw new Error("Expected second blocker");
+    const resolvedDocument = structuredClone(reblocked.snapshot.document);
+    const resolvedPhase = resolvedDocument.phases[0]!;
+    resolvedPhase.status = "in-progress";
+    resolvedPhase.attentionReason = null;
+    resolvedPhase.updatedAt = "2026-07-25T13:03:00.000Z";
+    resolvedPhase.overrides.status = {
+      value: "in-progress",
+      source: "user",
+      updatedAt: "2026-07-25T13:03:00.000Z",
+    };
+    resolvedPhase.lifecycleEvents.push({
+      id: "user-resolved-blocker",
+      fromStatus: "needs-attention",
+      toStatus: "in-progress",
+      source: "user",
+      timestamp: "2026-07-25T13:03:00.000Z",
+      reason: "Status changed by user",
+      kind: "other",
+    });
+    resolvedDocument.updatedAt = "2026-07-25T13:03:00.000Z";
+    const userResolved = await restartedRepository.save(
+      cwd,
+      reblocked.snapshot.revision,
+      resolvedDocument,
+    );
+    if (userResolved.status !== "ok") throw new Error("Expected user resolution save");
+
+    await expect(
+      restartedRepository.recordRoadmapStatusUpdate(cwd, {
+        ...blockedRequest,
+        updateId: "agent-cannot-reblock-user-resolution",
+        expectedRevision: userResolved.snapshot.revision,
+        timestamp: "2026-07-25T13:04:00.000Z",
+      }),
+    ).resolves.toMatchObject({
+      status: "committed",
+      statusOutcome: "manual-override",
+      phase: {
+        status: "in-progress",
+        attentionReason: null,
+        overrides: { status: { value: "in-progress", source: "user" } },
+        roadmapEvents: expect.arrayContaining([
+          expect.objectContaining({ id: "agent-cannot-reblock-user-resolution" }),
+        ]),
+      },
+    });
   });
 
   it("keeps retries idempotent, rejects conflicting IDs, and preserves a status override", async () => {
@@ -1259,6 +1572,7 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       transition: "in-progress" as const,
       progress: "Implementation is underway",
       blocker: null,
+      requiredExternalAction: null,
       evidence: [],
       verification: null,
       verificationReason: null,
@@ -1315,6 +1629,7 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       transition: "in-progress" as const,
       progress: "Verified normalized coordinates",
       blocker: null,
+      requiredExternalAction: null,
       evidence: [],
       verification: null,
       verificationReason: null,
@@ -1391,6 +1706,7 @@ describe("ProjectNotesRepository roadmap status reconciliation", () => {
       transition: "in-progress" as const,
       progress: "Verified source",
       blocker: null,
+      requiredExternalAction: null,
       evidence: [],
       verification: null,
       verificationReason: null,
@@ -1852,6 +2168,7 @@ describe("project Notes identity and validation", () => {
         transition: "in-progress",
         progress: "Invalid policy report",
         blocker: null,
+        requiredExternalAction: null,
         evidence: [],
         verification: null,
         verificationReason: null,
@@ -2658,6 +2975,7 @@ describe("ProjectNotesRepository durability", () => {
         transition: "review",
         progress: "Claimed verification passed",
         blocker: null,
+        requiredExternalAction: null,
         evidence: ["forged test output"],
         verification: "passed",
         verificationReason: null,
@@ -2810,6 +3128,7 @@ describe("ProjectNotesRepository durability", () => {
       transition: "review",
       progress: "Proposed evidence for user review",
       blocker: null,
+      requiredExternalAction: null,
       evidence: ["focused tests passed"],
       verification: null,
       verificationReason: null,
@@ -2980,7 +3299,8 @@ describe("ProjectNotesRepository completion transactions", () => {
       transition: "review",
       progress: "Focused verification passed",
       blocker: null,
-      evidence: ["pnpm test passed"],
+      requiredExternalAction: null,
+      evidence: ["pnpm test passed", "pnpm build passed"],
       verification: "passed",
       verificationReason: null,
       proposedReferences: [],
@@ -3023,6 +3343,7 @@ describe("ProjectNotesRepository completion transactions", () => {
       transition: "review",
       progress: "Ken completed the final review",
       blocker: null,
+      requiredExternalAction: null,
       evidence: ["Final review status evidence"],
       verification: null,
       verificationReason: null,
@@ -3166,7 +3487,7 @@ describe("ProjectNotesRepository completion transactions", () => {
     },
   );
 
-  it.each(["direct", "bundled"] as const)(
+  it.each(["bundled"] as Array<"direct" | "bundled">)(
     "accepts only a referenced verification exception on the %s review path",
     async (path) => {
       const { cwd, repository, expectedSession } = await completionSetup(`exception-${path}`);
@@ -3190,6 +3511,7 @@ describe("ProjectNotesRepository completion transactions", () => {
             transition: "review",
             progress: "Verification exception requested",
             blocker: null,
+            requiredExternalAction: null,
             evidence: ["CI environment is unavailable"],
             verification: "exception-requested",
             verificationReason: "CI environment is unavailable",
@@ -3338,6 +3660,7 @@ describe("ProjectNotesRepository completion transactions", () => {
   it.each([
     {
       blocker: "approval",
+      requiredExternalAction: "Approve the pending request",
       status: "waiting-for-approval" as const,
       source: "agent" as const,
       reason: "Bundled approval copy may change",
@@ -3353,6 +3676,7 @@ describe("ProjectNotesRepository completion transactions", () => {
     },
     {
       blocker: "question",
+      requiredExternalAction: "Answer the pending question",
       status: "needs-attention" as const,
       source: "agent" as const,
       reason: "Bundled question copy may change",
@@ -3368,6 +3692,7 @@ describe("ProjectNotesRepository completion transactions", () => {
     },
     {
       blocker: "runtime error",
+      requiredExternalAction: "Resolve the external runtime failure",
       status: "needs-attention" as const,
       source: "session" as const,
       reason: "Bundled runtime copy may change",
@@ -3383,6 +3708,7 @@ describe("ProjectNotesRepository completion transactions", () => {
     },
     {
       blocker: "tool failure",
+      requiredExternalAction: "Restore the external tool",
       status: "needs-attention" as const,
       source: "agent" as const,
       reason: "Bundled tool copy has no legacy failure pattern",
@@ -3422,6 +3748,7 @@ describe("ProjectNotesRepository completion transactions", () => {
           transition: "review",
           progress: `Ken reviewed the ${blocker} blocker`,
           blocker: null,
+          requiredExternalAction: null,
           evidence: ["Reviewer report must not resolve lifecycle blockers"],
           verification: null,
           verificationReason: null,
@@ -3484,6 +3811,7 @@ describe("ProjectNotesRepository completion transactions", () => {
             transition: "review",
             progress: `Ken confirmed the ${blocker} resolution`,
             blocker: null,
+            requiredExternalAction: null,
             evidence: ["A distinct lifecycle resolution was recorded"],
             verification: null,
             verificationReason: null,
@@ -3529,6 +3857,7 @@ describe("ProjectNotesRepository completion transactions", () => {
         transition: "review",
         progress: "Ken completed verification and final review",
         blocker: null,
+        requiredExternalAction: null,
         evidence: ["pnpm test passed"],
         verification: "passed",
         verificationReason: null,
@@ -3571,6 +3900,7 @@ describe("ProjectNotesRepository completion transactions", () => {
       transition: "review" as const,
       progress: "Ken completed final review",
       blocker: null,
+      requiredExternalAction: null,
       evidence: ["Review evidence"],
       verification: null,
       verificationReason: null,
@@ -3586,6 +3916,7 @@ describe("ProjectNotesRepository completion transactions", () => {
           updateId: "blocked-final-review-status",
           transition: "blocked",
           blocker: "Verification failed",
+          requiredExternalAction: "Decide whether to accept the failed verification",
         },
         review: { ...review, reviewId: "blocked-final-review" },
       }),
@@ -3621,6 +3952,7 @@ describe("ProjectNotesRepository completion transactions", () => {
           transition: "review",
           progress: "This status must not persist",
           blocker: null,
+          requiredExternalAction: null,
           evidence: [],
           verification: null,
           verificationReason: null,
@@ -3668,6 +4000,7 @@ describe("ProjectNotesRepository completion transactions", () => {
           transition: "review",
           progress: "This status must remain atomic",
           blocker: null,
+          requiredExternalAction: null,
           evidence: ["Ken reviewed all completion evidence"],
           verification: null,
           verificationReason: null,
@@ -3734,6 +4067,282 @@ describe("ProjectNotesRepository completion transactions", () => {
         timestamp: NOW,
       }),
     ).resolves.toMatchObject({ status: "invalid-review" });
+  });
+});
+
+describe("Roadmap blocker resolution", () => {
+  it("persists across restart and treats an exact retry as idempotent", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/blocker-resolution-restart";
+    const repository = new ProjectNotesRepository(agentDir);
+    const document = notes();
+    const phase = document.phases[0]!;
+    phase.status = "needs-attention";
+    phase.overrides.status = null;
+    phase.attentionReason = "Waiting for production access";
+    phase.lifecycleEvents.push({
+      id: "lifecycle-blocked-1",
+      fromStatus: "in-progress",
+      toStatus: "needs-attention",
+      source: "agent",
+      timestamp: NOW,
+      reason: phase.attentionReason,
+      kind: "other",
+    });
+    phase.roadmapEvents.push({
+      type: "status-update",
+      id: "blocked-update-1",
+      actor: "gg-coder",
+      transition: "blocked",
+      progress: "Deployment is paused",
+      blocker: "Waiting for production access",
+      requiredExternalAction: "Grant the production deployment role",
+      evidence: [],
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
+      statusOutcome: "applied",
+      proposedReferences: [],
+      timestamp: NOW,
+    });
+    const migrated = await repository.migrate(cwd, document);
+    if (migrated.status !== "ok") throw new Error(JSON.stringify(migrated));
+    const request = {
+      resolutionId: "blocker-resolution-1",
+      phaseId: phase.id,
+      blockerUpdateId: "blocked-update-1",
+      expectedRevision: 1,
+      expectedSession: phase.session,
+      resolver: "user" as const,
+      timestamp: "2026-07-25T12:35:00.000Z",
+    };
+
+    const committed = await repository.resolveRoadmapBlocker(cwd, request);
+    expect(committed).toMatchObject({
+      status: "committed",
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [
+            {
+              status: "needs-attention",
+              roadmapEvents: [
+                expect.objectContaining({ id: "blocked-update-1" }),
+                {
+                  type: "blocker-resolution",
+                  id: "blocker-resolution-1",
+                  blockerUpdateId: "blocked-update-1",
+                  resolver: "user",
+                  timestamp: "2026-07-25T12:35:00.000Z",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const laterUpdate = await repository.recordRoadmapStatusUpdate(cwd, {
+      updateId: "post-resolution-update",
+      phaseId: phase.id,
+      expectedRevision: 2,
+      expectedSession: phase.session,
+      requireBoundPhase: true,
+      actor: "gg-coder",
+      transition: "in-progress",
+      progress: "Continuing after the external action",
+      blocker: null,
+      requiredExternalAction: null,
+      evidence: [],
+      verification: null,
+      verificationReason: null,
+      proposedReferences: [],
+      timestamp: "2026-07-25T12:40:00.000Z",
+      autopilotEnabled: true,
+    });
+    expect(laterUpdate).toMatchObject({ status: "committed", snapshot: { revision: 3 } });
+
+    const restarted = new ProjectNotesRepository(agentDir);
+    await expect(restarted.resolveRoadmapBlocker(cwd, request)).resolves.toEqual({
+      status: "duplicate",
+      revision: 3,
+      phaseId: phase.id,
+    });
+    const loaded = await restarted.load(cwd);
+    expect(loaded).toMatchObject({ status: "ok", snapshot: { revision: 3 } });
+    if (loaded.status !== "ok") throw new Error("Expected persisted blocker resolution");
+    expect(
+      loaded.snapshot.document.phases[0]!.roadmapEvents.filter(
+        (event) => event.type === "blocker-resolution",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("guards the phase revision and session without changing lifecycle status", async () => {
+    const agentDir = await tempAgentDir();
+    const cwd = "/work/blocker-resolution-guards";
+    const repository = new ProjectNotesRepository(agentDir);
+    const document = notes();
+    const phase = document.phases[0]!;
+    phase.status = "needs-attention";
+    phase.overrides.status = null;
+    phase.attentionReason = "Waiting for approval";
+    phase.lifecycleEvents.push({
+      id: "lifecycle-blocked-2",
+      fromStatus: "in-progress",
+      toStatus: "needs-attention",
+      source: "agent",
+      timestamp: NOW,
+      reason: phase.attentionReason,
+      kind: "other",
+    });
+    phase.roadmapEvents.push({
+      type: "status-update",
+      id: "blocked-update-2",
+      actor: "gg-coder",
+      transition: "blocked",
+      progress: "Approval required",
+      blocker: "Waiting for approval",
+      requiredExternalAction: "Approve the release",
+      evidence: [],
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
+      statusOutcome: "applied",
+      proposedReferences: [],
+      timestamp: NOW,
+    });
+    const migrated = await repository.migrate(cwd, document);
+    if (migrated.status !== "ok") throw new Error(JSON.stringify(migrated));
+    const request = {
+      resolutionId: "blocker-resolution-2",
+      phaseId: phase.id,
+      blockerUpdateId: "blocked-update-2",
+      expectedRevision: 0,
+      expectedSession: phase.session,
+      resolver: "user" as const,
+      timestamp: "2026-07-25T12:35:00.000Z",
+    };
+
+    await expect(repository.resolveRoadmapBlocker(cwd, request)).resolves.toEqual({
+      status: "stale-revision",
+      revision: 1,
+    });
+    await expect(
+      repository.resolveRoadmapBlocker(cwd, {
+        ...request,
+        expectedRevision: 1,
+        expectedSession: { sessionId: "other-session", sessionPath: null },
+      }),
+    ).resolves.toEqual({ status: "stale-session" });
+    const loaded = await repository.load(cwd);
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 1,
+        document: { phases: [{ status: "needs-attention", roadmapEvents: [expect.any(Object)] }] },
+      },
+    });
+  });
+});
+
+describe("ProjectNotesRepository approved phase creation", () => {
+  it("appends every approved phase with canonical defaults in one revision", async () => {
+    const cwd = "/work/approved-phases";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = notes("approved phase baseline");
+    await repository.migrate(cwd, initial);
+
+    await expect(repository.createApprovedPhases(cwd, approvedPhaseDraft(cwd, 1))).resolves.toEqual(
+      {
+        status: "created",
+        revision: 2,
+        phaseIds: ["approved-phase-1", "approved-phase-2"],
+      },
+    );
+
+    const loaded = await repository.load(cwd);
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [
+            { id: "phase-1", order: 0 },
+            {
+              id: "approved-phase-1",
+              title: "Approved phase 1",
+              goal: "Deliver approved goal 1.",
+              doneWhen: ["Approved criterion 1 passes"],
+              order: 1,
+              status: "not-started",
+              sourcePrompt: "Implement approved phase 1 only.",
+              referenceIds: [],
+              session: null,
+              reminder: null,
+              attentionReason: null,
+              completedAt: null,
+              archivedAt: null,
+              overrides: { status: null, referenceIds: null },
+              pendingAutomaticLifecycleTransition: null,
+              lifecycleEvents: [],
+              roadmapEvents: [],
+            },
+            { id: "approved-phase-2", order: 2, status: "not-started" },
+          ],
+        },
+      },
+    });
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    const appended = loaded.snapshot.document.phases.slice(1);
+    expect(appended).toHaveLength(2);
+    expect(appended[0]!.createdAt).toBe(appended[0]!.updatedAt);
+    expect(appended[1]!.createdAt).toBe(appended[0]!.createdAt);
+    expect(loaded.snapshot.document.updatedAt).toBe(appended[0]!.createdAt);
+    expect(loaded.snapshot.document.phases[0]).toEqual(initial.phases[0]);
+  });
+
+  it("checks the exact revision under the lock and lets only one concurrent batch commit", async () => {
+    const cwd = "/work/approved-phase-cas";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    await repository.migrate(cwd, notes("CAS baseline"));
+
+    const [left, right] = await Promise.all([
+      repository.createApprovedPhases(cwd, approvedPhaseDraft(cwd, 1, ["phase-left"])),
+      repository.createApprovedPhases(cwd, approvedPhaseDraft(cwd, 1, ["phase-right"])),
+    ]);
+
+    expect([left.status, right.status].sort()).toEqual(["created", "stale-revision"]);
+    expect([left, right].find((result) => result.status === "stale-revision")).toEqual({
+      status: "stale-revision",
+      expectedRevision: 1,
+      currentRevision: 2,
+    });
+    const loaded = await repository.load(cwd);
+    expect(loaded).toMatchObject({ status: "ok", snapshot: { revision: 2 } });
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    expect(loaded.snapshot.document.phases).toHaveLength(2);
+    expect(["phase-left", "phase-right"]).toContain(loaded.snapshot.document.phases[1]!.id);
+  });
+
+  it("rejects an invalid batch without appending any of its phases or writing either envelope", async () => {
+    const cwd = "/work/approved-phase-atomic-validation";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    await repository.migrate(cwd, notes("atomic validation baseline"));
+    const paths = repository.paths(cwd);
+    const primaryBefore = await fs.readFile(paths.primary, "utf8");
+    const backupBefore = await fs.readFile(paths.backup, "utf8");
+    const draft = approvedPhaseDraft(cwd, 1, ["new-phase", "phase-1"]);
+
+    await expect(repository.createApprovedPhases(cwd, draft)).resolves.toMatchObject({
+      status: "invalid-proposal",
+      message: expect.stringContaining("duplicate ID: phase-1"),
+    });
+    expect(await fs.readFile(paths.primary, "utf8")).toBe(primaryBefore);
+    expect(await fs.readFile(paths.backup, "utf8")).toBe(backupBefore);
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1, document: { phases: [{ id: "phase-1" }] } },
+    });
   });
 });
 

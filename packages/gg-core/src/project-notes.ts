@@ -250,12 +250,21 @@ export interface NotesRoadmapStatusUpdate {
   transition: NotesRoadmapTransition;
   progress: string;
   blocker: string | null;
+  requiredExternalAction: string | null;
   evidence: string[];
   verification: NotesVerificationStatus | null;
   verificationReason: string | null;
   verificationSession: NotesSessionLink | null;
   statusOutcome: NotesRoadmapStatusOutcome;
   proposedReferences: NotesRoadmapReferenceProposal[];
+  timestamp: string;
+}
+
+export interface NotesRoadmapBlockerResolution {
+  type: "blocker-resolution";
+  id: string;
+  blockerUpdateId: string;
+  resolver: "user";
   timestamp: string;
 }
 
@@ -302,6 +311,7 @@ export interface NotesRoadmapCompletionReview {
 
 export type NotesRoadmapEvent =
   | NotesRoadmapStatusUpdate
+  | NotesRoadmapBlockerResolution
   | NotesRoadmapReferenceDecision
   | NotesRoadmapOverrideReset
   | NotesRoadmapImplementationCheckpoint
@@ -584,10 +594,19 @@ const UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS = [
   "verification",
   "verificationReason",
 ];
-const ROADMAP_STATUS_UPDATE_KEYS = [
+const PREVIOUS_ROADMAP_STATUS_UPDATE_KEYS = [
   ...UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS,
   "verificationSession",
 ];
+const CURRENT_UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS = [
+  ...UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS,
+  "requiredExternalAction",
+];
+const ROADMAP_STATUS_UPDATE_KEYS = [
+  ...PREVIOUS_ROADMAP_STATUS_UPDATE_KEYS,
+  "requiredExternalAction",
+];
+const ROADMAP_BLOCKER_RESOLUTION_KEYS = ["type", "id", "blockerUpdateId", "resolver", "timestamp"];
 const ROADMAP_REFERENCE_DECISION_KEYS = [
   "type",
   "id",
@@ -970,7 +989,7 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
     const roadmapEvents = migratedPhase.roadmapEvents.map((event) => {
       if (!isRecord(event) || event.type !== "status-update") return event;
       let migratedEvent = false;
-      const migratedStatusUpdate: Record<string, unknown> = hasExactKeys(
+      let migratedStatusUpdate: Record<string, unknown> = hasExactKeys(
         event,
         LEGACY_ROADMAP_STATUS_UPDATE_KEYS,
       )
@@ -984,13 +1003,23 @@ export function migrateNotesDocumentV3PhaseShape(value: unknown): NotesValidatio
               verificationSession: null,
             };
           })()
-        : hasExactKeys(event, UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS)
+        : hasExactKeys(event, UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS) ||
+            hasExactKeys(event, CURRENT_UNBOUND_VERIFICATION_ROADMAP_STATUS_UPDATE_KEYS)
           ? (() => {
               migratedEvent = true;
               migrated = true;
               return { ...event, verificationSession: null };
             })()
           : event;
+      if (hasExactKeys(migratedStatusUpdate, PREVIOUS_ROADMAP_STATUS_UPDATE_KEYS)) {
+        migratedEvent = true;
+        migrated = true;
+        migratedStatusUpdate = {
+          ...migratedStatusUpdate,
+          requiredExternalAction:
+            migratedStatusUpdate.transition === "blocked" ? migratedStatusUpdate.blocker : null,
+        };
+      }
       if (!Array.isArray(migratedStatusUpdate.proposedReferences)) {
         return migratedEvent ? migratedStatusUpdate : event;
       }
@@ -1659,6 +1688,8 @@ function validateRoadmapEvents(
   const implementationCheckpointIndexes = new Map<string, number>();
   const verificationUpdates = new Map<string, NotesRoadmapStatusUpdate>();
   const verificationUpdateIndexes = new Map<string, number>();
+  const blockedUpdates = new Set<string>();
+  const resolvedBlockedUpdates = new Set<string>();
   let latestRejectedReviewIndex = -1;
   let previousTimestamp = -Infinity;
 
@@ -1699,14 +1730,33 @@ function validateRoadmapEvents(
         return validationError(`${eventPath}.progress`, "expected 1 to 4,096 characters");
       }
       if (record.transition === "blocked") {
-        if (!isBoundedNonEmptyString(record.blocker, 1_024)) {
-          return validationError(`${eventPath}.blocker`, "blocked reports require a blocker");
+        if (!isBoundedNonEmptyString(record.blocker, NOTES_ROADMAP_REASON_MAX_LENGTH)) {
+          return validationError(
+            `${eventPath}.blocker`,
+            "blocked reports require a bounded blocker reason",
+          );
         }
-      } else if (record.blocker !== null) {
-        return validationError(
-          `${eventPath}.blocker`,
-          "only blocked reports may include a blocker",
-        );
+        if (
+          !isBoundedNonEmptyString(record.requiredExternalAction, NOTES_ROADMAP_REASON_MAX_LENGTH)
+        ) {
+          return validationError(
+            `${eventPath}.requiredExternalAction`,
+            "blocked reports require a bounded external action",
+          );
+        }
+      } else {
+        if (record.blocker !== null) {
+          return validationError(
+            `${eventPath}.blocker`,
+            "only blocked reports may include a blocker",
+          );
+        }
+        if (record.requiredExternalAction !== null) {
+          return validationError(
+            `${eventPath}.requiredExternalAction`,
+            "only blocked reports may require an external action",
+          );
+        }
       }
       if (!isValidNotesRoadmapEvidence(record.evidence)) {
         return validationError(`${eventPath}.evidence`, "expected up to 20 bounded evidence items");
@@ -1760,6 +1810,7 @@ function validateRoadmapEvents(
         verificationUpdates.set(record.id, record as unknown as NotesRoadmapStatusUpdate);
         verificationUpdateIndexes.set(record.id, index);
       }
+      if (record.transition === "blocked") blockedUpdates.add(record.id);
       if (!isNotesRoadmapStatusOutcome(record.statusOutcome)) {
         return validationError(`${eventPath}.statusOutcome`, "unknown status outcome");
       }
@@ -1790,6 +1841,29 @@ function validateRoadmapEvents(
         proposalIds.add(typed.id);
         if (typed.disposition === "pending") pendingProposalIds.add(typed.id);
       }
+      continue;
+    }
+
+    if (record.type === "blocker-resolution") {
+      if (!isRecordWithKeys(record, ROADMAP_BLOCKER_RESOLUTION_KEYS)) {
+        return validationError(eventPath, "invalid roadmap blocker resolution");
+      }
+      if (
+        !isNonEmptyString(record.blockerUpdateId) ||
+        !blockedUpdates.has(record.blockerUpdateId)
+      ) {
+        return validationError(
+          `${eventPath}.blockerUpdateId`,
+          "expected a prior blocked status update ID",
+        );
+      }
+      if (resolvedBlockedUpdates.has(record.blockerUpdateId)) {
+        return validationError(`${eventPath}.blockerUpdateId`, "blocker already resolved");
+      }
+      if (record.resolver !== "user") {
+        return validationError(`${eventPath}.resolver`, "expected user");
+      }
+      resolvedBlockedUpdates.add(record.blockerUpdateId);
       continue;
     }
 

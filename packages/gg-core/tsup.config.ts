@@ -7,6 +7,7 @@ export default defineConfig({
     "src/paths.ts",
     "src/project-notes.ts",
     "src/phase-start-protocol.ts",
+    "src/roadmap-workflow.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,

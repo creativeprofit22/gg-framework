@@ -32,6 +32,7 @@ import {
   type NotesReminderPermission,
   type NotesReviewDecision,
   type NotesRoadmapActor,
+  type NotesRoadmapBlockerResolution,
   type NotesRoadmapCompletionReview,
   type NotesRoadmapImplementationCheckpoint,
   type NotesRoadmapReferencePolicyOutcome,
@@ -52,6 +53,12 @@ import {
   type ProjectNotesSnapshot,
 } from "@kenkaiiii/gg-core/project-notes";
 export * from "@kenkaiiii/gg-core/project-notes";
+import {
+  validateRoadmapPhaseDraft,
+  type RoadmapPhaseDraft,
+  type RoadmapPhaseDraftApprovalResult,
+} from "@kenkaiiii/gg-core/roadmap-workflow";
+import { evaluateActivePhaseReviewReadiness } from "./active-phase-verification.js";
 import {
   evaluatePhaseCompletion,
   type PhaseCompletionEvaluation,
@@ -117,6 +124,7 @@ export type ProjectNotesPhaseLaunchOutcome =
 
 export type ProjectNotesPhaseLinkOutcome =
   | { status: "ok"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
+  | { status: "stale-session" }
   | { status: "phase-not-found" }
   | { status: "phase-archived" }
   | { status: "missing" }
@@ -151,6 +159,26 @@ export type ProjectNotesPhaseLifecycleOutcome =
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
+export interface ProjectNotesRoadmapBlockerResolutionRequest {
+  resolutionId: string;
+  phaseId: string;
+  blockerUpdateId: string;
+  expectedRevision: number;
+  expectedSession: NotesSessionLink | null;
+  resolver: "user";
+  timestamp: string;
+}
+
+export type ProjectNotesRoadmapBlockerResolutionOutcome =
+  | { status: "committed"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
+  | { status: "duplicate" | "already-resolved"; revision: number; phaseId: string }
+  | { status: "duplicate-id-conflict" | "stale-revision"; revision: number }
+  | {
+      status: "phase-not-found" | "phase-archived" | "stale-session" | "blocker-not-found";
+    }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
 export interface ProjectNotesRoadmapStatusRequest {
   updateId: string;
   phaseId: string;
@@ -159,6 +187,7 @@ export interface ProjectNotesRoadmapStatusRequest {
   transition: NotesRoadmapTransition;
   progress: string;
   blocker: string | null;
+  requiredExternalAction: string | null;
   evidence: string[];
   verification: NotesVerificationStatus | null;
   verificationReason: string | null;
@@ -272,9 +301,11 @@ export type ProjectNotesRoadmapStatusOutcome =
       status: "duplicate";
       revision: number;
       phaseId: string;
+      phase: NotesPhase;
       statusOutcome: NotesRoadmapStatusOutcome;
       proposals: ProjectNotesRoadmapProposalOutcome[];
     }
+  | { status: "verification-incomplete"; revision: number; message: string }
   | { status: "duplicate-id-conflict"; revision: number }
   | { status: "stale-revision"; revision: number }
   | {
@@ -881,6 +912,7 @@ function appendRoadmapStatusEvent(
     transition: request.transition,
     progress: request.progress,
     blocker: request.blocker,
+    requiredExternalAction: request.requiredExternalAction,
     evidence: [...request.evidence],
     verification: request.verification,
     verificationReason: request.verificationReason,
@@ -1118,6 +1150,7 @@ function sameRoadmapStatusPayload(
       transition: event.transition,
       progress: event.progress,
       blocker: event.blocker,
+      requiredExternalAction: event.requiredExternalAction,
       evidence: event.evidence,
       verification: event.verification,
       verificationReason: event.verificationReason,
@@ -1128,6 +1161,7 @@ function sameRoadmapStatusPayload(
       transition: request.transition,
       progress: request.progress,
       blocker: request.blocker,
+      requiredExternalAction: request.requiredExternalAction,
       evidence: request.evidence,
       verification: request.verification,
       verificationReason: request.verificationReason,
@@ -1278,6 +1312,87 @@ export class ProjectNotesRepository {
     });
   }
 
+  async createApprovedPhases(
+    cwd: string,
+    request: RoadmapPhaseDraft,
+  ): Promise<RoadmapPhaseDraftApprovalResult> {
+    const validated = validateRoadmapPhaseDraft(request);
+    if (!validated.ok) {
+      return {
+        status: "invalid-proposal",
+        message: `${validated.error.path}: ${validated.error.message}`,
+      };
+    }
+    const draft = validated.value;
+    const projectKey = canonicalProjectKey(cwd);
+    if (canonicalProjectKey(draft.projectKey) !== projectKey) {
+      return { status: "proposal-project-mismatch" };
+    }
+
+    const outcome = await this.withLockedCurrent<
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "created" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "stale-revision" }>
+      | Extract<RoadmapPhaseDraftApprovalResult, { status: "invalid-proposal" }>
+    >(cwd, async (paths, current) => {
+      if (current.revision !== draft.basedOnRevision) {
+        return {
+          status: "stale-revision",
+          expectedRevision: draft.basedOnRevision,
+          currentRevision: current.revision,
+        };
+      }
+
+      const timestamp = new Date().toISOString();
+      const document = structuredClone(current.document);
+      const firstOrder =
+        document.phases.reduce((maximum, phase) => Math.max(maximum, phase.order), -1) + 1;
+      const phases: NotesPhase[] = draft.phases.map((phase, index) => ({
+        id: phase.phaseId,
+        title: phase.title,
+        goal: phase.goal,
+        doneWhen: [...phase.doneWhen],
+        order: firstOrder + index,
+        status: "not-started",
+        sourcePrompt: phase.sourcePrompt,
+        referenceIds: [],
+        session: null,
+        reminder: null,
+        attentionReason: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: null,
+        archivedAt: null,
+        overrides: { status: null, referenceIds: null },
+        pendingAutomaticLifecycleTransition: null,
+        lifecycleEvents: [],
+        roadmapEvents: [],
+      }));
+      document.phases.push(...phases);
+      document.updatedAt = timestamp;
+
+      const notesValidation = validateNotesDocumentV3(document);
+      if (!notesValidation.ok) {
+        return {
+          status: "invalid-proposal",
+          message: `${notesValidation.error.path}: ${notesValidation.error.message}`,
+        };
+      }
+      const next = await this.commitDocument(paths, current, notesValidation.document, {
+        validationMode: "trusted",
+        context: "Approved phase creation commit",
+      });
+      return {
+        status: "created",
+        revision: next.revision,
+        phaseIds: phases.map((phase) => phase.id),
+      };
+    });
+
+    if (outcome.status === "missing") return { status: "notes-missing" };
+    if (outcome.status === "corrupt") return { status: "notes-corrupt" };
+    return outcome;
+  }
+
   async recordReminderDelivery(
     cwd: string,
     request: ProjectNotesReminderDeliveryRequest,
@@ -1359,6 +1474,77 @@ export class ProjectNotesRepository {
     });
   }
 
+  async resolveRoadmapBlocker(
+    cwd: string,
+    request: ProjectNotesRoadmapBlockerResolutionRequest,
+  ): Promise<ProjectNotesRoadmapBlockerResolutionOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const priorById = currentPhase.roadmapEvents.find(
+        (event) => event.id === request.resolutionId,
+      );
+      if (priorById) {
+        if (
+          priorById.type === "blocker-resolution" &&
+          priorById.blockerUpdateId === request.blockerUpdateId &&
+          priorById.resolver === request.resolver
+        ) {
+          return { status: "duplicate", revision, phaseId: request.phaseId };
+        }
+        return { status: "duplicate-id-conflict", revision };
+      }
+      if (
+        currentPhase.roadmapEvents.some(
+          (event) =>
+            event.type === "blocker-resolution" &&
+            event.blockerUpdateId === request.blockerUpdateId,
+        )
+      ) {
+        return { status: "already-resolved", revision, phaseId: request.phaseId };
+      }
+      if (request.expectedRevision !== revision) {
+        return { status: "stale-revision", revision };
+      }
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (!notesSessionLinksEqual(currentPhase.session, request.expectedSession)) {
+        return { status: "stale-session" };
+      }
+      const blocker = currentPhase.roadmapEvents.find(
+        (event): event is NotesRoadmapStatusUpdate =>
+          event.type === "status-update" &&
+          event.id === request.blockerUpdateId &&
+          event.transition === "blocked",
+      );
+      if (!blocker) return { status: "blocker-not-found" };
+
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      const timestamp = chronologicalRoadmapTimestamp(phase, request.timestamp);
+      const resolution: NotesRoadmapBlockerResolution = {
+        type: "blocker-resolution",
+        id: request.resolutionId,
+        blockerUpdateId: request.blockerUpdateId,
+        resolver: request.resolver,
+        timestamp,
+      };
+      phase.roadmapEvents.push(resolution);
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Blocker resolution created invalid Notes",
+      });
+      return {
+        status: "committed",
+        snapshot: toSnapshot(next),
+        phase: structuredClone(phase),
+      };
+    });
+  }
+
   async recordRoadmapStatusUpdate(
     cwd: string,
     request: ProjectNotesRoadmapStatusRequest,
@@ -1384,6 +1570,7 @@ export class ProjectNotesRepository {
           status: "duplicate",
           revision,
           phaseId: request.phaseId,
+          phase: structuredClone(currentPhase),
           statusOutcome: prior.statusOutcome,
           proposals: prior.proposedReferences.map(roadmapProposalOutcome),
         };
@@ -1404,6 +1591,20 @@ export class ProjectNotesRepository {
         !notesSessionLinksEqual(currentPhase.session, request.expectedSession)
       ) {
         return { status: "stale-session" };
+      }
+      if (request.actor === "gg-coder" && request.transition === "review") {
+        const readiness = evaluateActivePhaseReviewReadiness({
+          doneWhen: currentPhase.doneWhen,
+          evidence: request.evidence,
+          verification: request.verification,
+        });
+        if (!readiness.ready) {
+          return {
+            status: "verification-incomplete",
+            revision,
+            message: readiness.reason!,
+          };
+        }
       }
       const timestamp = chronologicalRoadmapTimestamp(currentPhase, request.timestamp);
       const referenceError = validateRoadmapProposedReferences(normalizedReferences, timestamp);
@@ -1797,6 +1998,7 @@ export class ProjectNotesRepository {
     cwd: string,
     phaseId: string,
     session: NotesSessionLink,
+    expectedPreviousSession?: NotesSessionLink,
   ): Promise<ProjectNotesPhaseLinkOutcome> {
     if (
       !session.sessionId.trim() ||
@@ -1804,9 +2006,14 @@ export class ProjectNotesRepository {
     ) {
       throw new Error("Cannot store an invalid phase session link.");
     }
-    return this.mutatePhaseLinkFields(cwd, phaseId, (phase) => {
-      phase.session = { ...session };
-    });
+    return this.mutatePhaseLinkFields(
+      cwd,
+      phaseId,
+      (phase) => {
+        phase.session = { ...session };
+      },
+      expectedPreviousSession,
+    );
   }
 
   async recordUserPhaseCancellation(
@@ -1897,6 +2104,24 @@ export class ProjectNotesRepository {
         return { status: "stale-session" };
       }
       if (currentPhase.overrides.status !== null) {
+        const existingPending = currentPhase.pendingAutomaticLifecycleTransition;
+        if (
+          existingPending !== null &&
+          existingPending.status === transition.status &&
+          existingPending.source === transition.source &&
+          existingPending.reason === transition.reason &&
+          existingPending.kind === transition.kind &&
+          notesSessionLinksEqual(
+            existingPending.expectedSession,
+            transition.expectedSession ?? null,
+          )
+        ) {
+          return {
+            status: "manual-override",
+            snapshot: toSnapshot(current),
+            phase: structuredClone(currentPhase),
+          };
+        }
         const document = structuredClone(current.document);
         const phase = document.phases[phaseIndex]!;
         const timestamp = chronologicalLifecycleTimestamp(phase, transition.timestamp);
@@ -1961,12 +2186,19 @@ export class ProjectNotesRepository {
     cwd: string,
     phaseId: string,
     mutate: (phase: NotesPhase) => void,
+    expectedSession?: NotesSessionLink,
   ): Promise<ProjectNotesPhaseLinkOutcome> {
     return this.withLockedCurrent(cwd, async (paths, current) => {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (
+        expectedSession !== undefined &&
+        !notesSessionLinksEqual(currentPhase.session, expectedSession)
+      ) {
+        return { status: "stale-session" };
+      }
       const document = structuredClone(current.document);
       const phase = document.phases[phaseIndex]!;
       mutate(phase);

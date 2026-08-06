@@ -19,3 +19,4 @@ export * from "./voice-transcriber.js";
 export * from "./auto-update.js";
 export * from "./project-notes.js";
 export * from "./phase-start-protocol.js";
+export * from "./roadmap-workflow.js";

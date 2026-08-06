@@ -7,6 +7,7 @@ import {
   NOTES_LIFECYCLE_EVENT_SOURCES,
   NOTES_PHASE_STATUSES,
   NOTES_ROADMAP_REFERENCE_POLICY_OUTCOMES,
+  NOTES_ROADMAP_REASON_MAX_LENGTH,
   canonicalProjectKey,
   canonicalReferenceIdentity,
   classifyLegacyNotesLifecycleEvent,
@@ -59,7 +60,8 @@ function protectedStatusReport(
     actor: "gg-coder",
     transition,
     progress: "Protected automatic status report",
-    blocker: transition === "blocked" ? "Waiting for verification" : null,
+    blocker: transition === "blocked" ? "Verification is pending" : null,
+    requiredExternalAction: transition === "blocked" ? "Run the focused verification" : null,
     evidence: [],
     verification: null,
     verificationReason: null,
@@ -416,6 +418,44 @@ describe("project Notes contract", () => {
     expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
   });
 
+  it("validates separate blocker reasons and required external actions on current blocked reports", async () => {
+    const document = await fixture();
+    const phase = document.phases[0]!;
+    const update = phase.roadmapEvents.find((event) => event.type === "status-update")!;
+    phase.roadmapEvents = [update];
+    update.transition = "blocked";
+    update.blocker = "A release owner has not approved the deployment";
+    update.requiredExternalAction = "Ask the release owner to approve the deployment";
+
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+
+    for (const [field, value] of [
+      ["blocker", "   "],
+      ["blocker", "x".repeat(NOTES_ROADMAP_REASON_MAX_LENGTH + 1)],
+      ["requiredExternalAction", "\t"],
+      ["requiredExternalAction", "x".repeat(NOTES_ROADMAP_REASON_MAX_LENGTH + 1)],
+    ] as const) {
+      const malformed = structuredClone(document);
+      const malformedUpdate = malformed.phases[0]!.roadmapEvents[0]!;
+      if (malformedUpdate.type !== "status-update") throw new Error("expected status update");
+      malformedUpdate[field] = value;
+      expectError(malformed, `phases[0].roadmapEvents[0].${field}`);
+    }
+  });
+
+  it.each(["blocker", "requiredExternalAction"] as const)(
+    "requires non-blocked reports to keep $0 null",
+    async (field) => {
+      const document = await fixture();
+      const update = document.phases[0]!.roadmapEvents.find(
+        (event) => event.type === "status-update",
+      )!;
+      update[field] = "Unexpected blocked-only detail";
+
+      expectError(document, `phases[0].roadmapEvents[0].${field}`);
+    },
+  );
+
   it("deterministically stabilizes missing and duplicate v2 task IDs", () => {
     const legacy = legacyV2();
 
@@ -487,6 +527,7 @@ describe("project Notes contract", () => {
     delete statusUpdate.verification;
     delete statusUpdate.verificationReason;
     delete statusUpdate.verificationSession;
+    delete statusUpdate.requiredExternalAction;
     const source = expected.references[0]!;
     statusUpdate.proposedReferences = [
       {
@@ -532,6 +573,7 @@ describe("project Notes contract", () => {
                 verification: null,
                 verificationReason: null,
                 verificationSession: null,
+                requiredExternalAction: null,
                 proposedReferences: [{ policyOutcome: "manual-review" }],
               },
             ],
@@ -560,6 +602,29 @@ describe("project Notes contract", () => {
     if (!migrated.ok) throw new Error(migrated.error.message);
     expect(migrated.document.phases[0]!.roadmapEvents).toMatchObject([
       { verificationSession: null },
+    ]);
+  });
+
+  it("migrates a legacy blocked report by preserving its blocker as the action fallback", async () => {
+    const legacy = await fixture();
+    const update = legacy.phases[0]!.roadmapEvents.find(
+      (event) => event.type === "status-update",
+    )! as unknown as Record<string, unknown>;
+    legacy.phases[0]!.roadmapEvents = [update as never];
+    update.transition = "blocked";
+    update.blocker = "Repository access is unavailable";
+    delete update.requiredExternalAction;
+
+    const migrated = migrateNotesDocumentV3PhaseShape(legacy);
+
+    expect(migrated.ok).toBe(true);
+    if (!migrated.ok) throw new Error(migrated.error.message);
+    expect(migrated.document.phases[0]!.roadmapEvents).toMatchObject([
+      {
+        transition: "blocked",
+        blocker: "Repository access is unavailable",
+        requiredExternalAction: "Repository access is unavailable",
+      },
     ]);
   });
 

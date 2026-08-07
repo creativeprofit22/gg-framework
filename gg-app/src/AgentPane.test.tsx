@@ -17,6 +17,7 @@ const nativeMocks = vi.hoisted(() => ({
   modelsChanged: null as null | (() => void),
   modelsUnlisten: vi.fn(),
   onSessionReset: null as null | ((operationId?: string) => void),
+  kenRunning: false,
   toast: vi.fn(),
   readDroppedFileAttachment: vi.fn(async (path: string) => ({
     path,
@@ -39,7 +40,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 vi.mock("./useKenMentor", () => ({
   useKenMentor: () => ({
-    kenRunning: false,
+    kenRunning: nativeMocks.kenRunning,
     kenTokens: 0,
     kenRunStartTs: null,
     kenIsThinking: false,
@@ -270,6 +271,7 @@ afterEach(() => {
   nativeMocks.modelsChanged = null;
   nativeMocks.modelsUnlisten.mockReset();
   nativeMocks.onSessionReset = null;
+  nativeMocks.kenRunning = false;
   nativeMocks.toast.mockReset();
   vi.useRealTimers();
 });
@@ -702,6 +704,87 @@ describe("AgentPane lifecycle", () => {
       expect(pane.sendPrompt).not.toHaveBeenCalled();
     },
   );
+
+  it("sends the Ken next quick action directly and adds a Ken-addressed bubble", async () => {
+    const pane = client("pane-ken-next", 1);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Ken, next?" }));
+
+    await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?"));
+    expect(pane.sendKenPrompt).toHaveBeenCalledOnce();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(document.querySelector(".user-msg.user-ken")?.textContent).toBe("@Ken next?");
+  });
+
+  it("preserves the current draft and attachments when asking Ken what is next", async () => {
+    const pane = client("pane-ken-next-draft", 1);
+    const actionsRef: { current: PaneInputActions | null } = { current: null };
+    render(
+      <AgentPane
+        client={pane}
+        registerInput={(_paneId, nextActions) => {
+          actionsRef.current = nextActions;
+        }}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "Keep this draft" } });
+    await waitFor(() => expect(actionsRef.current).toBeTruthy());
+
+    await act(async () => {
+      actionsRef.current?.handleNativeDrop(["/dropped/file.txt"]);
+      await Promise.resolve();
+    });
+    expect(await screen.findByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Ken, next?" }));
+
+    await waitFor(() => expect(pane.sendKenPrompt).toHaveBeenCalledWith("next?"));
+    expect((input as HTMLTextAreaElement).value).toBe("Keep this draft");
+    expect(screen.getByRole("button", { name: "Remove file.txt" })).toBeTruthy();
+  });
+
+  it("disables the Ken next quick action while Ken is running", async () => {
+    nativeMocks.kenRunning = true;
+    const pane = client("pane-ken-next-running", 1);
+    render(<AgentPane client={pane} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+
+    const quickAction = await screen.findByRole("button", { name: "Ken, next?" });
+    expect((quickAction as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(quickAction);
+    expect(pane.sendKenPrompt).not.toHaveBeenCalled();
+  });
+
+  it("disables the Ken next quick action while plan review blocks input", async () => {
+    const pane = client("pane-ken-next-plan", 1);
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
+    await waitFor(() =>
+      expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(false),
+    );
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+
+    act(() =>
+      handleEvent?.({
+        type: "plan_exit",
+        data: { planPath: "/plans/next.md", content: "## Steps\n1. Continue" },
+      }),
+    );
+
+    expect(await screen.findByRole("region", { name: "Plan approval required" })).toBeTruthy();
+    const quickAction = screen.getByRole("button", { name: "Ken, next?" });
+    expect((quickAction as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(quickAction);
+    expect(pane.sendKenPrompt).not.toHaveBeenCalled();
+  });
 
   it("registers pane-local native-drop staging without subscribing or mutating the title", async () => {
     const pane = client("pane-1", 1);

@@ -3783,6 +3783,40 @@ body {
   gap: 8px;
 }
 
+/* One-tap mentor follow-up. It stays at natural width while the textarea yields
+   on narrow panes, keeping the action reachable without growing the composer. */
+.ken-next-pill {
+  flex: 0 0 auto;
+  min-height: 24px;
+  margin-top: -1px;
+  padding: 3px 9px;
+  color: var(--ken);
+  font: 600 11px/1.4 var(--sans);
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--ken) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ken) 36%, var(--border));
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition:
+    color var(--t-fast),
+    background-color var(--t-fast),
+    border-color var(--t-fast),
+    opacity var(--t-fast);
+}
+.ken-next-pill:hover:not(:disabled) {
+  color: color-mix(in srgb, var(--ken) 84%, white);
+  background: color-mix(in srgb, var(--ken) 14%, transparent);
+  border-color: color-mix(in srgb, var(--ken) 62%, var(--border));
+}
+.ken-next-pill:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ken) 55%, transparent);
+  outline-offset: 2px;
+}
+.ken-next-pill:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
 /* Attach button (paperclip). The textarea's first line box is 15px×1.5 = 22.5px.
    The 28px button is taller, so nudge it up by half the difference to center its
    icon on the first text line instead of letting flex-start drop it low. */

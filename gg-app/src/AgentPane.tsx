@@ -2500,6 +2500,34 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setEnhanceHintVisible(true);
   }, [input, enhancing, hydrated, slashOpen, mentionOpen, scheduleDraft, enhancement]);
 
+  // Both typed `@Ken` prompts and composer quick actions use this path so Ken's
+  // transcript identity and transport stay identical. Quick actions opt out of
+  // clearing composer state, preserving the user's in-progress work.
+  function sendToKen(question: string, addressedText: string, preserveComposer = false): void {
+    const trimmedQuestion = question.trim();
+    const trimmedAddressedText = addressedText.trim();
+    if (
+      !readyRef.current ||
+      planReview !== null ||
+      !trimmedQuestion ||
+      !trimmedAddressedText
+    ) {
+      return;
+    }
+
+    recordHistory(trimmedAddressedText);
+    stickToBottomRef.current = true;
+    pushItem({ kind: "user", id: nextId(), text: trimmedAddressedText, ken: true });
+    if (!preserveComposer) {
+      setInput("");
+      setSlashIndex(0);
+      setMention(null);
+      setMentionedPaths([]);
+      setEnhancement(null);
+    }
+    void sendKenPrompt(trimmedQuestion);
+  }
+
   // Submit the current input together with any staged attachments. Images are
   // echoed inline in the user's bubble; all media is sent to the agent.
   function submit(): void {
@@ -2537,16 +2565,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const kenMatch = workspaceMode === "code" ? /^@(ken|supah)\b:?\s*/i.exec(trimmed) : null;
     if (kenMatch) {
       const question = trimmed.slice(kenMatch[0].length).trim();
-      if (!question) return;
-      recordHistory(trimmed);
-      stickToBottomRef.current = true;
-      pushItem({ kind: "user", id: nextId(), text: trimmed, ken: true });
-      setInput("");
-      setSlashIndex(0);
-      setMention(null);
-      setMentionedPaths([]);
-      setEnhancement(null);
-      void sendKenPrompt(question);
+      sendToKen(question, trimmed);
       return;
     }
 
@@ -3467,6 +3486,23 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               autoFocus
             />
           </div>
+          {workspaceMode === "code" && (
+            <button
+              type="button"
+              className="ken-next-pill"
+              title={
+                planReview !== null
+                  ? "Resolve the pending plan first"
+                  : kenRunning
+                    ? "Ken is already running"
+                    : "Ask Ken what to do next"
+              }
+              disabled={kenRunning || planReview !== null}
+              onClick={() => sendToKen("next?", "@Ken next?", true)}
+            >
+              Ken, next?
+            </button>
+          )}
         </div>
         {!enhanceAnim && (
           // Pill pinned to the center of the input box (.inputwrap) top border,

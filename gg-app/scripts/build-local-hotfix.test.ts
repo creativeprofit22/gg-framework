@@ -1,11 +1,15 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   freshInstallerForPlatform,
+  installerManifest,
+  PRODUCTION_IDENTITY,
   runWithCargoTomlRestored,
   tauriBuildArgs,
+  windowsNsisPayloadMetadata,
 } from "./build-local-hotfix.mjs";
 
 const temporaryDirectories: string[] = [];
@@ -25,10 +29,10 @@ function fixture(): { root: string; nsis: string } {
 }
 
 describe("local installer freshness", () => {
-  it("selects a Windows NSIS installer with an explicit post-build-start timestamp", () => {
+  it("selects the exact production Windows NSIS installer after build start", () => {
     const { root, nsis } = fixture();
     const startedAt = Date.now();
-    const installer = join(nsis, "Supah-Coder_1.2.3_x64-setup.exe");
+    const installer = join(nsis, "GG Coder_1.2.3_x64-setup.exe");
     writeFileSync(installer, "installer");
     const completedAt = new Date(startedAt + 1_000);
     utimesSync(installer, completedAt, completedAt);
@@ -36,14 +40,85 @@ describe("local installer freshness", () => {
     expect(freshInstallerForPlatform(root, "win32", startedAt)).toBe(installer);
   });
 
-  it("rejects a stale Windows installer from an earlier build", () => {
+  it("rejects stale and non-production Windows installers", () => {
     const { root, nsis } = fixture();
-    const installer = join(nsis, "old-setup.exe");
-    writeFileSync(installer, "old installer");
+    const staleInstaller = join(nsis, "GG Coder_1.2.3_x64-setup.exe");
+    const localForkInstaller = join(nsis, "GG Coder Local Fork_1.2.3_x64-setup.exe");
+    writeFileSync(staleInstaller, "stale installer");
+    writeFileSync(localForkInstaller, "wrong identity");
     const old = new Date(Date.now() - 60_000);
-    utimesSync(installer, old, old);
+    utimesSync(staleInstaller, old, old);
 
     expect(freshInstallerForPlatform(root, "win32", Date.now())).toBeNull();
+  });
+
+  it("rejects ambiguous fresh production installers", () => {
+    const { root, nsis } = fixture();
+    const startedAt = Date.now();
+    for (const name of ["GG Coder_1.2.3_x64-setup.exe", "GG Coder_1.2.4_x64-setup.exe"]) {
+      const installer = join(nsis, name);
+      writeFileSync(installer, name);
+      const completedAt = new Date(startedAt + 1_000);
+      utimesSync(installer, completedAt, completedAt);
+    }
+
+    expect(() => freshInstallerForPlatform(root, "win32", startedAt)).toThrow(
+      "multiple fresh production NSIS installers",
+    );
+  });
+});
+
+describe("local installer manifest", () => {
+  it("hashes the NSIS-patched payload bytes that Tauri embeds", () => {
+    const { root } = fixture();
+    const payload = join(root, "target", "release", "gg-app.exe");
+    mkdirSync(join(root, "target", "release"), { recursive: true });
+    const sourceBytes = Buffer.from("before__TAURI_BUNDLE_TYPE_VAR_UNKafter");
+    const installerBytes = Buffer.from("before__TAURI_BUNDLE_TYPE_VAR_NSSafter");
+    writeFileSync(payload, sourceBytes);
+
+    expect(windowsNsisPayloadMetadata(payload)).toEqual({
+      size: sourceBytes.length,
+      sha256: createHash("sha256").update(installerBytes).digest("hex"),
+    });
+  });
+
+  it("fails closed when the Tauri bundle marker is absent", () => {
+    const { root } = fixture();
+    const payload = join(root, "target", "release", "gg-app.exe");
+    mkdirSync(join(root, "target", "release"), { recursive: true });
+    writeFileSync(payload, "payload without marker");
+
+    expect(() => windowsNsisPayloadMetadata(payload)).toThrow(
+      "Expected exactly one unpatched Tauri bundle-type marker",
+    );
+  });
+
+  it("keeps installer compatibility fields and authenticates the production payload", () => {
+    const { root, nsis } = fixture();
+    const installer = join(nsis, "GG Coder_1.2.3_x64-setup.exe");
+    const payload = join(root, "target", "release", "gg-app.exe");
+    mkdirSync(join(root, "target", "release"), { recursive: true });
+    writeFileSync(installer, "installer bytes");
+    writeFileSync(payload, "payload bytes");
+
+    const manifest = installerManifest(installer, payload);
+
+    expect(manifest).toMatchObject({
+      path: installer,
+      size: Buffer.byteLength("installer bytes"),
+      schemaVersion: 1,
+      identity: PRODUCTION_IDENTITY,
+      payload: {
+        name: "gg-app.exe",
+        size: Buffer.byteLength("payload bytes"),
+      },
+    });
+    expect(manifest.mtimeMs).toBeGreaterThan(0);
+    expect(manifest.sha256).toBe(createHash("sha256").update("installer bytes").digest("hex"));
+    expect(manifest.payload.sha256).toBe(
+      createHash("sha256").update("payload bytes").digest("hex"),
+    );
   });
 });
 

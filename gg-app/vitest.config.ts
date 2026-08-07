@@ -6,6 +6,11 @@ export default defineConfig({
     // `scripts/**` covers the pure helpers of the packaged Windows smoke: the
     // smoke itself only runs on Windows, but its MSI-selection and
     // PID-ownership logic is safety-critical and must be verified on every OS.
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "scripts/**/*.test.mjs"],
+    include: [
+      "src/**/*.test.ts",
+      "src/**/*.test.tsx",
+      "scripts/**/*.test.mjs",
+      "scripts/**/*.test.ts",
+    ],
   },
 });

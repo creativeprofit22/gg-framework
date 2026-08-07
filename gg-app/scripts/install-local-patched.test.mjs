@@ -1,6 +1,14 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -21,6 +29,74 @@ function runPowerShell(body) {
   );
 }
 
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function productionManifest(installerPath, installerBytes, payloadBytes) {
+  return {
+    path: installerPath,
+    size: installerBytes.length,
+    mtimeMs: Date.now(),
+    sha256: sha256(installerBytes),
+    schemaVersion: 1,
+    identity: {
+      productName: "GG Coder",
+      identifier: "com.ggcoder.app",
+      mainBinaryName: "gg-app",
+      executableName: "gg-app.exe",
+      installMode: "currentUser",
+    },
+    payload: {
+      name: "gg-app.exe",
+      size: payloadBytes.length,
+      sha256: sha256(payloadBytes),
+    },
+  };
+}
+
+function installerFixture() {
+  const root = mkdtempSync(join(tmpdir(), "gg-installer-helper-"));
+  temporaryDirectories.push(root);
+  const installerRoot = join(root, "nsis");
+  mkdirSync(installerRoot);
+  const installerPath = join(installerRoot, "GG Coder_1.2.3_x64-setup.exe");
+  const installerBytes = Buffer.from("verified fixture installer", "utf8");
+  const payloadBytes = Buffer.from("verified fixture payload", "utf8");
+  writeFileSync(installerPath, installerBytes);
+  const metadataPath = join(root, "latest-installer.json");
+  const manifest = productionManifest(installerPath, installerBytes, payloadBytes);
+  writeFileSync(metadataPath, `${JSON.stringify(manifest)}\n`);
+  return {
+    root,
+    installerRoot,
+    installerPath,
+    installerBytes,
+    payloadBytes,
+    metadataPath,
+    manifest,
+  };
+}
+
+function transactionFixture() {
+  const fixture = installerFixture();
+  const installDirectory = join(fixture.root, "GG Coder");
+  const installedExecutable = join(installDirectory, "gg-app.exe");
+  const oldBytes = Buffer.from("previous official payload", "utf8");
+  mkdirSync(installDirectory);
+  writeFileSync(installedExecutable, oldBytes);
+  const logPath = join(fixture.root, "transaction.log");
+  return { ...fixture, installDirectory, installedExecutable, oldBytes, logPath };
+}
+
+function writeBytesPowerShell(path, bytes) {
+  return `[IO.File]::WriteAllBytes(${psLiteral(path)}, [Convert]::FromBase64String(${psLiteral(bytes.toString("base64"))}))`;
+}
+
+function transactionPrelude(fixture) {
+  return `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:registrationRestores = 0; function Get-ProductionRegistrationSnapshot { [pscustomobject]@{ Exists = $true; Values = @() } }; function Restore-ProductionRegistration([object]$Snapshot) { $script:registrationRestores += 1 }; $rawManifest = ${psLiteral(JSON.stringify(fixture.manifest))} | ConvertFrom-Json; $manifest = [pscustomobject]@{ Path = $rawManifest.path; PayloadSize = [int64]$rawManifest.payload.size; PayloadSha256 = [string]$rawManifest.payload.sha256 }; `;
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
@@ -30,77 +106,102 @@ afterEach(() => {
 const windowsDescribe = process.platform === "win32" ? describe : describe.skip;
 
 windowsDescribe("detached local installer helper", () => {
-  it("takes the installer path and SHA-256 from latest-installer metadata", () => {
-    const root = mkdtempSync(join(tmpdir(), "gg-installer-helper-"));
-    temporaryDirectories.push(root);
-    const installerRoot = join(root, "nsis");
-    mkdirSync(installerRoot);
-    const installerPath = join(installerRoot, "fixture-setup.exe");
-    const installerBytes = Buffer.from("verified fixture installer", "utf8");
-    writeFileSync(installerPath, installerBytes);
-    const sha256 = createHash("sha256").update(installerBytes).digest("hex");
-    const metadataPath = join(root, "latest-installer.json");
-    writeFileSync(
-      metadataPath,
-      `${JSON.stringify({ path: installerPath, size: installerBytes.length, sha256 })}\n`,
-    );
+  it("hashes files without relying on Get-FileHash", () => {
+    const fixture = installerFixture();
+    const fixturePath = join(fixture.root, "hash-fixture.bin");
+    const fixtureBytes = Buffer.from("portable SHA-256 fixture", "utf8");
+    writeFileSync(fixturePath, fixtureBytes);
 
     const result = runPowerShell(
-      `$result = Read-VerifiedInstallerMetadata -Path ${psLiteral(metadataPath)} -AllowedRoot ${psLiteral(installerRoot)}; $result | ConvertTo-Json -Compress`,
+      `function Get-FileHash { throw 'Get-FileHash must not be called' }; Get-Sha256 -Path ${psLiteral(fixturePath)}`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(sha256(fixtureBytes).toUpperCase());
+  });
+
+  it("validates the production identity and expected payload from the installer manifest", () => {
+    const fixture = installerFixture();
+
+    const result = runPowerShell(
+      `$result = Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)}; $result | ConvertTo-Json -Compress`,
     );
 
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout.trim())).toMatchObject({
-      Path: realpathSync.native(installerPath),
-      Sha256: sha256.toUpperCase(),
-      Size: installerBytes.length,
+      Path: realpathSync.native(fixture.installerPath),
+      Sha256: sha256(fixture.installerBytes).toUpperCase(),
+      Size: fixture.installerBytes.length,
+      ProductName: "GG Coder",
+      Identifier: "com.ggcoder.app",
+      MainBinaryName: "gg-app",
+      ExecutableName: "gg-app.exe",
+      InstallMode: "currentUser",
+      PayloadSize: fixture.payloadBytes.length,
+      PayloadSha256: sha256(fixture.payloadBytes).toUpperCase(),
     });
   });
 
-  it("rejects metadata whose SHA-256 does not match the installer", () => {
-    const root = mkdtempSync(join(tmpdir(), "gg-installer-helper-"));
-    temporaryDirectories.push(root);
-    const installerRoot = join(root, "nsis");
-    mkdirSync(installerRoot);
-    const installerPath = join(installerRoot, "fixture-setup.exe");
-    writeFileSync(installerPath, "different bytes");
-    const metadataPath = join(root, "latest-installer.json");
-    writeFileSync(
-      metadataPath,
-      `${JSON.stringify({ path: installerPath, sha256: "0".repeat(64) })}\n`,
-    );
+  it("rejects a manifest for a non-production identity", () => {
+    const fixture = installerFixture();
+    fixture.manifest.identity.identifier = "com.ggcoder.local-fork";
+    writeFileSync(fixture.metadataPath, JSON.stringify(fixture.manifest));
 
     const result = runPowerShell(
-      `Read-VerifiedInstallerMetadata -Path ${psLiteral(metadataPath)} -AllowedRoot ${psLiteral(installerRoot)}`,
+      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)}`,
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("production identity mismatch for identifier");
+  });
+
+  it("rejects a manifest whose SHA-256 does not match the installer", () => {
+    const fixture = installerFixture();
+    fixture.manifest.sha256 = "0".repeat(64);
+    writeFileSync(fixture.metadataPath, JSON.stringify(fixture.manifest));
+
+    const result = runPowerShell(
+      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)}`,
     );
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("Installer SHA-256 mismatch");
   });
 
-  it("rejects a metadata path outside the allowed NSIS output directory", () => {
-    const root = mkdtempSync(join(tmpdir(), "gg-installer-helper-"));
-    temporaryDirectories.push(root);
-    const installerRoot = join(root, "nsis");
-    mkdirSync(installerRoot);
-    const installerPath = join(root, "outside-setup.exe");
-    const installerBytes = Buffer.from("outside", "utf8");
-    writeFileSync(installerPath, installerBytes);
-    const metadataPath = join(root, "latest-installer.json");
-    writeFileSync(
-      metadataPath,
-      `${JSON.stringify({
-        path: installerPath,
-        sha256: createHash("sha256").update(installerBytes).digest("hex"),
-      })}\n`,
-    );
+  it("rejects a manifest path outside the allowed NSIS output directory", () => {
+    const fixture = installerFixture();
+    const outsidePath = join(fixture.root, "GG Coder_1.2.3_x64-setup.exe");
+    writeFileSync(outsidePath, fixture.installerBytes);
+    fixture.manifest.path = outsidePath;
+    writeFileSync(fixture.metadataPath, JSON.stringify(fixture.manifest));
 
     const result = runPowerShell(
-      `Read-VerifiedInstallerMetadata -Path ${psLiteral(metadataPath)} -AllowedRoot ${psLiteral(installerRoot)}`,
+      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)}`,
     );
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("outside the allowed NSIS output directory");
+  });
+
+  it("rejects unrelated current-user gg-app.exe processes", () => {
+    const result = runPowerShell(
+      `$official = [pscustomobject]@{ ProcessId = 101; ExecutablePath = 'C:\\Users\\me\\AppData\\Local\\GG Coder\\gg-app.exe' }; ` +
+        `$unrelated = [pscustomobject]@{ ProcessId = 202; ExecutablePath = 'D:\\Tools\\gg-app.exe' }; ` +
+        `Assert-NoUnrelatedGgAppProcesses -InstalledExecutable $official.ExecutablePath -Processes @($official, $unrelated)`,
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("unrelated current-user gg-app.exe");
+    expect(result.stderr).toContain("PID=202");
+  });
+
+  it("fails closed when gg-app.exe process enumeration is unavailable", () => {
+    const result = runPowerShell(
+      `function Get-CimInstance { throw 'simulated CIM failure' }; Get-CurrentUserGgAppProcesses`,
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Unable to enumerate gg-app.exe processes safely");
   });
 
   it("rejects an unbounded shutdown timeout before executing helper logic", () => {
@@ -152,5 +253,150 @@ windowsDescribe("detached local installer helper", () => {
     expect(noAcceptedClose.stderr).toContain("did not accept a graceful window close");
     expect(windowReturned.status).not.toBe(0);
     expect(windowReturned.stderr).toContain("still has a visible main window");
+  });
+
+  it("requires production uninstall registration at the official directory and binary", () => {
+    const fixture = transactionFixture();
+    const accepted = runPowerShell(
+      `function Get-ProductionUninstallRegistration { [pscustomobject]@{ DisplayName = 'GG Coder'; InstallLocation = ${psLiteral(`"${fixture.installDirectory}"`)}; MainBinaryName = 'gg-app.exe' } }; Assert-ProductionUninstallRegistration -InstallDirectory ${psLiteral(fixture.installDirectory)}; 'accepted'`,
+    );
+    const wrongBinary = runPowerShell(
+      `function Get-ProductionUninstallRegistration { [pscustomobject]@{ DisplayName = 'GG Coder'; InstallLocation = ${psLiteral(fixture.installDirectory)}; MainBinaryName = 'local-fork.exe' } }; Assert-ProductionUninstallRegistration -InstallDirectory ${psLiteral(fixture.installDirectory)}`,
+    );
+
+    expect(accepted.status, accepted.stderr).toBe(0);
+    expect(accepted.stdout.trim()).toBe("accepted");
+    expect(wrongBinary.status).not.toBe(0);
+    expect(wrongBinary.stderr).toContain("wrong main binary");
+  });
+
+  it("restores production registration values with their original registry types", () => {
+    const fixture = installerFixture();
+    const registryPath = `HKCU:\\Software\\GG Coder Tests\\${randomUUID()}`;
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(join(fixture.root, "registry.log"))}; $path = ${psLiteral(registryPath)}; try { ` +
+        `$null = New-Item -Path $path -Force; $null = New-ItemProperty -LiteralPath $path -Name 'Label' -Value 'original' -PropertyType String; $null = New-ItemProperty -LiteralPath $path -Name 'Count' -Value 42 -PropertyType DWord; ` +
+        `$snapshot = Get-ProductionRegistrationSnapshot -RegistrationPath $path; Remove-Item -LiteralPath $path -Recurse -Force; $null = New-Item -Path $path -Force; $null = New-ItemProperty -LiteralPath $path -Name 'Label' -Value 'mutated' -PropertyType String; ` +
+        `Restore-ProductionRegistration -Snapshot $snapshot -RegistrationPath $path; $key = Get-Item -LiteralPath $path; $values = Get-ItemProperty -LiteralPath $path; ` +
+        `[pscustomobject]@{ Label = $values.Label; Count = $values.Count; LabelKind = [string]$key.GetValueKind('Label'); CountKind = [string]$key.GetValueKind('Count') } | ConvertTo-Json -Compress ` +
+        `} finally { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      Label: "original",
+      Count: 42,
+      LabelKind: "String",
+      CountKind: "DWord",
+    });
+  });
+
+  it("installs the verified payload, restarts it, and removes the backup on success", () => {
+    const fixture = transactionFixture();
+    const body =
+      transactionPrelude(fixture) +
+      `$script:startCount = 0; ` +
+      `function Invoke-NsisInstaller([string]$InstallerPath) { New-Item -ItemType Directory -Path ${psLiteral(fixture.installDirectory)} | Out-Null; ${writeBytesPowerShell(fixture.installedExecutable, fixture.payloadBytes)}; return 0 }; ` +
+      `function Assert-ProductionUninstallRegistration([string]$InstallDirectory) {}; ` +
+      `function Start-VerifiedApp([string]$ExecutablePath, [ref]$LaunchedSnapshot) { $script:startCount += 1; $snapshot = [pscustomobject]@{ ProcessId = 700; ExecutablePath = $ExecutablePath; CreationTicks = 1 }; if ($LaunchedSnapshot) { $LaunchedSnapshot.Value = $snapshot }; return $snapshot }; ` +
+      `Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $true; ` +
+      `[pscustomobject]@{ Content = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes(${psLiteral(fixture.installedExecutable)})); Backups = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -Directory -Filter 'GG Coder.backup-*').Count; Starts = $script:startCount } | ConvertTo-Json -Compress`;
+
+    const result = runPowerShell(body);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      Content: fixture.payloadBytes.toString("utf8"),
+      Backups: 0,
+      Starts: 1,
+    });
+    expect(readFileSync(fixture.logPath, "utf8")).toContain(
+      "SUCCESS: installed and relaunched verified GG Coder",
+    );
+  });
+
+  it("rolls back a payload hash mismatch without restarting an app that was closed", () => {
+    const fixture = transactionFixture();
+    const tamperedBytes = Buffer.from("tampered payload", "utf8");
+    const body =
+      transactionPrelude(fixture) +
+      `$script:startCount = 0; ` +
+      `function Invoke-NsisInstaller([string]$InstallerPath) { New-Item -ItemType Directory -Path ${psLiteral(fixture.installDirectory)} | Out-Null; ${writeBytesPowerShell(fixture.installedExecutable, tamperedBytes)}; return 0 }; ` +
+      `function Start-VerifiedApp([string]$ExecutablePath, [ref]$LaunchedSnapshot) { $script:startCount += 1; return [pscustomobject]@{ ProcessId = 701 } }; ` +
+      `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $false } catch { $failure = $_.Exception.Message }; ` +
+      `[pscustomobject]@{ Failure = $failure; Content = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes(${psLiteral(fixture.installedExecutable)})); Backups = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -Directory -Filter 'GG Coder.backup-*').Count; Starts = $script:startCount } | ConvertTo-Json -Compress`;
+
+    const result = runPowerShell(body);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("previous install was restored"),
+      Content: fixture.oldBytes.toString("utf8"),
+      Backups: 0,
+      Starts: 0,
+    });
+  });
+
+  it("restores and restarts the previous app when the new app fails startup", () => {
+    const fixture = transactionFixture();
+    const body =
+      transactionPrelude(fixture) +
+      `$script:startCount = 0; $script:stopCount = 0; ` +
+      `function Invoke-NsisInstaller([string]$InstallerPath) { New-Item -ItemType Directory -Path ${psLiteral(fixture.installDirectory)} | Out-Null; ${writeBytesPowerShell(fixture.installedExecutable, fixture.payloadBytes)}; return 0 }; ` +
+      `function Assert-ProductionUninstallRegistration([string]$InstallDirectory) {}; ` +
+      `function Stop-LaunchedVerifiedRoot([object]$Snapshot, [string]$ExpectedExecutable) { if ($Snapshot) { $script:stopCount += 1 } }; ` +
+      `function Start-VerifiedApp([string]$ExecutablePath, [ref]$LaunchedSnapshot) { $script:startCount += 1; $snapshot = [pscustomobject]@{ ProcessId = 702; ExecutablePath = $ExecutablePath; CreationTicks = 2 }; if ($script:startCount -eq 1) { if ($LaunchedSnapshot) { $LaunchedSnapshot.Value = $snapshot }; throw 'simulated startup failure after launch' }; return $snapshot }; ` +
+      `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $true } catch { $failure = $_.Exception.Message }; ` +
+      `[pscustomobject]@{ Failure = $failure; Content = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes(${psLiteral(fixture.installedExecutable)})); Backups = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -Directory -Filter 'GG Coder.backup-*').Count; Starts = $script:startCount; Stops = $script:stopCount; RegistrationRestores = $script:registrationRestores } | ConvertTo-Json -Compress`;
+
+    const result = runPowerShell(body);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("previous install was restored"),
+      Content: fixture.oldBytes.toString("utf8"),
+      Backups: 0,
+      Starts: 2,
+      Stops: 1,
+      RegistrationRestores: 1,
+    });
+    expect(readFileSync(fixture.logPath, "utf8")).toContain("ROLLBACK SUCCESS");
+  });
+
+  it("preserves the backup and prints recovery instructions when rollback fails", () => {
+    const fixture = transactionFixture();
+    const partialBytes = Buffer.from("partial payload", "utf8");
+    const body =
+      transactionPrelude(fixture) +
+      `function Invoke-NsisInstaller([string]$InstallerPath) { New-Item -ItemType Directory -Path ${psLiteral(fixture.installDirectory)} | Out-Null; ${writeBytesPowerShell(fixture.installedExecutable, partialBytes)}; return 9 }; ` +
+      `function Remove-Item([string]$LiteralPath, [switch]$Recurse, [switch]$Force) { if ($LiteralPath -eq ${psLiteral(fixture.installDirectory)}) { throw 'simulated partial-directory removal failure' } }; ` +
+      `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $true } catch { $failure = $_.Exception.Message }; ` +
+      `$backup = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -Directory -Filter 'GG Coder.backup-*'); ` +
+      `[pscustomobject]@{ Failure = $failure; BackupCount = $backup.Count; BackupHasOldExecutable = if ($backup.Count -eq 1) { Test-Path -LiteralPath (Join-Path $backup[0].FullName 'gg-app.exe') } else { $false }; PartialStillExists = Test-Path -LiteralPath ${psLiteral(fixture.installedExecutable)} } | ConvertTo-Json -Compress`;
+
+    const result = runPowerShell(body);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("ROLLBACK FAILED"),
+      BackupCount: 1,
+      BackupHasOldExecutable: true,
+      PartialStillExists: true,
+    });
+    expect(JSON.parse(result.stdout.trim()).Failure).toContain("Manual recovery");
+  });
+
+  it("verifies the restored executable hash before declaring rollback success", () => {
+    const fixture = transactionFixture();
+    const expected = { Size: fixture.oldBytes.length, Sha256: sha256(fixture.oldBytes) };
+    writeFileSync(fixture.installedExecutable, "corrupted restored payload");
+
+    const result = runPowerShell(
+      `Assert-FileMatchesMetadata -Path ${psLiteral(fixture.installedExecutable)} -ExpectedSize ${expected.Size} -ExpectedSha256 ${psLiteral(expected.Sha256)} -Description 'Restored production executable'`,
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Restored production executable (size|SHA-256) mismatch/);
+    expect(existsSync(fixture.installedExecutable)).toBe(true);
   });
 });

@@ -4320,7 +4320,7 @@ async function createSession(
           // Claim the run NOW, synchronously. Everything below this line may
           // yield, and `running` does not flip until runAgent begins.
           claimedStart = runClaim.claim();
-          json(res, 202, { accepted: true });
+          json(res, 202, { queued: false, count: 0 });
           // Gate inputs captured around the run: whether this turn is a workflow
           // slash command (attachment prompts skip slash expansion entirely), and
           // how many assistant messages the run actually adds. Computed even when

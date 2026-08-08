@@ -15,9 +15,32 @@ export const CHAT_RESEARCH_COMMAND: ChatResearchCommandMetadata = Object.freeze(
   source: "built-in",
 });
 
+/** The complete chat slash-command catalog exposed by the app sidecar. */
+export const APP_SIDECAR_CHAT_COMMANDS = Object.freeze([CHAT_RESEARCH_COMMAND]);
+
 export interface ParsedChatResearchCommand {
   focus: string | null;
   displayText: string;
+}
+
+export type ChatResearchCommandRoute =
+  | { kind: "pass" }
+  | {
+      kind: "reject";
+      status: 409;
+      body: {
+        error: "research_attachments_unsupported" | "research_session_busy";
+        message: string;
+      };
+    }
+  | { kind: "start"; command: ParsedChatResearchCommand; continuationPrompt: string };
+
+export interface ChatResearchHandoffOperations<Session> {
+  session: Session;
+  switchToResearch(session: Session): Promise<void>;
+  persistAgentHandoff(session: Session, chatAgent: "research"): Promise<void>;
+  persistUserHint(session: Session, displayText: string): Promise<void>;
+  prompt(session: Session, continuationPrompt: string): Promise<void>;
 }
 
 /** Collapse formatting-only whitespace without changing the user's words or punctuation. */
@@ -66,4 +89,58 @@ Turn the explored ideas into an evidence-led proposal for the existing structure
 6. After submitting the draft, stop pending explicit user approval. Do not approve it, mutate Project Notes directly, start a phase, implement anything, or open a coding session.
 
 The only successful endpoint is either a researched draft awaiting explicit approval, a concise already-covered result, or one material clarification question.`;
+}
+
+/**
+ * Resolve the app-sidecar prompt-boundary behavior without touching session state.
+ * Attachment incompatibility is reported before busy state so invalid invocations are deterministic.
+ */
+export function resolveChatResearchCommandRoute(options: {
+  mode: "code" | "chat";
+  text: string;
+  attachmentCount: number;
+  busy: boolean;
+}): ChatResearchCommandRoute {
+  if (options.mode !== "chat") return { kind: "pass" };
+  const command = parseChatResearchCommand(options.text);
+  if (!command) return { kind: "pass" };
+
+  if (options.attachmentCount > 0) {
+    return {
+      kind: "reject",
+      status: 409,
+      body: {
+        error: "research_attachments_unsupported",
+        message: "Start /research without attachments.",
+      },
+    };
+  }
+  if (options.busy) {
+    return {
+      kind: "reject",
+      status: 409,
+      body: {
+        error: "research_session_busy",
+        message: "Wait for the current chat run to finish, then retry /research.",
+      },
+    };
+  }
+
+  return {
+    kind: "start",
+    command,
+    continuationPrompt: buildChatResearchContinuationPrompt(command.focus),
+  };
+}
+
+/** Execute the accepted same-session handoff in its persistence-critical order. */
+export async function executeChatResearchHandoff<Session>(
+  route: Extract<ChatResearchCommandRoute, { kind: "start" }>,
+  operations: ChatResearchHandoffOperations<Session>,
+): Promise<void> {
+  const { session } = operations;
+  await operations.switchToResearch(session);
+  await operations.persistAgentHandoff(session, "research");
+  await operations.persistUserHint(session, route.command.displayText);
+  await operations.prompt(session, route.continuationPrompt);
 }

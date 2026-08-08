@@ -235,6 +235,10 @@ import { latestVerificationExceptionForReview } from "./app-sidecar-phase-comple
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool-host.js";
 import {
+  appSidecarChatCommandsResponse,
+  handleAppSidecarChatResearchPrompt,
+} from "./app-sidecar-chat-research-route.js";
+import {
   createAppSidecarChatRoadmapSessionOptions,
   createAppSidecarCodingRoadmapSessionOptions,
 } from "./app-sidecar-roadmap-session-options.js";
@@ -4226,8 +4230,9 @@ async function createSession(
     }
 
     if (method === "GET" && url === "/commands") {
-      if (mode === "chat") {
-        json(res, 200, { commands: [] });
+      const chatCommands = appSidecarChatCommandsResponse(mode);
+      if (chatCommands) {
+        json(res, 200, chatCommands);
         return;
       }
       // Workflow commands with agent functionality: built-in prompt templates +
@@ -4339,6 +4344,41 @@ async function createSession(
             json(res, 400, { error: "empty prompt" });
             return;
           }
+
+          const handledResearch = await handleAppSidecarChatResearchPrompt({
+            mode,
+            text,
+            attachmentCount: attachments.length,
+            busy: running || runClaim.active || autopilotActive || runLifecycle.running,
+            claimStart: () => {
+              // `/research` is a fail-fast transition, never mid-run steering. Claim
+              // synchronously before any switch or persistence operation can yield.
+              claimedStart = runClaim.claim();
+              return claimedStart;
+            },
+            respond: ({ status, body }) => json(res, status, body),
+            runAgent,
+            operations: {
+              session,
+              switchToResearch: async (activeSession) => {
+                const changed = await switchChatAgent(activeSession, "research", false);
+                chatAgent = "research";
+                if (changed) broadcast("chat_agent_change", { chatAgent });
+              },
+              persistAgentHandoff: (activeSession, nextAgent) =>
+                activeSession.persistAppMarker("agent_handoff", { chatAgent: nextAgent }),
+              persistUserHint: (activeSession, displayText) =>
+                activeSession.persistAppMarker("user_hint", { command: displayText }, 1),
+              prompt: async (activeSession, continuationPrompt) => {
+                if (activeSession !== session) {
+                  throw new Error("Research handoff changed logical sessions");
+                }
+                await promptActiveSession(continuationPrompt);
+              },
+            },
+          });
+          if (handledResearch) return;
+
           if (
             runLifecycle.running &&
             runLifecycle.isCancellationRequested(runLifecycle.generation)

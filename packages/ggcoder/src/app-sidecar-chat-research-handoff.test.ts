@@ -1,9 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  APP_SIDECAR_CHAT_COMMANDS,
   buildChatResearchContinuationPrompt,
   CHAT_RESEARCH_COMMAND,
+  executeChatResearchHandoff,
   normalizeChatResearchFocus,
   parseChatResearchCommand,
+  resolveChatResearchCommandRoute,
 } from "./app-sidecar-chat-research-handoff.js";
 
 describe("chat Research command", () => {
@@ -15,6 +18,7 @@ describe("chat Research command", () => {
       usage: "/research [optional focus]",
       source: "built-in",
     });
+    expect(APP_SIDECAR_CHAT_COMMANDS).toEqual([CHAT_RESEARCH_COMMAND]);
   });
 
   it("recognizes only the exact case-sensitive command token", () => {
@@ -87,4 +91,155 @@ describe("buildChatResearchContinuationPrompt", () => {
     expect(prompt).toContain("implement anything");
     expect(prompt).toContain("open a coding session");
   });
+});
+
+describe("app-sidecar chat Research routing", () => {
+  it("routes an idle attachment-free chat command with its optional focus", () => {
+    const route = resolveChatResearchCommandRoute({
+      mode: "chat",
+      text: "  /research   approval UX  ",
+      attachmentCount: 0,
+      busy: false,
+    });
+
+    expect(route.kind).toBe("start");
+    if (route.kind !== "start") throw new Error("expected Research route");
+    expect(route.command).toEqual({
+      focus: "approval UX",
+      displayText: "/research approval UX",
+    });
+    expect(route.continuationPrompt).toContain("<research_focus>approval UX</research_focus>");
+  });
+
+  it("rejects attachments before busy state and never produces an executable route", () => {
+    expect(
+      resolveChatResearchCommandRoute({
+        mode: "chat",
+        text: "/research citations",
+        attachmentCount: 1,
+        busy: true,
+      }),
+    ).toEqual({
+      kind: "reject",
+      status: 409,
+      body: {
+        error: "research_attachments_unsupported",
+        message: "Start /research without attachments.",
+      },
+    });
+
+    expect(
+      resolveChatResearchCommandRoute({
+        mode: "chat",
+        text: "/research",
+        attachmentCount: 0,
+        busy: true,
+      }),
+    ).toMatchObject({
+      kind: "reject",
+      body: { error: "research_session_busy" },
+    });
+  });
+
+  it("leaves coding prompts, ordinary chat prompts, and near-match slash text unchanged", () => {
+    for (const input of [
+      { mode: "code" as const, text: "/research roadmap" },
+      { mode: "chat" as const, text: "research roadmap" },
+      { mode: "chat" as const, text: "/Research roadmap" },
+      { mode: "chat" as const, text: "/researcher roadmap" },
+      { mode: "chat" as const, text: "Please research the roadmap" },
+    ]) {
+      expect(
+        resolveChatResearchCommandRoute({
+          ...input,
+          attachmentCount: 0,
+          busy: false,
+        }),
+        input.text,
+      ).toEqual({ kind: "pass" });
+    }
+  });
+
+  it("switches, persists handoff and short hint, then sends only the hidden prompt", async () => {
+    const route = resolveChatResearchCommandRoute({
+      mode: "chat",
+      text: "/research   citations and UX",
+      attachmentCount: 0,
+      busy: false,
+    });
+    if (route.kind !== "start") throw new Error("expected Research route");
+
+    const session = { id: "same-logical-session" };
+    const seenSessions: Array<typeof session> = [];
+    const events: string[] = [];
+    let restoredUserText = "";
+    let modelPrompt = "";
+
+    await executeChatResearchHandoff(route, {
+      session,
+      switchToResearch: async (active) => {
+        seenSessions.push(active);
+        events.push("switch:research");
+      },
+      persistAgentHandoff: async (active, nextAgent) => {
+        seenSessions.push(active);
+        events.push(`marker:${nextAgent}`);
+      },
+      persistUserHint: async (active, displayText) => {
+        seenSessions.push(active);
+        restoredUserText = displayText;
+        events.push(`hint:${displayText}`);
+      },
+      prompt: async (active, continuationPrompt) => {
+        seenSessions.push(active);
+        modelPrompt = continuationPrompt;
+        events.push("prompt:hidden");
+      },
+    });
+
+    expect(events).toEqual([
+      "switch:research",
+      "marker:research",
+      "hint:/research citations and UX",
+      "prompt:hidden",
+    ]);
+    expect(restoredUserText).toBe("/research citations and UX");
+    expect(modelPrompt).toBe(route.continuationPrompt);
+    expect(modelPrompt).not.toContain("/research citations and UX");
+    expect(modelPrompt).toContain("<research_focus>citations and UX</research_focus>");
+    expect(seenSessions).toEqual([session, session, session, session]);
+  });
+
+  it.each(["switch", "marker", "hint", "prompt"] as const)(
+    "stops immediately when the %s operation fails",
+    async (failurePoint) => {
+      const route = resolveChatResearchCommandRoute({
+        mode: "chat",
+        text: "/research",
+        attachmentCount: 0,
+        busy: false,
+      });
+      if (route.kind !== "start") throw new Error("expected Research route");
+
+      const calls: string[] = [];
+      const operation = (name: (typeof calls)[number]) =>
+        vi.fn(async () => {
+          calls.push(name);
+          if (name === failurePoint) throw new Error(`${name} failed`);
+        });
+
+      await expect(
+        executeChatResearchHandoff(route, {
+          session: {},
+          switchToResearch: operation("switch"),
+          persistAgentHandoff: operation("marker"),
+          persistUserHint: operation("hint"),
+          prompt: operation("prompt"),
+        }),
+      ).rejects.toThrow(`${failurePoint} failed`);
+
+      const failureIndex = ["switch", "marker", "hint", "prompt"].indexOf(failurePoint);
+      expect(calls).toEqual(["switch", "marker", "hint", "prompt"].slice(0, failureIndex + 1));
+    },
+  );
 });

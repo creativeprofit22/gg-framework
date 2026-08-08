@@ -16,6 +16,16 @@ import {
 } from "./research.js";
 import { THERAPIST_CHAT_SYSTEM_PROMPT } from "./therapist.js";
 
+const RESEARCH_REMOVED_TOOL_NAMES = [
+  "remember",
+  "update_memory",
+  "forget",
+  "set_jiwa",
+  "update_jiwa",
+  "forget_jiwa",
+  "delegate_to_agent",
+] as const;
+
 const RESEARCH_PROHIBITED_TOOL_NAMES = [
   "bash",
   "edit",
@@ -34,6 +44,7 @@ const RESEARCH_PROHIBITED_TOOL_NAMES = [
   "list_agents",
   "interrupt_agent",
   "generate_image",
+  ...RESEARCH_REMOVED_TOOL_NAMES,
 ] as const;
 
 function optionsFor(agentId: "therapist" | "research"): AgentSessionOptions {
@@ -72,6 +83,12 @@ describe("specialist chat agents", () => {
     expect(options.additionalTools?.map((tool) => tool.name)).toContain("delegate_to_agent");
     expect(options.systemPrompt).toContain("available read-only research tools");
     expect(options.systemPrompt).toContain("Do not edit or create files");
+    expect(options.systemPrompt).not.toContain("Durable memory curation:");
+    expect(options.systemPrompt).not.toContain("Jiwa curation:");
+    expect(options.systemPrompt).not.toContain("delegate_to_agent");
+    for (const toolName of RESEARCH_REMOVED_TOOL_NAMES) {
+      expect(options.systemPrompt).not.toContain(toolName);
+    }
     expect(RESEARCH_CHAT_ALLOWED_TOOL_NAMES).toEqual([
       "read",
       "find",
@@ -82,13 +99,6 @@ describe("specialist chat agents", () => {
       "web_fetch",
       "web_search",
       "tool_search",
-      "remember",
-      "update_memory",
-      "forget",
-      "set_jiwa",
-      "update_jiwa",
-      "forget_jiwa",
-      "delegate_to_agent",
       "roadmap_inspect",
       "roadmap_phase_draft",
     ]);
@@ -172,14 +182,9 @@ describe("specialist chat agents", () => {
       parameters: z.object({}),
       execute: () => `${name} executed`,
     });
-    const contextToolNames = [
-      "remember",
-      "update_memory",
-      "forget",
-      "set_jiwa",
-      "update_jiwa",
-      "forget_jiwa",
-    ];
+    const contextToolNames = RESEARCH_REMOVED_TOOL_NAMES.filter(
+      (name) => name !== "delegate_to_agent",
+    );
     const futureMutator = makeTool("future_mutating_tool");
     const roadmapTools: AgentTool[] = [
       {
@@ -236,7 +241,17 @@ describe("specialist chat agents", () => {
       const staleFutureMutator = internals.tools.find(
         (tool) => tool.name === "future_mutating_tool",
       );
+      const staleRemovedTools = new Map(
+        RESEARCH_REMOVED_TOOL_NAMES.map((name) => [
+          name,
+          internals.tools.find((tool) => tool.name === name),
+        ]),
+      );
+      const expectedResearchTools = RESEARCH_CHAT_ALLOWED_TOOL_NAMES.filter(
+        (name) => brainstormTools.includes(name) || name.startsWith("roadmap_"),
+      ).sort();
       expect(staleFutureMutator).toBeDefined();
+      for (const tool of staleRemovedTools.values()) expect(tool).toBeDefined();
       expect(scopedNames()).toEqual([]);
       expect(allNames()).toEqual(expect.arrayContaining(["bash", "edit", "write", "tasks"]));
       expect(systemPrompt()).toContain("shared memory sentinel");
@@ -246,26 +261,21 @@ describe("specialist chat agents", () => {
       expect(scopedNames()).toEqual(["roadmap_inspect", "roadmap_phase_draft"]);
       expect(prohibitedNames()).toEqual([]);
       expect(unexpectedResearchTools()).toEqual([]);
-      expect(allNames()).toEqual(
-        expect.arrayContaining([
-          "read",
-          "find",
-          "grep",
-          "code_search",
-          "ls",
-          "source_path",
-          "web_fetch",
-          "delegate_to_agent",
-          ...contextToolNames,
-        ]),
-      );
-      expect(allNames()).not.toContain("future_mutating_tool");
+      expect(allNames()).toEqual(expectedResearchTools);
+      expect(systemPrompt()).not.toContain("Durable memory curation:");
+      expect(systemPrompt()).not.toContain("Jiwa curation:");
+      expect(systemPrompt()).not.toContain("delegate_to_agent");
       await expect(
         staleFutureMutator?.execute(
           {},
           { signal: new AbortController().signal, toolCallId: "stale-future" },
         ),
       ).rejects.toThrow("future_mutating_tool is unavailable while Research Agent is active");
+      for (const [name, tool] of staleRemovedTools) {
+        await expect(
+          tool?.execute({}, { signal: new AbortController().signal, toolCallId: `stale-${name}` }),
+        ).rejects.toThrow(`${name} is unavailable while Research Agent is active`);
+      }
       expect(agent.getMessages().slice(1)).toEqual(conversation);
 
       const lateMutator = makeTool("late_future_mutating_tool");
@@ -276,7 +286,9 @@ describe("specialist chat agents", () => {
       agent.registerTool(kencodeMcp);
       expect(allNames()).not.toContain("late_future_mutating_tool");
       expect(allNames()).not.toContain("mcp__unknown-mutator__write");
-      expect(allNames()).toContain("mcp__kencode-search__searchCode");
+      expect(allNames()).toEqual(
+        [...expectedResearchTools, "mcp__kencode-search__searchCode"].sort(),
+      );
 
       const staleInspectTool = internals.tools.find((tool) => tool.name === "roadmap_inspect");
       expect(staleInspectTool).toBeDefined();

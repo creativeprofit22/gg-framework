@@ -1,6 +1,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
+import { commitChatResearchTransition } from "./app-sidecar-chat-research-handoff.js";
 import {
   appSidecarChatCommandsResponse,
   handleAppSidecarChatResearchPrompt,
@@ -131,22 +132,31 @@ async function startRouteHarness(
           },
           operations: {
             session: state.session,
-            switchToResearch: async (session) => {
-              state.seenSessions.push(session);
-              state.events.push("switch:research");
-              fail("switch");
-              session.specialist = "research";
-            },
-            persistAgentHandoff: async (session, chatAgent) => {
-              state.seenSessions.push(session);
-              state.events.push(`marker:${chatAgent}`);
-              fail("marker");
-              session.markers.push({
-                kind: "agent_handoff",
-                data: { chatAgent },
-                afterMessageCount: session.messages.length,
-              });
-            },
+            commitResearchTransition: (session) =>
+              commitChatResearchTransition({
+                session,
+                previousAgent: session.specialist,
+                researchAgent: "research" as const,
+                switchAgent: async (active, nextAgent) => {
+                  state.seenSessions.push(active);
+                  state.events.push(`switch:${nextAgent}`);
+                  const changed = active.specialist !== nextAgent;
+                  active.specialist = nextAgent;
+                  if (nextAgent === "research") fail("switch");
+                  return changed;
+                },
+                persistAgentHandoff: async (active) => {
+                  state.seenSessions.push(active);
+                  state.events.push("marker:research");
+                  fail("marker");
+                  active.markers.push({
+                    kind: "agent_handoff",
+                    data: { chatAgent: "research" },
+                    afterMessageCount: active.messages.length,
+                  });
+                },
+                onCommitted: () => state.events.push("publish:research"),
+              }),
             persistUserHint: async (session, displayText) => {
               state.seenSessions.push(session);
               state.events.push(`hint:${displayText}`);
@@ -244,6 +254,7 @@ describe("app-sidecar chat Research HTTP routes", () => {
     expect(state.events).toEqual([
       "switch:research",
       "marker:research",
+      "publish:research",
       "hint:/research citations and UX",
       "prompt:hidden",
     ]);
@@ -299,7 +310,7 @@ describe("app-sidecar chat Research HTTP routes", () => {
   });
 
   it.each(["switch", "marker", "hint", "prompt"] as const)(
-    "surfaces a %s failure and does not execute later handoff operations",
+    "surfaces a %s failure without splitting live and restart agent state",
     async (failurePoint) => {
       const { baseUrl, state } = await startRouteHarness("chat", { failurePoint });
 
@@ -308,12 +319,31 @@ describe("app-sidecar chat Research HTTP routes", () => {
         body: { queued: false, count: 0 },
       });
 
-      const sequence = ["switch:research", "marker:research", "hint:/research", "prompt:hidden"];
-      const failureIndex = ["switch", "marker", "hint", "prompt"].indexOf(failurePoint);
-      expect(state.events).toEqual(sequence.slice(0, failureIndex + 1));
+      const expectedEvents = {
+        switch: ["switch:research", "switch:general"],
+        marker: ["switch:research", "marker:research", "switch:general"],
+        hint: ["switch:research", "marker:research", "publish:research", "hint:/research"],
+        prompt: [
+          "switch:research",
+          "marker:research",
+          "publish:research",
+          "hint:/research",
+          "prompt:hidden",
+        ],
+      };
+      expect(state.events).toEqual(expectedEvents[failurePoint]);
       expect(state.runErrors).toEqual([`${failurePoint} failed`]);
       expect(state.session.messages).toEqual([]);
       expect(state.queue).toEqual([]);
+
+      const restoredAgent = [...state.session.markers]
+        .reverse()
+        .find((marker) => marker.kind === "agent_handoff")?.data.chatAgent;
+      const expectedAgent =
+        failurePoint === "switch" || failurePoint === "marker" ? "general" : "research";
+      expect(state.session.specialist).toBe(expectedAgent);
+      expect(restoredAgent ?? "general").toBe(expectedAgent);
+      expect(state.events.includes("publish:research")).toBe(expectedAgent === "research");
     },
   );
 

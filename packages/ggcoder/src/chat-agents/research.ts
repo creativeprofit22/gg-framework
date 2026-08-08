@@ -6,9 +6,8 @@ export const RESEARCH_CHAT_AGENT_ID = "research" as const;
 /**
  * Positive capability boundary for Research.
  *
- * Memory/Jiwa tools are retained because chat continuity is an explicit product
- * capability; delegation is retained so Research can hand the same conversation
- * back to another specialist. Roadmap draft tools only stage reviewable proposals.
+ * Only read-only evidence gathering and review-gated Roadmap drafting belong here.
+ * The live AgentSession policy also applies this allowlist to stale and late tools.
  */
 export const RESEARCH_CHAT_ALLOWED_TOOL_NAMES = [
   // Workspace and web evidence
@@ -21,15 +20,6 @@ export const RESEARCH_CHAT_ALLOWED_TOOL_NAMES = [
   "web_fetch",
   "web_search",
   "tool_search",
-  // Durable chat context
-  "remember",
-  "update_memory",
-  "forget",
-  "set_jiwa",
-  "update_jiwa",
-  "forget_jiwa",
-  // Same-session specialist handoff
-  "delegate_to_agent",
   // Structured Project Notes review boundary
   "roadmap_inspect",
   "roadmap_phase_draft",

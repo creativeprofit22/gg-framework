@@ -234,6 +234,7 @@ import {
 import { latestVerificationExceptionForReview } from "./app-sidecar-phase-completion.js";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool-host.js";
+import { commitChatResearchTransition } from "./app-sidecar-chat-research-handoff.js";
 import {
   appSidecarChatCommandsResponse,
   handleAppSidecarChatResearchPrompt,
@@ -4360,13 +4361,22 @@ async function createSession(
             runAgent,
             operations: {
               session,
-              switchToResearch: async (activeSession) => {
-                const changed = await switchChatAgent(activeSession, "research", false);
-                chatAgent = "research";
-                if (changed) broadcast("chat_agent_change", { chatAgent });
-              },
-              persistAgentHandoff: (activeSession, nextAgent) =>
-                activeSession.persistAppMarker("agent_handoff", { chatAgent: nextAgent }),
+              commitResearchTransition: (activeSession) =>
+                commitChatResearchTransition({
+                  session: activeSession,
+                  previousAgent: chatAgent,
+                  researchAgent: "research" as const,
+                  switchAgent: (targetSession, nextAgent) =>
+                    switchChatAgent(targetSession, nextAgent, false),
+                  persistAgentHandoff: (targetSession) =>
+                    targetSession.persistAppMarker("agent_handoff", {
+                      chatAgent: "research",
+                    }),
+                  onCommitted: (changed) => {
+                    chatAgent = "research";
+                    if (changed) broadcast("chat_agent_change", { chatAgent });
+                  },
+                }),
               persistUserHint: (activeSession, displayText) =>
                 activeSession.persistAppMarker("user_hint", { command: displayText }, 1),
               prompt: async (activeSession, continuationPrompt) => {

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { z } from "zod";
 import {
+  commitChatResearchTransition,
   executeChatResearchHandoff,
   resolveChatResearchCommandRoute,
 } from "./app-sidecar-chat-research-handoff.js";
@@ -133,9 +134,15 @@ describe("chat Research restart restoration", () => {
     const liveHistoryBeforeHandoff = live.getMessages().slice(1);
     await executeChatResearchHandoff(route, {
       session: live,
-      switchToResearch: (session) => switchChatAgent(session, "research", false).then(() => {}),
-      persistAgentHandoff: (session, chatAgent) =>
-        session.persistAppMarker("agent_handoff", { chatAgent }),
+      commitResearchTransition: (session) =>
+        commitChatResearchTransition({
+          session,
+          previousAgent: "general" as const,
+          researchAgent: "research" as const,
+          switchAgent: (active, nextAgent) => switchChatAgent(active, nextAgent, false),
+          persistAgentHandoff: (active) =>
+            active.persistAppMarker("agent_handoff", { chatAgent: "research" }),
+        }),
       persistUserHint: (session, command) => session.persistAppMarker("user_hint", { command }, 1),
       prompt: (session, prompt) => session.prompt(prompt),
     });
@@ -200,4 +207,63 @@ describe("chat Research restart restoration", () => {
       await restarted.dispose();
     }
   }, 45_000);
+
+  it.each(["switch", "marker"] as const)(
+    "keeps live and restarted sessions on Brainstorm when the %s step fails",
+    async (failurePoint) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-chat-research-rollback-"));
+      tempDirs.push(root);
+      await fs.mkdir(path.join(root, "project"), { recursive: true });
+
+      const live = createChatAgent("general", chatOptions(root));
+      await live.initialize();
+      await live.prompt("Brainstorm context sentinel");
+      const sessionPath = live.getState().sessionPath;
+      const sessionManager = Reflect.get(live, "sessionManager") as {
+        appendEntry: (...args: unknown[]) => Promise<unknown>;
+      };
+      const appendEntrySpy = vi.spyOn(sessionManager, "appendEntry");
+      if (failurePoint === "marker") {
+        appendEntrySpy.mockRejectedValueOnce(new Error("marker failed"));
+      }
+
+      await expect(
+        commitChatResearchTransition({
+          session: live,
+          previousAgent: "general" as const,
+          researchAgent: "research" as const,
+          switchAgent: async (session, nextAgent) => {
+            const changed = await switchChatAgent(session, nextAgent, false);
+            if (failurePoint === "switch" && nextAgent === "research") {
+              throw new Error("switch failed");
+            }
+            return changed;
+          },
+          persistAgentHandoff: (session) =>
+            session.persistAppMarker("agent_handoff", { chatAgent: "research" }),
+        }),
+      ).rejects.toThrow(`${failurePoint} failed`);
+      appendEntrySpy.mockRestore();
+
+      expect(policySnapshot(live).roadmapTools).toEqual([]);
+      expect(live.getAppMarkers().filter((marker) => marker.kind === "agent_handoff")).toEqual([]);
+      await live.dispose();
+
+      const restarted = createChatAgent("general", chatOptions(root, sessionPath));
+      try {
+        await restarted.initialize();
+        const handoff = [...restarted.getAppMarkers()]
+          .reverse()
+          .find((marker) => marker.kind === "agent_handoff");
+        const restoredAgent = parseChatAgentId(handoff?.data.chatAgent);
+        await switchChatAgent(restarted, restoredAgent, false);
+
+        expect(restoredAgent).toBe("general");
+        expect(policySnapshot(restarted).roadmapTools).toEqual([]);
+      } finally {
+        await restarted.dispose();
+      }
+    },
+    45_000,
+  );
 });

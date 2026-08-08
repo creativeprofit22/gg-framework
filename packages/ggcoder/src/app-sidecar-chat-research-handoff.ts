@@ -37,10 +37,42 @@ export type ChatResearchCommandRoute =
 
 export interface ChatResearchHandoffOperations<Session> {
   session: Session;
-  switchToResearch(session: Session): Promise<void>;
-  persistAgentHandoff(session: Session, chatAgent: "research"): Promise<void>;
+  commitResearchTransition(session: Session): Promise<void>;
   persistUserHint(session: Session, displayText: string): Promise<void>;
   prompt(session: Session, continuationPrompt: string): Promise<void>;
+}
+
+export interface ChatResearchTransitionOperations<Session, Agent> {
+  session: Session;
+  previousAgent: Agent;
+  researchAgent: Agent;
+  switchAgent(session: Session, agent: Agent): Promise<boolean>;
+  persistAgentHandoff(session: Session): Promise<void>;
+  onCommitted?(changed: boolean): void;
+}
+
+/** Switch and persist as one transition, compensating to the prior live agent on failure. */
+export async function commitChatResearchTransition<Session, Agent>(
+  operations: ChatResearchTransitionOperations<Session, Agent>,
+): Promise<void> {
+  const { session } = operations;
+  let changed = false;
+  try {
+    changed = await operations.switchAgent(session, operations.researchAgent);
+    await operations.persistAgentHandoff(session);
+  } catch (transitionError) {
+    try {
+      await operations.switchAgent(session, operations.previousAgent);
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [transitionError, rollbackError],
+        "Research agent transition failed and could not restore the previous agent",
+      );
+    }
+    throw transitionError;
+  }
+
+  operations.onCommitted?.(changed);
 }
 
 /** Collapse formatting-only whitespace without changing the user's words or punctuation. */
@@ -133,14 +165,13 @@ export function resolveChatResearchCommandRoute(options: {
   };
 }
 
-/** Execute the accepted same-session handoff in its persistence-critical order. */
+/** Execute the accepted same-session handoff around one committed agent transition. */
 export async function executeChatResearchHandoff<Session>(
   route: Extract<ChatResearchCommandRoute, { kind: "start" }>,
   operations: ChatResearchHandoffOperations<Session>,
 ): Promise<void> {
   const { session } = operations;
-  await operations.switchToResearch(session);
-  await operations.persistAgentHandoff(session, "research");
+  await operations.commitResearchTransition(session);
   await operations.persistUserHint(session, route.command.displayText);
   await operations.prompt(session, route.continuationPrompt);
 }

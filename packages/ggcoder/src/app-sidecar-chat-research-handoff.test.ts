@@ -3,6 +3,7 @@ import {
   APP_SIDECAR_CHAT_COMMANDS,
   buildChatResearchContinuationPrompt,
   CHAT_RESEARCH_COMMAND,
+  commitChatResearchTransition,
   executeChatResearchHandoff,
   normalizeChatResearchFocus,
   parseChatResearchCommand,
@@ -160,7 +161,7 @@ describe("app-sidecar chat Research routing", () => {
     }
   });
 
-  it("switches, persists handoff and short hint, then sends only the hidden prompt", async () => {
+  it("commits the switch and marker before publishing state or continuing", async () => {
     const route = resolveChatResearchCommandRoute({
       mode: "chat",
       text: "/research   citations and UX",
@@ -177,14 +178,22 @@ describe("app-sidecar chat Research routing", () => {
 
     await executeChatResearchHandoff(route, {
       session,
-      switchToResearch: async (active) => {
-        seenSessions.push(active);
-        events.push("switch:research");
-      },
-      persistAgentHandoff: async (active, nextAgent) => {
-        seenSessions.push(active);
-        events.push(`marker:${nextAgent}`);
-      },
+      commitResearchTransition: (active) =>
+        commitChatResearchTransition({
+          session: active,
+          previousAgent: "general",
+          researchAgent: "research",
+          switchAgent: async (target) => {
+            seenSessions.push(target);
+            events.push("switch:research");
+            return true;
+          },
+          persistAgentHandoff: async (target) => {
+            seenSessions.push(target);
+            events.push("marker:research");
+          },
+          onCommitted: () => events.push("publish:research"),
+        }),
       persistUserHint: async (active, displayText) => {
         seenSessions.push(active);
         restoredUserText = displayText;
@@ -200,6 +209,7 @@ describe("app-sidecar chat Research routing", () => {
     expect(events).toEqual([
       "switch:research",
       "marker:research",
+      "publish:research",
       "hint:/research citations and UX",
       "prompt:hidden",
     ]);
@@ -210,8 +220,42 @@ describe("app-sidecar chat Research routing", () => {
     expect(seenSessions).toEqual([session, session, session, session]);
   });
 
-  it.each(["switch", "marker", "hint", "prompt"] as const)(
-    "stops immediately when the %s operation fails",
+  it.each(["switch", "marker"] as const)(
+    "restores live and restart state when the %s step fails",
+    async (failurePoint) => {
+      const session = { id: "same-logical-session" };
+      let liveAgent = "general";
+      let restoredAgent = "general";
+      const publishedAgents: string[] = [];
+
+      await expect(
+        commitChatResearchTransition({
+          session,
+          previousAgent: "general",
+          researchAgent: "research",
+          switchAgent: async (_active, nextAgent) => {
+            liveAgent = nextAgent;
+            if (failurePoint === "switch" && nextAgent === "research") {
+              throw new Error("switch failed");
+            }
+            return true;
+          },
+          persistAgentHandoff: async () => {
+            if (failurePoint === "marker") throw new Error("marker failed");
+            restoredAgent = "research";
+          },
+          onCommitted: () => publishedAgents.push("research"),
+        }),
+      ).rejects.toThrow(`${failurePoint} failed`);
+
+      expect(liveAgent).toBe("general");
+      expect(restoredAgent).toBe("general");
+      expect(publishedAgents).toEqual([]);
+    },
+  );
+
+  it.each(["transition", "hint", "prompt"] as const)(
+    "stops immediately when the %s operation fails without undoing a commit",
     async (failurePoint) => {
       const route = resolveChatResearchCommandRoute({
         mode: "chat",
@@ -222,6 +266,8 @@ describe("app-sidecar chat Research routing", () => {
       if (route.kind !== "start") throw new Error("expected Research route");
 
       const calls: string[] = [];
+      let liveAgent = "general";
+      let restoredAgent = "general";
       const operation = (name: (typeof calls)[number]) =>
         vi.fn(async () => {
           calls.push(name);
@@ -231,15 +277,21 @@ describe("app-sidecar chat Research routing", () => {
       await expect(
         executeChatResearchHandoff(route, {
           session: {},
-          switchToResearch: operation("switch"),
-          persistAgentHandoff: operation("marker"),
+          commitResearchTransition: async () => {
+            calls.push("transition");
+            if (failurePoint === "transition") throw new Error("transition failed");
+            liveAgent = "research";
+            restoredAgent = "research";
+          },
           persistUserHint: operation("hint"),
           prompt: operation("prompt"),
         }),
       ).rejects.toThrow(`${failurePoint} failed`);
 
-      const failureIndex = ["switch", "marker", "hint", "prompt"].indexOf(failurePoint);
-      expect(calls).toEqual(["switch", "marker", "hint", "prompt"].slice(0, failureIndex + 1));
+      const failureIndex = ["transition", "hint", "prompt"].indexOf(failurePoint);
+      expect(calls).toEqual(["transition", "hint", "prompt"].slice(0, failureIndex + 1));
+      expect(liveAgent).toBe(failurePoint === "transition" ? "general" : "research");
+      expect(restoredAgent).toBe(failurePoint === "transition" ? "general" : "research");
     },
   );
 });

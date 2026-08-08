@@ -3159,8 +3159,10 @@ export class AgentSession {
   ): Promise<void> {
     const afterMessageCount = this.persistedTranscriptCount() + anchorOffset;
     const payload: AppMarkerPayload = { version: 1, kind, afterMessageCount, data };
-    this.appMarkers.push(payload);
-    if (!this.sessionPath) return;
+    if (!this.sessionPath) {
+      this.appMarkers.push(payload);
+      return;
+    }
     const entry: CustomEntry = {
       type: "custom",
       kind: APP_MARKER_CUSTOM_KIND,
@@ -3170,6 +3172,7 @@ export class AgentSession {
       data: payload,
     };
     await this.sessionManager.appendEntry(this.sessionPath, entry);
+    this.appMarkers.push(payload);
   }
 
   /**

@@ -8,7 +8,6 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import { routePaneEvent, type PaneEventEnvelope } from "./pane-routing";
 import {
-  isRoadmapPhaseDraft,
   isRoadmapPhaseDraftApprovalResult,
   isRoadmapPhaseDraftRejectionResult,
   type RoadmapPhaseDraft,
@@ -16,6 +15,7 @@ import {
   type RoadmapPhaseDraftRejectionResult,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
+import { normalizeRoadmapPhaseDraft } from "./roadmap-phase-draft-state";
 import {
   isPhaseRunCancellationResult,
   isPhaseStartResult,
@@ -99,10 +99,12 @@ export interface RoadmapPhaseDraftChangeEvent extends SidecarEvent {
 export function isRoadmapPhaseDraftChangeEvent(
   event: SidecarEvent,
 ): event is RoadmapPhaseDraftChangeEvent {
-  return (
-    event.type === "roadmap_phase_draft_change" &&
-    (event.data === null || isRoadmapPhaseDraft(event.data))
-  );
+  if (event.type !== "roadmap_phase_draft_change") return false;
+  if (event.data === null) return true;
+  const draft = normalizeRoadmapPhaseDraft(event.data);
+  if (!draft) return false;
+  event.data = draft;
+  return true;
 }
 
 function parseRoadmapPhaseDraftPendingResponse(value: unknown): RoadmapPhaseDraft | null {
@@ -110,14 +112,13 @@ function parseRoadmapPhaseDraftPendingResponse(value: unknown): RoadmapPhaseDraf
     throw new Error("invalid Roadmap draft response");
   }
   const record = value as Record<string, unknown>;
-  if (
-    Object.keys(record).length !== 2 ||
-    record.status !== "ok" ||
-    !(record.draft === null || isRoadmapPhaseDraft(record.draft))
-  ) {
+  if (Object.keys(record).length !== 2 || record.status !== "ok") {
     throw new Error("invalid Roadmap draft response");
   }
-  return record.draft;
+  if (record.draft === null) return null;
+  const draft = normalizeRoadmapPhaseDraft(record.draft);
+  if (!draft) throw new Error("invalid Roadmap draft response");
+  return draft;
 }
 
 export {

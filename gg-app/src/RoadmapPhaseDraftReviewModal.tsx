@@ -1,6 +1,7 @@
-import { Check, FileText, GitBranch, ListChecks, X } from "lucide-react";
+import { Check, ExternalLink, FileText, GitBranch, ListChecks, X } from "lucide-react";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { Modal } from "./Modal";
+import { openReferenceUrl } from "./notes-open-source";
 
 interface RoadmapPhaseDraftReviewModalProps {
   draft: RoadmapPhaseDraft | null;
@@ -26,6 +27,13 @@ export function RoadmapPhaseDraftReviewModal({
   if (!draft || !open) return null;
   const deciding = decision !== "idle";
   const stale = draft.status === "stale";
+  const references = draft.references ?? [];
+  const referenceIdsForPhase = (phase: (typeof draft.phases)[number]): string[] =>
+    phase.referenceIds ?? [];
+  const referencesById = new Map(references.map((reference) => [reference.id, reference]));
+  const malformedLinks = draft.phases.some((phase) =>
+    referenceIdsForPhase(phase).some((referenceId) => !referencesById.has(referenceId)),
+  );
 
   return (
     <Modal onClose={onClose} title="Review Roadmap draft" className="roadmap-draft-modal">
@@ -37,7 +45,8 @@ export function RoadmapPhaseDraftReviewModal({
           </div>
           <p>{draft.summary}</p>
           <div className="roadmap-draft-count">
-            {draft.phases.length} peer {draft.phases.length === 1 ? "phase" : "phases"} · Nothing is
+            {draft.phases.length} peer {draft.phases.length === 1 ? "phase" : "phases"} ·{" "}
+            {references.length} {references.length === 1 ? "reference" : "references"} · Nothing is
             created until you approve
           </div>
         </div>
@@ -67,6 +76,53 @@ export function RoadmapPhaseDraftReviewModal({
                     <li key={criterion}>{criterion}</li>
                   ))}
                 </ul>
+                {referenceIdsForPhase(phase).length > 0 && (
+                  <div className="roadmap-draft-references">
+                    <div className="roadmap-draft-criteria-heading">
+                      <ExternalLink size={14} aria-hidden="true" />
+                      Reviewed sources
+                    </div>
+                    <ul>
+                      {referenceIdsForPhase(phase).map((referenceId) => {
+                        const reference = referencesById.get(referenceId);
+                        if (!reference) {
+                          return (
+                            <li className="roadmap-draft-reference-unavailable" key={referenceId}>
+                              Source details unavailable
+                            </li>
+                          );
+                        }
+                        const location = reference.path
+                          ? `${reference.path}${
+                              reference.range
+                                ? `:${reference.range.startLine}-${reference.range.endLine}`
+                                : ""
+                            }`
+                          : null;
+                        return (
+                          <li key={reference.id}>
+                            <div className="roadmap-draft-reference-heading">
+                              <strong>{reference.provider}</strong>
+                              <span>
+                                {reference.owner}/{reference.repo}
+                              </span>
+                            </div>
+                            {location && <code>{location}</code>}
+                            <p>{reference.relevance}</p>
+                            <button
+                              type="button"
+                              className="roadmap-draft-open-source"
+                              onClick={() => void openReferenceUrl(reference.canonicalUrl)}
+                            >
+                              Open source
+                              <ExternalLink size={12} aria-hidden="true" />
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
                 <details className="roadmap-draft-source">
                   <summary>
                     <FileText size={13} aria-hidden="true" />
@@ -79,6 +135,12 @@ export function RoadmapPhaseDraftReviewModal({
           ))}
         </ol>
 
+        {malformedLinks && (
+          <div className="roadmap-draft-error" role="alert">
+            One or more reviewed sources are unavailable. Ask GG Coder for a fresh draft before
+            approving.
+          </div>
+        )}
         {error && (
           <div className="roadmap-draft-error" role="alert">
             {error}
@@ -98,13 +160,15 @@ export function RoadmapPhaseDraftReviewModal({
             type="button"
             className="modal-btn primary roadmap-draft-create"
             onClick={onApprove}
-            disabled={deciding || stale}
+            disabled={deciding || stale || malformedLinks}
             data-modal-initial-focus
           >
             <Check size={15} aria-hidden="true" />
             {decision === "approving"
               ? "Creating phases…"
-              : `Create ${draft.phases.length === 1 ? "phase" : "phases"}`}
+              : references.length > 0
+                ? "Create phases with references"
+                : `Create ${draft.phases.length === 1 ? "phase" : "phases"}`}
           </button>
         </div>
         <div className="visually-hidden" aria-live="polite" aria-atomic="true">

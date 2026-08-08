@@ -8,12 +8,31 @@ import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadma
 const request = {
   expectedRevision: 3,
   summary: "Create a reviewable phase",
+  proposedReferences: [
+    {
+      referenceKey: "source",
+      provider: "github",
+      tool: null,
+      canonicalUrl: "https://github.com/KenKaiiii/gg-framework",
+      owner: "KenKaiiii",
+      repo: "gg-framework",
+      revision: null,
+      path: null,
+      range: null,
+      issue: null,
+      pullRequest: null,
+      query: null,
+      anchor: null,
+      relevance: "Approval contract",
+    },
+  ],
   phases: [
     {
       title: "Approval UI",
       goal: "Require an explicit decision.",
       doneWhen: ["Create is explicit", "Reject does not write Notes"],
       sourcePrompt: "Implement the approval UI only.",
+      referenceKeys: ["source"],
     },
   ],
 };
@@ -88,6 +107,13 @@ describe("AppSidecarRoadmapDraftDecisionService", () => {
       revision: 4,
     });
     expect(context.createApprovedPhases).toHaveBeenCalledOnce();
+    expect(context.createApprovedPhases).toHaveBeenCalledWith(
+      "/work/app",
+      expect.objectContaining({
+        references: [expect.objectContaining({ id: "id-2" })],
+        phases: [expect.objectContaining({ phaseId: "id-3", referenceIds: ["id-2"] })],
+      }),
+    );
     expect(context.load).toHaveBeenCalledOnce();
     expect(context.snapshots).toHaveBeenCalledOnce();
     expect(context.snapshots).toHaveBeenCalledWith(expect.objectContaining({ revision: 4 }));

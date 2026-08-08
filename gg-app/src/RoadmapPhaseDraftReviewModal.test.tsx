@@ -3,6 +3,9 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { RoadmapPhaseDraftReviewModal } from "./RoadmapPhaseDraftReviewModal";
+import { openReferenceUrl } from "./notes-open-source";
+
+vi.mock("./notes-open-source", () => ({ openReferenceUrl: vi.fn(async () => undefined) }));
 
 const draft = {
   id: "draft-1",
@@ -11,6 +14,7 @@ const draft = {
   createdAt: "2026-08-05T12:00:00.000Z",
   createdBySessionId: "session-1",
   summary: "Split this work into two flat delivery phases.",
+  references: [],
   phases: [
     {
       phaseId: "phase-1",
@@ -18,6 +22,7 @@ const draft = {
       goal: "Append approved phases once without rebasing stale work.",
       doneWhen: ["Stale revisions do not write", "Duplicate approval creates once"],
       sourcePrompt: "Implement the revision-safe repository transaction.",
+      referenceIds: [],
     },
     {
       phaseId: "phase-2",
@@ -25,6 +30,7 @@ const draft = {
       goal: "Show every approved field before the user decides.",
       doneWhen: ["Titles and goals are readable", "Reject leaves Notes unchanged"],
       sourcePrompt: "Implement the explicit draft review modal.",
+      referenceIds: [],
     },
   ],
   status: "pending" as const,
@@ -63,6 +69,57 @@ describe("RoadmapPhaseDraftReviewModal", () => {
     expect(screen.getByText("Reject leaves Notes unchanged")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Create phases" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Reject draft" })).toBeTruthy();
+  });
+
+  it("shows linked reference details and opens the reviewed canonical source", () => {
+    const reference = {
+      id: "reference-1",
+      provider: "github",
+      tool: "searchCode",
+      canonicalUrl: "https://github.com/KenKaiiii/gg-framework",
+      owner: "KenKaiiii",
+      repo: "gg-framework",
+      revision: "main",
+      path: "packages/gg-core/src/roadmap-workflow.ts",
+      range: { startLine: 12, endLine: 24 },
+      issue: null,
+      pullRequest: null,
+      query: null,
+      anchor: null,
+      relevance: "Defines the shared draft contract.",
+    };
+    renderModal({
+      draft: {
+        ...draft,
+        references: [reference],
+        phases: [
+          { ...draft.phases[0], referenceIds: [reference.id] },
+          { ...draft.phases[1], referenceIds: [] },
+        ],
+      },
+    });
+
+    expect(screen.getByText(/2 peer phases · 1 reference/)).toBeTruthy();
+    expect(screen.getByText("KenKaiiii/gg-framework")).toBeTruthy();
+    expect(screen.getByText("packages/gg-core/src/roadmap-workflow.ts:12-24")).toBeTruthy();
+    expect(screen.getByText("Defines the shared draft contract.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Open source" }));
+    expect(openReferenceUrl).toHaveBeenCalledWith(reference.canonicalUrl);
+    expect(screen.getByRole("button", { name: "Create phases with references" })).toBeTruthy();
+  });
+
+  it("disables approval when a phase points to an unavailable source", () => {
+    renderModal({
+      draft: {
+        ...draft,
+        phases: [{ ...draft.phases[0], referenceIds: ["missing"] }, draft.phases[1]],
+      },
+    });
+    expect(screen.getByRole("alert").textContent).toContain("sources are unavailable");
+    expect(screen.getByText("Source details unavailable")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Create phases" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("offers exactly explicit create/reject handlers while close remains a non-decision", () => {

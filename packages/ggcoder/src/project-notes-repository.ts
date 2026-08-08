@@ -1344,6 +1344,41 @@ export class ProjectNotesRepository {
 
       const timestamp = new Date().toISOString();
       const document = structuredClone(current.document);
+      const currentReferencesById = new Map(
+        document.references.map((reference) => [reference.id, reference] as const),
+      );
+      const currentReferenceIdsByIdentity = new Map(
+        document.references.map(
+          (reference) => [canonicalReferenceIdentity(reference)!, reference.id] as const,
+        ),
+      );
+      const resolvedReferenceIds = new Map<string, string>();
+      const newReferences: NotesReference[] = [];
+      for (const reference of draft.references) {
+        const identity = canonicalReferenceIdentity(reference)!;
+        const collidingReference = currentReferencesById.get(reference.id);
+        if (collidingReference && canonicalReferenceIdentity(collidingReference) !== identity) {
+          return {
+            status: "invalid-proposal",
+            message: `references: generated reference ID collides with existing source: ${reference.id}`,
+          };
+        }
+        const existingReferenceId = currentReferenceIdsByIdentity.get(identity);
+        if (existingReferenceId) {
+          resolvedReferenceIds.set(reference.id, existingReferenceId);
+          continue;
+        }
+        const createdReference: NotesReference = {
+          ...reference,
+          range: reference.range ? { ...reference.range } : null,
+          capturedAt: timestamp,
+        };
+        newReferences.push(createdReference);
+        currentReferencesById.set(createdReference.id, createdReference);
+        currentReferenceIdsByIdentity.set(identity, createdReference.id);
+        resolvedReferenceIds.set(reference.id, createdReference.id);
+      }
+
       const firstOrder =
         document.phases.reduce((maximum, phase) => Math.max(maximum, phase.order), -1) + 1;
       const phases: NotesPhase[] = draft.phases.map((phase, index) => ({
@@ -1354,7 +1389,9 @@ export class ProjectNotesRepository {
         order: firstOrder + index,
         status: "not-started",
         sourcePrompt: phase.sourcePrompt,
-        referenceIds: [],
+        referenceIds: phase.referenceIds.map(
+          (referenceId) => resolvedReferenceIds.get(referenceId)!,
+        ),
         session: null,
         reminder: null,
         attentionReason: null,
@@ -1367,6 +1404,7 @@ export class ProjectNotesRepository {
         lifecycleEvents: [],
         roadmapEvents: [],
       }));
+      document.references.push(...newReferences);
       document.phases.push(...phases);
       document.updatedAt = timestamp;
 

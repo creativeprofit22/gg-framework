@@ -96,6 +96,35 @@ describe("RoadmapPhaseDraftParams", () => {
     ).toThrow();
     expect(() => RoadmapPhaseDraftParams.parse({ ...input, summary: "  " })).toThrow();
   });
+
+  it("normalizes reference proposals and validates phase links", () => {
+    const candidate = {
+      ...input,
+      proposed_references: [
+        {
+          reference_key: " source ",
+          provider: " GitHub ",
+          canonical_url: "https://github.com/KenKaiiii/gg-framework",
+          owner: "KenKaiiii",
+          repo: "gg-framework",
+          path: " packages/gg-core/src/roadmap-workflow.ts ",
+          range: { start_line: 2, end_line: 4 },
+          relevance: " shared contract ",
+        },
+      ],
+      phases: [{ ...phase, reference_keys: [" source "] }],
+    };
+    expect(RoadmapPhaseDraftParams.parse(candidate)).toMatchObject({
+      proposed_references: [{ reference_key: "source", provider: "github" }],
+      phases: [{ reference_keys: ["source"] }],
+    });
+    expect(() =>
+      RoadmapPhaseDraftParams.parse({
+        ...candidate,
+        phases: [{ ...phase, reference_keys: ["missing"] }],
+      }),
+    ).toThrow(/unknown reference link/);
+  });
 });
 
 describe("createRoadmapPhaseDraftTool", () => {
@@ -113,7 +142,8 @@ describe("createRoadmapPhaseDraftTool", () => {
     expect(draft).toHaveBeenCalledWith({
       expectedRevision: 4,
       summary: "A two-step delivery plan.",
-      phases: parsed.phases,
+      phases: parsed.phases.map((item) => ({ ...item, referenceKeys: [] })),
+      proposedReferences: [],
     });
     expect(draft).toHaveBeenCalledOnce();
     expect(tool.name).toBe("roadmap_phase_draft");
@@ -140,6 +170,17 @@ describe("createRoadmapPhaseDraftTool", () => {
               goal: { maxLength: ROADMAP_PHASE_GOAL_MAX_LENGTH },
               doneWhen: { maxItems: ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS },
               sourcePrompt: { maxLength: ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH },
+            },
+          },
+        },
+        proposed_references: {
+          maxItems: 20,
+          items: {
+            additionalProperties: false,
+            properties: {
+              reference_key: { maxLength: 128 },
+              canonical_url: { maxLength: 2_048 },
+              pull_request: { minimum: 1 },
             },
           },
         },

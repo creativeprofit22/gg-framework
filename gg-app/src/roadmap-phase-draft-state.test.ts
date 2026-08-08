@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   initialRoadmapPhaseDraftState,
+  normalizeRoadmapPhaseDraft,
   reduceRoadmapPhaseDraftState,
 } from "./roadmap-phase-draft-state";
 
@@ -11,6 +12,7 @@ const draft = {
   createdAt: "2026-08-05T12:00:00.000Z",
   createdBySessionId: "session-1",
   summary: "Create a clear review flow",
+  references: [],
   phases: [
     {
       phaseId: "phase-1",
@@ -18,12 +20,29 @@ const draft = {
       goal: "Make the proposal legible.",
       doneWhen: ["Titles are visible", "Criteria are visible"],
       sourcePrompt: "Build the review UI.",
+      referenceIds: [],
     },
   ],
   status: "pending" as const,
 };
 
 describe("Roadmap phase draft state", () => {
+  it("normalizes legacy drafts and rejects malformed current links", () => {
+    const legacy = structuredClone(draft) as Record<string, unknown>;
+    delete legacy.references;
+    for (const phase of legacy.phases as Array<Record<string, unknown>>) delete phase.referenceIds;
+    expect(normalizeRoadmapPhaseDraft(legacy)).toMatchObject({
+      references: [],
+      phases: [{ referenceIds: [] }],
+    });
+    expect(
+      normalizeRoadmapPhaseDraft({
+        ...draft,
+        references: [],
+        phases: [{ ...draft.phases[0], referenceIds: ["missing"] }],
+      }),
+    ).toBeNull();
+  });
   it("ignores hydration that started before a newer event", () => {
     const eventState = reduceRoadmapPhaseDraftState(initialRoadmapPhaseDraftState, {
       type: "event",

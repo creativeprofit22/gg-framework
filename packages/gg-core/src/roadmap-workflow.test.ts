@@ -41,7 +41,8 @@ describe("Roadmap workflow protocol", () => {
       value: {
         ...candidate,
         summary: "Café\nworkflow",
-        phases: [{ ...candidate.phases[0], title: "Protocol" }],
+        phases: [{ ...candidate.phases[0], title: "Protocol", referenceKeys: [] }],
+        proposedReferences: [],
       },
     });
     expect(normalizeRoadmapWorkflowText(" x\r\ny ")).toBe("x\ny");
@@ -146,6 +147,123 @@ describe("Roadmap workflow protocol", () => {
     });
   });
 
+  it("normalizes and links structured references", () => {
+    const candidate = {
+      ...request(),
+      proposedReferences: [
+        {
+          referenceKey: " source ",
+          provider: " GitHub ",
+          canonicalUrl: "https://github.com/KenKaiiii/gg-framework/",
+          owner: "KenKaiiii",
+          repo: "gg-framework",
+          path: " packages/gg-core/src/roadmap-workflow.ts ",
+          range: { startLine: 1, endLine: 10 },
+          relevance: "  Shared contract  ",
+        },
+      ],
+      phases: [{ ...request().phases[0], referenceKeys: [" source "] }],
+    };
+
+    expect(validateRoadmapPhaseDraftRequest(candidate)).toEqual({
+      ok: true,
+      value: {
+        ...request(),
+        proposedReferences: [
+          {
+            referenceKey: "source",
+            provider: "github",
+            tool: null,
+            canonicalUrl: "https://github.com/KenKaiiii/gg-framework",
+            owner: "KenKaiiii",
+            repo: "gg-framework",
+            revision: null,
+            path: "packages/gg-core/src/roadmap-workflow.ts",
+            range: { startLine: 1, endLine: 10 },
+            issue: null,
+            pullRequest: null,
+            query: null,
+            anchor: null,
+            relevance: "Shared contract",
+          },
+        ],
+        phases: [{ ...request().phases[0], referenceKeys: ["source"] }],
+      },
+    });
+  });
+
+  it.each([
+    ["duplicate key", ["a", "a"], "proposedReferences[1].referenceKey"],
+    ["duplicate identity", ["a", "b"], "proposedReferences[1].canonicalUrl"],
+  ])("rejects %s", (_name, keys, path) => {
+    const references = keys.map((referenceKey) => ({
+      referenceKey,
+      provider: "github",
+      canonicalUrl: "https://github.com/KenKaiiii/gg-framework",
+      owner: "KenKaiiii",
+      repo: "gg-framework",
+      relevance: "contract",
+    }));
+    expect(
+      validateRoadmapPhaseDraftRequest({
+        ...request(),
+        proposedReferences: references,
+        phases: [{ ...request().phases[0], referenceKeys: [keys[0]!] }],
+      }),
+    ).toMatchObject({ ok: false, error: { path } });
+  });
+
+  it("rejects unknown, duplicate, and unlinked phase reference keys", () => {
+    const reference = {
+      referenceKey: "source",
+      provider: "github",
+      canonicalUrl: "https://github.com/KenKaiiii/gg-framework",
+      owner: "KenKaiiii",
+      repo: "gg-framework",
+      relevance: "contract",
+    };
+    for (const referenceKeys of [["missing"], ["source", "source"]]) {
+      expect(
+        validateRoadmapPhaseDraftRequest({
+          ...request(),
+          proposedReferences: [reference],
+          phases: [{ ...request().phases[0], referenceKeys }],
+        }).ok,
+      ).toBe(false);
+    }
+    expect(
+      validateRoadmapPhaseDraftRequest({ ...request(), proposedReferences: [reference] }),
+    ).toMatchObject({
+      ok: false,
+      error: { path: "proposedReferences[0].referenceKey" },
+    });
+  });
+
+  it("reuses Notes reference semantics for ranges and GitHub coordinates", () => {
+    const base = {
+      referenceKey: "source",
+      provider: "github",
+      canonicalUrl: "https://github.com/KenKaiiii/gg-framework",
+      owner: "wrong-owner",
+      repo: "gg-framework",
+      relevance: "contract",
+    };
+    expect(
+      validateRoadmapPhaseDraftRequest({
+        ...request(),
+        proposedReferences: [base],
+        phases: [{ ...request().phases[0], referenceKeys: ["source"] }],
+      }),
+    ).toMatchObject({ ok: false, error: { path: "proposedReferences[0].canonicalUrl" } });
+    expect(
+      validateRoadmapPhaseDraftRequest({
+        ...request(),
+        proposedReferences: [{ ...base, owner: "KenKaiiii", range: { startLine: 2, endLine: 1 } }],
+        phases: [{ ...request().phases[0], referenceKeys: ["source"] }],
+      }),
+    ).toMatchObject({ ok: false, error: { path: "proposedReferences[0].range.endLine" } });
+  });
+
   it("strictly validates pending drafts and immutable generated IDs", () => {
     const draft = {
       id: "draft-1",
@@ -154,7 +272,8 @@ describe("Roadmap workflow protocol", () => {
       createdAt: "2026-08-05T12:00:00.000Z",
       createdBySessionId: "session-1",
       summary: request().summary,
-      phases: [{ phaseId: "phase-1", ...request().phases[0] }],
+      references: [],
+      phases: [{ phaseId: "phase-1", ...request().phases[0], referenceIds: [] }],
       status: "pending",
     };
     expect(isRoadmapPhaseDraft(draft)).toBe(true);

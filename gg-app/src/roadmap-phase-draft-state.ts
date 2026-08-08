@@ -1,8 +1,28 @@
-import type {
-  RoadmapPhaseDraft,
-  RoadmapPhaseDraftApprovalResult,
-  RoadmapPhaseDraftRejectionResult,
+import {
+  isRoadmapPhaseDraft,
+  type RoadmapPhaseDraft,
+  type RoadmapPhaseDraftApprovalResult,
+  type RoadmapPhaseDraftRejectionResult,
 } from "@kenkaiiii/gg-core/roadmap-workflow";
+
+export function normalizeRoadmapPhaseDraft(value: unknown): RoadmapPhaseDraft | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (!Array.isArray(candidate.phases)) return null;
+  const normalized = {
+    ...candidate,
+    references: candidate.references ?? [],
+    phases: candidate.phases.map((phase) =>
+      typeof phase === "object" && phase !== null && !Array.isArray(phase)
+        ? {
+            ...(phase as Record<string, unknown>),
+            referenceIds: (phase as Record<string, unknown>).referenceIds ?? [],
+          }
+        : phase,
+    ),
+  };
+  return isRoadmapPhaseDraft(normalized) ? normalized : null;
+}
 
 export interface RoadmapPhaseDraftState {
   draft: RoadmapPhaseDraft | null;

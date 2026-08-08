@@ -77,14 +77,29 @@ export class AppSidecarRoadmapDraftCoordinator {
     const existing = this.pendingByProject.get(projectKey);
     if (existing) return { status: "proposal-pending", draft: cloneDraft(existing)! };
 
+    const draftId = this.createId();
+    const referenceIdsByKey = new Map<string, string>();
+    const references = (validated.value.proposedReferences ?? []).map(
+      ({ referenceKey, ...reference }) => {
+        const referenceId = this.createId();
+        referenceIdsByKey.set(referenceKey, referenceId);
+        return { id: referenceId, ...reference };
+      },
+    );
+    const phases = validated.value.phases.map(({ referenceKeys, ...phase }) => ({
+      phaseId: this.createId(),
+      ...phase,
+      referenceIds: (referenceKeys ?? []).map((key) => referenceIdsByKey.get(key)!),
+    }));
     const draft: RoadmapPhaseDraft = {
-      id: this.createId(),
+      id: draftId,
       projectKey,
       basedOnRevision: validated.value.expectedRevision,
       createdAt: this.now(),
       createdBySessionId: input.sessionId,
       summary: validated.value.summary,
-      phases: validated.value.phases.map((phase) => ({ phaseId: this.createId(), ...phase })),
+      references,
+      phases,
       status: "pending",
     };
     this.pendingByProject.set(projectKey, draft);
@@ -246,6 +261,14 @@ function cloneDraft(draft: RoadmapPhaseDraft | null): RoadmapPhaseDraft | null {
   if (!draft) return null;
   return {
     ...draft,
-    phases: draft.phases.map((phase) => ({ ...phase, doneWhen: [...phase.doneWhen] })),
+    references: draft.references.map((reference) => ({
+      ...reference,
+      range: reference.range ? { ...reference.range } : null,
+    })),
+    phases: draft.phases.map((phase) => ({
+      ...phase,
+      doneWhen: [...phase.doneWhen],
+      referenceIds: [...phase.referenceIds],
+    })),
   };
 }

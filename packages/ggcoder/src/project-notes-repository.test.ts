@@ -167,14 +167,42 @@ function approvedPhaseDraft(
     createdBySessionId: "session-draft",
     summary: "Create approved peer phases",
     status: "pending",
+    references: [],
     phases: phaseIds.map((phaseId, index) => ({
       phaseId,
       title: `Approved phase ${index + 1}`,
       goal: `Deliver approved goal ${index + 1}.`,
       doneWhen: [`Approved criterion ${index + 1} passes`],
       sourcePrompt: `Implement approved phase ${index + 1} only.`,
+      referenceIds: [],
     })),
   };
+}
+
+function approvedPhaseDraftWithReference(cwd: string, basedOnRevision: number): RoadmapPhaseDraft {
+  const draft = approvedPhaseDraft(cwd, basedOnRevision);
+  draft.references = [
+    {
+      id: "draft-reference-1",
+      provider: "github",
+      tool: "searchCode",
+      canonicalUrl: "https://github.com/KenKaiiii/gg-framework",
+      owner: "KenKaiiii",
+      repo: "gg-framework",
+      revision: "main",
+      path: "packages/gg-core/src/roadmap-workflow.ts",
+      range: { startLine: 1, endLine: 10 },
+      issue: null,
+      pullRequest: null,
+      query: null,
+      anchor: null,
+      relevance: "Shared Roadmap contract",
+    },
+  ];
+  draft.phases.forEach((phase) => {
+    phase.referenceIds = ["draft-reference-1"];
+  });
+  return draft;
 }
 
 async function tempAgentDir(): Promise<string> {
@@ -4299,6 +4327,78 @@ describe("ProjectNotesRepository approved phase creation", () => {
     expect(appended[1]!.createdAt).toBe(appended[0]!.createdAt);
     expect(loaded.snapshot.document.updatedAt).toBe(appended[0]!.createdAt);
     expect(loaded.snapshot.document.phases[0]).toEqual(initial.phases[0]);
+  });
+
+  it("appends references and links multiple phases in the same revision", async () => {
+    const cwd = "/work/approved-phase-references";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    await repository.migrate(cwd, notes("reference baseline"));
+
+    await expect(
+      repository.createApprovedPhases(cwd, approvedPhaseDraftWithReference(cwd, 1)),
+    ).resolves.toMatchObject({ status: "created", revision: 2 });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    expect(loaded.snapshot.document.references).toHaveLength(2);
+    expect(loaded.snapshot.document.references[1]).toMatchObject({
+      id: "draft-reference-1",
+      relevance: "Shared Roadmap contract",
+    });
+    expect(loaded.snapshot.document.references[1]!.capturedAt).toBe(
+      loaded.snapshot.document.phases[1]!.createdAt,
+    );
+    expect(loaded.snapshot.document.phases.slice(1).map((phase) => phase.referenceIds)).toEqual([
+      ["draft-reference-1"],
+      ["draft-reference-1"],
+    ]);
+  });
+
+  it("reuses an existing canonical reference without overwriting its metadata", async () => {
+    const cwd = "/work/approved-phase-reference-reuse";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    const initial = notes("reuse baseline");
+    await repository.migrate(cwd, initial);
+    const draft = approvedPhaseDraftWithReference(cwd, 1);
+    const { capturedAt: _capturedAt, ...existingProjection } = initial.references[0]!;
+    draft.references[0] = {
+      ...existingProjection,
+      id: "generated-reference-id",
+      relevance: "new relevance must not overwrite",
+    };
+    draft.phases.forEach((phase) => (phase.referenceIds = ["generated-reference-id"]));
+
+    const approval = await repository.createApprovedPhases(cwd, draft);
+    expect(approval).toEqual({
+      status: "created",
+      revision: 2,
+      phaseIds: ["approved-phase-1", "approved-phase-2"],
+    });
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("expected Notes to load");
+    expect(loaded.snapshot.document.references).toEqual(initial.references);
+    expect(loaded.snapshot.document.phases.slice(1).map((phase) => phase.referenceIds)).toEqual([
+      ["ref-1"],
+      ["ref-1"],
+    ]);
+  });
+
+  it("rejects a generated reference ID collision atomically", async () => {
+    const cwd = "/work/approved-phase-reference-collision";
+    const repository = new ProjectNotesRepository(await tempAgentDir());
+    await repository.migrate(cwd, notes("collision baseline"));
+    const draft = approvedPhaseDraftWithReference(cwd, 1);
+    draft.references[0]!.id = "ref-1";
+    draft.phases.forEach((phase) => (phase.referenceIds = ["ref-1"]));
+    const paths = repository.paths(cwd);
+    const primaryBefore = await fs.readFile(paths.primary, "utf8");
+    const backupBefore = await fs.readFile(paths.backup, "utf8");
+
+    await expect(repository.createApprovedPhases(cwd, draft)).resolves.toMatchObject({
+      status: "invalid-proposal",
+      message: expect.stringContaining("collides"),
+    });
+    expect(await fs.readFile(paths.primary, "utf8")).toBe(primaryBefore);
+    expect(await fs.readFile(paths.backup, "utf8")).toBe(backupBefore);
   });
 
   it("checks the exact revision under the lock and lets only one concurrent batch commit", async () => {

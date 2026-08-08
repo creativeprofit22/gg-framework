@@ -3,7 +3,12 @@ import {
   isNotesReviewDecision,
   isNotesRoadmapReviewer,
   isNotesVerificationStatus,
+  NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
+  canonicalReferenceIdentity,
+  normalizeCanonicalUrl,
+  validateNotesReferenceProjection,
   type NotesPhaseStatus,
+  type NotesReferenceProjection,
   type NotesReviewDecision,
   type NotesRoadmapReviewer,
   type NotesVerificationStatus,
@@ -17,6 +22,8 @@ export const ROADMAP_PHASE_GOAL_MAX_LENGTH = 4_096;
 export const ROADMAP_PHASE_DONE_WHEN_MAX_ITEMS = 20;
 export const ROADMAP_PHASE_DONE_WHEN_ITEM_MAX_LENGTH = 1_024;
 export const ROADMAP_PHASE_SOURCE_PROMPT_MAX_LENGTH = 16_384;
+export const ROADMAP_DRAFT_REFERENCE_KEY_MAX_LENGTH = 128;
+export const ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS = 20;
 export const ROADMAP_DRAFT_FEEDBACK_MAX_LENGTH = 4_096;
 
 export interface RoadmapWorkflowValidationError {
@@ -66,21 +73,28 @@ export type RoadmapInspectionOutcome =
   | { status: "missing"; projectKey: string }
   | ({ status: "corrupt"; projectKey: string } & ProjectNotesCorruption);
 
+export interface RoadmapDraftReferenceProposal extends Omit<NotesReferenceProjection, "id"> {
+  referenceKey: string;
+}
+
 export interface RoadmapProposedPhase {
   title: string;
   goal: string;
   doneWhen: string[];
   sourcePrompt: string;
+  referenceKeys?: string[];
 }
 
 export interface RoadmapPhaseDraftRequest {
   expectedRevision: number;
   summary: string;
   phases: RoadmapProposedPhase[];
+  proposedReferences?: RoadmapDraftReferenceProposal[];
 }
 
-export interface RoadmapDraftPhase extends RoadmapProposedPhase {
+export interface RoadmapDraftPhase extends Omit<RoadmapProposedPhase, "referenceKeys"> {
   phaseId: string;
+  referenceIds: string[];
 }
 
 export interface RoadmapPhaseDraft {
@@ -90,6 +104,7 @@ export interface RoadmapPhaseDraft {
   createdAt: string;
   createdBySessionId: string;
   summary: string;
+  references: NotesReferenceProjection[];
   phases: RoadmapDraftPhase[];
   status: "pending" | "stale";
 }
@@ -112,10 +127,13 @@ export type RoadmapPhaseDraftRejectionResult =
   | { status: "proposal-not-found" }
   | { status: "proposal-project-mismatch" };
 
-const PROPOSED_PHASE_KEYS = ["title", "goal", "doneWhen", "sourcePrompt"] as const;
-const DRAFT_PHASE_KEYS = ["phaseId", ...PROPOSED_PHASE_KEYS] as const;
-const DRAFT_REQUEST_KEYS = ["expectedRevision", "summary", "phases"] as const;
-const DRAFT_KEYS = [
+const PROPOSED_PHASE_BASE_KEYS = ["title", "goal", "doneWhen", "sourcePrompt"] as const;
+const PROPOSED_PHASE_KEYS = [...PROPOSED_PHASE_BASE_KEYS, "referenceKeys"] as const;
+const DRAFT_PHASE_BASE_KEYS = ["phaseId", ...PROPOSED_PHASE_BASE_KEYS] as const;
+const DRAFT_PHASE_KEYS = [...DRAFT_PHASE_BASE_KEYS, "referenceIds"] as const;
+const DRAFT_REQUEST_BASE_KEYS = ["expectedRevision", "summary", "phases"] as const;
+const DRAFT_REQUEST_KEYS = [...DRAFT_REQUEST_BASE_KEYS, "proposedReferences"] as const;
+const DRAFT_BASE_KEYS = [
   "id",
   "projectKey",
   "basedOnRevision",
@@ -124,6 +142,27 @@ const DRAFT_KEYS = [
   "summary",
   "phases",
   "status",
+] as const;
+const DRAFT_KEYS = [...DRAFT_BASE_KEYS.slice(0, 6), "references", "phases", "status"] as const;
+const REFERENCE_PROJECTION_KEYS = [
+  "id",
+  "provider",
+  "tool",
+  "canonicalUrl",
+  "owner",
+  "repo",
+  "revision",
+  "path",
+  "range",
+  "issue",
+  "pullRequest",
+  "query",
+  "anchor",
+  "relevance",
+] as const;
+const DRAFT_REFERENCE_PROPOSAL_KEYS = [
+  "referenceKey",
+  ...REFERENCE_PROJECTION_KEYS.filter((key) => key !== "id"),
 ] as const;
 
 /** Normalizes wire text before length checks and persistence. */
@@ -134,7 +173,10 @@ export function normalizeRoadmapWorkflowText(value: string): string {
 export function validateRoadmapPhaseDraftRequest(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapPhaseDraftRequest> {
-  if (!isRecordWithExactKeys(value, DRAFT_REQUEST_KEYS)) {
+  if (
+    !isRecordWithExactKeys(value, DRAFT_REQUEST_BASE_KEYS) &&
+    !isRecordWithExactKeys(value, DRAFT_REQUEST_KEYS)
+  ) {
     return invalid("$", `expected exactly: ${DRAFT_REQUEST_KEYS.join(", ")}`);
   }
   if (!isNonNegativeInteger(value.expectedRevision)) {
@@ -146,6 +188,11 @@ export function validateRoadmapPhaseDraftRequest(
     "summary",
   );
   if (!summary.ok) return summary;
+
+  const references = validateDraftReferenceProposals(value.proposedReferences ?? []);
+  if (!references.ok) return references;
+  const referenceKeys = new Set(references.value.map((reference) => reference.referenceKey));
+
   if (
     !Array.isArray(value.phases) ||
     value.phases.length < 1 ||
@@ -154,15 +201,31 @@ export function validateRoadmapPhaseDraftRequest(
     return invalid("phases", `expected 1..${ROADMAP_PROPOSED_PHASES_MAX_ITEMS} phases`);
   }
 
+  const linkedReferenceKeys = new Set<string>();
   const phases: RoadmapProposedPhase[] = [];
   for (let index = 0; index < value.phases.length; index += 1) {
-    const phase = validateProposedPhase(value.phases[index], `phases[${index}]`);
+    const phase = validateProposedPhase(value.phases[index], `phases[${index}]`, referenceKeys);
     if (!phase.ok) return phase;
+    for (const referenceKey of phase.value.referenceKeys ?? [])
+      linkedReferenceKeys.add(referenceKey);
     phases.push(phase.value);
+  }
+  for (let index = 0; index < references.value.length; index += 1) {
+    if (!linkedReferenceKeys.has(references.value[index]!.referenceKey)) {
+      return invalid(
+        `proposedReferences[${index}].referenceKey`,
+        "reference must be linked to a phase",
+      );
+    }
   }
   return {
     ok: true,
-    value: { expectedRevision: value.expectedRevision, summary: summary.value, phases },
+    value: {
+      expectedRevision: value.expectedRevision,
+      summary: summary.value,
+      phases,
+      proposedReferences: references.value,
+    },
   };
 }
 
@@ -173,7 +236,7 @@ export function isRoadmapPhaseDraftRequest(value: unknown): value is RoadmapPhas
 export function validateRoadmapPhaseDraft(
   value: unknown,
 ): RoadmapWorkflowValidationResult<RoadmapPhaseDraft> {
-  if (!isRecordWithExactKeys(value, DRAFT_KEYS)) {
+  if (!isRecordWithExactKeys(value, DRAFT_BASE_KEYS) && !isRecordWithExactKeys(value, DRAFT_KEYS)) {
     return invalid("$", `expected exactly: ${DRAFT_KEYS.join(", ")}`);
   }
   const id = boundedIdentifier(value.id, "id");
@@ -203,11 +266,19 @@ export function validateRoadmapPhaseDraft(
     return invalid("phases", `expected 1..${ROADMAP_PROPOSED_PHASES_MAX_ITEMS} phases`);
   }
 
+  const references = validateDraftReferences(value.references ?? []);
+  if (!references.ok) return references;
+  const referenceIds = new Set(references.value.map((reference) => reference.id));
+
   const phaseIds = new Set<string>();
+  const linkedReferenceIds = new Set<string>();
   const phases: RoadmapDraftPhase[] = [];
   for (let index = 0; index < value.phases.length; index += 1) {
     const candidate = value.phases[index];
-    if (!isRecordWithExactKeys(candidate, DRAFT_PHASE_KEYS)) {
+    if (
+      !isRecordWithExactKeys(candidate, DRAFT_PHASE_BASE_KEYS) &&
+      !isRecordWithExactKeys(candidate, DRAFT_PHASE_KEYS)
+    ) {
       return invalid(`phases[${index}]`, `expected exactly: ${DRAFT_PHASE_KEYS.join(", ")}`);
     }
     const phaseId = boundedIdentifier(candidate.phaseId, `phases[${index}].phaseId`);
@@ -218,7 +289,19 @@ export function validateRoadmapPhaseDraft(
     phaseIds.add(phaseId.value);
     const phase = validateProposedPhaseRecord(candidate, `phases[${index}]`);
     if (!phase.ok) return phase;
-    phases.push({ phaseId: phaseId.value, ...phase.value });
+    const linkedIds = validateReferenceLinks(
+      candidate.referenceIds ?? [],
+      `phases[${index}].referenceIds`,
+      referenceIds,
+    );
+    if (!linkedIds.ok) return linkedIds;
+    for (const referenceId of linkedIds.value) linkedReferenceIds.add(referenceId);
+    phases.push({ phaseId: phaseId.value, ...phase.value, referenceIds: linkedIds.value });
+  }
+  for (let index = 0; index < references.value.length; index += 1) {
+    if (!linkedReferenceIds.has(references.value[index]!.id)) {
+      return invalid(`references[${index}].id`, "reference must be linked to a phase");
+    }
   }
 
   return {
@@ -230,6 +313,7 @@ export function validateRoadmapPhaseDraft(
       createdAt: value.createdAt,
       createdBySessionId: sessionId.value,
       summary: summary.value,
+      references: references.value,
       phases,
       status: value.status,
     },
@@ -330,14 +414,196 @@ export function validateRoadmapDraftFeedback(
   return normalizedBoundedString(value, ROADMAP_DRAFT_FEEDBACK_MAX_LENGTH, "feedback");
 }
 
+function validateDraftReferenceProposals(
+  value: unknown,
+): RoadmapWorkflowValidationResult<RoadmapDraftReferenceProposal[]> {
+  if (!Array.isArray(value) || value.length > NOTES_ROADMAP_PROPOSALS_MAX_ITEMS) {
+    return invalid(
+      "proposedReferences",
+      `expected up to ${NOTES_ROADMAP_PROPOSALS_MAX_ITEMS} references`,
+    );
+  }
+  const keys = new Set<string>();
+  const identities = new Map<string, number>();
+  const references: RoadmapDraftReferenceProposal[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const path = `proposedReferences[${index}]`;
+    const candidate = value[index];
+    if (!isRecordWithAllowedKeys(candidate, DRAFT_REFERENCE_PROPOSAL_KEYS)) {
+      return invalid(path, "contains an unknown or missing required reference field");
+    }
+    const referenceKey = normalizedBoundedString(
+      candidate.referenceKey,
+      ROADMAP_DRAFT_REFERENCE_KEY_MAX_LENGTH,
+      `${path}.referenceKey`,
+    );
+    if (!referenceKey.ok) return referenceKey;
+    if (keys.has(referenceKey.value)) {
+      return invalid(`${path}.referenceKey`, "expected a unique reference key");
+    }
+    keys.add(referenceKey.value);
+    const reference = normalizeDraftReference(candidate, path, referenceKey.value);
+    if (!reference.ok) return reference;
+    const { id: _id, ...projection } = reference.value;
+    const identity = canonicalReferenceIdentity(reference.value)!;
+    const duplicateIndex = identities.get(identity);
+    if (duplicateIndex !== undefined) {
+      return invalid(
+        `${path}.canonicalUrl`,
+        `duplicate canonical source; already proposed at proposedReferences[${duplicateIndex}]`,
+      );
+    }
+    identities.set(identity, index);
+    references.push({ referenceKey: referenceKey.value, ...projection });
+  }
+  return { ok: true, value: references };
+}
+
+function validateDraftReferences(
+  value: unknown,
+): RoadmapWorkflowValidationResult<NotesReferenceProjection[]> {
+  if (!Array.isArray(value) || value.length > NOTES_ROADMAP_PROPOSALS_MAX_ITEMS) {
+    return invalid("references", `expected up to ${NOTES_ROADMAP_PROPOSALS_MAX_ITEMS} references`);
+  }
+  const ids = new Set<string>();
+  const identities = new Map<string, number>();
+  const references: NotesReferenceProjection[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const path = `references[${index}]`;
+    const candidate = value[index];
+    if (!isRecordWithExactKeys(candidate, REFERENCE_PROJECTION_KEYS)) {
+      return invalid(path, `expected exactly: ${REFERENCE_PROJECTION_KEYS.join(", ")}`);
+    }
+    const id = boundedIdentifier(candidate.id, `${path}.id`);
+    if (!id.ok) return id;
+    if (ids.has(id.value)) return invalid(`${path}.id`, "expected a unique reference ID");
+    ids.add(id.value);
+    const reference = normalizeDraftReference(candidate, path, id.value);
+    if (!reference.ok) return reference;
+    const identity = canonicalReferenceIdentity(reference.value)!;
+    const duplicateIndex = identities.get(identity);
+    if (duplicateIndex !== undefined) {
+      return invalid(
+        `${path}.canonicalUrl`,
+        `duplicate canonical source; already proposed at references[${duplicateIndex}]`,
+      );
+    }
+    identities.set(identity, index);
+    references.push(reference.value);
+  }
+  return { ok: true, value: references };
+}
+
+function normalizeDraftReference(
+  value: Record<string, unknown>,
+  path: string,
+  id: string,
+): RoadmapWorkflowValidationResult<NotesReferenceProjection> {
+  const required = ["provider", "canonicalUrl", "owner", "repo"] as const;
+  const normalizedRequired: Record<(typeof required)[number], string> = {
+    provider: "",
+    canonicalUrl: "",
+    owner: "",
+    repo: "",
+  };
+  for (const field of required) {
+    const result = normalizedBoundedString(
+      value[field],
+      field === "canonicalUrl" ? 2_048 : 4_096,
+      `${path}.${field}`,
+    );
+    if (!result.ok) return result;
+    normalizedRequired[field] = result.value;
+  }
+  const optionalFields = ["tool", "revision", "path", "query", "anchor"] as const;
+  const optional: Record<(typeof optionalFields)[number], string | null> = {
+    tool: null,
+    revision: null,
+    path: null,
+    query: null,
+    anchor: null,
+  };
+  for (const field of optionalFields) {
+    if (value[field] === undefined || value[field] === null) continue;
+    const result = normalizedBoundedString(value[field], 4_096, `${path}.${field}`);
+    if (!result.ok) return result;
+    optional[field] = result.value;
+  }
+  if (typeof value.relevance !== "string") return invalid(`${path}.relevance`, "expected a string");
+  const relevance = normalizeRoadmapWorkflowText(value.relevance);
+  const canonicalUrl =
+    normalizeCanonicalUrl(normalizedRequired.canonicalUrl) ?? normalizedRequired.canonicalUrl;
+  const reference: NotesReferenceProjection = {
+    id,
+    provider: normalizedRequired.provider.toLowerCase(),
+    tool: optional.tool,
+    canonicalUrl,
+    owner: normalizedRequired.owner,
+    repo: normalizedRequired.repo,
+    revision: optional.revision,
+    path: optional.path,
+    range:
+      value.range === undefined || value.range === null || !isRecord(value.range)
+        ? ((value.range as null | undefined) ?? null)
+        : { startLine: value.range.startLine as number, endLine: value.range.endLine as number },
+    issue: (value.issue as number | null | undefined) ?? null,
+    pullRequest: (value.pullRequest as number | null | undefined) ?? null,
+    query: optional.query,
+    anchor: optional.anchor,
+    relevance,
+  };
+  const error = validateNotesReferenceProjection(reference, path);
+  if (error) return invalid(error.path, error.message);
+  return { ok: true, value: reference };
+}
+
+function validateReferenceLinks(
+  value: unknown,
+  path: string,
+  knownReferences: ReadonlySet<string>,
+): RoadmapWorkflowValidationResult<string[]> {
+  if (!Array.isArray(value) || value.length > ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS) {
+    return invalid(path, `expected up to ${ROADMAP_DRAFT_REFERENCE_KEYS_MAX_ITEMS} references`);
+  }
+  const seen = new Set<string>();
+  const links: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const link = normalizedBoundedString(
+      value[index],
+      ROADMAP_DRAFT_REFERENCE_KEY_MAX_LENGTH,
+      `${path}[${index}]`,
+    );
+    if (!link.ok) return link;
+    if (seen.has(link.value))
+      return invalid(`${path}[${index}]`, "expected a unique reference link");
+    if (!knownReferences.has(link.value))
+      return invalid(`${path}[${index}]`, "unknown reference link");
+    seen.add(link.value);
+    links.push(link.value);
+  }
+  return { ok: true, value: links };
+}
+
 function validateProposedPhase(
   value: unknown,
   path: string,
+  knownReferenceKeys: ReadonlySet<string>,
 ): RoadmapWorkflowValidationResult<RoadmapProposedPhase> {
-  if (!isRecordWithExactKeys(value, PROPOSED_PHASE_KEYS)) {
+  if (
+    !isRecordWithExactKeys(value, PROPOSED_PHASE_BASE_KEYS) &&
+    !isRecordWithExactKeys(value, PROPOSED_PHASE_KEYS)
+  ) {
     return invalid(path, `expected exactly: ${PROPOSED_PHASE_KEYS.join(", ")}`);
   }
-  return validateProposedPhaseRecord(value, path);
+  const phase = validateProposedPhaseRecord(value, path);
+  if (!phase.ok) return phase;
+  const referenceKeys = validateReferenceLinks(
+    value.referenceKeys ?? [],
+    `${path}.referenceKeys`,
+    knownReferenceKeys,
+  );
+  if (!referenceKeys.ok) return referenceKeys;
+  return { ok: true, value: { ...phase.value, referenceKeys: referenceKeys.value } };
 }
 
 function validateProposedPhaseRecord(
@@ -479,6 +745,18 @@ function isRecordWithExactKeys(
   if (!isRecord(value)) return false;
   const actual = Object.keys(value);
   return actual.length === expected.length && expected.every((key) => actual.includes(key));
+}
+
+function isRecordWithAllowedKeys(
+  value: unknown,
+  allowed: readonly string[],
+): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const required = ["referenceKey", "provider", "canonicalUrl", "owner", "repo", "relevance"];
+  return (
+    Object.keys(value).every((key) => allowed.includes(key)) &&
+    required.every((key) => key in value)
+  );
 }
 
 function isNonNegativeInteger(value: unknown): value is number {

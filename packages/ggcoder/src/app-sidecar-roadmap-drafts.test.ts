@@ -49,8 +49,56 @@ describe("AppSidecarRoadmapDraftCoordinator", () => {
     });
     expect(onChange).toHaveBeenCalledOnce();
     if (created.status !== "drafted") throw new Error("expected draft");
+    expect(created.draft.references).toEqual([]);
+    expect(created.draft.phases.map((phase) => phase.referenceIds)).toEqual([[], []]);
     created.draft.phases[0]!.doneWhen.push("mutated");
     expect(value.pending("c:/work/app")?.phases[0]!.doneWhen).toEqual(["Backend tests pass"]);
+  });
+
+  it("generates reference IDs before phase IDs and deep-clones multi-phase links", () => {
+    const { value, onChange } = coordinator();
+    const linkedRequest = {
+      ...request,
+      proposedReferences: [
+        {
+          referenceKey: "source",
+          provider: "github",
+          canonicalUrl: "https://github.com/KenKaiiii/gg-framework",
+          owner: "KenKaiiii",
+          repo: "gg-framework",
+          tool: null,
+          revision: "main",
+          path: "packages/gg-core/src/roadmap-workflow.ts",
+          range: { startLine: 1, endLine: 5 },
+          issue: null,
+          pullRequest: null,
+          query: null,
+          anchor: null,
+          relevance: "shared contract",
+        },
+      ],
+      phases: request.phases.map((phase) => ({ ...phase, referenceKeys: ["source"] })),
+    };
+    const created = value.create({ cwd: "/work/app", sessionId: "s1", request: linkedRequest });
+    expect(created).toMatchObject({
+      status: "drafted",
+      draft: {
+        id: "id-1",
+        references: [{ id: "id-2" }],
+        phases: [
+          { phaseId: "id-3", referenceIds: ["id-2"] },
+          { phaseId: "id-4", referenceIds: ["id-2"] },
+        ],
+      },
+    });
+    if (created.status !== "drafted") throw new Error("expected draft");
+    created.draft.references[0]!.range!.startLine = 99;
+    created.draft.phases[0]!.referenceIds.push("mutated");
+    expect(value.pending("/work/app")?.references[0]!.range!.startLine).toBe(1);
+    expect(value.pending("/work/app")?.phases[0]!.referenceIds).toEqual(["id-2"]);
+    const emitted = onChange.mock.calls[0]![1]!;
+    emitted.references[0].range.startLine = 88;
+    expect(value.pending("/work/app")?.references[0]!.range!.startLine).toBe(1);
   });
 
   it("does not replace an unseen same-project proposal", () => {

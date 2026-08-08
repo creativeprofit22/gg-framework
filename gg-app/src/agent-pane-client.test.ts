@@ -17,7 +17,12 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
-import { createPaneAgentClient, getState, sendPrompt } from "./agent";
+import {
+  createPaneAgentClient,
+  getState,
+  isRoadmapPhaseDraftChangeEvent,
+  sendPrompt,
+} from "./agent";
 
 const target = {
   mode: "chat" as const,
@@ -131,7 +136,11 @@ describe("pane agent client", () => {
     });
     const client = createPaneAgentClient("right");
 
-    await expect(client.getRoadmapPhaseDraft()).resolves.toEqual(draft);
+    await expect(client.getRoadmapPhaseDraft()).resolves.toEqual({
+      ...draft,
+      references: [],
+      phases: [{ ...draft.phases[0], referenceIds: [] }],
+    });
     await expect(client.approveRoadmapPhaseDraft("draft/1")).resolves.toMatchObject({
       status: "created",
       revision: 4,
@@ -153,6 +162,32 @@ describe("pane agent client", () => {
     await expect(client.approveRoadmapPhaseDraft("draft/1")).rejects.toThrow(
       "invalid Roadmap draft approval response",
     );
+  });
+
+  it("normalizes legacy Roadmap drafts identically on change events", () => {
+    const event = {
+      type: "roadmap_phase_draft_change",
+      data: {
+        id: "draft-1",
+        projectKey: "/work",
+        basedOnRevision: 3,
+        createdAt: "2026-08-05T12:00:00.000Z",
+        createdBySessionId: "session-1",
+        summary: "Legacy draft",
+        phases: [
+          {
+            phaseId: "phase-1",
+            title: "Legacy",
+            goal: "Stay compatible.",
+            doneWhen: ["Compatibility passes"],
+            sourcePrompt: "Keep compatibility.",
+          },
+        ],
+        status: "pending",
+      },
+    };
+    expect(isRoadmapPhaseDraftChangeEvent(event)).toBe(true);
+    expect(event.data).toMatchObject({ references: [], phases: [{ referenceIds: [] }] });
   });
 
   it("cancels a Roadmap phase through its phase-specific pane command", async () => {

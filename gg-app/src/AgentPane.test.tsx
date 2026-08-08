@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as AgentModule from "./agent";
 import type * as ToastModule from "./toast";
+import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import type { NotesDocumentV3 } from "./notes-types";
 
 HTMLElement.prototype.scrollTo = vi.fn();
@@ -153,6 +154,49 @@ import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type { AgentState, PaneAgentClient, PaneSessionTarget } from "./agent";
 
 const target: PaneSessionTarget = { mode: "code", cwd: "/work", sessionPath: "/session" };
+const chatTarget: PaneSessionTarget = {
+  mode: "chat",
+  chatAgent: "general",
+  cwd: "/work",
+  sessionPath: "/chat-session",
+};
+const roadmapDraft: RoadmapPhaseDraft = {
+  id: "draft-research",
+  projectKey: "/work",
+  basedOnRevision: 12,
+  createdAt: "2026-08-08T12:00:00.000Z",
+  createdBySessionId: "research-session",
+  summary: "Add the researched delivery phase.",
+  references: [
+    {
+      id: "reference-1",
+      provider: "github",
+      tool: "code-search",
+      canonicalUrl: "https://github.com/example/project/blob/abc123/src/research.ts",
+      owner: "example",
+      repo: "project",
+      revision: "abc123",
+      path: "src/research.ts",
+      range: { startLine: 10, endLine: 24 },
+      issue: null,
+      pullRequest: null,
+      query: null,
+      anchor: null,
+      relevance: "Supports the researched implementation boundary.",
+    },
+  ],
+  phases: [
+    {
+      phaseId: "phase-research",
+      title: "Implement researched workflow",
+      goal: "Deliver the approved researched workflow without starting it.",
+      doneWhen: ["The workflow is available for a later explicit start"],
+      sourcePrompt: "Implement the researched workflow after approval.",
+      referenceIds: ["reference-1"],
+    },
+  ],
+  status: "pending",
+};
 const agentState = (model: string): AgentState => ({
   provider: "azure",
   model,
@@ -197,6 +241,8 @@ function client(paneId: string, generation: number): PaneAgentClient {
       status: "ok" as const,
       snapshot: { projectKey: "/work", revision: expectedRevision + 1, document },
     })),
+    startPhase: vi.fn(),
+    cancelPhaseRun: vi.fn(),
     getRoadmapPhaseDraft: vi.fn(async () => null),
     approveRoadmapPhaseDraft: vi.fn(),
     rejectRoadmapPhaseDraft: vi.fn(),
@@ -319,12 +365,6 @@ describe("AgentPane lifecycle", () => {
 
   it("presents the compatible general chat agent as Brainstorm", async () => {
     const pane = client("pane-brainstorm", 1);
-    const chatTarget: PaneSessionTarget = {
-      mode: "chat",
-      chatAgent: "general",
-      cwd: "/work",
-      sessionPath: "/chat-session",
-    };
     vi.mocked(pane.getState).mockResolvedValue({
       ...agentState("azure:gpt-test"),
       mode: "chat",
@@ -499,6 +539,153 @@ describe("AgentPane lifecycle", () => {
         expect.objectContaining({ paneId: "pane-1", activeWork: false }),
       ),
     );
+  });
+
+  it("hydrates a pending Roadmap draft in chat and keeps it reopenable after close", async () => {
+    const pane = client("pane-chat-hydration", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+
+    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(pane.getRoadmapPhaseDraft).toHaveBeenCalledOnce();
+    const trigger = screen.getByRole("button", {
+      name: "Review Roadmap draft with 1 proposed phase",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull();
+    expect(trigger).toBeTruthy();
+
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(pane.approveRoadmapPhaseDraft).not.toHaveBeenCalled();
+    expect(pane.rejectRoadmapPhaseDraft).not.toHaveBeenCalled();
+  });
+
+  it("opens and exposes Roadmap drafts received live in chat", async () => {
+    const pane = client("pane-chat-live-draft", 7);
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.getRoadmapPhaseDraft).toHaveBeenCalledOnce());
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
+
+    act(() =>
+      handleEvent?.({
+        type: "roadmap_phase_draft_change",
+        data: roadmapDraft,
+      }),
+    );
+
+    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+  });
+
+  it("approves a chat Roadmap draft without starting implementation or a coding session", async () => {
+    const pane = client("pane-chat-approve", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+    vi.mocked(pane.approveRoadmapPhaseDraft).mockResolvedValue({
+      status: "created",
+      revision: 13,
+      phaseIds: ["phase-research"],
+    });
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create phases with references" }));
+
+    await waitFor(() =>
+      expect(pane.approveRoadmapPhaseDraft).toHaveBeenCalledWith("draft-research"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeNull();
+    expect(pane.startPhase).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.acceptPlan).not.toHaveBeenCalled();
+  });
+
+  it("rejects and discards a chat Roadmap draft without starting other workflows", async () => {
+    const pane = client("pane-chat-reject", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+    vi.mocked(pane.rejectRoadmapPhaseDraft).mockResolvedValue({ status: "rejected" });
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    fireEvent.click(await screen.findByRole("button", { name: "Reject draft" }));
+
+    await waitFor(() =>
+      expect(pane.rejectRoadmapPhaseDraft).toHaveBeenCalledWith("draft-research"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Review Roadmap draft" })).toBeNull(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeNull();
+    expect(pane.startPhase).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.acceptPlan).not.toHaveBeenCalled();
+  });
+
+  it("shows stale chat drafts without allowing approval", async () => {
+    const pane = client("pane-chat-stale", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue({
+      ...roadmapDraft,
+      status: "stale",
+    });
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("This draft is out of date.");
+    expect(
+      (
+        screen.getByRole("button", {
+          name: "Create phases with references",
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+  });
+
+  it("keeps a chat draft reviewable when approval fails", async () => {
+    const pane = client("pane-chat-approval-error", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+    vi.mocked(pane.approveRoadmapPhaseDraft).mockRejectedValue(
+      new Error("approval transport failed"),
+    );
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    fireEvent.click(await screen.findByRole("button", { name: "Create phases with references" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("approval transport failed");
+    expect(screen.getByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+    expect(pane.startPhase).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it("preserves coding-mode Roadmap draft hydration and review", async () => {
+    const pane = client("pane-code-draft", 7);
+    vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);
+
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+
+    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(pane.getRoadmapPhaseDraft).toHaveBeenCalledOnce();
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Notes" })).toBeTruthy();
   });
 
   it("shows an approval draft after an unqualified natural-language Roadmap request", async () => {

@@ -1698,7 +1698,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }, [client]);
 
   useEffect(() => {
-    if (!hydrated || workspaceMode !== "code") return;
+    if (!hydrated) return;
     let cancelled = false;
     const startedAtEventVersion = roadmapDraftEventVersionRef.current;
     void client
@@ -1719,7 +1719,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [client, hydrated, hydrateNonce, workspaceMode]);
+  }, [client, hydrated, hydrateNonce]);
 
   const approveRoadmapDraft = useCallback(() => {
     const draftId = roadmapDraftState.draft?.id;
@@ -3043,6 +3043,23 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     );
   }
 
+  const roadmapDraftTrigger = roadmapDraftState.draft ? (
+    <button
+      type="button"
+      className="btn btn-sm btn-ghost roadmap-draft-trigger"
+      onClick={() => dispatchRoadmapDraft({ type: "open" })}
+      title="Review pending Roadmap draft"
+      aria-label={`Review Roadmap draft with ${roadmapDraftState.draft.phases.length} proposed ${roadmapDraftState.draft.phases.length === 1 ? "phase" : "phases"}`}
+      aria-haspopup="dialog"
+    >
+      <GitBranch size={13} aria-hidden="true" />
+      <span>Review draft</span>
+      <span className="roadmap-draft-trigger-count" aria-hidden="true">
+        {roadmapDraftState.draft.phases.length}
+      </span>
+    </button>
+  ) : null;
+
   return (
     <div
       className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}`}
@@ -3101,6 +3118,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         </div>
         {workspaceMode === "chat" ? (
           <span className="picker-head-actions">
+            {roadmapDraftTrigger}
             <button
               className="btn btn-primary btn-sm"
               disabled={running || autopilotReviewing || newSessionBusy}
@@ -3158,22 +3176,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 paneFocused={props.focused !== false}
                 windowFocused={windowFocused && props.windowFocused !== false}
               />
-              {roadmapDraftState.draft && (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-ghost roadmap-draft-trigger"
-                  onClick={() => dispatchRoadmapDraft({ type: "open" })}
-                  title="Review pending Roadmap draft"
-                  aria-label={`Review Roadmap draft with ${roadmapDraftState.draft.phases.length} proposed ${roadmapDraftState.draft.phases.length === 1 ? "phase" : "phases"}`}
-                  aria-haspopup="dialog"
-                >
-                  <GitBranch size={13} aria-hidden="true" />
-                  <span>Review draft</span>
-                  <span className="roadmap-draft-trigger-count" aria-hidden="true">
-                    {roadmapDraftState.draft.phases.length}
-                  </span>
-                </button>
-              )}
+              {roadmapDraftTrigger}
               <button
                 className="btn btn-sm btn-ghost"
                 title="View and run this project's tasks"

@@ -84,6 +84,27 @@ describe("tool_search", () => {
     expect(result).toContain("mcp__dead__get_screens");
   });
 
+  it("does not name or promote catalog tools hidden by a live capability policy", async () => {
+    const catalog = new DeferredToolCatalog();
+    catalog.add([
+      stub("mcp__kencode-search__searchCode", "search public code"),
+      stub("mcp__unknown-mutator__write", "search and mutate code"),
+    ]);
+    const promotedNames: string[] = [];
+    const tool = createToolSearchTool(
+      catalog,
+      (tools) => promotedNames.push(...tools.map((candidate) => candidate.name)),
+      undefined,
+      (name) => name.startsWith("mcp__kencode-search__"),
+    );
+
+    const result = await search(tool, "search code");
+    expect(result).toContain("mcp__kencode-search__searchCode");
+    expect(result).not.toContain("mcp__unknown-mutator__write");
+    expect(promotedNames).toEqual(["mcp__kencode-search__searchCode"]);
+    expect(catalog.names()).toEqual(["mcp__unknown-mutator__write"]);
+  });
+
   it("works without a resolver (all tools already live)", async () => {
     const catalog = new DeferredToolCatalog();
     catalog.add([stub("mcp__figma__get_screens", "fetch design screenshots")]);

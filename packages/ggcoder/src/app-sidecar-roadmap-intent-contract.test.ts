@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveChatResearchCommandRoute } from "./app-sidecar-chat-research-handoff.js";
 import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool-host.js";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import { APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT } from "./app-sidecar-roadmap-draft-tool-host.js";
@@ -24,6 +25,15 @@ interface IntentModelRoute {
   request: string;
   responses: ToolStep[];
 }
+
+const researchCommandRoute = resolveChatResearchCommandRoute({
+  mode: "chat",
+  text: "/research approval UX",
+  attachmentCount: 0,
+  busy: false,
+});
+if (researchCommandRoute.kind !== "start") throw new Error("expected Research command route");
+const researchContinuationPrompt = researchCommandRoute.continuationPrompt;
 
 const appIntentEvals: IntentContractEval[] = [
   {
@@ -55,6 +65,12 @@ const appIntentEvals: IntentContractEval[] = [
     request: "Review https://linear.app/acme/team/roadmap and identify delivery risks.",
     expectedTools: [],
     expectsDraft: false,
+  },
+  {
+    name: "/research command to pending review",
+    request: researchContinuationPrompt,
+    expectedTools: ["roadmap_inspect", "roadmap_phase_draft"],
+    expectsDraft: true,
   },
 ];
 
@@ -110,6 +126,27 @@ const appIntentModelRoutes: IntentModelRoute[] = [
   {
     request: "Review https://linear.app/acme/team/roadmap and identify delivery risks.",
     responses: [],
+  },
+  {
+    request: researchContinuationPrompt,
+    responses: [
+      { name: "roadmap_inspect", args: {} },
+      {
+        name: "roadmap_phase_draft",
+        args: {
+          expected_revision: 1,
+          summary: "Add approval UX from the Research handoff.",
+          phases: [
+            {
+              title: "Approval UX",
+              goal: "Make the researched approval flow clear and safe.",
+              doneWhen: ["The approval flow is reviewable before implementation"],
+              sourcePrompt: "/research approval UX",
+            },
+          ],
+        },
+      },
+    ],
   },
 ];
 
@@ -385,7 +422,9 @@ describe("app Roadmap behavioral intent-contract evals", () => {
   for (const evaluation of appIntentEvals) {
     it(`${evaluation.name}: consumes ${JSON.stringify(evaluation.request)}`, async () => {
       const result = await runAppIntentEval(evaluation);
-      expect(JSON.stringify(result.requestBodies[0]?.input)).toContain(evaluation.request);
+      expect(extractIntentPromptContext(result.requestBodies[0] ?? {}).request).toBe(
+        evaluation.request,
+      );
       expect(result.requestBodies[0]?.instructions).toContain("## App Roadmap intent");
       expect(result.calledTools).toEqual(evaluation.expectedTools);
       expect(result.pendingDraft !== null).toBe(evaluation.expectsDraft);

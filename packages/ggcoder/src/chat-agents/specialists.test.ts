@@ -9,8 +9,32 @@ import { createAppSidecarChatRoadmapSessionOptions } from "../app-sidecar-roadma
 import type { AgentSessionOptions } from "../core/agent-session.js";
 import { GENERAL_CHAT_SYSTEM_PROMPT } from "./general.js";
 import { CHAT_AGENT_LABELS, createChatAgent, parseChatAgentId, switchChatAgent } from "./index.js";
-import { RESEARCH_CHAT_SYSTEM_PROMPT } from "./research.js";
+import {
+  RESEARCH_CHAT_ALLOWED_TOOL_NAMES,
+  RESEARCH_CHAT_ALLOWED_TOOL_PREFIXES,
+  RESEARCH_CHAT_SYSTEM_PROMPT,
+} from "./research.js";
 import { THERAPIST_CHAT_SYSTEM_PROMPT } from "./therapist.js";
+
+const RESEARCH_PROHIBITED_TOOL_NAMES = [
+  "bash",
+  "edit",
+  "write",
+  "enter_plan",
+  "exit_plan",
+  "tasks",
+  "task_output",
+  "task_send",
+  "task_stop",
+  "subagent",
+  "spawn_agent",
+  "send_message",
+  "followup_task",
+  "wait_agent",
+  "list_agents",
+  "interrupt_agent",
+  "generate_image",
+] as const;
 
 function optionsFor(agentId: "therapist" | "research"): AgentSessionOptions {
   const agent = createChatAgent(agentId, {
@@ -37,7 +61,7 @@ describe("specialist chat agents", () => {
     expect(options.selfCorrectionHooks).toBe(false);
   });
 
-  it("configures Research with a cached isolated prompt and the full toolset", () => {
+  it("configures Research with a cached isolated read-only prompt", () => {
     const options = optionsFor("research");
     expect(options.systemPrompt).toContain(RESEARCH_CHAT_SYSTEM_PROMPT);
     expect(options.systemPrompt).toContain("- Active agent: research");
@@ -46,6 +70,29 @@ describe("specialist chat agents", () => {
     expect(options.sessionRootDir).toBe(path.resolve("/tmp/gg/chat-sessions/research"));
     expect(options.allowedTools).toBeUndefined();
     expect(options.additionalTools?.map((tool) => tool.name)).toContain("delegate_to_agent");
+    expect(options.systemPrompt).toContain("available read-only research tools");
+    expect(options.systemPrompt).toContain("Do not edit or create files");
+    expect(RESEARCH_CHAT_ALLOWED_TOOL_NAMES).toEqual([
+      "read",
+      "find",
+      "grep",
+      "code_search",
+      "ls",
+      "source_path",
+      "web_fetch",
+      "web_search",
+      "tool_search",
+      "remember",
+      "update_memory",
+      "forget",
+      "set_jiwa",
+      "update_jiwa",
+      "forget_jiwa",
+      "delegate_to_agent",
+      "roadmap_inspect",
+      "roadmap_phase_draft",
+    ]);
+    expect(RESEARCH_CHAT_ALLOWED_TOOL_PREFIXES).toEqual(["mcp__kencode-search__"]);
   });
 
   it("retains memory tools and dynamic context when handoff is disabled", () => {
@@ -117,8 +164,23 @@ describe("specialist chat agents", () => {
     expect(internals.opts.promptCacheKeyPrefix).toBe("ggchat:general");
   });
 
-  it("scopes app Roadmap draft tools and steering to active Research across live switches", async () => {
+  it("enforces positive Research capabilities across live and late tool registrations", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "gg-chat-roadmap-policy-"));
+    const makeTool = (name: string): AgentTool => ({
+      name,
+      description: name,
+      parameters: z.object({}),
+      execute: () => `${name} executed`,
+    });
+    const contextToolNames = [
+      "remember",
+      "update_memory",
+      "forget",
+      "set_jiwa",
+      "update_jiwa",
+      "forget_jiwa",
+    ];
+    const futureMutator = makeTool("future_mutating_tool");
     const roadmapTools: AgentTool[] = [
       {
         name: "roadmap_inspect",
@@ -140,11 +202,13 @@ describe("specialist chat agents", () => {
       sessionsDir: path.join(root, "sessions"),
       transient: true,
       mcpEnabled: false,
+      additionalTools: [...contextToolNames.map(makeTool), futureMutator],
       getSystemPromptTail: () => "shared memory sentinel",
       ...createAppSidecarChatRoadmapSessionOptions(roadmapTools),
     });
     const internals = agent as unknown as {
       tools: AgentTool[];
+      messages: Array<{ role: "system" | "user"; content: string }>;
       opts: AgentSessionOptions;
     };
     const scopedNames = () =>
@@ -153,20 +217,67 @@ describe("specialist chat agents", () => {
         .filter((name) => name.startsWith("roadmap_"))
         .sort();
     const allNames = () => internals.tools.map((tool) => tool.name).sort();
+    const prohibitedNames = () =>
+      RESEARCH_PROHIBITED_TOOL_NAMES.filter((name) => allNames().includes(name));
+    const unexpectedResearchTools = () =>
+      allNames().filter(
+        (name) =>
+          !RESEARCH_CHAT_ALLOWED_TOOL_NAMES.includes(
+            name as (typeof RESEARCH_CHAT_ALLOWED_TOOL_NAMES)[number],
+          ) && !RESEARCH_CHAT_ALLOWED_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix)),
+      );
     const systemPrompt = () => String(agent.getMessages()[0]?.content);
 
     try {
       await agent.initialize();
+      internals.messages.push({ role: "user", content: "conversation sentinel" });
+      const conversation = agent.getMessages().slice(1);
       const brainstormTools = allNames();
+      const staleFutureMutator = internals.tools.find(
+        (tool) => tool.name === "future_mutating_tool",
+      );
+      expect(staleFutureMutator).toBeDefined();
       expect(scopedNames()).toEqual([]);
+      expect(allNames()).toEqual(expect.arrayContaining(["bash", "edit", "write", "tasks"]));
       expect(systemPrompt()).toContain("shared memory sentinel");
       expect(systemPrompt()).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
 
       await switchChatAgent(agent, "research", false);
       expect(scopedNames()).toEqual(["roadmap_inspect", "roadmap_phase_draft"]);
-      expect(allNames().filter((name) => !name.startsWith("roadmap_"))).toEqual(
-        brainstormTools.filter((name) => !name.startsWith("roadmap_")),
+      expect(prohibitedNames()).toEqual([]);
+      expect(unexpectedResearchTools()).toEqual([]);
+      expect(allNames()).toEqual(
+        expect.arrayContaining([
+          "read",
+          "find",
+          "grep",
+          "code_search",
+          "ls",
+          "source_path",
+          "web_fetch",
+          "delegate_to_agent",
+          ...contextToolNames,
+        ]),
       );
+      expect(allNames()).not.toContain("future_mutating_tool");
+      await expect(
+        staleFutureMutator?.execute(
+          {},
+          { signal: new AbortController().signal, toolCallId: "stale-future" },
+        ),
+      ).rejects.toThrow("future_mutating_tool is unavailable while Research Agent is active");
+      expect(agent.getMessages().slice(1)).toEqual(conversation);
+
+      const lateMutator = makeTool("late_future_mutating_tool");
+      const unknownMcp = makeTool("mcp__unknown-mutator__write");
+      const kencodeMcp = makeTool("mcp__kencode-search__searchCode");
+      agent.registerTool(lateMutator);
+      agent.registerTool(unknownMcp);
+      agent.registerTool(kencodeMcp);
+      expect(allNames()).not.toContain("late_future_mutating_tool");
+      expect(allNames()).not.toContain("mcp__unknown-mutator__write");
+      expect(allNames()).toContain("mcp__kencode-search__searchCode");
+
       const staleInspectTool = internals.tools.find((tool) => tool.name === "roadmap_inspect");
       expect(staleInspectTool).toBeDefined();
       const [researchPrefix, researchTail] = systemPrompt().split("<!-- uncached -->");
@@ -176,20 +287,56 @@ describe("specialist chat agents", () => {
 
       await switchChatAgent(agent, "therapist", false);
       expect(scopedNames()).toEqual([]);
-      expect(allNames()).toEqual(brainstormTools);
+      const expandedRegistry = [
+        ...brainstormTools,
+        "late_future_mutating_tool",
+        "mcp__unknown-mutator__write",
+        "mcp__kencode-search__searchCode",
+      ].sort();
+      expect(allNames()).toEqual(expandedRegistry);
+      const staleLateMutator = internals.tools.find(
+        (tool) => tool.name === "late_future_mutating_tool",
+      );
+      const staleUnknownMcp = internals.tools.find(
+        (tool) => tool.name === "mcp__unknown-mutator__write",
+      );
+      expect(agent.getMessages().slice(1)).toEqual(conversation);
+      expect(allNames()).toEqual(expect.arrayContaining(["bash", "edit", "write", "tasks"]));
       expect(systemPrompt()).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
       await expect(
         staleInspectTool?.execute(
           {},
           { signal: new AbortController().signal, toolCallId: "stale-inspect" },
         ),
-      ).rejects.toThrow("roadmap_inspect is unavailable while Therapist Agent is active");
+      ).rejects.toThrow("roadmap_inspect is unavailable under the active host policy");
 
       await switchChatAgent(agent, "research", false);
       expect(scopedNames()).toEqual(["roadmap_inspect", "roadmap_phase_draft"]);
+      expect(prohibitedNames()).toEqual([]);
+      expect(unexpectedResearchTools()).toEqual([]);
+      expect(allNames()).not.toContain("late_future_mutating_tool");
+      expect(allNames()).not.toContain("mcp__unknown-mutator__write");
+      expect(allNames()).toContain("mcp__kencode-search__searchCode");
+      await expect(
+        staleLateMutator?.execute(
+          {},
+          { signal: new AbortController().signal, toolCallId: "stale-late" },
+        ),
+      ).rejects.toThrow("late_future_mutating_tool is unavailable while Research Agent is active");
+      await expect(
+        staleUnknownMcp?.execute(
+          {},
+          { signal: new AbortController().signal, toolCallId: "stale-mcp" },
+        ),
+      ).rejects.toThrow(
+        "mcp__unknown-mutator__write is unavailable while Research Agent is active",
+      );
+      expect(agent.getMessages().slice(1)).toEqual(conversation);
+
       await switchChatAgent(agent, "general", false);
       expect(scopedNames()).toEqual([]);
-      expect(allNames()).toEqual(brainstormTools);
+      expect(allNames()).toEqual(expandedRegistry);
+      expect(agent.getMessages().slice(1)).toEqual(conversation);
       expect(systemPrompt()).not.toContain(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
     } finally {
       await agent.dispose();

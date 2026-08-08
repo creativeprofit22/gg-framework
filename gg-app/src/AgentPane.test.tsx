@@ -8,6 +8,7 @@ import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
 import type { NotesDocumentV3 } from "./notes-types";
 
 HTMLElement.prototype.scrollTo = vi.fn();
+Element.prototype.scrollIntoView = vi.fn();
 
 const nativeMocks = vi.hoisted(() => ({
   onDragDropEvent: vi.fn(async () => vi.fn()),
@@ -570,6 +571,46 @@ describe("AgentPane lifecycle", () => {
     const subscriptions = vi.mocked(pane.subscribe).mock.calls;
     const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
 
+    act(() =>
+      handleEvent?.({
+        type: "roadmap_phase_draft_change",
+        data: roadmapDraft,
+      }),
+    );
+
+    expect(await screen.findByRole("dialog", { name: "Review Roadmap draft" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Review Roadmap draft with 1 proposed phase" }),
+    ).toBeTruthy();
+  });
+
+  it("discovers /research and carries its submission into pending draft review", async () => {
+    const pane = client("pane-chat-research-command", 7);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "research",
+        aliases: [],
+        description: "Research this conversation and draft net-new Roadmap phases",
+        source: "built-in",
+      },
+    ]);
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+    const input = await screen.findByRole("textbox");
+
+    fireEvent.change(input, { target: { value: "/res" } });
+    expect(await screen.findByText("/research")).toBeTruthy();
+    expect(
+      screen.getByText("Research this conversation and draft net-new Roadmap phases"),
+    ).toBeTruthy();
+
+    const command = "/research approval UX";
+    fireEvent.change(input, { target: { value: command } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith(command, [], undefined));
+
+    const subscriptions = vi.mocked(pane.subscribe).mock.calls;
+    const handleEvent = subscriptions[subscriptions.length - 1]?.[0];
     act(() =>
       handleEvent?.({
         type: "roadmap_phase_draft_change",

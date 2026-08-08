@@ -2,7 +2,12 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { AgentSession } from "../core/agent-session.js";
 import { createGeneralChatAgent, GENERAL_CHAT_SYSTEM_PROMPT } from "./general.js";
-import { createResearchChatAgent, RESEARCH_CHAT_SYSTEM_PROMPT } from "./research.js";
+import {
+  createResearchChatAgent,
+  RESEARCH_CHAT_ALLOWED_TOOL_NAMES,
+  RESEARCH_CHAT_ALLOWED_TOOL_PREFIXES,
+  RESEARCH_CHAT_SYSTEM_PROMPT,
+} from "./research.js";
 import { createTherapistChatAgent, THERAPIST_CHAT_SYSTEM_PROMPT } from "./therapist.js";
 import {
   buildChatAgentSystemPrompt,
@@ -132,6 +137,16 @@ export function createChatAgent(
     session.setToolAvailability(
       (additionalToolsByAgent[activeAgent] ?? []).map((tool) => tool.name),
       true,
+    );
+    session.setToolCapabilityPolicy(
+      activeAgent === "research"
+        ? {
+            allowedToolNames: RESEARCH_CHAT_ALLOWED_TOOL_NAMES,
+            allowedToolPrefixes: RESEARCH_CHAT_ALLOWED_TOOL_PREFIXES,
+            unavailableMessage: (toolName) =>
+              `${toolName} is unavailable while Research Agent is active.`,
+          }
+        : undefined,
     );
   };
   controller = {

@@ -381,9 +381,14 @@ export class AgentSession {
   private appMarkers: AppMarkerPayload[] = [];
   private turnMetrics: TurnMetricPayload[] = [];
   private tools: AgentTool[] = [];
-  /** Tools hidden by a host-owned runtime policy (for example, chat specialist handoffs). */
-  private unavailableTools = new Map<string, AgentTool>();
+  /** Canonical guarded tool registry; `tools` is the policy-filtered live view used by the loop. */
+  private registeredTools = new Map<string, AgentTool>();
   private unavailableToolNames = new Set<string>();
+  private toolCapabilityPolicy: {
+    allowedNames: Set<string>;
+    allowedPrefixes: string[];
+    unavailableMessage: (toolName: string) => string;
+  } | null = null;
   /** Rebuilds the read tool for a new model (video byte cap is baked in at
    *  creation). Called from switchModel so video-capable models get the
    *  read-tool's native-video path after a mid-session model change. */
@@ -655,12 +660,12 @@ export class AgentSession {
         : {}),
     });
     const tools = [...builtInTools, ...(this.opts.additionalTools ?? [])];
-    // Apply the optional tool allow-list (read-only advisory sessions). Filtering
-    // here means the excluded tools are never registered with the agent loop, so
-    // a hallucinated call can't mutate the repo — and buildSystemPrompt below is
-    // fed the same filtered names so the Tools section matches exactly.
-    this.tools = this.opts.allowedTools ? tools.filter((t) => this.isToolAllowed(t.name)) : tools;
-    for (const toolName of this.unavailableToolNames) this.hideTool(toolName);
+    // Static allow-lists (Ken) and live capability policies (chat Research) share
+    // one guarded registry, so late registrations and stale references obey the
+    // same boundary as tools present at initialization.
+    this.registerTools(
+      this.opts.allowedTools ? tools.filter((tool) => this.isToolAllowed(tool.name)) : tools,
+    );
     this.rebuildReadTool = rebuildReadTool;
     this.processManager = processManager;
     this.lspManager = lspManager;
@@ -789,7 +794,7 @@ export class AgentSession {
     if (this.opts.loadExtensions !== false) {
       const extContext: ExtensionContext = {
         eventBus: this.eventBus,
-        registerTool: (tool) => this.tools.push(tool),
+        registerTool: (tool) => this.registerTool(tool),
         registerSlashCommand: (cmd) => this.slashCommands.register(cmd),
         cwd: this.cwd,
         settingsManager: this.settingsManager,
@@ -949,11 +954,11 @@ export class AgentSession {
   private ensureToolSearchTool(): void {
     if (!this.mcpCatalog) return;
     if (this.tools.some((t) => t.name === "tool_search")) return;
-    this.tools.push(
+    this.registerTool(
       createToolSearchTool(
         this.mcpCatalog,
         (promoted) => {
-          this.tools.push(...promoted);
+          this.registerTools(promoted);
         },
         async (toolName) => {
           if (this.liveMcpTools.has(toolName)) return undefined;
@@ -969,6 +974,7 @@ export class AgentSession {
             ? { serverName, ok: true }
             : { serverName, ok: false, error: outcome.error };
         },
+        (toolName) => this.isToolCapabilityAllowed(toolName),
       ),
     );
   }
@@ -979,18 +985,13 @@ export class AgentSession {
 
   /** Append tools, replacing any same-named entry (cached stub → live tool). */
   private replaceOrPushTools(tools: AgentTool[]): void {
-    for (const tool of tools) {
-      const index = this.tools.findIndex((t) => t.name === tool.name);
-      if (index >= 0) this.tools[index] = tool;
-      else this.tools.push(tool);
-    }
+    this.registerTools(tools);
   }
 
   /** Swap already-promoted cached stubs for their live equivalents, in place. */
   private replaceLivePromotedTools(tools: AgentTool[]): void {
     for (const tool of tools) {
-      const index = this.tools.findIndex((t) => t.name === tool.name);
-      if (index >= 0) this.tools[index] = tool;
+      if (this.registeredTools.has(tool.name)) this.registerTool(tool);
     }
   }
 
@@ -2064,8 +2065,7 @@ export class AgentSession {
     // video-capable model mid-session needs a fresh tool object — mirrors
     // the TUI's rebuildReadTool call on model switch.
     if (this.rebuildReadTool) {
-      const newReadTool = this.rebuildReadTool(model);
-      this.tools = this.tools.map((t) => (t.name === "read" ? newReadTool : t));
+      this.registerTool(this.rebuildReadTool(model));
     }
 
     // Model-dependent guidance lives in the uncached tail, so this rewrites
@@ -2095,13 +2095,13 @@ export class AgentSession {
     if (provider && provider !== prevProvider) {
       // Add/remove client-side web_search tool based on provider.
       // Anthropic has native server-side web search; all other providers need the client tool.
-      const hasWebSearch = this.tools.some((t) => t.name === "web_search");
+      const hasWebSearch = this.registeredTools.has("web_search");
       if (this.provider === "anthropic" && hasWebSearch) {
         // Switching TO anthropic — remove client-side web_search (server-side handles it)
-        this.tools = this.tools.filter((t) => t.name !== "web_search");
+        this.unregisterTools((toolName) => toolName === "web_search");
       } else if (this.provider !== "anthropic" && !hasWebSearch) {
         // Switching FROM anthropic — add client-side web_search
-        this.tools.push(
+        this.registerTool(
           createWebSearchTool(() => ({
             mode: this.settingsManager.get("networkMode"),
             allow: this.settingsManager.get("networkAllow"),
@@ -2117,14 +2117,14 @@ export class AgentSession {
       const glmInvolved = this.provider === "glm" || prevProvider === "glm";
       if (this.mcpManager && glmInvolved) {
         // Remove old MCP tools
-        this.tools = this.tools.filter((t) => !t.name.startsWith("mcp__"));
+        this.unregisterTools((toolName) => toolName.startsWith("mcp__"));
 
         // Disconnect private servers and release this session's shared leases.
         await this.disposeMcpConnections();
 
         // Drop stale MCP tools from both the live set and deferred catalog before
         // reconnecting through the same shared/private ownership path as startup.
-        this.tools = this.tools.filter((t) => !t.name.startsWith("mcp__"));
+        this.unregisterTools((toolName) => toolName.startsWith("mcp__"));
         this.mcpCatalog?.removeWhere((name) => name.startsWith("mcp__"));
         this.liveMcpTools.clear();
         this.cachedMcpToolServers.clear();
@@ -2606,31 +2606,99 @@ export class AgentSession {
 
   /**
    * Change whether named tools are registered with the live agent loop.
-   *
-   * The loop retains this.tools by reference and rebuilds its lookup map each turn,
-   * so in-place mutations also take effect after a tool-triggered role handoff.
-   * Calls made before initialize() are remembered and applied during registration.
+   * Calls made before initialize() also apply to tools registered later.
    */
   setToolAvailability(toolNames: Iterable<string>, available: boolean): void {
     for (const toolName of toolNames) {
-      if (available) {
-        this.unavailableToolNames.delete(toolName);
-        const tool = this.unavailableTools.get(toolName);
-        if (!tool) continue;
-        this.unavailableTools.delete(toolName);
-        this.tools.push(tool);
-      } else {
-        this.unavailableToolNames.add(toolName);
-        this.hideTool(toolName);
-      }
+      if (available) this.unavailableToolNames.delete(toolName);
+      else this.unavailableToolNames.add(toolName);
     }
+    this.reconcileRegisteredTools();
   }
 
-  private hideTool(toolName: string): void {
-    const index = this.tools.findIndex((tool) => tool.name === toolName);
-    if (index < 0) return;
-    const [tool] = this.tools.splice(index, 1);
-    if (tool) this.unavailableTools.set(toolName, tool);
+  /**
+   * Apply a positive runtime capability policy without discarding the original registry.
+   * Late tools are guarded on registration; stale references re-check the current policy.
+   */
+  setToolCapabilityPolicy(
+    policy:
+      | {
+          allowedToolNames: Iterable<string>;
+          allowedToolPrefixes?: Iterable<string>;
+          unavailableMessage?: (toolName: string) => string;
+        }
+      | undefined,
+  ): void {
+    this.toolCapabilityPolicy = policy
+      ? {
+          allowedNames: new Set(policy.allowedToolNames),
+          allowedPrefixes: [...(policy.allowedToolPrefixes ?? [])],
+          unavailableMessage:
+            policy.unavailableMessage ??
+            ((toolName) => `${toolName} is unavailable under the active tool capability policy.`),
+        }
+      : null;
+    this.reconcileRegisteredTools();
+  }
+
+  /** Register or replace a host-owned runtime tool under the active capability policy. */
+  registerTool(tool: AgentTool): void {
+    const guardedTool = this.guardRegisteredTool(tool);
+    this.registeredTools.set(tool.name, guardedTool);
+    this.reconcileRegisteredTools();
+  }
+
+  private registerTools(tools: Iterable<AgentTool>): void {
+    for (const tool of tools) {
+      this.registeredTools.set(tool.name, this.guardRegisteredTool(tool));
+    }
+    this.reconcileRegisteredTools();
+  }
+
+  private guardRegisteredTool(tool: AgentTool): AgentTool {
+    const session = this;
+    let guardedTool!: AgentTool;
+    guardedTool = {
+      ...tool,
+      async execute(args, context) {
+        if (session.registeredTools.get(tool.name) !== guardedTool) {
+          throw new Error(`${tool.name} is no longer registered.`);
+        }
+        if (session.unavailableToolNames.has(tool.name)) {
+          throw new Error(`${tool.name} is unavailable under the active host policy.`);
+        }
+        if (!session.isToolCapabilityAllowed(tool.name)) {
+          throw new Error(
+            session.toolCapabilityPolicy?.unavailableMessage(tool.name) ??
+              `${tool.name} is unavailable under the active tool capability policy.`,
+          );
+        }
+        return tool.execute(args, context);
+      },
+    };
+    return guardedTool;
+  }
+
+  private isToolCapabilityAllowed(toolName: string): boolean {
+    const policy = this.toolCapabilityPolicy;
+    if (!policy) return true;
+    if (policy.allowedNames.has(toolName)) return true;
+    return policy.allowedPrefixes.some((prefix) => toolName.startsWith(prefix));
+  }
+
+  private reconcileRegisteredTools(): void {
+    const availableTools = [...this.registeredTools.values()].filter(
+      (tool) =>
+        !this.unavailableToolNames.has(tool.name) && this.isToolCapabilityAllowed(tool.name),
+    );
+    this.tools.splice(0, this.tools.length, ...availableTools);
+  }
+
+  private unregisterTools(predicate: (toolName: string) => boolean): void {
+    for (const toolName of this.registeredTools.keys()) {
+      if (predicate(toolName)) this.registeredTools.delete(toolName);
+    }
+    this.reconcileRegisteredTools();
   }
 
   /** Replace a host-owned system prompt in place without resetting conversation history. */
@@ -3252,8 +3320,10 @@ export class AgentSession {
     this.setSessionPath("");
     this.eventBus.removeAllListeners();
     this.messages = [];
-    this.tools = [];
-    this.unavailableTools.clear();
+    this.tools.splice(0, this.tools.length);
+    this.registeredTools.clear();
+    this.unavailableToolNames.clear();
+    this.toolCapabilityPolicy = null;
   }
 
   // ── Private ────────────────────────────────────────────

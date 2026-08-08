@@ -27,11 +27,14 @@ export interface CachedToolResolution {
  * whose server has not connected yet: it waits for that connection so the model
  * learns *now* whether the capability really exists, instead of promoting a
  * tool that will fail on first call. Returns undefined for already-live tools.
+ * `isVisible` applies a live host capability boundary before catalog entries are
+ * named or promoted, preventing deferred tools from bypassing that policy.
  */
 export function createToolSearchTool(
   catalog: DeferredToolCatalog,
   onPromote: (tools: AgentTool[]) => void,
   resolveCached?: (toolName: string) => Promise<CachedToolResolution | undefined>,
+  isVisible: (toolName: string) => boolean = () => true,
 ): AgentTool<typeof ToolSearchParams> {
   return {
     name: "tool_search",
@@ -41,9 +44,12 @@ export function createToolSearchTool(
       "Use this when you need a capability not in your current toolset.",
     parameters: ToolSearchParams,
     async execute({ query }) {
-      const matches = catalog.search(query);
+      const matches = catalog
+        .search(query, 100)
+        .filter((tool) => isVisible(tool.name))
+        .slice(0, 5);
       if (matches.length === 0) {
-        const remaining = catalog.names();
+        const remaining = catalog.names().filter(isVisible);
         return remaining.length === 0
           ? "No tools matched and the catalog is empty — every catalog tool is already available."
           : `No tools matched "${query}". Still in the catalog: ${remaining.join(", ")}`;

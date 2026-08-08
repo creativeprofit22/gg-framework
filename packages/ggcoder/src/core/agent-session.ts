@@ -381,6 +381,9 @@ export class AgentSession {
   private appMarkers: AppMarkerPayload[] = [];
   private turnMetrics: TurnMetricPayload[] = [];
   private tools: AgentTool[] = [];
+  /** Tools hidden by a host-owned runtime policy (for example, chat specialist handoffs). */
+  private unavailableTools = new Map<string, AgentTool>();
+  private unavailableToolNames = new Set<string>();
   /** Rebuilds the read tool for a new model (video byte cap is baked in at
    *  creation). Called from switchModel so video-capable models get the
    *  read-tool's native-video path after a mid-session model change. */
@@ -657,6 +660,7 @@ export class AgentSession {
     // a hallucinated call can't mutate the repo — and buildSystemPrompt below is
     // fed the same filtered names so the Tools section matches exactly.
     this.tools = this.opts.allowedTools ? tools.filter((t) => this.isToolAllowed(t.name)) : tools;
+    for (const toolName of this.unavailableToolNames) this.hideTool(toolName);
     this.rebuildReadTool = rebuildReadTool;
     this.processManager = processManager;
     this.lspManager = lspManager;
@@ -2600,6 +2604,35 @@ export class AgentSession {
     return this.processManager.stop(id);
   }
 
+  /**
+   * Change whether named tools are registered with the live agent loop.
+   *
+   * The loop retains this.tools by reference and rebuilds its lookup map each turn,
+   * so in-place mutations also take effect after a tool-triggered role handoff.
+   * Calls made before initialize() are remembered and applied during registration.
+   */
+  setToolAvailability(toolNames: Iterable<string>, available: boolean): void {
+    for (const toolName of toolNames) {
+      if (available) {
+        this.unavailableToolNames.delete(toolName);
+        const tool = this.unavailableTools.get(toolName);
+        if (!tool) continue;
+        this.unavailableTools.delete(toolName);
+        this.tools.push(tool);
+      } else {
+        this.unavailableToolNames.add(toolName);
+        this.hideTool(toolName);
+      }
+    }
+  }
+
+  private hideTool(toolName: string): void {
+    const index = this.tools.findIndex((tool) => tool.name === toolName);
+    if (index < 0) return;
+    const [tool] = this.tools.splice(index, 1);
+    if (tool) this.unavailableTools.set(toolName, tool);
+  }
+
   /** Replace a host-owned system prompt in place without resetting conversation history. */
   setCustomSystemPrompt(systemPrompt: string, promptCacheKeyPrefix?: string): void {
     this.customSystemPrompt = systemPrompt;
@@ -3220,6 +3253,7 @@ export class AgentSession {
     this.eventBus.removeAllListeners();
     this.messages = [];
     this.tools = [];
+    this.unavailableTools.clear();
   }
 
   // ── Private ────────────────────────────────────────────

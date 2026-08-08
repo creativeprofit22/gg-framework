@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { AgentSession, type AgentSessionOptions } from "../core/agent-session.js";
 import type { ChatAgentId } from "./types.js";
 
@@ -18,6 +19,8 @@ export type ChatAgentOptions = Omit<
 > & {
   sessionsDir: string;
   onAgentChange?: (agentId: ChatAgentId) => void | Promise<void>;
+  additionalToolsByAgent?: Partial<Record<ChatAgentId, AgentTool[]>>;
+  getSystemPromptTailForAgent?: (agentId: ChatAgentId) => string;
 };
 
 export function chatAgentSessionsDir(coderSessionsDir: string, agentId: ChatAgentId): string {
@@ -60,7 +63,13 @@ export function createChatAgentSession(
   systemPrompt: string,
   options: ChatAgentOptions,
 ): AgentSession {
-  const { sessionsDir, onAgentChange: _onAgentChange, ...sessionOptions } = options;
+  const {
+    sessionsDir,
+    onAgentChange: _onAgentChange,
+    additionalToolsByAgent: _additionalToolsByAgent,
+    getSystemPromptTailForAgent: _getSystemPromptTailForAgent,
+    ...sessionOptions
+  } = options;
   const sessionRootDir = chatAgentSessionsDir(sessionsDir, agentId);
   const requestedSession = sessionOptions.sessionId ? path.resolve(sessionOptions.sessionId) : null;
   const resumableSession =

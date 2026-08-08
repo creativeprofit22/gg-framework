@@ -74,20 +74,46 @@ export function createChatAgent(
   delegationEnabled = true,
 ): AgentSession {
   let session!: AgentSession;
-  const sessionOptions = delegationEnabled
-    ? {
-        ...options,
-        additionalTools: [
-          ...(options.additionalTools ?? []),
-          createDelegationTool(() => controller),
-        ],
+  let controller!: ChatAgentController;
+  const { additionalToolsByAgent = {}, getSystemPromptTailForAgent, ...baseOptions } = options;
+  const specialistSourceTools = new Map<string, AgentTool>();
+  const specialistAgentsByTool = new Map<string, Set<ChatAgentId>>();
+  for (const specialistId of ["general", "therapist", "research"] as const) {
+    for (const tool of additionalToolsByAgent[specialistId] ?? []) {
+      if (!specialistSourceTools.has(tool.name)) specialistSourceTools.set(tool.name, tool);
+      const agents = specialistAgentsByTool.get(tool.name) ?? new Set<ChatAgentId>();
+      agents.add(specialistId);
+      specialistAgentsByTool.set(tool.name, agents);
+    }
+  }
+  const specialistTools = [...specialistSourceTools].map<AgentTool>(([toolName, tool]) => ({
+    ...tool,
+    async execute(args, context) {
+      const activeAgent = controller?.current ?? agentId;
+      if (!specialistAgentsByTool.get(toolName)?.has(activeAgent)) {
+        throw new Error(
+          `${toolName} is unavailable while ${CHAT_AGENT_LABELS[activeAgent]} is active.`,
+        );
       }
-    : {
-        ...options,
-        additionalTools: (options.additionalTools ?? []).filter(
-          (tool) => tool.name !== "delegate_to_agent",
-        ),
-      };
+      return tool.execute(args, context);
+    },
+  }));
+  const specialistToolNames = specialistTools.map((tool) => tool.name);
+  const getSystemPromptTail = () =>
+    [options.getSystemPromptTail?.(), getSystemPromptTailForAgent?.(controller?.current ?? agentId)]
+      .filter((part): part is string => Boolean(part))
+      .join("\n\n");
+  const commonTools = options.additionalTools ?? [];
+  const additionalTools = delegationEnabled
+    ? [...commonTools, ...specialistTools, createDelegationTool(() => controller)]
+    : [...commonTools, ...specialistTools].filter((tool) => tool.name !== "delegate_to_agent");
+  const sessionOptions: ChatAgentOptions = {
+    ...baseOptions,
+    additionalTools,
+    getSystemPromptTail: getSystemPromptTailForAgent
+      ? getSystemPromptTail
+      : options.getSystemPromptTail,
+  };
 
   switch (agentId) {
     case "therapist":
@@ -101,11 +127,19 @@ export function createChatAgent(
       break;
   }
 
-  const controller: ChatAgentController = {
+  const applySpecialistToolPolicy = (activeAgent: ChatAgentId): void => {
+    session.setToolAvailability(specialistToolNames, false);
+    session.setToolAvailability(
+      (additionalToolsByAgent[activeAgent] ?? []).map((tool) => tool.name),
+      true,
+    );
+  };
+  controller = {
     current: agentId,
     async switchTo(nextAgent, notify) {
       if (nextAgent === controller.current) return false;
       controller.current = nextAgent;
+      applySpecialistToolPolicy(nextAgent);
       session.setCustomSystemPrompt(
         buildChatAgentSystemPrompt(
           nextAgent,
@@ -119,6 +153,7 @@ export function createChatAgent(
       return true;
     },
   };
+  applySpecialistToolPolicy(agentId);
   chatAgentControllers.set(session, controller);
   return session;
 }

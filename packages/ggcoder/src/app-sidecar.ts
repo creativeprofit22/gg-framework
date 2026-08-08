@@ -233,10 +233,11 @@ import {
 } from "./app-sidecar-autopilot-phase-review.js";
 import { latestVerificationExceptionForReview } from "./app-sidecar-phase-completion.js";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
+import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool-host.js";
 import {
-  APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
-  AppSidecarRoadmapDraftToolHost,
-} from "./app-sidecar-roadmap-draft-tool-host.js";
+  createAppSidecarChatRoadmapSessionOptions,
+  createAppSidecarCodingRoadmapSessionOptions,
+} from "./app-sidecar-roadmap-session-options.js";
 import {
   AppSidecarRoadmapDraftDecisionService,
   parseRoadmapPhaseDraftRejectBody,
@@ -1973,11 +1974,10 @@ async function createSession(
         broadcast("plan_exit", { planPath, content });
         return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
       },
-      additionalTools: [
-        ...roadmapToolHost.createSessionTools("coding", () => created),
-        ...roadmapDraftToolHost.createSessionTools(),
-      ],
-      getSystemPromptTail: () => APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
+      ...createAppSidecarCodingRoadmapSessionOptions(
+        roadmapToolHost.createSessionTools("coding", () => created),
+        roadmapDraftToolHost.createSessionTools(),
+      ),
     });
     return created;
   };
@@ -1986,6 +1986,7 @@ async function createSession(
       ...baseSessionOptions,
       sessionsDir: paths.sessionsDir,
       additionalTools: [...buildMemoryTools(memoryStore), ...buildJiwaTools(jiwaStore)],
+      ...createAppSidecarChatRoadmapSessionOptions(roadmapDraftToolHost.createSessionTools()),
       getSystemPromptTail: () =>
         `${memoryStore.renderForPrompt()}\n\n${jiwaStore.renderForPrompt()}`,
       onAgentChange: async (nextAgent) => {

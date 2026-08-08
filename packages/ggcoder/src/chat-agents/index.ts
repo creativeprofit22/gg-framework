@@ -15,7 +15,7 @@ export { CHAT_AGENT_IDS, parseChatAgentId, type ChatAgentId } from "./types.js";
 export { chatAgentSessionsDir } from "./shared.js";
 
 export const CHAT_AGENT_LABELS: Record<ChatAgentId, string> = {
-  general: "General Agent",
+  general: "Brainstorm",
   therapist: "Therapist Agent",
   research: "Research Agent",
 };
@@ -43,7 +43,7 @@ function createDelegationTool(
   return {
     name: "delegate_to_agent",
     description:
-      "Hand the entire ongoing conversation to a different active agent. Therapist handles emotional support, reflection, coping, relationships, and wellbeing. Research handles evidence, sources, current information, comparisons, and deep analysis. General handles broad conversation that no longer needs a specialist. This is a persistent handoff, not a one-off subtask.",
+      "Hand the entire ongoing conversation to a different active agent. Therapist handles emotional support, reflection, coping, relationships, and wellbeing. Research handles evidence, sources, current information, comparisons, and deep analysis. Brainstorm handles ideation, problem framing, assumptions, tradeoffs, and broad conversation that no longer needs a specialist. This is a persistent handoff, not a one-off subtask.",
     parameters: delegationParameters,
     executionMode: "sequential",
     async execute({ agent }) {

@@ -3548,7 +3548,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   ? "Therapist Agent"
                   : state?.chatAgent === "research"
                     ? "Research Agent"
-                    : "General Agent"}
+                    : "Brainstorm"}
               </span>
             ) : (
               <span className="footer-left footer-reveal" style={{ fontFamily: "var(--mono)" }}>

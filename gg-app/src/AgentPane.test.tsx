@@ -317,6 +317,26 @@ describe("AgentPane lifecycle", () => {
     );
   });
 
+  it("presents the compatible general chat agent as Brainstorm", async () => {
+    const pane = client("pane-brainstorm", 1);
+    const chatTarget: PaneSessionTarget = {
+      mode: "chat",
+      chatAgent: "general",
+      cwd: "/work",
+      sessionPath: "/chat-session",
+    };
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("azure:gpt-test"),
+      mode: "chat",
+      chatAgent: "general",
+    });
+
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+
+    expect(await screen.findByText("Brainstorm")).toBeDefined();
+    expect(screen.queryByText("General Agent")).toBeNull();
+  });
+
   it("binds an auxiliary picker through its pane-scoped client", async () => {
     const pane = client("pane-1", 3);
     const onUserTargetChange = vi.fn();

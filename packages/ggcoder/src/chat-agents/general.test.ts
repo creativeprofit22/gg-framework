@@ -1,14 +1,32 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AgentSessionOptions } from "../core/agent-session.js";
-import { createGeneralChatAgent, GENERAL_CHAT_SYSTEM_PROMPT } from "./general.js";
+import {
+  createGeneralChatAgent,
+  GENERAL_CHAT_AGENT_ID,
+  GENERAL_CHAT_SYSTEM_PROMPT,
+} from "./general.js";
 import { chatAgentSessionsDir } from "./shared.js";
 
 function optionsOf(agent: unknown): AgentSessionOptions {
   return (agent as { opts: AgentSessionOptions }).opts;
 }
 
-describe("General chat agent", () => {
+describe("Brainstorm chat agent", () => {
+  it("uses the Brainstorm public role without changing the internal general id", () => {
+    expect(GENERAL_CHAT_AGENT_ID).toBe("general");
+    expect(GENERAL_CHAT_SYSTEM_PROMPT).toContain(
+      "You are Brainstorm, the default ideation agent in GG Chat.",
+    );
+    expect(GENERAL_CHAT_SYSTEM_PROMPT).toContain("problem framing");
+    expect(GENERAL_CHAT_SYSTEM_PROMPT).toContain("Surface assumptions");
+    expect(GENERAL_CHAT_SYSTEM_PROMPT).toContain("meaningful tradeoffs");
+    expect(GENERAL_CHAT_SYSTEM_PROMPT).toContain("`/research [optional focus]`");
+    expect(GENERAL_CHAT_SYSTEM_PROMPT).toContain(
+      "Do not invoke that command yourself, claim the Research handoff happened",
+    );
+  });
+
   it("uses an isolated session namespace outside GG Coder history", () => {
     // path.resolve on BOTH sides: the production code resolves its input, and
     // on Windows that attaches the current drive ("\\tmp\\gg" -> "D:\\tmp\\gg").
@@ -49,7 +67,20 @@ describe("General chat agent", () => {
     expect(options.transient).toBeUndefined();
   });
 
-  it("refuses to resume a GG Coder session outside the General namespace", () => {
+  it("resumes existing sessions from the internal general namespace", () => {
+    const sessionId = path.resolve("/tmp/gg/chat-sessions/general/existing.jsonl");
+    const agent = createGeneralChatAgent({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: "/tmp/workspace",
+      sessionsDir: "/tmp/gg/sessions",
+      sessionId,
+    });
+
+    expect(optionsOf(agent).sessionId).toBe(sessionId);
+  });
+
+  it("refuses to resume a GG Coder session outside the internal general namespace", () => {
     const agent = createGeneralChatAgent({
       provider: "anthropic",
       model: "claude-test",

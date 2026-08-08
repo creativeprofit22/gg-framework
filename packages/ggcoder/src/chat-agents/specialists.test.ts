@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { AgentSessionOptions } from "../core/agent-session.js";
-import { createChatAgent, parseChatAgentId } from "./index.js";
+import { GENERAL_CHAT_SYSTEM_PROMPT } from "./general.js";
+import { CHAT_AGENT_LABELS, createChatAgent, parseChatAgentId } from "./index.js";
 import { RESEARCH_CHAT_SYSTEM_PROMPT } from "./research.js";
 import { THERAPIST_CHAT_SYSTEM_PROMPT } from "./therapist.js";
 import path from "node:path";
@@ -102,14 +103,19 @@ describe("specialist chat agents", () => {
     expect(agent.getMessages()[0]?.content).toContain(THERAPIST_CHAT_SYSTEM_PROMPT);
     expect(agent.getMessages()[0]?.content).toContain("- Active agent: therapist");
 
-    await tool?.execute({ agent: "general" }, {
+    const returnResult = await tool?.execute({ agent: "general" }, {
       signal: new AbortController().signal,
     } as never);
+    expect(String(returnResult)).toContain("Brainstorm is now the active agent");
     expect(changed).toEqual(["therapist", "general"]);
+    expect(agent.getMessages()[0]?.content).toContain(GENERAL_CHAT_SYSTEM_PROMPT);
     expect(agent.getMessages()[0]?.content).toContain("- Active agent: general");
+    expect(internals.opts.promptCacheKeyPrefix).toBe("ggchat:general");
   });
 
-  it("defaults unknown persisted agent ids to General", () => {
+  it("presents the compatible general id publicly as Brainstorm", () => {
+    expect(CHAT_AGENT_LABELS.general).toBe("Brainstorm");
+    expect(parseChatAgentId("general")).toBe("general");
     expect(parseChatAgentId("therapist")).toBe("therapist");
     expect(parseChatAgentId("research")).toBe("research");
     expect(parseChatAgentId("unknown")).toBe("general");

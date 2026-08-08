@@ -2746,6 +2746,55 @@ fn parse_sidecar_json_response(
     serde_json::from_str(body).map_err(|error| error.to_string())
 }
 
+const CONTINUATION_HANDOFF_PROMPT_MAX_CHARS: usize = 24_000;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuationHandoffResponse {
+    version: u8,
+    prompt: String,
+}
+
+fn parse_continuation_handoff_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Result<ContinuationHandoffResponse, String> {
+    if !status.is_success() {
+        return Err(sidecar_error_text(status, body));
+    }
+    let response: ContinuationHandoffResponse = serde_json::from_str(body)
+        .map_err(|_| "invalid continuation-handoff response".to_string())?;
+    if response.version != 1
+        || response.prompt.trim().is_empty()
+        || response.prompt.chars().count() > CONTINUATION_HANDOFF_PROMPT_MAX_CHARS
+    {
+        return Err("invalid continuation-handoff response".to_string());
+    }
+    Ok(response)
+}
+
+/// Proxy: synthesize a bounded continuation prompt for the authenticated pane.
+#[tauri::command]
+async fn agent_continuation_handoff(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+    next_instruction: String,
+) -> Result<ContinuationHandoffResponse, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .post(format!("{}/continuation-handoff", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "nextInstruction": next_instruction }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    parse_continuation_handoff_response(status, &body)
+}
+
 fn parse_new_session_response(
     status: reqwest::StatusCode,
     body: &str,
@@ -7272,6 +7321,7 @@ pub fn run() {
             agent_progress,
             agent_usage,
             agent_prompt,
+            agent_continuation_handoff,
             agent_cancel,
             agent_cancel_roadmap_status_retry,
             agent_ken_prompt,
@@ -8281,6 +8331,38 @@ mod tests {
                 "accepted": true,
                 "operationId": "operation-1"
             }))
+        );
+    }
+
+    #[test]
+    fn continuation_handoff_response_is_strict_and_preserves_errors() {
+        let valid = parse_continuation_handoff_response(
+            reqwest::StatusCode::OK,
+            r###"{"version":1,"prompt":"## Objective\nContinue"}"###,
+        )
+        .unwrap();
+        assert_eq!(valid.version, 1);
+        assert_eq!(valid.prompt, "## Objective\nContinue");
+
+        for malformed in [
+            r#"{"version":2,"prompt":"Continue"}"#,
+            r#"{"version":1,"prompt":""}"#,
+            r#"{"version":1,"prompt":"Continue","extra":true}"#,
+            r#"{"version":1}"#,
+            "not-json",
+        ] {
+            assert_eq!(
+                parse_continuation_handoff_response(reqwest::StatusCode::OK, malformed),
+                Err("invalid continuation-handoff response".to_string())
+            );
+        }
+
+        assert_eq!(
+            parse_continuation_handoff_response(
+                reqwest::StatusCode::BAD_GATEWAY,
+                r#"{"error":"provider unavailable"}"#,
+            ),
+            Err("provider unavailable".to_string())
         );
     }
 

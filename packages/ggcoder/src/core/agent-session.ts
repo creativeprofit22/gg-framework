@@ -210,6 +210,8 @@ export interface AgentSessionOptions {
    * connect-before-ready behavior so MCP tools are present on the first turn.
    */
   backgroundMcpConnect?: boolean;
+  /** Disable MCP discovery and connections for isolated one-shot sessions. */
+  mcpEnabled?: boolean;
   /**
    * Handler for a server-initiated MCP `elicitation/create` — a request for user
    * input in the middle of a tool call. Hosts that can render a form (the
@@ -668,15 +670,17 @@ export class AgentSession {
     // its listening handshake until this resolves), `backgroundMcpConnect`
     // moves the connect off the critical path so the session becomes usable
     // immediately and tools are appended whenever the servers come up.
-    this.mcpManager = new MCPClientManager({
-      catalogCache: this.mcpCatalogCache,
-      modernProtocol: this.settingsManager.get("mcpModernProtocol"),
-      onElicit: this.opts.onMcpElicit,
-    });
-    if (this.opts.backgroundMcpConnect) {
-      void this.connectMcpServers();
-    } else {
-      await this.connectMcpServers();
+    if (this.opts.mcpEnabled !== false) {
+      this.mcpManager = new MCPClientManager({
+        catalogCache: this.mcpCatalogCache,
+        modernProtocol: this.settingsManager.get("mcpModernProtocol"),
+        onElicit: this.opts.onMcpElicit,
+      });
+      if (this.opts.backgroundMcpConnect) {
+        void this.connectMcpServers();
+      } else {
+        await this.connectMcpServers();
+      }
     }
 
     const basePrompt =

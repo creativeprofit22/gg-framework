@@ -499,6 +499,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const {
     getState,
     sendPrompt,
+    prepareContinuationHandoff,
     sendKenPrompt,
     cancelKen,
     setAutopilot,
@@ -2227,6 +2228,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         }
         kenPromptActionLockRef.current = true;
         try {
+          let preparedPrompt: string;
+          try {
+            preparedPrompt = (await prepareContinuationHandoff(prompt)).prompt;
+          } catch {
+            return {
+              status: "failed",
+              action: action.type,
+              message:
+                "Couldn’t prepare the continuation handoff. The current session is unchanged; try again.",
+            };
+          }
           try {
             await createAuthoritativeNewSession();
           } catch (error) {
@@ -2241,36 +2253,36 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   "Couldn’t create a new session. The current session is unchanged; try again.",
               };
             }
-            restorePromptToComposer(prompt);
+            restorePromptToComposer(preparedPrompt);
             return {
               status: "failed",
               action: action.type,
-              message: `${AMBIGUOUS_NEW_SESSION_MESSAGE} The exact prompt is in the composer.`,
-              recoverPrompt: prompt,
+              message: `${AMBIGUOUS_NEW_SESSION_MESSAGE} The complete continuation handoff is in the composer.`,
+              recoverPrompt: preparedPrompt,
             };
           }
           try {
-            planResumePromptRef.current = prompt;
-            const submission = await sendPrompt(prompt, [], { kenSent: true });
+            planResumePromptRef.current = preparedPrompt;
+            const submission = await sendPrompt(preparedPrompt, [], { kenSent: true });
             stickToBottomRef.current = true;
             setQueuedCount(submission.count);
             pushItem({
               kind: "user",
               id: nextId(),
-              text: prompt,
+              text: preparedPrompt,
               kenSent: true,
               queued: submission.queued,
             });
             endStreamingText();
             return { status: "sent", session: "fresh" };
           } catch {
-            restorePromptToComposer(prompt);
+            restorePromptToComposer(preparedPrompt);
             return {
               status: "failed",
               action: action.type,
               message:
-                "The new session opened, but sending failed. The exact prompt is back in the composer.",
-              recoverPrompt: prompt,
+                "The new session opened, but sending failed. The complete continuation handoff is back in the composer.",
+              recoverPrompt: preparedPrompt,
             };
           }
         } finally {
@@ -2326,6 +2338,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       restorePromptToComposer,
       running,
       sendPrompt,
+      prepareContinuationHandoff,
     ],
   );
 
@@ -2506,12 +2519,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   function sendToKen(question: string, addressedText: string, preserveComposer = false): void {
     const trimmedQuestion = question.trim();
     const trimmedAddressedText = addressedText.trim();
-    if (
-      !readyRef.current ||
-      planReview !== null ||
-      !trimmedQuestion ||
-      !trimmedAddressedText
-    ) {
+    if (!readyRef.current || planReview !== null || !trimmedQuestion || !trimmedAddressedText) {
       return;
     }
 

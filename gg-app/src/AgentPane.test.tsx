@@ -161,6 +161,11 @@ const agentState = (model: string): AgentState => ({
   running: false,
 });
 const KEN_PROMPT = "Implement the guarded session action\n  Preserve this indentation";
+const CONTINUATION_PROMPT = `## Objective
+Continue safely.
+
+## Ken’s next instruction
+${KEN_PROMPT}`;
 
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
   let resolve!: (value: T) => void;
@@ -207,6 +212,10 @@ function client(paneId: string, generation: number): PaneAgentClient {
     getSubscriptionUsage: vi.fn(),
     enhancePrompt: vi.fn(),
     sendPrompt: vi.fn(async () => ({ queued: false, count: 0 })),
+    prepareContinuationHandoff: vi.fn(async () => ({
+      version: 1 as const,
+      prompt: CONTINUATION_PROMPT,
+    })),
     cancel: vi.fn(),
     sendKenPrompt: vi.fn(),
     cancelKen: vi.fn(),
@@ -823,6 +832,7 @@ describe("AgentPane lifecycle", () => {
       expect(pane.sendPrompt).toHaveBeenCalledWith(KEN_PROMPT, [], { kenSent: true }),
     );
     expect(pane.sendPrompt).toHaveBeenCalledOnce();
+    expect(pane.prepareContinuationHandoff).not.toHaveBeenCalled();
     expect(document.querySelector(".user-ken-sent")?.textContent).toContain("Sent to");
   });
 
@@ -848,6 +858,11 @@ describe("AgentPane lifecycle", () => {
     fireEvent.click(fresh);
     fireEvent.click(fresh);
     await waitFor(() => expect(pane.newSession).toHaveBeenCalledOnce());
+    expect(pane.prepareContinuationHandoff).toHaveBeenCalledWith(KEN_PROMPT);
+    expect(pane.prepareContinuationHandoff).toHaveBeenCalledOnce();
+    expect(vi.mocked(pane.prepareContinuationHandoff).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(pane.newSession).mock.invocationCallOrder[0],
+    );
     expect(pane.sendPrompt).not.toHaveBeenCalled();
 
     act(() => nativeMocks.onSessionReset?.("unrelated-operation"));
@@ -857,9 +872,30 @@ describe("AgentPane lifecycle", () => {
 
     await act(async () => creation.resolve({ operationId: "operation-1" }));
     await waitFor(() =>
-      expect(pane.sendPrompt).toHaveBeenCalledWith(KEN_PROMPT, [], { kenSent: true }),
+      expect(pane.sendPrompt).toHaveBeenCalledWith(CONTINUATION_PROMPT, [], { kenSent: true }),
     );
     expect(pane.sendPrompt).toHaveBeenCalledOnce();
+    expect(vi.mocked(pane.newSession).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(pane.sendPrompt).mock.invocationCallOrder[0],
+    );
+  });
+
+  it.each([
+    ["provider failure", new Error("provider unavailable")],
+    ["malformed synthesis", new Error("invalid continuation-handoff response")],
+  ])("fails closed before reset on %s", async (_label, error) => {
+    const pane = client("pane-ken-prepare-failure", 1);
+    vi.mocked(pane.prepareContinuationHandoff).mockRejectedValueOnce(error);
+    await renderKenPromptPane(pane);
+
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("current session is unchanged");
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+    expect(document.querySelector(".ken-prompt-body")?.textContent).toBe(KEN_PROMPT);
+    expect(pane.newSession).not.toHaveBeenCalled();
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
   it("keeps the old prompt card retryable after a known creation rejection", async () => {
@@ -877,11 +913,14 @@ describe("AgentPane lifecycle", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(pane.newSession).toHaveBeenCalledTimes(2));
+    expect(pane.prepareContinuationHandoff).toHaveBeenCalledTimes(2);
     act(() => nativeMocks.onSessionReset?.("operation-1"));
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith(CONTINUATION_PROMPT, [], { kenSent: true }),
+    );
   });
 
-  it("restores the exact prompt after an ambiguous new-session outcome", async () => {
+  it("restores the complete handoff after an ambiguous new-session outcome", async () => {
     const pane = client("pane-ken-ambiguous", 1);
     vi.mocked(pane.newSession).mockRejectedValueOnce(
       new NewSessionError("outcome-unknown", "connection closed"),
@@ -891,11 +930,11 @@ describe("AgentPane lifecycle", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Couldn’t confirm which session is active");
-    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(CONTINUATION_PROMPT);
     expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it("times out without guessing and restores the exact prompt to the composer", async () => {
+  it("times out without guessing and restores the complete handoff to the composer", async () => {
     const pane = client("pane-ken-timeout", 1);
     await renderKenPromptPane(pane);
     vi.useFakeTimers();
@@ -907,7 +946,7 @@ describe("AgentPane lifecycle", () => {
 
     expect(pane.newSession).toHaveBeenCalledOnce();
     expect(pane.sendPrompt).not.toHaveBeenCalled();
-    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT);
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(CONTINUATION_PROMPT);
     expect(screen.getByRole("alert").textContent).toContain("Couldn’t confirm which session");
   });
 
@@ -921,7 +960,7 @@ describe("AgentPane lifecycle", () => {
     act(() => nativeMocks.onSessionReset?.("operation-1"));
 
     await waitFor(() =>
-      expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(KEN_PROMPT),
+      expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe(CONTINUATION_PROMPT),
     );
     expect(screen.getByRole("alert").textContent).toContain("new session opened");
     expect(screen.getByRole("alert").textContent).toContain("back in the composer");

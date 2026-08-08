@@ -39,6 +39,9 @@ describe("pane agent client", () => {
         return { ready: true, error: null, generation: 1, sessionId: "session" };
       }
       if (command === "agent_prompt") return { queued: false, count: 0 };
+      if (command === "agent_continuation_handoff") {
+        return { version: 1, prompt: "## Objective\nContinue" };
+      }
       if (command === "agent_new_session") return { operationId: "new-session-op" };
       return {};
     });
@@ -55,6 +58,7 @@ describe("pane agent client", () => {
     await c.getSubscriptionUsage("openai");
     await c.enhancePrompt("e");
     await c.sendPrompt("p", [], { kenSent: true });
+    await c.prepareContinuationHandoff("next exactly");
     await c.cancel();
     await c.sendKenPrompt("k");
     await c.cancelKen();
@@ -99,6 +103,10 @@ describe("pane agent client", () => {
       text: "p",
       attachments: [],
       meta: { kenSent: true },
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_continuation_handoff", {
+      paneId: "right",
+      nextInstruction: "next exactly",
     });
     expect(invoke).toHaveBeenCalledWith("agent_sessions", {
       paneId: "right",
@@ -216,6 +224,22 @@ describe("pane agent client", () => {
     await expect(client.cancelPhaseRun("phase/21")).rejects.toThrow(
       "invalid phase cancellation response",
     );
+  });
+
+  it("rejects malformed continuation-handoff responses", async () => {
+    const client = createPaneAgentClient("right");
+    for (const malformed of [
+      null,
+      { version: 2, prompt: "Continue" },
+      { version: 1, prompt: "" },
+      { version: 1, prompt: "Continue", extra: true },
+      { version: 1 },
+    ]) {
+      invoke.mockResolvedValueOnce(malformed);
+      await expect(client.prepareContinuationHandoff("next")).rejects.toThrow(
+        "invalid continuation-handoff response",
+      );
+    }
   });
 
   it("keeps compatibility wrappers explicitly on primary", async () => {

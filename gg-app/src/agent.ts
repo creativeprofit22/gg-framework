@@ -619,6 +619,30 @@ export interface PromptMeta {
   enhancements?: PromptSegment[];
 }
 
+export interface ContinuationHandoffResponse {
+  version: 1;
+  prompt: string;
+}
+
+const CONTINUATION_HANDOFF_PROMPT_MAX_CHARS = 24_000;
+
+export function requireContinuationHandoffResponse(value: unknown): ContinuationHandoffResponse {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("invalid continuation-handoff response");
+  }
+  const response = value as Record<string, unknown>;
+  if (
+    Object.keys(response).length !== 2 ||
+    response.version !== 1 ||
+    typeof response.prompt !== "string" ||
+    !response.prompt.trim() ||
+    response.prompt.length > CONTINUATION_HANDOFF_PROMPT_MAX_CHARS
+  ) {
+    throw new Error("invalid continuation-handoff response");
+  }
+  return { version: 1, prompt: response.prompt };
+}
+
 /** Authoritative outcome of submitting one prompt to the sidecar. */
 export interface PromptSubmissionResult {
   queued: boolean;
@@ -2211,6 +2235,7 @@ export interface PaneAgentClient extends NotesClient {
     attachments?: Attachment[],
     meta?: PromptMeta,
   ): Promise<PromptSubmissionResult>;
+  prepareContinuationHandoff(nextInstruction: string): Promise<ContinuationHandoffResponse>;
   cancel(): Promise<CancelResult>;
   retryCancelledRoadmapStatus(): Promise<PhaseCancellationPersistenceResult>;
   sendKenPrompt(text: string): Promise<void>;
@@ -2487,6 +2512,10 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     sendPrompt: async (text, attachments = [], meta) =>
       requirePromptSubmissionResult(
         await call<unknown>("agent_prompt", { text, attachments, meta: meta ?? null }),
+      ),
+    prepareContinuationHandoff: async (nextInstruction) =>
+      requireContinuationHandoffResponse(
+        await call<unknown>("agent_continuation_handoff", { nextInstruction }),
       ),
     async cancel() {
       try {

@@ -26,6 +26,11 @@ import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
+import {
+  AppSidecarContinuationHandoffService,
+  type ContinuationSynthesisSessionOptions,
+} from "./app-sidecar-continuation-handoff.js";
+import { CONTINUATION_HANDOFF_LIMITS } from "./core/continuation-handoff.js";
 import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
 import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
 import { RunClaim } from "./core/run-claim.js";
@@ -3433,6 +3438,11 @@ async function createSession(
   };
   scheduleGitHubPoll(2000);
 
+  const continuationHandoffService = new AppSidecarContinuationHandoffService({
+    createSynthesisSession: (options: ContinuationSynthesisSessionOptions) =>
+      new AgentSession(options),
+  });
+
   function readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<string | null> {
     return readCappedBody(req, res);
   }
@@ -4260,6 +4270,43 @@ async function createSession(
           }));
         json(res, 200, { commands: [...workspaceActions, ...builtins, ...custom] });
       })();
+      return;
+    }
+
+    if (method === "POST" && url === "/continuation-handoff") {
+      void readBody(req, res)
+        .then(async (raw) => {
+          if (raw === null) return;
+          let nextInstruction: string;
+          try {
+            const body = JSON.parse(raw) as { nextInstruction?: unknown };
+            nextInstruction = typeof body.nextInstruction === "string" ? body.nextInstruction : "";
+          } catch {
+            json(res, 400, { error: "invalid JSON body" });
+            return;
+          }
+          if (!nextInstruction.trim()) {
+            json(res, 400, { error: "empty next instruction" });
+            return;
+          }
+          if (nextInstruction.length > CONTINUATION_HANDOFF_LIMITS.nextInstructionChars) {
+            json(res, 413, { error: "next instruction is too long" });
+            return;
+          }
+          try {
+            const prepared = await continuationHandoffService.prepare(session, nextInstruction);
+            json(res, 200, { version: prepared.version, prompt: prepared.prompt });
+          } catch (error) {
+            captureSidecarError(error, "app-sidecar.continuation-handoff");
+            json(res, 502, {
+              error: error instanceof Error ? error.message : "continuation handoff failed",
+            });
+          }
+        })
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.continuation-handoff.route");
+          json(res, 500, { error: "continuation handoff failed" });
+        });
       return;
     }
 

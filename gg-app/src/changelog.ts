@@ -22,6 +22,15 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.44.0",
+    date: "2026-08-09",
+    items: [
+      "Your agent now has a real crew. `Six` specialists ship with every install: `bee` builds things, `owl` maps your codebase, `researcher` digs through real docs, `worker` opens PRs, plus an auditor and a skeptic for security passes. They arrive ready to go and quietly refresh themselves with each update, so you never get stuck with a stale copy.",
+      "Delegated work comes back sharper. Helpers used to get silently dropped onto the cheap model and handed a stripped down brief, so they missed things you would never accept from your main agent. Now they inherit your model by default and keep your project rules, tools, and environment, and I stretched their time budget so long jobs actually finish.",
+      "Quitting means quitting. Closing a terminal or hitting `Ctrl+C` no longer leaves a stubborn background process clinging to its port when a slow plugin refuses to let go. Shutdown gets `5` seconds, then it exits for real.",
+    ],
+  },
+  {
     version: "0.43.0",
     date: "2026-08-08",
     items: [

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  buildSubAgentSystemPrompt,
   buildSystemPrompt,
   collectProjectContext,
   PROJECT_CONTEXT_MAX_BYTES,
@@ -625,5 +626,73 @@ describe("collectProjectContext", () => {
     expect(rendered).toContain(nearBig);
     expect(rendered).not.toContain(parentRules);
     expect(rendered).toContain("Skipped (context budget)");
+  });
+});
+
+describe("buildSubAgentSystemPrompt", () => {
+  it("composes the agent body with tools, context, contract and environment", async () => {
+    const cwd = await makeProject({ "CLAUDE.md": "Project rules win." });
+
+    const prompt = await buildSubAgentSystemPrompt("You are Owl. Explore this repo.", {
+      cwd,
+      toolNames: ["read", "grep", "code_search"],
+    });
+
+    expect(prompt.startsWith("You are Owl. Explore this repo.")).toBe(true);
+    expect(sectionIndex(prompt, "## Tools")).toBeLessThan(
+      sectionIndex(prompt, "## Project Context"),
+    );
+    expect(sectionIndex(prompt, "## Project Context")).toBeLessThan(
+      sectionIndex(prompt, "## Report"),
+    );
+    expect(sectionIndex(prompt, "## Report")).toBeLessThan(sectionIndex(prompt, "## Environment"));
+    expect(prompt).toContain("Project rules win.");
+    // The volatile date stays behind the cache marker, exactly as the parent's.
+    expect(prompt.indexOf("<!-- uncached -->")).toBeGreaterThan(
+      sectionIndex(prompt, "## Environment"),
+    );
+  });
+
+  it("never advertises a tool the child's allow-list strips", async () => {
+    const cwd = await makeProject();
+
+    const prompt = await buildSubAgentSystemPrompt("You are Owl.", {
+      cwd,
+      toolNames: ["read", "grep", "code_search"],
+    });
+
+    const toolsSection = prompt.slice(
+      sectionIndex(prompt, "## Tools"),
+      sectionIndex(prompt, "## Report"),
+    );
+    expect(toolsSection).toContain("code_search");
+    expect(toolsSection).not.toContain("**write**");
+    expect(toolsSection).not.toContain("**bash**");
+    expect(prompt).not.toContain("## Delegation");
+  });
+
+  it("skips project instruction files when the agent opts out of context", async () => {
+    const cwd = await makeProject({ "CLAUDE.md": "Project rules win." });
+
+    const prompt = await buildSubAgentSystemPrompt("You are Owl.", {
+      cwd,
+      toolNames: ["read"],
+      context: "none",
+    });
+
+    expect(prompt).not.toContain("Project rules win.");
+    expect(prompt).toContain("## Environment");
+  });
+
+  it("briefs a delegating child on standalone task briefs", async () => {
+    const cwd = await makeProject();
+
+    const prompt = await buildSubAgentSystemPrompt("You are Bee.", {
+      cwd,
+      toolNames: ["read", "subagent"],
+    });
+
+    expect(prompt).toContain("## Delegation");
+    expect(prompt).toContain("sees none of this conversation");
   });
 });

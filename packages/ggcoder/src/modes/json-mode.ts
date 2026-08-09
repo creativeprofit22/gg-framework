@@ -11,7 +11,15 @@ export interface JsonModeOptions {
   provider: Provider;
   model: string;
   baseUrl?: string;
+  /** Replaces the whole system prompt. */
   systemPrompt?: string;
+  /**
+   * Agent definition body composed with the standard scaffolding (Tools,
+   * project context, return contract, Environment) — the delegation path.
+   */
+  agentPrompt?: string;
+  /** Whether the composed prompt includes project instruction files. */
+  agentContext?: "project" | "none";
   cwd: string;
   thinkingLevel?: ThinkingLevel;
   maxTurns?: number;
@@ -93,6 +101,8 @@ export async function runJsonMode(options: JsonModeOptions): Promise<void> {
     model: options.model,
     baseUrl: options.baseUrl,
     systemPrompt: options.systemPrompt,
+    agentPrompt: options.agentPrompt,
+    agentContext: options.agentContext,
     cwd: options.cwd,
     thinkingLevel: options.thinkingLevel,
     maxTurns: options.maxTurns,

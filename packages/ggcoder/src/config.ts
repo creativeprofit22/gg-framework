@@ -161,16 +161,38 @@ function isValidThemeSetting(value: string): value is "auto" | ThemeName {
 }
 
 /**
- * SHA-256 of the exact `auditor.md` / `skeptic.md` bodies seeded by v5.22.6.
- * Used to delete only our own mistakenly-seeded copies — never a user's file.
+ * SHA-256 of every agent body ggcoder has ever seeded into `~/.gg/agents`.
+ *
+ * All of those names now ship as BUNDLED_AGENTS with richer prompts, and user-dir
+ * agents take precedence — so a seeded copy silently shadows the bundled one
+ * and freezes it at the version that happened to be written on first run.
+ * Delete those copies, but ONLY when the file is byte-identical to something we
+ * wrote, so a user who edited or authored their own agent of that name keeps
+ * it. Hashes cover every historical variant (`git log -p -- src/config.ts`); a
+ * variant we missed just means that user keeps an old shadowing copy.
  */
-export const SHADOWING_SEEDED_AGENT_HASHES: Record<string, string> = {
-  "auditor.md": "7c8c6c1ff892a7ebf45164b0367e340f099cf2cd611bfec23eb39ecc24592502",
-  "skeptic.md": "7def72d81da78919efb4934f396d8da47912786a49176badf996eac4d57a285d",
+export const SHADOWING_SEEDED_AGENT_HASHES: Record<string, readonly string[]> = {
+  "auditor.md": ["7c8c6c1ff892a7ebf45164b0367e340f099cf2cd611bfec23eb39ecc24592502"],
+  "skeptic.md": ["7def72d81da78919efb4934f396d8da47912786a49176badf996eac4d57a285d"],
+  "owl.md": [
+    "aace1c0aa0f25971f8ea24058a2581baa790aea1d83972f3fd3498e56ff05f8a",
+    "896a41bcd0c253c77619fb96903d8ab880005fa2f21fe2a22f89f9716156527d",
+    "a1066c116dc8381937cf67ea567c3c449891a525a3fca874ec59a8d7040249e7",
+    "705180ca682a29f40803b063e198526295c8d1d536b2eabe2462f9757ebf2a9c",
+  ],
+  "bee.md": [
+    "f2f09824758ea6207d470a64249d3c0ebc9b2cb790d2517608959a77d40f6688",
+    "3cd4a051e30c3eebed8b1f068f18a3f425b27eaeeb6eacc4d65916abf8f1b45a",
+    "7ef25f058a58099358f19fb6ca874a21f7101f0e037bdffc7bb9de2713a8ee92",
+  ],
 };
 
 /**
- * Seed built-in agent definitions on first run (won't overwrite user edits).
+ * Reclaim agent files ggcoder seeded into the user agents dir in past versions.
+ *
+ * Nothing is seeded anymore: bee/owl/researcher/worker/auditor/skeptic ship as
+ * BUNDLED_AGENTS, which stay improvable across upgrades. A file written to
+ * `~/.gg/agents` never would.
  *
  * Exported for tests: `getAppPaths()` resolves `os.homedir()` inside gg-core's
  * prebuilt dist, which vitest does not transform, so a homedir spy would not
@@ -178,87 +200,23 @@ export const SHADOWING_SEEDED_AGENT_HASHES: Record<string, string> = {
  * call this with an explicit temp directory instead of going via ensureAppDirs.
  */
 export async function seedDefaultAgents(agentsDir: string): Promise<void> {
-  const defaults: Record<string, string> = {
-    "owl.md": `---
-name: owl
-description: "In-repo code explorer \u2014 traces symbols, call chains, and structure (no web)"
-tools: read, grep, find, ls, source_path
----
-
-You are Owl, a sharp-eyed codebase explorer.
-You map how THIS repository fits together \u2014 structure, symbols, call chains, patterns. You work only from local code and never research the web (that's \`researcher\`).
-
-When given a task:
-1. Fix the scope \u2014 the exact symbol, pattern, or question to resolve
-2. \`find\`/\`ls\` to map the relevant directories
-3. \`grep\` to locate symbols, imports, and call sites
-4. \`read\` the key files to confirm details
-5. Trace connections \u2014 exports, imports, callers, data flow
-
-Return findings tightly:
-- **Answer**: the direct answer, first
-- **Files**: each relevant path + one line on what it holds
-- **Connections**: who calls/imports what
-- **Flags**: anything surprising, risky, or ambiguous
-
-Explore widely, report tightly. Miss nothing, waste no words.
-`,
-    "bee.md": `---
-name: bee
-description: "Task worker \u2014 writes code, runs commands, fixes bugs, does anything"
-tools: read, write, edit, bash, find, grep, ls, source_path
----
-
-You are Bee, an industrious task worker.
-You complete an assigned task end-to-end \u2014 writing code, running commands, fixing bugs, refactoring \u2014 and deliver a working result, not a description of one.
-
-When given a task:
-1. Understand what's asked and explore the relevant code for context
-2. Implement directly, in minimal focused changes
-3. Verify: run the narrowest check that proves the change (typecheck or the nearest test), and fix what breaks
-4. Report concisely
-
-## Stop when
-- The task is done and your verification passes \u2014 OR
-- You're blocked (ambiguous requirement, missing dependency, a failure you can't resolve without guessing). Stop and report the blocker; don't thrash or expand scope to force it.
-
-## Report (end with this)
-- **Done**: what you changed, file by file, one line each
-- **Verified**: the exact command you ran and its result \u2014 never claim a check you didn't run
-- **Blocked/Notes**: anything unfinished, assumed, or left for follow-up
-
-Do the work, don't just describe it. Don't over-engineer.
-`,
-  };
-
-  for (const [filename, content] of Object.entries(defaults)) {
-    const filePath = path.join(agentsDir, filename);
-    try {
-      await fs.access(filePath);
-      // File exists — don't overwrite user edits
-    } catch {
-      await fs.writeFile(filePath, content, "utf-8");
-    }
-  }
-
   await removeShadowingSeededAgents(agentsDir);
 }
 
 /**
- * v5.22.6 briefly seeded `auditor.md` / `skeptic.md` into the user agents dir.
- * Those names are already shipped as BUNDLED_AGENTS with richer prompts, and
- * user-dir agents take precedence — so the seeded copies silently shadowed the
- * bundled ones (a weaker /bullet-proof). Delete them, but ONLY when the file is
- * byte-identical to what 5.22.6 wrote, so a user who edited or authored their
- * own agent of that name keeps it.
+ * Delete agent files that are byte-identical to one we seeded ourselves.
+ *
+ * Anything else — a user-authored agent of the same name, or a seeded file the
+ * user has since edited — is left untouched. That precedence is the point:
+ * user agents beat bundled ones.
  */
 async function removeShadowingSeededAgents(agentsDir: string): Promise<void> {
-  for (const [filename, seededHash] of Object.entries(SHADOWING_SEEDED_AGENT_HASHES)) {
+  for (const [filename, seededHashes] of Object.entries(SHADOWING_SEEDED_AGENT_HASHES)) {
     const filePath = path.join(agentsDir, filename);
     try {
       const content = await fs.readFile(filePath, "utf-8");
       const hash = createHash("sha256").update(content, "utf-8").digest("hex");
-      if (hash === seededHash) await fs.rm(filePath, { force: true });
+      if (seededHashes.includes(hash)) await fs.rm(filePath, { force: true });
     } catch {
       // Missing or unreadable — nothing to clean up.
     }

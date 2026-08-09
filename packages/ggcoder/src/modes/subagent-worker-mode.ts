@@ -47,7 +47,12 @@ export interface SubagentWorkerInitialize {
   fallbackModel?: string;
   cwd: string;
   baseUrl?: string;
+  /** Replaces the whole system prompt. */
   systemPrompt?: string;
+  /** Agent body composed with the standard prompt scaffolding — the delegation path. */
+  agentPrompt?: string;
+  /** Whether the composed prompt includes project instruction files. */
+  agentContext?: "project" | "none";
   thinkingLevel?: ThinkingLevel;
   allowedTools?: string[];
   /** MCP servers this agent may connect, derived from its `tools:` frontmatter. */

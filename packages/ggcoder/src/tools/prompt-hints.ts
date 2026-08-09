@@ -81,6 +81,45 @@ export function buildToolSteering(activeTools: readonly string[]): string {
     .join(" ");
 }
 
+/**
+ * Every tool name `createTools()` can register, including the conditional ones
+ * (web_search on non-Anthropic providers, generate_image with OpenAI auth,
+ * plan tools, the subagent cluster) and `tool_search`, which MCP deferred
+ * loading adds. Used to validate an agent definition's `tools:` frontmatter —
+ * an unknown name is silently dropped by the session allow-list, so a typo
+ * would otherwise cost the agent a capability with no signal at all.
+ */
+export const BUILTIN_TOOL_NAMES: readonly string[] = [
+  "bash",
+  "code_search",
+  "edit",
+  "enter_plan",
+  "exit_plan",
+  "find",
+  "followup_task",
+  "generate_image",
+  "grep",
+  "interrupt_agent",
+  "list_agents",
+  "ls",
+  "read",
+  "screenshot",
+  "send_message",
+  "skill",
+  "source_path",
+  "spawn_agent",
+  "subagent",
+  "task_output",
+  "task_send",
+  "task_stop",
+  "tasks",
+  "tool_search",
+  "wait_agent",
+  "web_fetch",
+  "web_search",
+  "write",
+];
+
 /** Tools always rendered when no explicit tool list is provided. */
 export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "read",

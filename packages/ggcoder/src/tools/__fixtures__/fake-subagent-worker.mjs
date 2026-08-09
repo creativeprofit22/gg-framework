@@ -23,9 +23,12 @@ const complete = (status = "completed", output = `turn-${contextTurns}`) => {
 createInterface({ input: process.stdin }).on("line", (line) => {
   const frame = JSON.parse(line);
   if (frame.command === "initialize") {
-    if (frame.options?.systemPrompt === "malformed") process.stdout.write("not-json\n");
-    else if (frame.options?.systemPrompt === "die") process.exit(2);
-    else if (frame.options?.systemPrompt === "hang") return;
+    // Named agents arrive as `agentPrompt` (composed with the standard prompt
+    // scaffolding); `systemPrompt` remains the full-replacement path.
+    const prompt = frame.options?.agentPrompt ?? frame.options?.systemPrompt;
+    if (prompt === "malformed") process.stdout.write("not-json\n");
+    else if (prompt === "die") process.exit(2);
+    else if (prompt === "hang") return;
     else {
       emit({ type: "state", state: "idle" });
       const childSessionPath =

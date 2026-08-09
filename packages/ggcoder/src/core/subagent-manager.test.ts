@@ -16,6 +16,8 @@ const agents: AgentDefinition[] = [
     name: "fake",
     description: "Fake test worker",
     tools: ["read"],
+    // Explicit cheap tier — the only way an agent opts out of the parent model.
+    model: "fast",
     systemPrompt: "fake",
     source: "bundled",
   },
@@ -92,17 +94,17 @@ describe("SubAgentManager", () => {
     });
   });
 
-  it("returns after launch and overlaps four child turns", async () => {
+  it("returns after launch and overlaps eight child turns", async () => {
     const instance = manager();
     const children = await Promise.all(
-      [1, 2, 3, 4].map((number) => instance.spawn(`task-${number}`, "slow", "fake")),
+      [1, 2, 3, 4, 5, 6, 7, 8].map((number) => instance.spawn(`task-${number}`, "slow", "fake")),
     );
     // Returning every child in the running state proves spawn resolves on the
     // start acknowledgement rather than waiting for the turn to complete.
     // Avoid a wall-clock threshold here: process startup is scheduler-dependent
     // under the full parallel workspace suite.
     expect(children.every((child) => child.state === "running")).toBe(true);
-    await expect(instance.spawn("fifth", "slow", "fake")).rejects.toThrow("At most 4");
+    await expect(instance.spawn("ninth", "slow", "fake")).rejects.toThrow("At most 8");
     const result = await instance.wait(
       children.map((child) => child.agent_id),
       "all",
@@ -154,8 +156,8 @@ describe("SubAgentManager", () => {
   });
 
   it("enforces the per-model cap against the resolved child model", async () => {
-    // The read-only "fake" agent resolves to the fast model (gpt-5.6-luna);
-    // a shell-capable agent stays on the parent model (gpt-5.6-sol).
+    // The "fake" agent declares model: fast (gpt-5.6-luna); an agent with no
+    // model policy inherits the parent model (gpt-5.6-sol).
     const shellAgent: AgentDefinition = {
       name: "sheller",
       description: "Shell-capable worker",
@@ -178,6 +180,14 @@ describe("SubAgentManager", () => {
     expect(other.model).toBe("gpt-5.6-sol");
   });
 
+  it("names the available agents when asked for one that does not exist", async () => {
+    const instance = manager();
+
+    await expect(instance.spawn("typo", "task", "hawk")).rejects.toThrow(
+      'Unknown agent: "hawk". Available agents: fake',
+    );
+  });
+
   it("counts followups toward the per-model cap", async () => {
     const instance = manager({ maxPerModel: 1 });
     const done = await instance.spawn("finished", "fast", "fake");
@@ -190,10 +200,10 @@ describe("SubAgentManager", () => {
     await expect(instance.followup(done.agent_id, "again")).rejects.toThrow("subagentMaxPerModel");
   });
 
-  it("allows four same-model children when no per-model cap is set (regression)", async () => {
+  it("allows eight same-model children when no per-model cap is set (regression)", async () => {
     const instance = manager();
     const children = await Promise.all(
-      [1, 2, 3, 4].map((n) => instance.spawn(`uncapped-${n}`, "slow", "fake")),
+      [1, 2, 3, 4, 5, 6, 7, 8].map((n) => instance.spawn(`uncapped-${n}`, "slow", "fake")),
     );
     expect(children.every((child) => child.state === "running")).toBe(true);
   });

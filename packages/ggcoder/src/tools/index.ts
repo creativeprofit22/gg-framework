@@ -36,6 +36,11 @@ import type { AgentDefinition } from "../core/agents.js";
 import type { Skill } from "../core/skills.js";
 import type { AgentNotificationQueue } from "../core/agent-notifications.js";
 
+// Canonical registry of built-in tool names. Defined in prompt-hints (a leaf
+// module) so `core/agents.ts` can validate `tools:` frontmatter without
+// importing this module's heavy tool graph.
+export { BUILTIN_TOOL_NAMES } from "./prompt-hints.js";
+
 export interface CreateToolsOptions {
   agents?: AgentDefinition[];
   skills?: Skill[];

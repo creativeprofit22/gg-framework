@@ -73,7 +73,11 @@ import {
 } from "./model-registry.js";
 import { discoverSkills, type Skill } from "./skills.js";
 import { ensureAppDirs } from "../config.js";
-import { buildSystemPrompt, type SystemPromptEnvironment } from "../system-prompt.js";
+import {
+  buildSubAgentSystemPrompt,
+  buildSystemPrompt,
+  type SystemPromptEnvironment,
+} from "../system-prompt.js";
 import {
   createTools,
   createWebSearchTool,
@@ -169,7 +173,21 @@ export interface AgentSessionOptions {
   model: string;
   cwd: string;
   baseUrl?: string;
+  /** Replaces the whole system prompt — nothing else is rendered. */
   systemPrompt?: string;
+  /**
+   * A sub-agent definition's body, COMPOSED with the standard scaffolding
+   * (Tools, project context, return contract, Environment) instead of replacing
+   * it — see `buildSubAgentSystemPrompt`.
+   *
+   * Prefer this over `systemPrompt` for delegated children: a bare replacement
+   * leaves the child with no Tools section and no Environment facts, which is
+   * precisely how a sub-agent ends up misusing tools it was never told it had.
+   * Ignored when `systemPrompt` is set.
+   */
+  agentPrompt?: string;
+  /** Whether `agentPrompt` composition includes project instruction files. Default `"project"`. */
+  agentContext?: "project" | "none";
   /** Synchronous volatile prompt suffix, refreshed immediately before every run. */
   getSystemPromptTail?: () => string;
   sessionId?: string;
@@ -483,6 +501,8 @@ export class AgentSession {
   private maxTokens: number;
   private thinkingLevel?: ThinkingLevel;
   private customSystemPrompt?: string;
+  /** Sub-agent definition body composed into the standard prompt scaffolding. */
+  private agentPrompt?: string;
   /** Stable prompt prefix retained separately from the volatile uncached tail. */
   private baseSystemPrompt = "";
   /** Shared with the tool layer so plan-mode restrictions read live state. */
@@ -548,6 +568,7 @@ export class AgentSession {
     this.maxTokens = this.resolveMaxTokens(options.model);
     this.thinkingLevel = options.thinkingLevel;
     this.customSystemPrompt = options.systemPrompt;
+    this.agentPrompt = options.agentPrompt;
   }
 
   /**
@@ -706,18 +727,7 @@ export class AgentSession {
       }
     }
 
-    const basePrompt =
-      this.customSystemPrompt ??
-      (await buildSystemPrompt(
-        this.cwd,
-        this.skills,
-        false,
-        undefined,
-        this.tools.map((tool) => tool.name),
-        undefined,
-        this.provider,
-        this.promptEnvironment(),
-      ));
+    const basePrompt = await this.buildBasePrompt(false, undefined);
     this.baseSystemPrompt = basePrompt;
     this.messages = [{ role: "system", content: this.withSystemPromptTail(basePrompt) }];
 
@@ -2457,18 +2467,7 @@ export class AgentSession {
     this.autopilotMarkers = [];
     this.appMarkers = [];
     this.turnMetrics = [];
-    const basePrompt =
-      this.customSystemPrompt ??
-      (await buildSystemPrompt(
-        this.cwd,
-        this.skills,
-        false,
-        undefined,
-        this.tools.map((tool) => tool.name),
-        undefined,
-        this.provider,
-        this.promptEnvironment(),
-      ));
+    const basePrompt = await this.buildBasePrompt(false, undefined);
     this.baseSystemPrompt = basePrompt;
     this.messages = [{ role: "system", content: this.withSystemPromptTail(basePrompt) }];
     // Fresh conversation — new entries must not chain onto the old DAG's leaf.
@@ -2892,19 +2891,43 @@ export class AgentSession {
     return { additionalRoots: this.additionalRoots, networkAllow };
   }
 
-  /** Rebuild messages[0] from current plan-mode + approved-plan state. */
-  private async rebuildSystemPromptInPlace(): Promise<void> {
-    if (this.customSystemPrompt) return;
-    const rebuilt = await buildSystemPrompt(
+  /**
+   * Build the stable system-prompt prefix for the current tool set and state.
+   *
+   * Three modes, in precedence order: a full replacement (`systemPrompt`), a
+   * composed sub-agent prompt (`agentPrompt` — agent body plus Tools, project
+   * context, return contract and Environment), or the standard prompt.
+   */
+  private async buildBasePrompt(planMode: boolean, approvedPlanPath?: string): Promise<string> {
+    if (this.customSystemPrompt) return this.customSystemPrompt;
+    const toolNames = this.tools.map((tool) => tool.name);
+    if (this.agentPrompt !== undefined) {
+      return buildSubAgentSystemPrompt(this.agentPrompt, {
+        cwd: this.cwd,
+        toolNames,
+        context: this.opts.agentContext,
+        environment: this.promptEnvironment(),
+      });
+    }
+    return buildSystemPrompt(
       this.cwd,
       this.skills,
-      this.planModeRef.current,
-      this.approvedPlanPath,
-      this.tools.map((tool) => tool.name),
+      planMode,
+      approvedPlanPath,
+      toolNames,
       undefined,
       this.provider,
       this.promptEnvironment(),
     );
+  }
+
+  /** Rebuild messages[0] from current plan-mode + approved-plan state. */
+  private async rebuildSystemPromptInPlace(): Promise<void> {
+    // A full replacement is verbatim by contract — there is nothing to rebuild.
+    // A composed agent prompt still must be: its Tools section has to follow
+    // late-arriving MCP tools, or a compacted child loses tools it can call.
+    if (this.customSystemPrompt) return;
+    const rebuilt = await this.buildBasePrompt(this.planModeRef.current, this.approvedPlanPath);
     this.baseSystemPrompt = rebuilt;
     const content = this.withSystemPromptTail(rebuilt);
     if (this.messages[0]?.role === "system") {

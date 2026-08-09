@@ -24,6 +24,9 @@ const owl: AgentDefinition = {
   name: "owl",
   description: "Read-only scout",
   tools: ["read"],
+  // Declares the cheap tier explicitly — the only way an agent opts out of the
+  // parent's model now — which is what arms the fast-model fallback path below.
+  model: "fast",
   systemPrompt: "Inspect code and report findings.",
   source: "bundled",
 };

@@ -18,6 +18,7 @@ import {
   subAgentCacheKey,
   type SubAgentTokenUsage,
   SUB_AGENT_MAX_STDERR_CHARS,
+  SUB_AGENT_TIMEOUT_MS,
 } from "../tools/subagent-shared.js";
 
 export type SubAgentState =
@@ -90,12 +91,25 @@ interface WorkerRecord extends SubAgentSnapshot {
   turnResolvers: Set<() => void>;
 }
 
-const ACTIVE_LIMIT = 4;
+const ACTIVE_LIMIT = 8;
 const RETAINED_WORKER_LIMIT = 8;
 const SNAPSHOT_LIMIT = 20;
-const WAIT_OUTPUT_LIMIT = 100_000;
-const DEFAULT_WAIT_MS = 30_000;
-const MAX_WAIT_MS = 5 * 60_000;
+/**
+ * Chars of child output `wait_agent` returns — in total, and per agent.
+ *
+ * Whatever comes back is pasted into the PARENT's context: the old 100k cap
+ * could hand a single wait ~25k tokens of transcript. The full output always
+ * remains readable at each child's `child_session_path`.
+ */
+const WAIT_OUTPUT_LIMIT = 60_000;
+const WAIT_OUTPUT_PER_AGENT_LIMIT = 30_000;
+/**
+ * Wait budgets, aligned with the child's own `SUB_AGENT_TIMEOUT_MS` (10 min).
+ * The previous 30s default and 5-min ceiling meant a parent waiting on a
+ * legitimately long child gave up ~20x early and finalized on a half-answer.
+ */
+export const DEFAULT_WAIT_MS = 120_000;
+export const MAX_WAIT_MS = SUB_AGENT_TIMEOUT_MS;
 const DEFAULT_IDLE_MS = 10 * 60_000;
 
 function activity(name: string, args: Record<string, unknown>): string {
@@ -147,6 +161,11 @@ export class SubAgentManager {
   private persistQueue: Promise<void> = Promise.resolve();
   private persistPending = false;
   private persistScheduled = false;
+
+  /** Agent definitions `spawn` resolves names against — the delegation roster. */
+  get agents(): readonly AgentDefinition[] {
+    return this.options.agents;
+  }
 
   constructor(private readonly options: SubAgentManagerOptions) {
     const paths = getAppPaths();
@@ -235,7 +254,12 @@ export class SubAgentManager {
     const provider = this.options.getProvider();
     const parentModel = this.options.getModel();
     const selection = selectSubAgent(this.options.agents, agentName, provider, parentModel);
-    if (agentName && !selection.agentDef) throw new Error(`Unknown agent: "${agentName}"`);
+    if (agentName && !selection.agentDef) {
+      // Name the real roster: an unqualified "unknown agent" gives the model
+      // nothing to correct against, so it re-guesses the same wrong name.
+      const available = this.options.agents.map((a) => a.name).join(", ") || "none";
+      throw new Error(`Unknown agent: "${agentName}". Available agents: ${available}`);
+    }
     this.assertModelCapacity(selection.model);
 
     const now = Date.now();
@@ -275,7 +299,10 @@ export class SubAgentManager {
           fallbackModel: selection.model === parentModel ? undefined : parentModel,
           cwd: this.options.cwd,
           baseUrl: this.options.getBaseUrl?.(),
-          systemPrompt: selection.agentDef?.systemPrompt,
+          // Composed, not replaced — the child keeps its Tools section, project
+          // context and Environment facts alongside its agent body.
+          agentPrompt: selection.agentDef?.systemPrompt,
+          agentContext: selection.agentDef?.context,
           thinkingLevel: childThinkingLevel(this.options.getThinkingLevel()),
           allowedTools: selection.agentDef?.tools.length ? selection.agentDef.tools : undefined,
           // Without this, an allow-listed child connects NO MCP servers — even
@@ -409,9 +436,20 @@ export class SubAgentManager {
     const agents = ids.map((id) => {
       const snapshot = { ...this.snapshots.get(id)! };
       if (snapshot.output) {
-        const remaining = Math.max(0, WAIT_OUTPUT_LIMIT - chars);
-        snapshot.output = snapshot.output.slice(0, remaining);
-        chars += snapshot.output.length;
+        // Head, not tail: a child's report leads with its answer. Bounded per
+        // agent as well as in total so one verbose child cannot consume the
+        // whole budget and starve the others of any output at all.
+        const budget = Math.min(
+          WAIT_OUTPUT_PER_AGENT_LIMIT,
+          Math.max(0, WAIT_OUTPUT_LIMIT - chars),
+        );
+        if (snapshot.output.length > budget) {
+          const path = snapshot.child_session_path;
+          snapshot.output =
+            snapshot.output.slice(0, budget) +
+            `\n\n[output truncated at ${budget} chars${path ? `; full transcript: ${path}` : ""}]`;
+        }
+        chars += Math.min(budget, snapshot.output.length);
       }
       return snapshot;
     });
@@ -544,7 +582,8 @@ export class SubAgentManager {
           fallbackModel: model === parentModel ? undefined : parentModel,
           cwd: this.options.cwd,
           baseUrl: this.options.getBaseUrl?.(),
-          systemPrompt: agentDef?.systemPrompt,
+          agentPrompt: agentDef?.systemPrompt,
+          agentContext: agentDef?.context,
           thinkingLevel: childThinkingLevel(this.options.getThinkingLevel()),
           allowedTools: agentDef?.tools.length ? agentDef.tools : undefined,
           allowedMcpServers: agentDef?.tools.length

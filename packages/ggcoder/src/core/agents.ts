@@ -1,11 +1,31 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { stripBom } from "../utils/text.js";
+import { log } from "./logger.js";
+import { BUILTIN_TOOL_NAMES } from "../tools/prompt-hints.js";
+import { BUNDLED_AGENTS } from "./bundled-agents.js";
+
+/**
+ * Which model a sub-agent runs on.
+ *
+ * - `"inherit"` (default) — the parent's model, so a delegated task is not
+ *   silently downgraded.
+ * - `"fast"` — the provider's cheap tier (`getFastModel`), for genuinely
+ *   mechanical recon.
+ * - any other string — an explicit model id.
+ */
+export type AgentModelPreference = "inherit" | "fast" | (string & {});
 
 export interface AgentDefinition {
   name: string;
+  /** Routing signal — written for the dispatcher, not for the child. */
   description: string;
+  /** Tool allow-list. Empty means inherit the full toolset. */
   tools: string[];
+  /** Model policy for children of this agent. Defaults to `"inherit"`. */
+  model?: AgentModelPreference;
+  /** Whether the child's prompt includes project context files. Default `"project"`. */
+  context?: "project" | "none";
   systemPrompt: string;
   source: "global" | "project" | "bundled";
 }
@@ -29,6 +49,34 @@ export function mcpServersForAgent(tools: readonly string[]): string[] {
     if (match) servers.add(match[1]);
   }
   return [...servers];
+}
+
+const BUILTIN_TOOL_NAME_SET = new Set(BUILTIN_TOOL_NAMES);
+// mcp__<server>__<tool> — the only non-built-in shape a session can register.
+const MCP_TOOL_PATTERN = /^mcp__(.+?)__(.+)$/;
+
+/**
+ * Report `tools:` entries the session could never register.
+ *
+ * `AgentSession` filters its tool set by name, so an unknown entry is dropped
+ * without a word: the agent just quietly loses a capability (or, if every name
+ * is wrong, runs with nothing). Warn instead — and stay non-fatal, because a
+ * bad agent file must never take down a session.
+ *
+ * @returns the unrecognized names, for tests and callers that want to report.
+ */
+export function validateAgentTools(agent: AgentDefinition, origin: string): string[] {
+  const unknown = agent.tools.filter(
+    (tool) => !BUILTIN_TOOL_NAME_SET.has(tool) && !MCP_TOOL_PATTERN.test(tool),
+  );
+  if (unknown.length > 0) {
+    log("WARN", "agents", "Agent lists unknown tools; they will be ignored", {
+      agent: agent.name,
+      origin,
+      unknown,
+    });
+  }
+  return unknown;
 }
 
 /**
@@ -63,6 +111,7 @@ export async function discoverAgents(options: {
   const userNames = new Set(agents.map((a) => a.name.toLowerCase()));
   for (const bundled of BUNDLED_AGENTS) {
     if (!userNames.has(bundled.name.toLowerCase())) {
+      validateAgentTools(bundled, "bundled");
       agents.push(bundled);
     }
   }
@@ -91,6 +140,7 @@ async function loadAgentsFromDir(
       if (!agent.name) {
         agent.name = path.basename(file, ".md");
       }
+      validateAgentTools(agent, filePath);
       agents.push(agent);
     } catch {
       // Skip unreadable files
@@ -119,6 +169,8 @@ export function parseAgentFile(rawInput: string, source: "global" | "project"): 
   let name = "";
   let description = "";
   let tools: string[] = [];
+  let model: AgentModelPreference | undefined;
+  let context: "project" | "none" | undefined;
   let systemPrompt = raw;
 
   if (raw.startsWith("---")) {
@@ -140,113 +192,23 @@ export function parseAgentFile(rawInput: string, source: "global" | "project"): 
             .split(",")
             .map((t) => t.trim())
             .filter(Boolean);
+        } else if (key === "model") {
+          if (value) model = value;
+        } else if (key === "context") {
+          const normalized = value.toLowerCase();
+          if (normalized === "project" || normalized === "none") context = normalized;
         }
+        // Unknown keys are ignored on purpose: agent files stay
+        // forward-compatible with fields a newer ggcoder understands.
       }
     }
   }
 
-  return { name, description, tools, systemPrompt, source };
+  return { name, description, tools, model, context, systemPrompt, source };
 }
 
 // ── Bundled agents ─────────────────────────────────────────
-// Shipped with ggcoder. Used by /bullet-proof and available to any
-// subagent call. User-defined agents with the same name override these.
-
-const AUDITOR_PROMPT = `You are Auditor, a defensive security analyst tasked with finding exploitable weaknesses in this codebase so the team can patch them before the project ships.
-
-You review code rigorously: you look for bypasses that would matter in practice, not pattern violations. You trace data flow from untrusted sources to dangerous sinks. Assume a sophisticated adversary with SDK-level access, an intercepting proxy, the public source, and time — and identify what would expose the project to them.
-
-## Core discipline
-
-1. **Trace, don't pattern-match.** Every finding must have a concrete Source → Sink path traced through the actual code.
-2. **Untrusted vs trusted inputs.** Before flagging, decide whether the input is *actually* reachable by an untrusted source, or a settings constant / build-time string / hardcoded value. If the latter, drop it.
-3. **Vulnerability scenarios are mandatory.** Describe how the weakness is triggered: input, system response, resulting exposure. If you cannot describe the steps, you cannot flag the finding.
-4. **Confidence ≥0.8 only.** Better to miss theoretical issues than flood the report with noise.
-5. **Framework awareness.** ORM parameterization, auto-escape, memory-safe languages, JSX/template escaping all eliminate entire vuln classes. Don't flag what the framework already handles.
-
-## Output for each finding
-
-- **Location**: file:line
-- **Category**: <slug> (sql_injection, ssrf, prototype_pollution, supply_chain, ...)
-- **CWE**: CWE-XXX
-- **Confidence**: 0.0–1.0
-- **Source → Sink**: the actual data path
-- **Vulnerability scenario**: numbered steps showing trigger → response → exposure
-- **Impact**: what is exposed, blast radius
-- **Fix**: concrete code-level remediation
-
-## Hard exclusions — do NOT report:
-
-- DOS / rate-limiting / memory exhaustion without an amplification primitive
-- Theoretical race conditions without a demonstrable window
-- Regex-DOS without untrusted-supplied regex
-- Log spoofing / log injection (cosmetic)
-- SSRF where the URL is a settings constant or build-time string
-- Env-var trust (env is server-controlled by definition)
-- Client-side authentication theatre on a server-validated endpoint
-- React/Vue/Angular XSS without unsafe sinks (\`dangerouslySetInnerHTML\`, \`v-html\`, \`bypassSecurityTrust*\` are the only real ones)
-- Shell-script command injection without an untrusted input path
-- Findings in documentation, example code, or test fixtures
-- Insecure-by-design dev tooling that doesn't ship to users
-- "Could be improved" preferences with no demonstrable path
-
-Return findings ranked Critical → High → Medium. If nothing meets the bar, return "No high-confidence findings."`;
-
-const SKEPTIC_PROMPT = `You are Skeptic, a rigorous reviewer whose job is to DISPROVE security findings handed to you. You start from "this is a false positive" and only conclude otherwise if the evidence is overwhelming.
-
-## Your mission
-
-Given a security finding, attempt to break it. Try every angle:
-
-1. **Reachability**: Is the claimed source actually untrusted-controlled, or a settings constant, build-time value, or env var (server-controlled by definition)?
-2. **Control flow**: Even if the source is real, does control flow actually reach the sink? Is there a guard, validator, or sanitizer in between that the original audit missed?
-3. **Framework handling**: Would the framework (ORM, template engine, auto-escape, memory-safe language) eliminate this entire vuln class?
-4. **Trigger feasibility**: Can you actually construct the input that triggers the path? What would the response look like? If you can't construct it, the finding stands on theory.
-5. **Severity inflation**: Is the impact overstated? "RCE" claims often turn out to be "writes to a sandboxed file path."
-
-Read the code yourself. Do not trust the audit's claim — verify each step.
-
-## Verdict format
-
-For each finding, return:
-- **Verdict**: CONFIRMED / DROP / DOWNGRADE
-- **Reason**: 1-3 sentence explanation
-- **If CONFIRMED**: re-state the vulnerability scenario in your own words to prove you verified it end-to-end
-- **If DROP**: cite which exclusion rule applies, or which step in the chain fails
-- **If DOWNGRADE**: new severity + reason
-
-## Hard exclusions — automatic DROP regardless of source:
-
-- DOS / rate-limiting / memory exhaustion without an amplification primitive
-- Theoretical race conditions without a demonstrable window
-- Regex-DOS without untrusted-supplied regex
-- Log spoofing / log injection (cosmetic only)
-- SSRF where the URL is a settings constant or build-time string
-- Env-var trust ("untrusted source controls \\$HOME" — env is server-controlled)
-- Client-side authn checks on endpoints that re-validate server-side
-- React/Vue/Angular XSS unless \`dangerouslySetInnerHTML\` / \`v-html\` / \`bypassSecurityTrust*\` is the sink
-- Shell-script command injection without an untrusted input path
-- Findings in documentation, example code, or test fixtures
-- Insecure-by-design dev tooling that doesn't ship to users
-- "Could be improved" preferences with no demonstrable path
-
-Be rigorous. The cost of a false positive is the user's trust in the entire report.`;
-
-export const BUNDLED_AGENTS: AgentDefinition[] = [
-  {
-    name: "auditor",
-    description:
-      "Defensive security analyst — finds exploitable weaknesses with concrete vulnerability scenarios",
-    tools: ["read", "grep", "find", "ls", "bash", "web_fetch", "web_search"],
-    systemPrompt: AUDITOR_PROMPT,
-    source: "bundled",
-  },
-  {
-    name: "skeptic",
-    description:
-      "Rigorous false-positive reviewer — disproves security findings and applies exclusion rules strictly",
-    tools: ["read", "grep", "find", "ls", "bash", "web_fetch", "web_search"],
-    systemPrompt: SKEPTIC_PROMPT,
-    source: "bundled",
-  },
-];
+// Shipped with ggcoder (see ./bundled-agents.ts). Used by /bullet-proof and
+// available to any subagent call. User-defined agents with the same name
+// override these because they come first in `discoverAgents`.
+export { BUNDLED_AGENTS };

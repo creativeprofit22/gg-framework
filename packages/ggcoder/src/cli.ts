@@ -182,7 +182,9 @@ function printHelp(): void {
     ],
     ["--model <name>", "Model to use (e.g. claude-sonnet-5, gpt-5.5)"],
     ["--max-turns <n>", "Maximum agent turns per prompt"],
-    ["--system-prompt <text>", "Override the system prompt"],
+    ["--system-prompt <text>", "Replace the system prompt entirely"],
+    ["--agent-prompt <text>", "Sub-agent body composed with tools/context/environment"],
+    ["--agent-context <mode>", "Project files in the composed prompt (project|none)"],
     ["--thinking <level>", "Enable thinking level (low, medium, high, xhigh, max)"],
     ["--resume <id>", "Resume a session by id"],
     ["--json", "JSON output mode (for sub-agents)"],
@@ -293,6 +295,8 @@ function main(): void {
       model: { type: "string" },
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
+      "agent-prompt": { type: "string" },
+      "agent-context": { type: "string" },
       tools: { type: "string" },
       "mcp-servers": { type: "string" },
       "prompt-cache-key": { type: "string" },
@@ -320,6 +324,11 @@ function main(): void {
     const jsonModel = values.model ?? "claude-opus-5";
     const maxTurns = values["max-turns"] ? parseInt(values["max-turns"], 10) : undefined;
     const systemPrompt = values["system-prompt"];
+    // An agent definition's body: composed with the Tools/context/Environment
+    // scaffolding rather than replacing it, so a delegated child still knows
+    // which tools it has and where it is running.
+    const agentPrompt = values["agent-prompt"];
+    const agentContext = values["agent-context"] === "none" ? "none" : undefined;
     const promptCacheKey = values["prompt-cache-key"];
     const thinkingLevel = parseThinkingLevel(values.thinking);
     // Optional tool allow-list forwarded by the subagent spawner from an agent
@@ -350,6 +359,8 @@ function main(): void {
       model: jsonModel,
       cwd,
       systemPrompt,
+      agentPrompt,
+      agentContext,
       maxTurns,
       allowedTools,
       allowedMcpServers,

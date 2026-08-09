@@ -69,9 +69,10 @@ describe("loadSavedSettings", () => {
   });
 });
 
-// v5.22.6 seeded auditor.md / skeptic.md into the user agents dir, silently
-// shadowing the richer BUNDLED_AGENTS of the same name. seedDefaultAgents now
-// cleans them up on next launch — but only when the file is untouched.
+// ggcoder used to seed agent files into the user agents dir, where they
+// silently shadowed the richer BUNDLED_AGENTS of the same name and froze at
+// whatever version wrote them. Nothing is seeded anymore, and seedDefaultAgents
+// cleans up the old copies on next launch — but only when the file is untouched.
 //
 // These call seedDefaultAgents(dir) directly: getAppPaths() resolves
 // os.homedir() inside gg-core's prebuilt dist, which vitest does not transform,
@@ -84,15 +85,18 @@ describe("seedDefaultAgents shadowing-agent cleanup", () => {
     path.join(fixturesDir, "seeded-auditor-v5.22.6.md"),
     "utf-8",
   );
+  const SEEDED_OWL = fs.readFileSync(path.join(fixturesDir, "seeded-owl-v5.37.0.md"), "utf-8");
 
-  it("the recorded hashes match the real v5.22.6 seed files", () => {
+  it("the recorded hashes match the real seed files", () => {
     for (const [name, fixture] of [
       ["auditor.md", "seeded-auditor-v5.22.6.md"],
       ["skeptic.md", "seeded-skeptic-v5.22.6.md"],
+      ["owl.md", "seeded-owl-v5.37.0.md"],
+      ["bee.md", "seeded-bee-v5.37.0.md"],
     ]) {
       const content = fs.readFileSync(path.join(fixturesDir, fixture), "utf-8");
       const hash = createHash("sha256").update(content, "utf-8").digest("hex");
-      expect(hash, name).toBe(SHADOWING_SEEDED_AGENT_HASHES[name]);
+      expect(SHADOWING_SEEDED_AGENT_HASHES[name], name).toContain(hash);
     }
   });
 
@@ -122,18 +126,25 @@ describe("seedDefaultAgents shadowing-agent cleanup", () => {
     expect(fs.readFileSync(path.join(dir, "auditor.md"), "utf-8")).toBe(mine);
   });
 
-  it("seeds owl and bee but never auditor or skeptic", async () => {
+  it("seeds nothing at all", async () => {
     const dir = tempAgentsDir();
 
     await seedDefaultAgents(dir);
 
-    expect(fs.existsSync(path.join(dir, "owl.md"))).toBe(true);
-    expect(fs.existsSync(path.join(dir, "bee.md"))).toBe(true);
-    expect(fs.existsSync(path.join(dir, "auditor.md"))).toBe(false);
-    expect(fs.existsSync(path.join(dir, "skeptic.md"))).toBe(false);
+    expect(fs.readdirSync(dir)).toEqual([]);
   });
 
-  it("does not overwrite a user's edited owl.md", async () => {
+  it("deletes a previously seeded owl.md so the bundled owl wins again", async () => {
+    const dir = tempAgentsDir();
+    fs.writeFileSync(path.join(dir, "owl.md"), SEEDED_OWL, "utf-8");
+
+    await seedDefaultAgents(dir);
+
+    expect(fs.existsSync(path.join(dir, "owl.md"))).toBe(false);
+    expect(BUNDLED_AGENTS.some((a) => a.name === "owl")).toBe(true);
+  });
+
+  it("keeps a user's own owl.md", async () => {
     const dir = tempAgentsDir();
     fs.writeFileSync(path.join(dir, "owl.md"), "mine", "utf-8");
 

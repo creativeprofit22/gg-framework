@@ -2,6 +2,8 @@ import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { SubAgentManager } from "../core/subagent-manager.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
+import { renderAgentRoster } from "./subagent-shared.js";
+import { DEFAULT_WAIT_MS, MAX_WAIT_MS } from "../core/subagent-manager.js";
 
 const AgentId = z.string().min(1).describe("Eight-character agent ID returned by spawn_agent");
 
@@ -16,17 +18,34 @@ export function createSubAgentControlTools(
   const blocked = (name: string) =>
     isPlanModeActive(planModeRef) ? planModeRestriction(name) : undefined;
 
+  // Constrain `agent` to the real roster when one exists: a name the model
+  // invented then fails schema validation, which it can correct, instead of
+  // throwing at spawn time or silently starting a generic child with no agent
+  // prompt and the full toolset.
+  const agentNames = manager.agents.map((agent) => agent.name);
+  const agentParam = (
+    agentNames.length > 0 ? z.enum(agentNames as [string, ...string[]]) : z.string()
+  )
+    .optional()
+    .describe("Named agent definition to run this task as; omit for a general-purpose child");
   const spawnParams = z.object({
     task_name: z.string().min(1).describe("Short unique name for this delegated task"),
-    task: z.string().min(1).describe("Standalone task instruction for the child agent"),
-    agent: z.string().optional().describe("Optional named agent definition"),
+    task: z
+      .string()
+      .min(1)
+      .describe(
+        "Standalone task instruction. The child sees none of this conversation, so state the " +
+          "objective, the paths involved, and what to return.",
+      ),
+    agent: agentParam,
   });
   const spawnTool: AgentTool<typeof spawnParams> = {
     name: "spawn_agent",
     description:
       "Start an isolated persistent child agent and return immediately after launch. " +
       "Start all independent agents, then keep working \u2014 each child announces its own " +
-      "completion to you, so you do not need to wait or poll. Shared files are not isolated.",
+      "completion to you, so you do not need to wait or poll. Shared files are not isolated." +
+      renderAgentRoster(manager.agents),
     parameters: spawnParams,
     executionMode: "parallel",
     async execute(args) {
@@ -73,9 +92,9 @@ export function createSubAgentControlTools(
       .number()
       .int()
       .min(0)
-      .max(300_000)
+      .max(MAX_WAIT_MS)
       .optional()
-      .describe("Default 30000; max 300000"),
+      .describe(`Default ${DEFAULT_WAIT_MS}; max ${MAX_WAIT_MS}`),
   });
   const waitTool: AgentTool<typeof waitParams> = {
     name: "wait_agent",

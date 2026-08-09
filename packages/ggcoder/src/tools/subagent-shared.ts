@@ -5,8 +5,6 @@ import type { AgentDefinition } from "../core/agents.js";
 import { getFastModel } from "../core/model-registry.js";
 import { truncateTail } from "./truncate.js";
 
-const MUTATING_TOOLS = new Set(["bash", "write", "edit"]);
-
 export const SUB_AGENT_MAX_TURNS = 50;
 /**
  * Sub-agents get at most ONE turn-budget extension. A child's extensions run
@@ -52,16 +50,46 @@ export function selectSubAgent(
   parentModel: string,
 ): SubAgentSelection {
   const agentDef = resolveAgentDefinition(agents, requestedName);
-  const readOnly =
-    !!agentDef &&
-    agentDef.tools.length > 0 &&
-    !agentDef.tools.some((tool) => MUTATING_TOOLS.has(tool.toLowerCase()));
   return {
     agentDef,
     provider,
     parentModel,
-    model: readOnly ? getFastModel(provider, parentModel).id : parentModel,
+    model: resolveAgentModel(agentDef, provider, parentModel),
   };
+}
+
+/**
+ * Resolve which model a named agent runs on.
+ *
+ * The choice is declared in the agent's `model:` frontmatter, never inferred.
+ * This used to guess: any agent without bash/write/edit was treated as
+ * "read-only" and silently routed to the provider's cheapest tier — so every
+ * research, recon and audit agent always ran on a Haiku-class model, invisibly
+ * and with no way to override it. Defaulting to the parent's model instead
+ * makes a downgrade opt-in and one line of frontmatter away.
+ */
+export function resolveAgentModel(
+  agentDef: AgentDefinition | undefined,
+  provider: Provider,
+  parentModel: string,
+): string {
+  const preference = agentDef?.model?.trim();
+  if (!preference || preference === "inherit") return parentModel;
+  if (preference === "fast") return getFastModel(provider, parentModel).id;
+  return preference;
+}
+
+/**
+ * Render the agent roster for a tool description.
+ *
+ * Both delegation tools use this: the dispatcher picks an agent from the tool
+ * schema alone, so a tool that omits the roster leaves the model guessing a
+ * name — which either errors or, worse, silently spawns a generic child.
+ */
+export function renderAgentRoster(agents: readonly AgentDefinition[]): string {
+  if (agents.length === 0) return "\n\nNo named agents configured.";
+  const list = agents.map((agent) => `- ${agent.name}: ${agent.description}`).join("\n");
+  return `\n\nAvailable named agents:\n${list}`;
 }
 
 export function childThinkingLevel(level: ThinkingLevel | undefined): ThinkingLevel | undefined {

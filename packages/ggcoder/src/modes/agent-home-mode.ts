@@ -7,6 +7,7 @@ import { isAbortError } from "@kenkaiiii/gg-agent";
 import chalk from "chalk";
 import { formatUserError } from "../utils/error-handler.js";
 import { log, closeLogger } from "../core/logger.js";
+import { installTerminationHandlers } from "../core/shutdown.js";
 import { getAppPaths } from "../config.js";
 import { MODELS, getContextWindow } from "../core/model-registry.js";
 import { estimateConversationTokens } from "../core/compaction/token-estimator.js";
@@ -646,17 +647,20 @@ export async function runAgentHomeMode(options: AgentHomeModeOptions): Promise<v
     console.log(chalk.hex("#6b7280")("  Connecting to relay..."));
     console.log();
 
-    const shutdown = async () => {
-      console.log("\nShutting down...");
-      client.disconnect();
-      for (const state of sessionStates.values()) {
-        await state.session.dispose();
-      }
-      closeLogger();
-      process.exit(0);
-    };
-    process.on("SIGINT", shutdown);
-    process.on("SIGTERM", shutdown);
+    // Sessions dispose MCP/LSP/extension resources that can hang; without a
+    // deadline one wedged server keeps this process attached to the relay after
+    // the user quit. SIGHUP is the terminal-close case, which arrives once.
+    installTerminationHandlers({
+      scope: "agent-home",
+      onShutdownStart: () => console.log("\nShutting down..."),
+      teardown: async () => {
+        client.disconnect();
+        for (const state of sessionStates.values()) {
+          await state.session.dispose();
+        }
+        closeLogger();
+      },
+    });
 
     client.connect();
   } catch (err) {

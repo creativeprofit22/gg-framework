@@ -2,7 +2,13 @@ import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { BUNDLED_AGENTS, discoverAgents, mcpServersForAgent, parseAgentFile } from "./agents.js";
+import {
+  BUNDLED_AGENTS,
+  discoverAgents,
+  mcpServersForAgent,
+  parseAgentFile,
+  validateAgentTools,
+} from "./agents.js";
 
 describe("mcpServersForAgent", () => {
   it("derives server names from mcp__<server>__<tool> entries", () => {
@@ -47,11 +53,120 @@ describe("mcpServersForAgent", () => {
   });
 });
 
+describe("parseAgentFile", () => {
+  it("reads the model and context policies from frontmatter", () => {
+    const agent = parseAgentFile(
+      [
+        "---",
+        "name: scout",
+        "description: Recon",
+        "tools: read, grep",
+        "model: fast",
+        "context: none",
+        "---",
+        "Scout it.",
+      ].join("\n"),
+      "project",
+    );
+
+    expect(agent.model).toBe("fast");
+    expect(agent.context).toBe("none");
+    expect(agent.systemPrompt).toBe("Scout it.");
+  });
+
+  it("leaves both unset when absent, and ignores unknown keys", () => {
+    const agent = parseAgentFile(
+      ["---", "name: scout", "description: Recon", "temperature: 0.3", "---", "Scout."].join("\n"),
+      "project",
+    );
+
+    expect(agent.model).toBeUndefined();
+    expect(agent.context).toBeUndefined();
+    expect(agent.name).toBe("scout");
+  });
+
+  it("accepts an explicit model id and rejects a nonsense context", () => {
+    const agent = parseAgentFile(
+      [
+        "---",
+        "name: scout",
+        "description: Recon",
+        "model: claude-haiku-4-5",
+        "context: sometimes",
+        "---",
+        "Scout.",
+      ].join("\n"),
+      "project",
+    );
+
+    expect(agent.model).toBe("claude-haiku-4-5");
+    expect(agent.context).toBeUndefined();
+  });
+});
+
+describe("validateAgentTools", () => {
+  const base = {
+    name: "scout",
+    description: "Recon",
+    systemPrompt: "x",
+    source: "project",
+  } as const;
+
+  it("accepts built-in and mcp__<server>__<tool> names", () => {
+    expect(
+      validateAgentTools(
+        { ...base, tools: ["read", "code_search", "mcp__kencode-search__searchCode"] },
+        "test",
+      ),
+    ).toEqual([]);
+  });
+
+  it("reports names no session could ever register", () => {
+    expect(
+      validateAgentTools({ ...base, tools: ["read", "webfetch", "Bash", "mcp__broken"] }, "test"),
+    ).toEqual(["webfetch", "Bash", "mcp__broken"]);
+  });
+});
+
 describe("bundled agents", () => {
-  it("ships auditor and skeptic so /bullet-proof always resolves them", () => {
-    const names = BUNDLED_AGENTS.map((a) => a.name);
-    expect(names).toContain("auditor");
-    expect(names).toContain("skeptic");
+  it("ships all six agents on a fresh install", () => {
+    expect(BUNDLED_AGENTS.map((a) => a.name).sort()).toEqual([
+      "auditor",
+      "bee",
+      "owl",
+      "researcher",
+      "skeptic",
+      "worker",
+    ]);
+  });
+
+  it("lists only tools a session can actually register", () => {
+    for (const agent of BUNDLED_AGENTS) {
+      expect(validateAgentTools(agent, "bundled"), agent.name).toEqual([]);
+    }
+  });
+
+  it("declares its model policy instead of leaving it to inference", () => {
+    for (const agent of BUNDLED_AGENTS) {
+      expect(agent.model, agent.name).toBeDefined();
+    }
+    // Only cheap structural recon opts out of the parent's model.
+    const fast = BUNDLED_AGENTS.filter((a) => a.model === "fast").map((a) => a.name);
+    expect(fast).toEqual(["owl"]);
+  });
+
+  it("writes descriptions that route — distinct, and never 'does anything'", () => {
+    const descriptions = BUNDLED_AGENTS.map((a) => a.description);
+    expect(new Set(descriptions).size).toBe(BUNDLED_AGENTS.length);
+    for (const description of descriptions) {
+      expect(description.toLowerCase()).not.toContain("does anything");
+      expect(description.length).toBeGreaterThan(40);
+    }
+  });
+
+  it("gives the researcher live code search so it cannot fall back to training data", () => {
+    const researcher = BUNDLED_AGENTS.find((a) => a.name === "researcher")!;
+    expect(mcpServersForAgent(researcher.tools)).toEqual(["kencode-search"]);
   });
 
   it("does not shadow bundled agents unless the user defines that name", async () => {

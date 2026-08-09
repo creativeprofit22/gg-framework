@@ -157,6 +157,7 @@ import {
   markTaskInProgress,
 } from "./core/tasks-store.js";
 import { initLogger, log } from "./core/logger.js";
+import { installTerminationHandlers } from "./core/shutdown.js";
 import {
   RADIO_STATIONS,
   getCurrentStation,
@@ -805,6 +806,8 @@ async function runJsonModeIfRequested(): Promise<boolean> {
       model: { type: "string" },
       "max-turns": { type: "string" },
       "system-prompt": { type: "string" },
+      "agent-prompt": { type: "string" },
+      "agent-context": { type: "string" },
       tools: { type: "string" },
       "mcp-servers": { type: "string" },
       "prompt-cache-key": { type: "string" },
@@ -838,6 +841,8 @@ async function runJsonModeIfRequested(): Promise<boolean> {
     model: values.model ?? "claude-opus-5",
     cwd: process.cwd(),
     systemPrompt: values["system-prompt"],
+    agentPrompt: values["agent-prompt"],
+    agentContext: values["agent-context"] === "none" ? "none" : undefined,
     maxTurns: maxTurnsRaw ? parseInt(maxTurnsRaw, 10) : undefined,
     allowedTools,
     allowedMcpServers,
@@ -1248,7 +1253,7 @@ async function main(): Promise<void> {
           return;
         }
         daemonJson(res, 202, { ok: true });
-        setImmediate(() => void shutdown("configuration_refresh"));
+        setImmediate(() => shutdown("configuration_refresh"));
         return;
       }
       const releaseMutation = reloadCoordinator.tryAcquireSessionMutation(method);
@@ -1418,36 +1423,66 @@ async function main(): Promise<void> {
     log("INFO", "app-sidecar", "daemon listening", { port: String(addr.port), host });
   });
 
-  type ShutdownReason = "configuration_refresh" | "SIGINT" | "SIGTERM" | "parent_unavailable";
-  let shuttingDown = false;
+  type ShutdownReason =
+    | "configuration_refresh"
+    | "SIGINT"
+    | "SIGTERM"
+    | "SIGHUP"
+    | "parent_unavailable";
   let terminationReason: ShutdownReason | "event_loop_exit" = "event_loop_exit";
-  async function shutdown(reason: ShutdownReason): Promise<void> {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  let shutdownRequested = false;
+  let shutdownSessionCount = 0;
+
+  // Session teardown awaits MCP servers, LSP servers and third-party extension
+  // `deactivate()` hooks. Any of those can hang, and an unbounded await here
+  // means the daemon never exits: the app looks quit while this process keeps
+  // the port and the radio stream alive. The deadline exits regardless.
+  const requestShutdown = installTerminationHandlers({
+    scope: "app-sidecar",
+    onShutdownStart: (signal) => {
+      shutdownRequested = true;
+      if (signal) terminationReason = signal;
+      shutdownSessionCount = [...sessions.values()].length;
+      log("INFO", "app-sidecar", "daemon termination requested", {
+        daemonPid: process.pid,
+        shellPid,
+        reason: terminationReason,
+      });
+    },
+    teardown: async () => {
+      clearInterval(parentWatch);
+      // Radio playback is app-wide (one stream across all windows), so it stops
+      // at the daemon level, not per session.
+      stopRadio();
+      // Close the ~/.gg progress fs.watch handle (baseline #8 leak fix).
+      progress.dispose();
+      reminderCoordinator.dispose();
+      await sessions.disposeAll();
+      await sharedMcpPool.dispose();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      log("INFO", "app-sidecar", "daemon shutdown complete", {
+        daemonPid: process.pid,
+        shellPid,
+        reason: terminationReason,
+      });
+    },
+    onTimeout: (timeoutMs) => {
+      // Radio is audible, so it must stop even when the rest is wedged.
+      stopRadio();
+      log("WARN", "app-sidecar", "daemon teardown hung; exiting on deadline", {
+        timeoutMs: String(timeoutMs),
+        sessions: String(shutdownSessionCount),
+      });
+    },
+  });
+
+  function shutdown(reason: ShutdownReason): void {
+    if (shutdownRequested) return;
+    shutdownRequested = true;
     terminationReason = reason;
-    log("INFO", "app-sidecar", "daemon termination requested", {
-      daemonPid: process.pid,
-      shellPid,
-      reason,
-    });
-    clearInterval(parentWatch);
-    // Radio playback is app-wide (one stream across all windows), so it stops
-    // at the daemon level, not per session.
-    stopRadio();
-    progress.dispose();
-    reminderCoordinator.dispose();
-    await sessions.disposeAll();
-    await sharedMcpPool.dispose();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    log("INFO", "app-sidecar", "daemon shutdown complete", {
-      daemonPid: process.pid,
-      shellPid,
-      reason,
-    });
-    process.exit(0);
+    requestShutdown(0);
   }
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
   process.once("exit", (code) => {
     stopRadio();
     log("INFO", "app-sidecar", "daemon lifecycle exit", {
@@ -1470,7 +1505,7 @@ async function main(): Promise<void> {
         parentAlive = (error as NodeJS.ErrnoException).code === "EPERM";
       }
     }
-    if (!parentAlive) void shutdown("parent_unavailable");
+    if (!parentAlive) shutdown("parent_unavailable");
   }, 1_000);
   parentWatch.unref?.();
 }

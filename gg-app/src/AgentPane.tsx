@@ -524,9 +524,6 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     startServe,
     stopServe,
   } = client;
-  const waitForReady = useCallback(async (): Promise<void> => {
-    await client.waitForReady();
-  }, [client]);
   const acceptPlanIPC = client.acceptPlan;
   const subscribe = client.subscribe;
   const catalogClient = useMemo(() => createPaneAgentClient("primary"), []);
@@ -542,6 +539,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   onGenerationChangeRef.current = props.onGenerationChange;
   const onLifecycleErrorRef = useRef(props.onLifecycleError);
   onLifecycleErrorRef.current = props.onLifecycleError;
+  const adoptGeneration = useCallback((generation: number): void => {
+    generationRef.current = generation;
+    onGenerationChangeRef.current?.(generation);
+  }, []);
+  const waitForReady = useCallback(async (): Promise<void> => {
+    const ready = await client.waitForReady();
+    adoptGeneration(ready.generation);
+  }, [adoptGeneration, client]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -568,8 +573,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       .then((next) => {
         if (!props.workspaceOwnsSessionLifecycle) ownedGeneration = next;
         if (mountedRef.current && lifecycleEpochRef.current === epoch) {
-          generationRef.current = next;
-          onGenerationChangeRef.current?.(next);
+          adoptGeneration(next);
           setNeedsProject(false);
           setHydrateNonce((nonce) => nonce + 1);
         } else if (ownedGeneration !== null) {
@@ -587,7 +591,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         void client.dispose(ownedGeneration).catch(() => {});
       }
     };
-  }, [client, props.reclaimNativeSession, props.workspaceOwnsSessionLifecycle, target]);
+  }, [
+    adoptGeneration,
+    client,
+    props.reclaimNativeSession,
+    props.workspaceOwnsSessionLifecycle,
+    target,
+  ]);
 
   // Ken Kai (mentor agent): own running flag, token/thinking metrics, streaming
   // bubble, and `ken_*` SSE handling. Lives in its own hook; App just consumes
@@ -1675,7 +1685,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       setModelCatalogRefreshNonce((nonce) => nonce + 1);
       void (async () => {
         try {
-          await client.waitForReady();
+          await waitForReady();
           const [available, refreshedState] = await Promise.all([
             client.listModels(),
             client.getState(),
@@ -1695,7 +1705,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       cancelled = true;
       void unlisten?.();
     };
-  }, [client]);
+  }, [client, waitForReady]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -2119,6 +2129,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setNewSessionBusy(true);
     try {
       const { operationId } = await newSession();
+      await waitForReady();
       await registerSessionResetOperationWaiter(operationId);
       return operationId;
     } finally {
@@ -2131,6 +2142,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     newSessionBusy,
     registerSessionResetOperationWaiter,
     running,
+    waitForReady,
   ]);
 
   const restorePromptToComposer = useCallback((prompt: string) => {
@@ -2816,20 +2828,30 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }
 
   const bindPickerProject = useCallback(
-    (cwd: string, sessionPath?: string): Promise<number> =>
-      client.selectWorkspace(
+    async (cwd: string, sessionPath?: string): Promise<number> => {
+      const nextGeneration = await client.selectWorkspace(
         { mode: "code", cwd, sessionPath: sessionPath ?? null },
         generationRef.current ?? 0,
-      ),
-    [client],
+      );
+      adoptGeneration(nextGeneration);
+      return nextGeneration;
+    },
+    [adoptGeneration, client],
   );
   const bindPickerChat = useCallback(
-    (cwd: string, sessionPath: string | undefined, chatAgent: ChatAgentId): Promise<number> =>
-      client.selectWorkspace(
+    async (
+      cwd: string,
+      sessionPath: string | undefined,
+      chatAgent: ChatAgentId,
+    ): Promise<number> => {
+      const nextGeneration = await client.selectWorkspace(
         { mode: "chat", cwd, sessionPath: sessionPath ?? null, chatAgent },
         generationRef.current ?? 0,
-      ),
-    [client],
+      );
+      adoptGeneration(nextGeneration);
+      return nextGeneration;
+    },
+    [adoptGeneration, client],
   );
   const handlePickerChosen = useCallback((): void => {
     onUserTargetChange?.();
@@ -2879,12 +2901,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         { mode: "code", cwd: currentCwd, sessionPath: link.sessionPath },
         generationRef.current ?? 0,
       );
-      generationRef.current = nextGeneration;
-      onGenerationChangeRef.current?.(nextGeneration);
+      adoptGeneration(nextGeneration);
       // onProjectChosen owns the single readiness + hydration pass for this session.
       onProjectChosen();
     },
-    [autopilotReviewing, client, newSessionBusy, running, startRoadmapPhase],
+    [adoptGeneration, autopilotReviewing, client, newSessionBusy, running, startRoadmapPhase],
   );
 
   useEffect(() => {

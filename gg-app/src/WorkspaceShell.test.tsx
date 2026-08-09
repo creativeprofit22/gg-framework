@@ -338,6 +338,18 @@ describe("WorkspaceShell", () => {
     expect(document.querySelector(".workspace-split-vertical")).toBeTruthy();
   });
 
+  it("removes a never-bound empty pane locally", async () => {
+    render(<WorkspaceShell renderPane={renderPane} />);
+    await screen.findByTestId("pane-primary");
+
+    fireEvent.click(screen.getByRole("button", { name: "Split Right" }));
+    expect(await screen.findByTestId("pane-pane-1")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Close pane-1 pane" }));
+
+    await waitFor(() => expect(screen.queryByTestId("pane-pane-1")).toBeNull());
+    expect(bridge.disposePaneSession).not.toHaveBeenCalled();
+  });
+
   it("restores pane targets and persists canonical focus", async () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
@@ -844,12 +856,13 @@ describe("WorkspaceShell", () => {
     expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "primary input" }));
   });
 
-  it("keeps the pane and retry surface when session disposal is rejected", async () => {
+  it("retries a stale close with the pane's adopted generation", async () => {
     activeWorkPanes.add("secondary");
-    bridge.disposePaneSession.mockRejectedValueOnce(new Error("daemon unavailable"));
+    bridge.disposePaneSession.mockRejectedValueOnce(new Error("stale pane generation"));
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     await waitForInitialWorkspaceReady();
+    act(() => latestPaneProps.get("secondary")?.onGenerationChange?.(12));
 
     fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
     fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
@@ -860,14 +873,12 @@ describe("WorkspaceShell", () => {
       ),
     ).toBeTruthy();
     expect(screen.getByTestId("pane-secondary")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "Close Pane" }) as HTMLButtonElement).disabled).toBe(
-      false,
-    );
-    expect(bridge.disposePaneSession).toHaveBeenCalledTimes(1);
+    expect(bridge.disposePaneSession).toHaveBeenCalledWith("secondary", 12);
 
+    act(() => latestPaneProps.get("secondary")?.onGenerationChange?.(13));
     fireEvent.click(screen.getByRole("button", { name: "Close Pane" }));
     await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
-    expect(bridge.disposePaneSession).toHaveBeenCalledTimes(2);
+    expect(bridge.disposePaneSession).toHaveBeenNthCalledWith(2, "secondary", 13);
   });
 
   it("warns once for a stale pane restore target", async () => {
@@ -945,10 +956,11 @@ describe("WorkspaceShell", () => {
     saveTwoPaneLayout();
     render(<WorkspaceShell renderPane={renderPane} />);
     await screen.findByTestId("pane-secondary");
+    act(() => latestPaneProps.get("secondary")?.onGenerationChange?.(7));
     fireEvent.click(screen.getByRole("button", { name: "Close secondary pane" }));
 
     await waitFor(() => expect(screen.queryByTestId("pane-secondary")).toBeNull());
-    expect(bridge.disposePaneSession).toHaveBeenCalledWith("secondary");
+    expect(bridge.disposePaneSession).toHaveBeenCalledWith("secondary", 7);
     expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "primary input" }));
     await waitFor(() => {
       const saved = JSON.parse(localStorage.getItem("gg-workspace-layout-recursive:main")!);

@@ -390,6 +390,10 @@ function ReadyWorkspaceShell({
     });
   }, []);
 
+  const updatePaneGeneration = useCallback((paneId: WorkspacePaneId, generation: number): void => {
+    paneGenerationsRef.current.set(paneId, generation);
+  }, []);
+
   const registerInput = useCallback((paneId: string, actions: PaneInputActions | null): void => {
     if (actions) inputActionsRef.current.set(paneId, actions);
     else inputActionsRef.current.delete(paneId);
@@ -610,8 +614,7 @@ function ReadyWorkspaceShell({
       cancelPaneDrag(false);
       try {
         const generation = paneGenerationsRef.current.get(paneId);
-        if (generation === undefined) await disposePaneSession(paneId);
-        else await disposePaneSession(paneId, generation);
+        if (generation !== undefined) await disposePaneSession(paneId, generation);
         setConfirmPaneCloseId((current) => (current === paneId ? null : current));
         warnedRestorePanesRef.current.delete(paneId);
         inputActionsRef.current.delete(paneId);
@@ -778,6 +781,7 @@ function ReadyWorkspaceShell({
           renderPane={renderPane}
           onFocusPane={focusPane}
           onSnapshot={updateSnapshot}
+          onGenerationChange={updatePaneGeneration}
           onLifecycleError={handlePaneLifecycleError}
           registerInput={registerInput}
           onSplitPane={splitPane}

@@ -230,7 +230,7 @@ function client(paneId: string, generation: number): PaneAgentClient {
     subscribe: vi.fn(() => vi.fn()),
     waitForReady: vi.fn(async () => ({ ready: true, error: null, generation, sessionId: paneId })),
     status: vi.fn(async () => ({ ready: true, error: null, generation, sessionId: paneId })),
-    selectWorkspace: vi.fn(),
+    selectWorkspace: vi.fn(async () => generation),
     getState: vi.fn(async () => ({ running: false })),
     getNotes: vi.fn(async () => ({ status: "missing" as const })),
     migrateNotes: vi.fn(async (document: NotesDocumentV3) => ({
@@ -302,6 +302,7 @@ async function renderKenPromptPane(
   pane: PaneAgentClient,
   running = false,
   prompt = KEN_PROMPT,
+  onGenerationChange?: (generation: number) => void,
 ): Promise<HTMLButtonElement> {
   vi.mocked(pane.getState).mockResolvedValue({
     ...agentState("azure:gpt-test"),
@@ -315,7 +316,7 @@ async function renderKenPromptPane(
       ken: true,
     },
   ] as Awaited<ReturnType<PaneAgentClient["listHistory"]>>);
-  render(<AgentPane client={pane} />);
+  render(<AgentPane client={pane} onGenerationChange={onGenerationChange} />);
   fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
   fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
   return (await screen.findByRole("button", { name: "Continue here" })) as HTMLButtonElement;
@@ -378,9 +379,17 @@ describe("AgentPane lifecycle", () => {
     expect(screen.queryByText("General Agent")).toBeNull();
   });
 
-  it("binds an auxiliary picker through its pane-scoped client", async () => {
+  it("adopts a switched pane generation before the next selection", async () => {
     const pane = client("pane-1", 3);
+    vi.mocked(pane.selectWorkspace).mockResolvedValueOnce(4).mockResolvedValueOnce(5);
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 4,
+      sessionId: "pane-1",
+    });
     const onUserTargetChange = vi.fn();
+    const onGenerationChange = vi.fn();
     render(
       <AgentPane
         client={pane}
@@ -389,19 +398,25 @@ describe("AgentPane lifecycle", () => {
         initialTarget={null}
         workspaceOwnsSessionLifecycle
         onUserTargetChange={onUserTargetChange}
+        onGenerationChange={onGenerationChange}
       />,
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
 
+    await waitFor(() => expect(onGenerationChange).toHaveBeenCalledWith(4));
+    fireEvent.click(await screen.findByRole("button", { name: /Back to this project's sessions/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
+
     await waitFor(() =>
-      expect(pane.selectWorkspace).toHaveBeenCalledWith(
+      expect(pane.selectWorkspace).toHaveBeenLastCalledWith(
         { mode: "code", cwd: "/chosen", sessionPath: "/chosen.jsonl" },
-        0,
+        4,
       ),
     );
-    expect(onUserTargetChange).toHaveBeenCalledOnce();
+    expect(onGenerationChange).toHaveBeenCalledWith(5);
+    expect(onUserTargetChange).toHaveBeenCalledTimes(2);
   });
 
   it("reloads and replaces the pane model catalog after a native refresh", async () => {
@@ -461,17 +476,25 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() => expect(nativeMocks.modelsUnlisten).toHaveBeenCalledOnce());
   });
 
-  it("refreshes the active model state after daemon respawn", async () => {
+  it("adopts the recovered generation after daemon respawn", async () => {
     const pane = client("pane-1", 1);
+    const onGenerationChange = vi.fn();
     vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-old"));
     vi.mocked(pane.listModels).mockResolvedValue([
       { id: "azure:gpt-old", name: "Azure old", provider: "azure" },
     ]);
-    render(<AgentPane client={pane} />);
+    render(<AgentPane client={pane} onGenerationChange={onGenerationChange} />);
     fireEvent.click(await screen.findByRole("button", { name: "Open projects" }));
     fireEvent.click(await screen.findByRole("button", { name: "Bind project" }));
     const modelButton = await screen.findByTitle("Switch Supah Coder's model");
     await waitFor(() => expect(modelButton.textContent).toContain("Azure old"));
+    onGenerationChange.mockClear();
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 2,
+      sessionId: "pane-1",
+    });
     vi.mocked(pane.getState).mockReset().mockResolvedValue(agentState("azure:gpt-new"));
     vi.mocked(pane.listModels)
       .mockReset()
@@ -482,9 +505,8 @@ describe("AgentPane lifecycle", () => {
       await Promise.resolve();
     });
 
-    await waitFor(() =>
-      expect(screen.getByTitle("Switch Supah Coder's model").textContent).toContain("Azure new"),
-    );
+    await waitFor(() => expect(onGenerationChange).toHaveBeenCalledWith(2));
+    expect(screen.getByTitle("Switch Supah Coder's model").textContent).toContain("Azure new");
   });
 
   it("separate pane clients create and subscribe independently", async () => {
@@ -1096,11 +1118,19 @@ describe("AgentPane lifecycle", () => {
     expect(document.querySelector(".queued-pill")?.textContent).toBe("queued");
   });
 
-  it("waits for the matching fresh-session reset and handles reset-before-response once", async () => {
+  it("adopts the new-session ready generation and handles reset-before-response once", async () => {
     const pane = client("pane-ken-fresh", 1);
     const creation = deferred<Awaited<ReturnType<PaneAgentClient["newSession"]>>>();
     vi.mocked(pane.newSession).mockReturnValueOnce(creation.promise);
-    await renderKenPromptPane(pane);
+    const onGenerationChange = vi.fn();
+    await renderKenPromptPane(pane, false, KEN_PROMPT, onGenerationChange);
+    onGenerationChange.mockClear();
+    vi.mocked(pane.waitForReady).mockResolvedValue({
+      ready: true,
+      error: null,
+      generation: 2,
+      sessionId: "pane-ken-fresh",
+    });
     const fresh = screen.getByRole("button", { name: "New session" });
 
     fireEvent.click(fresh);
@@ -1122,6 +1152,7 @@ describe("AgentPane lifecycle", () => {
     await waitFor(() =>
       expect(pane.sendPrompt).toHaveBeenCalledWith(CONTINUATION_PROMPT, [], { kenSent: true }),
     );
+    expect(onGenerationChange).toHaveBeenCalledWith(2);
     expect(pane.sendPrompt).toHaveBeenCalledOnce();
     expect(vi.mocked(pane.newSession).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(pane.sendPrompt).mock.invocationCallOrder[0],

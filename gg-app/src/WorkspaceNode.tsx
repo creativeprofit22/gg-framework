@@ -59,6 +59,7 @@ export interface WorkspaceNodeProps {
   renderPane?: (props: AgentPaneProps) => React.ReactNode;
   onFocusPane: (paneId: WorkspacePaneId) => void;
   onSnapshot: NonNullable<AgentPaneProps["onSnapshot"]>;
+  onGenerationChange: (paneId: WorkspacePaneId, generation: number) => void;
   onLifecycleError: (paneId: WorkspacePaneId, error: unknown) => void;
   registerInput: NonNullable<AgentPaneProps["registerInput"]>;
   onSplitPane: (paneId: WorkspacePaneId, direction: SplitDirection) => void;
@@ -283,6 +284,7 @@ function WorkspaceAgentLeaf({
   renderPane,
   onFocusPane,
   onSnapshot,
+  onGenerationChange,
   onLifecycleError,
   registerInput,
   onSplitPane,
@@ -326,6 +328,7 @@ function WorkspaceAgentLeaf({
     initialTarget,
     onFocus: onFocusPane,
     onSnapshot,
+    onGenerationChange: (generation) => onGenerationChange(paneId, generation),
     onLifecycleError: dispatchLifecycleError,
     workspaceOwnsSessionLifecycle: true,
     registerInput,

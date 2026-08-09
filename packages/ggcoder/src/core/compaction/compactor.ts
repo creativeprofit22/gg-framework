@@ -1096,9 +1096,13 @@ export async function compact(
     options.signal?.addEventListener("abort", forwardAbort, { once: true });
 
     try {
+      const summaryTransportModel =
+        summaryModel.id === options.model
+          ? (options.transportModel ?? summaryModel.id)
+          : summaryModel.id;
       const result = stream({
         provider: options.provider,
-        model: options.transportModel ?? summaryModel.id,
+        model: summaryTransportModel,
         messages: summaryMessages,
         maxTokens: summaryOutputTokens,
         apiKey: options.apiKey,

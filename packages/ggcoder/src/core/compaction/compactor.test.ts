@@ -741,6 +741,30 @@ describe("compact", () => {
     expect(result.result.tokensAfterEstimate).toBeLessThan(result.result.targetTokens);
   });
 
+  it("uses the active transport alias only when the summary model is active", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReturnValue(
+      mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never,
+    );
+    const messages = buildConversation(30);
+
+    await compact(messages, { ...baseOptions, transportModel: "active-transport-alias" });
+    expect(mockStream.mock.calls.at(-1)?.[0].model).toBe("active-transport-alias");
+
+    await compact(messages, {
+      ...baseOptions,
+      model: "claude-opus-5",
+      transportModel: "active-transport-alias",
+    });
+    expect(mockStream.mock.calls.at(-1)?.[0].model).toBe("claude-sonnet-5");
+  });
+
   it("feeds query-relevant older evidence to the summarizer when its prompt budget is constrained", async () => {
     const mockStream = vi.mocked(stream);
     mockStream.mockImplementation((request) => {

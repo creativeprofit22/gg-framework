@@ -714,6 +714,96 @@ describe("production launchBoundPhase orchestration", () => {
     expect(promoted.disposeCalls).toBe(1);
   });
 
+  it("isolates a parent-root draft from a child repo while launching it in-place at the exact cwd", async () => {
+    const { repository, cwd: parentCwd } = await setup();
+    const childCwd = path.join(parentCwd, "repo");
+    await fs.mkdir(childCwd, { recursive: true });
+    const baseline = await repository.load(parentCwd);
+    if (baseline.status !== "ok") throw new Error("Expected parent Roadmap baseline");
+
+    const sourcePrompt = "Plan and implement the exact parent-root phase";
+    const ids = ["draft-parent-scope", "phase-parent-scope"];
+    const drafts = new AppSidecarRoadmapDraftCoordinator({ createId: () => ids.shift()! });
+    const drafted = drafts.create({
+      cwd: parentCwd,
+      sessionId: "research-chat-at-parent-root",
+      request: {
+        expectedRevision: baseline.snapshot.revision,
+        summary: "Parent-root scope regression",
+        phases: [
+          {
+            title: "Parent-root phase",
+            goal: "Prove exact canonical cwd isolation and same-cwd launch",
+            doneWhen: ["The parent-root phase launches only from its exact project"],
+            sourcePrompt,
+          },
+        ],
+      },
+    });
+    expect(drafted).toMatchObject({
+      status: "drafted",
+      draft: { projectKey: baseline.snapshot.projectKey },
+    });
+    if (drafted.status !== "drafted") throw new Error("Expected parent-root Roadmap draft");
+    expect(drafts.pending(childCwd)).toBeNull();
+
+    const draftDecision = new AppSidecarRoadmapDraftDecisionService({
+      drafts,
+      repository,
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      onCommittedSnapshot: () => undefined,
+    });
+    await expect(draftDecision.approve(parentCwd, drafted.draft.id)).resolves.toMatchObject({
+      status: "created",
+      phaseIds: ["phase-parent-scope"],
+    });
+    await expect(repository.load(childCwd)).resolves.toEqual({ status: "missing" });
+
+    const childFixture = new ProductionPhaseFixture(repository, childCwd);
+    await expect(childFixture.start("phase-parent-scope")).resolves.toMatchObject({
+      status: 404,
+      body: { status: "failed", code: "notes-missing" },
+    });
+    expect(childFixture.createCalls).toBe(0);
+    expect(childFixture.currentSession).toBe(childFixture.previousSession);
+    expect(childFixture.events).not.toContain("session-replaced");
+    expect(childFixture.broadcasts).toEqual([]);
+
+    const parentFixture = new ProductionPhaseFixture(repository, parentCwd);
+    const outerMutationCoordinator = parentFixture.mutations;
+    const previousInnerSession = parentFixture.currentSession;
+    previousInnerSession.emitPaneEvent("before-phase-bind");
+
+    await expect(parentFixture.start("phase-parent-scope")).resolves.toMatchObject({
+      status: 202,
+      body: {
+        status: "accepted",
+        session: { sessionId: "session-1", sessionPath: "/sessions/session-1.jsonl" },
+      },
+    });
+    await parentFixture.promptSettled;
+
+    expect(parentFixture.mutations).toBe(outerMutationCoordinator);
+    expect(parentFixture.currentSession).not.toBe(previousInnerSession);
+    expect(previousInnerSession.disposeCalls).toBe(1);
+    expect(parentFixture.events).toContain("session-replaced");
+    expect(parentFixture.broadcasts).toContainEqual({
+      type: "session_reset",
+      data: expect.objectContaining({
+        phaseId: "phase-parent-scope",
+        sessionId: "session-1",
+      }),
+    });
+    expect(parentFixture.currentSession.activeContext?.phase.sourcePrompt).toBe(sourcePrompt);
+    expect(parentFixture.currentSession.lastPrompt).toContain(sourcePrompt);
+    parentFixture.currentSession.emitPaneEvent("after-phase-bind");
+    expect(parentFixture.paneEvents).toEqual(["before-phase-bind", "after-phase-bind"]);
+    expect(parentFixture.events).not.toContain("fresh-session:false");
+
+    await childFixture.dispose();
+    await parentFixture.dispose();
+  });
+
   it("persists the complete Phase 26 release-gate journey and rejects restart after Done", async () => {
     const { repository, cwd, root } = await setup();
     const fixture = new ProductionPhaseFixture(repository, cwd);

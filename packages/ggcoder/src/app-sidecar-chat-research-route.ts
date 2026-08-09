@@ -11,10 +11,7 @@ export interface ChatResearchHttpResponse {
 }
 
 export interface AppSidecarChatResearchPromptOptions<Session> {
-  mode: "code" | "chat";
-  text: string;
-  attachmentCount: number;
-  busy: boolean;
+  route: ReturnType<typeof resolveChatResearchCommandRoute>;
   operations: ChatResearchHandoffOperations<Session>;
   claimStart(): boolean;
   respond(response: ChatResearchHttpResponse): void;
@@ -29,18 +26,13 @@ export function appSidecarChatCommandsResponse(
 }
 
 /**
- * Own the `/research` branch at the parsed POST /prompt boundary.
- * Returns false only when the caller must continue through its ordinary prompt path.
+ * Execute a Research route already classified at the raw POST /prompt boundary.
+ * Returns false only when the caller must continue through ordinary command expansion.
  */
 export async function handleAppSidecarChatResearchPrompt<Session>(
   options: AppSidecarChatResearchPromptOptions<Session>,
 ): Promise<boolean> {
-  const route = resolveChatResearchCommandRoute({
-    mode: options.mode,
-    text: options.text,
-    attachmentCount: options.attachmentCount,
-    busy: options.busy,
-  });
+  const { route } = options;
   if (route.kind === "pass") return false;
 
   if (route.kind === "reject") {

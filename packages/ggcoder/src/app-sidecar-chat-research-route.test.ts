@@ -1,11 +1,19 @@
+import fs from "node:fs/promises";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { commitChatResearchTransition } from "./app-sidecar-chat-research-handoff.js";
+import {
+  commitChatResearchTransition,
+  resolveChatResearchCommandRoute,
+} from "./app-sidecar-chat-research-handoff.js";
 import {
   appSidecarChatCommandsResponse,
   handleAppSidecarChatResearchPrompt,
 } from "./app-sidecar-chat-research-route.js";
+import { loadCustomCommands } from "./core/custom-commands.js";
+import { useFakeHome } from "./test-support/fake-home.js";
 
 interface FakeMarker {
   kind: "agent_handoff" | "user_hint";
@@ -28,6 +36,7 @@ interface HarnessState {
   events: string[];
   seenSessions: FakeSession[];
   runErrors: string[];
+  customExpansions: string[];
   failurePoint?: "switch" | "marker" | "hint" | "prompt";
 }
 
@@ -59,6 +68,8 @@ async function readJson(req: http.IncomingMessage): Promise<Record<string, unkno
 async function startRouteHarness(
   mode: "code" | "chat",
   overrides: Partial<Pick<HarnessState, "busy" | "claimAllowed" | "failurePoint">> = {},
+  cwd = process.cwd(),
+  expandCustomCommands = false,
 ): Promise<{ baseUrl: string; state: HarnessState }> {
   const state: HarnessState = {
     session: {
@@ -73,6 +84,7 @@ async function startRouteHarness(
     events: [],
     seenSessions: [],
     runErrors: [],
+    customExpansions: [],
     ...(overrides.failurePoint ? { failurePoint: overrides.failurePoint } : {}),
   };
 
@@ -116,11 +128,14 @@ async function startRouteHarness(
       void readJson(req).then(async (body) => {
         const text = typeof body.text === "string" ? body.text : "";
         const attachments = Array.isArray(body.attachments) ? body.attachments : [];
-        const handled = await handleAppSidecarChatResearchPrompt({
+        const route = resolveChatResearchCommandRoute({
           mode,
           text,
           attachmentCount: attachments.length,
           busy: state.busy,
+        });
+        const handled = await handleAppSidecarChatResearchPrompt({
+          route,
           claimStart: () => state.claimAllowed,
           respond: (response) => json(res, response.status, response.body),
           runAgent: async (_displayText, run) => {
@@ -177,12 +192,22 @@ async function startRouteHarness(
         });
         if (handled) return;
 
+        const match = /^\/([^\s]+)(?:\s+([\s\S]*))?$/u.exec(text.trim());
+        const customCommand =
+          expandCustomCommands && match
+            ? (await loadCustomCommands(cwd)).find((command) => command.name === match[1])
+            : undefined;
+        const expandedText = customCommand
+          ? `${customCommand.prompt}${match?.[2] ? `\n\n## User Instructions\n\n${match[2]}` : ""}`
+          : text;
+        if (customCommand) state.customExpansions.push(customCommand.name);
+
         if (state.busy) {
-          state.queue.push(text);
+          state.queue.push(expandedText);
           json(res, 202, { queued: true, count: state.queue.length });
           return;
         }
-        state.session.messages.push(text);
+        state.session.messages.push(expandedText);
         json(res, 202, { queued: false, count: 0 });
       });
       return;
@@ -275,6 +300,55 @@ describe("app-sidecar chat Research HTTP routes", () => {
         history: [{ role: "user", text: "/research citations and UX", command: true }],
       },
     });
+  });
+
+  it("dispatches exact /research before a conflicting global custom command", async () => {
+    const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), "research-command-home-"));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "research-command-project-"));
+    const restoreHome = useFakeHome(fakeHome);
+    try {
+      const commandsDir = path.join(fakeHome, ".gg", "commands");
+      await fs.mkdir(commandsDir, { recursive: true });
+      await fs.writeFile(
+        path.join(commandsDir, "research.md"),
+        "CUSTOM RESEARCH TEMPLATE MUST NOT RUN",
+      );
+      expect(
+        (await loadCustomCommands(cwd)).find((command) => command.name === "research")?.prompt,
+      ).toBe("CUSTOM RESEARCH TEMPLATE MUST NOT RUN");
+
+      const { baseUrl, state } = await startRouteHarness("chat", {}, cwd, true);
+      expect(await postPrompt(baseUrl, "/research exact collision")).toEqual({
+        status: 202,
+        body: { queued: false, count: 0 },
+      });
+
+      expect(state.customExpansions).toEqual([]);
+      expect(state.session.messages).toHaveLength(1);
+      expect(state.session.messages[0]).toContain(
+        "<research_focus>exact collision</research_focus>",
+      );
+      expect(state.session.messages[0]).not.toContain("CUSTOM RESEARCH TEMPLATE MUST NOT RUN");
+
+      for (const nearMatch of ["/Research exact collision", "/researcher", "/res"]) {
+        expect(await postPrompt(baseUrl, nearMatch)).toMatchObject({
+          status: 202,
+          body: { queued: false },
+        });
+      }
+      expect(state.session.messages.slice(1)).toEqual([
+        "/Research exact collision",
+        "/researcher",
+        "/res",
+      ]);
+      expect(state.customExpansions).toEqual([]);
+    } finally {
+      restoreHome();
+      await Promise.all([
+        fs.rm(fakeHome, { recursive: true, force: true }),
+        fs.rm(cwd, { recursive: true, force: true }),
+      ]);
+    }
   });
 
   it.each([

@@ -234,7 +234,10 @@ import {
 import { latestVerificationExceptionForReview } from "./app-sidecar-phase-completion.js";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool-host.js";
-import { commitChatResearchTransition } from "./app-sidecar-chat-research-handoff.js";
+import {
+  commitChatResearchTransition,
+  resolveChatResearchCommandRoute,
+} from "./app-sidecar-chat-research-handoff.js";
 import {
   appSidecarChatCommandsResponse,
   handleAppSidecarChatResearchPrompt,
@@ -4346,11 +4349,16 @@ async function createSession(
             return;
           }
 
-          const handledResearch = await handleAppSidecarChatResearchPrompt({
+          // Classify the raw, case-sensitive built-in token before any generic
+          // workflow/custom-command lookup can expand a conflicting research.md.
+          const researchRoute = resolveChatResearchCommandRoute({
             mode,
             text,
             attachmentCount: attachments.length,
             busy: running || runClaim.active || autopilotActive || runLifecycle.running,
+          });
+          const handledResearch = await handleAppSidecarChatResearchPrompt({
+            route: researchRoute,
             claimStart: () => {
               // `/research` is a fail-fast transition, never mid-run steering. Claim
               // synchronously before any switch or persistence operation can yield.

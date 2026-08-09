@@ -477,7 +477,7 @@ export function useAgentLoop(
         // only call setState at 100ms intervals to avoid saturating the event
         // loop with React renders during fast token streaming. 100ms (10fps) is
         // imperceptible for prose but cuts streaming render CPU ~49% vs 16ms
-        // (bench/RESULTS.md, bench B — the Markdown re-render dominates, so CPU
+        // (the Markdown re-render dominates, so CPU
         // scales with flush count, not delta count). Worst case it adds 100ms
         // to the first visible token — noise next to seconds of provider TTFT.
         let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;

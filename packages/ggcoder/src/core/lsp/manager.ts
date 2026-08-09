@@ -1,6 +1,6 @@
 import path from "node:path";
 import { log } from "../logger.js";
-import type { LspClient, LspDiagnostic } from "./client.js";
+import type { LspClient, LspDiagnostic, LspPosition, LspRequestOutcome } from "./client.js";
 import { formatDiagnostics } from "./format.js";
 import { lspClientPool, type LspClientPool } from "./pool.js";
 import {
@@ -52,6 +52,20 @@ export type LspDiagnosticOutcome =
   | (LspOutcomeBase & {
       kind: Exclude<LspOutcomeKind, "diagnostics">;
     });
+
+/**
+ * A navigation answer, or the specific reason there isn't one. Shares its
+ * failure vocabulary with `LspDiagnosticOutcome` so both surfaces degrade in
+ * the same, legible way.
+ */
+export type LspNavigationOutcome<T> =
+  | { kind: "ok"; filePath: string; serverId: string; value: T }
+  | {
+      kind: "timeout" | "unsupported" | "unavailable" | "server_failed";
+      filePath: string;
+      serverId?: string;
+      message?: string;
+    };
 
 const DEFAULT_WARM_BUDGET_MS = 3000;
 
@@ -304,9 +318,119 @@ export class LspManager {
     }
     return this.outcome(client.hasActiveProgress ? "low_confidence" : "clean", filePath);
   }
+
+  // ── Navigation ───────────────────────────────────────────────
+
+  /** Where the symbol under `position` is defined. */
+  definition(filePath: string, content: string, position: LspPosition) {
+    return this.navigate(filePath, content, (client, uri, budgetMs) =>
+      client.definition(uri, position, budgetMs),
+    );
+  }
+
+  /** Every reference to the symbol under `position`. */
+  references(filePath: string, content: string, position: LspPosition) {
+    return this.navigate(filePath, content, (client, uri, budgetMs) =>
+      client.references(uri, position, budgetMs),
+    );
+  }
+
+  /** Symbol outline for one document. */
+  documentSymbols(filePath: string, content: string) {
+    return this.navigate(filePath, content, (client, uri, budgetMs) =>
+      client.documentSymbols(uri, budgetMs),
+    );
+  }
+
+  /** Type/signature summary under `position`. */
+  hover(filePath: string, content: string, position: LspPosition) {
+    return this.navigate(filePath, content, (client, uri, budgetMs) =>
+      client.hover(uri, position, budgetMs),
+    );
+  }
+
+  /**
+   * Shared navigation path: resolve a server, sync the document, run one
+   * request inside the same warm/first budget split diagnostics use.
+   *
+   * The outcome kinds match `LspDiagnosticOutcome`'s degraded kinds exactly
+   * (`timeout` / `unsupported` / `unavailable` / `server_failed`), because a
+   * navigation tool that answers "no results" when the truth is "no server"
+   * teaches the model that the symbol does not exist.
+   */
+  private async navigate<T>(
+    filePath: string,
+    content: string,
+    run: (client: LspClient, uri: string, budgetMs: number) => Promise<LspRequestOutcome<T>>,
+  ): Promise<LspNavigationOutcome<T>> {
+    const normalizedFilePath = path.resolve(this.cwd, filePath);
+    if (this.shutDown) return { kind: "unavailable", filePath: normalizedFilePath };
+
+    try {
+      const spec = serverForFile(normalizedFilePath, this.catalog);
+      if (!spec) return { kind: "unsupported", filePath: normalizedFilePath };
+      const root = findProjectRoot(normalizedFilePath, spec.rootMarkers, this.cwd);
+      const key = `${spec.id}\u0000${root}`;
+      const budgetMs = this.isWarm(key, spec, root) ? this.warmBudgetMs : this.firstBudgetMs;
+
+      const resolution = await this.pool.retain(spec, root, this);
+      if (resolution.status !== "ready") {
+        return { kind: resolution.status, filePath: normalizedFilePath, serverId: spec.id };
+      }
+      const { client } = resolution;
+      if (!client.isAlive) {
+        this.pool.markDead(spec, root);
+        return { kind: "server_failed", filePath: normalizedFilePath, serverId: spec.id };
+      }
+
+      // Hold the entry open for the whole request, exactly as diagnostics do:
+      // the idle sweep must not reclaim a server mid-answer.
+      const endCall = this.pool.beginCall(spec, root);
+      try {
+        const uri = client.syncDocument(normalizedFilePath, content);
+        const outcome = await withBudget(run(client, uri, budgetMs), budgetMs, () => ({
+          status: "timeout" as const,
+        }));
+        this.warmKeys.set(key, this.pool.generationFor(spec, root));
+        if (outcome.status === "ok") {
+          return {
+            kind: "ok",
+            filePath: normalizedFilePath,
+            serverId: spec.id,
+            value: outcome.value,
+          };
+        }
+        if (outcome.status === "unsupported") {
+          return { kind: "unsupported", filePath: normalizedFilePath, serverId: spec.id };
+        }
+        if (outcome.status === "timeout") {
+          log("WARN", "lsp", `${spec.id} navigation timed out`, {
+            file: normalizedFilePath,
+            budgetMs,
+            stderr: client.stderrTail() || "(none)",
+          });
+          return { kind: "timeout", filePath: normalizedFilePath, serverId: spec.id };
+        }
+        return {
+          kind: "server_failed",
+          filePath: normalizedFilePath,
+          serverId: spec.id,
+          message: outcome.message,
+        };
+      } finally {
+        endCall();
+      }
+    } catch (error) {
+      log("WARN", "lsp", `navigation failed for ${normalizedFilePath}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { kind: "server_failed", filePath: normalizedFilePath };
+    }
+  }
 }
 
 /** Race work against a hard budget while allowing it to settle in background. */
+
 function withBudget<T>(work: Promise<T>, budgetMs: number, onTimeout: () => T): Promise<T> {
   return new Promise<T>((resolve) => {
     const timer = setTimeout(() => resolve(onTimeout()), budgetMs);

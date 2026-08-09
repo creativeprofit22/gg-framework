@@ -1,6 +1,6 @@
 # Preserving Local Fixes Across App Updates
 
-Official GG App updates replace the installed binary and cannot preserve source-only fixes from this checkout. A local-patched build still checks the official release feed, but routes installation through this repository instead of installing the official binary directly.
+Official GG App updates replace the installed binary and cannot preserve source-only fixes from this checkout. A local-patched build never contacts the official release feed; updates are started explicitly and routed through this repository.
 
 ## Protected checkout
 
@@ -20,15 +20,15 @@ pnpm --filter gg-app update:local-fixes -- --check
 The workflow defaults to `upstream/main` and:
 
 1. Rejects unresolved conflicts and in-progress Git operations.
-2. Records the source/fork OIDs, commit range, tracked patch, and dirty status in a timestamped manifest under `.gg/local-fixes/backups/`.
+2. Records the source/fork OIDs, merge base, local commit range, tracked patch, and dirty status in a timestamped manifest under `.gg/local-fixes/backups/`.
 3. Fetches `upstream/main` and `origin/custom/local-customizations`.
-4. Creates `gg-local-before-update-*` at the old `HEAD` before rebasing.
+4. Creates `gg-local-before-update-*` at the old `HEAD` before merging.
 5. Stashes tracked and untracked work and records the stash OID.
-6. Rebases every local commit onto the fetched upstream target, retaining cherry-picks and empty commits.
-7. Applies dirty work without dropping its stash, then verifies the commit sequence and saves a `range-diff`.
-8. Verifies Supah Coder branding, the `GG Coder` native identity, official update discovery, source-update routing, and four-file version lockstep.
+6. Merges upstream with `--no-ff --no-commit`, stopping before a merge commit when semantic conflict review is required.
+7. Commits a clean merge, restores dirty work byte-for-byte, and keeps the backup branch until verification completes.
+8. Verifies Supah Coder branding, production and local native identity isolation, source-update routing, and four-file version lockstep.
 9. Runs required checks and builds a fresh Windows NSIS installer with a recorded SHA-256.
-10. Retains the backup branch. The app never pushes; CLI push requires an explicit exact-OID lease.
+10. Retains the backup branch. The app never pushes; CLI push requires an explicit normal fast-forward push.
 
 Preview the exact plan without mutation:
 
@@ -46,20 +46,20 @@ pnpm --filter gg-app update:local-fixes -- --allow-other-branch --no-build --no-
 
 ## Conflict recovery
 
-A rebase conflict, dirty-work restore conflict, identity drift, changed commit sequence, or failed check stops before build and push. The backup branch and recorded stash remain available. Follow the printed manifest instructions, then:
+A merge conflict, dirty-work restore conflict, identity drift, changed merge result, or failed check stops before build and push. The backup branch and recorded stash remain available. Follow the printed manifest instructions, then:
 
 ```bash
 git status
 git add <resolved-files>
-git rebase --continue
+git commit # complete the merge only after semantic review
 # Apply the printed stash OID only when the updater says dirty work was not applied.
-git stash apply <printed-stash-oid>
+git stash apply --index <printed-stash-oid>
 pnpm --filter gg-app check
 pnpm --filter @kenkaiiii/ggcoder check
 pnpm --filter gg-app build:local-patched
 ```
 
-Follow the manifest's `phase` and `dirtyWorkApplied` fields before touching the stash. To recover instead, run `git rebase --abort` and use the printed backup branch, stash OID, manifest, byte-for-byte worktree backup, or patch path. The stash is dropped only after successful verification and restoration.
+Follow the manifest's `phase` and `dirtyWorkApplied` fields before touching the stash. To abandon a conflicted merge, run `git merge --abort`, switch or reset to the printed backup branch, and recover dirty work from the recorded stash OID, manifest, byte-for-byte worktree backup, or patch path. The automated flow drops the stash only after successful verification and restoration.
 
 ## Build a local-patched installer
 
@@ -71,11 +71,10 @@ pnpm --filter gg-app build:local-patched
 
 ## Verified fork push
 
-App-triggered updates never push. After reviewing the backup manifest, `range-diff`, checks, and installer hash, an operator may rerun the CLI flow with `--push`. The updater captures the fork branch's exact pre-rebase OID and uses only:
+App-triggered updates never push. After reviewing the backup manifest, checks, and installer hash, an operator may rerun the CLI flow with `--push`. The updater uses only a normal fast-forward push:
 
 ```bash
-git push --force-with-lease=refs/heads/custom/local-customizations:<captured-origin-oid> \
-  origin HEAD:refs/heads/custom/local-customizations
+git push origin HEAD:refs/heads/custom/local-customizations
 ```
 
-A concurrent fork update makes the lease fail. Plain `--force`, pushes to `upstream`, noncanonical branches, skipped checks, and skipped builds are rejected.
+A concurrent or diverged fork update makes the push fail. Force pushes, pushes to `upstream`, noncanonical branches, skipped checks, and skipped builds are rejected.

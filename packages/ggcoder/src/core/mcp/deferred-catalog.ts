@@ -4,7 +4,7 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
  * Holds MCP tools OUT of the per-turn request payload until the model asks
  * for them via `tool_search`.
  *
- * Benchmarked (bench/RESULTS.md, bench A): injecting every MCP tool schema
+ * Measured: injecting every MCP tool schema
  * eagerly cost ~33KB (~8.3k tokens) per cache-miss turn with just two MCP
  * servers connected — 56% of all billed input tokens in a 6-turn session.
  * Deferring keeps the tool prefix small and byte-stable; promotion is a

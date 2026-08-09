@@ -11,31 +11,42 @@
  * Cross-tool preferences for those tools live in TOOL_STEERING instead.
  */
 export const TOOL_PROMPT_HINTS: Record<string, string> = {
+  code_nav:
+    "Language-server navigation: `definition`, `references`, `symbols` (file outline), `hover` " +
+    "(type/signature). Exact and cross-file, unlike text search.",
   code_search:
     "Find the most relevant functions/classes/types for a query via AST chunking + BM25 " +
     "ranking. Returns whole ranked symbol chunks with `file:line → symbol` headers — far fewer " +
-    "tokens than reading whole files. TS/JS only.",
+    "tokens than reading whole files. TS/JS, Python, Go, Rust, Java, C#.",
   source_path:
-    "Resolve installed package/repo source via opensrc. Use before assuming dependency APIs; inspect returned absolute path with read/grep/find/ls.",
+    "Resolve installed package/repo source via opensrc. Inspect the returned path with read/grep/find/ls before assuming a dependency API.",
   web_search:
     "Search the web. Use before web_fetch to find pages; supports include/exclude_domains and a time_range recency filter.",
   web_fetch:
     "Fetch page content as Markdown (or text/html). Pass `urls` to fetch many at once; reads PDFs, follows safe redirects, and prefers a site's /llms.txt for docs.",
   task_output: "Read new output from a background process by id.",
   task_stop: "Stop a background process by id.",
+  screenshot:
+    "Capture a headless-browser PNG of a URL or dev server to visually verify rendered UI; supports waits, click/type actions and viewport size.",
+  send_message: "Queue steering into a running child agent without starting another turn.",
+  followup_task: "Start another turn in an idle child agent, preserving its context.",
+  wait_agent: "Block until named child agents finish and return their output snapshots.",
+  list_agents: "List child agent IDs, states, turns and token totals.",
+  interrupt_agent: "Interrupt a child agent's current turn, keeping its context for a follow-up.",
   tasks:
-    "Manage the project task list. Do not use this tool proactively — only when the user explicitly requests it, or when an active slash-command's flow reaches its task-handoff step.",
+    "Manage the project task list. Never proactively — only on explicit request, or at a slash-command's task-handoff step.",
   enter_plan:
     "Enter read-only plan mode for complex/risky tasks before implementation; draft a plan under .gg/plans/.",
   exit_plan: "Submit a .gg/plans/ markdown plan for user approval and leave plan mode.",
   subagent: "Delegate focused, isolated subtasks (research, parallel exploration).",
   skill: "Invoke a named skill for specialized instructions.",
   tool_search:
-    "Search the extended tool catalog (MCP servers/integrations) by capability — e.g. " +
-    "'search public GitHub code', 'UI design screenshots'. Matches become callable on your " +
-    "next step. Check the catalog BEFORE concluding you lack a capability.",
+    "Load any tool listed as available on demand, plus the extended catalog of " +
+    "integrations (MCP servers) — e.g. 'take a screenshot', 'search public GitHub code'. " +
+    "Matches become callable on your next step. Check the catalog BEFORE concluding you " +
+    "lack a capability.",
   generate_image:
-    "Generate or edit images using OpenAI's gpt-image-2 model. Only use when the user explicitly asks to create or edit an image — never generate images proactively. Requires OpenAI to be connected. Pass `image` with a file path to edit an existing image. Save with `out_path`.",
+    "Generate or edit images via OpenAI's gpt-image-2. Only when the user explicitly asks — never proactively. Pass `image` to edit an existing file.",
   "mcp__kencode-search__referenceSources":
     "Get curated, categorized reference repos for examples, inspiration, architecture, UI, agents, SaaS, workflows, and domain patterns. Repo-only starting points; fetch docs/source, then verify code with searchCode.",
   "mcp__kencode-search__discoverRepos":
@@ -65,7 +76,11 @@ export const TOOL_STEERING_CLAUSES: ReadonlyArray<{
   },
   {
     needs: ["code_search", "grep", "read"],
-    text: "Prefer `code_search` for “where/how is X implemented” in TS/JS; use `grep` for exact strings or non-TS files.",
+    text: "Prefer `code_search` for “where/how is X implemented”; use `grep` for exact strings or unindexed file types.",
+  },
+  {
+    needs: ["code_nav", "grep"],
+    text: "For “who calls this” / “where is this defined”, use `code_nav` — it resolves symbols exactly, across files; `grep` only matches text and misses renames, re-exports and shadowing.",
   },
   {
     needs: ["read", "grep", "ls", "find"],
@@ -91,6 +106,7 @@ export function buildToolSteering(activeTools: readonly string[]): string {
  */
 export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "bash",
+  "code_nav",
   "code_search",
   "edit",
   "enter_plan",
@@ -128,6 +144,7 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "bash",
   "find",
   "grep",
+  "code_nav",
   "code_search",
   "ls",
   "source_path",

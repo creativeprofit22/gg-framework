@@ -50,9 +50,10 @@ describe("tool_search", () => {
       ok: false,
       error: "spawn ENOENT",
     };
+    const promotedNames: string[] = [];
     const tool = createToolSearchTool(
       catalog,
-      () => {},
+      (tools) => promotedNames.push(...tools.map((candidate) => candidate.name)),
       async () => resolution,
     );
 
@@ -60,6 +61,8 @@ describe("tool_search", () => {
     expect(result).toContain("No usable tools matched");
     expect(result).toContain("figma");
     expect(result).toContain("spawn ENOENT");
+    expect(promotedNames).toEqual([]);
+    expect(catalog.names()).toEqual(["mcp__figma__get_screens"]);
   });
 
   it("promotes the reachable tools and flags only the unreachable ones", async () => {
@@ -68,9 +71,10 @@ describe("tool_search", () => {
       stub("mcp__figma__get_screens", "fetch design screenshots"),
       stub("mcp__dead__get_screens", "fetch design screenshots"),
     ]);
+    const promotedNames: string[] = [];
     const tool = createToolSearchTool(
       catalog,
-      () => {},
+      (tools) => promotedNames.push(...tools.map((candidate) => candidate.name)),
       async (name) =>
         name.startsWith("mcp__dead__")
           ? { serverName: "dead", ok: false, error: "timed out after 30000ms" }
@@ -82,6 +86,8 @@ describe("tool_search", () => {
     expect(result).toContain("mcp__figma__get_screens");
     expect(result).toContain("Unreachable:");
     expect(result).toContain("mcp__dead__get_screens");
+    expect(promotedNames).toEqual(["mcp__figma__get_screens"]);
+    expect(catalog.names()).toEqual(["mcp__dead__get_screens"]);
   });
 
   it("does not name or promote catalog tools hidden by a live capability policy", async () => {

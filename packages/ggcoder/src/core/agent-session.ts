@@ -84,6 +84,7 @@ import {
   type LspManager,
   type ProcessManager,
 } from "../tools/index.js";
+import { partitionToolsByTier } from "../tools/tool-tiers.js";
 import type { BackgroundProcess } from "./process-manager.js";
 import { buildProcessCompletionFollowUp } from "./process-gate.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
@@ -482,8 +483,17 @@ export class AgentSession {
   };
   private mcpManager?: MCPClientManager;
   private sharedMcpLeases = new Map<string, SharedMcpClientLease>();
-  /** Deferred MCP tools awaiting discovery via tool_search (bench A win). */
+  /** Deferred MCP tools awaiting discovery via tool_search. */
   private mcpCatalog?: DeferredToolCatalog;
+  /**
+   * Built-in tools held in the catalog instead of the live toolset. Their names
+   * still render as one-line hints in the prompt's Tools section, so the model
+   * can discover and promote them; a promoted name drops out of this list.
+   */
+  private deferredBuiltinToolNames: string[] = [];
+  private deferredBuiltinTools = new Map<string, AgentTool>();
+  private capabilityPromotedBuiltinNames = new Set<string>();
+  private searchedPromotedBuiltinNames = new Set<string>();
   /** Live (connected) MCP tools by name — the reconcile target for cached stubs. */
   private liveMcpTools = new Map<string, AgentTool>();
   /** Server name for each cached-only tool, so a stub knows what to wait on. */
@@ -663,6 +673,7 @@ export class AgentSession {
         additionalRoots: this.additionalRoots,
         allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
       }),
+      getUseExternalGrep: () => this.settingsManager.get("grepUseRipgrep"),
       authStorage: this.authStorage,
       onFileRead: (filePath) => this.reviewCoverage.recordRead(filePath),
       onFileMutated: (filePath) => {
@@ -694,13 +705,34 @@ export class AgentSession {
           }
         : {}),
     });
-    const tools = [...builtInTools, ...(this.opts.additionalTools ?? [])];
+    const additionalTools = this.opts.additionalTools ?? [];
+    const tools = [...builtInTools, ...additionalTools];
     // Static allow-lists (Ken) and live capability policies (chat Research) share
-    // one guarded registry, so late registrations and stale references obey the
-    // same boundary as tools present at initialization.
-    this.registerTools(
-      this.opts.allowedTools ? tools.filter((tool) => this.isToolAllowed(tool.name)) : tools,
-    );
+    // one guarded registry, so initial, additional, promoted, and late tools obey
+    // the same boundary and stale references re-check it at execution time.
+    const allowedTools = this.opts.allowedTools
+      ? tools.filter((tool) => this.isToolAllowed(tool.name))
+      : tools;
+    // Tier built-ins only. Host-owned additional tools are live immediately; a
+    // same-named host tool also overrides its built-in instead of leaving a stale
+    // built-in definition in the deferred catalog.
+    if (!this.opts.allowedTools && this.settingsManager.get("deferredBuiltinTools")) {
+      const additionalToolNames = new Set(additionalTools.map((tool) => tool.name));
+      const tierableBuiltIns = builtInTools.filter((tool) => !additionalToolNames.has(tool.name));
+      const { core, deferred } = partitionToolsByTier(tierableBuiltIns);
+      this.registerTools([...core, ...additionalTools]);
+      if (deferred.length > 0) {
+        this.deferredBuiltinToolNames = deferred.map((tool) => tool.name);
+        this.deferredBuiltinTools = new Map(deferred.map((tool) => [tool.name, tool]));
+        this.mcpCatalog ??= new DeferredToolCatalog();
+        this.mcpCatalog.add(deferred);
+        this.ensureToolSearchTool();
+        this.promoteCapabilityAllowedDeferredBuiltins();
+        this.reconcileRegisteredTools();
+      }
+    } else {
+      this.registerTools(allowedTools);
+    }
     this.rebuildReadTool = rebuildReadTool;
     this.processManager = processManager;
     this.lspManager = lspManager;
@@ -943,8 +975,8 @@ export class AgentSession {
 
   /**
    * Route freshly connected MCP tools: deferred into the tool_search catalog
-   * (default — keeps ~8k tokens of schema out of every cache-miss turn, see
-   * bench/RESULTS.md bench A) or pushed eagerly when the user opted out.
+   * (default — keeps ~8k tokens of schema out of every cache-miss turn) or
+   * pushed eagerly when the user opted out.
    * Allow-listed sessions (Ken) always get the eager path — their fixed tool
    * expectations predate the catalog, and tool_search isn't allow-listed.
    * Promotion pushes onto the live `this.tools` array the running agent loop
@@ -974,15 +1006,25 @@ export class AgentSession {
    * Register `tool_search` once. Promotion of a cached-only entry waits for its
    * server so the model is told immediately when that capability turns out to
    * be unreachable, instead of promoting a tool that fails on first call.
+   *
+   * The catalog is created on demand rather than required up front: deferred
+   * built-in tools populate it with zero MCP servers connected, so gating
+   * registration on an existing catalog would leave those tools unreachable.
    */
   private ensureToolSearchTool(): void {
-    if (!this.mcpCatalog) return;
+    this.mcpCatalog ??= new DeferredToolCatalog();
     if (this.tools.some((t) => t.name === "tool_search")) return;
     this.registerTool(
       createToolSearchTool(
         this.mcpCatalog,
-        (promoted) => {
+        async (promoted) => {
+          for (const tool of promoted) {
+            if (this.deferredBuiltinTools.has(tool.name)) {
+              this.searchedPromotedBuiltinNames.add(tool.name);
+            }
+          }
           this.registerTools(promoted);
+          await this.rebuildSystemPromptInPlace();
         },
         async (toolName) => {
           if (this.liveMcpTools.has(toolName)) return undefined;
@@ -998,7 +1040,8 @@ export class AgentSession {
             ? { serverName, ok: true }
             : { serverName, ok: false, error: outcome.error };
         },
-        (toolName) => this.isToolCapabilityAllowed(toolName),
+        (toolName) =>
+          !this.unavailableToolNames.has(toolName) && this.isToolCapabilityAllowed(toolName),
       ),
     );
   }
@@ -2715,6 +2758,13 @@ export class AgentSession {
         }
       | undefined,
   ): void {
+    for (const toolName of this.capabilityPromotedBuiltinNames) {
+      if (!this.searchedPromotedBuiltinNames.has(toolName)) {
+        this.registeredTools.delete(toolName);
+      }
+    }
+    this.capabilityPromotedBuiltinNames.clear();
+
     this.toolCapabilityPolicy = policy
       ? {
           allowedNames: new Set(policy.allowedToolNames),
@@ -2724,7 +2774,18 @@ export class AgentSession {
             ((toolName) => `${toolName} is unavailable under the active tool capability policy.`),
         }
       : null;
+
+    this.promoteCapabilityAllowedDeferredBuiltins();
     this.reconcileRegisteredTools();
+  }
+
+  private promoteCapabilityAllowedDeferredBuiltins(): void {
+    if (!this.toolCapabilityPolicy) return;
+    for (const [toolName, tool] of this.deferredBuiltinTools) {
+      if (!this.isToolCapabilityAllowed(toolName) || this.registeredTools.has(toolName)) continue;
+      this.registeredTools.set(toolName, this.guardRegisteredTool(tool));
+      this.capabilityPromotedBuiltinNames.add(toolName);
+    }
   }
 
   /** Register or replace a host-owned runtime tool under the active capability policy. */
@@ -2742,20 +2803,18 @@ export class AgentSession {
   }
 
   private guardRegisteredTool(tool: AgentTool): AgentTool {
-    const session = this;
-    let guardedTool!: AgentTool;
-    guardedTool = {
+    const guardedTool: AgentTool = {
       ...tool,
-      async execute(args, context) {
-        if (session.registeredTools.get(tool.name) !== guardedTool) {
+      execute: async (args, context) => {
+        if (this.registeredTools.get(tool.name) !== guardedTool) {
           throw new Error(`${tool.name} is no longer registered.`);
         }
-        if (session.unavailableToolNames.has(tool.name)) {
+        if (this.unavailableToolNames.has(tool.name)) {
           throw new Error(`${tool.name} is unavailable under the active host policy.`);
         }
-        if (!session.isToolCapabilityAllowed(tool.name)) {
+        if (!this.isToolCapabilityAllowed(tool.name)) {
           throw new Error(
-            session.toolCapabilityPolicy?.unavailableMessage(tool.name) ??
+            this.toolCapabilityPolicy?.unavailableMessage(tool.name) ??
               `${tool.name} is unavailable under the active tool capability policy.`,
           );
         }
@@ -2766,6 +2825,7 @@ export class AgentSession {
   }
 
   private isToolCapabilityAllowed(toolName: string): boolean {
+    if (!this.isToolAllowed(toolName)) return false;
     const policy = this.toolCapabilityPolicy;
     if (!policy) return true;
     if (policy.allowedNames.has(toolName)) return true;
@@ -2882,6 +2942,17 @@ export class AgentSession {
     return { ok: true, root: resolved };
   }
 
+  /**
+   * Names to advertise as available-on-demand. A tool the model already
+   * promoted lives in `this.tools` and carries its own schema, so it drops out
+   * of the index rather than being listed twice.
+   */
+  private deferredToolNamesForPrompt(liveNames: readonly string[]): string[] {
+    if (this.deferredBuiltinToolNames.length === 0) return [];
+    const live = new Set(liveNames);
+    return this.deferredBuiltinToolNames.filter((name) => !live.has(name));
+  }
+
   /** Environment facts that vary per session rather than per host. */
   private promptEnvironment(): SystemPromptEnvironment {
     const networkAllow =
@@ -2901,10 +2972,12 @@ export class AgentSession {
   private async buildBasePrompt(planMode: boolean, approvedPlanPath?: string): Promise<string> {
     if (this.customSystemPrompt) return this.customSystemPrompt;
     const toolNames = this.tools.map((tool) => tool.name);
+    const deferredToolNames = this.deferredToolNamesForPrompt(toolNames);
     if (this.agentPrompt !== undefined) {
       return buildSubAgentSystemPrompt(this.agentPrompt, {
         cwd: this.cwd,
         toolNames,
+        deferredToolNames,
         context: this.opts.agentContext,
         environment: this.promptEnvironment(),
       });
@@ -2918,6 +2991,7 @@ export class AgentSession {
       undefined,
       this.provider,
       this.promptEnvironment(),
+      deferredToolNames,
     );
   }
 

@@ -11,7 +11,6 @@
     "format:check": "node scripts/format-check-reconstruction.mjs",
     "test": "pnpm test:audit-generated && pnpm --filter @kenkaiiii/gg-ai test && pnpm --filter @kenkaiiii/gg-agent test && pnpm --filter @kenkaiiii/gg-core test && pnpm --filter @kenkaiiii/ggcoder test && pnpm --filter @kenkaiiii/gg-boss test && pnpm --filter gg-app test",
     "test:audit-generated": "node --test scripts/audit-generated.test.mjs",
-    "bench": "pnpm build && npx tsx benchmarks/run-comparison.ts",
     "prepare": "pnpm build",
     "app:update:local-fixes": "pnpm --filter gg-app update:local-fixes",
     "app:build:local-patched": "pnpm --filter gg-app build:local-patched",

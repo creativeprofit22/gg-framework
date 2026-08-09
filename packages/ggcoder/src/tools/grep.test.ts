@@ -88,33 +88,35 @@ describe("createGrepTool", () => {
 
   it("returns partial results plus a notice when the deadline expires", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-grep-deadline-"));
-    await fs.writeFile(path.join(tmpDir, "a.txt"), "needle\n");
-    await fs.writeFile(path.join(tmpDir, "z.txt"), "needle\n");
+    // More candidates than the scan pool is wide, so the files past the first
+    // wave are genuinely never reached once the budget expires.
+    const names = Array.from({ length: 40 }, (_, i) => `f${String(i).padStart(2, "0")}.txt`);
+    for (const name of names) await fs.writeFile(path.join(tmpDir, name), "needle\n");
 
     const slowOps: ToolOperations = {
       ...localOperations,
       stat: async (p) => {
         const stat = await localOperations.stat(p);
-        if (stat.isFile()) await new Promise((resolve) => setTimeout(resolve, 40));
+        if (stat.isFile()) await new Promise((resolve) => setTimeout(resolve, 400));
         return stat;
       },
     };
 
-    const result = await createGrepTool(tmpDir, slowOps, 20).execute(
-      { pattern: "needle", include: "*.txt" },
+    const result = await createGrepTool(tmpDir, slowOps, { deadlineMs: 300 }).execute(
+      { pattern: "needle", include: "*.txt", max_results: 100 },
       context(),
     );
 
-    expect(result).toContain("a.txt:1:needle");
-    expect(result).not.toContain("z.txt:1:needle");
-    expect(result).toContain("Stopped after 0.02s");
+    expect(result).toContain("f00.txt:1:needle");
+    expect(result).not.toContain("f39.txt:1:needle");
+    expect(result).toContain("Stopped after 0.3s");
   });
 
   it("reports the deadline notice when nothing matched", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-grep-deadline-empty-"));
     await fs.writeFile(path.join(tmpDir, "a.txt"), "needle\n");
 
-    const result = await createGrepTool(tmpDir, localOperations, 0).execute(
+    const result = await createGrepTool(tmpDir, localOperations, { deadlineMs: 0 }).execute(
       { pattern: "needle", include: "*.txt" },
       context(),
     );

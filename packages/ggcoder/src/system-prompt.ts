@@ -133,10 +133,15 @@ function renderResearchSection(
     : provider === "anthropic"
       ? `use \`web_fetch\` for authoritative docs (native web search is available)`
       : `use \`web_fetch\` for authoritative docs`;
+  const dependencySource = active.has("source_path")
+    ? `Use \`source_path\` for installed deps`
+    : active.has("tool_search")
+      ? `Call \`tool_search\` to load \`source_path\` before inspecting installed deps`
+      : `Inspect installed dependency source when available`;
   return (
     `## Research & Verification\n\n` +
     `Your training data has a cutoff; the real current date is the final line of this prompt. Assume your knowledge of library versions, APIs, CLI flags, config schema, defaults, and best practices has changed since then — treat it as a stale hint to verify, never as ground truth. ` +
-    `Do not rely on memory for APIs, CLI flags, config schema, internals, or error wording — verify first. Use \`source_path\` for installed deps; ${docs}.` +
+    `Do not rely on memory for APIs, CLI flags, config schema, internals, or error wording — verify first. ${dependencySource}; ${docs}.` +
     publicCode
   );
 }
@@ -177,19 +182,41 @@ function renderDelegationSection(toolNames: readonly string[] | undefined): stri
   return `## Delegation\n\n${lines.map((line) => `- ${line}`).join("\n")}`;
 }
 
-function renderToolsSection(toolNames: readonly string[] | undefined): string | null {
+/**
+ * Render the Tools section.
+ *
+ * `deferredToolNames` are tools that exist but whose parameter schemas are held
+ * out of the request until `tool_search` promotes them. They get a one-line
+ * capability hint under their own sub-heading: without it the model cannot
+ * search for what it does not know exists, and deferral would trade tokens for
+ * capability blindness. Steering clauses see both tiers, since a preference
+ * like "use X rather than Y" stays true while X is one `tool_search` away.
+ */
+function renderToolsSection(
+  toolNames: readonly string[] | undefined,
+  deferredToolNames?: readonly string[],
+): string | null {
   const activeTools = toolNames ?? DEFAULT_TOOL_NAMES;
+  const deferred = (deferredToolNames ?? []).filter((name) => !activeTools.includes(name));
   const toolLines: string[] = [];
   for (const name of activeTools) {
     const hint = TOOL_PROMPT_HINTS[name];
     if (hint) toolLines.push(`- **${name}**: ${hint}`);
   }
+  const deferredLines: string[] = [];
+  for (const name of deferred) {
+    const hint = TOOL_PROMPT_HINTS[name];
+    if (hint) deferredLines.push(`- **${name}**: ${hint}`);
+  }
   // Cross-tool steering: each clause renders only when its tools are active.
   // Per-tool hints only exist for tools with non-obvious usage (see prompt-hints).
-  const steering = buildToolSteering(activeTools);
+  const steering = buildToolSteering([...activeTools, ...deferred]);
   const parts: string[] = [];
   if (steering) parts.push(steering);
   if (toolLines.length > 0) parts.push(toolLines.join("\n"));
+  if (deferredLines.length > 0) {
+    parts.push(`Available on demand (call \`tool_search\` to load):\n${deferredLines.join("\n")}`);
+  }
   return parts.length > 0 ? `## Tools\n\n${parts.join("\n\n")}` : null;
 }
 
@@ -345,13 +372,15 @@ export async function buildSubAgentSystemPrompt(
   opts: {
     cwd: string;
     toolNames?: readonly string[];
+    /** Tools available via `tool_search` but not carrying a schema this turn. */
+    deferredToolNames?: readonly string[];
     context?: "project" | "none";
     environment?: SystemPromptEnvironment;
   },
 ): Promise<string> {
   const sections: string[] = [agentBody.trim()];
 
-  const toolsSection = renderToolsSection(opts.toolNames);
+  const toolsSection = renderToolsSection(opts.toolNames, opts.deferredToolNames);
   if (toolsSection) sections.push(toolsSection);
 
   // A child may itself delegate (up to the nesting limit), so it needs the same
@@ -388,6 +417,9 @@ export async function buildSubAgentSystemPrompt(
  * @param environment — extra Environment-section facts (additional workspace
  *   roots, network allowlist). This sits in the cached prefix, so changing it
  *   costs exactly one cache-miss turn.
+ * @param deferredToolNames — tools the model can call only after `tool_search`
+ *   promotes them. Listed as one-line hints so the capability stays discoverable
+ *   while its parameter schema stays out of the request.
  */
 export async function buildSystemPrompt(
   cwd: string,
@@ -398,6 +430,7 @@ export async function buildSystemPrompt(
   activeLanguages?: Set<LanguageId>,
   provider?: Provider,
   environment?: SystemPromptEnvironment,
+  deferredToolNames?: readonly string[],
 ): Promise<string> {
   const sections: string[] = [
     renderIdentitySection(provider),
@@ -412,7 +445,7 @@ export async function buildSystemPrompt(
 
   sections.push(renderResearchSection(toolNames, provider), renderCodeQualitySection());
 
-  const toolsSection = renderToolsSection(toolNames);
+  const toolsSection = renderToolsSection(toolNames, deferredToolNames);
   if (toolsSection) sections.push(toolsSection);
 
   const delegationSection = renderDelegationSection(toolNames);

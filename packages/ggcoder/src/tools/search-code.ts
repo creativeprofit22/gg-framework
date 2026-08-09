@@ -5,7 +5,7 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { resolvePath, toPosixPath } from "./path-utils.js";
 import { truncateTail } from "./truncate.js";
 import { localOperations, type ToolOperations } from "./operations.js";
-import { chunkFile, bm25Rank, type Chunk } from "../core/code-retrieval.js";
+import { chunkFile, bm25Rank, CHUNKABLE_EXTENSIONS, type Chunk } from "../core/code-retrieval.js";
 
 const SearchCodeParams = z.object({
   query: z.string().describe("Natural-language description of the code you're looking for"),
@@ -19,8 +19,8 @@ const SearchCodeParams = z.object({
 });
 
 const DEFAULT_MAX_RESULTS = 8;
-/** TS/JS only — matches our AST chunking capability. Non-TS files are out of scope. */
-const SOURCE_GLOB = "**/*.{ts,tsx,js,jsx,mts,cts}";
+/** Every language with a symbol chunker; anything else has no symbols to rank. */
+const SOURCE_GLOB = `**/*.{${CHUNKABLE_EXTENSIONS.join(",")}}`;
 const MAX_CANDIDATE_FILES = 5000;
 
 export function createSearchCodeTool(
@@ -31,8 +31,9 @@ export function createSearchCodeTool(
     name: "code_search",
     description:
       "Find the most relevant functions/classes/types for a query. Returns whole ranked " +
-      "symbol chunks (not lines), AST-aware — far fewer tokens than reading whole files. " +
-      "TS/JS only; use grep for text/other languages.",
+      "symbol chunks (not lines) — far fewer tokens than reading whole files. Indexes " +
+      "TypeScript/JavaScript, Python, Go, Rust, Java and C#; use grep for other languages " +
+      "or exact strings.",
     parameters: SearchCodeParams,
     async execute({ query, path: searchPath, max_results }) {
       const dir = searchPath ? resolvePath(cwd, searchPath) : cwd;
@@ -55,7 +56,7 @@ export function createSearchCodeTool(
 
       const files = entries.filter((entry) => !ig.ignores(entry)).slice(0, MAX_CANDIDATE_FILES);
       if (files.length === 0) {
-        return "No TS/JS files to search. code_search indexes TypeScript/JavaScript only — use grep for other languages.";
+        return "No indexable source files here. code_search covers TypeScript/JavaScript, Python, Go, Rust, Java and C# — use grep for other languages.";
       }
 
       const chunks: Chunk[] = [];

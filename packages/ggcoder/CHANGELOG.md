@@ -1,5 +1,26 @@
 # @kenkaiiii/ggcoder
 
+## 5.39.1
+
+### Patch Changes
+
+- Fix the `code_nav` file outline: list symbols in document order instead of the language server's name-grouped order, and drop locals declared inside function bodies so real declarations are no longer buried or truncated away. `definition`, `references` and `hover` now also resolve from a symbol name alone, with no line number required.
+  - @kenkaiiii/gg-ai@5.39.1
+  - @kenkaiiii/gg-agent@5.39.1
+  - @kenkaiiii/gg-core@5.39.1
+
+## 5.39.0
+
+### Minor Changes
+
+- Add the `code_nav` language-server tool (definition, references, file outline, hover), tier rarely used built-in tool schemas behind `tool_search` to cut per-request tokens, widen `code_search` to Python, Go, Rust, Java and C#, and fix `grep` recall so dot-directories are searched and `.gitignore` is honoured.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.39.0
+- @kenkaiiii/gg-agent@5.39.0
+- @kenkaiiii/gg-core@5.39.0
+
 ## 5.38.0
 
 ### Minor Changes

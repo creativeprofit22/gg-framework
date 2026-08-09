@@ -73,8 +73,15 @@ const SettingsSchema = z.object({
    */
   sandboxMode: z.enum(["auto", "workspace", "off"]).default("off"),
   /** Defer MCP tool schemas out of the prompt until discovered via tool_search.
-   *  Cuts ~8k tokens/cache-miss turn with two MCP servers (bench/RESULTS.md). */
+   *  Cuts ~8k tokens/cache-miss turn with two MCP servers connected. */
   deferredMcpTools: z.boolean().default(true),
+  /** Defer rarely reached BUILT-IN tool schemas the same way, leaving a one-line
+   *  capability hint in the prompt that `tool_search` expands on demand. Trades
+   *  per-request tokens against how reliably the model still finds the tool. */
+  deferredBuiltinTools: z.boolean().default(true),
+  /** Use the `rg` binary for `grep` content search when it is on PATH, falling
+   *  back to the in-process scanner otherwise. */
+  grepUseRipgrep: z.boolean().default(true),
   /** Opt into the 2026-07-28 MCP protocol revision. When on, a connect probes
    *  with `server/discover` and falls back to the 2025 `initialize` handshake,
    *  so a legacy server still connects. Off by default: the probe costs a round
@@ -109,6 +116,8 @@ export const DEFAULT_SETTINGS: Settings = {
   networkAllow: [],
   sandboxMode: "off",
   deferredMcpTools: true,
+  deferredBuiltinTools: true,
+  grepUseRipgrep: true,
   mcpModernProtocol: false,
   sessionRetentionDays: 30,
   speedProfile: "optimized",

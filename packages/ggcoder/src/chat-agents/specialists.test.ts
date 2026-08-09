@@ -7,6 +7,7 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import { APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT } from "../app-sidecar-roadmap-draft-tool-host.js";
 import { createAppSidecarChatRoadmapSessionOptions } from "../app-sidecar-roadmap-session-options.js";
 import type { AgentSessionOptions } from "../core/agent-session.js";
+import { DEFERRED_TOOL_NAMES } from "../tools/tool-tiers.js";
 import { GENERAL_CHAT_SYSTEM_PROMPT } from "./general.js";
 import { CHAT_AGENT_LABELS, createChatAgent, parseChatAgentId, switchChatAgent } from "./index.js";
 import {
@@ -248,7 +249,10 @@ describe("specialist chat agents", () => {
         ]),
       );
       const expectedResearchTools = RESEARCH_CHAT_ALLOWED_TOOL_NAMES.filter(
-        (name) => brainstormTools.includes(name) || name.startsWith("roadmap_"),
+        (name) =>
+          brainstormTools.includes(name) ||
+          DEFERRED_TOOL_NAMES.includes(name) ||
+          name.startsWith("roadmap_"),
       ).sort();
       expect(staleFutureMutator).toBeDefined();
       for (const tool of staleRemovedTools.values()) expect(tool).toBeDefined();

@@ -620,8 +620,8 @@ export async function* agentLoop(
       const eventTypeCounts: Record<string, number> = {};
       let lastEventType = "";
       // Runaway tool-call detection — accumulated across all toolcall_delta
-      // events in this stream attempt. When tripped we abort the stream and
-      // bail out without retrying (the model has glitched, retries won't help).
+      // events in this stream attempt. When tripped we abort, retry within a
+      // fixed budget, then surface a model error if every attempt runs away.
       let toolcallDeltaChars = 0;
       let toolcallDeltaCount = 0;
       let runawayDetected: { kind: "chars" | "events"; chars: number; events: number } | null =
@@ -642,7 +642,7 @@ export async function* agentLoop(
       //  - Before first event: STREAM_FIRST_EVENT_TIMEOUT_MS (45s) -- Opus can
       //    take 30s+ to start on large contexts, that's not a stall.
       //  - After output event (text_delta, server_toolcall): STREAM_IDLE_TIMEOUT_MS
-      //    (10s) -- once output is streaming, 10s of silence is dead. Retry fast.
+      //    (90s) -- long tool-call streams can pause while the provider builds args.
       //  - After thinking events only: STREAM_THINKING_IDLE_TIMEOUT_MS (5min) --
       //    reasoning models (MiMo) can pause minutes between thinking and output.
       //
@@ -775,7 +775,7 @@ export async function* agentLoop(
             hasReceivedEvent = true;
             // Extend hard timeout now that output is actively streaming.
             // Long responses (plan mode, detailed code) can exceed 90s while
-            // events flow continuously — the idle timeout (10s) catches real stalls.
+            // events flow continuously — the idle timeout catches real stalls.
             if (hardTimer && hardTimeoutMs < STREAM_OUTPUT_HARD_TIMEOUT_MS) {
               clearTimeout(hardTimer);
               hardTimeoutMs = STREAM_OUTPUT_HARD_TIMEOUT_MS;
@@ -1106,8 +1106,8 @@ export async function* agentLoop(
           // Preserve partial output: everything streamed before the drop is
           // already paid for (output tokens) and already shown to the user.
           // Keep it as a completed assistant message + continuation instruction
-          // instead of replaying the whole turn from scratch (bench/RESULTS.md,
-          // bench C — replay re-bills 100% of pre-drop output). Skipped when a
+          // instead of replaying the whole turn from scratch (a replay re-bills
+          // 100% of the pre-drop output). Skipped when a
           // tool call was mid-stream: partial tool-call JSON is unusable, and
           // the model must re-issue the call intact on the replay.
           let preservedChars = 0;

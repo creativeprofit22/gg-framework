@@ -258,8 +258,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // Streaming deltas arrive faster than React can usefully render each one.
   // We buffer chunks in a ref and flush every 100ms — imperceptible for prose
   // but roughly halves streaming render CPU vs per-frame flushing, since the
-  // Markdown re-render dominates and CPU scales with flush count
-  // (bench/RESULTS.md, bench B). First token still paints immediately.
+  // Markdown re-render dominates and CPU scales with flush count.
+  // First token still paints immediately.
   const STREAM_FLUSH_MS = 100;
   const flushChunks = useCallback(() => {
     flushTimerRef.current = null;

@@ -15,6 +15,52 @@ export interface LspDiagnostic {
   code?: string | number;
 }
 
+/** Zero-based LSP text position. */
+export interface LspPosition {
+  line: number;
+  character: number;
+}
+
+export interface LspRange {
+  start: LspPosition;
+  end: LspPosition;
+}
+
+/** A resolved place in the workspace. */
+export interface LspLocation {
+  uri: string;
+  range: LspRange;
+}
+
+/** One symbol from `textDocument/documentSymbol`, flattened to a depth path. */
+export interface LspSymbolEntry {
+  name: string;
+  kind: number;
+  detail?: string;
+  range: LspRange;
+  /** Ancestor names, outermost first — `["ClassName"]` for a method. */
+  containers: string[];
+  /**
+   * SymbolKind of each ancestor, parallel to `containers`. Lets a caller tell a
+   * class member from a local variable buried in a function body — the two are
+   * indistinguishable by name alone, and only one belongs in a file outline.
+   * Empty when the server sent flat `SymbolInformation` (no hierarchy to read).
+   */
+  containerKinds: number[];
+}
+
+/**
+ * Every navigation request answers with one of these. `unsupported` and
+ * `timeout` are values rather than exceptions on purpose: a language server
+ * that cannot answer must produce a statement the model can act on, not an
+ * empty result that reads exactly like "this symbol has no references".
+ */
+export type LspRequestOutcome<T> =
+  | { status: "ok"; value: T }
+  | { status: "unsupported" }
+  | { status: "timeout" }
+  | { status: "failed"; message: string };
+
 interface PublishDiagnosticsParams {
   uri: string;
   diagnostics: LspDiagnostic[];
@@ -36,6 +82,8 @@ function progressTokenKey(token: string | number): string {
 
 const SERVER_CANCELLED = -32802;
 const METHOD_NOT_FOUND = -32601;
+/** Our own timeout code, raised by JsonRpcConnection when a request expires. */
+const REQUEST_TIMED_OUT = -32803;
 const PULL_POLL_INTERVAL_MS = 300;
 /** Bounded stderr retained per server for failure diagnostics. */
 const STDERR_TAIL_BYTES = 4000;
@@ -84,6 +132,86 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms).unref();
   });
+}
+
+/**
+ * Normalize the several shapes LSP allows for a location reply: a bare
+ * `Location`, an array of them, or `LocationLink[]` from a link-support server.
+ */
+function parseLocations(raw: unknown): LspLocation[] {
+  if (raw === null || raw === undefined) return [];
+  const items = Array.isArray(raw) ? raw : [raw];
+  const locations: LspLocation[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    // LocationLink prefers the selection range: it points at the name itself,
+    // not the whole declaration body.
+    const uri = (record.uri ?? record.targetUri) as string | undefined;
+    const range = (record.range ?? record.targetSelectionRange ?? record.targetRange) as
+      | LspRange
+      | undefined;
+    if (typeof uri === "string" && range) locations.push({ uri, range });
+  }
+  return locations;
+}
+
+/**
+ * Flatten either reply shape into one list. Hierarchical `DocumentSymbol`s
+ * nest children; legacy `SymbolInformation`s are flat and carry a `location`
+ * plus an optional `containerName`.
+ */
+function parseSymbols(raw: unknown): LspSymbolEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const entries: LspSymbolEntry[] = [];
+  const visit = (node: unknown, containers: string[], containerKinds: number[]): void => {
+    if (!node || typeof node !== "object") return;
+    const record = node as Record<string, unknown>;
+    const name = record.name;
+    if (typeof name !== "string") return;
+    const location = record.location as { range?: LspRange } | undefined;
+    const range = (record.selectionRange ?? record.range ?? location?.range) as
+      | LspRange
+      | undefined;
+    if (!range) return;
+    const containerName = record.containerName;
+    const kind = typeof record.kind === "number" ? record.kind : 0;
+    entries.push({
+      name,
+      kind,
+      detail: typeof record.detail === "string" ? record.detail : undefined,
+      range,
+      containers:
+        containers.length > 0
+          ? containers
+          : typeof containerName === "string" && containerName
+            ? [containerName]
+            : [],
+      containerKinds,
+    });
+    const children = record.children;
+    if (Array.isArray(children)) {
+      for (const child of children) visit(child, [...containers, name], [...containerKinds, kind]);
+    }
+  };
+  for (const node of raw) visit(node, [], []);
+  return entries;
+}
+
+/** Collapse `Hover.contents` (string | MarkedString | MarkupContent | array). */
+function parseHover(raw: unknown): string {
+  if (!raw || typeof raw !== "object") return "";
+  const contents = (raw as Record<string, unknown>).contents;
+  const render = (value: unknown): string => {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return value.map(render).filter(Boolean).join("\n");
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      if (typeof record.value === "string") return record.value;
+    }
+    return "";
+  };
+  return render(contents).trim();
 }
 
 /**
@@ -144,6 +272,8 @@ export class LspClient {
   private readonly published = new Map<string, LspDiagnostic[]>();
   private waiters: DiagnosticWaiter[] = [];
   private hasPullDiagnostics = false;
+  /** Server capabilities from `initialize`; undefined until the handshake lands. */
+  private serverCapabilities?: Record<string, unknown>;
   private readonly activeProgressTokens = new Set<string>();
   private sawProgress = false;
   private alive = true;
@@ -293,15 +423,116 @@ export class LspClient {
             synchronization: { didSave: true },
             publishDiagnostics: { relatedInformation: false },
             diagnostic: { dynamicRegistration: false, relatedDocumentSupport: false },
+            // Navigation. `linkSupport` accepts LocationLink replies (which
+            // carry a target selection range) and is normalized back to a plain
+            // Location on our side.
+            definition: { dynamicRegistration: false, linkSupport: true },
+            references: { dynamicRegistration: false },
+            documentSymbol: { dynamicRegistration: false, hierarchicalDocumentSymbolSupport: true },
+            hover: { dynamicRegistration: false, contentFormat: ["markdown", "plaintext"] },
           },
           workspace: { configuration: true, workspaceFolders: true },
           window: { workDoneProgress: true },
         },
       },
       timeoutMs,
-    )) as { capabilities?: { diagnosticProvider?: unknown } } | null;
+    )) as { capabilities?: Record<string, unknown> } | null;
     this.hasPullDiagnostics = Boolean(result?.capabilities?.diagnosticProvider);
+    this.serverCapabilities = result?.capabilities ?? {};
     this.conn.notify("initialized", {});
+  }
+
+  /**
+   * Does the server advertise a capability? Unknown (no initialize result yet)
+   * counts as advertised: some servers under-report and answer anyway, and a
+   * real refusal still surfaces as `unsupported` from the request itself.
+   */
+  private advertises(capability: string): boolean {
+    if (this.serverCapabilities === undefined) return true;
+    return (
+      this.serverCapabilities[capability] !== false &&
+      this.serverCapabilities[capability] !== undefined
+    );
+  }
+
+  /**
+   * One navigation request, with LSP's three legible failure modes separated:
+   * the server does not implement the method, it did not answer inside the
+   * budget, or it errored. Silence is never reported as an empty result.
+   */
+  private async navigate<T>(
+    method: string,
+    params: unknown,
+    timeoutMs: number,
+    capability: string,
+    parse: (raw: unknown) => T,
+  ): Promise<LspRequestOutcome<T>> {
+    if (!this.alive) return { status: "failed", message: "language server is not running" };
+    if (!this.advertises(capability)) return { status: "unsupported" };
+    try {
+      const raw = await this.conn.request(method, params, timeoutMs);
+      return { status: "ok", value: parse(raw) };
+    } catch (error) {
+      if (error instanceof JsonRpcRequestError) {
+        if (error.code === METHOD_NOT_FOUND) return { status: "unsupported" };
+        if (error.code === REQUEST_TIMED_OUT) return { status: "timeout" };
+        return { status: "failed", message: error.message };
+      }
+      return { status: "failed", message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Where a symbol at `position` is defined. */
+  definition(
+    uri: string,
+    position: LspPosition,
+    timeoutMs: number,
+  ): Promise<LspRequestOutcome<LspLocation[]>> {
+    return this.navigate(
+      "textDocument/definition",
+      { textDocument: { uri }, position },
+      timeoutMs,
+      "definitionProvider",
+      parseLocations,
+    );
+  }
+
+  /** Every reference to the symbol at `position`, declaration included. */
+  references(
+    uri: string,
+    position: LspPosition,
+    timeoutMs: number,
+    includeDeclaration = true,
+  ): Promise<LspRequestOutcome<LspLocation[]>> {
+    return this.navigate(
+      "textDocument/references",
+      { textDocument: { uri }, position, context: { includeDeclaration } },
+      timeoutMs,
+      "referencesProvider",
+      parseLocations,
+    );
+  }
+
+  /** Flattened symbol outline for a whole document. */
+  documentSymbols(uri: string, timeoutMs: number): Promise<LspRequestOutcome<LspSymbolEntry[]>> {
+    return this.navigate(
+      "textDocument/documentSymbol",
+      { textDocument: { uri } },
+      timeoutMs,
+      "documentSymbolProvider",
+      parseSymbols,
+    );
+  }
+
+  /** Type/signature summary at `position`, as plain text. */
+  hover(uri: string, position: LspPosition, timeoutMs: number): Promise<LspRequestOutcome<string>> {
+    return this.navigate(
+      "textDocument/hover",
+      { textDocument: { uri }, position },
+      timeoutMs,
+      "hoverProvider",
+      parseHover,
+    );
   }
 
   /**

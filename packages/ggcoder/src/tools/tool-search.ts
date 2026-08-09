@@ -32,14 +32,15 @@ export interface CachedToolResolution {
  */
 export function createToolSearchTool(
   catalog: DeferredToolCatalog,
-  onPromote: (tools: AgentTool[]) => void,
+  onPromote: (tools: AgentTool[]) => unknown | Promise<unknown>,
   resolveCached?: (toolName: string) => Promise<CachedToolResolution | undefined>,
   isVisible: (toolName: string) => boolean = () => true,
 ): AgentTool<typeof ToolSearchParams> {
   return {
     name: "tool_search",
     description:
-      "Search the extended tool catalog (MCP servers and integrations) by capability. " +
+      "Load a tool that is listed as available on demand. Searches the catalog of " +
+      "built-in capabilities and connected integrations (MCP servers) by capability. " +
       "Matching tools become available immediately — call them on your next step. " +
       "Use this when you need a capability not in your current toolset.",
     parameters: ToolSearchParams,
@@ -54,20 +55,22 @@ export function createToolSearchTool(
           ? "No tools matched and the catalog is empty — every catalog tool is already available."
           : `No tools matched "${query}". Still in the catalog: ${remaining.join(", ")}`;
       }
-      const promoted = catalog.promote(matches.map((t) => t.name));
-      onPromote(promoted);
-
+      const matchedNames = matches.map((tool) => tool.name);
       const unavailable = new Map<string, CachedToolResolution>();
       if (resolveCached) {
         const settled = await Promise.all(
-          promoted.map(async (tool) => [tool.name, await resolveCached(tool.name)] as const),
+          matchedNames.map(async (toolName) => [toolName, await resolveCached(toolName)] as const),
         );
         for (const [name, resolution] of settled) {
           if (resolution && !resolution.ok) unavailable.set(name, resolution);
         }
       }
 
-      const available = promoted.filter((tool) => !unavailable.has(tool.name));
+      // Keep unreachable cache entries in the catalog and out of the live
+      // registry. A later search can retry after the backing server recovers.
+      const promoted = catalog.promote(matchedNames.filter((name) => !unavailable.has(name)));
+      await onPromote(promoted);
+      const available = promoted;
       const failures = [...unavailable].map(
         ([name, resolution]) =>
           `- ${name}: MCP server "${resolution.serverName}" did not connect (${resolution.error ?? "unknown error"}).`,

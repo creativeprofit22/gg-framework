@@ -11,6 +11,7 @@ import { createBashTool } from "./bash.js";
 import { createFindTool } from "./find.js";
 import { createGrepTool } from "./grep.js";
 import { createSearchCodeTool } from "./search-code.js";
+import { createCodeNavTool } from "./code-nav.js";
 import { createLsTool } from "./ls.js";
 import { createSubAgentTool } from "./subagent.js";
 import { createSubAgentControlTools } from "./subagent-control.js";
@@ -109,6 +110,11 @@ export interface CreateToolsOptions {
   /** Lazily read the OS command-sandbox mode and allowed network domains. */
   getSandboxPolicy?: () => SandboxPolicy;
   /**
+   * Lazily read whether `grep` may use the external `rg` scanner when present
+   * (grepUseRipgrep). Defaults to enabled when omitted.
+   */
+  getUseExternalGrep?: () => boolean;
+  /**
    * Push queue for out-of-band notifications (child completions, background
    * process progress). When provided, producers enqueue here and the session
    * drains it into steering, so the agent learns about them without spending a
@@ -131,9 +137,9 @@ export interface CreateToolsResult {
    */
   rebuildReadTool: (model: string) => AgentTool;
   /**
-   * Language-server pool backing edit/write diagnostics. Present only when
-   * enabled and running against the local filesystem; callers wire
-   * `shutdownAll()` into their exit/cleanup paths alongside processManager.
+   * Local language-server pool backing navigation and, when enabled, edit/write
+   * diagnostics. Present only for local filesystem operations; callers wire
+   * `shutdownAll()` into cleanup alongside processManager.
    */
   lspManager?: LspManager;
   subAgentManager?: SubAgentManager;
@@ -150,15 +156,14 @@ export async function createTools(
   });
   const planModeRef = opts?.planModeRef;
 
-  // LSP diagnostics only make sense against the local filesystem — remote
-  // operations (SSH/Docker) would point local language servers at paths that
-  // don't exist here. Lazy: no server spawns until the first matching edit.
-  const lspEnabled = (opts?.lspDiagnostics ?? true) && ops === localOperations;
-  const lspManager = lspEnabled ? new LspManager(cwd) : undefined;
-  const getDiagnostics = lspManager
-    ? (filePath: string, content: string): Promise<string> =>
-        lspManager.diagnosticsAfterWrite(filePath, content)
-    : undefined;
+  // Navigation and diagnostics require local paths. The diagnostics preference
+  // controls only edit/write annotations; code_nav keeps the lazy local manager.
+  const lspManager = ops === localOperations ? new LspManager(cwd) : undefined;
+  const getDiagnostics =
+    (opts?.lspDiagnostics ?? true) && lspManager
+      ? (filePath: string, content: string): Promise<string> =>
+          lspManager.diagnosticsAfterWrite(filePath, content)
+      : undefined;
 
   // Enable native video returns from the read tool for any video-capable model
   // (Kimi/Moonshot, Gemini, MiniMax), each with its own per-model byte cap that
@@ -197,8 +202,9 @@ export async function createTools(
       ops === localOperations ? opts?.getSandboxPolicy : undefined,
     ),
     createFindTool(cwd),
-    createGrepTool(cwd, ops),
+    createGrepTool(cwd, ops, { useExternalScanner: opts?.getUseExternalGrep }),
     createSearchCodeTool(cwd, ops),
+    createCodeNavTool(cwd, lspManager, ops),
     createLsTool(cwd, ops),
     createSourcePathTool(cwd),
     createWebFetchTool(opts?.getNetworkPolicy),
@@ -285,6 +291,7 @@ export { createBashTool } from "./bash.js";
 export { createFindTool } from "./find.js";
 export { createGrepTool } from "./grep.js";
 export { createSearchCodeTool } from "./search-code.js";
+export { createCodeNavTool } from "./code-nav.js";
 export { createLsTool } from "./ls.js";
 export { createWebFetchTool } from "./web-fetch.js";
 export { createWebSearchTool } from "./web-search.js";

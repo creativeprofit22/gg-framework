@@ -22,6 +22,13 @@ const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 const SAFE_LOCAL_BRANCH = "custom/local-customizations";
 const LEGACY_LOCAL_BRANCH = "custom/local-customizations-v2";
 const READ_ONLY_SAFETY_BRANCH = "custom/local-customizations-safety";
+const LOCAL_FORK_IDENTITY = Object.freeze({
+  productName: "GG Coder Local Fork",
+  identifier: "com.ggcoder.local-fork",
+  mainBinaryName: "gg-coder-local-fork",
+  executableName: "gg-coder-local-fork.exe",
+  installMode: "currentUser",
+});
 const ALLOWED_LOCAL_BRANCHES = new Set([SAFE_LOCAL_BRANCH, LEGACY_LOCAL_BRANCH]);
 const DEFAULT_REMOTE = "upstream";
 const DEFAULT_PUSH_REMOTE = "origin";
@@ -34,13 +41,13 @@ let recoveryPrinted = false;
 function usage() {
   return `Usage: node gg-app/scripts/update-with-local-fixes.mjs [options]
 
-Safely rebases ${SAFE_LOCAL_BRANCH}, restores dirty work, verifies the local fork,
-and builds a local-patched installer. It never pushes unless --push is explicit.
+Safely merges upstream into ${SAFE_LOCAL_BRANCH}, restores dirty work, verifies the Local Fork,
+and builds an isolated installer. It never pushes unless --push is explicit.
 
 Options:
   --remote <name>        Source remote (default: upstream, then origin)
   --branch <name>        Source branch (default: main)
-  --push                 Push the verified branch to origin with an exact lease
+  --push                 Push the verified branch normally (never force-push)
   --allow-other-branch   Allow a noncanonical local branch (never pushable)
   --no-install           Skip dependency refresh
   --no-build             Skip installer build (incompatible with --push)
@@ -238,6 +245,21 @@ function restoreDirtyFileBytes(files) {
   }
 }
 
+function changedDirtyFilePaths(files) {
+  const changed = [];
+  for (const [relativePath, contents] of files) {
+    const absolutePath = join(repoRoot, relativePath);
+    if (
+      !existsSync(absolutePath) ||
+      !statSync(absolutePath).isFile() ||
+      !readFileSync(absolutePath).equals(contents)
+    ) {
+      changed.push(relativePath);
+    }
+  }
+  return changed;
+}
+
 function cargoVersion(text) {
   return text.match(/^version = "(\d+\.\d+\.\d+)"/m)?.[1] ?? "";
 }
@@ -252,7 +274,8 @@ export function verifyLocalForkIdentity(root = repoRoot) {
   const index = read("gg-app/index.html");
   const vite = read("gg-app/vite.config.ts");
   const policy = read("gg-app/src/update-policy.ts");
-  const config = JSON.parse(read("gg-app/src-tauri/tauri.conf.json"));
+  const production = JSON.parse(read("gg-app/src-tauri/tauri.conf.json"));
+  const local = JSON.parse(read("gg-app/src-tauri/tauri.local.conf.json"));
   const pkg = JSON.parse(read("gg-app/package.json"));
   const cargo = cargoVersion(read("gg-app/src-tauri/Cargo.toml"));
   const lock = cargoLockAppVersion(read("gg-app/src-tauri/Cargo.lock"));
@@ -264,17 +287,32 @@ export function verifyLocalForkIdentity(root = repoRoot) {
   if (!policy.includes('return "local-patched"') || !policy.includes("startLocalPatchedUpdate")) {
     failures.push("source-update routing");
   }
-  if (config.productName !== "GG Coder") failures.push("Tauri productName");
-  if (config.identifier !== "com.ggcoder.app") failures.push("Tauri identifier");
-  if (config.bundle?.windows?.nsis?.installerHooks !== "windows/nsis-hooks.nsh") {
-    failures.push("NSIS installer hook");
+  if (production.productName !== "GG Coder") failures.push("production productName");
+  if (production.identifier !== "com.ggcoder.app") failures.push("production identifier");
+  if (production.bundle?.createUpdaterArtifacts !== true)
+    failures.push("production updater artifacts");
+  if (production.bundle?.windows?.nsis?.installerHooks !== "windows/nsis-hooks.nsh") {
+    failures.push("production installer hooks");
   }
-  if (config.bundle?.createUpdaterArtifacts !== true) failures.push("official updater artifacts");
-  if (!String(config.plugins?.updater?.pubkey ?? "").trim()) failures.push("updater public key");
-  if (!config.plugins?.updater?.endpoints?.includes(OFFICIAL_UPDATER_ENDPOINT)) {
-    failures.push("official updater endpoint");
+  if (!production.plugins?.updater?.pubkey?.trim()) failures.push("production updater public key");
+  if (!production.plugins?.updater?.endpoints?.includes(OFFICIAL_UPDATER_ENDPOINT)) {
+    failures.push("production updater endpoint");
   }
-  const versions = [pkg.version, config.version, cargo, lock];
+  for (const [key, expected] of Object.entries(LOCAL_FORK_IDENTITY)) {
+    if (key === "executableName" || key === "installMode") continue;
+    if (local[key] !== expected) failures.push(`local ${key}`);
+  }
+  if (local.bundle?.createUpdaterArtifacts !== false) failures.push("local updater artifacts");
+  if (local.bundle?.windows?.nsis?.installMode !== LOCAL_FORK_IDENTITY.installMode) {
+    failures.push("local install mode");
+  }
+  if (
+    !Array.isArray(local.plugins?.updater?.endpoints) ||
+    local.plugins.updater.endpoints.length !== 0
+  ) {
+    failures.push("local updater endpoint");
+  }
+  const versions = [pkg.version, production.version, cargo, lock];
   if (
     new Set(versions).size !== 1 ||
     versions.some((version) => !/^\d+\.\d+\.\d+$/.test(version))
@@ -284,7 +322,7 @@ export function verifyLocalForkIdentity(root = repoRoot) {
   if (failures.length > 0) {
     throw new Error(`Local fork identity verification failed: ${failures.join(", ")}.`);
   }
-  return { version: versions[0], productName: config.productName, identifier: config.identifier };
+  return { version: versions[0], ...LOCAL_FORK_IDENTITY };
 }
 
 function sha256(path) {
@@ -315,14 +353,8 @@ function commitList(range) {
     : [];
 }
 
-export function forceWithLeaseArgs(branch, expectedOid) {
-  const destination = `refs/heads/${branch}`;
-  return [
-    "push",
-    `--force-with-lease=${destination}:${expectedOid}`,
-    DEFAULT_PUSH_REMOTE,
-    `HEAD:${destination}`,
-  ];
+export function normalPushArgs(branch) {
+  return ["push", DEFAULT_PUSH_REMOTE, `HEAD:refs/heads/${branch}`];
 }
 
 export function targetedVitestArgs(packageName, paths) {
@@ -430,7 +462,7 @@ async function main() {
   console.log(`Local branch: ${localBranch}`);
   console.log(`Checks: ${options.check ? "required" : "skipped (no push allowed)"}`);
   console.log(`Build: ${options.build ? "enabled" : "skipped"}`);
-  console.log(`Push: ${options.push ? "explicit exact-lease push" : "disabled"}`);
+  console.log(`Push: ${options.push ? "explicit normal push" : "disabled"}`);
 
   const initialStatus = capture("git", [
     "status",
@@ -456,7 +488,7 @@ async function main() {
     originOid: null,
     mergeBase: null,
     localCommits: [],
-    rebasedHead: null,
+    mergedHead: null,
     installer: null,
     dirtyFilePaths: [...dirtyFileBytes.keys()],
     dirtyWorkApplied: false,
@@ -510,15 +542,6 @@ async function main() {
     manifest.originOid = originResult.status === 0 ? originResult.stdout.trim() : null;
     manifest.mergeBase = capture("git", ["merge-base", startingHead, target]).stdout.trim();
     manifest.localCommits = commitList(`${manifest.mergeBase}..${startingHead}`);
-    const merges = capture("git", [
-      "rev-list",
-      "--merges",
-      `${manifest.mergeBase}..${startingHead}`,
-    ]).stdout.trim();
-    if (merges)
-      throw new Error(
-        "Local commit range contains merge commits; manual rebase review is required.",
-      );
     requireSuccess(
       run("git", ["branch", backupBranch, startingHead]),
       `Failed to create ${backupBranch}.`,
@@ -534,7 +557,7 @@ async function main() {
         ["stash", "push", "--include-untracked", "-m", `gg local update ${timestamp}`],
         options,
       ),
-      "Failed to stash dirty work. No rebase was attempted.",
+      "Failed to stash dirty work. No merge was attempted.",
     );
     if (!options.dryRun) {
       manifest.stashOid = capture("git", ["rev-parse", "stash@{0}"]).stdout.trim();
@@ -550,12 +573,25 @@ async function main() {
   }
 
   try {
-    const rebase = run(
-      "git",
-      ["rebase", "--reapply-cherry-picks", "--empty=keep", target],
-      options,
-    );
-    if (rebase.status !== 0) throw new Error("Rebase stopped for manual conflict review.");
+    const merge = run("git", ["merge", "--no-ff", "--no-commit", target], options);
+    if (merge.status !== 0) throw new Error("Merge stopped for manual semantic conflict review.");
+    if (!options.dryRun) {
+      manifest.phase = "merged-uncommitted";
+      writeJson(manifestPath, manifest);
+      const mergeInProgress =
+        capture("git", ["rev-parse", "--verify", "MERGE_HEAD"], { allowFailure: true }).status ===
+        0;
+      if (mergeInProgress) {
+        requireSuccess(
+          run("git", ["commit", "-m", `Merge ${target} into ${localBranch}`]),
+          "Merged source could not be committed.",
+        );
+      }
+      manifest.mergedHead = capture("git", ["rev-parse", "HEAD"]).stdout.trim();
+      manifest.phase = "merged";
+      writeJson(manifestPath, manifest);
+    }
+
     if (hasDirtyWork) {
       const stashRef = options.dryRun ? "<saved-stash>" : manifest.stashOid;
       requireSuccess(
@@ -565,11 +601,63 @@ async function main() {
       if (!options.dryRun) {
         restoreDirtyFileBytes(dirtyFileBytes);
         manifest.dirtyWorkApplied = true;
+        const restoredStatus = capture("git", [
+          "status",
+          "--porcelain=v1",
+          "--untracked-files=all",
+        ]).stdout;
+        if (restoredStatus !== initialStatus) {
+          throw new Error("Restored dirty-work status does not match the pre-update status.");
+        }
+        const changedPaths = changedDirtyFilePaths(dirtyFileBytes);
+        if (changedPaths.length > 0) {
+          throw new Error(`Dirty work was not restored byte-for-byte: ${changedPaths.join(", ")}.`);
+        }
       }
     }
+
     if (!options.dryRun) {
-      manifest.phase = "rebased-and-restored";
+      verifyLocalForkIdentity();
+      manifest.phase = "source-verified";
       writeJson(manifestPath, manifest);
+    } else {
+      console.log("[dry-run] verify Local Fork isolation, updater policy, and version lockstep");
+    }
+
+    if (options.install) {
+      requireSuccess(
+        run(pnpm, ["install", "--frozen-lockfile", "--ignore-scripts"], {
+          ...options,
+          env: { CI: "true" },
+        }),
+        "Dependency refresh failed.",
+      );
+    }
+    if (options.check) {
+      runWorkspaceChecks(options);
+      if (!options.dryRun) {
+        manifest.phase = "checks-passed";
+        writeJson(manifestPath, manifest);
+      }
+    }
+
+    if (options.build) {
+      if (process.platform !== "win32" && !options.dryRun) {
+        throw new Error("This protected flow currently requires Windows for NSIS verification.");
+      }
+      const buildStartedAt = Date.now();
+      requireSuccess(
+        run(pnpm, ["--filter", "gg-app", "build:local-patched"], options),
+        "Local Fork installer build failed.",
+      );
+      if (!options.dryRun) {
+        const installer = newestFreshWindowsInstaller(buildStartedAt);
+        if (!installer) throw new Error("Build did not produce a fresh Local Fork NSIS installer.");
+        manifest.installer = installer;
+        verifyLocalForkIdentity();
+        manifest.phase = "installer-verified";
+        writeJson(manifestPath, manifest);
+      }
     }
   } catch (error) {
     if (!options.dryRun) printRecovery(manifest);
@@ -577,100 +665,32 @@ async function main() {
   }
 
   if (!options.dryRun) {
-    manifest.rebasedHead = capture("git", ["rev-parse", "HEAD"]).stdout.trim();
-    const rebased = commitList(`${target}..HEAD`);
-    const oldSubjects = manifest.localCommits.map(({ subject }) => subject);
-    const newSubjects = rebased.map(({ subject }) => subject);
-    const rangeDiff = capture(
-      "git",
-      ["range-diff", `${manifest.mergeBase}..${backupBranch}`, `${target}..HEAD`],
-      { allowFailure: true },
-    );
-    writeFileSync(join(backupDir, "range-diff.txt"), rangeDiff.stdout || rangeDiff.stderr);
-    manifest.phase = "rebase-reviewed";
-    writeJson(manifestPath, manifest);
-    if (JSON.stringify(oldSubjects) !== JSON.stringify(newSubjects)) {
-      printRecovery(manifest);
-      throw new Error("Rebased commit sequence changed; review range-diff.txt manually.");
-    }
-    const restoredStatus = capture("git", [
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=all",
-    ]).stdout;
-    if (restoredStatus !== initialStatus) {
-      printRecovery(manifest);
-      throw new Error("Dirty work was not restored byte-for-byte at the status level.");
-    }
-    verifyLocalForkIdentity();
-    manifest.phase = "source-verified";
-    writeJson(manifestPath, manifest);
-  } else {
-    console.log("[dry-run] verify commit sequence, dirty status, branding, updater, and versions");
-  }
-
-  if (options.install) {
-    requireSuccess(
-      run(pnpm, ["install", "--frozen-lockfile", "--ignore-scripts"], {
-        ...options,
-        env: { CI: "true" },
-      }),
-      "Dependency refresh failed.",
-    );
-  }
-  if (options.check) {
-    runWorkspaceChecks(options);
-    if (!options.dryRun) {
-      manifest.phase = "checks-passed";
-      writeJson(manifestPath, manifest);
-    }
-  }
-
-  if (options.build) {
-    if (process.platform !== "win32" && !options.dryRun) {
-      throw new Error(
-        "This protected flow currently requires a Windows host for NSIS verification.",
-      );
-    }
-    const buildStartedAt = Date.now();
-    requireSuccess(
-      run(pnpm, ["--filter", "gg-app", "build:local-patched"], options),
-      "Local-patched installer build failed.",
-    );
-    if (!options.dryRun) {
-      const installer = newestFreshWindowsInstaller(buildStartedAt);
-      if (!installer) throw new Error("Build did not produce a fresh Windows NSIS installer.");
-      manifest.installer = installer;
-      verifyLocalForkIdentity();
-      manifest.phase = "installer-verified";
-      writeJson(manifestPath, manifest);
-    }
-  }
-
-  if (!options.dryRun) {
-    if (capture("git", ["rev-parse", "HEAD"]).stdout.trim() !== manifest.rebasedHead) {
-      throw new Error("HEAD changed during verification/build; refusing to continue.");
+    if (capture("git", ["rev-parse", "HEAD"]).stdout.trim() !== manifest.mergedHead) {
+      throw new Error("HEAD changed after the verified merge; refusing to continue.");
     }
     const finalStatus = capture("git", [
       "status",
       "--porcelain=v1",
       "--untracked-files=all",
     ]).stdout;
-    if (finalStatus !== initialStatus)
-      throw new Error("Build/checks changed the worktree; refusing to push.");
+    if (finalStatus !== initialStatus) {
+      throw new Error("Dependency refresh, checks, or build changed the worktree status.");
+    }
+    const changedPaths = changedDirtyFilePaths(dirtyFileBytes);
+    if (changedPaths.length > 0) {
+      throw new Error(
+        `Dependency refresh, checks, or build changed preserved dirty files: ${changedPaths.join(", ")}.`,
+      );
+    }
     manifest.verified = true;
     manifest.phase = "verified";
     writeJson(manifestPath, manifest);
   }
 
   if (options.push) {
-    const expectedOriginOid = options.dryRun ? "<captured-origin-oid>" : manifest.originOid;
-    if (!expectedOriginOid) {
-      throw new Error("The fork branch did not exist before rebase; refusing forced creation.");
-    }
     requireSuccess(
-      run("git", forceWithLeaseArgs(SAFE_LOCAL_BRANCH, expectedOriginOid), options),
-      "Exact force-with-lease push rejected; origin moved or verification is stale.",
+      run("git", normalPushArgs(SAFE_LOCAL_BRANCH), options),
+      "Normal push rejected; origin moved or the update is not fast-forward.",
     );
     if (!options.dryRun) {
       const pushedRef = `refs/heads/${SAFE_LOCAL_BRANCH}`;
@@ -686,8 +706,9 @@ async function main() {
         "rev-parse",
         `refs/remotes/${DEFAULT_PUSH_REMOTE}/${SAFE_LOCAL_BRANCH}`,
       ]).stdout.trim();
-      if (remoteHead !== manifest.rebasedHead)
-        throw new Error("Remote branch does not match verified HEAD.");
+      if (remoteHead !== manifest.mergedHead) {
+        throw new Error("Remote branch does not match the verified merge.");
+      }
       manifest.phase = "pushed";
       writeJson(manifestPath, manifest);
     }
@@ -701,14 +722,11 @@ async function main() {
         "Verified update succeeded, but backup stash cleanup failed.",
       );
     } else {
-      console.log(
-        `Retained dirty-work stash ${manifest.stashOid}; the stash stack changed during update.`,
-      );
+      console.log(`Retained dirty-work stash ${manifest.stashOid}; the stash stack changed.`);
     }
   }
-  console.log(`Verified local update complete. Backup branch retained: ${backupBranch}`);
-  if (!options.push)
-    console.log("Push disabled. Review the manifest and range-diff before an explicit --push run.");
+  console.log(`Verified local merge complete. Safety branch retained: ${backupBranch}`);
+  if (!options.push) console.log("Push disabled. Review the manifest before any explicit push.");
 }
 
 const invokedDirectly =

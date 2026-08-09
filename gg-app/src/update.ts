@@ -45,8 +45,8 @@ function appendProgress(lines: string[], line: string): string[] {
 
 function describeLocalProgress(line: string): string | null {
   if (line.includes("git fetch")) return "Fetching upstream source…";
-  if (line.includes("git rebase")) return "Rebasing local customizations on upstream…";
-  if (line.includes("git stash pop")) return "Restoring your local work…";
+  if (line.includes("git merge")) return "Merging upstream into local customizations…";
+  if (line.includes("git stash apply")) return "Restoring your local work…";
   if (line.includes(" gg-app check") || line.includes("@kenkaiiii/ggcoder check")) {
     return "Checking the patched source…";
   }
@@ -67,6 +67,15 @@ export function useAppUpdate(): UpdateInfo {
   const [installerPath, setInstallerPath] = useState<string | null>(null);
 
   const runCheck = useCallback(async (): Promise<void> => {
+    // Local Fork builds use the reviewed source-merge flow and must never contact
+    // the production updater endpoint.
+    if (appBuildInfo.localPatched) {
+      setUpdate(null);
+      setPhase((current) =>
+        current === "installing" || current === "completed" ? current : "available",
+      );
+      return;
+    }
     if (devFakeEnabled) {
       setFakeVersion(FAKE_VERSION);
       setPhase((current) => (current === "installing" ? current : "available"));
@@ -105,7 +114,7 @@ export function useAppUpdate(): UpdateInfo {
         setPhase("installing");
         setInstallerPath(null);
         setProgressLines([]);
-        setStatusMessage(payload.message ?? "Starting the protected source update…");
+        setStatusMessage("Starting protected source merge…");
       } else if (payload.type === "line" && payload.line) {
         const prefix = payload.stream === "stderr" ? "! " : "";
         setProgressLines((lines) => appendProgress(lines, `${prefix}${payload.line}`));
@@ -147,7 +156,9 @@ export function useAppUpdate(): UpdateInfo {
       setPhase("installing");
       setProgressLines([]);
       setInstallerPath(null);
-      setStatusMessage("Starting local rebase — the official binary will not be installed.");
+      setStatusMessage(
+        "Starting protected local merge — the official binary will not be installed.",
+      );
       try {
         await installUpdateForBuild({
           localPatched: true,

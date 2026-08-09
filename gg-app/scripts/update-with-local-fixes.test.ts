@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  forceWithLeaseArgs,
+  normalPushArgs,
   targetedVitestArgs,
   verifyLocalForkIdentity,
 } from "./update-with-local-fixes.mjs";
@@ -84,6 +84,23 @@ function writeIdentityFixture(repo: string): void {
             ],
           },
         },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  write(
+    join(repo, "gg-app/src-tauri/tauri.local.conf.json"),
+    `${JSON.stringify(
+      {
+        productName: "GG Coder Local Fork",
+        identifier: "com.ggcoder.local-fork",
+        mainBinaryName: "gg-coder-local-fork",
+        bundle: {
+          createUpdaterArtifacts: false,
+          windows: { nsis: { installMode: "currentUser" } },
+        },
+        plugins: { updater: { endpoints: [] } },
       },
       null,
       2,
@@ -208,8 +225,8 @@ describe("local-fixes updater", () => {
     ]);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("Push: disabled");
-    expect(result.stdout).toContain("git rebase --reapply-cherry-picks --empty=keep upstream/main");
-    expect(result.stdout).not.toContain("git merge");
+    expect(result.stdout).toContain("git merge --no-ff --no-commit upstream/main");
+    expect(result.stdout).not.toContain("git rebase");
     expect({
       head: git(fixture.repo, "rev-parse", "HEAD"),
       refs: git(fixture.repo, "for-each-ref", "--format=%(refname) %(objectname)"),
@@ -229,7 +246,7 @@ describe("local-fixes updater", () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.stderr).toContain("continuing without push eligibility");
-    expect(result.stdout).not.toContain("git push");
+    expect(result.stdout).not.toMatch(/^> git push/m);
   }, 15_000);
 
   it("does not print nonexistent recovery artifacts when the source fetch fails", () => {
@@ -243,17 +260,44 @@ describe("local-fixes updater", () => {
     expect(result.stderr).not.toContain("Manifest:");
   }, 30_000);
 
-  it("rebases all local commits and restores tracked and untracked dirt", () => {
+  it("merges upstream without rewriting local commits and restores tracked and untracked dirt", () => {
     const fixture = createUpdateFixture();
+    const localHead = git(fixture.repo, "rev-parse", "HEAD");
+    const sourceHead = git(fixture.repo, "rev-parse", "upstream/main");
+    const localCommits = git(
+      fixture.repo,
+      "log",
+      "--reverse",
+      "--no-merges",
+      "--format=%H%x09%s",
+      "upstream/main..HEAD",
+    ).split(/\r?\n/);
     const result = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
 
     expect(result.status, result.stderr).toBe(0);
+    const integratedLocalCommits = git(
+      fixture.repo,
+      "log",
+      "--reverse",
+      "--no-merges",
+      "--format=%H%x09%s",
+      "upstream/main..HEAD",
+    ).split(/\r?\n/);
+    expect(integratedLocalCommits).toEqual(localCommits);
+    expect(integratedLocalCommits.map((line) => line.split("\t").slice(1).join("\t"))).toEqual([
+      "local one",
+      "local two unpushed",
+    ]);
     expect(
-      git(fixture.repo, "log", "--reverse", "--format=%s", "upstream/main..HEAD").split(/\r?\n/),
-    ).toEqual(["local one", "local two unpushed"]);
+      git(fixture.repo, "rev-list", "--parents", "-n", "1", "HEAD").split(" ").slice(1),
+    ).toEqual([localHead, sourceHead]);
+    expect(git(fixture.repo, "show", "-s", "--format=%s", "HEAD")).toBe(
+      "Merge upstream/main into custom/local-customizations",
+    );
     expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(
       fixture.initialDirtyStatus,
     );
+    expect(readFileSync(join(fixture.repo, "local-two.txt"), "utf8")).toBe("two\ndirty tracked\n");
     expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe(
       "dirty untracked\n",
     );
@@ -280,7 +324,7 @@ describe("local-fixes updater", () => {
     const result = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("Rebase stopped for manual conflict review");
+    expect(result.stderr).toContain("Merge stopped for manual semantic conflict review");
     expect(result.stderr).toContain("Backup branch:");
     expect(git(fixture.repo, "status", "--porcelain=v1")).toContain("UU shared.txt");
     expect(git(fixture.repo, "stash", "list")).toContain("gg local update");
@@ -310,7 +354,7 @@ describe("local-fixes updater", () => {
     expect(result.stderr).toContain("build failed");
     expect(result.stderr).toContain("Backup branch:");
     expect(result.stdout).not.toContain("build:local-patched");
-    expect(result.stdout).not.toContain("git push");
+    expect(result.stdout).not.toMatch(/^> git push/m);
     expect(git(fixture.repo, "stash", "list")).toContain("gg local update");
     const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
     const manifest = JSON.parse(
@@ -326,8 +370,8 @@ describe("local-fixes updater", () => {
     expect(result.stderr).toContain("--push requires checks and installer build");
   });
 
-  it("uses an exact expected-OID lease that rejects a concurrent remote update", () => {
-    const root = tempDir("gg-local-lease-");
+  it("uses a normal push that rejects a concurrent remote update", () => {
+    const root = tempDir("gg-local-push-");
     const origin = join(root, "origin.git");
     const local = join(root, "local");
     const other = join(root, "other");
@@ -340,7 +384,6 @@ describe("local-fixes updater", () => {
     git(local, "commit", "-m", "base");
     git(local, "remote", "add", "origin", origin);
     git(local, "push", "-u", "origin", "custom/local-customizations");
-    const capturedOid = git(local, "rev-parse", "HEAD");
 
     git(root, "clone", "--branch", "custom/local-customizations", origin, other);
     configureRepository(other);
@@ -352,11 +395,10 @@ describe("local-fixes updater", () => {
     write(join(local, "local.txt"), "verified local\n");
     git(local, "add", ".");
     git(local, "commit", "-m", "verified local update");
-    const rejected = spawnSync(
-      "git",
-      forceWithLeaseArgs("custom/local-customizations", capturedOid),
-      { cwd: local, encoding: "utf8" },
-    );
+    const rejected = spawnSync("git", normalPushArgs("custom/local-customizations"), {
+      cwd: local,
+      encoding: "utf8",
+    });
     expect(rejected.status).not.toBe(0);
     expect(git(other, "rev-parse", "HEAD")).toBe(
       git(root, `--git-dir=${origin}`, "rev-parse", "refs/heads/custom/local-customizations"),
@@ -371,8 +413,30 @@ describe("local fork identity", () => {
     };
     expect(verifyLocalForkIdentity(repoRoot)).toEqual({
       version,
-      productName: "GG Coder",
-      identifier: "com.ggcoder.app",
+      productName: "GG Coder Local Fork",
+      identifier: "com.ggcoder.local-fork",
+      mainBinaryName: "gg-coder-local-fork",
+      executableName: "gg-coder-local-fork.exe",
+      installMode: "currentUser",
     });
+  });
+
+  it("requires the local config to explicitly disable updater feeds and use current-user install", () => {
+    const root = tempDir("gg-local-identity-");
+    writeIdentityFixture(root);
+    const configPath = join(root, "gg-app/src-tauri/tauri.local.conf.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as {
+      bundle: { windows: { nsis: { installMode?: string } } };
+      plugins: { updater: { endpoints?: string[] } };
+    };
+
+    delete config.plugins.updater.endpoints;
+    write(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    expect(() => verifyLocalForkIdentity(root)).toThrow("local updater endpoint");
+
+    config.plugins.updater.endpoints = [];
+    delete config.bundle.windows.nsis.installMode;
+    write(configPath, `${JSON.stringify(config, null, 2)}\n`);
+    expect(() => verifyLocalForkIdentity(root)).toThrow("local install mode");
   });
 });

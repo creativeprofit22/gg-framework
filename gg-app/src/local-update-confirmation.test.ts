@@ -12,12 +12,15 @@ describe("local update confirmation", () => {
     expect(shouldConfirmLocalUpdate(false, "available")).toBe(false);
   });
 
-  it("names the canonical protected rebase and safety behavior", () => {
-    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("rebase");
-    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("custom/local-customizations");
+  it("names the canonical merge-preserving flow and safety behavior", () => {
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain(
+      "merge upstream/main into custom/local-customizations",
+    );
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("without rewriting existing local commits");
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).not.toContain("rebase");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).not.toContain("custom/local-customizations-v2");
-    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("upstream/main");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("backup");
+    expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("restore dirty work");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("verify the local fork");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("run checks");
     expect(LOCAL_UPDATE_CONFIRMATION_MESSAGE).toContain("build a patched installer");

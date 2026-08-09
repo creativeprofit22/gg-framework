@@ -36,6 +36,32 @@ interface Harness {
 
 const harnesses: Harness[] = [];
 
+function isFetchForbiddenPortError(error: unknown): boolean {
+  return (
+    error instanceof TypeError && error.cause instanceof Error && error.cause.message === "bad port"
+  );
+}
+
+async function closeTestServer(serverToClose: http.Server): Promise<void> {
+  await new Promise<void>((resolve) => serverToClose.close(() => resolve()));
+}
+
+async function listenOnFetchCompatiblePort(serverToListen: http.Server): Promise<string> {
+  while (true) {
+    await new Promise<void>((resolve) => serverToListen.listen(0, "127.0.0.1", resolve));
+    const candidateBaseUrl = `http://127.0.0.1:${(serverToListen.address() as AddressInfo).port}`;
+
+    try {
+      const probe = await fetch(`${candidateBaseUrl}/__fixture-port-check`);
+      await probe.body?.cancel();
+      return candidateBaseUrl;
+    } catch (error) {
+      await closeTestServer(serverToListen);
+      if (!isFetchForbiddenPortError(error)) throw error;
+    }
+  }
+}
+
 afterEach(async () => {
   await Promise.all(harnesses.splice(0).map((harness) => harness.close()));
 });
@@ -107,11 +133,10 @@ async function startHarness(): Promise<Harness> {
       }
     })();
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const port = (server.address() as AddressInfo).port;
+  const baseUrl = await listenOnFetchCompatiblePort(server);
 
   const harness: Harness = {
-    baseUrl: `http://127.0.0.1:${port}`,
+    baseUrl,
     started,
     continueReset,
     sessionDir,
@@ -126,7 +151,7 @@ async function startHarness(): Promise<Harness> {
     async close() {
       continueReset.resolve();
       server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await closeTestServer(server);
       await fs.rm(sessionDir, { recursive: true, force: true });
     },
   };

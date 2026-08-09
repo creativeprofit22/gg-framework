@@ -2,58 +2,57 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  assertProductionIdentity,
+  assertIsolatedIdentities,
+  LOCAL_FORK_IDENTITY,
   LOCAL_TAURI_CONFIG,
-  PRODUCTION_IDENTITY,
 } from "./build-local-hotfix.mjs";
 
 const srcTauri = join(import.meta.dirname, "..", "src-tauri");
 const baseConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.conf.json"), "utf8"));
+const localConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.local.conf.json"), "utf8"));
 const cargoToml = readFileSync(join(srcTauri, "Cargo.toml"), "utf8");
 
-describe("local-patched native identity", () => {
-  it("preserves the production package identity and changes only updater artifact creation", () => {
-    expect(LOCAL_TAURI_CONFIG).toEqual({ bundle: { createUpdaterArtifacts: false } });
-    expect(assertProductionIdentity(baseConfig, cargoToml)).toEqual(PRODUCTION_IDENTITY);
-    expect({
-      ...baseConfig,
-      ...LOCAL_TAURI_CONFIG,
-      bundle: { ...baseConfig.bundle, ...LOCAL_TAURI_CONFIG.bundle },
-    }).toMatchObject({
-      productName: "GG Coder",
-      identifier: "com.ggcoder.app",
-      bundle: {
-        createUpdaterArtifacts: false,
-        windows: { nsis: { installMode: "currentUser" } },
-      },
-    });
-    expect(PRODUCTION_IDENTITY).toEqual({
-      productName: "GG Coder",
-      identifier: "com.ggcoder.app",
-      mainBinaryName: "gg-app",
-      executableName: "gg-app.exe",
+describe("Local Fork native identity", () => {
+  it("preserves production config and supplies a fully isolated local overlay", () => {
+    expect(localConfig).toMatchObject(LOCAL_TAURI_CONFIG);
+    expect(assertIsolatedIdentities(baseConfig, cargoToml, localConfig)).toEqual(
+      LOCAL_FORK_IDENTITY,
+    );
+    expect(LOCAL_FORK_IDENTITY).toEqual({
+      productName: "GG Coder Local Fork",
+      identifier: "com.ggcoder.local-fork",
+      mainBinaryName: "gg-coder-local-fork",
+      executableName:
+        process.platform === "win32" ? "gg-coder-local-fork.exe" : "gg-coder-local-fork",
       installMode: "currentUser",
+    });
+    expect(localConfig.bundle.createUpdaterArtifacts).toBe(false);
+    expect(localConfig.plugins.updater.endpoints).toEqual([]);
+    expect(baseConfig).toMatchObject({
+      productName: "GG Coder",
+      identifier: "com.ggcoder.app",
+      bundle: { createUpdaterArtifacts: true },
     });
   });
 
   it.each(["productName", "identifier", "mainBinaryName"])(
-    "rejects a local %s identity override",
+    "rejects a missing or incorrect local %s override",
     (key) => {
       expect(() =>
-        assertProductionIdentity(baseConfig, cargoToml, {
-          ...LOCAL_TAURI_CONFIG,
-          [key]: "local-fork",
+        assertIsolatedIdentities(baseConfig, cargoToml, {
+          ...localConfig,
+          [key]: "production-collision",
         }),
-      ).toThrow("Local Tauri config overrides production identity");
+      ).toThrow("Local Fork identity must be fully isolated");
     },
   );
 
-  it("fails closed when a production identity source drifts", () => {
+  it("fails closed when production identity drifts", () => {
     expect(() =>
-      assertProductionIdentity({ ...baseConfig, productName: "GG Coder Fork" }, cargoToml),
-    ).toThrow("Expected production productName GG Coder");
+      assertIsolatedIdentities({ ...baseConfig, productName: "GG Coder Fork" }, cargoToml),
+    ).toThrow("Canonical production Tauri identity drifted");
     expect(() =>
-      assertProductionIdentity(baseConfig, cargoToml.replace('name = "gg-app"', 'name = "fork"')),
-    ).toThrow("Expected production main binary gg-app");
+      assertIsolatedIdentities(baseConfig, cargoToml.replace('name = "gg-app"', 'name = "fork"')),
+    ).toThrow("Canonical production binary drifted");
   });
 });

@@ -11,16 +11,19 @@ const repoRoot = join(appDir, "..");
 const srcTauri = join(appDir, "src-tauri");
 const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 const env = { ...process.env, VITE_GG_LOCAL_PATCHED: "1", VITE_GG_SOURCE_ROOT: repoRoot };
-export const LOCAL_TAURI_CONFIG = {
-  bundle: { createUpdaterArtifacts: false },
-};
-
-export const PRODUCTION_IDENTITY = Object.freeze({
-  productName: "GG Coder",
-  identifier: "com.ggcoder.app",
-  mainBinaryName: "gg-app",
-  executableName: "gg-app.exe",
+export const LOCAL_FORK_IDENTITY = Object.freeze({
+  productName: "GG Coder Local Fork",
+  identifier: "com.ggcoder.local-fork",
+  mainBinaryName: "gg-coder-local-fork",
+  executableName: process.platform === "win32" ? "gg-coder-local-fork.exe" : "gg-coder-local-fork",
   installMode: "currentUser",
+});
+export const LOCAL_TAURI_CONFIG = Object.freeze({
+  productName: LOCAL_FORK_IDENTITY.productName,
+  identifier: LOCAL_FORK_IDENTITY.identifier,
+  mainBinaryName: LOCAL_FORK_IDENTITY.mainBinaryName,
+  bundle: { createUpdaterArtifacts: false },
+  plugins: { updater: { endpoints: [] } },
 });
 export const LOCAL_INSTALLER_MANIFEST_SCHEMA_VERSION = 1;
 
@@ -50,15 +53,15 @@ function newestFreshFile(dir, extension, startedAt) {
   return candidates[0] ?? null;
 }
 
-function freshProductionWindowsInstaller(dir, startedAt) {
+function freshLocalForkWindowsInstaller(dir, startedAt) {
   if (!existsSync(dir)) return null;
   const candidates = readdirSync(dir)
-    .filter((name) => /^GG Coder_[^_]+_[^_]+-setup\.exe$/.test(name))
+    .filter((name) => /^GG Coder Local Fork_[^_]+_[^_]+-setup\.exe$/.test(name))
     .map((name) => join(dir, name))
     .filter((path) => statSync(path).mtimeMs >= startedAt);
   if (candidates.length > 1) {
     throw new Error(
-      `Tauri produced multiple fresh production NSIS installers: ${candidates.join(", ")}`,
+      `Tauri produced multiple fresh Local Fork NSIS installers: ${candidates.join(", ")}`,
     );
   }
   return candidates[0] ?? null;
@@ -67,7 +70,7 @@ function freshProductionWindowsInstaller(dir, startedAt) {
 export function freshInstallerForPlatform(srcTauriRoot, platform, startedAt) {
   const bundleDir = join(srcTauriRoot, "target", "release", "bundle");
   if (platform === "win32") {
-    return freshProductionWindowsInstaller(join(bundleDir, "nsis"), startedAt);
+    return freshLocalForkWindowsInstaller(join(bundleDir, "nsis"), startedAt);
   }
   if (platform === "darwin") return newestFreshFile(join(bundleDir, "dmg"), ".dmg", startedAt);
   return newestFreshFile(join(bundleDir, "appimage"), ".AppImage", startedAt);
@@ -83,29 +86,32 @@ function cargoPackageName(cargoToml) {
   return packageSection.match(/^name\s*=\s*"([^"]+)"\s*$/m)?.[1] ?? null;
 }
 
-export function assertProductionIdentity(baseConfig, cargoToml, localConfig = LOCAL_TAURI_CONFIG) {
-  const forbiddenOverrides = ["productName", "identifier", "mainBinaryName"].filter((key) =>
-    Object.prototype.hasOwnProperty.call(localConfig, key),
-  );
-  if (forbiddenOverrides.length > 0) {
-    throw new Error(
-      `Local Tauri config overrides production identity: ${forbiddenOverrides.join(", ")}`,
-    );
+export function assertIsolatedIdentities(baseConfig, cargoToml, localConfig = LOCAL_TAURI_CONFIG) {
+  if (baseConfig.productName !== "GG Coder" || baseConfig.identifier !== "com.ggcoder.app") {
+    throw new Error("Canonical production Tauri identity drifted.");
   }
-  if (baseConfig.productName !== PRODUCTION_IDENTITY.productName) {
-    throw new Error(`Expected production productName ${PRODUCTION_IDENTITY.productName}.`);
+  const productionBinary = baseConfig.mainBinaryName ?? cargoPackageName(cargoToml);
+  if (productionBinary !== "gg-app") throw new Error("Canonical production binary drifted.");
+  if (baseConfig.bundle?.createUpdaterArtifacts !== true) {
+    throw new Error("Canonical production updater artifacts must remain enabled.");
   }
-  if (baseConfig.identifier !== PRODUCTION_IDENTITY.identifier) {
-    throw new Error(`Expected production identifier ${PRODUCTION_IDENTITY.identifier}.`);
+  if (
+    localConfig.productName !== LOCAL_FORK_IDENTITY.productName ||
+    localConfig.identifier !== LOCAL_FORK_IDENTITY.identifier ||
+    localConfig.mainBinaryName !== LOCAL_FORK_IDENTITY.mainBinaryName
+  ) {
+    throw new Error("Local Fork identity must be fully isolated from production.");
   }
-  const mainBinaryName = baseConfig.mainBinaryName ?? cargoPackageName(cargoToml);
-  if (mainBinaryName !== PRODUCTION_IDENTITY.mainBinaryName) {
-    throw new Error(`Expected production main binary ${PRODUCTION_IDENTITY.mainBinaryName}.`);
+  if (localConfig.bundle?.createUpdaterArtifacts !== false) {
+    throw new Error("Local Fork updater artifacts must be disabled.");
   }
-  if (baseConfig.bundle?.windows?.nsis?.installMode !== PRODUCTION_IDENTITY.installMode) {
-    throw new Error(`Expected Windows NSIS install mode ${PRODUCTION_IDENTITY.installMode}.`);
+  if ((localConfig.plugins?.updater?.endpoints ?? []).length !== 0) {
+    throw new Error("Local Fork must not use an updater endpoint.");
   }
-  return PRODUCTION_IDENTITY;
+  if (localConfig.bundle?.windows?.nsis?.installMode === "perMachine") {
+    throw new Error("Local Fork must not install per-machine.");
+  }
+  return LOCAL_FORK_IDENTITY;
 }
 
 function hostTriple() {
@@ -144,11 +150,7 @@ function stagedNodePath() {
 }
 
 function localTauriConfigPath() {
-  const configDir = join(repoRoot, ".gg", "local-fixes");
-  const configPath = join(configDir, "tauri-local-patched.conf.json");
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(configPath, `${JSON.stringify(LOCAL_TAURI_CONFIG, null, 2)}\n`);
-  return configPath;
+  return join(srcTauri, "tauri.local.conf.json");
 }
 
 function fileMetadata(path) {
@@ -187,7 +189,7 @@ export function installerManifest(
     mtimeMs: installerStats.mtimeMs,
     sha256: createHash("sha256").update(readFileSync(installerPath)).digest("hex"),
     schemaVersion: LOCAL_INSTALLER_MANIFEST_SCHEMA_VERSION,
-    identity: PRODUCTION_IDENTITY,
+    identity: LOCAL_FORK_IDENTITY,
     payload: {
       name: basename(payloadPath),
       ...payloadMetadata,
@@ -200,7 +202,7 @@ function writeInstallerManifest(metadata) {
   mkdirSync(outputDir, { recursive: true });
   const path = join(outputDir, "latest-installer.json");
   writeFileSync(path, `${JSON.stringify(metadata, null, 2)}\n`);
-  console.log(`Verified fresh production installer: ${metadata.path}`);
+  console.log(`Verified fresh Local Fork installer: ${metadata.path}`);
   console.log(`Installer SHA-256: ${metadata.sha256}`);
   console.log(`Payload SHA-256: ${metadata.payload.sha256}`);
 }
@@ -208,7 +210,8 @@ function writeInstallerManifest(metadata) {
 async function main() {
   const baseConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.conf.json"), "utf8"));
   const cargoTomlPath = join(srcTauri, "Cargo.toml");
-  assertProductionIdentity(baseConfig, readFileSync(cargoTomlPath, "utf8"));
+  const localConfig = JSON.parse(readFileSync(localTauriConfigPath(), "utf8"));
+  assertIsolatedIdentities(baseConfig, readFileSync(cargoTomlPath, "utf8"), localConfig);
 
   if (!env.GG_NODE_SOURCE) {
     const stagedNode = stagedNodePath();
@@ -231,10 +234,10 @@ async function main() {
   if (buildStatus !== 0) process.exit(buildStatus);
   const installer = freshInstallerForPlatform(srcTauri, process.platform, bundleBuildStartedAt);
   if (!installer) {
-    console.error("Tauri did not produce exactly one fresh production installer for this build.");
+    console.error("Tauri did not produce exactly one fresh Local Fork installer for this build.");
     process.exit(1);
   }
-  const payloadName = process.platform === "win32" ? "gg-app.exe" : "gg-app";
+  const payloadName = LOCAL_FORK_IDENTITY.executableName;
   const payload = join(srcTauri, "target", "release", payloadName);
   if (!existsSync(payload)) {
     console.error(`Tauri did not produce the expected payload: ${payload}`);

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   freshInstallerForPlatform,
   installerManifest,
-  PRODUCTION_IDENTITY,
+  LOCAL_FORK_IDENTITY,
   runWithCargoTomlRestored,
   tauriBuildArgs,
   windowsNsisPayloadMetadata,
@@ -29,10 +29,10 @@ function fixture(): { root: string; nsis: string } {
 }
 
 describe("local installer freshness", () => {
-  it("selects the exact production Windows NSIS installer after build start", () => {
+  it("selects the exact Local Fork Windows NSIS installer after build start", () => {
     const { root, nsis } = fixture();
     const startedAt = Date.now();
-    const installer = join(nsis, "GG Coder_1.2.3_x64-setup.exe");
+    const installer = join(nsis, "GG Coder Local Fork_1.2.3_x64-setup.exe");
     writeFileSync(installer, "installer");
     const completedAt = new Date(startedAt + 1_000);
     utimesSync(installer, completedAt, completedAt);
@@ -40,10 +40,10 @@ describe("local installer freshness", () => {
     expect(freshInstallerForPlatform(root, "win32", startedAt)).toBe(installer);
   });
 
-  it("rejects stale and non-production Windows installers", () => {
+  it("rejects stale and non-Local Fork Windows installers", () => {
     const { root, nsis } = fixture();
-    const staleInstaller = join(nsis, "GG Coder_1.2.3_x64-setup.exe");
-    const localForkInstaller = join(nsis, "GG Coder Local Fork_1.2.3_x64-setup.exe");
+    const staleInstaller = join(nsis, "GG Coder Local Fork_1.2.3_x64-setup.exe");
+    const localForkInstaller = join(nsis, "GG Coder_1.2.3_x64-setup.exe");
     writeFileSync(staleInstaller, "stale installer");
     writeFileSync(localForkInstaller, "wrong identity");
     const old = new Date(Date.now() - 60_000);
@@ -52,10 +52,13 @@ describe("local installer freshness", () => {
     expect(freshInstallerForPlatform(root, "win32", Date.now())).toBeNull();
   });
 
-  it("rejects ambiguous fresh production installers", () => {
+  it("rejects ambiguous fresh Local Fork installers", () => {
     const { root, nsis } = fixture();
     const startedAt = Date.now();
-    for (const name of ["GG Coder_1.2.3_x64-setup.exe", "GG Coder_1.2.4_x64-setup.exe"]) {
+    for (const name of [
+      "GG Coder Local Fork_1.2.3_x64-setup.exe",
+      "GG Coder Local Fork_1.2.4_x64-setup.exe",
+    ]) {
       const installer = join(nsis, name);
       writeFileSync(installer, name);
       const completedAt = new Date(startedAt + 1_000);
@@ -63,7 +66,7 @@ describe("local installer freshness", () => {
     }
 
     expect(() => freshInstallerForPlatform(root, "win32", startedAt)).toThrow(
-      "multiple fresh production NSIS installers",
+      "multiple fresh Local Fork NSIS installers",
     );
   });
 });
@@ -71,7 +74,7 @@ describe("local installer freshness", () => {
 describe("local installer manifest", () => {
   it("hashes the NSIS-patched payload bytes that Tauri embeds", () => {
     const { root } = fixture();
-    const payload = join(root, "target", "release", "gg-app.exe");
+    const payload = join(root, "target", "release", "gg-coder-local-fork.exe");
     mkdirSync(join(root, "target", "release"), { recursive: true });
     const sourceBytes = Buffer.from("before__TAURI_BUNDLE_TYPE_VAR_UNKafter");
     const installerBytes = Buffer.from("before__TAURI_BUNDLE_TYPE_VAR_NSSafter");
@@ -85,7 +88,7 @@ describe("local installer manifest", () => {
 
   it("fails closed when the Tauri bundle marker is absent", () => {
     const { root } = fixture();
-    const payload = join(root, "target", "release", "gg-app.exe");
+    const payload = join(root, "target", "release", "gg-coder-local-fork.exe");
     mkdirSync(join(root, "target", "release"), { recursive: true });
     writeFileSync(payload, "payload without marker");
 
@@ -94,10 +97,10 @@ describe("local installer manifest", () => {
     );
   });
 
-  it("keeps installer compatibility fields and authenticates the production payload", () => {
+  it("keeps installer compatibility fields and authenticates the Local Fork payload", () => {
     const { root, nsis } = fixture();
-    const installer = join(nsis, "GG Coder_1.2.3_x64-setup.exe");
-    const payload = join(root, "target", "release", "gg-app.exe");
+    const installer = join(nsis, "GG Coder Local Fork_1.2.3_x64-setup.exe");
+    const payload = join(root, "target", "release", "gg-coder-local-fork.exe");
     mkdirSync(join(root, "target", "release"), { recursive: true });
     writeFileSync(installer, "installer bytes");
     writeFileSync(payload, "payload bytes");
@@ -108,9 +111,9 @@ describe("local installer manifest", () => {
       path: installer,
       size: Buffer.byteLength("installer bytes"),
       schemaVersion: 1,
-      identity: PRODUCTION_IDENTITY,
+      identity: LOCAL_FORK_IDENTITY,
       payload: {
-        name: "gg-app.exe",
+        name: "gg-coder-local-fork.exe",
         size: Buffer.byteLength("payload bytes"),
       },
     });

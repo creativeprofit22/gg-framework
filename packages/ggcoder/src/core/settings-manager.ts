@@ -53,6 +53,25 @@ const SettingsSchema = z.object({
   /** Hosts allowed when networkMode is "allowlist". A leading `*.` wildcard
    *  matches subdomains (`*.github.com`). */
   networkAllow: z.array(z.string()).default([]),
+  /**
+   * OS-enforced command isolation for bash (filesystem + network), via
+   * sandbox-runtime. `auto` isolates wherever the platform supports it and
+   * degrades with a warning where it does not; `workspace` additionally fails
+   * closed on hosts that cannot isolate.
+   *
+   * Opt-in, and deliberately so. Verified day-one breakage in the upstream
+   * sandbox that we cannot fix from here:
+   *   • Linux: pipes and redirections fail under seccomp — `echo hi | grep hi`
+   *     returns "Permission denied" on /proc/self/fd/3 (upstream #261).
+   *   • macOS: git over SSH fails the SOCKS handshake, because the ProxyCommand
+   *     uses `nc`, which cannot do SOCKS5 auth (upstream sandbox-utils.ts).
+   *   • `git config --global` is refused: ~/.gitconfig is a mandatory upstream
+   *     write protection with no opt-out.
+   *   • Corporate TLS interception and private registries need extra config.
+   * Enabling it by default would break `git push` and piped commands for a
+   * large share of users immediately after an update, with no obvious cause.
+   */
+  sandboxMode: z.enum(["auto", "workspace", "off"]).default("off"),
   /** Defer MCP tool schemas out of the prompt until discovered via tool_search.
    *  Cuts ~8k tokens/cache-miss turn with two MCP servers (bench/RESULTS.md). */
   deferredMcpTools: z.boolean().default(true),
@@ -88,6 +107,7 @@ export const DEFAULT_SETTINGS: Settings = {
   allowOutsideWorkspaceWrites: false,
   networkMode: "off",
   networkAllow: [],
+  sandboxMode: "off",
   deferredMcpTools: true,
   mcpModernProtocol: false,
   sessionRetentionDays: 30,

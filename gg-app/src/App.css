@@ -896,6 +896,58 @@ body {
 .login-status a {
   color: var(--primary);
 }
+/* Method comparison for providers offering OAuth *and* an API key: one card per
+   method so billing and prerequisites are readable before committing, plus its
+   own state badge and disconnect (both can be connected at once). */
+.login-method-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* Two explained methods can outgrow a short app window — scroll the list
+     rather than pushing Connect/Close off screen. */
+  max-height: min(46vh, 420px);
+  overflow-y: auto;
+}
+.login-method-card {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-card);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 12px 14px;
+}
+.login-method-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.login-method-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.login-method-card-line {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.login-method-card-note {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin-top: 4px;
+}
+.login-method-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+/* How the two methods interact once both are connected. */
+.login-method-note {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin-top: 12px;
+}
 
 /* ── Project picker (new-window / app-load project chooser) ── */
 .picker {
@@ -2307,6 +2359,46 @@ body {
   border-radius: var(--radius-button);
   font-size: 13px;
   line-height: 1.45;
+}
+/* Row + its hover-revealed hide affordance. The hide control can't nest inside
+   .picker-item (button-in-button is invalid), so it's an absolutely positioned
+   sibling. */
+.picker-item-wrap {
+  position: relative;
+  display: flex;
+}
+.picker-hide {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-button);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--t-fast),
+    color var(--t-fast),
+    background-color var(--t-fast);
+}
+.picker-item-wrap:hover .picker-hide,
+.picker-hide:focus-visible {
+  opacity: 1;
+}
+.picker-hide:hover {
+  background: var(--surface-2);
+  color: var(--text);
 }
 .picker-item {
   display: flex;
@@ -4842,6 +4934,35 @@ body {
   animation: reveal-up 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* ── "Show full output" control ──
+   Long fenced blocks and oversized rows fold to a preview so a single dump
+   cannot balloon the webview; this reveals the rest on demand. Sits under the
+   folded block, matching the code chrome around it. */
+.code-expand {
+  display: block;
+  width: 100%;
+  margin: 4px 0 0;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  color: var(--text-dim, #8b8b8b);
+  background: transparent;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.8;
+  transition: opacity 120ms ease;
+}
+.code-expand:hover {
+  opacity: 1;
+}
+/* Fade the last preview line so a fold reads as "there is more", not "the end". */
+.code-block.folded pre {
+  mask-image: linear-gradient(to bottom, #000 60%, rgba(0, 0, 0, 0.25) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 60%, rgba(0, 0, 0, 0.25) 100%);
+}
+
 /* ── Wake screen: Matrix-style empty state (the app addressing the user) ──
    Fills the transcript area: faint brand-tinted digital rain behind a single
    line of terminal text that types itself out and rests on the invitation. */
@@ -4972,7 +5093,8 @@ body {
 .picker-reveal {
   display: contents;
 }
-.picker-reveal > .picker-item {
+.picker-reveal > .picker-item,
+.picker-reveal > .picker-item-wrap {
   animation: reveal-up 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -4981,7 +5103,8 @@ body {
   .transcript-reveal,
   .skeleton-msg,
   .skeleton-item,
-  .picker-reveal > .picker-item {
+  .picker-reveal > .picker-item,
+  .picker-reveal > .picker-item-wrap {
     animation-name: none;
   }
   .skeleton {
@@ -5638,7 +5761,14 @@ body {
 }
 .rank-fx-gradient,
 .rank-fx-gradient-glow,
-.rank-fx-gold {
+.rank-fx-gold,
+.rank-fx-ember,
+.rank-fx-nebula,
+.rank-fx-rift,
+.rank-fx-prism,
+.rank-fx-eternal,
+.rank-fx-platinum,
+.rank-fx-omega {
   color: transparent;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -5666,6 +5796,44 @@ body {
   color: #a99cff;
   text-shadow: 0 0 12px rgba(125, 249, 255, 0.2);
 }
+/* Past the Singularity (levels 51+): one look per two tiers, ending on Origin. */
+.rank-fx-ember {
+  background-image: linear-gradient(90deg, #ff9d4d, #ffd48a, #ff7a3d);
+}
+.rank-fx-nebula {
+  background-image: linear-gradient(90deg, #c77dff, #7ad7ff, #ff8fd0);
+}
+.rank-fx-rift {
+  background-image: linear-gradient(90deg, #6ef2ff, #8f7bff);
+}
+.rank-fx-void {
+  color: #b39dff;
+  text-shadow: 0 0 14px rgba(122, 90, 255, 0.32);
+}
+.rank-fx-aether {
+  color: #b8fff0;
+  text-shadow: 0 0 12px rgba(125, 249, 255, 0.22);
+}
+.rank-fx-prism {
+  background-image: linear-gradient(90deg, #ff8bd2, #ffe38a, #7df9ff, #b88cff);
+}
+.rank-fx-eternal {
+  background-image: linear-gradient(90deg, #ffd77a, #fff8e6, #ffc861);
+}
+.rank-fx-platinum {
+  background-image: linear-gradient(90deg, #c9d6e6, #ffffff, #a9b8cc);
+}
+.rank-fx-radiant {
+  color: #eaf6ff;
+  text-shadow: 0 0 14px rgba(165, 243, 255, 0.34);
+}
+.rank-fx-omega {
+  background-image: linear-gradient(90deg, #ff6b6b, #ffd166, #ff8fab);
+}
+.rank-fx-origin {
+  color: #d7ccff;
+  text-shadow: 0 0 16px rgba(125, 249, 255, 0.3);
+}
 @media (prefers-reduced-motion: no-preference) {
   .rank-badge-celebrate::before {
     animation: rankBadgePulse 2.2s ease-out both;
@@ -5690,6 +5858,12 @@ body {
   }
   .rank-fx-iridescent {
     animation: rankIridescentShift 12s ease-in-out infinite;
+  }
+  .rank-fx-radiant {
+    animation: rankRadiantShift 9s ease-in-out infinite;
+  }
+  .rank-fx-origin {
+    animation: rankOriginShift 10s ease-in-out infinite;
   }
 }
 @keyframes rankXpChip {
@@ -5796,6 +5970,30 @@ body {
   }
   66% {
     color: #ff8bd2;
+  }
+}
+@keyframes rankRadiantShift {
+  0%,
+  100% {
+    color: #eaf6ff;
+  }
+  50% {
+    color: #a5f3ff;
+  }
+}
+@keyframes rankOriginShift {
+  0%,
+  100% {
+    color: #d7ccff;
+  }
+  25% {
+    color: #7df9ff;
+  }
+  50% {
+    color: #ffe9b0;
+  }
+  75% {
+    color: #ff9ede;
   }
 }
 
@@ -5916,6 +6114,14 @@ body {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+/* The milestone the bar is filling toward — present but never louder than the count. */
+.scorecard-stat-goal {
+  margin-left: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 500;
 }
 .scorecard-footer {
   display: flex;

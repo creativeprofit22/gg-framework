@@ -667,16 +667,19 @@ export class SessionManager {
 
   async load(
     sessionPath: string,
-    expected?: { projectKey?: string },
+    expected?: { projectKey?: string; resolveCanonical?: boolean },
   ): Promise<{
     header: SessionHeader;
     entries: SessionEntry[];
     path: string;
   }> {
-    // Resuming is a write operation, so transparently thaw a gzip archive and
-    // return the effective plain path every future append must use.
-    const canonicalPath = (await this.resolveCanonicalSession(sessionPath)) ?? sessionPath;
-    const effectivePath = await thawSessionArchive(canonicalPath);
+    // Normal resume resolves to the conversation tip. Exact checkpoint callers
+    // can opt out while retaining archive thawing and project validation.
+    const selectedPath =
+      expected?.resolveCanonical === false
+        ? sessionPath
+        : ((await this.resolveCanonicalSession(sessionPath)) ?? sessionPath);
+    const effectivePath = await thawSessionArchive(selectedPath);
     const loaded = await this.loadPhysicalCheckpoint(effectivePath);
     const storedProjectKey = canonicalProjectKey(loaded.header.cwd);
     if (expected?.projectKey !== undefined && storedProjectKey !== expected.projectKey) {
@@ -762,47 +765,52 @@ export class SessionManager {
     path: string;
   }> {
     const effectivePath = await resolveSessionPath(sessionPath);
-    const { stream } = await openSessionReadStream(effectivePath);
+    const { stream, close } = await openSessionReadStream(effectivePath);
     let header: SessionHeader | null = null;
     const entries: SessionEntry[] = [];
     const rl = createInterface({ input: stream, crlfDelay: Infinity });
-
-    for await (const line of rl) {
-      if (!line) continue;
-      try {
-        const parsed = JSON.parse(line) as SessionLine;
-        if (parsed.type === "session") {
-          if ((parsed as SessionHeader).version === 2) {
-            header = parsed as SessionHeader;
-          } else {
-            const v1 = parsed as SessionHeaderV1;
-            header = {
-              type: "session",
-              version: 2,
-              id: v1.id,
-              conversationId: v1.id,
-              generation: 0,
-              timestamp: v1.timestamp,
-              cwd: v1.cwd,
-              provider: v1.provider,
-              model: v1.model,
-              leafId: null,
-            };
+    // rejectMalformedLines can throw mid-transcript; close() on the way out.
+    try {
+      for await (const line of rl) {
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line) as SessionLine;
+          if (parsed.type === "session") {
+            if ((parsed as SessionHeader).version === 2) {
+              header = parsed as SessionHeader;
+            } else {
+              const v1 = parsed as SessionHeaderV1;
+              header = {
+                type: "session",
+                version: 2,
+                id: v1.id,
+                conversationId: v1.id,
+                generation: 0,
+                timestamp: v1.timestamp,
+                cwd: v1.cwd,
+                provider: v1.provider,
+                model: v1.model,
+                leafId: null,
+              };
+            }
+            continue;
           }
-          continue;
-        }
 
-        const entry = parsed as SessionEntry;
-        if (entry.type === "message" && !entry.id) {
-          (entry as MessageEntry).id = crypto.randomUUID();
-          (entry as MessageEntry).parentId = null;
+          const entry = parsed as SessionEntry;
+          if (entry.type === "message" && !entry.id) {
+            (entry as MessageEntry).id = crypto.randomUUID();
+            (entry as MessageEntry).parentId = null;
+          }
+          entries.push(entry);
+        } catch (error) {
+          if (rejectMalformedLines) throw error;
+          // Skip malformed JSON lines — cold migration preserves their raw bytes
+          // so a future recovery tool still has a chance to repair them.
         }
-        entries.push(entry);
-      } catch (error) {
-        if (rejectMalformedLines) throw error;
-        // Skip malformed JSON lines — cold migration preserves their raw bytes
-        // so a future recovery tool still has a chance to repair them.
       }
+    } finally {
+      rl.close();
+      close();
     }
 
     if (!header) {
@@ -825,39 +833,44 @@ export class SessionManager {
   ): Promise<(SessionInfo & { conversationId: string; generation: number }) | null> {
     try {
       const resolvedPath = await resolveSessionPath(candidatePath);
-      const { stream } = await openSessionReadStream(resolvedPath);
+      const { stream, close } = await openSessionReadStream(resolvedPath);
       const rl = createInterface({ input: stream, crlfDelay: Infinity });
       let first: SessionLine | null = null;
       let messageCount = 0;
       let lastActivity: string | null = null;
       let preview: string | undefined;
-      for await (const line of rl) {
-        if (!line) continue;
-        try {
-          const parsed = JSON.parse(line) as SessionLine;
-          if (!first) {
-            if (parsed.type !== "session") break;
-            first = parsed;
-            // v2 headers usually carry the preview already; when they do,
-            // nothing below has to look for one.
-            preview = (parsed as SessionHeader).preview?.trim() || undefined;
-          } else if (parsed.type === "message") {
-            messageCount += 1;
-            if (parsed.timestamp) lastActivity = parsed.timestamp;
-            // Recover a title for the sessions whose header predates `preview`.
-            // Free here: this pass already reads every line. `getUserSessionPrompt`
-            // rejects compaction summaries and autopilot/status injections, so a
-            // session is titled by what its user actually asked.
-            if (!preview && parsed.message?.role === "user") {
-              preview =
-                getUserSessionPrompt(parsed.message.content, parsed.message.provenance)
-                  ?.replace(/\s+/g, " ")
-                  .trim() || undefined;
+      try {
+        for await (const line of rl) {
+          if (!line) continue;
+          try {
+            const parsed = JSON.parse(line) as SessionLine;
+            if (!first) {
+              if (parsed.type !== "session") break;
+              first = parsed;
+              // v2 headers usually carry the preview already; when they do,
+              // nothing below has to look for one.
+              preview = (parsed as SessionHeader).preview?.trim() || undefined;
+            } else if (parsed.type === "message") {
+              messageCount += 1;
+              if (parsed.timestamp) lastActivity = parsed.timestamp;
+              // Recover a title for the sessions whose header predates `preview`.
+              // Free here: this pass already reads every line. `getUserSessionPrompt`
+              // rejects compaction summaries and autopilot/status injections, so a
+              // session is titled by what its user actually asked.
+              if (!preview && parsed.message?.role === "user") {
+                preview =
+                  getUserSessionPrompt(parsed.message.content, parsed.message.provenance)
+                    ?.replace(/\s+/g, " ")
+                    .trim() || undefined;
+              }
             }
+          } catch {
+            // Skip malformed lines while retaining readable entries around them.
           }
-        } catch {
-          // Skip malformed lines while retaining readable entries around them.
         }
+      } finally {
+        rl.close();
+        close();
       }
       if (!first || first.type !== "session") return null;
       return {
@@ -904,7 +917,7 @@ export class SessionManager {
   ): Promise<(SessionSummary & { conversationId: string; generation: number }) | null> {
     try {
       const resolvedPath = await resolveSessionPath(candidatePath);
-      const { stream } = await openSessionReadStream(resolvedPath);
+      const { stream, close } = await openSessionReadStream(resolvedPath);
       const rl = createInterface({ input: stream, crlfDelay: Infinity });
       let first: SessionLine | null = null;
       let preview: string | undefined;
@@ -939,8 +952,11 @@ export class SessionManager {
           }
         }
       } finally {
+        // close() destroys the gunzip AND its source. Destroying only the
+        // stream orphans the underlying fd — this listing runs over every
+        // session on the machine, so that leaked one fd per archive per call.
         rl.close();
-        stream.destroy();
+        close();
       }
       if (!first || first.type !== "session") return null;
       const stat = await fs.stat(resolvedPath);

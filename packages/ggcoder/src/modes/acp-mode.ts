@@ -10,16 +10,20 @@
  * Spec: https://agentclientprotocol.com/protocol/overview
  *
  * Scope: `initialize`, `session/new`, `session/prompt`, `session/cancel`,
- * `session/list`, `session/load` and `session/set_config_option`. Everything
- * advertised in `agentCapabilities` is implemented, because a client must be
- * able to trust that list — advertising a method that then errors is worse
- * than advertising nothing.
+ * `session/list`, `session/load`, `session/resume`, `session/close`,
+ * `session/delete`, `session/set_mode` and `session/set_config_option`.
+ * Everything advertised in `agentCapabilities` is implemented, because a client
+ * must be able to trust that list — advertising a method that then errors is
+ * worse than advertising nothing.
  *
  * stdout carries protocol frames ONLY. Anything diagnostic goes to stderr or
  * the log file; a stray `console.log` anywhere in the process corrupts the
  * stream and the client disconnects.
  */
 import readline from "node:readline";
+import path from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { isAbortError } from "@kenkaiiii/gg-agent";
 import { getAllModels, getMaxThinkingLevel, getModel } from "@kenkaiiii/gg-core";
@@ -38,6 +42,15 @@ import {
   reconstructCheckpointHistory,
   restoreUserRow,
 } from "../core/session-history.js";
+import { findUserSessionPrompt } from "../core/session-preview.js";
+import { sessionGroupPaths } from "../core/session-storage.js";
+import {
+  extractPlanSteps,
+  findCompletedMarkers,
+  markStepsCompleted,
+  rebasePlanSteps,
+  type PlanStep,
+} from "../utils/plan-steps.js";
 import { formatUserError } from "../utils/error-handler.js";
 import { closeLogger } from "../core/logger.js";
 
@@ -84,6 +97,12 @@ export interface AcpAgentSession {
   initialize(): Promise<void>;
   prompt(content: string): Promise<void>;
   getState(): { sessionId: string; provider: Provider; model: string };
+  /**
+   * Context accounting for the ACP `usage_update` notification. Optional so a
+   * test double or an alternative session implementation need not carry token
+   * accounting — a session without it simply reports no usage.
+   */
+  getContextUsage?(): { used: number; size: number; costUsd?: number };
   dispose(): Promise<void>;
   /** Replace the turn-cancellation signal so the session remains reusable. */
   setSignal(signal: AbortSignal): void;
@@ -109,6 +128,20 @@ export interface AcpAgentSession {
   };
 }
 
+/**
+ * The plan-mode callbacks the agent loop calls when the model uses the
+ * `enter_plan` / `exit_plan` tools.
+ *
+ * Handed to the session factory rather than built inside it so a test double
+ * can drive plan mode without a model: approving a plan is what turns it into
+ * the client's to-do list, and that path is otherwise unreachable.
+ */
+export interface AcpPlanHooks {
+  onEnterPlan: () => Promise<void>;
+  /** Returns the instruction handed back to the model after approval. */
+  onExitPlan: (planPath: string) => Promise<string>;
+}
+
 export interface AcpModeOptions {
   provider: Provider;
   model: string;
@@ -124,7 +157,7 @@ export interface AcpModeOptions {
    * Builds the session for `session/new`. Overridden by tests; production
    * always gets a real {@link AgentSession}.
    */
-  createSession?: (signal: AbortSignal) => AcpAgentSession;
+  createSession?: (signal: AbortSignal, hooks: AcpPlanHooks) => AcpAgentSession;
 }
 
 // ── Tool mapping ───────────────────────────────────────────
@@ -173,6 +206,127 @@ function toolTitle(name: string, args: Record<string, unknown>): string {
     return `${name}(${clipped})`;
   }
   return name;
+}
+
+// ── Tool locations ─────────────────────────────────────────
+
+/**
+ * Argument names that hold the path a tool works on, most specific first.
+ *
+ * Deliberately a small allowlist rather than "any string that looks like a
+ * path": `bash`'s command and `web_fetch`'s url would both pass a heuristic and
+ * both would send the client's editor somewhere that does not exist.
+ */
+const PATH_ARG_KEYS = ["file_path", "path", "out_path"] as const;
+
+/**
+ * The file a tool call touches, which is what drives "follow the agent" in a
+ * client: the editor jumps to whatever GG is reading or editing right now.
+ *
+ * Paths are resolved to absolute against the session cwd, because the client
+ * runs somewhere else entirely and cannot know what a relative path was
+ * relative to. A wrong location is worse than none, so anything unrecognised
+ * reports nothing.
+ */
+function toolLocations(
+  args: Record<string, unknown>,
+  cwd: string,
+): { path: string; line?: number }[] {
+  for (const key of PATH_ARG_KEYS) {
+    const value = args[key];
+    if (typeof value !== "string" || !value) continue;
+    const absolute = path.isAbsolute(value) ? value : path.resolve(cwd, value);
+    // `read`'s offset is a 1-based line, which is exactly what ACP wants for
+    // scrolling the client to the region being looked at.
+    const offset = args.offset;
+    return typeof offset === "number" && Number.isInteger(offset) && offset > 0
+      ? [{ path: absolute, line: offset }]
+      : [{ path: absolute }];
+  }
+  return [];
+}
+
+// ── File diffs ─────────────────────────────────────────────
+
+/** Tools whose whole purpose is changing a file's contents. */
+const DIFF_TOOLS = new Set(["edit", "write"]);
+
+/**
+ * Largest file we will snapshot to build a diff.
+ *
+ * The contents cross the wire twice (old and new) and are read on the event
+ * loop, so a generated bundle or lockfile would stall the turn and flood the
+ * client with a diff no human is going to read.
+ */
+const MAX_DIFF_BYTES = 256 * 1024;
+
+/**
+ * A snapshot of a file for diffing: its text, or `null` when the file does not
+ * exist yet (which is the normal case for `write` creating one). `undefined`
+ * means "do not diff this at all" — too big, or unreadable.
+ */
+type DiffSnapshot = { text: string | null } | undefined;
+
+/**
+ * Read a file for diffing, SYNCHRONOUSLY and on purpose.
+ *
+ * The "before" snapshot is taken inside the `tool_call_start` handler, and the
+ * tool it belongs to begins writing in the same tick. An async read would race
+ * that write and could capture the file as it is AFTER the edit, which renders
+ * in the client as a real change with an empty diff.
+ */
+function snapshotForDiff(filePath: string): DiffSnapshot {
+  let size: number;
+  try {
+    size = statSync(filePath).size;
+  } catch {
+    // Missing: `write` creating a new file. ACP represents that as a null
+    // `oldText`, which clients render as an all-additions diff.
+    return { text: null };
+  }
+  if (size > MAX_DIFF_BYTES) return undefined;
+  try {
+    return { text: readFileSync(filePath, "utf8") };
+  } catch {
+    return undefined;
+  }
+}
+
+// ── Plans ──────────────────────────────────────────────────
+
+/**
+ * GG's plan steps as ACP plan entries.
+ *
+ * ACP requires a priority per entry and GG's plans have no such concept, so
+ * every entry reports `medium` rather than inventing a ranking the user never
+ * expressed. The first unfinished step is reported `in_progress`: entries are
+ * worked in order, so this is what the agent is actually doing now, and it
+ * gives the client a live marker instead of a list that only ever flips from
+ * pending to completed.
+ */
+function planEntries(steps: readonly PlanStep[]): Record<string, unknown>[] {
+  let activeMarked = false;
+  return steps.map((step) => {
+    let status: string;
+    if (step.completed) {
+      status = "completed";
+    } else if (activeMarked) {
+      status = "pending";
+    } else {
+      activeMarked = true;
+      status = "in_progress";
+    }
+    return { content: step.text, priority: "medium", status };
+  });
+}
+
+/** Read a plan markdown file, or empty string when it has gone missing. */
+function readPlanFile(planPath: string): string {
+  try {
+    return readFileSync(planPath, "utf8");
+  } catch {
+    return "";
+  }
 }
 
 // ── Stop reasons ───────────────────────────────────────────
@@ -412,9 +566,15 @@ function messageText(content: unknown): string {
  * rendering path. Thinking is deliberately NOT replayed — it is transient by
  * design, and a wall of stale reasoning above a resumed conversation buries the
  * thing the user came back for.
+ *
+ * Each replayed chunk carries a `messageId` so a client can group chunks into
+ * the messages they came from; ids are per-replay and positional, which is all
+ * the protocol needs of them.
  */
 export function historyUpdates(messages: readonly Message[]): Record<string, unknown>[] {
   const updates: Record<string, unknown>[] = [];
+  let replayed = 0;
+  const nextMessageId = (): string => `hist-${++replayed}`;
 
   for (const message of messages) {
     if (getHistoryMessageVisibility(message) === "hidden") continue;
@@ -425,6 +585,7 @@ export function historyUpdates(messages: readonly Message[]): Record<string, unk
       if (restored.text) {
         updates.push({
           sessionUpdate: "user_message_chunk",
+          messageId: nextMessageId(),
           content: { type: "text", text: restored.text },
         });
       }
@@ -436,6 +597,7 @@ export function historyUpdates(messages: readonly Message[]): Record<string, unk
       if (text) {
         updates.push({
           sessionUpdate: "agent_message_chunk",
+          messageId: nextMessageId(),
           content: { type: "text", text },
         });
       }
@@ -521,11 +683,157 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
   /** Detaches every event listener when the session is replaced or disposed. */
   let unwire: (() => void)[] = [];
 
+  /**
+   * Chunk grouping. A message runs until something interrupts it — a tool call
+   * or the end of the turn — so the id is minted lazily on the first chunk and
+   * dropped at those boundaries, which is exactly where the client should start
+   * a new bubble.
+   */
+  let messageSeq = 0;
+  let currentMessageId: string | null = null;
+
+  /** Before-snapshots for in-flight `edit`/`write` calls, keyed by tool call. */
+  const diffSnapshots = new Map<string, { path: string; before: DiffSnapshot }>();
+
+  /** The approved plan being implemented, and how far through it the agent is. */
+  let planPath: string | undefined;
+  let planSteps: PlanStep[] = [];
+  const completedSteps = new Set<number>();
+  /** This turn's assistant text, scanned for `[DONE:n]` markers. */
+  let turnText = "";
+
+  /** Whether this session has already announced a title to the client. */
+  let titleAnnounced = false;
+
   function notifyUpdate(update: Record<string, unknown>): void {
     write({
       jsonrpc: "2.0",
       method: "session/update",
       params: { sessionId, update },
+    });
+  }
+
+  /**
+   * Report context-window usage to the client.
+   *
+   * Sent whenever token accounting moves — after each model response and after
+   * a compaction — because a client's context meter is otherwise frozen at
+   * whatever it last inferred. Compaction is only visible to a client as a drop
+   * in `used` at unchanged `size`, so the post-compaction emit is what makes
+   * that detectable at all.
+   *
+   * `used`/`size` are required by the schema; a session that cannot count
+   * tokens sends nothing rather than a zero, which would render as an empty
+   * context the user does not have.
+   */
+  function notifyUsage(target: AcpAgentSession | null = session): void {
+    if (!target || target !== session || !sessionId) return;
+    const usage = target.getContextUsage?.();
+    if (!usage || !Number.isFinite(usage.used) || !Number.isFinite(usage.size)) return;
+    notifyUpdate({
+      sessionUpdate: "usage_update",
+      used: usage.used,
+      size: usage.size,
+      ...(usage.costUsd === undefined ? {} : { cost: { amount: usage.costUsd, currency: "USD" } }),
+    });
+  }
+
+  /**
+   * State for a session that was just created or restored, sent after the
+   * response that told the client the session exists.
+   *
+   * Same deferral (and same staleness guard) as {@link notifyAvailableCommands}:
+   * a notification addressed to a sessionId the client has not seen yet has
+   * nowhere to land. Without this a resumed conversation shows no usage and no
+   * title until its first reply, which is exactly when they matter least.
+   */
+  function announceSessionSoon(target: AcpAgentSession): void {
+    const forSession = sessionId;
+    setTimeout(() => {
+      if (session !== target || sessionId !== forSession) return;
+      notifyUsage(target);
+      notifySessionInfo(target);
+    }, 0);
+  }
+
+  /**
+   * The id chunks of the current agent message share, minted on demand.
+   */
+  function messageId(): string {
+    currentMessageId ??= `msg-${++messageSeq}`;
+    return currentMessageId;
+  }
+
+  /** Start a new message at the next chunk (tool call, or end of turn). */
+  function endMessage(): void {
+    currentMessageId = null;
+  }
+
+  /**
+   * Send the whole plan, which is what ACP requires: the client REPLACES its
+   * copy on every update rather than patching it, so a partial list would
+   * silently delete steps.
+   */
+  function notifyPlan(): void {
+    if (planSteps.length === 0) return;
+    notifyUpdate({ sessionUpdate: "plan", entries: planEntries(planSteps) });
+  }
+
+  /**
+   * Adopt a freshly approved plan and show it to the client as a to-do list.
+   *
+   * Progress resets with the plan: `[DONE:n]` markers are relative to the plan
+   * that was approved, so carrying completions across a new one would mark
+   * steps of the new plan done that nobody has started.
+   */
+  function adoptPlan(approvedPath: string): void {
+    planPath = approvedPath;
+    planSteps = extractPlanSteps(readPlanFile(approvedPath));
+    completedSteps.clear();
+    notifyPlan();
+  }
+
+  /**
+   * Advance the plan from `[DONE:n]` markers in the agent's own text.
+   *
+   * The plan is re-read rather than trusted from approval time because the
+   * agent is allowed to rewrite it while implementing (a 2-step plan becoming
+   * 12 is normal), and a frozen snapshot would report the wrong total and drop
+   * markers for steps it has never heard of.
+   */
+  function refreshPlanProgress(): void {
+    if (planSteps.length === 0) return;
+
+    let advanced = false;
+    for (const step of findCompletedMarkers(turnText)) {
+      if (completedSteps.has(step)) continue;
+      completedSteps.add(step);
+      advanced = true;
+    }
+    if (!advanced) return;
+
+    const fresh = planPath ? extractPlanSteps(readPlanFile(planPath)) : [];
+    planSteps = markStepsCompleted(rebasePlanSteps(planSteps, fresh), completedSteps);
+    notifyPlan();
+  }
+
+  /**
+   * Give the session a human-readable title, once.
+   *
+   * ACP expects this "after the first meaningful exchange", and GG already
+   * derives the same first-prompt title for its own session list — reusing it
+   * means a session is named identically on a phone, in the picker, and on
+   * disk instead of three near-misses.
+   */
+  function notifySessionInfo(target: AcpAgentSession): void {
+    if (titleAnnounced || target !== session || !sessionId) return;
+    const prompt = findUserSessionPrompt(target.getMessages()).replace(/\s+/g, " ").trim();
+    if (!prompt) return;
+    titleAnnounced = true;
+    notifyUpdate({
+      sessionUpdate: "session_info_update",
+      title: prompt.length > 80 ? `${prompt.slice(0, 79)}…` : prompt,
+      updatedAt: new Date().toISOString(),
     });
   }
 
@@ -573,6 +881,42 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
   }
 
   /**
+   * The finished tool call's result as an ACP file diff, or undefined when we
+   * cannot honestly produce one.
+   *
+   * A real diff is what lets a client render a reviewable side-by-side edit
+   * instead of a wall of text. It REPLACES the tool's text result rather than
+   * accompanying it: `edit` already returns a unified diff as prose, and
+   * showing both means the same change twice in two formats.
+   *
+   * A failed call is left as text on purpose — the error message is the useful
+   * output, and the file on disk did not change.
+   */
+  function diffContent(
+    toolCallId: string,
+    isError: boolean,
+  ): Record<string, unknown>[] | undefined {
+    const snapshot = diffSnapshots.get(toolCallId);
+    if (!snapshot) return undefined;
+    diffSnapshots.delete(toolCallId);
+    if (isError || !snapshot.before) return undefined;
+
+    const after = snapshotForDiff(snapshot.path);
+    // `newText` is required by the schema, so a file that vanished or grew past
+    // the diff budget mid-call falls back to the tool's own text output.
+    if (!after || after.text === null) return undefined;
+
+    return [
+      {
+        type: "diff",
+        path: snapshot.path,
+        oldText: snapshot.before.text,
+        newText: after.text,
+      },
+    ];
+  }
+
+  /**
    * Bridge ggcoder's event bus onto `session/update` notifications.
    *
    * Every handler is synchronous and writes immediately, which is what keeps
@@ -585,8 +929,15 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       bus.on("text_delta", ({ text }) => {
         notifyUpdate({
           sessionUpdate: "agent_message_chunk",
+          messageId: messageId(),
           content: { type: "text", text },
         });
+        // Plan markers arrive inside this text and can straddle two deltas, so
+        // the scan runs over the turn's accumulated text rather than the chunk.
+        // Only a delta that closes a bracket can complete a marker, which keeps
+        // this from re-scanning the whole turn on every token.
+        turnText += text;
+        if (text.includes("]")) refreshPlanProgress();
       }),
 
       bus.on("thinking_delta", ({ text }) => {
@@ -597,6 +948,21 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       }),
 
       bus.on("tool_call_start", ({ toolCallId, name, args }) => {
+        // A tool call ends the message it interrupted; whatever the agent says
+        // afterwards is a new one.
+        endMessage();
+
+        const locations = toolLocations(args, options.cwd);
+        // Snapshot BEFORE the tool runs. This handler is synchronous and the
+        // tool starts writing immediately after it, which is the only window
+        // where the file still holds its pre-edit contents.
+        if (DIFF_TOOLS.has(name) && locations[0]) {
+          diffSnapshots.set(toolCallId, {
+            path: locations[0].path,
+            before: snapshotForDiff(locations[0].path),
+          });
+        }
+
         notifyUpdate({
           sessionUpdate: "tool_call",
           toolCallId,
@@ -605,6 +971,7 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
           kind: toolKind(name),
           status: "in_progress",
           rawInput: args,
+          ...(locations.length > 0 ? { locations } : {}),
         });
       }),
 
@@ -625,7 +992,9 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
           sessionUpdate: "tool_call_update",
           toolCallId,
           status: isError ? "failed" : "completed",
-          content: [{ type: "content", content: { type: "text", text: result } }],
+          content: diffContent(toolCallId, isError) ?? [
+            { type: "content", content: { type: "text", text: result } },
+          ],
         });
       }),
 
@@ -638,6 +1007,23 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       bus.on("max_turns", () => {
         hitMaxTurns = true;
       }),
+
+      // Token accounting changes: after every model response, and after a
+      // compaction rebuilds the context. `compaction_end` fires once the
+      // compacted messages are installed, so the emit carries the POST-
+      // compaction count — the drop the client watches for.
+      bus.on("turn_end", () => {
+        notifyUsage(target);
+        notifySessionInfo(target);
+        // The turn is over: the next chunk starts a new message, and the next
+        // turn's markers are scanned against its own text.
+        endMessage();
+        turnText = "";
+      }),
+
+      bus.on("compaction_end", () => {
+        notifyUsage(target);
+      }),
     ];
   }
 
@@ -646,21 +1032,63 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
     unwire = [];
   }
 
+  /**
+   * Drop everything scoped to one session's lifetime. A new session inherits
+   * none of it: another session's plan progress, half-finished diffs or message
+   * numbering would all be reported as if they were its own.
+   */
+  function resetSessionState(): void {
+    diffSnapshots.clear();
+    planPath = undefined;
+    planSteps = [];
+    completedSteps.clear();
+    turnText = "";
+    titleAnnounced = false;
+    currentMessageId = null;
+    messageSeq = 0;
+  }
+
   async function disposeSession(): Promise<void> {
     if (!session) return;
     unwireAll();
+    resetSessionState();
     const previous = session;
     session = null;
     sessionId = "";
     await previous.dispose();
   }
 
+  /**
+   * Plan mode. Supplying these callbacks is what registers the
+   * enter_plan/exit_plan tools at all — without them the mode exists but the
+   * model cannot move between states. GG Coder runs without approvals, so a
+   * submitted plan is auto-approved, the [DONE:n] contract is baked in so
+   * progress markers work as on the desktop, and the client is told about every
+   * mode change.
+   *
+   * They act on the CURRENT session rather than closing over one: a tool can
+   * only run inside a prompt, which is long after `startSession` published it.
+   */
+  const planHooks: AcpPlanHooks = {
+    onEnterPlan: async () => {
+      await session?.setPlanMode(true);
+      notifyModeChange(MODE_PLAN);
+    },
+    onExitPlan: async (approvedPath) => {
+      await session?.setPlanMode(false);
+      await session?.setApprovedPlan(approvedPath);
+      notifyModeChange(MODE_DEFAULT);
+      // The approved plan becomes the client's to-do list, which then advances
+      // from the [DONE:n] markers the returned instruction asks for.
+      adoptPlan(approvedPath);
+      return "Plan approved. Proceed with implementation, marking each completed step with [DONE:n].";
+    },
+  };
+
   const createSession =
     options.createSession ??
-    ((signal: AbortSignal): AcpAgentSession => {
-      // Self-reference is safe: the callbacks only run once the agent loop is
-      // executing tools, long after the constructor returns.
-      const created = new AgentSession({
+    ((signal: AbortSignal, hooks: AcpPlanHooks): AcpAgentSession =>
+      new AgentSession({
         provider: options.provider,
         model: options.model,
         cwd: options.cwd,
@@ -675,26 +1103,10 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
         // client gets its session in milliseconds and the same tools a moment
         // later.
         backgroundMcpConnect: true,
-        // Plan mode. Supplying these callbacks is what registers the
-        // enter_plan/exit_plan tools at all — without them the mode exists but
-        // the model cannot move between states. GG Coder runs without
-        // approvals, so a submitted plan is auto-approved, the [DONE:n]
-        // contract is baked in so progress markers work as on the desktop, and
-        // the client is told about every mode change.
-        onEnterPlan: async () => {
-          await created.setPlanMode(true);
-          notifyModeChange(MODE_PLAN);
-        },
-        onExitPlan: async (planPath) => {
-          await created.setPlanMode(false);
-          await created.setApprovedPlan(planPath);
-          notifyModeChange(MODE_DEFAULT);
-          return "Plan approved. Proceed with implementation, marking each completed step with [DONE:n].";
-        },
+        onEnterPlan: hooks.onEnterPlan,
+        onExitPlan: hooks.onExitPlan,
         signal,
-      });
-      return created;
-    });
+      }));
 
   // ── Method handlers ──────────────────────────────────────
 
@@ -707,7 +1119,7 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
         mcpCapabilities: { http: false, sse: false, acp: false },
         // `{}` is how ACP says "supported" for a capability with no options of
         // its own. Omitting the key means unsupported, so this is not cosmetic.
-        sessionCapabilities: { list: {}, resume: {} },
+        sessionCapabilities: { list: {}, resume: {}, close: {}, delete: {} },
       },
       authMethods: [],
       agentInfo: { name: "ggcoder", title: "GG Coder", version: options.version },
@@ -725,7 +1137,7 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
     // on it, so the old one is stopped first, deliberately and visibly.
     await disposeSession();
     abort = new AbortController();
-    const created = createSession(abort.signal);
+    const created = createSession(abort.signal, planHooks);
     await created.initialize();
     if (restorePath) await created.loadSession(restorePath);
     session = created;
@@ -737,6 +1149,7 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
   async function handleNewSession(): Promise<unknown> {
     const created = await startSession();
     notifyAvailableCommands(created);
+    announceSessionSoon(created);
     return { sessionId, configOptions: configOptionsFor(created), modes: sessionModes(created) };
   }
 
@@ -812,8 +1225,98 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
 
     for (const update of historyUpdates(displayMessages)) notifyUpdate(update);
     notifyAvailableCommands(restored);
+    announceSessionSoon(restored);
 
     return { configOptions: configOptionsFor(restored), modes: sessionModes(restored) };
+  }
+
+  /**
+   * Abort the running turn and WAIT for it to unwind.
+   *
+   * `handleCancel` only signals: `session.prompt()` keeps unwinding after it
+   * returns, and its last act is persisting the turn. Disposing before that
+   * finishes clears the session path out from under the write, so the final
+   * exchange is silently dropped and the session is missing its tail when the
+   * user comes back to it. The read loop's own teardown already waits like
+   * this; a lifecycle request that tears a session down mid-turn must too.
+   */
+  async function cancelAndSettle(): Promise<void> {
+    handleCancel();
+    await Promise.allSettled([...inFlight]);
+  }
+
+  /** The sessionId a lifecycle request names, validated. */
+  function requestedSessionId(params: unknown, method: string): string {
+    const requested = (params as { sessionId?: unknown })?.sessionId;
+    if (typeof requested !== "string" || !requested) {
+      throw new InvalidParams(`${method} requires a sessionId.`);
+    }
+    return requested;
+  }
+
+  /**
+   * Reconnect to a stored session WITHOUT replaying it.
+   *
+   * The difference from `session/load` is the whole point: a client that still
+   * holds the transcript (it was showing this session a moment ago) wants the
+   * agent-side context back, not a second copy of every message pushed at it.
+   */
+  async function handleResumeSession(params: unknown): Promise<unknown> {
+    const requested = requestedSessionId(params, "session/resume");
+    const sessionPath = await findSessionById(requested, requestCwd(params));
+    if (!sessionPath) throw new InvalidParams(`Unknown session '${requested}'.`);
+
+    const restored = await startSession(sessionPath);
+    // As in session/load: the client keeps addressing the id it asked for.
+    sessionId = requested;
+    notifyAvailableCommands(restored);
+    announceSessionSoon(restored);
+
+    return { configOptions: configOptionsFor(restored), modes: sessionModes(restored) };
+  }
+
+  /**
+   * Close the active session, cancelling whatever it is doing.
+   *
+   * The spec requires the in-flight turn to be cancelled exactly as
+   * `session/cancel` would, so this reuses that path rather than tearing the
+   * session down underneath a running agent loop.
+   */
+  async function handleCloseSession(params: unknown): Promise<unknown> {
+    const requested = requestedSessionId(params, "session/close");
+    if (!session || requested !== sessionId) {
+      throw new InvalidParams(`Session '${requested}' is not active.`);
+    }
+    await cancelAndSettle();
+    await disposeSession();
+    return {};
+  }
+
+  /**
+   * Delete a stored session from disk.
+   *
+   * Hard delete, including the archive and asset siblings, because a session
+   * left half-present would come back as a broken row in the next
+   * `session/list`. Deleting something that is not there succeeds silently:
+   * the spec asks for idempotence, and the user's intent is already satisfied.
+   */
+  async function handleDeleteSession(params: unknown): Promise<unknown> {
+    const requested = requestedSessionId(params, "session/delete");
+    const sessionPath = await findSessionById(requested, requestCwd(params));
+    if (!sessionPath) return {};
+
+    // Deleting the session we are serving would leave a live AgentSession
+    // appending to a file that no longer exists, quietly recreating it.
+    if (session && requested === sessionId) {
+      await cancelAndSettle();
+      await disposeSession();
+    }
+
+    const group = sessionGroupPaths(sessionPath);
+    for (const target of [group.plainPath, group.archivePath, group.assetsPath]) {
+      await rm(target, { recursive: true, force: true });
+    }
+    return {};
   }
 
   /**
@@ -920,6 +1423,13 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       throw err;
     } finally {
       running = false;
+      // Drop any before-snapshot whose tool never reported an end. A cancelled
+      // turn stops emitting tool events, so `diffContent` — the only other
+      // place these are removed — never runs for the call that was in flight,
+      // and its file contents would stay pinned for the rest of the session.
+      // Cleared here rather than on `turn_end`, which fires before that turn's
+      // tools execute and would discard snapshots still in use.
+      diffSnapshots.clear();
     }
 
     return { stopReason: cancelled ? "cancelled" : stopReasonFor(truncation, hitMaxTurns) };
@@ -948,6 +1458,12 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
         return handleListSessions(params);
       case "session/load":
         return handleLoadSession(params);
+      case "session/resume":
+        return handleResumeSession(params);
+      case "session/close":
+        return handleCloseSession(params);
+      case "session/delete":
+        return handleDeleteSession(params);
       case "session/set_config_option":
         return handleSetConfigOption(params);
       case "session/set_mode":

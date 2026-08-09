@@ -31,6 +31,7 @@ import { localOperations, type ToolOperations } from "./operations.js";
 import type { ReadTracker } from "./read-tracker.js";
 import type { WriteGuardSettings } from "../core/workspace-guard.js";
 import type { GetNetworkPolicy } from "../core/network-guard.js";
+import type { SandboxPolicy } from "../core/sandbox.js";
 import type { AgentDefinition } from "../core/agents.js";
 import type { Skill } from "../core/skills.js";
 import type { AgentNotificationQueue } from "../core/agent-notifications.js";
@@ -100,6 +101,8 @@ export interface CreateToolsOptions {
    * When omitted, no network restriction is applied.
    */
   getNetworkPolicy?: GetNetworkPolicy;
+  /** Lazily read the OS command-sandbox mode and allowed network domains. */
+  getSandboxPolicy?: () => SandboxPolicy;
   /**
    * Push queue for out-of-band notifications (child completions, background
    * process progress). When provided, producers enqueue here and the session
@@ -179,7 +182,15 @@ export async function createTools(
       getDiagnostics,
       opts?.getWriteGuardSettings,
     ),
-    createBashTool(cwd, processManager, ops, planModeRef, undefined, opts?.getNetworkPolicy),
+    createBashTool(
+      cwd,
+      processManager,
+      ops,
+      planModeRef,
+      undefined,
+      opts?.getNetworkPolicy,
+      ops === localOperations ? opts?.getSandboxPolicy : undefined,
+    ),
     createFindTool(cwd),
     createGrepTool(cwd, ops),
     createSearchCodeTool(cwd, ops),

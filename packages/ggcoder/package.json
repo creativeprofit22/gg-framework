@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/ggcoder",
-  "version": "5.31.0",
+  "version": "5.37.0",
   "type": "module",
   "description": "CLI coding agent with OAuth authentication for Anthropic, OpenAI, and Gemini",
   "license": "MIT",
@@ -105,12 +105,14 @@
     "verify:goal:e2e": "pnpm dlx tsx scripts/verify-goal-e2e.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.67",
     "@jridgewell/trace-mapping": "^0.3.25",
     "@kenkaiiii/agent-home-sdk": "^0.3.8",
     "@kenkaiiii/gg-agent": "workspace:*",
     "@kenkaiiii/gg-ai": "workspace:*",
     "@kenkaiiii/gg-core": "workspace:*",
     "@kenkaiiii/kencode-search": "^0.1.17",
+    "@modelcontextprotocol/client": "^2.0.0",
     "ansi-regex": "^6.2.2",
     "chalk": "^5.6.2",
     "cli-highlight": "^2.1.11",
@@ -129,8 +131,7 @@
     "typescript": "^6.0.3",
     "typescript-language-server": "^5.3.0",
     "wrap-ansi": "^10.0.0",
-    "zod": "^4.4.3",
-    "@modelcontextprotocol/client": "^2.0.0"
+    "zod": "^4.4.3"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "^3.6.0",

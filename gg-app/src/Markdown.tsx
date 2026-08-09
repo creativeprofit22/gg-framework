@@ -22,6 +22,7 @@ import {
   type KenPromptActionResult,
   type KenPromptSavePreview,
 } from "./ken-prompt-actions";
+import { collapsedCode, shouldCollapseCode, visibleBlockCount } from "./collapse";
 import { marked } from "marked";
 import "highlight.js/styles/github-dark.css";
 
@@ -534,21 +535,34 @@ function PreBlock({ children }: { children?: React.ReactNode }): React.ReactElem
 function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactElement {
   const preRef = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  // Raw text drives both the copy fallback and the fold decision. The rendered
+  // `children` is the highlighted tree; while folded we deliberately do NOT
+  // mount it, so a thousand-line dump costs seven lines of DOM instead of a
+  // thousand highlighted spans. That withheld markup is the memory win.
+  const text = codeNodeText(children);
+  const collapsible = shouldCollapseCode(text);
+  const folded = collapsible && !expanded;
+  const { preview, hiddenLines } = collapsedCode(text);
 
   const copy = useCallback(() => {
-    const text = preRef.current?.innerText ?? "";
-    if (!text) return;
+    // Read the full source, not the folded preview, so copying a collapsed
+    // block still yields the whole thing.
+    const rendered = preRef.current?.innerText ?? "";
+    const value = text || rendered;
+    if (!value) return;
     void navigator.clipboard
-      .writeText(text.replace(/\n$/, ""))
+      .writeText(value.replace(/\n$/, ""))
       .then(() => {
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       })
       .catch(() => {});
-  }, []);
+  }, [text]);
 
   return (
-    <div className="code-block">
+    <div className={`code-block${folded ? " folded" : ""}`}>
       <button
         type="button"
         className="code-copy"
@@ -565,8 +579,13 @@ function CodeBlock({ children }: { children?: React.ReactNode }): React.ReactEle
           if (selectWordAtPoint(e.clientX, e.clientY)) e.preventDefault();
         }}
       >
-        {children}
+        {folded ? preview : children}
       </pre>
+      {collapsible && (
+        <button type="button" className="code-expand" onClick={() => setExpanded(!expanded)}>
+          {folded ? `Show full output (${hiddenLines} more lines)` : "Show less"}
+        </button>
+      )}
     </div>
   );
 }
@@ -640,9 +659,16 @@ const MemoizedMarkdownBlock = memo(
  */
 export const Markdown = memo(function Markdown({ children }: Props): React.ReactElement {
   const blocks = useMemo(() => parseMarkdownIntoBlocks(children), [children]);
+  const [rowExpanded, setRowExpanded] = useState(false);
+  // Oversized content mounts only its leading blocks. Fenced-code folding above
+  // handles one huge block; this handles the other shape, hundreds of ordinary
+  // blocks in a single row, which no per-block rule would catch.
+  const visibleCount = useMemo(() => visibleBlockCount(blocks), [blocks]);
+  const rowFolded = !rowExpanded && visibleCount < blocks.length;
+  const visible = rowFolded ? blocks.slice(0, visibleCount) : blocks;
   return (
     <div className="markdown">
-      {blocks.map((block, index) => (
+      {visible.map((block, index) => (
         // A ```prompt block reveals its "Send to GG Coder" button as soon as ITS
         // own closing fence arrives (per-block), not when the whole reply ends —
         // so the button shows right after Ken finishes the prompt even if he
@@ -653,6 +679,11 @@ export const Markdown = memo(function Markdown({ children }: Props): React.React
           promptReady={isPromptBlockComplete(block)}
         />
       ))}
+      {rowFolded && (
+        <button type="button" className="code-expand" onClick={() => setRowExpanded(true)}>
+          {`Show full output (${blocks.length - visibleCount} more blocks)`}
+        </button>
+      )}
     </div>
   );
 });

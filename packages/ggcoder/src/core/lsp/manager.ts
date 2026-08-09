@@ -1,7 +1,8 @@
 import path from "node:path";
 import { log } from "../logger.js";
-import { LspClient, type LspDiagnostic } from "./client.js";
+import type { LspClient, LspDiagnostic } from "./client.js";
 import { formatDiagnostics } from "./format.js";
+import { lspClientPool, type LspClientPool } from "./pool.js";
 import {
   LSP_SERVER_CATALOG,
   findProjectRoot,
@@ -20,6 +21,11 @@ export interface LspManagerOptions {
   settleMs?: number;
   /** Maximum number of per-file latest outcomes retained. */
   snapshotLimit?: number;
+  /**
+   * Client pool backing this manager. Defaults to the daemon-wide singleton so
+   * sessions share servers; injectable so tests get isolation.
+   */
+  pool?: LspClientPool;
 }
 
 export type LspOutcomeKind =
@@ -47,11 +53,8 @@ export type LspDiagnosticOutcome =
       kind: Exclude<LspOutcomeKind, "diagnostics">;
     });
 
-type ClientResolution =
-  | { status: "ready"; client: LspClient }
-  | { status: "unavailable" | "server_failed" };
-
 const DEFAULT_WARM_BUDGET_MS = 3000;
+
 const DEFAULT_FIRST_BUDGET_MS = 8000;
 /**
  * How long to wait for a corrected publish after a server's FIRST result for a
@@ -63,12 +66,14 @@ const DEFAULT_FIRST_BUDGET_MS = 8000;
  */
 const DEFAULT_SETTLE_MS = 1500;
 const DEFAULT_SNAPSHOT_LIMIT = 100;
-const INIT_TIMEOUT_MS = 10_000;
 
 /**
- * Lazily spawns and pools language servers keyed by (serverId, projectRoot).
- * The detailed outcome path preserves confidence and failure evidence while the
- * compatibility wrapper keeps edit/write output byte-identical on degradation.
+ * Per-session view over the process-wide language-server pool (see pool.ts).
+ *
+ * The manager owns only session-scoped state — per-file outcome snapshots and
+ * which keys have gone warm — while the servers themselves are shared by every
+ * session in the process and reclaimed when idle. That split is what stops two
+ * windows open on one repo from running two full tsserver stacks.
  */
 export class LspManager {
   private readonly catalog: readonly LspServerSpec[];
@@ -76,10 +81,18 @@ export class LspManager {
   private readonly firstBudgetMs: number;
   private readonly settleMs: number;
   private readonly snapshotLimit: number;
-  /** (serverId\0root) → in-flight or settled client resolution. */
-  private readonly clients = new Map<string, Promise<ClientResolution>>();
-  /** Keys that have completed at least one diagnostics pass (warm). */
-  private readonly warmKeys = new Set<string>();
+  private readonly pool: LspClientPool;
+  /**
+   * Keys that have completed a diagnostics pass, mapped to the pool generation
+   * that served it.
+   *
+   * Storing the generation rather than a bare flag is what keeps "warm" honest
+   * across idle reclamation: once the pool retires a server, the replacement is
+   * genuinely cold again, and treating it as warm would give it the 3s budget
+   * instead of 8s AND skip the cold-load settle guard — turning tsserver's
+   * premature empty publish into a reported "clean", which is a false all-clear.
+   */
+  private readonly warmKeys = new Map<string, number>();
   private readonly latestOutcomes = new Map<string, LspDiagnosticOutcome>();
   private shutDown = false;
 
@@ -92,6 +105,7 @@ export class LspManager {
     this.firstBudgetMs = options?.firstBudgetMs ?? DEFAULT_FIRST_BUDGET_MS;
     this.settleMs = Math.max(0, options?.settleMs ?? DEFAULT_SETTLE_MS);
     this.snapshotLimit = Math.max(1, options?.snapshotLimit ?? DEFAULT_SNAPSHOT_LIMIT);
+    this.pool = options?.pool ?? lspClientPool;
   }
 
   /**
@@ -116,7 +130,7 @@ export class LspManager {
       if (!spec) return this.record(this.outcome("unsupported", normalizedFilePath));
       const root = findProjectRoot(normalizedFilePath, spec.rootMarkers, this.cwd);
       const key = `${spec.id}\u0000${root}`;
-      const budgetMs = this.warmKeys.has(key) ? this.warmBudgetMs : this.firstBudgetMs;
+      const budgetMs = this.isWarm(key, spec, root) ? this.warmBudgetMs : this.firstBudgetMs;
       const work = this.collect(key, spec, root, normalizedFilePath, content, budgetMs);
 
       // Leave slow initialization/indexing alive to warm the next edit. Record
@@ -141,22 +155,41 @@ export class LspManager {
     return this.latestOutcomes.get(path.resolve(this.cwd, filePath));
   }
 
+  /**
+   * Has this session already completed a pass against the server that is live
+   * NOW? False once the pool has rebuilt it, because the replacement is cold.
+   */
+  private isWarm(key: string, spec: LspServerSpec, root: string): boolean {
+    const warmedGeneration = this.warmKeys.get(key);
+    return (
+      warmedGeneration !== undefined && warmedGeneration === this.pool.generationFor(spec, root)
+    );
+  }
+
+  /**
+   * Retained stderr of a language server this session is using, for failure
+   * reporting when a server accepts a document and then never answers.
+   */
+  serverStderrTail(): Promise<string> {
+    return this.pool.stderrTail(this);
+  }
+
   /** Newest retained per-file evidence snapshots. */
   getLatestOutcomes(): LspDiagnosticOutcome[] {
     return [...this.latestOutcomes.values()].reverse();
   }
 
-  /** Shut down every pooled server. Safe in process exit handlers. */
+  /**
+   * Release this session's claim on every server it used. Safe in process exit
+   * handlers.
+   *
+   * This drops REFERENCES, not processes: a server another session still holds
+   * keeps running, and one left with no holders is shut down immediately. The
+   * name is kept because every caller wires it into an exit path.
+   */
   shutdownAll(): void {
     this.shutDown = true;
-    for (const pending of this.clients.values()) {
-      void pending
-        .then((resolution) => {
-          if (resolution.status === "ready") resolution.client.shutdown();
-        })
-        .catch(() => {});
-    }
-    this.clients.clear();
+    this.pool.release(this);
     this.warmKeys.clear();
   }
 
@@ -190,23 +223,46 @@ export class LspManager {
     // here has to fit inside the same deadline or a good answer arrives after
     // the caller has already given up and reported a timeout.
     const deadline = Date.now() + budgetMs;
-    const resolution = await this.ensureClient(key, spec, root);
+    const resolution = await this.pool.retain(spec, root, this);
     if (resolution.status !== "ready") return this.outcome(resolution.status, filePath);
     const { client } = resolution;
     if (!client.isAlive) {
-      this.clients.set(key, Promise.resolve({ status: "server_failed" }));
+      this.pool.markDead(spec, root);
       log("WARN", "lsp", `${spec.id} server died`, { root });
       return this.outcome("server_failed", filePath);
     }
 
+    // Hold the entry open for the whole pass: a first-file load can take
+    // seconds, and the idle sweep must not reclaim a server that is mid-answer.
+    const endCall = this.pool.beginCall(spec, root);
+    try {
+      return await this.collectFrom(client, key, spec, root, filePath, content, budgetMs, deadline);
+    } finally {
+      endCall();
+    }
+  }
+
+  /** The diagnostics exchange itself, against an initialized live client. */
+  private async collectFrom(
+    client: LspClient,
+    key: string,
+    spec: LspServerSpec,
+    root: string,
+    filePath: string,
+    content: string,
+    budgetMs: number,
+    deadline: number,
+  ): Promise<LspDiagnosticOutcome> {
     // Sampled BEFORE the collect: a cold client is the one that has to load the
     // project, and therefore the only one that can answer prematurely.
-    const wasCold = !this.warmKeys.has(key);
+    const wasCold = !this.isWarm(key, spec, root);
     const uri = client.syncDocument(filePath, content);
     let diagnostics = await client.collectDiagnostics(uri, budgetMs);
-    this.warmKeys.add(key);
+    // Record WHICH build of the server went warm, so a later reclamation of it
+    // is detectable rather than silently inherited as warm.
+    this.warmKeys.set(key, this.pool.generationFor(spec, root));
     if (!client.isAlive) {
-      this.clients.set(key, Promise.resolve({ status: "server_failed" }));
+      this.pool.markDead(spec, root);
       return this.outcome("server_failed", filePath);
     }
     if (diagnostics === null) {
@@ -247,50 +303,6 @@ export class LspManager {
       };
     }
     return this.outcome(client.hasActiveProgress ? "low_confidence" : "clean", filePath);
-  }
-
-  private ensureClient(key: string, spec: LspServerSpec, root: string): Promise<ClientResolution> {
-    const existing = this.clients.get(key);
-    if (existing) return existing;
-
-    const pending = (async (): Promise<ClientResolution> => {
-      const command = spec.resolveCommand(root);
-      if (!command) {
-        log("INFO", "lsp", `${spec.id} language server not available`, { root });
-        return { status: "unavailable" };
-      }
-      // `client` is declared outside the try so one that fails to initialize
-      // can still be killed. `new LspClient` SPAWNS the process, so discarding
-      // the reference on a throw leaked the server forever — one orphan per
-      // (server, root) every time initialize timed out, for the life of the
-      // session. Invisible on POSIX; on Windows the orphan keeps handles open
-      // in the project directory.
-      let client: LspClient | undefined;
-      try {
-        const startedAt = Date.now();
-        client = new LspClient(spec, root, command);
-        await client.initialize(INIT_TIMEOUT_MS);
-        if (!client.isAlive) return { status: "server_failed" };
-        log("INFO", "lsp", `${spec.id} server initialized`, {
-          root,
-          ms: String(Date.now() - startedAt),
-        });
-        return { status: "ready", client };
-      } catch (error) {
-        log("WARN", "lsp", `${spec.id} server failed to start`, {
-          root,
-          error: error instanceof Error ? error.message : String(error),
-          // The server's own last words — usually the only explanation of why
-          // the handshake never completed.
-          stderr: client?.stderrTail() || "(none)",
-        });
-        client?.terminate();
-        return { status: "server_failed" };
-      }
-    })();
-
-    this.clients.set(key, pending);
-    return pending;
   }
 }
 

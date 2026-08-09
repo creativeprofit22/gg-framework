@@ -686,7 +686,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   let thinkingAccum = "";
   let stopReason: StreamResponse["stopReason"] = "end_turn";
   let inputTokens = 0;
-  let outputTokens = 0;
+  let candidateTokens = 0;
+  let reasoningTokens = 0;
   let cacheRead = 0;
   let toolIndex = 0;
 
@@ -694,7 +695,8 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     const usage = usageFromResponse(chunk);
     if (usage) {
       inputTokens = usage.promptTokenCount ?? inputTokens;
-      outputTokens = usage.candidatesTokenCount ?? outputTokens;
+      candidateTokens = usage.candidatesTokenCount ?? candidateTokens;
+      reasoningTokens = usage.thoughtsTokenCount ?? reasoningTokens;
       cacheRead = usage.cachedContentTokenCount ?? cacheRead;
     }
 
@@ -758,6 +760,9 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (pendingToolCalls.length > 0) stopReason = "tool_use";
 
   const adjustedInputTokens = Math.max(0, inputTokens - cacheRead);
+  // Gemini reports thoughts separately from candidate output, but both are billed
+  // output. Keep the subset for diagnostics while making outputTokens the cost-safe total.
+  const outputTokens = candidateTokens + reasoningTokens;
   const streamResponse: StreamResponse = {
     message: {
       role: "assistant",
@@ -767,6 +772,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     usage: {
       inputTokens: adjustedInputTokens,
       outputTokens,
+      ...(reasoningTokens > 0 ? { reasoningTokens } : {}),
       ...(cacheRead > 0 ? { cacheRead } : {}),
     },
   };

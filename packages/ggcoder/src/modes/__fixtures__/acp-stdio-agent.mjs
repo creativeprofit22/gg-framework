@@ -19,6 +19,7 @@
 
 import os from "node:os";
 import path from "node:path";
+import { writeFileSync } from "node:fs";
 import { EventBus } from "../../core/event-bus.js";
 import { SessionManager } from "../../core/session-manager.js";
 import { loadSession } from "../../session.js";
@@ -156,14 +157,26 @@ class ScriptedSession {
     ],
   };
 
+  // Token accounting the mode reports as ACP `usage_update`. Scripted so the
+  // test can pin exact numbers, and so the post-compaction DROP at an unchanged
+  // window size — the only way a client can detect compaction — is observable
+  // without a real model.
+  #used = 4200;
+  #contextWindow = 200_000;
+  #costUsd = 0;
+
   #messages = [];
   #sessionId = "acp-fixture-session";
   #model = "claude-opus-5";
   #provider = "anthropic";
   #thinking;
 
-  constructor(signal) {
+  constructor(signal, hooks) {
     this.signal = signal;
+    // The plan-mode callbacks the real agent loop would invoke from the
+    // enter_plan/exit_plan tools. Held so a scripted prompt can approve a plan
+    // without a model.
+    this.hooks = hooks;
   }
 
   setSignal(signal) {
@@ -174,6 +187,14 @@ class ScriptedSession {
 
   getState() {
     return { sessionId: this.#sessionId, provider: this.#provider, model: this.#model };
+  }
+
+  getContextUsage() {
+    return {
+      used: this.#used,
+      size: this.#contextWindow,
+      ...(this.#costUsd > 0 ? { costUsd: this.#costUsd } : {}),
+    };
   }
 
   // Deliberately the REAL loader against the REAL file the fixture wrote, so
@@ -218,6 +239,83 @@ class ScriptedSession {
   }
 
   async prompt(content) {
+    // A real `edit` run: the file on disk genuinely changes between the tool's
+    // start and end events, which is the only way to prove the mode snapshots
+    // the BEFORE contents rather than reading the finished file twice.
+    if (content === "edit a file") {
+      const target = path.join(cwd, "diffed.txt");
+      writeFileSync(target, "before\n");
+      this.eventBus.emit("tool_call_start", {
+        toolCallId: "d1",
+        name: "edit",
+        args: { file_path: target },
+      });
+      writeFileSync(target, "after\n");
+      this.eventBus.emit("tool_call_end", {
+        toolCallId: "d1",
+        result: "unified diff prose the client should not have to read",
+        isError: false,
+        durationMs: 2,
+      });
+
+      // A brand-new file: ACP represents that as a null oldText.
+      const created = path.join(cwd, "created.txt");
+      this.eventBus.emit("tool_call_start", {
+        toolCallId: "d2",
+        name: "write",
+        args: { file_path: "created.txt" },
+      });
+      writeFileSync(created, "brand new\n");
+      this.eventBus.emit("tool_call_end", {
+        toolCallId: "d2",
+        result: "wrote created.txt",
+        isError: false,
+        durationMs: 1,
+      });
+
+      this.eventBus.emit("turn_end", { turn: 1, stopReason: "end_turn" });
+      this.eventBus.emit("agent_done", { totalTurns: 1 });
+      return;
+    }
+
+    // Plan mode end to end: the model approves a plan, then reports progress
+    // with the [DONE:n] markers the approval instruction asks for.
+    if (content === "approve a plan") {
+      const planFile = path.join(cwd, "plan.md");
+      writeFileSync(
+        planFile,
+        "# Plan\n\n## Steps\n\n1. Wire the transport layer\n2. Render the results\n3. Ship the thing\n",
+      );
+      await this.hooks.onExitPlan(planFile);
+      this.eventBus.emit("text_delta", { text: "Transport done. [DONE" });
+      // Split across two deltas on purpose: a marker that straddles a chunk
+      // boundary must still register.
+      this.eventBus.emit("text_delta", { text: ":1] Moving on." });
+      this.eventBus.emit("turn_end", { turn: 1, stopReason: "end_turn" });
+      this.eventBus.emit("agent_done", { totalTurns: 1 });
+      return;
+    }
+
+    // Auto-compaction: the real session compacts BEFORE the model runs, and
+    // emits `compaction_end` once the compacted messages are installed.
+    if (content === "compact me") {
+      this.eventBus.emit("compaction_start", { messageCount: 40 });
+      this.#used = 900;
+      this.eventBus.emit("compaction_end", { compacted: true, originalCount: 40, newCount: 4 });
+      this.#used += 1500;
+      this.#costUsd += 0.25;
+      this.eventBus.emit("turn_end", {
+        turn: 1,
+        stopReason: "end_turn",
+        usage: { inputTokens: 1500, outputTokens: 60 },
+      });
+      this.eventBus.emit("agent_done", {
+        totalTurns: 1,
+        totalUsage: { inputTokens: 1500, outputTokens: 60 },
+      });
+      return;
+    }
+
     if (content === "report loaded context") {
       const text = this.#messages
         .map((message) =>
@@ -242,11 +340,21 @@ class ScriptedSession {
     // match, or the test would pass against behaviour production never has.
     if (content === "hang") {
       if (this.signal.aborted) return;
+      this.turnRunning = true;
       await new Promise((resolve) => {
         this.signal.addEventListener("abort", () => resolve(), { once: true });
       });
+      // The real session persists the turn AFTER the abort unwinds it, on a
+      // later tick. Anything that disposes without waiting for prompt() to
+      // return races this write and silently loses the turn's tail.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      this.turnRunning = false;
       return;
     }
+
+    // The real session records the prompt, which is where its auto-generated
+    // title comes from.
+    this.#messages.push({ role: "user", content });
 
     this.eventBus.emit("thinking_delta", { text: "planning" });
     this.eventBus.emit("text_delta", { text: "Hello " });
@@ -281,6 +389,13 @@ class ScriptedSession {
       this.eventBus.emit("truncated", { reason: "refusal", continued: false });
     }
 
+    this.#used += 5000;
+    this.eventBus.emit("turn_end", {
+      turn: 1,
+      stopReason: "end_turn",
+      usage: { inputTokens: 10, outputTokens: 20 },
+    });
+
     this.eventBus.emit("agent_done", {
       totalTurns: 1,
       totalUsage: { inputTokens: 10, outputTokens: 20 },
@@ -289,6 +404,12 @@ class ScriptedSession {
 
   async dispose() {
     this.disposed = true;
+    // Records whether teardown cut a turn off mid-unwind, which in the real
+    // session is exactly when the final exchange fails to persist.
+    writeFileSync(
+      path.join(cwd, "dispose-witness.json"),
+      JSON.stringify({ disposedMidTurn: this.turnRunning === true }),
+    );
     this.eventBus.removeAllListeners();
   }
 }
@@ -303,8 +424,8 @@ await runAcpMode({
   model: "claude-opus-5",
   cwd,
   version: "0.0.0-test",
-  createSession: (signal) => {
-    current = new ScriptedSession(signal);
+  createSession: (signal, hooks) => {
+    current = new ScriptedSession(signal, hooks);
     return current;
   },
 });

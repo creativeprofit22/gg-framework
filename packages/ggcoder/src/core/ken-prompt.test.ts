@@ -36,6 +36,12 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(prompt).toContain("Use PROMPT with the concrete next step");
   });
 
+  it("trusts only harness-classified passed verification evidence", () => {
+    expect(prompt).toContain("trust only PASSED rows");
+    expect(prompt).toContain("FAILED or REJECTED rows");
+    expect(prompt).toContain("model-authored claims are not proof");
+  });
+
   it("makes Ken the plan reviewer (no automatic HUMAN on plan submissions)", () => {
     // In autopilot, a submitted plan is reviewed by Ken himself — approve,
     // revise, or (rarely) hand a genuine product decision to the user.

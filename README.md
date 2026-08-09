@@ -81,8 +81,9 @@ level and both models down bottom.
 ### Use whatever model you want
 
 Anthropic, OpenAI/Codex, Gemini, Kimi, GLM, MiniMax, DeepSeek, Xiaomi MiMo, xAI,
-OpenRouter. OAuth or API key, your call. Swap models mid-conversation, nobody's stopping
-you.
+OpenRouter. OAuth or API key, your call. Kimi and Grok take both at once — your
+subscription goes first and the API key covers you automatically when plan usage runs
+out. Swap models mid-conversation, nobody's stopping you.
 
 <p align="center">
   <img src="docs/screenshots/05-providers.png" alt="Provider login hub with OAuth and API-key options" width="900">

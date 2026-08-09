@@ -63,6 +63,15 @@ export { classifyProviderError } from "./error-classification.js";
 export { REDACTION_MARKER, environmentSecrets, redactText, redactValue } from "./redaction.js";
 export type { RedactionOptions } from "./redaction.js";
 
+// UTF-16 well-formedness: providers reject request bodies holding lone surrogates.
+export {
+  hasLoneSurrogate,
+  sanitizeMessagesForWire,
+  sliceHead,
+  sliceTail,
+  toWellFormedText,
+} from "./utils/well-formed.js";
+
 // Provider-level diagnostics (raw SSE event types, etc.)
 export { setProviderDiagnostic } from "./utils/diag.js";
 export type { ProviderDiagnosticFn } from "./utils/diag.js";

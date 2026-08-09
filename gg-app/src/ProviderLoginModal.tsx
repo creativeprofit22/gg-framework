@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
+import { Badge } from "./Badge";
 import {
   authApiKey,
   authOAuthStart,
@@ -15,6 +16,13 @@ import {
 
 function defaultVariantKey(provider: AuthProvider): string | undefined {
   return provider.apiKeyVariants?.[0]?.key;
+}
+
+/** "in 3h" / "in 12m" — how long OAuth stays sidelined, not an absolute stamp. */
+function untilLabel(epochMs: number): string {
+  const mins = Math.max(1, Math.round((epochMs - Date.now()) / 60_000));
+  if (mins < 60) return `${mins}m`;
+  return `${Math.round(mins / 60)}h`;
 }
 
 interface Props {
@@ -119,11 +127,14 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
     }
   }
 
-  async function disconnect(): Promise<void> {
+  // `method` omitted disconnects the provider entirely; passing one drops just
+  // that credential, so a spent API key can go without signing out of the
+  // subscription (and vice versa).
+  async function disconnect(scope?: AuthMethod): Promise<void> {
     if (busy) return;
     setBusy(true);
     try {
-      await authLogout(provider.value);
+      await authLogout(provider.value, scope);
       onChanged();
       onClose();
     } catch (e) {
@@ -133,21 +144,78 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
   }
 
   const apiKeyLabel = provider.apiKeyLabel ?? provider.label;
+  const connectedMethods = provider.connectedMethods ?? [];
+  const guidance = provider.methodGuidance ?? [];
 
   return (
     <Modal title={`Connect ${provider.label}`} onClose={onClose}>
       <div className="login-modal-desc">{provider.description}</div>
 
-      {/* Method picker — only when the provider supports both. */}
+      {/* Method picker — only when the provider supports both. Each option spells
+          out what it bills against and when to pick it, because the choice is not
+          cosmetic: subscription vs. metered credits. Both can be connected at
+          once, so each card also shows its own state and its own disconnect. */}
       {!single && !method && (
-        <div className="login-method-row">
-          <button className="modal-btn primary" onClick={() => setMethod("oauth")}>
-            Sign in with OAuth
-          </button>
-          <button className="modal-btn" onClick={() => setMethod("apikey")}>
-            Use API key
-          </button>
-        </div>
+        <>
+          {provider.oauthExhaustedUntil !== undefined && (
+            <div className="login-status" style={{ color: theme.warning, marginTop: 0 }}>
+              {`Subscription usage is out for ~${untilLabel(provider.oauthExhaustedUntil)} — requests are using the ${apiKeyLabel} API key until it resets.`}
+            </div>
+          )}
+          <div className="login-method-list">
+            {(guidance.length > 0
+              ? guidance
+              : provider.methods.map((m) => ({
+                  method: m,
+                  label: m === "oauth" ? "Sign in" : `${apiKeyLabel} API key`,
+                  billing: "",
+                  when: "",
+                  requires: undefined as string | undefined,
+                }))
+            ).map((g) => {
+              const isConnected = connectedMethods.includes(g.method);
+              const isActive = provider.activeMethod === g.method;
+              return (
+                <div key={g.method} className="login-method-card">
+                  <div className="login-method-card-head">
+                    <span className="login-method-card-title">{g.label}</span>
+                    {isConnected && (
+                      <Badge color={isActive ? theme.success : theme.textDim}>
+                        {isActive ? "In use" : "Standby"}
+                      </Badge>
+                    )}
+                  </div>
+                  {g.billing && <div className="login-method-card-line">{g.billing}</div>}
+                  {g.when && <div className="login-method-card-line">{g.when}</div>}
+                  {g.requires && (
+                    <div className="login-method-card-note">{`Needs: ${g.requires}`}</div>
+                  )}
+                  <div className="login-method-card-actions">
+                    <button
+                      className={"modal-btn" + (isConnected ? "" : " primary")}
+                      onClick={() => setMethod(g.method)}
+                    >
+                      {isConnected ? "Replace" : "Connect"}
+                    </button>
+                    {isConnected && (
+                      <button
+                        className="modal-btn"
+                        style={{ color: theme.error }}
+                        disabled={busy}
+                        onClick={() => void disconnect(g.method)}
+                      >
+                        Disconnect
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {provider.priorityNote && (
+            <div className="login-method-note">{provider.priorityNote}</div>
+          )}
+        </>
       )}
 
       {/* API key entry. */}
@@ -237,7 +305,17 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
             disabled={busy}
             onClick={() => void disconnect()}
           >
-            Disconnect
+            {/* Dual-auth providers get per-method disconnects in the picker cards;
+                this one is the blunt "remove everything" action, so say so when
+                there are two credentials to remove. */}
+            {connectedMethods.length > 1 ? "Disconnect both" : "Disconnect"}
+          </button>
+        )}
+        {/* Picking a method is not a one-way door — let the user back out to the
+            comparison instead of closing and reopening the modal. */}
+        {!single && method && !busy && !needCode && (
+          <button className="modal-btn" onClick={() => setMethod(null)}>
+            Back
           </button>
         )}
         <button className="modal-btn" onClick={onClose}>

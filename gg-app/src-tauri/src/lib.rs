@@ -3506,6 +3506,75 @@ async fn agent_save_settings(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn agent_plugins(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .get(format!("{}/plugins", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn agent_install_plugin(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    bundle_path: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/plugins/install", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "bundlePath": bundle_path }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn agent_remove_plugin(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    plugin_id: String,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let mut endpoint = reqwest::Url::parse(&format!("{}/plugins/", sidecar_base(port)))
+        .map_err(|e| e.to_string())?;
+    endpoint
+        .path_segments_mut()
+        .map_err(|_| "invalid sidecar URL".to_string())?
+        .push(&plugin_id);
+    let res = client
+        .delete(endpoint)
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── Native app settings (~/.gg/gg-app.json) ───────────────────────────────
 // The project folder is a plain home-dir file with NOTHING to do with the
 // agent, so Rust reads/writes it directly. This makes the home-screen Settings
@@ -3830,6 +3899,22 @@ struct ApiKeyVariant {
     base_url: Option<&'static str>,
 }
 
+/// Guidance for one auth method — what it bills against and when to pick it.
+/// Only providers offering a real choice (the dual-auth ones) carry these.
+/// Mirrors `AuthMethodMeta` in packages/ggcoder/src/core/auth-providers.ts.
+struct MethodDetail {
+    /// "oauth" or "apikey".
+    method: &'static str,
+    /// Button/row label, e.g. "Sign in with Grok".
+    label: &'static str,
+    /// What the user spends on this method.
+    billing: &'static str,
+    /// When to choose it.
+    when: &'static str,
+    /// Prerequisite the user must already have, if any.
+    requires: Option<&'static str>,
+}
+
 /// Static metadata for one AI provider in the login hub. Mirrors
 /// packages/ggcoder/src/core/auth-providers.ts (AUTH_PROVIDERS) — keep in sync.
 struct ProviderMeta {
@@ -3839,6 +3924,16 @@ struct ProviderMeta {
     description: &'static str,
     /// Supported auth methods, e.g. `["oauth"]`, `["apikey"]`, or both.
     methods: &'static [&'static str],
+    /// Distinct auth.json key holding subscription OAuth credentials, for the
+    /// providers that can hold OAuth *and* an API key at once. Mirrors gg-core's
+    /// DUAL_AUTH_PROVIDERS — OAuth-only providers store under `value` itself and
+    /// leave this `None`.
+    oauth_key: Option<&'static str>,
+    /// Display name of the OAuth credential ("Grok OAuth"), for the
+    /// priority note. Only meaningful alongside `oauth_key`.
+    oauth_label: Option<&'static str>,
+    /// Per-method guidance; empty when the provider offers no choice.
+    method_details: &'static [MethodDetail],
     api_key_label: Option<&'static str>,
     /// Custom API base URL stored alongside an API-key credential. Used as the
     /// default when `api_key_variants` is empty.
@@ -3857,6 +3952,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Anthropic",
         description: "Claude Fable 5, Opus 4.8, Sonnet 5, Haiku 4.5",
         methods: &["oauth"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: None,
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3866,6 +3964,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "OpenAI",
         description: "GPT-5.6 Sol, GPT-5.6 Terra, GPT-5.6 Luna, GPT-5.5",
         methods: &["oauth"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: None,
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3875,6 +3976,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Gemini",
         description: "Gemini 3.1 Flash Lite, Gemini 3.5 Flash, Gemini 3.1 Pro (Preview)",
         methods: &["oauth"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: None,
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3882,8 +3986,28 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
     ProviderMeta {
         value: "xai",
         label: "xAI (Grok)",
-        description: "Grok 4.5",
-        methods: &["apikey"],
+        description: "Grok 4.5 · OAuth or API key",
+        methods: &["oauth", "apikey"],
+        oauth_key: Some("xai-oauth"),
+        oauth_label: Some("Grok OAuth"),
+        method_details: &[
+            MethodDetail {
+                method: "oauth",
+                label: "Sign in with Grok",
+                billing: "Uses your SuperGrok or X Premium subscription — no per-token API billing.",
+                when: "Preferred. Pick this if you already pay for Grok.",
+                requires: Some(
+                    "An active SuperGrok or X Premium subscription. xAI gates this endpoint by tier, so a valid login can still be refused — keep an API key as backup.",
+                ),
+            },
+            MethodDetail {
+                method: "apikey",
+                label: "xAI API key",
+                billing: "Metered pay-per-token billing on your console.x.ai credits.",
+                when: "Use without a Grok subscription, or as the fallback when OAuth usage runs out.",
+                requires: Some("An API key from console.x.ai."),
+            },
+        ],
         api_key_label: Some("xAI"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3893,6 +4017,24 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Moonshot",
         description: "Kimi K3, K2.7 Code · OAuth or API key",
         methods: &["oauth", "apikey"],
+        oauth_key: Some("moonshot-oauth"),
+        oauth_label: Some("Kimi OAuth"),
+        method_details: &[
+            MethodDetail {
+                method: "oauth",
+                label: "Sign in with Kimi",
+                billing: "Uses your Kimi For Coding plan — no per-token API billing.",
+                when: "Preferred. Pick this if you have a Kimi coding plan.",
+                requires: Some("An active Kimi For Coding subscription."),
+            },
+            MethodDetail {
+                method: "apikey",
+                label: "Moonshot API key",
+                billing: "Metered pay-per-token billing on your Moonshot platform credits.",
+                when: "Use without a Kimi plan, or as the fallback when plan usage runs out.",
+                requires: Some("An API key from platform.moonshot.ai."),
+            },
+        ],
         api_key_label: Some("Moonshot"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3902,6 +4044,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Z.AI (GLM)",
         description: "GLM-5.2, GLM-5.1, GLM-4.7, GLM-4.7 Flash",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("Z.AI"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3911,6 +4056,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "MiniMax",
         description: "MiniMax M3",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("MiniMax"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3921,6 +4069,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         description:
             "MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 · Token Plan or API Credits",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("Xiaomi MiMo"),
         api_key_base_url: Some("https://token-plan-sgp.xiaomimimo.com/v1"),
         api_key_variants: &[
@@ -3941,6 +4092,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "DeepSeek",
         description: "DeepSeek V4 Pro, V4 Flash",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("DeepSeek"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3950,6 +4104,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "Sakana (Fugu)",
         description: "Fugu, Fugu Ultra",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("Sakana"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3959,6 +4116,9 @@ const AUTH_PROVIDERS: &[ProviderMeta] = &[
         label: "OpenRouter",
         description: "Multi-provider gateway",
         methods: &["apikey"],
+        oauth_key: None,
+        oauth_label: None,
+        method_details: &[],
         api_key_label: Some("OpenRouter"),
         api_key_base_url: None,
         api_key_variants: &[],
@@ -3990,10 +4150,17 @@ fn resolve_apikey_target(
 
 /// Native: provider list + live connection status, read directly from
 /// ~/.gg/auth.json. `connected` is true when a credential key is present
-/// (moonshot is satisfied by either its OAuth key `moonshot-oauth` or the
-/// `moonshot` API key; a multi-variant provider like Xiaomi is satisfied by
-/// ANY of its variant keys — mirrors AuthStorage.hasProviderAuth). Never needs
-/// the sidecar.
+/// (a dual-auth provider like Moonshot/xAI is satisfied by either its OAuth key
+/// or its API key; a multi-variant provider like Xiaomi is satisfied by ANY of
+/// its variant keys — mirrors AuthStorage.hasProviderAuth). Never needs the
+/// sidecar.
+///
+/// Also reports WHICH methods are connected and which one a request would
+/// actually use, mirroring AuthStorage's resolution order: subscription OAuth
+/// wins, and the API key only takes over while OAuth's usage window is
+/// exhausted. A single `connected` bit cannot express "signed in with OAuth,
+/// key on file as backup", and the UI needs that to explain itself and to offer
+/// a per-method disconnect.
 #[tauri::command]
 fn app_auth_status() -> serde_json::Value {
     // Parse the auth file into a JSON object; missing/invalid → empty (no creds).
@@ -4007,26 +4174,115 @@ fn app_auth_status() -> serde_json::Value {
             .map(|v| !v.is_null())
             .unwrap_or(false)
     };
-    let connected = |p: &ProviderMeta| -> bool {
-        if p.value == "moonshot" {
-            return has_key("moonshot-oauth") || has_key("moonshot");
-        }
-        if !p.api_key_variants.is_empty() {
-            return has_key(p.value) || p.api_key_variants.iter().any(|v| has_key(v.key));
-        }
-        has_key(p.value)
+    // `usageExhaustedUntil` on an OAuth credential: set by the agent loop when the
+    // subscription endpoint reported its plan usage was spent (0 when absent).
+    let exhausted_until = |key: &str| -> i64 {
+        creds
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.get("usageExhaustedUntil"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
     };
+    // API-key credential present under any of the provider's key(s).
+    let has_api_key = |p: &ProviderMeta| -> bool {
+        if !p.methods.contains(&"apikey") {
+            return false;
+        }
+        has_key(p.value) || p.api_key_variants.iter().any(|v| has_key(v.key))
+    };
+    // OAuth credential present. Dual-auth providers keep it under a distinct key;
+    // OAuth-only providers store it under the provider id itself.
+    let has_oauth = |p: &ProviderMeta| -> bool {
+        if !p.methods.contains(&"oauth") {
+            return false;
+        }
+        match p.oauth_key {
+            Some(key) => has_key(key),
+            None => has_key(p.value),
+        }
+    };
+    let connected = |p: &ProviderMeta| -> bool { has_oauth(p) || has_api_key(p) };
 
+    let now_ms = current_unix_millis();
     let list: Vec<serde_json::Value> = AUTH_PROVIDERS
         .iter()
         .map(|p| {
+            let oauth = has_oauth(p);
+            let api_key = has_api_key(p);
+            let mut connected_methods: Vec<&str> = Vec::new();
+            if oauth {
+                connected_methods.push("oauth");
+            }
+            if api_key {
+                connected_methods.push("apikey");
+            }
+            // OAuth is sidelined only while its usage window is spent AND a key
+            // exists to cover it — with no key, OAuth stays active so the real
+            // usage-limit error surfaces instead of a silent billing switch.
+            let sidelined_until = match p.oauth_key {
+                Some(key) if oauth && api_key => {
+                    let until = exhausted_until(key);
+                    if until > now_ms {
+                        Some(until)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let active_method = if oauth {
+                if sidelined_until.is_some() {
+                    Some("apikey")
+                } else {
+                    Some("oauth")
+                }
+            } else if api_key {
+                Some("apikey")
+            } else {
+                None
+            };
+
             let mut obj = serde_json::json!({
                 "value": p.value,
                 "label": p.label,
                 "description": p.description,
                 "methods": p.methods,
                 "connected": connected(p),
+                "connectedMethods": connected_methods,
             });
+            if let Some(m) = active_method {
+                obj["activeMethod"] = serde_json::json!(m);
+            }
+            if let Some(until) = sidelined_until {
+                obj["oauthExhaustedUntil"] = serde_json::json!(until);
+            }
+            if !p.method_details.is_empty() {
+                let guidance: Vec<serde_json::Value> = p
+                    .method_details
+                    .iter()
+                    .map(|d| {
+                        let mut g = serde_json::json!({
+                            "method": d.method,
+                            "label": d.label,
+                            "billing": d.billing,
+                            "when": d.when,
+                        });
+                        if let Some(r) = d.requires {
+                            g["requires"] = serde_json::json!(r);
+                        }
+                        g
+                    })
+                    .collect();
+                obj["methodGuidance"] = serde_json::json!(guidance);
+            }
+            // Only a provider with two methods has a priority to explain. Keep the
+            // wording in sync with gg-core's DUAL_AUTH_PROVIDERS resolution order.
+            if let (Some(oauth_label), Some(key_label)) = (p.oauth_label, p.api_key_label) {
+                obj["priorityNote"] = serde_json::json!(format!(
+                    "With both connected, {oauth_label} is used first. The {key_label} API key takes over automatically while subscription usage is out (or if the OAuth login expires), then {oauth_label} resumes on its own."
+                ));
+            }
             if let Some(l) = p.api_key_label {
                 obj["apiKeyLabel"] = serde_json::json!(l);
             }
@@ -4102,20 +4358,44 @@ fn apply_apikey(
     serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
 }
 
-/// Pure: remove a provider's credential from the existing auth.json text.
-/// Moonshot also drops its distinct OAuth key (`moonshot-oauth`) so a single
-/// "disconnect" fully removes Kimi OAuth + the Moonshot API key. Returns the new
-/// pretty-printed JSON (an empty object `{}` when nothing remains / no file).
-fn apply_logout(existing: Option<&str>, provider: &str) -> Result<String, String> {
+/// Pure: remove a provider's credential(s) from the existing auth.json text.
+///
+/// `method` scopes the removal for dual-auth providers (Moonshot, xAI), which
+/// hold two independent credentials: `Some("oauth")` drops only the subscription
+/// login, `Some("apikey")` drops only the key(s), and `None` disconnects the
+/// provider entirely. Dropping a spent API key must not sign the user out of
+/// their subscription, and vice versa.
+///
+/// Returns the new pretty-printed JSON (an empty object `{}` when nothing
+/// remains / no file).
+fn apply_logout(
+    existing: Option<&str>,
+    provider: &str,
+    method: Option<&str>,
+) -> Result<String, String> {
     let mut root = parse_auth_object(existing)?;
+    let meta = AUTH_PROVIDERS.iter().find(|p| p.value == provider);
     if let Some(map) = root.as_object_mut() {
-        map.remove(provider);
-        if provider == "moonshot" {
-            map.remove("moonshot-oauth");
+        if method != Some("apikey") {
+            // A dual-auth provider's OAuth credential lives under its own key;
+            // every other provider's lives under the provider id.
+            match meta.and_then(|m| m.oauth_key) {
+                Some(key) => {
+                    map.remove(key);
+                }
+                None => {
+                    map.remove(provider);
+                }
+            }
         }
-        if let Some(meta) = AUTH_PROVIDERS.iter().find(|p| p.value == provider) {
-            for v in meta.api_key_variants {
-                map.remove(v.key);
+        if method != Some("oauth") {
+            // Covers single-credential providers and a dual provider's API key,
+            // plus every extra variant key (currently only Xiaomi's).
+            map.remove(provider);
+            if let Some(meta) = meta {
+                for v in meta.api_key_variants {
+                    map.remove(v.key);
+                }
             }
         }
     }
@@ -4187,18 +4467,27 @@ fn app_auth_apikey(
 }
 
 /// Native: disconnect a provider (remove its credential from ~/.gg/auth.json).
-/// Moonshot also clears its OAuth key; any provider with multiple
-/// `api_key_variants` (currently only Xiaomi) clears every variant key, so a
-/// single "disconnect" fully removes all of a provider's credentials. Never
-/// touches the sidecar. Returns `{ ok: true }`.
+/// `method` ("oauth" | "apikey") disconnects just one of a dual-auth provider's
+/// two credentials; omitted, it removes all of them — including the OAuth key
+/// and every API-key variant (currently only Xiaomi's). Never touches the
+/// sidecar. Returns `{ ok: true }`.
 #[tauri::command]
-fn app_auth_logout(app: tauri::AppHandle, provider: String) -> Result<serde_json::Value, String> {
+fn app_auth_logout(
+    app: tauri::AppHandle,
+    provider: String,
+    method: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if let Some(m) = method.as_deref() {
+        if m != "oauth" && m != "apikey" {
+            return Err(format!("unknown auth method: {m}"));
+        }
+    }
     let existing = std::fs::read_to_string(auth_file_path()).ok();
     // Nothing to remove and no file → succeed silently (idempotent).
     if existing.is_none() {
         return Ok(serde_json::json!({ "ok": true }));
     }
-    let next = apply_logout(existing.as_deref(), &provider)?;
+    let next = apply_logout(existing.as_deref(), &provider, method.as_deref())?;
     write_auth_file(&next)?;
     // Disconnecting removes that provider's models from `/models` and clears
     // its connection dot. Logout is deliberately native (it must work even with
@@ -4595,6 +4884,38 @@ async fn agent_create_project(
             .get("error")
             .and_then(|v| v.as_str())
             .unwrap_or("failed to create project");
+        return Err(msg.to_string());
+    }
+    Ok(body)
+}
+
+/// Proxy: hide (or with `hidden: false`, restore) a project in the picker.
+#[tauri::command]
+async fn agent_set_project_hidden(
+    webview: WebviewWindow,
+    client: State<'_, reqwest::Client>,
+    path: String,
+    hidden: bool,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = session_for(&webview).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/projects/hidden", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "path": path, "hidden": hidden }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let body = res
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        let msg = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("failed to update hidden projects");
         return Err(msg.to_string());
     }
     Ok(body)
@@ -7360,7 +7681,11 @@ pub fn run() {
             agent_files,
             agent_settings,
             agent_save_settings,
+            agent_plugins,
+            agent_install_plugin,
+            agent_remove_plugin,
             agent_create_project,
+            agent_set_project_hidden,
             app_settings_get,
             app_settings_save,
             app_create_project,
@@ -8696,7 +9021,7 @@ mod tests {
     #[test]
     fn apply_logout_xiaomi_drops_both_variant_keys() {
         let existing = r#"{ "xiaomi": { "accessToken": "tp", "refreshToken": "", "expiresAt": 1 }, "xiaomi-credits": { "accessToken": "cr", "refreshToken": "", "expiresAt": 1 } }"#;
-        let out = apply_logout(Some(existing), "xiaomi").unwrap();
+        let out = apply_logout(Some(existing), "xiaomi", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("xiaomi").is_none());
         assert!(v.get("xiaomi-credits").is_none());
@@ -8750,7 +9075,7 @@ mod tests {
     #[test]
     fn apply_logout_removes_provider() {
         let existing = r#"{ "glm": { "accessToken": "k", "refreshToken": "", "expiresAt": 1 }, "openai": { "accessToken": "o", "refreshToken": "", "expiresAt": 1 } }"#;
-        let out = apply_logout(Some(existing), "glm").unwrap();
+        let out = apply_logout(Some(existing), "glm", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("glm").is_none());
         assert_eq!(v["openai"]["accessToken"], "o");
@@ -8759,15 +9084,51 @@ mod tests {
     #[test]
     fn apply_logout_moonshot_drops_both_keys() {
         let existing = r#"{ "moonshot": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "moonshot-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
-        let out = apply_logout(Some(existing), "moonshot").unwrap();
+        let out = apply_logout(Some(existing), "moonshot", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert!(v.get("moonshot").is_none());
         assert!(v.get("moonshot-oauth").is_none());
     }
 
     #[test]
+    fn apply_logout_xai_drops_both_keys() {
+        let existing = r#"{ "xai": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "xai-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
+        let out = apply_logout(Some(existing), "xai", None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("xai").is_none());
+        assert!(v.get("xai-oauth").is_none());
+    }
+
+    #[test]
+    fn apply_logout_scoped_to_one_method_keeps_the_other() {
+        // Disconnecting Grok OAuth must leave a configured API key usable, and
+        // dropping a spent API key must not sign the user out of the subscription.
+        let existing = r#"{ "xai": { "accessToken": "key", "refreshToken": "", "expiresAt": 1 }, "xai-oauth": { "accessToken": "oauth", "refreshToken": "r", "expiresAt": 1 } }"#;
+
+        let out = apply_logout(Some(existing), "xai", Some("oauth")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("xai-oauth").is_none());
+        assert_eq!(v["xai"]["accessToken"], "key");
+
+        let out = apply_logout(Some(existing), "xai", Some("apikey")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("xai").is_none());
+        assert_eq!(v["xai-oauth"]["accessToken"], "oauth");
+    }
+
+    #[test]
+    fn apply_logout_oauth_only_provider_uses_provider_id_key() {
+        // Anthropic has no distinct OAuth key — its credential IS `anthropic`.
+        let existing =
+            r#"{ "anthropic": { "accessToken": "t", "refreshToken": "r", "expiresAt": 1 } }"#;
+        let out = apply_logout(Some(existing), "anthropic", Some("oauth")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(v.get("anthropic").is_none());
+    }
+
+    #[test]
     fn apply_logout_missing_file_is_empty_object() {
-        let out = apply_logout(None, "glm").unwrap();
+        let out = apply_logout(None, "glm", None).unwrap();
         assert_eq!(out.trim(), "{}");
     }
 

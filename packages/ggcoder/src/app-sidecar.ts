@@ -83,9 +83,10 @@ import { cleanupToolOutputs } from "./tools/overflow.js";
 import { readCappedBody } from "./utils/http-body.js";
 import {
   fetchSubscriptionUsage,
-  MOONSHOT_OAUTH_KEY,
   SubscriptionUsageError,
   XIAOMI_CREDITS_KEY,
+  dualAuthProvider,
+  oauthStorageKey,
   discoverLocalModels,
   findProbedModel,
   formatLocalModelId,
@@ -108,10 +109,23 @@ import { loginAnthropic } from "./core/oauth/anthropic.js";
 import { loginOpenAI } from "./core/oauth/openai.js";
 import { loginGemini } from "./core/oauth/gemini.js";
 import { loginKimi } from "./core/oauth/kimi.js";
+import { loginXai } from "./core/oauth/xai.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "./core/oauth/types.js";
-import { AUTH_PROVIDERS, type AuthProviderMeta } from "./core/auth-providers.js";
+import {
+  AUTH_PROVIDERS,
+  authPriorityNote,
+  describeAuthMethods,
+  type AuthMethod,
+  type AuthMethodMeta,
+  type AuthProviderMeta,
+} from "./core/auth-providers.js";
 import { ensureAppDirs, loadSavedSettings } from "./config.js";
 import { SettingsManager, type Settings } from "./core/settings-manager.js";
+import {
+  installPlugin,
+  listInstalledPlugins,
+  removePlugin,
+} from "./core/extensions/plugin-bundles.js";
 import {
   getModel,
   getDefaultThinkingLevel,
@@ -133,11 +147,7 @@ import {
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
-import {
-  discoverProjects,
-  discoverProjectsRootFolders,
-  mergeDiscoveredProjects,
-} from "./core/project-discovery.js";
+import { discoverProjects } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
 import {
   loadTasksSync,
@@ -316,6 +326,16 @@ interface AppSettings {
    *  GG Coder's model (the historical behavior). Set → Ken (chat + autopilot)
    *  uses this model regardless of GG Coder's. */
   kenModels?: Record<string, KenModelPref>;
+  /** Extra folders scanned for projects alongside `projectsRoot`. */
+  projectRoots?: string[];
+  /** Project paths dismissed from the picker, as normalized cwds. */
+  hiddenProjects?: string[];
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+  return out.length > 0 ? out : undefined;
 }
 
 function appSettingsFile(): string {
@@ -346,6 +366,8 @@ async function loadAppSettings(): Promise<AppSettings> {
         raw.projectModels && typeof raw.projectModels === "object" ? raw.projectModels : undefined,
       autopilot: raw.autopilot && typeof raw.autopilot === "object" ? raw.autopilot : undefined,
       kenModels: raw.kenModels && typeof raw.kenModels === "object" ? raw.kenModels : undefined,
+      projectRoots: stringArray(raw.projectRoots),
+      hiddenProjects: stringArray(raw.hiddenProjects),
     };
   } catch {
     return { projectsRoot: defaultProjectsRoot() };
@@ -1076,7 +1098,7 @@ async function main(): Promise<void> {
       provider === "anthropic" ? "Anthropic" : provider === "openai" ? "Codex" : "Kimi";
     // Kimi plan usage is tracked on the OAuth credential specifically — the
     // Moonshot platform API key is metered per-token, not per plan window.
-    const authKey = provider === "moonshot" ? MOONSHOT_OAUTH_KEY : provider;
+    const authKey = oauthStorageKey(provider) ?? provider;
     if (!(await auth.hasProviderAuth(authKey))) {
       // Logged out: drop the replay cache so a later login on a DIFFERENT
       // account can never inherit the previous one's numbers.
@@ -2596,6 +2618,13 @@ async function createSession(
       sharedMcpPool,
       transient: true,
       signal: kenAbort.signal,
+      // Ken belongs to THIS window, so its window is where an MCP prompt
+      // should appear. Passing the bridge also keeps every session in the
+      // daemon uniformly interactive, which is what lets them share ONE pooled
+      // MCP connection: the pool separates interactive from headless callers,
+      // because a connection declares its elicitation capability once, at
+      // initialize (see core/mcp/shared-pool.ts).
+      onMcpElicit: elicitations.onElicit,
       // Ken's bursty, spread-out turns (chat) outlast the default 5-min cache
       // TTL regardless of the user's global speedProfile pick.
       forceLongCacheRetention: true,
@@ -2667,6 +2696,10 @@ async function createSession(
       sharedMcpPool,
       transient: true,
       signal: kenAutoAbort.signal,
+      // Same as Ken chat: this reviewer belongs to a window, so route prompts
+      // there, and keep the daemon's sessions uniformly interactive so they
+      // share one pooled MCP connection.
+      onMcpElicit: elicitations.onElicit,
       // Autopilot review rounds routinely span the injected GG Coder run
       // (often >5 min) regardless of the user's global speedProfile pick.
       forceLongCacheRetention: true,
@@ -3374,13 +3407,65 @@ async function createSession(
   }
 
   async function authStatusPayload(): Promise<{
-    providers: (AuthProviderMeta & { connected: boolean })[];
+    providers: (AuthProviderMeta & {
+      connected: boolean;
+      connectedMethods: AuthMethod[];
+      activeMethod?: AuthMethod;
+      oauthExhaustedUntil?: number;
+      priorityNote?: string;
+      methodGuidance: AuthMethodMeta[];
+    })[];
   }> {
     const providers = await Promise.all(
-      AUTH_PROVIDERS.map(async (p) => ({
-        ...p,
-        connected: await auth.hasProviderAuth(p.value),
-      })),
+      AUTH_PROVIDERS.map(async (p) => {
+        const dual = dualAuthProvider(p.value);
+        // Which methods hold a credential right now. Dual-auth providers can hold
+        // both at once, and the app needs them separately: one "connected" bit
+        // cannot express "OAuth signed in, key also on file as backup", nor offer
+        // a per-method disconnect.
+        const oauthKey = dual?.oauthKey;
+        const hasOAuth = oauthKey ? await auth.hasCredentials(oauthKey) : false;
+        const apiKeyKeys = p.apiKeyVariants?.map((v) => v.key) ?? [p.value];
+        const hasApiKey = p.methods.includes("apikey")
+          ? (await Promise.all(apiKeyKeys.map((k) => auth.hasCredentials(k)))).some(Boolean)
+          : false;
+        const connectedMethods: AuthMethod[] = [];
+        // OAuth-only providers (Anthropic/OpenAI/Gemini) store under the provider
+        // id itself, so `hasProviderAuth` is what proves their OAuth connection.
+        if (
+          p.methods.includes("oauth") &&
+          (hasOAuth || (!dual && (await auth.hasCredentials(p.value))))
+        )
+          connectedMethods.push("oauth");
+        if (hasApiKey) connectedMethods.push("apikey");
+
+        // Which one a request would actually use, mirroring AuthStorage's
+        // resolution: OAuth wins unless its usage window is exhausted AND a key
+        // is configured to cover it.
+        const exhaustedUntil = oauthKey
+          ? ((await auth.getCredentials(oauthKey))?.usageExhaustedUntil ?? 0)
+          : 0;
+        const oauthSidelined = hasOAuth && Date.now() < exhaustedUntil && hasApiKey;
+        const activeMethod = connectedMethods.includes("oauth")
+          ? oauthSidelined
+            ? ("apikey" as const)
+            : ("oauth" as const)
+          : connectedMethods[0];
+
+        // `methodDetails` is the server-side lookup table behind
+        // `methodGuidance` — shipping both would duplicate every string on the
+        // wire for no consumer.
+        const { methodDetails: _table, ...wireMeta } = p;
+        return {
+          ...wireMeta,
+          connected: await auth.hasProviderAuth(p.value),
+          connectedMethods,
+          ...(activeMethod ? { activeMethod } : {}),
+          ...(oauthSidelined ? { oauthExhaustedUntil: exhaustedUntil } : {}),
+          ...(authPriorityNote(p.value) ? { priorityNote: authPriorityNote(p.value)! } : {}),
+          methodGuidance: describeAuthMethods(p.value),
+        };
+      }),
     );
     return { providers };
   }
@@ -3690,6 +3775,46 @@ async function createSession(
       return;
     }
 
+    if (method === "GET" && url === "/plugins") {
+      void listInstalledPlugins(paths.extensionsDir)
+        .then((plugins) => json(res, 200, { plugins }))
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.plugins.list");
+          json(res, 500, { error: error instanceof Error ? error.message : String(error) });
+        });
+      return;
+    }
+
+    if (method === "POST" && url === "/plugins/install") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        try {
+          const bundlePath = (JSON.parse(raw) as { bundlePath?: unknown }).bundlePath;
+          if (typeof bundlePath !== "string" || !path.isAbsolute(bundlePath)) {
+            json(res, 400, { error: "bundlePath must be an absolute path" });
+            return;
+          }
+          const plugin = await installPlugin(bundlePath, paths.extensionsDir);
+          json(res, 200, { plugin, restartRequired: true });
+        } catch (error) {
+          captureSidecarError(error, "app-sidecar.plugins.install");
+          json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
+      });
+      return;
+    }
+
+    if (method === "DELETE" && url.startsWith("/plugins/")) {
+      const pluginId = decodeURIComponent(url.slice("/plugins/".length));
+      void removePlugin(pluginId, paths.extensionsDir)
+        .then(() => json(res, 200, { removed: pluginId, restartRequired: true }))
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.plugins.remove");
+          json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        });
+      return;
+    }
+
     if (method === "GET" && url === "/settings") {
       // `configured` is true only when the user explicitly saved a projects root
       // (the gg-app.json file exists with a value) — not when we fall back to the
@@ -3775,17 +3900,53 @@ async function createSession(
       return;
     }
 
+    // Dismiss a project from the picker (or restore it with hidden:false). The
+    // path is kept rather than the row: sessions in scratch dirs keep
+    // re-surfacing, so the user's decision has to outlive any one scan.
+    if (method === "POST" && url === "/projects/hidden") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { path?: string; hidden?: boolean };
+        try {
+          body = JSON.parse(raw) as { path?: string; hidden?: boolean };
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const target = body.path?.trim();
+        if (!target) {
+          json(res, 400, { error: "path is required" });
+          return;
+        }
+        const key = path.resolve(target);
+        try {
+          const settings = await loadAppSettings();
+          const current = new Set((settings.hiddenProjects ?? []).map((p) => path.resolve(p)));
+          if (body.hidden === false) current.delete(key);
+          else current.add(key);
+          settings.hiddenProjects = current.size > 0 ? Array.from(current) : undefined;
+          await saveAppSettings(settings);
+          json(res, 200, { hidden: Array.from(current) });
+        } catch (err) {
+          captureSidecarError(err, "app-sidecar.projects.hidden");
+          json(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        }
+      });
+      return;
+    }
+
     if (method === "GET" && url === "/projects") {
-      // Include configured root children before they have agent session history.
+      // Session stores plus configured/inferred filesystem roots, with hidden
+      // projects filtered by the canonical discovery implementation.
       void loadAppSettings()
-        .then(({ projectsRoot }) =>
-          Promise.all([discoverProjects(), discoverProjectsRootFolders(projectsRoot)]),
-        )
-        .then(([historyProjects, rootProjects]) =>
-          json(res, 200, {
-            projects: mergeDiscoveredProjects([...historyProjects, ...rootProjects]),
+        .then(({ projectsRoot, projectRoots, hiddenProjects }) =>
+          discoverProjects({
+            projectsRoot,
+            extraRoots: projectRoots,
+            hiddenPaths: hiddenProjects,
           }),
         )
+        .then((projects) => json(res, 200, { projects }))
         .catch((err) => {
           captureSidecarError(err, "app-sidecar.projects.discover");
           log("ERROR", "app-sidecar", "discoverProjects failed", {
@@ -5320,9 +5481,11 @@ async function createSession(
             if (provider === "anthropic") creds = await loginAnthropic(cb);
             else if (provider === "openai") creds = await loginOpenAI(cb);
             else if (provider === "gemini") creds = await loginGemini(cb);
-            else if (provider === "moonshot") {
-              creds = await loginKimi(cb);
-              storageKey = MOONSHOT_OAUTH_KEY;
+            else if (provider === "moonshot" || provider === "xai") {
+              // Subscription OAuth (Kimi plan / SuperGrok-X Premium) stores under
+              // a distinct key so it can coexist with the provider's API key.
+              creds = provider === "moonshot" ? await loginKimi(cb) : await loginXai(cb);
+              storageKey = dualAuthProvider(provider)!.oauthKey;
             } else {
               throw new Error(`OAuth not implemented for ${provider}`);
             }
@@ -5415,19 +5578,32 @@ async function createSession(
       void readBody(req, res).then(async (raw) => {
         if (raw === null) return;
         let provider: string;
+        let logoutMethod: AuthMethod | undefined;
         try {
-          provider = (JSON.parse(raw) as { provider?: string }).provider ?? "";
+          const body = JSON.parse(raw) as { provider?: string; method?: string };
+          provider = body.provider ?? "";
+          logoutMethod =
+            body.method === "oauth" || body.method === "apikey" ? body.method : undefined;
         } catch {
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        await auth.clearCredentials(provider);
-        // Moonshot's OAuth credential lives under a distinct key — clear both so
-        // "disconnect" fully removes Kimi OAuth and the API key.
-        if (provider === "moonshot") await auth.clearCredentials(MOONSHOT_OAUTH_KEY);
-        // Xiaomi's API Credits credential lives under a distinct key — clear it
-        // too so "disconnect" fully removes both the Token Plan and Credits keys.
-        if (provider === "xiaomi") await auth.clearCredentials(XIAOMI_CREDITS_KEY);
+        const dual = dualAuthProvider(provider);
+        // A dual-auth provider can be disconnected one method at a time: dropping
+        // a spent API key should not sign the user out of their subscription, and
+        // vice versa. Omitting `method` still clears everything (the plain
+        // "Disconnect" action).
+        if (logoutMethod !== "apikey") {
+          await auth.clearCredentials(dual ? dual.oauthKey : provider);
+        }
+        if (logoutMethod !== "oauth") {
+          // Non-dual providers store their only credential under the provider id,
+          // so this covers both them and a dual provider's API key.
+          await auth.clearCredentials(provider);
+          // Xiaomi's API Credits credential lives under a distinct key — clear it
+          // too so "disconnect" fully removes both the Token Plan and Credits keys.
+          if (provider === "xiaomi") await auth.clearCredentials(XIAOMI_CREDITS_KEY);
+        }
         broadcast("auth_done", { provider });
         json(res, 200, { ok: true });
       });

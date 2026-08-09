@@ -2,6 +2,7 @@ import readline from "node:readline";
 import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { sliceHead } from "@kenkaiiii/gg-ai";
 import { resolvePath } from "./path-utils.js";
 import { BINARY_EXTENSIONS } from "./read.js";
 import { localOperations, type ToolOperations } from "./operations.js";
@@ -275,7 +276,7 @@ async function searchFile(
         if (regex.test(line)) {
           // Truncate long lines to prevent massive output from binary/minified files
           const truncatedLine =
-            line.length > MAX_LINE_LENGTH ? line.slice(0, MAX_LINE_LENGTH) + "…" : line;
+            line.length > MAX_LINE_LENGTH ? sliceHead(line, MAX_LINE_LENGTH) + "…" : line;
           results.push(`${relPath}:${lineNum}:${truncatedLine}`);
           if (results.length >= maxResults) {
             break;

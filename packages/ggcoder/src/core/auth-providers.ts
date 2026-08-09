@@ -3,7 +3,7 @@
 // so the desktop app and the terminal stay in lockstep. The app fetches this
 // (plus live connection status) from the sidecar's /auth/status endpoint.
 
-import { XIAOMI_CREDITS_KEY } from "@kenkaiiii/gg-core";
+import { XIAOMI_CREDITS_KEY, dualAuthProvider } from "@kenkaiiii/gg-core";
 
 export type AuthMethod = "oauth" | "apikey";
 
@@ -42,6 +42,28 @@ export interface AuthProviderMeta {
    * for every provider with a single API-key credential.
    */
   apiKeyVariants?: ApiKeyVariant[];
+  /**
+   * Per-method guidance overrides. Only providers whose methods differ in
+   * billing/entitlement (the dual-auth ones) need these; everything else is
+   * described generically by {@link describeAuthMethods}.
+   */
+  methodDetails?: Partial<Record<AuthMethod, AuthMethodMeta>>;
+}
+
+/**
+ * What one auth method means for a provider, so both UIs can answer "which do I
+ * pick?" without hardcoding provider knowledge in a component.
+ */
+export interface AuthMethodMeta {
+  method: AuthMethod;
+  /** Button/row label, e.g. "Sign in with Grok (SuperGrok / X Premium)". */
+  label: string;
+  /** What the user spends on this method. */
+  billing: string;
+  /** When to choose it. */
+  when: string;
+  /** Prerequisite the user must already have, if any. */
+  requires?: string;
 }
 
 export const AUTH_PROVIDERS: AuthProviderMeta[] = [
@@ -66,9 +88,27 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "xai",
     label: "xAI (Grok)",
-    description: "Grok 4.5",
-    methods: ["apikey"],
+    description: "Grok 4.5 · OAuth or API key",
+    methods: ["oauth", "apikey"],
     apiKeyLabel: "xAI",
+    methodDetails: {
+      oauth: {
+        method: "oauth",
+        label: "Sign in with Grok",
+        billing: "Uses your SuperGrok or X Premium subscription — no per-token API billing.",
+        when: "Preferred. Pick this if you already pay for Grok.",
+        requires:
+          "An active SuperGrok or X Premium subscription. xAI gates this endpoint by tier, " +
+          "so a valid login can still be refused — keep an API key as backup.",
+      },
+      apikey: {
+        method: "apikey",
+        label: "xAI API key",
+        billing: "Metered pay-per-token billing on your console.x.ai credits.",
+        when: "Use without a Grok subscription, or as the fallback when OAuth usage runs out.",
+        requires: "An API key from console.x.ai.",
+      },
+    },
   },
   {
     value: "moonshot",
@@ -76,6 +116,22 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
     description: "Kimi K3, K2.7 Code · OAuth or API key",
     methods: ["oauth", "apikey"],
     apiKeyLabel: "Moonshot",
+    methodDetails: {
+      oauth: {
+        method: "oauth",
+        label: "Sign in with Kimi",
+        billing: "Uses your Kimi For Coding plan — no per-token API billing.",
+        when: "Preferred. Pick this if you have a Kimi coding plan.",
+        requires: "An active Kimi For Coding subscription.",
+      },
+      apikey: {
+        method: "apikey",
+        label: "Moonshot API key",
+        billing: "Metered pay-per-token billing on your Moonshot platform credits.",
+        when: "Use without a Kimi plan, or as the fallback when plan usage runs out.",
+        requires: "An API key from platform.moonshot.ai.",
+      },
+    },
   },
   {
     value: "glm",
@@ -136,4 +192,52 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
 
 export function getAuthProvider(value: string): AuthProviderMeta | undefined {
   return AUTH_PROVIDERS.find((p) => p.value === value);
+}
+
+/**
+ * Per-method guidance for a provider, in resolution order. Providers with a
+ * single method get a generic description; the dual-auth ones (Kimi, Grok) carry
+ * explicit `methodDetails` because the choice changes what the user is billed.
+ */
+export function describeAuthMethods(provider: string): AuthMethodMeta[] {
+  const meta = getAuthProvider(provider);
+  if (!meta) return [];
+  return meta.methods.map((method) => {
+    const override = meta.methodDetails?.[method];
+    // Copy rather than hand back the table entry itself: callers serialize this
+    // alongside the provider meta, and a shared reference appearing twice in one
+    // payload trips the sidecar's cycle-safe JSON encoder ([CIRCULAR]).
+    if (override) return { ...override };
+    return method === "oauth"
+      ? {
+          method,
+          label: `Sign in with ${meta.label}`,
+          billing: "Uses your existing plan with this provider.",
+          when: "The only way to connect this provider.",
+        }
+      : {
+          method,
+          label: `${meta.apiKeyLabel ?? meta.label} API key`,
+          billing: "Metered pay-per-token billing on this provider's credits.",
+          when: "The only way to connect this provider.",
+        };
+  });
+}
+
+/**
+ * How the runtime picks between two connected methods, phrased for the UI. Only
+ * dual-auth providers have a choice to explain; everything else returns
+ * undefined so callers can omit the note entirely.
+ *
+ * Keep this wording in sync with AuthStorage's actual resolution order in
+ * gg-core (`DUAL_AUTH_PROVIDERS`) — it is the user-facing description of it.
+ */
+export function authPriorityNote(provider: string): string | undefined {
+  const dual = dualAuthProvider(provider);
+  if (!dual) return undefined;
+  return (
+    `With both connected, ${dual.oauthLabel} is used first. The ${dual.apiKeyLabel} takes over ` +
+    `automatically while subscription usage is out (or if the OAuth login expires), then ` +
+    `${dual.oauthLabel} resumes on its own.`
+  );
 }

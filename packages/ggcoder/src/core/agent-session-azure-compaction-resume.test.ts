@@ -180,7 +180,8 @@ describe("AgentSession Azure compaction and resume", () => {
     expect(summaryRequest?.body).toMatchObject({
       model: DEPLOYMENT,
       store: false,
-      max_output_tokens: 4096,
+      // The merged model-window policy clamps this deployment to the summary ceiling.
+      max_output_tokens: 8192,
     });
     expect(JSON.stringify(summaryRequest?.body.input)).toContain(
       "Summarize the conversation above",

@@ -156,16 +156,44 @@ export async function isGzipSessionPath(filePath: string): Promise<boolean> {
   }
 }
 
+/**
+ * Open a session transcript for reading, transparently gunzipping archives.
+ *
+ * Returns `close()` alongside the stream because tearing down a gzip read is a
+ * trap: `source.pipe(gunzip)` leaves the source unreachable, and `.pipe()` does
+ * NOT propagate destroy() upstream. Destroying only the returned stream — the
+ * intuitive cleanup — severs the pipe before the source can be torn down and
+ * orphans its file descriptor forever.
+ *
+ * Measured on the shipped Node 22.12 runtime, 100 partial reads:
+ *   destroy(gunzip) only ....... 10 leaked fds
+ *   destroy(gunzip) + source ... 0 leaked fds
+ *
+ * A bare `break` out of `for await` is safe on its own (readline's iterator
+ * return() tears down the whole chain), but any explicit teardown must go
+ * through `close()` so both ends are destroyed together. Callers that stop
+ * early should always call it; destroy() is idempotent, so calling it after a
+ * natural end-of-stream is harmless.
+ */
 export async function openSessionReadStream(filePath: string): Promise<{
   path: string;
   stream: Readable;
+  close: () => void;
 }> {
   const resolved = await resolveSessionPath(filePath);
   const input: ReadStream = createReadStream(resolved);
   if (await isGzipSessionPath(resolved)) {
-    return { path: resolved, stream: input.pipe(createGunzip()) };
+    const stream = input.pipe(createGunzip());
+    return {
+      path: resolved,
+      stream,
+      close: () => {
+        stream.destroy();
+        input.destroy();
+      },
+    };
   }
-  return { path: resolved, stream: input };
+  return { path: resolved, stream: input, close: () => input.destroy() };
 }
 
 /**

@@ -1,5 +1,39 @@
 # @kenkaiiii/gg-ai
 
+## 5.37.0
+
+## 5.36.0
+
+## 5.35.1
+
+### Patch Changes
+
+- 8e124fd: Fix "no low surrogate in string" / Bad Request errors from Anthropic and OpenAI.
+
+  An unpaired UTF-16 surrogate anywhere in the conversation (a model streaming a
+  split emoji inside tool-call arguments, or a character-indexed truncation that
+  cut an astral character in half) made the JSON request body unparseable for
+  every provider — and it persisted in history, so retries and model switches
+  failed identically.
+
+  `stream()` now scrubs lone surrogates from all messages at the single provider
+  boundary, and the tool-result/shell/web-fetch/grep truncation paths cut on
+  character boundaries instead of splitting surrogate pairs.
+
+## 5.35.0
+
+## 5.34.3
+
+## 5.34.2
+
+## 5.34.1
+
+## 5.34.0
+
+## 5.33.0
+
+## 5.32.0
+
 ## 5.31.0
 
 ## 5.30.3

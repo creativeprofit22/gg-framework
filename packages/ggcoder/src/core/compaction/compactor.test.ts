@@ -11,7 +11,14 @@ import {
   extractSummaryText,
   compact,
   compactHistoricalToolCallArgs,
+  extractFileOperations,
+  splitTrackedModifiedFiles,
+  buildModifiedFilesSection,
+  resolveSummaryOutputTokens,
   HISTORICAL_TOOL_ARG_MAX_CHARS,
+  MAX_TRACKED_MODIFIED_FILES,
+  MIN_SUMMARY_OUTPUT_TOKENS,
+  MAX_SUMMARY_OUTPUT_TOKENS,
   SUMMARY_ATTEMPT_TIMEOUT_MS,
 } from "./compactor.js";
 import { remapAnchorForCompaction } from "../session-history.js";
@@ -734,6 +741,46 @@ describe("compact", () => {
     expect(result.result.tokensAfterEstimate).toBeLessThan(result.result.targetTokens);
   });
 
+  it("feeds query-relevant older evidence to the summarizer when its prompt budget is constrained", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockImplementation((request) => {
+      const requestText = (request.messages as Message[])
+        .map((message) =>
+          typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+        )
+        .join("\n");
+      expect(requestText).toContain("OLD_EVIDENCE_MARKER");
+      return mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Relevant summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never;
+    });
+
+    const messages: Message[] = [makeMessage("system", "sys")];
+    messages.push(makeMessage("user", `Original account task ${"a".repeat(10_000)}`));
+    for (let index = 0; index < 100; index++) {
+      const detail =
+        index === 5
+          ? "OAuth verifier mismatch root cause OLD_EVIDENCE_MARKER"
+          : `Unrelated dashboard detail ${index}`;
+      messages.push(makeMessage("user", `${detail} ${"x".repeat(10_000)}`));
+      messages.push(makeMessage("assistant", `Handled detail ${index}`));
+    }
+    messages.push(makeMessage("user", "Fix the OAuth verifier mismatch."));
+
+    const result = await compact(messages, baseOptions);
+    expect(mockStream).toHaveBeenCalled();
+    expect(result.result.contextSelection).toMatchObject({
+      strategy: "query_aware",
+      queryTerms: expect.any(Number),
+      selectedTokens: expect.any(Number),
+      droppedMessages: expect.any(Number),
+    });
+  });
+
   it("updates an anchored prior summary and preserves the approved plan reference", async () => {
     const mockStream = vi.mocked(stream);
     mockStream.mockImplementation((request) => {
@@ -1155,5 +1202,182 @@ describe("compact", () => {
     for (let anchor = 0; anchor <= oldNonSystem; anchor++) {
       expect(remapAnchorForCompaction(anchor, remap!)).toBeLessThanOrEqual(newNonSystem);
     }
+  });
+
+  it("appends one merged modified-files block and never lists read files", async () => {
+    const mockStream = vi.mocked(stream);
+    mockStream.mockReturnValue(
+      mockStreamResult(
+        Promise.resolve({
+          message: { role: "assistant", content: "Fresh summary." },
+          stopReason: "end_turn",
+          usage: { inputTokens: 1000, outputTokens: 50 },
+        }),
+      ) as never,
+    );
+
+    const messages = buildConversation(30);
+    // Prior compacted memory already carrying tracked edits from a collapsed segment.
+    messages.splice(1, 0, {
+      role: "user",
+      content:
+        "[Previous conversation summary]\n\nOlder work.\n\n" +
+        "<read-files>\nsrc/legacy-read.ts\n</read-files>\n" +
+        "<modified-files>\nsrc/carried.ts\n</modified-files>",
+      provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
+    } as Message);
+    messages.splice(2, 0, makeToolCallMessage("edit", { file_path: "src/fresh.ts" }, "e1"));
+    messages.splice(3, 0, makeToolCallMessage("grep", { path: "src/" }, "g1"));
+
+    const result = await compact(messages, baseOptions);
+    const summary = result.messages[1].content as string;
+
+    expect(summary).not.toContain("<read-files>");
+    expect(summary).not.toContain("src/legacy-read.ts");
+    // Exactly one block, carrying both the pre-collapse and the fresh edit.
+    expect(summary.match(/<modified-files>/gu)).toHaveLength(1);
+    expect(summary).toContain("src/carried.ts");
+    expect(summary).toContain("src/fresh.ts");
+    // grep's path argument is a directory, not a file the agent opened.
+    expect(summary).not.toContain("src/\n");
+
+    // The prior block is stripped from the prose handed back to the summarizer,
+    // so it cannot be transcribed into the new summary a second time.
+    // Mocks are not reset between tests in this file — inspect this test's call.
+    const lastCall = vi.mocked(stream).mock.calls.at(-1)!;
+    const sentText = (lastCall[0].messages as Message[])
+      .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+      .join("\n");
+    expect(sentText).toContain("<previous-summary>");
+    expect(sentText).not.toContain("<modified-files>");
+    expect(sentText).toContain("SUPERSEDES");
+  });
+});
+
+// ── extractFileOperations ──────────────────────────────────
+
+describe("extractFileOperations", () => {
+  it("counts only the read tool as a read, not grep/find directory scans", () => {
+    const ops = extractFileOperations([
+      makeToolCallMessage("read", { file_path: "src/opened.ts" }, "r1"),
+      makeToolCallMessage("grep", { path: "src/components" }, "g1"),
+      makeToolCallMessage("find", { path: "packages" }, "f1"),
+      makeToolCallMessage("edit", { file_path: "src/changed.ts" }, "e1"),
+    ]);
+
+    expect([...ops.read]).toEqual(["src/opened.ts"]);
+    expect([...ops.modified]).toEqual(["src/changed.ts"]);
+  });
+});
+
+// ── modified-file tracking ─────────────────────────────────
+
+describe("splitTrackedModifiedFiles", () => {
+  it("extracts tracked paths and strips both tracking blocks from the prose", () => {
+    const { text, files } = splitTrackedModifiedFiles(
+      "Prose body.\n\n<read-files>\nsrc/a.ts\n</read-files>\n" +
+        "<modified-files>\nsrc/b.ts\nsrc/c.ts\n</modified-files>",
+    );
+
+    expect(text).toBe("Prose body.");
+    expect(files).toEqual(["src/b.ts", "src/c.ts"]);
+  });
+
+  it("leaves prose without tracking blocks untouched", () => {
+    const { text, files, omitted } = splitTrackedModifiedFiles("Just a summary.");
+    expect(text).toBe("Just a summary.");
+    expect(files).toEqual([]);
+    expect(omitted).toBe(0);
+  });
+
+  it("reads the overflow note as a count, never as a file path", () => {
+    const { files, omitted } = splitTrackedModifiedFiles(
+      "Prose.\n\n<modified-files>\nsrc/a.ts\n[... 7 earlier modified files omitted]\n</modified-files>",
+    );
+
+    expect(files).toEqual(["src/a.ts"]);
+    expect(omitted).toBe(7);
+  });
+});
+
+describe("buildModifiedFilesSection", () => {
+  it("returns empty string when nothing was modified", () => {
+    expect(buildModifiedFilesSection([])).toBe("");
+    expect(buildModifiedFilesSection(["  ", ""])).toBe("");
+  });
+
+  it("dedupes carried and fresh paths into a single block", () => {
+    const section = buildModifiedFilesSection(["src/a.ts", "src/b.ts", "src/a.ts"]);
+    expect(section.match(/src\/a\.ts/gu)).toHaveLength(1);
+    expect(section).toContain("src/b.ts");
+  });
+
+  it("keeps the most recent paths when the list overflows", () => {
+    const paths = Array.from({ length: MAX_TRACKED_MODIFIED_FILES + 5 }, (_v, i) => `src/f${i}.ts`);
+    const section = buildModifiedFilesSection(paths);
+
+    expect(section).toContain(`src/f${paths.length - 1}.ts`);
+    expect(section).not.toContain("src/f0.ts\n");
+    expect(section).toContain("[... 5 earlier modified files omitted]");
+  });
+
+  it("accumulates the omitted count across generations instead of resetting", () => {
+    const section = buildModifiedFilesSection(["src/a.ts"], 7);
+    expect(section).toContain("[... 7 earlier modified files omitted]");
+
+    const overflowing = Array.from(
+      { length: MAX_TRACKED_MODIFIED_FILES + 5 },
+      (_v, i) => `src/f${i}.ts`,
+    );
+    expect(buildModifiedFilesSection(overflowing, 7)).toContain(
+      "[... 12 earlier modified files omitted]",
+    );
+  });
+
+  it("still reports prior omissions when nothing survives the merge", () => {
+    expect(buildModifiedFilesSection([], 4)).toContain("[... 4 earlier modified files omitted]");
+  });
+
+  it("survives repeated build/split generations without stacking notes", () => {
+    // Generation 1: overflow by 5.
+    let section = buildModifiedFilesSection(
+      Array.from({ length: MAX_TRACKED_MODIFIED_FILES + 5 }, (_v, i) => `src/f${i}.ts`),
+    );
+
+    // Three further generations, each adding two fresh edits.
+    let carried = splitTrackedModifiedFiles(`Prose.${section}`);
+    for (let gen = 0; gen < 3; gen++) {
+      expect(carried.files).toHaveLength(MAX_TRACKED_MODIFIED_FILES);
+      // The note must never be mistaken for a path.
+      expect(carried.files.some((f) => f.startsWith("[..."))).toBe(false);
+
+      section = buildModifiedFilesSection(
+        [...carried.files, `src/new-${gen}-a.ts`, `src/new-${gen}-b.ts`],
+        carried.omitted,
+      );
+      carried = splitTrackedModifiedFiles(`Prose.${section}`);
+    }
+
+    // Exactly one note line, with the running total (5 + 2 + 2 + 2).
+    expect(section.match(/earlier modified files omitted/gu)).toHaveLength(1);
+    expect(section).toContain("[... 11 earlier modified files omitted]");
+    expect(carried.omitted).toBe(11);
+    expect(carried.files).toHaveLength(MAX_TRACKED_MODIFIED_FILES);
+    expect(section).toContain("src/new-2-b.ts");
+  });
+});
+
+// ── resolveSummaryOutputTokens ─────────────────────────────
+
+describe("resolveSummaryOutputTokens", () => {
+  it("floors at the minimum for small or unknown windows", () => {
+    expect(resolveSummaryOutputTokens(32_000)).toBe(MIN_SUMMARY_OUTPUT_TOKENS);
+    expect(resolveSummaryOutputTokens(0)).toBe(MIN_SUMMARY_OUTPUT_TOKENS);
+    expect(resolveSummaryOutputTokens(Number.NaN)).toBe(MIN_SUMMARY_OUTPUT_TOKENS);
+  });
+
+  it("scales with the window and caps at the maximum", () => {
+    expect(resolveSummaryOutputTokens(200_000)).toBe(6000);
+    expect(resolveSummaryOutputTokens(1_000_000)).toBe(MAX_SUMMARY_OUTPUT_TOKENS);
   });
 });

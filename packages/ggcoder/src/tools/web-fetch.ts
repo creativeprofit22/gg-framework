@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
+import { sliceHead } from "@kenkaiiii/gg-ai";
 import { extractToMarkdown } from "./html-extract.js";
 import { extractPdfText, PdfExtractorUnavailable } from "./pdf-extract.js";
 import { checkUrlPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
@@ -352,7 +353,9 @@ export async function readBoundedBody(
 
 function truncate(content: string, maxLength: number): string {
   if (content.length <= maxLength) return content;
-  return content.slice(0, maxLength) + "\n\n[Content truncated]";
+  // Surrogate-safe: a mid-emoji cut strands a lone surrogate that makes the
+  // provider request body invalid JSON on the next turn.
+  return sliceHead(content, maxLength) + "\n\n[Content truncated]";
 }
 
 function byteLimitForResponse(contentType: string, url: string): number {

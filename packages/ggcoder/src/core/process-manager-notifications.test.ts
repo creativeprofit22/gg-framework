@@ -21,8 +21,19 @@ const tempDirs: string[] = [];
 /** Mirrors WATCH_MAX_REPORTS in process-manager.ts (module-private). */
 const WATCH_MAX_REPORTS_EXPECTED = 3;
 
-function manager(notifications: AgentNotificationQueue): ProcessManager {
-  const instance = new ProcessManager({ notifications });
+/**
+ * Every manager here gets its own log directory. `start()` writes AND prunes
+ * inside `bgDir`, so an un-overridden instance would sweep the developer's real
+ * `~/.gg/bg` history when the suite runs.
+ */
+async function bgDir(): Promise<string> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "gg-process-bg-"));
+  tempDirs.push(directory);
+  return directory;
+}
+
+async function manager(notifications: AgentNotificationQueue): Promise<ProcessManager> {
+  const instance = new ProcessManager({ notifications, bgDir: await bgDir() });
   managers.push(instance);
   return instance;
 }
@@ -65,7 +76,7 @@ afterEach(async () => {
 describe("ProcessManager progress notifications", () => {
   it("pushes a terminal exit checkpoint without any task_output call", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     const started = await instance.start("echo hello-from-build; exit 3", cwd);
@@ -81,7 +92,7 @@ describe("ProcessManager progress notifications", () => {
 
   it("surfaces progress on a long-running process before it exits", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     // Logs steadily for ~12s: long enough for at least one 5s checkpoint tick.
@@ -101,7 +112,7 @@ describe("ProcessManager progress notifications", () => {
 
   it("bounds the digest of a process that floods its log", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     await instance.start(`for i in $(seq 1 2000); do echo "line-$i padding padding"; done`, cwd);
@@ -114,7 +125,7 @@ describe("ProcessManager progress notifications", () => {
 
   it("leaves no watcher timer alive after a process exits", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     const started = await instance.start("true", cwd);
@@ -126,7 +137,7 @@ describe("ProcessManager progress notifications", () => {
 
   it("disposes the watcher when a running process is stopped", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     const started = await instance.start("sleep 30", cwd);
@@ -139,7 +150,7 @@ describe("ProcessManager progress notifications", () => {
 
   it("backs off repeated progress checkpoints on a long-lived chatty process", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     // A dev server: logs continuously and never exits on its own. At a flat 5s
@@ -167,7 +178,7 @@ describe("ProcessManager progress notifications", () => {
 
   it("still reports a short build promptly, before any backoff matters", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     const started = await instance.start(
@@ -183,7 +194,7 @@ describe("ProcessManager progress notifications", () => {
 
   it("stays responsive after an idle stretch instead of drifting to the cap", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     // A dev server that boots, idles, then fails a recompile and KEEPS RUNNING
@@ -226,7 +237,7 @@ describe("ProcessManager progress notifications", () => {
 
   it("stops pushing progress entirely once the report budget is spent", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     // A dev server: logs continuously, never exits. Without a budget this kept
@@ -259,7 +270,7 @@ describe("ProcessManager progress notifications", () => {
 
   it("still reports the exit after the progress budget is spent", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = manager(queue);
+    const instance = await manager(queue);
     const cwd = await tempDir();
 
     // Chatty enough to burn the budget, then exits non-zero. "It finished, and
@@ -277,7 +288,7 @@ describe("ProcessManager progress notifications", () => {
   }, 120_000);
 
   it("stays silent when no notification queue is wired", async () => {
-    const instance = new ProcessManager();
+    const instance = new ProcessManager({ bgDir: await bgDir() });
     managers.push(instance);
     const cwd = await tempDir();
 

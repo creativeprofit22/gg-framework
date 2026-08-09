@@ -56,6 +56,9 @@ const EXTERNAL = [
   "typescript",
   // source_path spawns opensrc's CLI by physical path; it is never imported.
   "opensrc",
+  // Bash launches SRT's physical CLI as a child process for per-session OS
+  // sandboxing; keep its platform binaries and CLI files on disk.
+  "@anthropic-ai/sandbox-runtime",
   // Default MCP server: spawned as a stdio child, never imported, so esbuild
   // won't bundle it. Copy it next to the sidecar so resolveStdioCommand can
   // resolve its bin and rewrite `npx -y @kenkaiiii/kencode-search` to a direct

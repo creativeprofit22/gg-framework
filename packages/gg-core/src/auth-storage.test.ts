@@ -6,7 +6,10 @@ import {
   AuthStorage,
   MOONSHOT_OAUTH_KEY,
   NotLoggedInError,
+  XAI_OAUTH_KEY,
   XIAOMI_CREDITS_KEY,
+  dualAuthProvider,
+  providerStorageKeys,
   readStoredBaseUrlSync,
 } from "./auth-storage.js";
 
@@ -102,6 +105,26 @@ describe("AuthStorage — shared-file concurrency", () => {
     expect((await runningSession.resolveCredentials("anthropic")).accessToken).toBe(
       "relogged-token",
     );
+  });
+
+  it("sees a credential another writer added, without waiting for a restart", async () => {
+    const filePath = await tempAuthFile();
+    tmpFiles.push(filePath);
+    const daemon = new AuthStorage(filePath);
+    // The daemon answers "what is connected?" from a cached snapshot. Prime it
+    // while logged out — the state a user is in right before connecting.
+    expect(await daemon.hasProviderAuth("xai")).toBe(false);
+
+    // The desktop app writes API keys and disconnects NATIVELY (they must work
+    // with no daemon running), so the daemon never sees the mutation go by. A
+    // load-once cache left it listing stale models until the app restarted.
+    await new AuthStorage(filePath).setCredentials("xai", oauthCreds("key"));
+    expect(await daemon.hasProviderAuth("xai")).toBe(true);
+    expect(await daemon.listProviders()).toContain("xai");
+
+    // And the reverse: a disconnect elsewhere must stop reporting it connected.
+    await new AuthStorage(filePath).clearCredentials("xai");
+    expect(await daemon.hasProviderAuth("xai")).toBe(false);
   });
 });
 
@@ -396,7 +419,7 @@ describe("AuthStorage — Moonshot dual credential (Kimi OAuth vs. API key)", ()
     expect(await storage.getCredentials(MOONSHOT_OAUTH_KEY)).toBeUndefined();
   });
 
-  it("treats the xAI API key as a static credential (no refresh mechanism)", async () => {
+  it("treats the xAI API key as a static credential when no OAuth login exists", async () => {
     const storage = await makeStorage();
     await storage.setCredentials("xai", {
       accessToken: "xai-api-key",
@@ -421,5 +444,94 @@ describe("AuthStorage — Moonshot dual credential (Kimi OAuth vs. API key)", ()
       storageKeys: ["moonshot"],
     });
     expect(creds.accessToken).toBe("moonshot-api-key");
+  });
+});
+
+// Grok rides the same dual-auth policy as Kimi. These assert the POLICY is
+// generic (table-driven) rather than a Moonshot special case — the exact bug the
+// hardcoded provider checks would have reintroduced for every new provider.
+describe("AuthStorage — xAI dual credential (Grok OAuth vs. API key)", () => {
+  const oauthCreds = () => ({
+    accessToken: "grok-oauth-token",
+    refreshToken: "grok-refresh",
+    expiresAt: Date.now() + 1_000_000,
+    baseUrl: "https://cli-chat-proxy.grok.com/v1",
+  });
+  const apiKeyCreds = () => ({
+    accessToken: "xai-api-key",
+    refreshToken: "",
+    expiresAt: Date.now() + 1_000_000,
+  });
+
+  it("prefers the Grok OAuth credential when both are configured", async () => {
+    const storage = await makeStorage();
+    await storage.setCredentials("xai", apiKeyCreds());
+    await storage.setCredentials(XAI_OAUTH_KEY, oauthCreds());
+    // AgentSession passes storageKeys: ["xai"] — which must NOT shortcut past the
+    // OAuth preference (the bug that once served the raw API key for Moonshot).
+    const creds = await storage.resolveCredentials("xai", { storageKeys: ["xai"] });
+    expect(creds.accessToken).toBe("grok-oauth-token");
+    expect(creds.baseUrl).toBe("https://cli-chat-proxy.grok.com/v1");
+    expect(await storage.isStaticApiKey("xai")).toBe(false);
+  });
+
+  it("falls back to the API key while the OAuth credential is usage-exhausted", async () => {
+    const storage = await makeStorage();
+    await storage.setCredentials("xai", apiKeyCreds());
+    await storage.setCredentials(XAI_OAUTH_KEY, oauthCreds());
+
+    await storage.markUsageExhausted(XAI_OAUTH_KEY);
+    const creds = await storage.resolveCredentials("xai", { storageKeys: ["xai"] });
+    expect(creds.accessToken).toBe("xai-api-key");
+    // The key is active now, so its endpoint (public api.x.ai default) applies and
+    // a 401 should clear it instead of force-refreshing the sidelined token.
+    expect(storage.getStoredBaseUrl("xai")).toBeUndefined();
+    expect(await storage.isStaticApiKey("xai")).toBe(true);
+  });
+
+  it("keeps serving OAuth when exhausted with no API key (real error must surface)", async () => {
+    const storage = await makeStorage();
+    await storage.setCredentials(XAI_OAUTH_KEY, oauthCreds());
+    await storage.markUsageExhausted(XAI_OAUTH_KEY);
+    const creds = await storage.resolveCredentials("xai", { storageKeys: ["xai"] });
+    expect(creds.accessToken).toBe("grok-oauth-token");
+  });
+
+  it("resumes OAuth once the exhaustion mark lapses", async () => {
+    const storage = await makeStorage();
+    await storage.setCredentials("xai", apiKeyCreds());
+    await storage.setCredentials(XAI_OAUTH_KEY, {
+      ...oauthCreds(),
+      usageExhaustedUntil: Date.now() - 1_000,
+    });
+    const creds = await storage.resolveCredentials("xai", { storageKeys: ["xai"] });
+    expect(creds.accessToken).toBe("grok-oauth-token");
+  });
+
+  it("reports the Grok CLI proxy as the active endpoint while OAuth is live", async () => {
+    const storage = await makeStorage();
+    await storage.setCredentials(XAI_OAUTH_KEY, oauthCreds());
+    expect(storage.getStoredBaseUrl("xai")).toBe("https://cli-chat-proxy.grok.com/v1");
+    // Boot paths read the file synchronously before AuthStorage exists — agree.
+    expect(readStoredBaseUrlSync(storage.path, "xai")).toBe("https://cli-chat-proxy.grok.com/v1");
+  });
+
+  it("either credential satisfies hasProviderAuth", async () => {
+    const storage = await makeStorage();
+    expect(await storage.hasProviderAuth("xai")).toBe(false);
+    await storage.setCredentials(XAI_OAUTH_KEY, oauthCreds());
+    expect(await storage.hasProviderAuth("xai")).toBe(true);
+
+    const keyOnly = await makeStorage();
+    await keyOnly.setCredentials("xai", apiKeyCreds());
+    expect(await keyOnly.hasProviderAuth("xai")).toBe(true);
+  });
+
+  it("exposes both storage keys in resolution order", () => {
+    expect(providerStorageKeys("xai")).toEqual([XAI_OAUTH_KEY, "xai"]);
+    expect(providerStorageKeys("moonshot")).toEqual([MOONSHOT_OAUTH_KEY, "moonshot"]);
+    // Single-method providers are unaffected.
+    expect(providerStorageKeys("anthropic")).toEqual(["anthropic"]);
+    expect(dualAuthProvider("anthropic")).toBeUndefined();
   });
 });

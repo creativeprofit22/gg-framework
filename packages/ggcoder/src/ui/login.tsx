@@ -44,7 +44,7 @@ const PROVIDERS: { label: string; value: Provider; description: string }[] = [
     value: "gemini",
     description: "Gemini 3.1 Flash Lite, Gemini 3.5 Flash, Gemini 3.1 Pro (Preview)",
   },
-  { label: "xAI (Grok)", value: "xai", description: "Grok 4.5" },
+  { label: "xAI (Grok)", value: "xai", description: "Grok 4.5 · OAuth or API key" },
   {
     label: "Moonshot",
     value: "moonshot",

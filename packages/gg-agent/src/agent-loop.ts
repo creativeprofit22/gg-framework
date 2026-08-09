@@ -12,6 +12,8 @@ import {
   type AssistantMessage,
   isHardBillingMessage,
   redactValue,
+  sliceHead,
+  sliceTail,
 } from "@kenkaiiii/gg-ai";
 import type {
   AgentEvent,
@@ -1277,6 +1279,10 @@ export async function* agentLoop(
       // Accumulate usage
       totalUsage.inputTokens += response.usage.inputTokens;
       totalUsage.outputTokens += response.usage.outputTokens;
+      if (response.usage.reasoningTokens) {
+        totalUsage.reasoningTokens =
+          (totalUsage.reasoningTokens ?? 0) + response.usage.reasoningTokens;
+      }
       if (response.usage.cacheRead) {
         totalUsage.cacheRead = (totalUsage.cacheRead ?? 0) + response.usage.cacheRead;
       }
@@ -1950,9 +1956,11 @@ export function capToolResults(
     // Keep 70% head + 30% tail to preserve errors/diagnostics at the end.
     const headChars = Math.floor(max * 0.7);
     const tailChars = max - headChars;
-    const head = toolResult.content.slice(0, headChars);
-    const tail = toolResult.content.slice(-tailChars);
-    const omitted = originalChars - headChars - tailChars;
+    // Surrogate-safe: a raw char slice can cut an emoji in half and leave a
+    // lone surrogate, which makes the whole provider request body invalid JSON.
+    const head = sliceHead(toolResult.content, headChars);
+    const tail = sliceTail(toolResult.content, tailChars);
+    const omitted = originalChars - head.length - tail.length;
     toolResult.content = head + `\n\n[... ${omitted} characters omitted ...]\n\n` + tail;
     // Mark the divergence: the model + persistent transcript now hold this
     // trimmed content, but the tool_call_end event already carried the full one.
@@ -2003,11 +2011,11 @@ export function capTurnToolResults(
     const tailChars = fairShare - headChars;
     const omitted = originalChars - fairShare;
     toolResult.content =
-      toolResult.content.slice(0, headChars) +
+      sliceHead(toolResult.content, headChars) +
       `\n\n[... ${omitted} characters trimmed: this turn's combined tool results exceeded the ` +
       `per-turn budget. Re-run this call alone with narrower filters or offset/limit if you ` +
       `need the omitted content ...]\n\n` +
-      (tailChars > 0 ? toolResult.content.slice(-tailChars) : "");
+      sliceTail(toolResult.content, tailChars);
     // Mark the divergence (per-turn budget). Preserve an existing per-result
     // marker's originalChars so the full pre-any-trim size stays visible.
     toolResult.capped = {
@@ -2035,8 +2043,10 @@ function truncateToolResultText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   const tailChars = Math.min(Math.floor(maxChars * 0.3), 20_000);
   const headChars = Math.max(maxChars - tailChars, 0);
-  const omitted = text.length - headChars - tailChars;
-  return `${text.slice(0, headChars)}\n\n[... ${omitted} characters omitted after context overflow ...]\n\n${text.slice(-tailChars)}`;
+  const head = sliceHead(text, headChars);
+  const tail = sliceTail(text, tailChars);
+  const omitted = text.length - head.length - tail.length;
+  return `${head}\n\n[... ${omitted} characters omitted after context overflow ...]\n\n${tail}`;
 }
 
 function truncateOversizedToolResults(messages: Message[], maxChars: number): boolean {

@@ -28,14 +28,18 @@ import { stream } from "@kenkaiiii/gg-ai";
 const mockStream = vi.mocked(stream);
 const emptyParams = z.object({});
 
-function makeResponse(text: string, stopReason = "end_turn") {
+function makeResponse(
+  text: string,
+  stopReason = "end_turn",
+  usage: Usage = { inputTokens: 100, outputTokens: 50 },
+) {
   return {
     message: {
       role: "assistant" as const,
       content: text ? [{ type: "text" as const, text }] : "",
     },
     stopReason,
-    usage: { inputTokens: 100, outputTokens: 50 },
+    usage,
   };
 }
 
@@ -374,6 +378,47 @@ describe("agentLoop", () => {
       expect(turnEnd.timing.completedAt).toBeGreaterThanOrEqual(turnEnd.timing.startedAt);
       expect(turnEnd.timing.providerDurationMs).toBeGreaterThanOrEqual(0);
     }
+  });
+
+  it("sums reasoning-token detail without double-counting aggregate output", async () => {
+    const response = makeResponse("Done", "end_turn", {
+      inputTokens: 60,
+      outputTokens: 40,
+      reasoningTokens: 20,
+    });
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", {
+          inputTokens: 40,
+          outputTokens: 30,
+          reasoningTokens: 10,
+        }) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: "text_delta" as const, text: "Done" };
+        },
+        response: Promise.resolve(response),
+      } as unknown as ReturnType<typeof stream>);
+
+    const { result } = await collectLoop([{ role: "user", content: "test" }], {
+      provider: "gemini",
+      model: "test",
+      tools: [
+        {
+          name: "context_probe",
+          description: "continue the test",
+          parameters: emptyParams,
+          execute: () => "ok",
+        },
+      ],
+    });
+
+    expect(result.totalUsage).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 70,
+      reasoningTokens: 30,
+    });
   });
 
   it("forwards Codex transport identity separately from prompt cache routing", async () => {

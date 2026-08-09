@@ -14,6 +14,7 @@ export * from "./oauth/anthropic.js";
 export * from "./oauth/openai.js";
 export * from "./oauth/gemini.js";
 export * from "./oauth/kimi.js";
+export * from "./oauth/xai.js";
 export * from "./telegram.js";
 export * from "./voice-transcriber.js";
 export * from "./auto-update.js";

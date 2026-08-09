@@ -22,7 +22,7 @@ import {
 import { localProcessLifecycle, type ProcessLifecycleAdapter } from "../tools/operations.js";
 import type { ForegroundLogHandle } from "./process-manager.js";
 import { log } from "./logger.js";
-import { resolveShell, type ResolveShellOpts } from "./shell.js";
+import { resolveShell, type ResolveShellOpts, type ShellResolution } from "./shell.js";
 
 type PersistentOutputSource = "stdout" | "stderr";
 
@@ -65,6 +65,7 @@ export class PersistentShell {
     private readonly maxOutputBytes: number,
     private readonly lifecycle: ProcessLifecycleAdapter = localProcessLifecycle,
     private readonly shellOpts?: ResolveShellOpts,
+    private readonly launch?: ShellResolution,
   ) {}
 
   private startCleanup(target: ProcessTarget): void {
@@ -87,9 +88,11 @@ export class PersistentShell {
     if (this.child && this.child.exitCode === null && !this.child.killed) {
       return this.child;
     }
-    // Fresh session: use the same resolved shell as one-shot execution.
-    const shell = resolveShell("", this.shellOpts);
-    const child = this.lifecycle.spawn(shell.file, ["--norc", "--noprofile"], {
+    // Fresh session: use the prepared sandbox launch when provided; otherwise
+    // use the same resolved shell as one-shot execution without user rc files.
+    const resolved = this.launch ?? resolveShell("", this.shellOpts);
+    const args = this.launch ? resolved.args : ["--norc", "--noprofile"];
+    const child = this.lifecycle.spawn(resolved.file, args, {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env,

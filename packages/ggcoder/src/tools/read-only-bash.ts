@@ -86,7 +86,7 @@ const DANGEROUS_TOKENS: readonly string[] = [
 ];
 
 /** Split a command on shell control operators into individual segments. */
-function splitSegments(command: string): string[] {
+export function splitShellCommandSegments(command: string): string[] {
   // Split on ; && || | and newlines. The pipe split also covers |& since the
   // trailing & becomes its own (empty/garbage) segment that fails the allowlist.
   return command
@@ -135,13 +135,13 @@ function isReadOnlySed(segment: string): boolean {
   );
 }
 
+export function hasUnsafeShellSyntax(segment: string): boolean {
+  return DANGEROUS_TOKENS.some((token) => segment.includes(token)) || /&\s*$/.test(segment);
+}
+
 function isReadOnlySegment(segment: string): boolean {
-  // Reject any segment containing write/redirection or substitution tokens.
-  for (const token of DANGEROUS_TOKENS) {
-    if (segment.includes(token)) return false;
-  }
-  // Reject trailing background operator.
-  if (/&\s*$/.test(segment)) return false;
+  // Keep shell-syntax policy shared with semantic verification classification.
+  if (hasUnsafeShellSyntax(segment)) return false;
 
   const command = leadingWord(segment);
   if (command === "git") return isReadOnlyGit(segment);
@@ -155,7 +155,7 @@ function isReadOnlySegment(segment: string): boolean {
 export function isReadOnlyCommand(command: string): boolean {
   const trimmed = command.trim();
   if (trimmed.length === 0) return false;
-  const segments = splitSegments(trimmed);
+  const segments = splitShellCommandSegments(trimmed);
   if (segments.length === 0) return false;
   return segments.every(isReadOnlySegment);
 }

@@ -31,6 +31,34 @@ let sessions: Map<string, FakeSession>;
 let repository: ProjectNotesRepository;
 let committedSnapshots: Array<{ projectKey: string; revision: number }>;
 
+function isFetchForbiddenPortError(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    error.cause instanceof Error &&
+    error.cause.message === "bad port"
+  );
+}
+
+async function closeTestServer(serverToClose: http.Server): Promise<void> {
+  await new Promise<void>((resolve) => serverToClose.close(() => resolve()));
+}
+
+async function listenOnFetchCompatiblePort(serverToListen: http.Server): Promise<string> {
+  while (true) {
+    await new Promise<void>((resolve) => serverToListen.listen(0, "127.0.0.1", resolve));
+    const candidateBaseUrl = `http://127.0.0.1:${(serverToListen.address() as AddressInfo).port}`;
+
+    try {
+      const probe = await fetch(`${candidateBaseUrl}/__fixture-port-check`);
+      await probe.body?.cancel();
+      return candidateBaseUrl;
+    } catch (error) {
+      await closeTestServer(serverToListen);
+      if (!isFetchForbiddenPortError(error)) throw error;
+    }
+  }
+}
+
 function notes(reference: string): NotesDocumentV3 {
   return {
     version: 3,
@@ -142,15 +170,12 @@ beforeEach(async () => {
       res.end(JSON.stringify({ error: "not found" }));
     }
   });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  baseUrl = await listenOnFetchCompatiblePort(server);
 });
 
 afterEach(async () => {
-  await new Promise<void>((resolve) => {
-    server.closeAllConnections();
-    server.close(() => resolve());
-  });
+  server.closeAllConnections();
+  await closeTestServer(server);
   await fs.rm(root, { recursive: true, force: true });
 });
 

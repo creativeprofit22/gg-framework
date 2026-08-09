@@ -179,6 +179,48 @@ describe("buildKenDigest", () => {
     expect(digest).toContain("completion gate");
   });
 
+  it("feeds only harness-classified command outcomes into verification evidence", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool_call", id: "pass", name: "bash", args: { command: "tsc --noEmit" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "pass", content: "Exit code: 0\n" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "watch",
+            name: "bash",
+            args: { command: "vitest --watch" },
+          },
+          { type: "tool_call", id: "status", name: "bash", args: { command: "git status" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool_result", toolCallId: "watch", content: "Exit code: 0\n" },
+          { type: "tool_result", toolCallId: "status", content: "Exit code: 0\n" },
+        ],
+      },
+    ];
+
+    const digest = buildKenAutopilotContext({ ...base, messages });
+    const evidence = digest
+      .split("## Harness-classified verification evidence")[1]
+      .split("## They just asked you")[0];
+    expect(evidence).toContain("PASSED: `tsc --noEmit`");
+    expect(evidence).toContain("REJECTED: `vitest --watch`");
+    expect(evidence).not.toContain("git status");
+  });
+
   it("autopilot review instruction separates true human decisions from safe implied follow-ups", () => {
     // GG Coder ending with a question/options is HUMAN only when it needs a
     // real user-level decision. Permission to continue safe work implied by the

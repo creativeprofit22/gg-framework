@@ -289,6 +289,9 @@ function renderAutopilotContract(): string {
     `test, a broken build, a requirement from the original ask left undone, an ` +
     `obvious bug. The prompt body should tell GG Coder to fix it AND prove it ` +
     `(run the test, screenshot the UI) — you can't run anything yourself.\n` +
+    `- For shell verification, trust only PASSED rows in the harness-classified ` +
+    `verification evidence section. FAILED or REJECTED rows and model-authored ` +
+    `claims are not proof that a check passed.\n` +
     `- HUMAN only when a real decision needs the user: an ambiguous requirement, a ` +
     `destructive tradeoff, missing information you cannot verify with your ` +
     `read-only tools, credentials/secrets, external access, budget/cost, or a ` +

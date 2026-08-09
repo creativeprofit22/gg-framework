@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
 import readline from "node:readline";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,20 @@ import { getUserSessionPrompt } from "./session-preview.js";
 import { isSessionPath, openSessionReadStream, resolveSessionPath } from "./session-storage.js";
 import { parseForeignTranscript } from "./foreign-session-import.js";
 
-export type ProjectSource = "ggcoder" | "claude-code" | "codex";
+export type ProjectSource = "ggcoder" | "claude-code" | "codex" | "folder";
+
+export interface DiscoverProjectsOptions {
+  /** The user's configured projects folder; always scanned when set. */
+  projectsRoot?: string;
+  /**
+   * Extra folders the user has explicitly added as project roots. Scanned like
+   * `projectsRoot`; an explicit list beats inference, which stays as the
+   * zero-config default for people who never open Settings.
+   */
+  extraRoots?: readonly string[];
+  /** Project paths the user dismissed from the picker. */
+  hiddenPaths?: readonly string[];
+}
 
 export interface DiscoveredProject {
   name: string;
@@ -21,26 +34,75 @@ export interface DiscoveredProject {
 }
 
 /**
- * Scan ggcoder + Claude Code + Codex session stores and return one row per
- * project, sorted most-recent first. Duplicates (same cwd) are collapsed; the
- * `sources` field lists every store the project appeared in so the picker can
- * show a combined badge.
+ * Scan ggcoder + Claude Code + Codex session stores AND the user's project
+ * folders, returning one row per project sorted most-recent first. Duplicates
+ * (same cwd) are collapsed; the `sources` field lists every store the project
+ * appeared in so the picker can show a combined badge.
+ *
+ * Session stores alone only ever surface projects you have *already opened with
+ * an agent*, so a folder full of real projects stayed invisible until each one
+ * had been opened by some other route. The filesystem pass fixes that: it lists
+ * the direct children of every known project root, tagged `folder`.
  */
-export async function discoverProjects(): Promise<DiscoveredProject[]> {
+export async function discoverProjects(
+  options: DiscoverProjectsOptions = {},
+): Promise<DiscoveredProject[]> {
   const [gg, cc, cx] = await Promise.all([
     discoverGgcoderProjects(),
     discoverClaudeProjects(),
     discoverCodexProjects(),
   ]);
 
-  return mergeDiscoveredProjects([...gg, ...cc, ...cx]);
+  const fromSessions = [...gg, ...cc, ...cx];
+  const folders = await discoverFolderProjects(
+    resolveProjectRoots(options.projectsRoot, options.extraRoots, fromSessions),
+  );
+
+  const byPath = new Map<string, DiscoveredProject>();
+  for (const project of [...fromSessions, ...folders]) {
+    const resolvedProjectPath = path.resolve(project.path);
+    const key = discoveryPathKey(resolvedProjectPath, process.platform);
+    const existing = byPath.get(key);
+    if (!existing) {
+      byPath.set(key, { ...project, path: path.resolve(project.path) });
+      continue;
+    }
+    // A folder's mtime is not activity: session recency wins whenever any
+    // session store knows this project.
+    const mergedSources = mergeSources(existing.sources, project.sources);
+    const sessionRows = [existing, project].filter((row) => !isFolderOnly(row.sources));
+    const recencyRows = sessionRows.length > 0 ? sessionRows : [existing, project];
+    byPath.set(key, {
+      name: existing.name,
+      path: existing.path,
+      lastActiveMs: Math.max(...recencyRows.map((row) => row.lastActiveMs)),
+      lastActiveDisplay: "",
+      sources: mergedSources,
+    });
+  }
+
+  const hidden = new Set(
+    (options.hiddenPaths ?? []).map((hiddenPath) => discoveryPathKey(hiddenPath, process.platform)),
+  );
+  return Array.from(byPath.values())
+    .filter((project) => !hidden.has(discoveryPathKey(project.path, process.platform)))
+    .map((project) => ({
+      ...project,
+      lastActiveDisplay: formatRelativeTime(project.lastActiveMs),
+    }))
+    .sort((a, b) => b.lastActiveMs - a.lastActiveMs);
 }
 
 const SOURCE_ORDER: Record<ProjectSource, number> = {
   ggcoder: 0,
   "claude-code": 1,
   codex: 2,
+  folder: 3,
 };
+
+function isFolderOnly(sources: ProjectSource[]): boolean {
+  return sources.length === 1 && sources[0] === "folder";
+}
 
 function mergeSources(a: ProjectSource[], b: ProjectSource[]): ProjectSource[] {
   const set = new Set<ProjectSource>([...a, ...b]);
@@ -135,32 +197,53 @@ async function discoverGgcoderProjects(): Promise<DiscoveredProject[]> {
     return [];
   }
 
-  const results: DiscoveredProject[] = [];
-  for (const entry of entries) {
+  // Per-entry work is independent I/O (readdir + stat + a header read), so it
+  // runs concurrently; sequentially this dominated picker load time once a user
+  // had dozens of session stores.
+  const results = await mapConcurrent(entries, async (entry): Promise<DiscoveredProject | null> => {
     const dir = path.join(sessionsDir, entry);
     const mtime = await maxGgcoderSessionMtime(dir);
-    if (mtime === null) continue;
+    if (mtime === null) return null;
 
     const rawCwd =
       (await readFirstFromGgcoderDir(dir, ggcoderCwdExtractor)) ?? fallbackUnderscoreDecode(entry);
-    if (!rawCwd) continue;
+    if (!rawCwd) return null;
     // Normalize traversal segments (e.g. an agent launched with cwd
     // `.../src-tauri/../..`) so the basename isn't a stray "..", and drop any
     // Windows extended-length prefix so a session recorded as `\\?\C:\proj`
     // (what Rust's canonicalize used to hand the sidecar) resolves to the same
     // project as a plain `C:\proj` instead of listing a prefixed duplicate.
     const cwd = path.resolve(stripExtendedLengthPrefix(rawCwd));
-    if (!(await isDirectory(cwd))) continue;
+    if (!(await isDirectory(cwd))) return null;
 
-    results.push({
+    return {
       name: path.basename(cwd),
       path: cwd,
       lastActiveMs: mtime,
       lastActiveDisplay: formatRelativeTime(mtime),
       sources: ["ggcoder"],
-    });
-  }
-  return results;
+    };
+  });
+  return results.filter((p): p is DiscoveredProject => p !== null);
+}
+
+/**
+ * Bounded-concurrency `Promise.all`. Discovery fans out over hundreds of
+ * session files; an unbounded `Promise.all` exhausts the file-descriptor limit
+ * on a large store, while running sequentially is needlessly slow.
+ */
+const IO_CONCURRENCY = 32;
+
+async function mapConcurrent<T, R>(items: readonly T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(IO_CONCURRENCY, items.length) }, async () => {
+    for (let i = next++; i < items.length; i = next++) {
+      out[i] = await fn(items[i]!);
+    }
+  });
+  await Promise.all(workers);
+  return out;
 }
 
 /**
@@ -213,26 +296,23 @@ async function discoverClaudeProjects(): Promise<DiscoveredProject[]> {
     return [];
   }
 
-  const results = await Promise.all(
-    entries.map(async (entry): Promise<DiscoveredProject | null> => {
-      const dir = path.join(projectsDir, entry);
-      const mtime = await maxJsonlMtime(dir);
-      if (mtime === null) return null;
+  const results = await mapConcurrent(entries, async (entry): Promise<DiscoveredProject | null> => {
+    const dir = path.join(projectsDir, entry);
+    const mtime = await maxJsonlMtime(dir);
+    if (mtime === null) return null;
 
-      const cwd =
-        (await readFirstFromJsonlDir(dir, claudeCwdExtractor)) ?? fallbackDashDecode(entry);
-      if (!cwd) return null;
-      if (!(await isDirectory(cwd))) return null;
+    const cwd = (await readFirstFromJsonlDir(dir, claudeCwdExtractor)) ?? fallbackDashDecode(entry);
+    if (!cwd) return null;
+    if (!(await isDirectory(cwd))) return null;
 
-      return {
-        name: path.basename(cwd),
-        path: cwd,
-        lastActiveMs: mtime,
-        lastActiveDisplay: formatRelativeTime(mtime),
-        sources: ["claude-code"],
-      };
-    }),
-  );
+    return {
+      name: path.basename(cwd),
+      path: cwd,
+      lastActiveMs: mtime,
+      lastActiveDisplay: formatRelativeTime(mtime),
+      sources: ["claude-code"],
+    };
+  });
   return results.filter((p): p is DiscoveredProject => p !== null);
 }
 
@@ -253,26 +333,156 @@ async function discoverCodexProjects(): Promise<DiscoveredProject[]> {
   // Process newest first so per-cwd we always start with the latest mtime.
   files.sort((a, b) => b.mtime - a.mtime);
 
+  const cwds = await mapConcurrent(files, (f) => readFirstFromFile(f.path, codexCwdExtractor));
+
   const byCwd = new Map<string, number>();
-  for (const f of files) {
-    const cwd = await readFirstFromFile(f.path, codexCwdExtractor);
-    if (!cwd) continue;
+  files.forEach((f, i) => {
+    const cwd = cwds[i];
+    if (!cwd) return;
     const prev = byCwd.get(cwd);
     if (prev === undefined || f.mtime > prev) byCwd.set(cwd, f.mtime);
+  });
+
+  const results = await mapConcurrent(
+    Array.from(byCwd),
+    async ([cwd, mtime]): Promise<DiscoveredProject | null> => {
+      if (!(await isDirectory(cwd))) return null;
+      return {
+        name: path.basename(cwd),
+        path: cwd,
+        lastActiveMs: mtime,
+        lastActiveDisplay: formatRelativeTime(mtime),
+        sources: ["codex"],
+      };
+    },
+  );
+  return results.filter((p): p is DiscoveredProject => p !== null);
+}
+
+/**
+ * How many already-known projects must share a parent directory before that
+ * parent is treated as a project root in its own right. Users keep more than
+ * one "projects folder" (the configured root plus wherever the rest actually
+ * live), but only one is configurable — so a directory that has repeatedly
+ * acted like a root is inferred from evidence rather than guessed.
+ */
+const INFERRED_ROOT_MIN_PROJECTS = 3;
+
+/** Directory names that are never a project of their own. */
+const FOLDER_SCAN_IGNORED = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "out",
+  "target",
+  "vendor",
+  "coverage",
+  "tmp",
+  "temp",
+  "Library",
+  "Applications",
+]);
+
+/**
+ * Which directories should be scanned for project folders: the configured root,
+ * plus any parent that already holds several known projects.
+ *
+ * Scanning the home directory or a filesystem/temp root would list mail, music
+ * and scratch dirs as "projects", so those are never roots no matter how many
+ * sessions point inside them.
+ */
+function resolveProjectRoots(
+  projectsRoot: string | undefined,
+  extraRoots: readonly string[] | undefined,
+  discovered: DiscoveredProject[],
+): string[] {
+  const roots = new Set<string>();
+  const configured = projectsRoot?.trim();
+  if (configured) roots.add(path.resolve(configured));
+  for (const extra of extraRoots ?? []) {
+    const trimmed = extra.trim();
+    if (trimmed) roots.add(path.resolve(trimmed));
   }
 
-  const results: DiscoveredProject[] = [];
-  for (const [cwd, mtime] of byCwd) {
-    if (!(await isDirectory(cwd))) continue;
-    results.push({
-      name: path.basename(cwd),
-      path: cwd,
-      lastActiveMs: mtime,
-      lastActiveDisplay: formatRelativeTime(mtime),
-      sources: ["codex"],
-    });
+  const counts = new Map<string, number>();
+  const seen = new Set<string>();
+  for (const project of discovered) {
+    if (seen.has(project.path)) continue;
+    seen.add(project.path);
+    const parent = path.dirname(project.path);
+    if (parent === project.path) continue;
+    counts.set(parent, (counts.get(parent) ?? 0) + 1);
   }
-  return results;
+  for (const [parent, count] of counts) {
+    if (count >= INFERRED_ROOT_MIN_PROJECTS && !isUnscannableRoot(parent)) roots.add(parent);
+  }
+
+  return Array.from(roots);
+}
+
+function isUnscannableRoot(dir: string): boolean {
+  const resolved = resolveExistingPath(dir);
+  if (resolved === resolveExistingPath(path.parse(resolved).root)) return true;
+  if (resolved === resolveExistingPath(os.homedir())) return true;
+  // Scratch checkouts and test fixtures cluster as direct children of the temp
+  // dir, which would otherwise infer it as a root and list every stale
+  // `tmp.XXXX` as a project. Resolve symlinks before comparing because macOS
+  // reports the same temp directory through both `/var` and `/private/var`.
+  // Only the temp dir itself is barred — a real projects folder below it is
+  // still scannable.
+  return resolved === resolveExistingPath(os.tmpdir());
+}
+
+function resolveExistingPath(dir: string): string {
+  const resolved = path.resolve(dir);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/**
+ * List the direct children of each project root as projects. Directory mtime
+ * stands in for "last active" — imprecise, but these rows are session-less by
+ * definition and merging keeps real session recency where it exists.
+ */
+async function discoverFolderProjects(roots: string[]): Promise<DiscoveredProject[]> {
+  const candidates: { name: string; path: string }[] = [];
+  for (const root of roots) {
+    let entries;
+    try {
+      entries = await fs.readdir(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      if (entry.name.startsWith(".")) continue;
+      if (FOLDER_SCAN_IGNORED.has(entry.name)) continue;
+      candidates.push({ name: entry.name, path: path.join(root, entry.name) });
+    }
+  }
+
+  // `stat` (not `lstat`) so a symlinked project folder resolves to its target:
+  // `readdir` reports a symlink as neither file nor directory, so checking the
+  // dirent alone would silently drop linked-in projects.
+  const rows = await mapConcurrent(candidates, async (c): Promise<DiscoveredProject | null> => {
+    try {
+      const stats = await fs.stat(c.path);
+      if (!stats.isDirectory()) return null;
+      return {
+        name: c.name,
+        path: c.path,
+        lastActiveMs: stats.mtimeMs,
+        lastActiveDisplay: formatRelativeTime(stats.mtimeMs),
+        sources: ["folder"],
+      };
+    } catch {
+      return null;
+    }
+  });
+  return rows.filter((r): r is DiscoveredProject => r !== null);
 }
 
 async function isDirectory(p: string): Promise<boolean> {
@@ -441,13 +651,19 @@ async function readFirstFromGgcoderDir(
   files.sort((a, b) => b.mtime - a.mtime);
   for (const file of files) {
     try {
-      const { stream } = await openSessionReadStream(file.path);
+      const { stream, close } = await openSessionReadStream(file.path);
       const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-      let lines = 0;
-      for await (const line of rl) {
-        if (++lines > 200) break;
-        const value = extractor(line);
-        if (value) return value;
+      try {
+        let lines = 0;
+        for await (const line of rl) {
+          if (++lines > 200) break;
+          const value = extractor(line);
+          if (value) return value;
+        }
+      } finally {
+        // Always via close(): destroying the gunzip alone strands the source fd.
+        rl.close();
+        close();
       }
     } catch {
       // A corrupt archive must not hide otherwise valid projects in this store.
@@ -700,7 +916,7 @@ interface ParsedRecentSession extends RecentSession {
 /** Single-pass parse of one session file: identity + count + activity + preview. */
 async function readSessionSummary(file: string): Promise<ParsedRecentSession | null> {
   try {
-    const { path: resolvedPath, stream } = await openSessionReadStream(file);
+    const { path: resolvedPath, stream, close } = await openSessionReadStream(file);
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     let id = "";
     let conversationId = "";
@@ -711,42 +927,48 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
     let label = "";
     let valid = false;
 
-    for await (const line of rl) {
-      if (!line) continue;
-      try {
-        const entry = JSON.parse(line) as {
-          type?: string;
-          id?: string;
-          conversationId?: string;
-          preview?: unknown;
-          timestamp?: string;
-          label?: unknown;
-          message?: { role?: string; content?: unknown };
-        };
-        if (!valid) {
-          if (entry.type !== "session") return null;
-          valid = true;
-          id = entry.id ?? "";
-          conversationId = entry.conversationId ?? id;
-          if (typeof entry.preview === "string") {
-            headerPreview = entry.preview.replace(/\s+/g, " ").trim().slice(0, 80);
+    try {
+      for await (const line of rl) {
+        if (!line) continue;
+        try {
+          const entry = JSON.parse(line) as {
+            type?: string;
+            id?: string;
+            conversationId?: string;
+            preview?: unknown;
+            timestamp?: string;
+            label?: unknown;
+            message?: { role?: string; content?: unknown };
+          };
+          if (!valid) {
+            if (entry.type !== "session") return null;
+            valid = true;
+            id = entry.id ?? "";
+            conversationId = entry.conversationId ?? id;
+            if (typeof entry.preview === "string") {
+              headerPreview = entry.preview.replace(/\s+/g, " ").trim().slice(0, 80);
+            }
+            if (entry.timestamp) lastActivity = entry.timestamp;
+            continue;
           }
-          if (entry.timestamp) lastActivity = entry.timestamp;
-          continue;
-        }
-        if (entry.type === "label" && typeof entry.label === "string" && entry.label.trim()) {
-          label = entry.label.replace(/\s+/g, " ").trim().slice(0, 80);
-        } else if (entry.type === "message") {
-          messageCount += 1;
-          if (entry.timestamp) lastActivity = entry.timestamp;
-          if (!preview && entry.message?.role === "user") {
-            const text = getUserSessionPrompt(entry.message.content);
-            if (text) preview = text.replace(/\s+/g, " ").trim().slice(0, 80);
+          if (entry.type === "label" && typeof entry.label === "string" && entry.label.trim()) {
+            label = entry.label.replace(/\s+/g, " ").trim().slice(0, 80);
+          } else if (entry.type === "message") {
+            messageCount += 1;
+            if (entry.timestamp) lastActivity = entry.timestamp;
+            if (!preview && entry.message?.role === "user") {
+              const text = getUserSessionPrompt(entry.message.content);
+              if (text) preview = text.replace(/\s+/g, " ").trim().slice(0, 80);
+            }
           }
+        } catch {
+          // Skip malformed lines; archive migration preserves them byte-for-byte.
         }
-      } catch {
-        // Skip malformed lines; archive migration preserves them byte-for-byte.
       }
+    } finally {
+      // `return null` above exits mid-stream; close() destroys gunzip + source.
+      rl.close();
+      close();
     }
     return valid
       ? {

@@ -174,6 +174,159 @@ describe("discoverProjects (ggcoder store)", () => {
     expect(projects.some((p) => p.path === path.join(tmp, "projects", "my", "app"))).toBe(false);
   });
 
+  it("lists folders in the configured projects root that have no sessions yet", async () => {
+    const root = path.join(tmp, "gg-projects");
+    await fs.mkdir(path.join(root, "never-opened"), { recursive: true });
+    await fs.mkdir(path.join(root, "node_modules"), { recursive: true });
+    await fs.mkdir(path.join(root, ".hidden"), { recursive: true });
+
+    const projects = await discoverProjects({ projectsRoot: root });
+
+    const found = projects.find((p) => p.path === path.join(root, "never-opened"));
+    expect(found).toBeDefined();
+    expect(found?.sources).toEqual(["folder"]);
+    // Build output and dotfolders are not projects.
+    expect(projects.some((p) => p.path.endsWith("node_modules"))).toBe(false);
+    expect(projects.some((p) => p.path.endsWith(".hidden"))).toBe(false);
+  });
+
+  it("follows a symlinked project folder (readdir reports it as neither file nor dir)", async () => {
+    const root = path.join(tmp, "gg-projects");
+    await fs.mkdir(root, { recursive: true });
+    const real = path.join(tmp, "elsewhere", "linked-project");
+    await fs.mkdir(real, { recursive: true });
+    await fs.symlink(real, path.join(root, "linked-project"), "dir");
+    // A dangling link must not become a phantom row.
+    await fs.symlink(path.join(tmp, "gone"), path.join(root, "dangling"), "dir");
+
+    const projects = await discoverProjects({ projectsRoot: root });
+
+    expect(projects.some((p) => p.path === path.join(root, "linked-project"))).toBe(true);
+    expect(projects.some((p) => p.path === path.join(root, "dangling"))).toBe(false);
+  });
+
+  it("omits hidden projects regardless of which store surfaced them", async () => {
+    const root = path.join(tmp, "gg-projects");
+    const hidden = path.join(root, "scratch");
+    const kept = path.join(root, "kept");
+    await fs.mkdir(hidden, { recursive: true });
+    await fs.mkdir(kept, { recursive: true });
+    await writeSession(path.join(state.sessionsDir, encodeCwd(hidden)), hidden);
+
+    const projects = await discoverProjects({
+      projectsRoot: root,
+      // Unnormalized on purpose: hiding is keyed by resolved path.
+      hiddenPaths: [hidden + path.sep + "."],
+    });
+
+    expect(projects.some((p) => p.path === hidden)).toBe(false);
+    expect(projects.some((p) => p.path === kept)).toBe(true);
+  });
+
+  it("scans explicitly configured extra roots", async () => {
+    const root = path.join(tmp, "gg-projects");
+    const extra = path.join(tmp, "second-home");
+    await fs.mkdir(root, { recursive: true });
+    await fs.mkdir(path.join(extra, "over-here"), { recursive: true });
+
+    const projects = await discoverProjects({ projectsRoot: root, extraRoots: [extra] });
+
+    // One project is far short of the inference threshold, so this only lists
+    // because the root was configured explicitly.
+    expect(projects.some((p) => p.path === path.join(extra, "over-here"))).toBe(true);
+  });
+
+  it("merges a folder row into the session row instead of duplicating it", async () => {
+    const root = path.join(tmp, "gg-projects");
+    const projectPath = path.join(root, "opened");
+    await fs.mkdir(projectPath, { recursive: true });
+    await writeSession(path.join(state.sessionsDir, encodeCwd(projectPath)), projectPath);
+
+    const projects = await discoverProjects({ projectsRoot: root });
+
+    const rows = projects.filter((p) => p.path === projectPath);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.sources).toEqual(["ggcoder", "folder"]);
+  });
+
+  it("keeps session recency when a folder mtime is newer", async () => {
+    const root = path.join(tmp, "gg-projects");
+    const projectPath = path.join(root, "opened");
+    await fs.mkdir(projectPath, { recursive: true });
+    const store = path.join(state.sessionsDir, encodeCwd(projectPath));
+    await writeSession(store, projectPath);
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    await fs.utimes(path.join(store, "session.jsonl"), old, old);
+
+    const projects = await discoverProjects({ projectsRoot: root });
+
+    // The folder was just created (mtime = now); a checkout touching the
+    // directory must not present the project as freshly worked in.
+    const found = projects.find((p) => p.path === projectPath);
+    expect(found?.lastActiveMs).toBeLessThan(Date.now() - 24 * 60 * 60 * 1000);
+  });
+
+  it("infers an extra project root from several known projects sharing a parent", async () => {
+    const other = path.join(tmp, "elsewhere");
+    for (const name of ["one", "two", "three"]) {
+      const projectPath = path.join(other, name);
+      await fs.mkdir(projectPath, { recursive: true });
+      await writeSession(path.join(state.sessionsDir, encodeCwd(projectPath)), projectPath);
+    }
+    await fs.mkdir(path.join(other, "never-opened"), { recursive: true });
+
+    const projects = await discoverProjects();
+
+    // Three known siblings make `elsewhere` a root, so its unopened sibling lists too.
+    const found = projects.find((p) => p.path === path.join(other, "never-opened"));
+    expect(found?.sources).toEqual(["folder"]);
+  });
+
+  it("does not infer the temp directory through a symlink alias", async () => {
+    const transientRoot = path.join(tmp, "transient-real");
+    const tempAlias = path.join(tmp, "transient-alias");
+    await fs.mkdir(transientRoot, { recursive: true });
+    await fs.symlink(transientRoot, tempAlias, "dir");
+    vi.spyOn(os, "tmpdir").mockReturnValue(tempAlias);
+
+    for (const name of ["one", "two", "three"]) {
+      const projectPath = path.join(transientRoot, name);
+      await fs.mkdir(projectPath, { recursive: true });
+      await writeSession(path.join(state.sessionsDir, encodeCwd(projectPath)), projectPath);
+    }
+    const unrelatedFolder = path.join(transientRoot, "unrelated-temp-folder");
+    await fs.mkdir(unrelatedFolder, { recursive: true });
+
+    const projects = await discoverProjects();
+
+    expect(projects.some((project) => project.path === unrelatedFolder)).toBe(false);
+  });
+
+  it("does not infer a root from too few projects, nor scan the home directory", async () => {
+    const sparse = path.join(tmp, "sparse");
+    for (const name of ["only-one", "only-two"]) {
+      const projectPath = path.join(sparse, name);
+      await fs.mkdir(projectPath, { recursive: true });
+      await writeSession(path.join(state.sessionsDir, encodeCwd(projectPath)), projectPath);
+    }
+    await fs.mkdir(path.join(sparse, "never-opened"), { recursive: true });
+
+    // Home holds plenty of non-project dirs, so it is never inferred as a root
+    // even when several sessions point at its direct children.
+    const home = path.join(tmp, "home");
+    for (const name of ["h1", "h2", "h3"]) {
+      const projectPath = path.join(home, name);
+      await fs.mkdir(projectPath, { recursive: true });
+      await writeSession(path.join(state.sessionsDir, encodeCwd(projectPath)), projectPath);
+    }
+    await fs.mkdir(path.join(home, "Music"), { recursive: true });
+
+    const projects = await discoverProjects();
+
+    expect(projects.some((p) => p.path === path.join(sparse, "never-opened"))).toBe(false);
+    expect(projects.some((p) => p.path === path.join(home, "Music"))).toBe(false);
+  });
+
   it("keys the project off the header cwd, not the directory name", async () => {
     // The real cwd lives in the session header; the directory name is only a
     // lossy hint. Prove the header wins by giving the dir an arbitrary name

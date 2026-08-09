@@ -7,6 +7,7 @@ import { refreshAnthropicToken } from "./oauth/anthropic.js";
 import { refreshOpenAIToken } from "./oauth/openai.js";
 import { refreshGeminiToken } from "./oauth/gemini.js";
 import { refreshKimiToken } from "./oauth/kimi.js";
+import { refreshXaiToken } from "./oauth/xai.js";
 import { withFileLock } from "./file-lock.js";
 import { log } from "./logger.js";
 
@@ -18,6 +19,88 @@ type AuthData = Record<string, OAuthCredentials>;
  * prefer OAuth for the logical `moonshot` provider.
  */
 export const MOONSHOT_OAUTH_KEY = "moonshot-oauth";
+
+/**
+ * Storage key for Grok (xAI) subscription OAuth credentials. Kept distinct from
+ * the `xai` API-key entry for the same reason as Kimi's: a user may configure
+ * BOTH — a SuperGrok/X Premium subscription plus a metered console key — and we
+ * always prefer OAuth for the logical `xai` provider.
+ */
+export const XAI_OAUTH_KEY = "xai-oauth";
+
+/**
+ * A provider that can hold two credentials at once: a refreshable subscription
+ * OAuth token and a static API key. One policy governs all of them — see
+ * {@link DUAL_AUTH_PROVIDERS} — so adding a provider here is enough to give it
+ * OAuth-first resolution, usage-exhaustion fallback, per-method logout and the
+ * matching UI affordances.
+ */
+export interface DualAuthProvider {
+  /** Logical provider id, which is also the API-key storage key. */
+  provider: string;
+  /** Storage key holding the OAuth credential. */
+  oauthKey: string;
+  /** Human label for the OAuth credential (log/UI wording). */
+  oauthLabel: string;
+  /** Human label for the API-key credential (log/UI wording). */
+  apiKeyLabel: string;
+  /** What the user should do to restore OAuth after it went invalid. */
+  restoreHint: string;
+}
+
+/**
+ * Providers offering subscription OAuth *and* an API key. The resolution policy
+ * is identical for every entry:
+ *
+ *  1. OAuth wins whenever it is configured — it is the cheaper, subscription
+ *     credential, and the one the user opted into most recently.
+ *  2. If OAuth's usage window is exhausted (marked by the agent loop when the
+ *     subscription endpoint rejects with a usage/quota stop) the API key serves
+ *     until the mark lapses — but only when a key is actually configured, so
+ *     OAuth-only users still see the real usage-limit error and its reset time.
+ *  3. If OAuth's refresh token is dead, fall back to the API key and log loudly:
+ *     it is a billing switch (subscription → metered), not a detail.
+ */
+const DUAL_AUTH_PROVIDERS: readonly DualAuthProvider[] = [
+  {
+    provider: "moonshot",
+    oauthKey: MOONSHOT_OAUTH_KEY,
+    oauthLabel: "Kimi OAuth",
+    apiKeyLabel: "Moonshot API key",
+    restoreHint: 'Run "ggcoder login" and choose Kimi OAuth to restore OAuth auth.',
+  },
+  {
+    provider: "xai",
+    oauthKey: XAI_OAUTH_KEY,
+    oauthLabel: "Grok OAuth",
+    apiKeyLabel: "xAI API key",
+    restoreHint: 'Run "ggcoder login" and choose Grok OAuth to restore OAuth auth.',
+  },
+];
+
+/** Dual-auth policy for a logical provider, or undefined if it has just one method. */
+export function dualAuthProvider(provider: string): DualAuthProvider | undefined {
+  return DUAL_AUTH_PROVIDERS.find((entry) => entry.provider === provider);
+}
+
+/** Dual-auth policy keyed by the OAuth storage key (the reverse lookup). */
+export function dualAuthProviderByOAuthKey(storageKey: string): DualAuthProvider | undefined {
+  return DUAL_AUTH_PROVIDERS.find((entry) => entry.oauthKey === storageKey);
+}
+
+/** The OAuth storage key for a dual-auth provider, if it has one. */
+export function oauthStorageKey(provider: string): string | undefined {
+  return dualAuthProvider(provider)?.oauthKey;
+}
+
+/**
+ * Both storage keys a dual-auth provider may hold, in resolution order
+ * (OAuth first). Single-method providers yield just their own key.
+ */
+export function providerStorageKeys(provider: string): string[] {
+  const dual = dualAuthProvider(provider);
+  return dual ? [dual.oauthKey, dual.provider] : [provider];
+}
 
 /**
  * Storage key for the Xiaomi API Credits credential (`https://api.xiaomimimo.com/v1`).
@@ -42,21 +125,22 @@ export const LOCAL_AUTH_KEY_PREFIX = "local:";
 const LOCAL_CREDENTIAL_LIFETIME_MS = 100 * 365 * 24 * 60 * 60 * 1000;
 
 /**
- * The credential entry whose baseUrl applies right now. For `moonshot` this
- * mirrors resolveCredentials' preference: the Kimi OAuth entry, sidelined to
- * the Moonshot API key only while its usage window is exhausted and a key is
- * configured. Shared by {@link AuthStorage.getStoredBaseUrl} and
- * {@link readStoredBaseUrlSync} so both paths agree on the active endpoint.
+ * The credential entry whose baseUrl applies right now. For a dual-auth provider
+ * this mirrors resolveCredentials' preference: the OAuth entry, sidelined to the
+ * API key only while its usage window is exhausted and a key is configured.
+ * Shared by {@link AuthStorage.getStoredBaseUrl} and {@link readStoredBaseUrlSync}
+ * so both paths agree on the active endpoint.
  */
 function activeBaseUrlEntry(data: AuthData, provider: string): OAuthCredentials | undefined {
-  if (provider === "moonshot") {
-    const oauth = data[MOONSHOT_OAUTH_KEY];
+  const dual = dualAuthProvider(provider);
+  if (dual) {
+    const oauth = data[dual.oauthKey];
     if (oauth) {
       const exhaustedUntil = oauth.usageExhaustedUntil ?? 0;
-      if (Date.now() < exhaustedUntil && data["moonshot"]) return data["moonshot"];
+      if (Date.now() < exhaustedUntil && data[dual.provider]) return data[dual.provider];
       return oauth;
     }
-    return data["moonshot"];
+    return data[dual.provider];
   }
   return data[provider];
 }
@@ -124,6 +208,16 @@ export class AuthStorage {
   private data: AuthData = {};
   private filePath: string;
   private loaded = false;
+  /**
+   * mtime+size of the file as of the cached snapshot (`size: -1` = no file).
+   * auth.json is shared: the desktop app writes API keys and disconnects
+   * NATIVELY (so they work with no daemon running), and every window/process has
+   * its own AuthStorage. A load-once cache therefore goes stale — the sidecar
+   * would keep listing models for a provider just disconnected, and hide the
+   * ones just connected, until the daemon restarted.
+   */
+  private snapshotMtimeMs = 0;
+  private snapshotSize = -1;
   /** Per-provider lock to serialize concurrent refresh calls. */
   private refreshLocks = new Map<string, Promise<OAuthCredentials>>();
 
@@ -138,13 +232,13 @@ export class AuthStorage {
 
   /** List provider keys with stored credentials. */
   async listProviders(): Promise<string[]> {
-    await this.ensureLoaded();
+    await this.ensureFresh();
     return Object.keys(this.data);
   }
 
   /** True if credentials exist for `provider`. */
   async hasCredentials(provider: string): Promise<boolean> {
-    await this.ensureLoaded();
+    await this.ensureFresh();
     return Boolean(this.data[provider]);
   }
 
@@ -156,19 +250,20 @@ export class AuthStorage {
    * instead of re-deriving the same order.
    */
   async pickStorageKey(keys: string[]): Promise<string | undefined> {
-    await this.ensureLoaded();
+    await this.ensureFresh();
     return keys.find((key) => Boolean(this.data[key]));
   }
 
   /**
-   * True if the user has any usable auth for the logical provider. For
-   * `moonshot` this is satisfied by either the Kimi OAuth credential or the
-   * Moonshot API key.
+   * True if the user has any usable auth for the logical provider. For a
+   * dual-auth provider (Kimi/Grok) either the OAuth credential or the API key
+   * satisfies it.
    */
   async hasProviderAuth(provider: string): Promise<boolean> {
-    await this.ensureLoaded();
-    if (provider === "moonshot") {
-      return Boolean(this.data[MOONSHOT_OAUTH_KEY] || this.data["moonshot"]);
+    await this.ensureFresh();
+    const dual = dualAuthProvider(provider);
+    if (dual) {
+      return Boolean(this.data[dual.oauthKey] || this.data[dual.provider]);
     }
     if (provider === "xiaomi") {
       return Boolean(this.data["xiaomi"] || this.data[XIAOMI_CREDITS_KEY]);
@@ -209,18 +304,20 @@ export class AuthStorage {
 
   /**
    * True if the active credential for `provider` is a static API key with no
-   * refresh mechanism. For `moonshot` this is only true when the Kimi OAuth
-   * credential is absent (a present OAuth credential is refreshable).
+   * refresh mechanism. For a dual-auth provider this is only true when its OAuth
+   * credential is absent or sidelined (a live OAuth credential is refreshable).
    */
   async isStaticApiKey(provider: string): Promise<boolean> {
-    await this.ensureLoaded();
-    if (provider === "moonshot" && this.data[MOONSHOT_OAUTH_KEY]) {
+    await this.ensureFresh();
+    const dual = dualAuthProvider(provider);
+    const oauthCreds = dual ? this.data[dual.oauthKey] : undefined;
+    if (dual && oauthCreds) {
       // A usage-exhausted OAuth credential with an API key configured means
       // the API key is what actually resolves right now — treat it as the
       // static key it is (so a 401 clears the key instead of pointlessly
       // force-refreshing the sidelined OAuth token).
-      const exhaustedUntil = this.data[MOONSHOT_OAUTH_KEY].usageExhaustedUntil ?? 0;
-      const apiKeyActive = Date.now() < exhaustedUntil && Boolean(this.data["moonshot"]);
+      const exhaustedUntil = oauthCreds.usageExhaustedUntil ?? 0;
+      const apiKeyActive = Date.now() < exhaustedUntil && Boolean(this.data[dual.provider]);
       if (!apiKeyActive) return false;
     }
     return STATIC_API_KEY_PROVIDERS.has(provider);
@@ -229,27 +326,33 @@ export class AuthStorage {
   /**
    * The base URL on the credential that is active right now, if any.
    * Synchronous — call only after load()/resolveCredentials() populated the
-   * snapshot. For `moonshot` this is the Kimi For Coding URL whenever the
-   * OAuth entry is the one resolveCredentials would serve (i.e. not currently
-   * usage-exhausted with an API key configured).
+   * snapshot. For a dual-auth provider this is the subscription endpoint (Kimi
+   * For Coding, the Grok CLI proxy) whenever the OAuth entry is the one
+   * resolveCredentials would serve (i.e. not currently usage-exhausted with an
+   * API key configured).
    */
   getStoredBaseUrl(provider: string): string | undefined {
     return activeBaseUrlEntry(this.data, provider)?.baseUrl;
   }
 
   async load(): Promise<void> {
+    // A reload (the file changed under us) is routine — log it once at first
+    // load so ~/.gg/debug.log doesn't fill with identical lines on every read.
+    const first = !this.loaded;
     await withFileLock(this.filePath, async () => {
       try {
         const content = await fs.readFile(this.filePath, "utf-8");
         this.data = JSON.parse(content) as AuthData;
-        log("INFO", "auth", `Loaded credentials from ${this.filePath}`, {
-          providers: Object.keys(this.data).join(",") || "(none)",
-        });
+        if (first) {
+          log("INFO", "auth", `Loaded credentials from ${this.filePath}`, {
+            providers: Object.keys(this.data).join(",") || "(none)",
+          });
+        }
       } catch (err) {
         this.data = {};
         const code = (err as NodeJS.ErrnoException).code;
         if (code === "ENOENT") {
-          log("INFO", "auth", `No auth file found at ${this.filePath} (first run)`);
+          if (first) log("INFO", "auth", `No auth file found at ${this.filePath} (first run)`);
         } else {
           log(
             "ERROR",
@@ -261,10 +364,53 @@ export class AuthStorage {
       }
     });
     this.loaded = true;
+    await this.rememberSnapshot();
   }
 
   private async ensureLoaded(): Promise<void> {
     if (!this.loaded) await this.load();
+  }
+
+  /**
+   * Like {@link ensureLoaded}, but re-reads when the file changed since this
+   * snapshot — a cheap stat, not a re-parse. Used by the "what is connected?"
+   * readers, which must reflect writes made by another window, the CLI, or the
+   * desktop app's native (daemon-free) API-key and disconnect paths.
+   *
+   * Deliberately NOT used by {@link resolveCredentials}: that path compares the
+   * caller's snapshot against the latest file to detect a concurrent re-login,
+   * and silently refreshing this instance's view first would destroy the
+   * evidence that the token it just had rejected has already been replaced.
+   */
+  private async ensureFresh(): Promise<void> {
+    if (!this.loaded) {
+      await this.load();
+      return;
+    }
+    let changed: boolean;
+    try {
+      const stat = await fs.stat(this.filePath);
+      changed = stat.mtimeMs !== this.snapshotMtimeMs || stat.size !== this.snapshotSize;
+    } catch {
+      // File is gone (logged out everywhere) — reload only if we still hold one.
+      changed = this.snapshotSize !== -1;
+    }
+    if (changed) await this.load();
+  }
+
+  /**
+   * Record the file identity behind the current snapshot, so {@link ensureLoaded}
+   * can tell "someone else wrote" from "this is our own write".
+   */
+  private async rememberSnapshot(): Promise<void> {
+    try {
+      const stat = await fs.stat(this.filePath);
+      this.snapshotMtimeMs = stat.mtimeMs;
+      this.snapshotSize = stat.size;
+    } catch {
+      this.snapshotMtimeMs = 0;
+      this.snapshotSize = -1;
+    }
   }
 
   /**
@@ -282,16 +428,18 @@ export class AuthStorage {
       await atomicWriteFile(this.filePath, JSON.stringify(latest, null, 2));
       this.data = latest;
     });
+    await this.rememberSnapshot();
   }
 
   private async reloadLatest(): Promise<void> {
     await withFileLock(this.filePath, async () => {
       this.data = await readAuthData(this.filePath);
     });
+    await this.rememberSnapshot();
   }
 
   async getCredentials(provider: string): Promise<OAuthCredentials | undefined> {
-    await this.ensureLoaded();
+    await this.ensureFresh();
     return this.data[provider];
   }
 
@@ -312,7 +460,7 @@ export class AuthStorage {
    * `resetsAt` (unix SECONDS, from the provider's rate-limit response) or a
    * 15-minute default when no reset time is known. While the mark is in the
    * future, `resolveCredentials("moonshot")` serves the Moonshot API key
-   * instead of the Kimi OAuth credential (when both are configured) — OAuth
+   * instead of the subscription OAuth credential (when both are configured) — OAuth
    * stays the preferred credential and is retried automatically once the mark
    * lapses. Persisted to auth.json so a restart (or another gg-app window)
    * doesn't burn a request rediscovering the same exhausted window. No-op if
@@ -364,9 +512,7 @@ export class AuthStorage {
     const directStorageKeys =
       opts?.storageKeys && !(opts.storageKeys.length === 1 && opts.storageKeys[0] === provider)
         ? opts.storageKeys
-        : provider === "moonshot"
-          ? [MOONSHOT_OAUTH_KEY, "moonshot"]
-          : [provider];
+        : providerStorageKeys(provider);
     if (!directStorageKeys.some((key) => Boolean(this.data[key]))) {
       await this.reloadLatest();
     }
@@ -385,25 +531,27 @@ export class AuthStorage {
       throw new NotLoggedInError(provider);
     }
 
-    // Prefer Kimi OAuth over the Moonshot API key for the logical `moonshot`
-    // provider. When an OAuth credential exists, resolve (and refresh) that
+    // Prefer subscription OAuth over the API key for a dual-auth provider
+    // (Kimi/Grok). When an OAuth credential exists, resolve (and refresh) that
     // instead — this is the "default to OAuth first" rule.
-    if (provider === "moonshot" && this.data[MOONSHOT_OAUTH_KEY]) {
+    const dual = dualAuthProvider(provider);
+    const dualOAuthCreds = dual ? this.data[dual.oauthKey] : undefined;
+    if (dual && dualOAuthCreds) {
       // OAuth plan usage window exhausted (marked by the agent loop when the
-      // managed endpoint rejected with a usage/quota stop). Serve the API key
-      // while the window recovers — but ONLY when one is configured; with no
+      // subscription endpoint rejected with a usage/quota stop). Serve the API
+      // key while the window recovers — but ONLY when one is configured; with no
       // API key the OAuth credential still resolves so the real usage-limit
       // error (with its reset time) surfaces to the user instead of a
       // misleading "not logged in".
-      const exhaustedUntil = this.data[MOONSHOT_OAUTH_KEY].usageExhaustedUntil ?? 0;
-      if (Date.now() < exhaustedUntil && this.data["moonshot"]) {
+      const exhaustedUntil = dualOAuthCreds.usageExhaustedUntil ?? 0;
+      if (Date.now() < exhaustedUntil && this.data[dual.provider]) {
         log(
           "WARN",
           "auth",
-          "Kimi OAuth usage window is exhausted — using the Moonshot API key until " +
+          `${dual.oauthLabel} usage window is exhausted — using the ${dual.apiKeyLabel} until ` +
             `${new Date(exhaustedUntil).toISOString()} (OAuth resumes automatically).`,
         );
-        return this.data["moonshot"];
+        return this.data[dual.provider]!;
       }
       try {
         // Do NOT forward `storageKeys` here: the caller's keys (e.g.
@@ -412,23 +560,23 @@ export class AuthStorage {
         // storage-key override branch — silently returning the raw API key
         // when both credentials existed (misattributed "usage is out"
         // errors) and throwing NotLoggedInError for OAuth-only users.
-        return await this.resolveCredentials(MOONSHOT_OAUTH_KEY, {
+        return await this.resolveCredentials(dual.oauthKey, {
           ...(opts?.forceRefresh ? { forceRefresh: true } : {}),
         });
       } catch (err) {
-        // OAuth refresh token is dead and was wiped. Fall back to the
-        // Moonshot API key if the user also configured one. This is a billing
-        // switch (OAuth → paid API key), so make it loud in the debug log
-        // rather than silent — the user expects OAuth to stay active and
-        // should know a re-login is needed to restore it.
-        if (err instanceof NotLoggedInError && this.data["moonshot"]) {
+        // OAuth refresh token is dead and was wiped. Fall back to the API key if
+        // the user also configured one. This is a billing switch (subscription →
+        // metered key), so make it loud in the debug log rather than silent —
+        // the user expects OAuth to stay active and should know a re-login is
+        // needed to restore it.
+        if (err instanceof NotLoggedInError && this.data[dual.provider]) {
           log(
             "WARN",
             "auth",
-            "Kimi OAuth credential is no longer valid — falling back to the Moonshot API key. " +
-              'Run "ggcoder login" and choose Kimi OAuth to restore OAuth auth.',
+            `${dual.oauthLabel} credential is no longer valid — falling back to the ` +
+              `${dual.apiKeyLabel}. ${dual.restoreHint}`,
           );
-          return this.data["moonshot"];
+          return this.data[dual.provider]!;
         }
         throw err;
       }
@@ -439,8 +587,9 @@ export class AuthStorage {
       throw new NotLoggedInError(provider);
     }
 
-    // Static API-key providers have no refresh mechanism. The Kimi OAuth key
-    // (MOONSHOT_OAUTH_KEY) is intentionally excluded — it refreshes below.
+    // Static API-key providers have no refresh mechanism. The dual-auth OAuth
+    // keys (`moonshot-oauth`, `xai-oauth`) are intentionally excluded from that
+    // set — they refresh below.
     if (STATIC_API_KEY_PROVIDERS.has(provider)) {
       return creds;
     }
@@ -489,7 +638,9 @@ export class AuthStorage {
             ? refreshGeminiToken
             : provider === MOONSHOT_OAUTH_KEY
               ? refreshKimiToken
-              : refreshOpenAIToken;
+              : provider === XAI_OAUTH_KEY
+                ? refreshXaiToken
+                : refreshOpenAIToken;
       let refreshed: OAuthCredentials;
       try {
         refreshed = await refreshFn(latestCreds.refreshToken);

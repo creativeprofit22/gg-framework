@@ -9,6 +9,7 @@ import { killProcessTree as killLocalProcessTree, type ProcessTarget } from "../
 import { localProcessLifecycle, type ProcessLifecycleAdapter } from "../tools/operations.js";
 import { getSafeToolEnv } from "../tools/safe-env.js";
 import { resolveShell } from "./shell.js";
+import { SANDBOX_ENV_PATCH, type SandboxLaunch } from "./sandbox.js";
 import type { AgentNotificationQueue } from "./agent-notifications.js";
 
 export interface BackgroundProcess {
@@ -86,6 +87,8 @@ export interface ForegroundLogHandle {
 }
 
 export interface ProcessManagerOptions {
+  /** Upstream-compatible alias used by tests and lightweight callers. */
+  bgDir?: string;
   backgroundLogRoot?: string;
   foregroundLogRoot?: string;
   createForegroundLogStream?: (logPath: string) => Writable;
@@ -179,11 +182,17 @@ export class ProcessManager {
     if (isLifecycleAdapter(lifecycleOrOptions)) {
       this.lifecycle = lifecycleOrOptions;
       this.createLogStream = createLogStream;
-      this.options = options;
+      this.options = {
+        ...options,
+        backgroundLogRoot: options.backgroundLogRoot ?? options.bgDir,
+      };
     } else {
       this.lifecycle = lifecycleFromOptions(lifecycleOrOptions);
       this.createLogStream = createLogStream;
-      this.options = lifecycleOrOptions;
+      this.options = {
+        ...lifecycleOrOptions,
+        backgroundLogRoot: lifecycleOrOptions.backgroundLogRoot ?? lifecycleOrOptions.bgDir,
+      };
     }
   }
 
@@ -403,7 +412,7 @@ export class ProcessManager {
     };
   }
 
-  async start(command: string, cwd: string): Promise<StartResult> {
+  async start(command: string, cwd: string, launch?: SandboxLaunch): Promise<StartResult> {
     this.pruneExpiredRecords();
     await this.sweepStaleLogs();
     const backgroundLogRoot = this.options.backgroundLogRoot ?? BG_DIR;
@@ -430,7 +439,10 @@ export class ProcessManager {
     logStream.once("close", markLogClosed);
     logStream.once("error", markLogClosed);
 
-    const shell = resolveShell(command);
+    const shell = launch ?? resolveShell(command);
+    const environment = launch?.sandboxed
+      ? { ...getSafeToolEnv(), ...SANDBOX_ENV_PATCH }
+      : getSafeToolEnv();
     let child: ChildProcess;
     try {
       child = this.lifecycle.spawn(shell.file, shell.args, {
@@ -439,7 +451,7 @@ export class ProcessManager {
         // Keep adapter-owned process I/O as pipes. Numeric descriptors would
         // bypass remote/SSH/Docker adapters and execute logging on their target.
         stdio: ["pipe", "pipe", "pipe"],
-        env: getSafeToolEnv(),
+        env: environment,
       });
     } catch (error) {
       logStream.end();

@@ -1,0 +1,219 @@
+import type * as ChildProcessModule from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { PassThrough } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getAppPaths } from "../config.js";
+import { DEFAULT_SETTINGS } from "./settings-manager.js";
+import {
+  buildSandboxSettings,
+  prepareSandboxLaunch,
+  resetSandboxSupportProbeForTests,
+} from "./sandbox.js";
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof ChildProcessModule>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
+
+describe("buildSandboxSettings", () => {
+  it("limits writes to the workspace and temp directory, and enforces an allowlist", () => {
+    // A real directory, so symlinked temp roots (macOS /var → /private/var) are
+    // exercised rather than silently skipped.
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gg-sandbox-workspace-"));
+    const settings = buildSandboxSettings(cwd, { mode: "workspace", allowedDomains: [] }, "darwin");
+
+    expect(settings.filesystem.allowWrite).toEqual(
+      expect.arrayContaining([
+        fs.realpathSync(path.resolve(cwd)),
+        fs.realpathSync(path.resolve(os.tmpdir())),
+        getAppPaths().agentDir,
+      ]),
+    );
+    expect(settings.filesystem.allowWrite).not.toContain(os.homedir());
+    // The sandbox matches real paths, so a deny rule must cover the resolved
+    // workspace or it silently never fires (macOS /var → /private/var).
+    expect(settings.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([path.join(fs.realpathSync(path.resolve(cwd)), ".env")]),
+    );
+    expect(settings.filesystem.denyRead).toEqual(
+      expect.arrayContaining([
+        path.join(os.homedir(), ".ssh"),
+        path.join(os.homedir(), ".gg", "auth.json"),
+      ]),
+    );
+    expect(settings.network).toMatchObject({
+      strictAllowlist: true,
+      allowUnixSockets: [],
+      // Dev servers and the screenshot tool bind loopback; blocking it would
+      // break core workflows without containing anything.
+      allowLocalBinding: true,
+    });
+    // Egress is an allowlist, never open: an unknown host stays unreachable.
+    expect(settings.network.allowedDomains).not.toContain("api.example.com");
+  });
+
+  it("keeps bash writable in the same roots the write guard already allows", () => {
+    const cwd = path.join(os.tmpdir(), "gg-sandbox-workspace");
+    const extraRoot = path.join(os.tmpdir(), "gg-sandbox-second-root");
+    const settings = buildSandboxSettings(
+      cwd,
+      { mode: "workspace", allowedDomains: [], additionalRoots: [extraRoot] },
+      "darwin",
+    );
+
+    // Multi-root sessions and ~/.gg must not silently lose bash writes.
+    expect(settings.filesystem.allowWrite).toEqual(
+      expect.arrayContaining([path.resolve(cwd), path.resolve(extraRoot), getAppPaths().agentDir]),
+    );
+    expect(settings.filesystem.allowWrite).not.toContain(os.homedir());
+  });
+
+  it("honors the outside-workspace opt-out instead of contradicting the user", () => {
+    const settings = buildSandboxSettings(
+      path.join(os.tmpdir(), "gg-sandbox-workspace"),
+      { mode: "workspace", allowedDomains: [], allowOutsideWorkspaceWrites: true },
+      "darwin",
+    );
+
+    expect(settings.filesystem.allowWrite).toContain(os.homedir());
+    // Consenting to write outside the workspace is not consent to leak secrets.
+    expect(settings.filesystem.denyRead).toContain(path.join(os.homedir(), ".ssh"));
+  });
+
+  it("normalizes and de-duplicates explicit network domains deterministically", () => {
+    const settings = buildSandboxSettings("/workspace", {
+      mode: "workspace",
+      allowedDomains: [" registry.npmjs.org ", "github.com", "github.com", ""],
+      strictDomains: true,
+    });
+
+    expect(settings.network.allowedDomains).toEqual(["github.com", "registry.npmjs.org"]);
+  });
+});
+
+describe("sandbox defaults", () => {
+  it("stays opt-in while upstream breaks core workflows", () => {
+    // Verified upstream breakage: Linux pipes/redirections fail under seccomp,
+    // macOS git-over-SSH fails the SOCKS handshake, and `git config --global`
+    // is refused. Turning this on by default would break `git push` and piped
+    // commands right after an update. Revisit when those are fixed upstream.
+    expect(DEFAULT_SETTINGS.sandboxMode).toBe("off");
+  });
+
+  it("reaches mainstream toolchains out of the box, so the default is invisible", () => {
+    const { network } = buildSandboxSettings("/workspace", {
+      mode: "auto",
+      allowedDomains: [],
+    });
+
+    // If any of these were missing, `npm install` / `pip install` / `git clone`
+    // would fail for every user the moment the sandbox shipped on.
+    for (const host of [
+      "github.com",
+      "registry.npmjs.org",
+      "pypi.org",
+      "files.pythonhosted.org",
+      "proxy.golang.org",
+      "crates.io",
+      "rubygems.org",
+    ]) {
+      expect(network.allowedDomains).toContain(host);
+    }
+  });
+
+  it("rejects patterns the sandbox itself refuses, so a bad entry cannot brick startup", () => {
+    const { network } = buildSandboxSettings("/workspace", {
+      mode: "auto",
+      allowedDomains: [],
+    });
+
+    for (const domain of network.allowedDomains) {
+      expect(domain).not.toBe("*");
+      // sandbox-runtime rejects overly broad wildcards like "*.com".
+      expect(domain).not.toMatch(/^\*\.[a-z]+$/);
+      expect(domain).not.toMatch(/[:/]/);
+    }
+  });
+
+  it("adds user hosts to the defaults, and honors an explicit takeover", () => {
+    const merged = buildSandboxSettings("/workspace", {
+      mode: "auto",
+      allowedDomains: ["internal.example.com"],
+    });
+    expect(merged.network.allowedDomains).toContain("internal.example.com");
+    expect(merged.network.allowedDomains).toContain("github.com");
+
+    const strict = buildSandboxSettings("/workspace", {
+      mode: "auto",
+      allowedDomains: ["internal.example.com"],
+      strictDomains: true,
+    });
+    expect(strict.network.allowedDomains).toEqual(["internal.example.com"]);
+  });
+});
+
+describe("prepareSandboxLaunch", () => {
+  const shell = { file: "bash", args: ["-c", "echo ok"], isCmdFallback: false };
+
+  beforeEach(() => resetSandboxSupportProbeForTests());
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetSandboxSupportProbeForTests();
+  });
+
+  it("preserves the original shell only for explicit sandbox opt-out", async () => {
+    await expect(
+      prepareSandboxLaunch(shell, "/workspace", { mode: "off", allowedDomains: [] }),
+    ).resolves.toEqual({ ...shell, sandboxed: false });
+  });
+
+  it("wraps the command when the support probe succeeds", async () => {
+    // The real probe launches sandbox-runtime and may legitimately take up to
+    // its 20-second production deadline under process-heavy parallel suites.
+    // Simulate support here so this unit test verifies wrapping, not host load.
+    vi.mocked(spawn).mockImplementationOnce(() => {
+      const child = new ChildProcess();
+      child.stderr = new PassThrough();
+      queueMicrotask(() => child.emit("exit", 0));
+      return child;
+    });
+
+    const probe = await prepareSandboxLaunch(shell, os.tmpdir(), {
+      mode: "auto",
+      allowedDomains: [],
+    });
+    expect(probe.sandboxed).toBe(true);
+
+    const launch = await prepareSandboxLaunch(shell, os.tmpdir(), {
+      mode: "workspace",
+      allowedDomains: [],
+    });
+
+    expect(launch.sandboxed).toBe(true);
+    expect(launch.file).toBe(process.execPath);
+    expect(launch.args).toEqual(
+      expect.arrayContaining(["--settings", "--", "bash", "-c", "echo ok"]),
+    );
+  });
+
+  it("degrades instead of breaking every command when prerequisites are missing", async () => {
+    // An unusable interpreter makes the probe child exit non-zero, standing in
+    // for bwrap-less Linux or an unprovisioned Windows sandbox user.
+    vi.spyOn(process, "execPath", "get").mockReturnValue("/nonexistent/gg-node");
+
+    await expect(
+      prepareSandboxLaunch(shell, os.tmpdir(), { mode: "auto", allowedDomains: [] }),
+    ).resolves.toEqual({ ...shell, sandboxed: false });
+  });
+
+  it("fails closed in strict workspace mode with actionable install guidance", async () => {
+    vi.spyOn(process, "execPath", "get").mockReturnValue("/nonexistent/gg-node");
+
+    await expect(
+      prepareSandboxLaunch(shell, os.tmpdir(), { mode: "workspace", allowedDomains: [] }),
+    ).rejects.toThrow(/bubblewrap \+ socat|windows-install/);
+  });
+});

@@ -18,6 +18,7 @@
  */
 import type { Message, ContentPart, ToolResult } from "@kenkaiiii/gg-ai";
 import { matchExpandedCommand, type WorkflowCommandSpec } from "./autopilot-gate.js";
+import { collectVerificationEvidence } from "./verification-evidence.js";
 
 /** How many of the most recent build-session messages to inline verbatim. */
 export const KEN_RECENT_MESSAGE_LIMIT = 20;
@@ -407,6 +408,19 @@ export function buildKenDigest(input: KenDigestInput): string {
       renderedRecent.length > 0 ? renderedRecent.join("\n\n") : "(no conversation yet)"
     }`,
   );
+
+  const verificationEvidence = collectVerificationEvidence(afterSummary).slice(-12);
+  if (verificationEvidence.length > 0) {
+    const rows = verificationEvidence.map(
+      (evidence) =>
+        `- ${evidence.status.toUpperCase()}: \`${cap(evidence.command, 180)}\` — ${evidence.reason}`,
+    );
+    sections.push(
+      "## Harness-classified verification evidence\n" +
+        "Only PASSED entries below count as bounded verification evidence; model-authored claims do not.\n" +
+        rows.join("\n"),
+    );
+  }
 
   sections.push(`## They just asked you\n${input.question.trim()}`);
 

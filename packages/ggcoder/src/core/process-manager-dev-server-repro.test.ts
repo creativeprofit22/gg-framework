@@ -4,6 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import { ProcessManager } from "./process-manager.js";
 
+/**
+ * A throwaway background-log directory per manager.
+ *
+ * `start()` writes AND prunes inside `bgDir`, so a manager constructed without
+ * one sweeps the developer's real `~/.gg/bg` when the suite runs.
+ */
+async function bgTempDir(): Promise<string> {
+  return fs.mkdtemp(path.join(os.tmpdir(), "gg-bg-logs-"));
+}
+
 async function waitForOutput(
   manager: ProcessManager,
   id: string,
@@ -81,7 +91,7 @@ describe("ProcessManager dev-server lifecycle repro", () => {
   it("scrubs unsafe inherited environment for background commands", async () => {
     const oldSecret = process.env.GG_TEST_SHOULD_NOT_LEAK;
     process.env.GG_TEST_SHOULD_NOT_LEAK = "super-secret";
-    manager = new ProcessManager();
+    manager = new ProcessManager({ bgDir: await bgTempDir() });
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-bg-env-"));
     try {
       const started = await manager.start(
@@ -104,6 +114,7 @@ describe("ProcessManager dev-server lifecycle repro", () => {
   it("force-kills the PID tree with taskkill on Windows", async () => {
     const taskkill = vi.fn().mockReturnValue({ status: 1 });
     manager = new ProcessManager({
+      bgDir: await bgTempDir(),
       platform: "win32",
       kill: vi.fn(() => {
         throw new Error("force fallback");
@@ -136,7 +147,7 @@ describe("ProcessManager dev-server lifecycle repro", () => {
   }, 45_000);
 
   it("starts, reads, and stops a long-running Node HTTP server through the worker background path", async () => {
-    manager = new ProcessManager();
+    manager = new ProcessManager({ bgDir: await bgTempDir() });
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-dev-server-repro-"));
     const fixture = path.join(tmpDir, "dev-server.mjs");
     await fs.writeFile(
@@ -193,7 +204,7 @@ describe("ProcessManager dev-server lifecycle repro", () => {
   posixIt(
     "kills the whole detached process group on POSIX/WSL shutdown",
     async () => {
-      manager = new ProcessManager();
+      manager = new ProcessManager({ bgDir: await bgTempDir() });
       const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-posix-process-group-"));
       const childFixture = path.join(tmpDir, "grandchild.mjs");
       const parentFixture = path.join(tmpDir, "parent.mjs");
@@ -233,4 +244,36 @@ describe("ProcessManager dev-server lifecycle repro", () => {
     },
     15_000,
   );
+});
+
+/**
+ * `start()` both writes and prunes inside its log directory, and the default is
+ * the user's real `~/.gg/bg`. A suite run once deleted ~12.7k genuine logs off a
+ * developer machine that way, silently, because the tests only sandboxed cwd.
+ *
+ * This asserts the isolation seam itself: a manager given a `bgDir` must confine
+ * every write to it and leave the real directory untouched.
+ */
+describe("background log isolation", () => {
+  it("writes logs only inside the injected bgDir", async () => {
+    const logs = await fs.mkdtemp(path.join(os.tmpdir(), "gg-bg-isolation-"));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gg-bg-isolation-cwd-"));
+    const realBgDir = path.join(os.homedir(), ".gg", "bg");
+    const before = await fs.readdir(realBgDir).catch(() => [] as string[]);
+
+    const isolated = new ProcessManager({ bgDir: logs });
+    try {
+      const started = await isolated.start("echo isolated", cwd);
+      await waitForOutput(isolated, started.id, (text) => text.includes("isolated"));
+
+      expect(started.logFile.startsWith(logs)).toBe(true);
+      expect(await fs.readdir(logs)).toContain(`${started.id}.log`);
+
+      // The real directory gained nothing — no stray log, no prune sweep.
+      const after = await fs.readdir(realBgDir).catch(() => [] as string[]);
+      expect(after.sort()).toEqual(before.sort());
+    } finally {
+      isolated.shutdownAll();
+    }
+  }, 30_000);
 });

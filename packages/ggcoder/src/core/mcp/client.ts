@@ -12,7 +12,7 @@ import {
   UnauthorizedError,
 } from "@modelcontextprotocol/client";
 import type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";
-import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
 import { z } from "zod";
 import http from "node:http";
 import os from "node:os";
@@ -27,6 +27,12 @@ import { McpOAuthStore } from "./oauth-store.js";
 import { isLocalhost, alternateLoopback, isNetworkError } from "./loopback.js";
 import { resolveStdioCommand } from "./resolve-stdio.js";
 import { McpCatalogCache, type ProtocolEra } from "./catalog-cache.js";
+import {
+  isShareableServer,
+  sharedMcpPool,
+  type SharedMcpPool,
+  type SharedServerHandle,
+} from "./shared-pool.js";
 
 interface ConnectedServer {
   name: string;
@@ -80,6 +86,8 @@ export interface MCPClientManagerOptions {
   catalogCache?: McpCatalogCache;
   modernProtocol?: boolean;
   onElicit?: MCPElicitHandler;
+  sharedPool?: SharedMcpPool;
+  onServerClosed?: (name: string) => void;
 }
 
 export class MCPClientManager {
@@ -101,6 +109,14 @@ export class MCPClientManager {
    */
   private reconnecting = new Map<string, Promise<void>>();
 
+  /**
+   * Claims on process-wide shared connections, keyed by server name. Held so
+   * `dispose` can hand them back: the pooled child only exits once the LAST
+   * manager holding it releases, so leaking a claim here would pin the process
+   * for the daemon's lifetime — the exact bug sharing is meant to fix.
+   */
+  private sharedHandles = new Map<string, SharedServerHandle>();
+
   private readonly catalogCache: McpCatalogCache;
   /**
    * Opt into the 2026-07-28 revision. Off by default: `mode: "auto"` probes with
@@ -116,10 +132,28 @@ export class MCPClientManager {
    */
   private readonly onElicit?: MCPElicitHandler;
 
+  /**
+   * Pool backing `shared: true` servers. Defaults to the daemon-wide singleton;
+   * injectable so tests can exercise sharing without touching global state.
+   */
+  private readonly pool: SharedMcpPool;
+
+  /**
+   * Fired when a connected server's transport closes on its own — a crashed or
+   * exited child, not our own `dispose`. The pool uses it to drop a dead
+   * connection so the next session rebuilds instead of inheriting a corpse.
+   */
+  private readonly onServerClosed?: (name: string) => void;
+
+  /** Set while `dispose` runs, so our own teardown is not reported as a death. */
+  private disposing = false;
+
   constructor(opts: MCPClientManagerOptions = {}) {
     this.catalogCache = opts.catalogCache ?? new McpCatalogCache();
     this.modernProtocol = opts.modernProtocol ?? false;
     this.onElicit = opts.onElicit;
+    this.pool = opts.sharedPool ?? sharedMcpPool;
+    this.onServerClosed = opts.onServerClosed;
   }
 
   /**
@@ -182,6 +216,78 @@ export class MCPClientManager {
     };
   }
 
+  /**
+   * Claim the pooled connection for a shared server and adopt its tools.
+   *
+   * Shaped like `connectServer` (resolve tools / throw on failure) so the
+   * caller's `allSettled` handling is identical for both kinds. The pool
+   * reports failure in-band, so it is rethrown here with the message the pool
+   * already formatted.
+   */
+  private async connectShared(config: MCPServerConfig): Promise<AgentTool[]> {
+    const handle = await this.pool.acquire(
+      config,
+      // The pooled connection is just another manager with sharing switched
+      // off, so it takes the normal connect path instead of recursing into the
+      // pool. Its elicit handler is the pool's dispatcher, NOT this session's:
+      // the connection is shared, so each request has to be routed to whichever
+      // session actually provoked it.
+      (opts) => {
+        const manager = new MCPClientManager({
+          catalogCache: opts.catalogCache,
+          modernProtocol: opts.modernProtocol,
+          onElicit: opts.onElicit,
+          sharedPool: this.pool,
+          // Let the pool retire this connection if its server exits.
+          onServerClosed: opts.onClosed,
+        });
+        return {
+          connect: async (target) => {
+            const [result] = await manager.connectAllDetailed([{ ...target, shared: false }]);
+            return (
+              result ?? {
+                name: target.name,
+                ok: false,
+                toolCount: 0,
+                tools: [],
+                error: "connection produced no result",
+              }
+            );
+          },
+          dispose: () => manager.dispose(),
+        };
+      },
+      {
+        catalogCache: this.catalogCache,
+        modernProtocol: this.modernProtocol,
+        onElicit: this.onElicit,
+      },
+    );
+    if (!handle.result.ok) {
+      // Nothing was claimed on a failed connect, but releasing is idempotent
+      // and keeps this path honest if that ever changes.
+      await handle.release();
+      throw new Error(handle.result.error ?? "connection failed");
+    }
+    this.sharedHandles.set(config.name, handle);
+
+    // Wrap each pooled tool so a call from THIS session is attributable while
+    // it runs. The pool needs that to answer "which window asked?" when the
+    // server elicits mid-call; without it a shared server could only ever
+    // cancel its prompts.
+    return handle.result.tools.map((tool) => ({
+      ...tool,
+      execute: async (args: unknown, context?: ToolContext) => {
+        const endCall = handle.beginCall();
+        try {
+          return await tool.execute(args, context as ToolContext);
+        } finally {
+          endCall();
+        }
+      },
+    }));
+  }
+
   /** Get-or-create the settlement record for one server name. */
   private connectionSlot(name: string): {
     promise: Promise<ConnectionOutcome>;
@@ -231,6 +337,14 @@ export class MCPClientManager {
    * Connect every enabled server and return one result per server (success →
    * ok + toolCount; failure → ok:false with a human-readable error string).
    * Keeps successfully connected servers in `this.servers`.
+   *
+   * Shareable servers — stdio, unless opted out with `shared: false` — are not
+   * connected here at all: they are claimed from the process-wide pool, so every
+   * session in the daemon multiplexes over one child process instead of spawning
+   * its own. The split is invisible to callers — results and tools come back in
+   * the same shape, `whenConnected` settles for both kinds, and `dispose`
+   * releases the pooled claims — so sharing applies wherever a manager is used
+   * (sessions, CLI, subagents) without each call site opting in.
    */
   async connectAllDetailed(configs: MCPServerConfig[]): Promise<MCPConnectResult[]> {
     const enabled = configs.filter((c) => c.enabled !== false);
@@ -241,7 +355,9 @@ export class MCPClientManager {
     // promise instead of creating a second one.
     for (const config of enabled) this.connectionSlot(config.name);
 
-    const settled = await Promise.allSettled(enabled.map((c) => this.connectServer(c)));
+    const settled = await Promise.allSettled(
+      enabled.map((c) => (isShareableServer(c) ? this.connectShared(c) : this.connectServer(c))),
+    );
 
     const results: MCPConnectResult[] = settled.map((result, i) => {
       const name = enabled[i].name;
@@ -521,6 +637,18 @@ export class MCPClientManager {
 
     this.servers.push({ name: config.name, client, transport, lastCallTime: 0, config });
 
+    // Report an unexpected close. A stdio child that crashes has no recovery
+    // path (`canRecoverSession` excludes stdio deliberately: respawning one
+    // mid-call would be a surprise), so the only safe response is to let the
+    // owner drop this connection and rebuild on the next use. That matters most
+    // for a POOLED connection, where a corpse would otherwise be handed to every
+    // session in the daemon, including ones that connect later.
+    client.onclose = () => {
+      if (this.disposing) return;
+      log("WARN", "mcp", `MCP server "${config.name}" closed unexpectedly`);
+      this.onServerClosed?.(config.name);
+    };
+
     const { tools } = await client.listTools(undefined, { timeout });
 
     // Persist the live tool list so the NEXT cold start can answer tool_search
@@ -759,8 +887,17 @@ export class MCPClientManager {
   }
 
   async dispose(): Promise<void> {
+    // Our own teardown closes transports too; flag it so those closes are not
+    // reported as unexpected deaths.
+    this.disposing = true;
     this.connections.clear();
     this.reconnecting.clear();
+    // Hand back pooled claims first. These are references, not connections —
+    // the shared child survives if another session still holds it, and exits
+    // when this was the last claim.
+    const handles = [...this.sharedHandles.values()];
+    this.sharedHandles.clear();
+    await Promise.all(handles.map((handle) => handle.release()));
     for (const server of this.servers) {
       try {
         await server.client.close();

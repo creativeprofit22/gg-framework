@@ -281,7 +281,10 @@ export interface StreamResponse {
 
 export interface Usage {
   inputTokens: number;
+  /** Total billed output tokens, including reasoning tokens when the provider reports them separately. */
   outputTokens: number;
+  /** Reasoning/thinking-token subset of outputTokens. */
+  reasoningTokens?: number;
   cacheRead?: number;
   cacheWrite?: number;
   serverToolUse?: { webSearchRequests?: number; webFetchRequests?: number };

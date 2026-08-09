@@ -27,6 +27,19 @@ import {
   type BoundedOutputTailSnapshot,
   OutputChunkDecoder,
 } from "./bounded-output-tail.js";
+import {
+  prepareSandboxLaunch,
+  SANDBOX_ENV_PATCH,
+  type SandboxPolicy,
+  type SandboxLaunch,
+} from "../core/sandbox.js";
+import { annotateSandboxDenial } from "../core/sandbox-feedback.js";
+
+/** Tool env, plus the tweaks that only make sense inside the OS sandbox. */
+function sandboxAwareEnv(sandboxed: boolean): Record<string, string> {
+  const env = getSafeToolEnv();
+  return sandboxed ? { ...env, ...SANDBOX_ENV_PATCH } : env;
+}
 
 const DEFAULT_TIMEOUT = 120_000; // 120 seconds
 const FOREGROUND_TIMEOUT_CLEANUP_GRACE_MS = 1_000;
@@ -117,6 +130,7 @@ interface ForegroundCommandOptions {
   signal: AbortSignal;
   ops: ToolOperations;
   processManager: ProcessManager;
+  launch?: SandboxLaunch;
   onUpdate?: (output: string, totalBytes: number) => void;
   cleanupProcessTree?: (target: ProcessTarget) => Promise<void>;
   reapProcessWrapper?: (target: ProcessTarget) => void;
@@ -139,13 +153,17 @@ export async function executeForegroundCommand({
   signal,
   ops,
   processManager,
+  launch,
   onUpdate,
   cleanupProcessTree = ops.process.cleanupProcessTree,
   reapProcessWrapper: reapWrapper = ops.process.reapProcessWrapper,
 }: ForegroundCommandOptions): Promise<ForegroundCommandExecution> {
   const startedAt = Date.now();
   const foregroundLog = await processManager.allocateForegroundLog();
-  const shell = resolveShell(command);
+  const effectiveLaunch: SandboxLaunch = launch ?? {
+    ...resolveShell(command),
+    sandboxed: false,
+  };
   const outputTail = new BoundedOutputTail();
   let totalBytes = 0;
   let pid: number | null = null;
@@ -266,7 +284,7 @@ export async function executeForegroundCommand({
         rawOutput: outputSnapshot.content,
         outputCapped: outputSnapshot.capped,
         outputSnapshot,
-        isCmdFallback: shell.isCmdFallback,
+        isCmdFallback: effectiveLaunch.isCmdFallback,
       };
       void foregroundLog.close().then(() => {
         if (foregroundLog.error) {
@@ -301,11 +319,11 @@ export async function executeForegroundCommand({
     }
 
     try {
-      child = ops.process.spawn(shell.file, shell.args, {
+      child = ops.process.spawn(effectiveLaunch.file, effectiveLaunch.args, {
         cwd,
         detached: true,
         stdio: ["ignore", "pipe", "pipe"],
-        env: getSafeToolEnv(),
+        env: sandboxAwareEnv(effectiveLaunch.sandboxed),
       });
       pid = child.pid ?? null;
 
@@ -571,10 +589,13 @@ export function createBashTool(
   planModeRef?: { current: boolean },
   shellOpts?: ResolveShellOpts,
   getNetworkPolicy?: GetNetworkPolicy,
+  getSandboxPolicy?: () => SandboxPolicy,
 ): AgentTool<typeof BashParams> {
   // Lazily created on the first persist:true call; one session per tool
   // instance (i.e. per agent session), owned by the shared process manager.
   let sessionShell: PersistentShell | null = null;
+  let sessionSandboxKey: string | null = null;
+  let sessionSandboxed = false;
   // Shell selection doesn't depend on the command, so resolve ONCE at tool
   // creation and bake the true execution environment into the description —
   // promising bash on a cmd.exe fallback makes the model write POSIX commands
@@ -626,6 +647,11 @@ export function createBashTool(
       if (networkBlocked) {
         return `Error: ${networkBlocked}`;
       }
+      const sandboxPolicy = getSandboxPolicy?.() ?? { mode: "off", allowedDomains: [] };
+      const prepareLaunch = async (
+        shell: ReturnType<typeof resolveShell>,
+      ): Promise<SandboxLaunch> => prepareSandboxLaunch(shell, cwd, sandboxPolicy);
+
       // Persistent session mode — POSIX only; Windows-without-bash falls through
       // to the normal spawn path (cmd.exe fallback) below.
       if (
@@ -633,16 +659,33 @@ export function createBashTool(
         commandMode === "foreground" &&
         !resolveShell(command, shellOpts).isCmdFallback
       ) {
+        const sandboxKey = JSON.stringify(sandboxPolicy);
+        if (sessionShell && sessionSandboxKey !== sandboxKey) {
+          sessionShell.kill();
+          sessionShell = null;
+        }
         if (!sessionShell) {
-          const shell = new PersistentShell(
-            cwd,
-            getSafeToolEnv(),
-            MAX_OUTPUT_BYTES,
-            ops.process,
-            shellOpts,
-          );
-          sessionShell = shell;
-          processManager.registerShutdown(() => shell.killNow());
+          try {
+            const resolved = resolveShell("", shellOpts);
+            const launch = await prepareLaunch({
+              ...resolved,
+              args: ["--norc", "--noprofile"],
+            });
+            const shell = new PersistentShell(
+              cwd,
+              sandboxAwareEnv(launch.sandboxed),
+              MAX_OUTPUT_BYTES,
+              ops.process,
+              shellOpts,
+              launch,
+            );
+            sessionShell = shell;
+            processManager.registerShutdown(() => shell.killNow());
+            sessionSandboxKey = sandboxKey;
+            sessionSandboxed = launch.sandboxed;
+          } catch (error) {
+            return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
+          }
         }
         const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
         const execution = await executePersistentCommand({
@@ -657,10 +700,20 @@ export function createBashTool(
                 context.onUpdate?.({ type: "bash_progress", output, totalBytes })
             : undefined,
         });
-        return renderStructuredForegroundResult(execution, true);
+        const rendered = await renderStructuredForegroundResult(execution, true);
+        return {
+          ...rendered,
+          content: annotateSandboxDenial(rendered.content, sessionSandboxed),
+        };
       }
       if (commandMode === "background") {
-        const result = await processManager.start(command, cwd);
+        let launch: SandboxLaunch;
+        try {
+          launch = await prepareLaunch(resolveShell(command, shellOpts));
+        } catch (error) {
+          return `Error: OS sandbox unavailable; command was not run: ${(error as Error).message}`;
+        }
+        const result = await processManager.start(command, cwd, launch);
         return (
           `Background process started.\n` +
           `ID: ${result.id}\n` +
@@ -672,6 +725,14 @@ export function createBashTool(
       }
 
       const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT;
+      const shell = resolveShell(command, shellOpts);
+      let launch: SandboxLaunch;
+      try {
+        launch = await prepareLaunch(shell);
+      } catch (error) {
+        return `Exit code: 1\nOS sandbox unavailable; command was not run: ${(error as Error).message}`;
+      }
+
       const execution = await executeForegroundCommand({
         command,
         cwd,
@@ -679,12 +740,17 @@ export function createBashTool(
         signal: context.signal,
         ops,
         processManager,
+        launch,
         onUpdate: context.onUpdate
           ? (output, totalBytes) =>
               context.onUpdate?.({ type: "bash_progress", output, totalBytes })
           : undefined,
       });
-      return renderStructuredForegroundResult(execution, false);
+      const rendered = await renderStructuredForegroundResult(execution, false);
+      return {
+        ...rendered,
+        content: annotateSandboxDenial(rendered.content, launch.sandboxed),
+      };
     },
   };
 }

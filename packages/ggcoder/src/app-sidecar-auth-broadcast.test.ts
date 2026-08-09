@@ -340,3 +340,81 @@ describe("OAuth login across windows", () => {
     expect(retry.status).toBe(202);
   }, 90_000);
 });
+
+/**
+ * Providers that accept subscription OAuth AND an API key (Kimi, Grok) hold two
+ * independent credentials. The app renders a per-method comparison and per-method
+ * disconnect from this payload, so a single "connected" bit is not enough.
+ */
+describe("dual-auth providers (OAuth + API key)", () => {
+  async function providerStatus(session: string, value: string): Promise<Record<string, unknown>> {
+    const res = await request("GET", "/auth/status", { session });
+    expect(res.status).toBe(200);
+    const providers = res.json.providers as Record<string, unknown>[];
+    const found = providers.find((p) => p.value === value);
+    expect(found).toBeDefined();
+    return found!;
+  }
+
+  it("offers Grok both methods, with guidance and the priority rule", async () => {
+    const session = await createSession();
+    const xai = await providerStatus(session, "xai");
+
+    expect(xai.methods).toEqual(["oauth", "apikey"]);
+    expect(xai.connected).toBe(false);
+    expect(xai.connectedMethods).toEqual([]);
+    // The UI cannot invent this copy — the choice changes what the user is billed.
+    const guidance = xai.methodGuidance as { method: string; billing: string }[];
+    expect(guidance.map((g) => g.method)).toEqual(["oauth", "apikey"]);
+    expect(String(xai.priorityNote)).toMatch(/used first/i);
+  }, 90_000);
+
+  it("reports which method is connected and which one requests will use", async () => {
+    const session = await createSession();
+    await request("POST", "/auth/apikey", {
+      session,
+      body: { provider: "xai", key: "xai-test-key" },
+    });
+
+    const xai = await providerStatus(session, "xai");
+    expect(xai.connected).toBe(true);
+    // Key only: it is both connected and active, and OAuth is still on offer.
+    expect(xai.connectedMethods).toEqual(["apikey"]);
+    expect(xai.activeMethod).toBe("apikey");
+    expect(xai.oauthExhaustedUntil).toBeUndefined();
+  }, 90_000);
+
+  it("disconnects one method without dropping the other", async () => {
+    const session = await createSession();
+    // Write both credentials directly: an OAuth login needs a real browser, and
+    // what matters here is the two-credential state the app has to manage.
+    await fs.writeFile(
+      path.join(tmpHome, ".gg", "auth.json"),
+      JSON.stringify({
+        xai: { accessToken: "key", refreshToken: "", expiresAt: Date.now() + 1_000_000 },
+        "xai-oauth": {
+          accessToken: "oauth",
+          refreshToken: "r",
+          expiresAt: Date.now() + 1_000_000,
+          baseUrl: "https://cli-chat-proxy.grok.com/v1",
+        },
+      }),
+    );
+
+    const both = await providerStatus(session, "xai");
+    expect(both.connectedMethods).toEqual(["oauth", "apikey"]);
+    // Both on file → the subscription is what actually gets used.
+    expect(both.activeMethod).toBe("oauth");
+
+    // Dropping a spent API key must not sign the user out of the subscription.
+    const out = await request("POST", "/auth/logout", {
+      session,
+      body: { provider: "xai", method: "apikey" },
+    });
+    expect(out.status).toBe(200);
+
+    const after = await providerStatus(session, "xai");
+    expect(after.connectedMethods).toEqual(["oauth"]);
+    expect(after.connected).toBe(true);
+  }, 90_000);
+});

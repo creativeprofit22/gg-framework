@@ -413,6 +413,7 @@ describe("streamGemini", () => {
         usageMetadata: {
           promptTokenCount: 7,
           candidatesTokenCount: 3,
+          thoughtsTokenCount: 4,
           cachedContentTokenCount: 2,
         },
       })}\n\n`,
@@ -453,7 +454,45 @@ describe("streamGemini", () => {
         ],
       },
       stopReason: "tool_use",
-      usage: { inputTokens: 5, outputTokens: 3, cacheRead: 2 },
+      usage: { inputTokens: 5, outputTokens: 7, reasoningTokens: 4, cacheRead: 2 },
     });
+  });
+
+  it.each([
+    {
+      name: "ordinary output",
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 3 },
+      expectedUsage: { inputTokens: 5, outputTokens: 3 },
+    },
+    {
+      name: "reasoning-only output",
+      usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 0, thoughtsTokenCount: 6 },
+      expectedUsage: { inputTokens: 5, outputTokens: 6, reasoningTokens: 6 },
+    },
+  ])("normalizes $name for billing totals", async ({ usageMetadata, expectedUsage }) => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          response: {
+            candidates: [
+              { content: { parts: [{ text: "internal", thought: true }] }, finishReason: "STOP" },
+            ],
+            usageMetadata,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const result = streamGemini({
+      provider: "gemini",
+      model: "gemini-3-flash-preview",
+      projectId: "test-project",
+      apiKey: "test-token",
+      streaming: false,
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    await expect(result.response).resolves.toMatchObject({ usage: expectedUsage });
   });
 });

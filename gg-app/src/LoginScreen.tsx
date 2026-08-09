@@ -99,9 +99,30 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
                 </span>
                 <span className="login-tile-name">{p.label}</span>
                 <span className="login-tile-methods">
-                  {p.methods.map((m) => (
-                    <Badge key={p.value}>{m === "oauth" ? "OAuth" : "API key"}</Badge>
-                  ))}
+                  {p.methods.map((m) => {
+                    // Providers can support two methods and have BOTH connected, so
+                    // colour each badge by its own state instead of the tile's one
+                    // dot: green = this credential is on file. The dot above still
+                    // answers "is this provider usable at all".
+                    const isConnected = (p.connectedMethods ?? []).includes(m);
+                    const isActive = p.activeMethod === m;
+                    const label = m === "oauth" ? "OAuth" : "API key";
+                    return (
+                      <Badge
+                        key={m}
+                        color={isConnected ? theme.success : undefined}
+                        title={
+                          isConnected
+                            ? isActive
+                              ? `${label} — connected, in use`
+                              : `${label} — connected, standby`
+                            : `${label} — not connected`
+                        }
+                      >
+                        {label}
+                      </Badge>
+                    );
+                  })}
                 </span>
               </button>
             );

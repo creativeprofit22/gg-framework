@@ -14,6 +14,10 @@ import { estimateTokens } from "./token-estimator.js";
  * 3. Large completed tool arguments — old write/edit payloads are capped once
  *    their result has returned; the files and tool result are the durable truth.
  *
+ * `PROTECTED_TOOLS` output is never pruned: it is behavioural instruction rather
+ * than reproducible data, so a "re-run the tool" stub is not recoverable — the
+ * agent has no signal that it ever loaded the skill.
+ *
  * Tool batches—not human turns—are the protection boundary. Autonomous research
  * can execute dozens of provider/tool cycles for one user prompt; protecting the
  * whole human turn lets reproducible reads refill the context immediately after
@@ -29,7 +33,17 @@ export const PRUNE_PROTECT_TOKENS = 40_000;
 export const PRUNE_MINIMUM_TOKENS = 20_000;
 export const PRUNE_PROTECT_TOOL_BATCHES = 2;
 
+/** Tools whose output is instruction, not reproducible data — never pruned. */
+export const PRUNE_PROTECTED_TOOLS = new Set(["skill"]);
+
 const PRUNE_MARKER = "[Pruned:";
+/**
+ * Prefix of the token-overflow stub specifically. Reaching one of these while
+ * walking backwards proves the whole older prefix was already considered, which
+ * a superseded-read stub does NOT prove — read dedup fires independently of the
+ * token budget, so an older verbatim result can sit behind one.
+ */
+const PRUNE_OVERFLOW_MARKER = `${PRUNE_MARKER} old tool output`;
 
 export interface PruneOptions {
   /** Recent tool-output token budget kept verbatim. Default 40k. */
@@ -84,7 +98,7 @@ export function pruneStaleToolResults(messages: Message[], opts: PruneOptions = 
   let recentToolBatches = 0;
   let recentToolTokens = 0;
 
-  for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex--) {
+  scan: for (let msgIndex = messages.length - 1; msgIndex >= 0; msgIndex--) {
     const msg = messages[msgIndex];
     if (msg.role !== "tool" || !Array.isArray(msg.content)) continue;
     recentToolBatches++;
@@ -94,9 +108,19 @@ export function pruneStaleToolResults(messages: Message[], opts: PruneOptions = 
       if (result.type !== "tool_result") continue;
       toolBatchByCallId.set(result.toolCallId, recentToolBatches);
       if (typeof result.content !== "string") continue;
-      if (result.content.startsWith(PRUNE_MARKER)) continue;
+      // An overflow stub outside the protect zone means an earlier pass blew
+      // the token budget here and pruned every prunable result older than it in
+      // that same batch. History only grows at the tail, so nothing older can
+      // have become prunable since: stop instead of re-scanning the whole
+      // transcript every turn. Other stub kinds prove nothing about what lies
+      // behind them, so they are merely skipped.
+      if (result.content.startsWith(PRUNE_MARKER)) {
+        if (!protectedBatch && result.content.startsWith(PRUNE_OVERFLOW_MARKER)) break scan;
+        continue;
+      }
 
       const info = callInfo.get(result.toolCallId);
+      if (info && PRUNE_PROTECTED_TOOLS.has(info.name)) continue;
       // Dedup key includes the range: a partial read (offset/limit) covers
       // different content than a full read or another range, so only an
       // identical path+range read supersedes an older one.

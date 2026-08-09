@@ -68,4 +68,40 @@ describe("provider wire boundary", () => {
       providerRegistry.unregister("wire-capture");
     }
   });
+
+  it("scrubs lone surrogates so the provider body stays valid JSON", () => {
+    let captured: StreamOptions | undefined;
+    const sentinel = new Error("captured");
+    providerRegistry.register("wire-capture", {
+      stream: (options) => {
+        captured = options;
+        throw sentinel;
+      },
+    });
+
+    try {
+      expect(() =>
+        stream({
+          provider: "wire-capture" as StreamOptions["provider"],
+          model: "test",
+          messages: [
+            { role: "user", content: "read a file \uD83D" },
+            {
+              role: "tool",
+              content: [{ type: "tool_result", toolCallId: "1", content: "\uDE00 output" }],
+            },
+          ],
+        }),
+      ).toThrow(sentinel);
+      // Assert on the raw strings: well-formed `JSON.stringify` escapes a lone
+      // surrogate to ASCII `\ud83d`, so checking the serialized body would pass
+      // even if the scrub never ran.
+      const user = captured?.messages[0];
+      const tool = captured?.messages[1] as { content: { content: string }[] } | undefined;
+      expect(user?.content).toBe("read a file \uFFFD");
+      expect(tool?.content[0]?.content).toBe("\uFFFD output");
+    } finally {
+      providerRegistry.unregister("wire-capture");
+    }
+  });
 });

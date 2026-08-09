@@ -103,7 +103,13 @@ not built — see the matrix comment in `release.yml`.
 `.github/workflows/ci.yml`'s `app` job exercises the same cross-OS spawn path on
 every push/PR (stage + bundle + smoke + `cargo test`) without a full bundle.
 
-### Required secrets
+### Protected release environment and required secrets
+
+Create a GitHub Actions environment named **`desktop-production`**, require the
+release approvers there, restrict deployment to protected `v*` tags, and store
+all secrets below in that environment—not as unprotected repository secrets.
+The workflow validates the tag is on `main` and fails before building if any
+target-required credential is missing.
 
 Updater signing (every OS):
 
@@ -115,8 +121,8 @@ Updater signing (every OS):
 If the updater key is lost, rotate both the key and the `pubkey` in
 `tauri.conf.json` (old installs won't auto-update across the rotation).
 
-macOS code signing + notarization (only consumed by the macOS matrix legs;
-leave unset to ship an unsigned build — the workflow stays green):
+macOS code signing + notarization (required on the macOS matrix leg; an absent
+value fails preflight rather than publishing an unsigned build):
 
 | Secret                       | Purpose                                                                    |
 | ---------------------------- | -------------------------------------------------------------------------- |
@@ -151,8 +157,9 @@ leave unset to ship an unsigned build — the workflow stays green):
    Security → App-Specific Passwords → generate one (→ `APPLE_PASSWORD`). Never
    commit it; store it only as a GitHub secret. If one leaks, revoke and
    regenerate.
-5. **Add all seven secrets** under repo Settings → Secrets and variables →
-   Actions, then push a `v*` tag to trigger the release.
+5. **Add all seven Apple secrets** plus both updater-signing secrets to the
+   protected `desktop-production` environment, then push a `v*` tag that points
+   to a commit on `main`. An environment reviewer must approve before the jobs run.
 
 > Notarization uses the Apple ID path (`APPLE_ID` + `APPLE_PASSWORD` +
 > `APPLE_TEAM_ID`). To switch to the App Store Connect API key path instead, set

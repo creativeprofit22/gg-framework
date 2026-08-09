@@ -4,6 +4,7 @@ import { theme } from "./theme";
 import {
   waitForReady,
   listProjects,
+  setProjectHidden,
   listSessions,
   selectProject,
   importTranscript,
@@ -133,6 +134,31 @@ export function ProjectPicker({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Drop a project from the list and persist the decision. Removed optimistically
+   * because discovery is a multi-store filesystem scan — re-listing to confirm
+   * would leave the row sitting there for a visible beat.
+   */
+  function hideProject(project: DiscoveredProject): void {
+    let index = -1;
+    setProjects((prev) => {
+      index = prev.findIndex((p) => p.path === project.path);
+      return prev.filter((p) => p.path !== project.path);
+    });
+    void setProjectHidden(project.path, true).catch(() => {
+      // Persisting failed, so the row is still real: put it back at its old
+      // position rather than leaving the list disagreeing with what the next
+      // launch will show. Rows are sorted by recency server-side, so restoring
+      // by index preserves that order without duplicating the sort here.
+      setProjects((prev) => {
+        if (prev.some((p) => p.path === project.path)) return prev;
+        const next = [...prev];
+        next.splice(index < 0 ? next.length : index, 0, project);
+        return next;
+      });
+    });
+  }
 
   function openProject(project: DiscoveredProject): void {
     setSelected(project);
@@ -297,32 +323,37 @@ export function ProjectPicker({
           {!loading && filteredProjects.length > 0 && (
             <div className="picker-reveal">
               {filteredProjects.map((p) => (
-                <button
-                  key={p.path}
-                  className="picker-item"
-                  onClick={() => openProject(p)}
-                  title={p.path}
-                >
-                  <span className="picker-row">
-                    <span className="picker-name" style={{ color: theme.text }}>
-                      {p.name}
+                <div key={p.path} className="picker-item-wrap">
+                  <button className="picker-item" onClick={() => openProject(p)} title={p.path}>
+                    <span className="picker-row">
+                      <span className="picker-name" style={{ color: theme.text }}>
+                        {p.name}
+                      </span>
+                      <Badge>{p.lastActiveDisplay}</Badge>
                     </span>
-                    <Badge>{p.lastActiveDisplay}</Badge>
-                  </span>
-                  <span className="picker-sources">
-                    {p.sources.map((s, i) => {
-                      const { label, color } = sourceStyle(s);
-                      return (
-                        <span key={s} style={{ color }}>
-                          {i > 0 ? (
-                            <span style={{ color: theme.textDim }}>{" \u00b7 "}</span>
-                          ) : null}
-                          {label}
-                        </span>
-                      );
-                    })}
-                  </span>
-                </button>
+                    <span className="picker-sources">
+                      {p.sources.map((s, i) => {
+                        const { label, color } = sourceStyle(s);
+                        return (
+                          <span key={s} style={{ color }}>
+                            {i > 0 ? (
+                              <span style={{ color: theme.textDim }}>{" \u00b7 "}</span>
+                            ) : null}
+                            {label}
+                          </span>
+                        );
+                      })}
+                    </span>
+                  </button>
+                  <button
+                    className="picker-hide"
+                    aria-label={`Hide ${p.name}`}
+                    title="Hide from this list"
+                    onClick={() => hideProject(p)}
+                  >
+                    {"\u00d7"}
+                  </button>
+                </div>
               ))}
             </div>
           )}

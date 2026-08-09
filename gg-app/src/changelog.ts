@@ -22,6 +22,110 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.43.0",
+    date: "2026-08-08",
+    items: [
+      "You can now sign in to `Grok` with your SuperGrok or `X Premium` subscription. No API key, no per-token bill, just log in and start building. Add a key as well and I will always spend your subscription first, then slide over to the key the moment your plan usage runs dry, and back again once it resets.",
+      "Long sessions stay rock solid. I sealed a slow leak that ate system resources every time GG Coder reopened your archived chats, and background logs in `~/.gg` now tidy up after themselves instead of quietly growing on your disk forever.",
+    ],
+  },
+  {
+    version: "0.42.0",
+    date: "2026-08-08",
+    items: [
+      "Your rank no longer stops at the top. I stretched the ladder from `50` levels all the way to `1000`, with `145` fresh rank names waiting past Singularity, from Starforge and Voidwalker to Omega and Origin. Every level you already earned stays exactly where it is, so you just keep climbing.",
+      "The stat bars on your scorecard actually mean something now. Instead of sitting pinned at full forever, each one chases your next real milestone and empties the moment you smash it. Glance at your card and you can see exactly how close you are to `1K` commits or your next `60` day streak.",
+    ],
+  },
+  {
+    version: "0.41.2",
+    date: "2026-08-07",
+    items: [
+      "Your chat window works properly again. My last update tried to get clever about how the conversation is drawn and got it badly wrong: messages went invisible, new replies never appeared, and the spacing at the bottom fell apart. I tore that change back out and put the solid original rendering back, so every message shows up exactly where it should.",
+    ],
+  },
+  {
+    version: "0.41.1",
+    date: "2026-08-07",
+    items: [
+      "Killed a nasty crash that could poison a whole conversation. One stray half-emoji, from a model, a long file, or a wild terminal dump, used to make every single message after it bounce with a `Bad Request`, even after a retry or a model switch. I now clean it before it ever leaves your machine, and chats that were already stuck heal themselves on the very next message.",
+    ],
+  },
+  {
+    version: "0.41.0",
+    date: "2026-08-07",
+    items: [
+      "Your chat window just got a lot lighter on its feet. I now only draw the part of the conversation you are actually looking at, so a full day of work costs about the same as five minutes of it. My heaviest window dropped from `753 MB` to `380 MB` and the scrolling stayed buttery.",
+      "Giant command dumps no longer bury your chat. Anything long now folds into a neat preview with a `Show full output` button, so you skim the good part and open the rest only when you want it. Copy still grabs the whole thing, every time.",
+    ],
+  },
+  {
+    version: "0.40.1",
+    date: "2026-08-06",
+    items: [
+      "I hunted down the last big memory hog: the chat window itself. Marathon sessions used to keep every message and every screenshot loaded all day, quietly swelling each window into the gigabytes. Now I keep just the newest `120` messages live and park the rest behind a tidy `Show earlier messages` button, so your chat stays complete while your memory stays yours.",
+    ],
+  },
+  {
+    version: "0.40.0",
+    date: "2026-08-06",
+    items: [
+      "GG Coder just got dramatically lighter. I used to spin up a private set of background helpers for every single window, so four projects open meant four copies of everything doing identical work. Now they all share, and a four window session on my machine dropped from `3.3 GB` to about `900 MB`. Same speed, same features, far more room for everything else you are running.",
+      "Projects you walk away from now hand their memory back. Leave one alone for `5 minutes` and I quietly release the code intelligence holding it, then spin it straight back up the moment you return. No more watching the app get heavier all day just because you opened something once this morning.",
+    ],
+  },
+  {
+    version: "0.39.5",
+    date: "2026-08-05",
+    items: [
+      "I hold the thread on long sessions now. When a chat runs long enough that I have to compress my own memory, I lead with exactly what I was doing and what comes next, instead of burying it under a replay of everything you already said. Fewer dropped balls, less repeating yourself.",
+      "That same memory got leaner. I stopped hoarding lists of every file I had glanced at and stopped stacking old summaries on top of each other, so more of my `memory` goes to your actual work and long chats stay sharp for longer.",
+    ],
+  },
+  {
+    version: "0.39.4",
+    date: "2026-08-05",
+    items: [
+      "The `Choose a project` screen is back on its feet. I stopped `macOS` scratch folders from crashing the list, so your real projects load cleanly instead of leaving you staring at a black window.",
+    ],
+  },
+  {
+    version: "0.39.3",
+    date: "2026-08-05",
+    items: [
+      "Every one of your projects is finally on the `Choose a project` screen. It used to only show the ones you had already opened with an agent, so most of your work was invisible. Now I read your project folders straight off disk and list the lot. On my own machine that took it from `31` projects to `97`.",
+      "Spot something you never want to see in that list again? Hover it and hit the `\u00d7`. It is gone for good, and it stays gone next time you launch. Great for the scratch folders and stray temp directories that used to clutter the place up.",
+      "The project list also opens noticeably quicker. I got it scanning everything at once instead of one folder at a time, so it lands almost `2x` faster even with a hundred projects to sift through.",
+      "Skills now stick. When I load a skill to do a job properly, it can no longer get quietly dropped from my memory partway through a long session, so I keep working the way you asked all the way to the end.",
+    ],
+  },
+  {
+    version: "0.39.2",
+    date: "2026-08-03",
+    items: [
+      "Watch me work inside your own editor. Every file I change now shows up as a proper side by side diff instead of a wall of text, and your editor follows along to the exact file and line I am touching. Reviewing my work just became a glance instead of a chore.",
+      "My plan is now your live to do list. When I map out a job in `Plan Mode`, you see every step appear in your editor and tick off in real time as I finish them. No more wondering how far along I am.",
+      "Your saved conversations are finally yours to manage from anywhere. Pick one back up right where you left it, close it, or delete it for good, all without leaving your editor. Each one even names itself from what you asked.",
+    ],
+  },
+  {
+    version: "0.39.1",
+    date: "2026-08-03",
+    items: [
+      "Your phone remote and other `ACP` clients now show a live context meter. I report exactly how full the window is as the conversation moves, so you can see the room you have left instead of guessing. Best part: when GG Coder compacts a long session, you watch the usage drop on the spot, and a resumed chat shows its context the moment it opens rather than after the first reply.",
+    ],
+  },
+  {
+    version: "0.39.0",
+    date: "2026-08-03",
+    items: [
+      "GG Coder can no longer tell you a check passed when it did not. I taught it to judge every command it runs, so a `--watch` that never finishes, a build that rewrites files, or a `--help` that proves nothing all get rejected as evidence. Only real, finished checks like `tsc --noEmit` count now.",
+      "Your long sessions stay sharper for longer. When the conversation gets trimmed, I now pick what to keep based on what you just asked, so the error, the file, and the decision that actually matter survive instead of whatever happened to be most recent.",
+      "You can install `Agent Plugins` straight from Settings. One portable file adds new commands and abilities, and I check every bundle before it lands so a bad one cannot touch anything outside its own folder.",
+      "Gemini usage finally reads true. Its thinking tokens were quietly missing from your totals, so every long reasoning run looked cheaper than it was. Now the number you see is the number you pay.",
+    ],
+  },
+  {
     version: "0.38.0",
     date: "2026-08-01",
     items: [

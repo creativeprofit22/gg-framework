@@ -20,9 +20,9 @@ name: Release
 #     APPLE_ID                    — Apple ID email used for notarization
 #     APPLE_PASSWORD              — app-specific password for that Apple ID
 #     APPLE_TEAM_ID               — Apple Team ID (396M7LY29W)
-# Signing/notarization is skipped automatically if the secrets are absent
-# (unsigned build still succeeds). Windows code signing is a follow-up — see
-# DISTRIBUTION.md.
+# All signing/notarization credentials live in the protected
+# `desktop-production` environment. Preflight fails closed before any build if
+# credentials are absent; unsigned public releases are never produced.
 
 on:
   push:
@@ -30,7 +30,52 @@ on:
       - "v*"
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    environment:
+      name: desktop-production
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Validate tag and every release credential
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == "tag" ]]
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "Release tag must point to a commit on origin/main" >&2
+            exit 1
+          }
+          required=(
+            TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+            APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
+            KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          )
+          for name in "${required[@]}"; do
+            [[ -n "${!name:-}" ]] || {
+              echo "Missing protected release secret: $name" >&2
+              exit 1
+            }
+          done
+
   release:
+    needs: preflight
     permissions:
       contents: write
     strategy:
@@ -52,12 +97,52 @@ jobs:
           # `args: --bundles deb,rpm` — AppImage's linuxdeploy hangs on CI for
           # Node-bundling apps) when Linux support is prioritized.
     runs-on: ${{ matrix.platform }}
+    environment:
+      name: desktop-production
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
     # Hoisted to job level so the certificate-import step's own `if` can read it
     # (a step cannot reference env it defines in the same step's `if`).
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Validate protected release context
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == "tag" ]]
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "Release tag must point to a commit on origin/main" >&2
+            exit 1
+          }
+          required=(TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD)
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            required+=(
+              APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
+              KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+            )
+          fi
+          for name in "${required[@]}"; do
+            [[ -n "${!name:-}" ]] || {
+              echo "Missing protected release secret: $name" >&2
+              exit 1
+            }
+          done
 
       - uses: pnpm/action-setup@v6
         with:
@@ -113,11 +198,11 @@ jobs:
         run: node gg-app/scripts/smoke-sidecar.mjs
         shell: bash
 
-      # Import the Developer ID Application cert into a throwaway CI keychain so
-      # codesign can find it. macOS only, and only when the secret is present —
-      # an empty APPLE_CERTIFICATE leaves the build unsigned but still green.
+      # Preflight above guarantees every macOS signing secret exists. Import the
+      # Developer ID certificate into an ephemeral keychain for nested signing and
+      # Tauri notarization.
       - name: Import Apple Developer certificate (macOS)
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
@@ -138,7 +223,7 @@ jobs:
       # the assembled app passes. Runs after the cert is in the keychain and
       # before tauri-action assembles + notarizes the bundle.
       - name: Sign nested bundle binaries (macOS)
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        if: runner.os == 'macOS'
         run: |
           bash gg-app/scripts/sign-nested-macos.sh \
             "${{ secrets.APPLE_SIGNING_IDENTITY }}" \
@@ -150,9 +235,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS signing + notarization. On non-macOS legs these are empty and
-          # ignored; on macOS, empty secrets mean Tauri produces an unsigned app.
-          # (APPLE_CERTIFICATE is inherited from the job-level env.)
+          # macOS signing + notarization; protected-environment preflight
+          # guarantees these are populated on the macOS leg.
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}

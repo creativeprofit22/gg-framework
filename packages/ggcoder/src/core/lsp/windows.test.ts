@@ -258,20 +258,9 @@ function readTrace(traceLog: string, traceOpen: boolean): string {
   return [...head, ...(tail.length ? [`  … ${lines.length - 60} more …`] : []), ...tail].join("\n");
 }
 
-/**
- * The pooled client's retained stderr, for the log line above. Reaches into the
- * private pool deliberately: this is a diagnostic probe, and widening the public
- * API just to print stderr in one test isn't worth the surface area.
- */
+/** The pooled client's retained stderr, for the log line above. */
 async function serverStderr(manager: LspManager): Promise<string> {
-  // The pool stores PROMISES of resolutions, so these must be awaited — reading
-  // `.client` off the promise itself silently yields nothing.
-  const clients = (manager as unknown as { clients: Map<string, Promise<unknown>> }).clients;
-  for (const [, pending] of clients) {
-    const resolution = (await pending) as { client?: { stderrTail(): string } };
-    if (resolution?.client) return resolution.client.stderrTail();
-  }
-  return "";
+  return manager.serverStderrTail();
 }
 
 /** Nearest `node_modules/<name>` walking up from this test file. */

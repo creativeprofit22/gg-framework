@@ -55,8 +55,9 @@ export interface ProgressFile {
   sig: string;
 }
 
-/** One rung of the 50-rank ladder, as sent to the webview. */
+/** One named rank of the 1000-level ladder, as sent to the webview. */
 export interface RankLadderEntry {
+  /** First level at which this rank is earned (ranks span 10 levels above level 50). */
   level: number;
   name: string;
   tier: number;

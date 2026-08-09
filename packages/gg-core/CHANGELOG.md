@@ -1,5 +1,66 @@
 # @kenkaiiii/gg-core
 
+## 5.37.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.37.0
+
+## 5.36.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.36.0
+
+## 5.35.1
+
+### Patch Changes
+
+- Updated dependencies [8e124fd]
+  - @kenkaiiii/gg-ai@5.35.1
+
+## 5.35.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.35.0
+
+## 5.34.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.34.3
+
+## 5.34.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.34.2
+
+## 5.34.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.34.1
+
+## 5.34.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.34.0
+
+## 5.33.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.33.0
+
+## 5.32.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.32.0
+
 ## 5.31.0
 
 ### Patch Changes

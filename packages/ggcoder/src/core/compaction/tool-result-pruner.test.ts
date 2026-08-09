@@ -267,6 +267,85 @@ describe("pruneStaleToolResults", () => {
     expect(resultOf(messages, "old").content).toBe(stub);
   });
 
+  it("never prunes skill output, which is instruction rather than reproducible data", () => {
+    const messages: Message[] = [
+      { role: "user", content: "turn 1" },
+      ...toolTurn("skill-load", "skill", { skill: "evidence-led-ui" }, "s".repeat(120_000)),
+      { role: "user", content: "turn 2" },
+      ...toolTurn("old-bash", "bash", { command: "ls" }, "o".repeat(120_000)),
+      { role: "user", content: "turn 3" },
+      { role: "user", content: "turn 4" },
+    ];
+
+    const result = pruneStaleToolResults(messages, {
+      protectTokens: 100,
+      minimumTokens: 1_000,
+      protectToolBatches: 0,
+    });
+
+    expect(result.pruned).toBe(true);
+    expect(result.prunedResults).toBe(1);
+    expect(resultOf(messages, "skill-load").content).toBe("s".repeat(120_000));
+    expect(resultOf(messages, "old-bash").content).toContain("old tool output");
+  });
+
+  it("stops scanning at the first stub outside the protected batches", () => {
+    const messages: Message[] = [
+      { role: "user", content: "turn 1" },
+      ...toolTurn("oldest", "bash", { command: "ls" }, "o".repeat(120_000)),
+      { role: "user", content: "turn 2" },
+      ...toolTurn("middle", "bash", { command: "pwd" }, "m".repeat(120_000)),
+      { role: "user", content: "turn 3" },
+    ];
+
+    const opts = { protectTokens: 100, minimumTokens: 1_000, protectToolBatches: 0 };
+    expect(pruneStaleToolResults(messages, opts).prunedResults).toBe(2);
+
+    // Fresh output arrives; the older half is already stubbed, so the second
+    // pass must stop at "middle" rather than re-walking the whole transcript.
+    messages.push(...toolTurn("newest", "bash", { command: "env" }, "n".repeat(120_000)));
+    const second = pruneStaleToolResults(messages, opts);
+
+    expect(second.pruned).toBe(true);
+    expect(second.prunedResults).toBe(1);
+    expect(resultOf(messages, "newest").content).toContain("old tool output");
+    expect(resultOf(messages, "oldest").content).toContain("old tool output");
+  });
+
+  it("does not let a superseded-read stub strand older output behind it", () => {
+    // A read dedup stub is written regardless of the token budget, so it can
+    // sit in front of results that are still verbatim. Stopping the backwards
+    // walk at one would strand them permanently.
+    const messages: Message[] = [
+      { role: "user", content: "turn 1" },
+      ...toolTurn("old-bash", "bash", { command: "ls" }, "o".repeat(400_000)),
+      { role: "user", content: "turn 2" },
+      ...toolTurn("read-1", "read", { file_path: "/a.ts" }, "a".repeat(1_000)),
+      { role: "user", content: "turn 3" },
+      ...toolTurn("read-2", "read", { file_path: "/a.ts" }, "a".repeat(1_000)),
+      { role: "user", content: "turn 4" },
+    ];
+
+    // A protect budget this large spares the bash output, so only the
+    // superseded read is stubbed on the first pass.
+    const first = pruneStaleToolResults(messages, {
+      protectTokens: 500_000,
+      minimumTokens: 100,
+      protectToolBatches: 0,
+    });
+    expect(first.prunedResults).toBe(1);
+    expect(resultOf(messages, "old-bash").content).toBe("o".repeat(400_000));
+
+    // Now the budget is tight: the older bash output must still be reachable.
+    const second = pruneStaleToolResults(messages, {
+      protectTokens: 100,
+      minimumTokens: 1_000,
+      protectToolBatches: 0,
+    });
+    expect(second.pruned).toBe(true);
+    expect(resultOf(messages, "old-bash").content).toContain("old tool output");
+  });
+
   it("skips structured (non-string) tool results", () => {
     const messages: Message[] = [
       { role: "user", content: "turn 1" },

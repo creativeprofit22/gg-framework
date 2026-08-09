@@ -9,7 +9,9 @@ import { loginAnthropic } from "../core/oauth/anthropic.js";
 import { loginOpenAI } from "../core/oauth/openai.js";
 import { loginGemini } from "../core/oauth/gemini.js";
 import { loginKimi } from "../core/oauth/kimi.js";
-import { MOONSHOT_OAUTH_KEY, XIAOMI_CREDITS_KEY } from "@kenkaiiii/gg-core";
+import { loginXai } from "../core/oauth/xai.js";
+import { XIAOMI_CREDITS_KEY, dualAuthProvider } from "@kenkaiiii/gg-core";
+import { getAuthProvider, describeAuthMethods } from "../core/auth-providers.js";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "../core/oauth/types.js";
 import {
   CLI_VERSION,
@@ -65,17 +67,33 @@ export async function runLogin(): Promise<void> {
       },
     };
 
-    // Moonshot supports two auth methods: Kimi Code OAuth (preferred) and a
-    // Moonshot Open Platform API key. Let the user pick; OAuth credentials are
-    // stored under a distinct key so both can coexist (OAuth wins at runtime).
-    let kimiViaOAuth = false;
-    if (provider === "moonshot") {
+    // Dual-auth providers (Moonshot/Kimi, xAI/Grok) accept subscription OAuth
+    // *and* a metered API key. Let the user pick; OAuth credentials are stored
+    // under a distinct key so both can coexist (OAuth wins at runtime, the key
+    // covers OAuth being out — see gg-core's DUAL_AUTH_PROVIDERS).
+    const dual = dualAuthProvider(provider);
+    let useOAuth = false;
+    if (dual) {
+      for (const detail of describeAuthMethods(provider)) {
+        const n = detail.method === "oauth" ? "1" : "2";
+        console.log(chalk.hex("#a78bfa")(`  (${n}) ${detail.label}`));
+        console.log(chalk.hex("#6b7280")(`      ${detail.billing}`));
+        if (detail.requires) console.log(chalk.hex("#6b7280")(`      Needs: ${detail.requires}`));
+      }
+      console.log(
+        chalk.hex("#6b7280")(
+          `\n  Connecting both is fine — ${dual.oauthLabel} is used first and the ` +
+            `${dual.apiKeyLabel} covers it while subscription usage is out.\n`,
+        ),
+      );
       const choice = (
         await rl.question(
-          chalk.hex("#60a5fa")("Sign in with (1) Kimi OAuth [default] or (2) API key? "),
+          chalk.hex("#60a5fa")(
+            `Sign in with (1) ${dual.oauthLabel} [default] or (2) ${dual.apiKeyLabel}? `,
+          ),
         )
       ).trim();
-      kimiViaOAuth = choice === "" || choice === "1";
+      useOAuth = choice === "" || choice === "1";
     }
 
     // Xiaomi splits API-key auth across two distinct endpoints: the Token Plan
@@ -95,35 +113,13 @@ export async function runLogin(): Promise<void> {
 
     let creds;
     let storageKey: string = provider;
-    if (provider === "moonshot" && kimiViaOAuth) {
-      creds = await loginKimi(callbacks);
-      storageKey = MOONSHOT_OAUTH_KEY;
-    } else if (
-      provider === "glm" ||
-      provider === "moonshot" ||
-      provider === "xiaomi" ||
-      provider === "minimax" ||
-      provider === "deepseek" ||
-      provider === "openrouter" ||
-      provider === "sakana" ||
-      provider === "xai"
-    ) {
-      const keyLabel =
-        provider === "glm"
-          ? "Z.AI"
-          : provider === "xiaomi"
-            ? "Xiaomi MiMo"
-            : provider === "minimax"
-              ? "MiniMax"
-              : provider === "deepseek"
-                ? "DeepSeek"
-                : provider === "openrouter"
-                  ? "OpenRouter"
-                  : provider === "sakana"
-                    ? "Sakana"
-                    : provider === "xai"
-                      ? "xAI"
-                      : "Moonshot";
+    if (dual && useOAuth) {
+      creds = provider === "moonshot" ? await loginKimi(callbacks) : await loginXai(callbacks);
+      storageKey = dual.oauthKey;
+    } else if (getAuthProvider(provider)?.methods.includes("apikey")) {
+      // Key label comes from AUTH_PROVIDERS so the CLI and the desktop app can
+      // never drift on what a provider's key is called.
+      const keyLabel = getAuthProvider(provider)?.apiKeyLabel ?? displayName(provider);
       const apiKey = await rl.question(chalk.hex("#60a5fa")(`Paste your ${keyLabel} API key: `));
       if (!apiKey.trim()) {
         console.log(chalk.hex("#ef4444")("No API key provided. Login cancelled."));

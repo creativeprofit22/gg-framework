@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { Message } from "@kenkaiiii/gg-ai";
 import { AgentSession } from "./agent-session.js";
 import { ProcessManager } from "./process-manager.js";
@@ -27,7 +30,10 @@ function makeSession(): { session: AgentSession; internal: GateInternals } {
 const managers: ProcessManager[] = [];
 
 function trackedManager(): ProcessManager {
-  const manager = new ProcessManager();
+  // Own log dir: start() prunes bgDir, whose default is the real ~/.gg/bg.
+  const manager = new ProcessManager({
+    bgDir: mkdtempSync(path.join(os.tmpdir(), "gg-bg-gate-")),
+  });
   managers.push(manager);
   return manager;
 }

@@ -7,6 +7,7 @@ import {
   listProjects,
   listSessions,
   selectProject,
+  setProjectHidden,
   waitForReady,
   type DiscoveredProject,
   type RecentSession,
@@ -21,6 +22,7 @@ vi.mock("./agent", () => ({
   listProjects: vi.fn(),
   listSessions: vi.fn(),
   selectProject: vi.fn(),
+  setProjectHidden: vi.fn(),
   waitForReady: vi.fn(),
 }));
 vi.mock("./RadioButton", () => ({ RadioButton: () => <button>Radio</button> }));
@@ -32,6 +34,7 @@ const importTranscriptMock = vi.mocked(importTranscript);
 const listProjectsMock = vi.mocked(listProjects);
 const listSessionsMock = vi.mocked(listSessions);
 const selectProjectMock = vi.mocked(selectProject);
+const setProjectHiddenMock = vi.mocked(setProjectHidden);
 const waitForReadyMock = vi.mocked(waitForReady);
 
 const PROJECT: DiscoveredProject = {
@@ -73,6 +76,50 @@ async function renderSessionList(sessions: RecentSession[]): Promise<void> {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+const OTHER_PROJECT: DiscoveredProject = {
+  name: "scratch",
+  path: "/private/tmp",
+  lastActiveDisplay: "1d ago",
+  sources: ["ggcoder"],
+};
+
+/** Render the picker on the project list (no deep link). */
+async function renderProjectList(projects: DiscoveredProject[]): Promise<void> {
+  getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+  waitForReadyMock.mockResolvedValue();
+  listProjectsMock.mockResolvedValue(projects);
+
+  render(<ProjectPicker onChosen={vi.fn()} />);
+  await screen.findByText(projects[0]!.name);
+}
+
+describe("ProjectPicker hide", () => {
+  it("removes the row and persists the decision", async () => {
+    setProjectHiddenMock.mockResolvedValue();
+    await renderProjectList([PROJECT, OTHER_PROJECT]);
+
+    fireEvent.click(screen.getByLabelText("Hide scratch"));
+
+    await waitFor(() => expect(screen.queryByText("scratch")).toBeNull());
+    expect(setProjectHiddenMock).toHaveBeenCalledWith("/private/tmp", true);
+    // The untouched project stays put.
+    expect(screen.getByText("ui-test")).toBeTruthy();
+  });
+
+  it("restores the row in place when persisting fails", async () => {
+    setProjectHiddenMock.mockRejectedValue(new Error("disk full"));
+    await renderProjectList([PROJECT, OTHER_PROJECT]);
+
+    fireEvent.click(screen.getByLabelText("Hide ui-test"));
+
+    // Comes back rather than lying about what the next launch will show, and
+    // returns to its original position rather than the end of the list.
+    await waitFor(() => expect(screen.getByText("ui-test")).toBeTruthy());
+    const names = screen.getAllByText(/^(ui-test|scratch)$/).map((n) => n.textContent);
+    expect(names).toEqual(["ui-test", "scratch"]);
+  });
 });
 
 describe("ProjectPicker session list", () => {

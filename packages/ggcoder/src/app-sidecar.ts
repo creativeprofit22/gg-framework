@@ -21,6 +21,7 @@ import { parseArgs } from "node:util";
 import { environmentSecrets, redactValue, type ToolResultContent } from "@kenkaiiii/gg-ai";
 import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
+import { appSettingsFile } from "./app-sidecar-paths.js";
 import { formatSidecarError, sidecarSensitiveValues } from "./app-sidecar-error.js";
 import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
@@ -337,10 +338,6 @@ function stringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const out = value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
   return out.length > 0 ? out : undefined;
-}
-
-function appSettingsFile(): string {
-  return path.join(os.homedir(), ".gg", "gg-app.json");
 }
 
 function defaultProjectsRoot(): string {
@@ -912,6 +909,7 @@ async function main(): Promise<void> {
   log("INFO", "app-sidecar", "daemon lifecycle start", {
     daemonPid: process.pid,
     shellPid,
+    agentDataRoot: paths.agentDir,
   });
   // The desktop sidecar previously omitted the stream diagnostic hook used by
   // the CLI, leaving device-specific provider stalls impossible to distinguish from

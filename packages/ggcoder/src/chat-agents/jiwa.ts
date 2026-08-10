@@ -1,11 +1,10 @@
 import crypto from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import { withFileLock } from "@kenkaiiii/gg-core";
+import { getAppPaths, withFileLock } from "@kenkaiiii/gg-core";
 
 export const JIWA_SOFT_LIMIT = 60;
 export const JIWA_HARD_LIMIT = 90;
@@ -152,7 +151,7 @@ export class JiwaStore {
   private readonly now: () => Date;
 
   constructor(options: JiwaStoreOptions = {}) {
-    this.filePath = options.filePath ?? path.join(os.homedir(), ".gg", "chat-jiwa.json");
+    this.filePath = options.filePath ?? getAppPaths().chatJiwaFile;
     this.onChange = options.onChange;
     this.now = options.now ?? (() => new Date());
   }

@@ -22,6 +22,17 @@ function context(): ToolContext {
 }
 
 describe("JiwaStore", () => {
+  it("derives its default file from the configured agent root", () => {
+    const previous = process.env.GG_AGENT_DIR;
+    process.env.GG_AGENT_DIR = tempDir;
+    try {
+      expect(new JiwaStore().filePath).toBe(path.join(tempDir, "chat-jiwa.json"));
+    } finally {
+      if (previous === undefined) delete process.env.GG_AGENT_DIR;
+      else process.env.GG_AGENT_DIR = previous;
+    }
+  });
+
   it("persists behavior instructions separately across store instances", async () => {
     const first = new JiwaStore({ filePath });
     const added = await first.set("Call yourself Blargo in chat.", "identity", 5);

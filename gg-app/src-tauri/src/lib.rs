@@ -1060,9 +1060,7 @@ fn force_kill_pid(pid: i32) {
 
 /// Absolute path to this product identity's sidecar PID ledger.
 fn sidecar_ledger_path(identifier: &str) -> PathBuf {
-    home_dir()
-        .join(".gg")
-        .join(format!("{}-sidecars", runtime_identity_slug(identifier)))
+    agent_data_root(identifier).join(format!("{}-sidecars", runtime_identity_slug(identifier)))
 }
 
 fn read_sidecar_ledger(identifier: &str) -> HashSet<i32> {
@@ -3583,9 +3581,9 @@ async fn agent_remove_plugin(
 // up-to-date builds. (The sidecar keeps its own /settings endpoint for its
 // internal use; this is the authoritative path for the webview.)
 
-/// Absolute path to ~/.gg/gg-app.json.
-fn app_settings_path() -> PathBuf {
-    home_dir().join(".gg").join("gg-app.json")
+/// Absolute path to this product identity's gg-app.json.
+fn app_settings_path(identifier: &str) -> PathBuf {
+    agent_data_root(identifier).join("gg-app.json")
 }
 
 /// Default projects root: ~/gg-projects.
@@ -3620,13 +3618,8 @@ fn is_valid_project_name(name: &str) -> bool {
     true
 }
 
-/// Native: read gg-app settings directly from ~/.gg/gg-app.json. `configured`
-/// is true only when the file exists with a non-empty projectsRoot (so the home
-/// screen's "Your Projects" gate matches the sidecar's semantics). Never needs
-/// the sidecar.
-#[tauri::command]
-fn app_settings_get() -> serde_json::Value {
-    let raw = std::fs::read_to_string(app_settings_path()).ok();
+fn read_app_settings(identifier: &str) -> serde_json::Value {
+    let raw = std::fs::read_to_string(app_settings_path(identifier)).ok();
     let parsed = raw
         .as_deref()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
@@ -3646,15 +3639,24 @@ fn app_settings_get() -> serde_json::Value {
     serde_json::json!({ "projectsRoot": projects_root, "configured": configured })
 }
 
+/// Native: read gg-app settings directly from this app identity's data root.
+#[tauri::command]
+fn app_settings_get(app: tauri::AppHandle) -> serde_json::Value {
+    read_app_settings(&app.config().identifier)
+}
+
 /// Native: write gg-app settings directly to ~/.gg/gg-app.json. Creates the
 /// ~/.gg directory if needed. Never needs the sidecar.
 #[tauri::command]
-fn app_settings_save(projects_root: String) -> Result<serde_json::Value, String> {
+fn app_settings_save(
+    app: tauri::AppHandle,
+    projects_root: String,
+) -> Result<serde_json::Value, String> {
     let trimmed = projects_root.trim();
     if trimmed.is_empty() {
         return Err("projectsRoot is required".to_string());
     }
-    let path = app_settings_path();
+    let path = app_settings_path(&app.config().identifier);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -3668,7 +3670,7 @@ fn app_settings_save(projects_root: String) -> Result<serde_json::Value, String>
 /// Returns `{ path }` on success, an error message on invalid name / conflict.
 /// Never needs the sidecar.
 #[tauri::command]
-fn app_create_project(name: String) -> Result<serde_json::Value, String> {
+fn app_create_project(app: tauri::AppHandle, name: String) -> Result<serde_json::Value, String> {
     let name = name.trim();
     if !is_valid_project_name(name) {
         return Err(
@@ -3677,7 +3679,7 @@ fn app_create_project(name: String) -> Result<serde_json::Value, String> {
         );
     }
     // Resolve the projects root the same way app_settings_get does.
-    let settings = app_settings_get();
+    let settings = read_app_settings(&app.config().identifier);
     let root = settings
         .get("projectsRoot")
         .and_then(|v| v.as_str())
@@ -3731,21 +3733,21 @@ struct Workspace {
 }
 
 /// Absolute path to ~/.gg/gg-app-workspace.json.
-fn app_workspace_path() -> PathBuf {
-    home_dir().join(".gg").join("gg-app-workspace.json")
+fn app_workspace_path(identifier: &str) -> PathBuf {
+    agent_data_root(identifier).join("gg-app-workspace.json")
 }
 
 /// Read the workspace snapshot; missing/invalid file → an empty workspace.
-fn read_workspace() -> Workspace {
-    std::fs::read_to_string(app_workspace_path())
+fn read_workspace(identifier: &str) -> Workspace {
+    std::fs::read_to_string(app_workspace_path(identifier))
         .ok()
         .and_then(|s| serde_json::from_str::<Workspace>(&s).ok())
         .unwrap_or_default()
 }
 
 /// Write the workspace snapshot (creating ~/.gg if needed). Best-effort.
-fn write_workspace(ws: &Workspace) {
-    let path = app_workspace_path();
+fn write_workspace(identifier: &str, ws: &Workspace) {
+    let path = app_workspace_path(identifier);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -3827,7 +3829,7 @@ fn snapshot_workspace(app: &tauri::AppHandle) {
         });
     }
     drop(map);
-    write_workspace(&Workspace { windows: entries });
+    write_workspace(&app.config().identifier, &Workspace { windows: entries });
 }
 
 /// Remove one window's entry from the snapshot (deliberate user close). Keyed by
@@ -3847,7 +3849,8 @@ fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str) {
     let Some((mode, chat_agent, cwd)) = target else {
         return;
     };
-    let mut ws = read_workspace();
+    let identifier = &app.config().identifier;
+    let mut ws = read_workspace(identifier);
     // Remove a SINGLE matching entry: duplicate windows must restore independently.
     if let Some(idx) = ws
         .windows
@@ -3855,7 +3858,7 @@ fn remove_window_from_workspace(app: &tauri::AppHandle, label: &str) {
         .position(|w| w.mode == mode && w.chat_agent == chat_agent && w.cwd == cwd)
     {
         ws.windows.remove(idx);
-        write_workspace(&ws);
+        write_workspace(identifier, &ws);
     }
 }
 
@@ -3881,8 +3884,8 @@ fn window_restore_target(webview: WebviewWindow) -> Option<RestoreEntry> {
 // Keep the two in sync when adding a provider.
 
 /// Absolute path to ~/.gg/auth.json.
-fn auth_file_path() -> PathBuf {
-    home_dir().join(".gg").join("auth.json")
+fn auth_file_path(identifier: &str) -> PathBuf {
+    agent_data_root(identifier).join("auth.json")
 }
 
 /// One API-key option for a provider that splits auth across multiple
@@ -4162,9 +4165,9 @@ fn resolve_apikey_target(
 /// key on file as backup", and the UI needs that to explain itself and to offer
 /// a per-method disconnect.
 #[tauri::command]
-fn app_auth_status() -> serde_json::Value {
+fn app_auth_status(app: tauri::AppHandle) -> serde_json::Value {
     // Parse the auth file into a JSON object; missing/invalid → empty (no creds).
-    let creds = std::fs::read_to_string(auth_file_path())
+    let creds = std::fs::read_to_string(auth_file_path(&app.config().identifier))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
     let has_key = |key: &str| -> bool {
@@ -4422,8 +4425,8 @@ fn parse_auth_object(existing: Option<&str>) -> Result<serde_json::Value, String
 
 /// Atomically write auth.json (temp file + rename), creating ~/.gg if needed.
 /// On unix the file is mode 0600 (credentials). Mirrors gg-core's atomicWriteFile.
-fn write_auth_file(contents: &str) -> Result<(), String> {
-    let path = auth_file_path();
+fn write_auth_file(identifier: &str, contents: &str) -> Result<(), String> {
+    let path = auth_file_path(identifier);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -4449,6 +4452,7 @@ fn write_auth_file(contents: &str) -> Result<(), String> {
 /// unknown defaults to the first/primary variant. Returns `{ ok: true }`.
 #[tauri::command]
 fn app_auth_apikey(
+    app: tauri::AppHandle,
     provider: String,
     key: String,
     variant: Option<String>,
@@ -4459,10 +4463,11 @@ fn app_auth_apikey(
     }
     let (storage_key, base_url) = resolve_apikey_target(&provider, variant.as_deref())
         .ok_or_else(|| "provider does not support API key auth".to_string())?;
-    let existing = std::fs::read_to_string(auth_file_path()).ok();
+    let identifier = &app.config().identifier;
+    let existing = std::fs::read_to_string(auth_file_path(identifier)).ok();
     let now_ms = current_unix_millis();
     let next = apply_apikey(existing.as_deref(), &storage_key, base_url, now_ms, key)?;
-    write_auth_file(&next)?;
+    write_auth_file(identifier, &next)?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
@@ -4482,13 +4487,14 @@ fn app_auth_logout(
             return Err(format!("unknown auth method: {m}"));
         }
     }
-    let existing = std::fs::read_to_string(auth_file_path()).ok();
+    let identifier = &app.config().identifier;
+    let existing = std::fs::read_to_string(auth_file_path(identifier)).ok();
     // Nothing to remove and no file → succeed silently (idempotent).
     if existing.is_none() {
         return Ok(serde_json::json!({ "ok": true }));
     }
     let next = apply_logout(existing.as_deref(), &provider, method.as_deref())?;
-    write_auth_file(&next)?;
+    write_auth_file(identifier, &next)?;
     // Disconnecting removes that provider's models from `/models` and clears
     // its connection dot. Logout is deliberately native (it must work even with
     // no daemon), so the sidecar never learns about it — tell every window
@@ -6800,14 +6806,8 @@ fn strip_extended_prefix(path: PathBuf) -> PathBuf {
 
 /// The current user's home directory.
 ///
-/// MUST agree with Node's `os.homedir()` in the sidecar — both sides read and
-/// write the same `~/.gg` files (auth.json, gg-app.json, the workspace file,
-/// the sidecar ledger). libuv resolves Windows homes as
-/// `USERPROFILE` → `HOMEDRIVE`+`HOMEPATH`, and ignores `HOME` entirely; a
-/// Windows box with `HOME` set (Git for Windows / MSYS sets it, often to a
-/// POSIX-style `/c/Users/x` that no Win32 API can open) made the Rust shell
-/// look for settings, auth and projects in a directory the sidecar never
-/// wrote — the app came up logged out with an empty project picker.
+/// This must agree with Node's `os.homedir()` because production preserves the
+/// legacy `~/.gg` root and identity roots are derived from that same home.
 fn home_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -6830,6 +6830,73 @@ fn home_dir() -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+const PRODUCTION_APP_IDENTIFIER: &str = "com.ggcoder.app";
+const IDENTITY_BOOTSTRAP_MARKER: &str = ".identity-bootstrap-v1";
+const IDENTITY_BOOTSTRAP_FILES: &[&str] = &[
+    "auth.json",
+    "settings.json",
+    "gg-app.json",
+    "mcp.json",
+    "mcp-auth.json",
+];
+
+/// Production remains byte-for-byte compatible with the legacy root. Every
+/// other signed Tauri identity owns a child root under `~/.gg/identities`.
+fn agent_data_root_for_home(home: &Path, identifier: &str) -> PathBuf {
+    let legacy = home.join(".gg");
+    if identifier == PRODUCTION_APP_IDENTIFIER {
+        legacy
+    } else {
+        legacy.join("identities").join(identifier)
+    }
+}
+
+fn agent_data_root(identifier: &str) -> PathBuf {
+    agent_data_root_for_home(&home_dir(), identifier)
+}
+
+/// Seed a non-production identity once from production's legacy files.
+/// Sources are read-only; existing identity files are never overwritten.
+fn bootstrap_identity_data(home: &Path, identifier: &str) -> Result<bool, String> {
+    if identifier == PRODUCTION_APP_IDENTIFIER {
+        return Ok(false);
+    }
+
+    let target_root = agent_data_root_for_home(home, identifier);
+    let marker = target_root.join(IDENTITY_BOOTSTRAP_MARKER);
+    if marker.exists() {
+        return Ok(false);
+    }
+
+    std::fs::create_dir_all(&target_root).map_err(|error| {
+        format!(
+            "failed to create identity data root {}: {error}",
+            target_root.display()
+        )
+    })?;
+    let legacy_root = agent_data_root_for_home(home, PRODUCTION_APP_IDENTIFIER);
+    for filename in IDENTITY_BOOTSTRAP_FILES {
+        let source = legacy_root.join(filename);
+        let target = target_root.join(filename);
+        if target.exists() || !source.is_file() {
+            continue;
+        }
+        std::fs::copy(&source, &target).map_err(|error| {
+            format!(
+                "failed to bootstrap {} into identity root: {error}",
+                source.display()
+            )
+        })?;
+    }
+    std::fs::write(&marker, b"v1\n").map_err(|error| {
+        format!(
+            "failed to complete identity bootstrap {}: {error}",
+            marker.display()
+        )
+    })?;
+    Ok(true)
 }
 
 /// Whether this process can read inside a macOS TCC-protected folder (probed
@@ -6949,6 +7016,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     let node = resolve_node(&app);
     let identifier = app.config().identifier.clone();
     let identity_arg = sidecar_identity_arg(&identifier);
+    let identity_data_root = agent_data_root(&identifier);
     let sidecar_log = sidecar_log_filename(&identifier);
     let auth_token = match generate_daemon_auth_token() {
         Ok(token) => token,
@@ -6963,8 +7031,9 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         lifecycle_message(
             "daemon_spawn_requested",
             &format!(
-                "shell_pid={} respawn={is_respawn} identity={identifier} node={} script={}",
+                "shell_pid={} respawn={is_respawn} identity={identifier} data_root={} node={} script={}",
                 std::process::id(),
+                identity_data_root.display(),
                 node.display(),
                 script.display()
             ),
@@ -6983,6 +7052,11 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         .env("ERROR_MOM_RELEASE", env!("CARGO_PKG_VERSION"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if identifier == PRODUCTION_APP_IDENTIFIER {
+        cmd.env_remove("GG_AGENT_DIR");
+    } else {
+        cmd.env("GG_AGENT_DIR", &identity_data_root);
+    }
     let secure_azure = azure_connection::secure_config().unwrap_or_else(|_| {
         log::warn!("Azure secure configuration is unavailable; preserving inherited environment");
         None
@@ -7486,7 +7560,7 @@ fn recreate_all_window_sessions(app: tauri::AppHandle) {
 /// restore target so the webview skips the picker. Otherwise fall back to the
 /// single default `main` window at the boot cwd (the picker then shows).
 fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
-    let ws = read_workspace();
+    let ws = read_workspace(&app.config().identifier);
     let entries = filter_restorable(ws.windows, |c| Path::new(c).exists());
     if entries.is_empty() {
         // Fresh boot / nothing to restore: the usual single main window.
@@ -7729,6 +7803,13 @@ pub fn run() {
                     ),
                 )
             );
+            let identifier = app.config().identifier.clone();
+            let identity_root = agent_data_root(&identifier);
+            let bootstrapped = bootstrap_identity_data(&home_dir(), &identifier)?;
+            log::info!(
+                "identity data root: identity={identifier} root={} bootstrapped={bootstrapped}",
+                identity_root.display()
+            );
             // Windows-only: track per-window minimized state so restoring one
             // window can restore its siblings (macOS does this natively).
             #[cfg(target_os = "windows")]
@@ -7737,7 +7818,7 @@ pub fn run() {
             // spawning a replacement. The isolated Phase 25 dev fixture must
             // never inspect or terminate a pre-existing host sidecar.
             if !phase25_dev_fixture_enabled() {
-                sweep_orphan_sidecars(&app.config().identifier);
+                sweep_orphan_sidecars(&identifier);
             }
             // macOS menu-bar / Windows notification-area presence.
             #[cfg(any(target_os = "macos", windows))]
@@ -9361,6 +9442,82 @@ mod tests {
     }
 
     #[test]
+    fn identity_data_paths_preserve_production_and_separate_local_fork() {
+        let home = PathBuf::from("/test-home");
+        let production_root = agent_data_root_for_home(&home, PRODUCTION_APP_IDENTIFIER);
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+
+        assert_eq!(production_root, home.join(".gg"));
+        assert_eq!(
+            local_root,
+            home.join(".gg")
+                .join("identities")
+                .join("com.ggcoder.local-fork")
+        );
+        assert_ne!(production_root, local_root);
+        assert_eq!(
+            app_settings_path(PRODUCTION_APP_IDENTIFIER),
+            agent_data_root(PRODUCTION_APP_IDENTIFIER).join("gg-app.json")
+        );
+        assert_eq!(
+            auth_file_path("com.ggcoder.local-fork"),
+            agent_data_root("com.ggcoder.local-fork").join("auth.json")
+        );
+        assert_eq!(
+            app_workspace_path("com.ggcoder.local-fork"),
+            agent_data_root("com.ggcoder.local-fork").join("gg-app-workspace.json")
+        );
+    }
+
+    #[test]
+    fn identity_bootstrap_is_once_only_and_preserves_sources_and_targets() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!(
+            "gg-app-identity-bootstrap-{}-{unique}",
+            std::process::id()
+        ));
+        let legacy_root = home.join(".gg");
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        for filename in IDENTITY_BOOTSTRAP_FILES {
+            std::fs::write(legacy_root.join(filename), format!("production-{filename}")).unwrap();
+        }
+
+        let local_root = agent_data_root_for_home(&home, "com.ggcoder.local-fork");
+        std::fs::create_dir_all(&local_root).unwrap();
+        std::fs::write(local_root.join("settings.json"), "identity-settings").unwrap();
+
+        assert!(bootstrap_identity_data(&home, "com.ggcoder.local-fork").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(local_root.join("settings.json")).unwrap(),
+            "identity-settings"
+        );
+        assert_eq!(
+            std::fs::read_to_string(local_root.join("auth.json")).unwrap(),
+            "production-auth.json"
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy_root.join("auth.json")).unwrap(),
+            "production-auth.json"
+        );
+
+        std::fs::write(legacy_root.join("auth.json"), "production-changed").unwrap();
+        std::fs::remove_file(local_root.join("auth.json")).unwrap();
+        assert!(!bootstrap_identity_data(&home, "com.ggcoder.local-fork").unwrap());
+        assert!(!local_root.join("auth.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(legacy_root.join("auth.json")).unwrap(),
+            "production-changed"
+        );
+
+        assert!(!bootstrap_identity_data(&home, PRODUCTION_APP_IDENTIFIER).unwrap());
+        assert!(!legacy_root.join(IDENTITY_BOOTSTRAP_MARKER).exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn runtime_identity_files_are_product_scoped() {
         assert_eq!(
             runtime_identity_slug("com.ggcoder.app"),
@@ -9378,9 +9535,19 @@ mod tests {
             sidecar_log_filename("com.ggcoder.local-fork"),
             "gg-app-com-ggcoder-local-fork-sidecar.log"
         );
-        assert_ne!(
-            sidecar_ledger_path("com.ggcoder.app"),
-            sidecar_ledger_path("com.ggcoder.local-fork")
+        assert_eq!(
+            sidecar_ledger_path(PRODUCTION_APP_IDENTIFIER),
+            home_dir()
+                .join(".gg")
+                .join("gg-app-com-ggcoder-app-sidecars")
+        );
+        assert_eq!(
+            sidecar_ledger_path("com.ggcoder.local-fork"),
+            home_dir()
+                .join(".gg")
+                .join("identities")
+                .join("com.ggcoder.local-fork")
+                .join("gg-app-com-ggcoder-local-fork-sidecars")
         );
     }
 

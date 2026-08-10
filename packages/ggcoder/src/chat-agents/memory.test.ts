@@ -28,6 +28,17 @@ function context(): ToolContext {
 }
 
 describe("MemoryStore", () => {
+  it("derives its default file from the configured agent root", () => {
+    const previous = process.env.GG_AGENT_DIR;
+    process.env.GG_AGENT_DIR = tempDir;
+    try {
+      expect(new MemoryStore().filePath).toBe(path.join(tempDir, "chat-memories.json"));
+    } finally {
+      if (previous === undefined) delete process.env.GG_AGENT_DIR;
+      else process.env.GG_AGENT_DIR = previous;
+    }
+  });
+
   it("persists additions, updates, and explicit deletion across store instances", async () => {
     const first = new MemoryStore({ filePath });
     const added = await first.remember("Ken prefers concise answers.", "preference", 4);

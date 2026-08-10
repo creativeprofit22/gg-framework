@@ -8,6 +8,8 @@ export interface AppPaths {
   subagentsDir: string;
   settingsFile: string;
   authFile: string;
+  chatMemoryFile: string;
+  chatJiwaFile: string;
   telegramFile: string;
   agentHomeFile: string;
   mcpFile: string;
@@ -22,8 +24,19 @@ export interface AppPaths {
   progressBackupFile: string;
 }
 
+export function resolveAgentDir(
+  override = process.env.GG_AGENT_DIR,
+  homeDir = os.homedir(),
+): string {
+  if (override && path.isAbsolute(override)) {
+    return path.normalize(override);
+  }
+
+  return path.join(homeDir, ".gg");
+}
+
 export function getAppPaths(): AppPaths {
-  const agentDir = path.join(os.homedir(), ".gg");
+  const agentDir = resolveAgentDir();
   return {
     agentDir,
     sessionsDir: path.join(agentDir, "sessions"),
@@ -31,6 +44,8 @@ export function getAppPaths(): AppPaths {
     subagentsDir: path.join(agentDir, "subagents"),
     settingsFile: path.join(agentDir, "settings.json"),
     authFile: path.join(agentDir, "auth.json"),
+    chatMemoryFile: path.join(agentDir, "chat-memories.json"),
+    chatJiwaFile: path.join(agentDir, "chat-jiwa.json"),
     telegramFile: path.join(agentDir, "telegram.json"),
     agentHomeFile: path.join(agentDir, "agent-home.json"),
     mcpFile: path.join(agentDir, "mcp.json"),

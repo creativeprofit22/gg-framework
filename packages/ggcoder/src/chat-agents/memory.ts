@@ -1,11 +1,10 @@
 import crypto from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import { withFileLock } from "@kenkaiiii/gg-core";
+import { getAppPaths, withFileLock } from "@kenkaiiii/gg-core";
 
 export const MEMORY_SOFT_LIMIT = 60;
 export const MEMORY_HARD_LIMIT = 90;
@@ -150,7 +149,7 @@ export class MemoryStore {
   private readonly now: () => Date;
 
   constructor(options: MemoryStoreOptions = {}) {
-    this.filePath = options.filePath ?? path.join(os.homedir(), ".gg", "chat-memories.json");
+    this.filePath = options.filePath ?? getAppPaths().chatMemoryFile;
     this.onChange = options.onChange;
     this.now = options.now ?? (() => new Date());
   }

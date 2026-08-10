@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  assertIdentityDataRootWiring,
   assertIsolatedIdentities,
   LOCAL_FORK_IDENTITY,
   LOCAL_TAURI_CONFIG,
@@ -11,6 +12,16 @@ const srcTauri = join(import.meta.dirname, "..", "src-tauri");
 const baseConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.conf.json"), "utf8"));
 const localConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.local.conf.json"), "utf8"));
 const cargoToml = readFileSync(join(srcTauri, "Cargo.toml"), "utf8");
+const repoRoot = join(import.meta.dirname, "..", "..");
+const identityDataSources = {
+  corePaths: readFileSync(join(repoRoot, "packages", "gg-core", "src", "paths.ts"), "utf8"),
+  sidecarPaths: readFileSync(
+    join(repoRoot, "packages", "ggcoder", "src", "app-sidecar-paths.ts"),
+    "utf8",
+  ),
+  appSidecar: readFileSync(join(repoRoot, "packages", "ggcoder", "src", "app-sidecar.ts"), "utf8"),
+  rustShell: readFileSync(join(srcTauri, "src", "lib.rs"), "utf8"),
+};
 
 describe("Local Fork native identity", () => {
   it("preserves production config and supplies a fully isolated local overlay", () => {
@@ -54,5 +65,50 @@ describe("Local Fork native identity", () => {
     expect(() =>
       assertIsolatedIdentities(baseConfig, cargoToml.replace('name = "gg-app"', 'name = "fork"')),
     ).toThrow("Canonical production binary drifted");
+  });
+
+  it("requires identity-root wiring with a production legacy-path exception", () => {
+    expect(assertIdentityDataRootWiring(identityDataSources)).toBe(true);
+
+    expect(() =>
+      assertIdentityDataRootWiring({
+        ...identityDataSources,
+        corePaths: identityDataSources.corePaths.replace("path.isAbsolute(override)", "true"),
+      }),
+    ).toThrow("gg-core must reject relative overrides");
+
+    expect(() =>
+      assertIdentityDataRootWiring({
+        ...identityDataSources,
+        rustShell: identityDataSources.rustShell.replace(
+          "if identifier == PRODUCTION_APP_IDENTIFIER",
+          "if false",
+        ),
+      }),
+    ).toThrow("production must keep the legacy Rust data root");
+
+    expect(() =>
+      assertIdentityDataRootWiring({
+        ...identityDataSources,
+        rustShell: identityDataSources.rustShell.replace(
+          'cmd.env("GG_AGENT_DIR", &identity_data_root);',
+          "// missing identity override",
+        ),
+      }),
+    ).toThrow(
+      "production must clear inherited GG_AGENT_DIR and non-production sidecars must set it",
+    );
+
+    expect(() =>
+      assertIdentityDataRootWiring({
+        ...identityDataSources,
+        rustShell: identityDataSources.rustShell.replace(
+          'cmd.env_remove("GG_AGENT_DIR");',
+          "// missing production environment cleanup",
+        ),
+      }),
+    ).toThrow(
+      "production must clear inherited GG_AGENT_DIR and non-production sidecars must set it",
+    );
   });
 });

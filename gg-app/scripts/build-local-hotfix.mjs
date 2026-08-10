@@ -114,6 +114,51 @@ export function assertIsolatedIdentities(baseConfig, cargoToml, localConfig = LO
   return LOCAL_FORK_IDENTITY;
 }
 
+export function assertIdentityDataRootWiring({ corePaths, sidecarPaths, appSidecar, rustShell }) {
+  const requirements = [
+    [corePaths.includes("process.env.GG_AGENT_DIR"), "gg-core must read GG_AGENT_DIR"],
+    [corePaths.includes("path.isAbsolute(override)"), "gg-core must reject relative overrides"],
+    [corePaths.includes('path.join(homeDir, ".gg")'), "gg-core must preserve the legacy default"],
+    [
+      sidecarPaths.includes("getAppPaths().agentDir"),
+      "app-sidecar settings must use the resolved agent root",
+    ],
+    [appSidecar.includes("agentDataRoot: paths.agentDir"), "app-sidecar must log its data root"],
+    [
+      rustShell.includes('const PRODUCTION_APP_IDENTIFIER: &str = "com.ggcoder.app"'),
+      "Rust must identify the production exception",
+    ],
+    [
+      /if identifier == PRODUCTION_APP_IDENTIFIER\s*\{\s*legacy\s*\}/m.test(rustShell),
+      "production must keep the legacy Rust data root",
+    ],
+    [
+      rustShell.includes('legacy.join("identities").join(identifier)'),
+      "non-production Rust data must be identity-scoped",
+    ],
+    [
+      /if identifier == PRODUCTION_APP_IDENTIFIER\s*\{\s*cmd\.env_remove\("GG_AGENT_DIR"\);\s*\}\s*else\s*\{\s*cmd\.env\("GG_AGENT_DIR", &identity_data_root\);\s*\}/m.test(
+        rustShell,
+      ),
+      "production must clear inherited GG_AGENT_DIR and non-production sidecars must set it",
+    ],
+    [rustShell.includes("bootstrap_identity_data"), "Rust must bootstrap identity data once"],
+    [
+      rustShell.includes('agent_data_root(identifier).join("gg-app-workspace.json")'),
+      "workspace snapshots must be identity-scoped",
+    ],
+    [
+      rustShell.includes('agent_data_root(identifier).join("auth.json")'),
+      "native auth must be identity-scoped",
+    ],
+  ];
+  const missing = requirements.filter(([ok]) => !ok).map(([, message]) => message);
+  if (missing.length > 0) {
+    throw new Error(`Local Fork identity data-root wiring is incomplete: ${missing.join("; ")}`);
+  }
+  return true;
+}
+
 function hostTriple() {
   return execFileSync("rustc", ["--print", "host-tuple"], { encoding: "utf8" }).trim();
 }
@@ -212,6 +257,18 @@ async function main() {
   const cargoTomlPath = join(srcTauri, "Cargo.toml");
   const localConfig = JSON.parse(readFileSync(localTauriConfigPath(), "utf8"));
   assertIsolatedIdentities(baseConfig, readFileSync(cargoTomlPath, "utf8"), localConfig);
+  assertIdentityDataRootWiring({
+    corePaths: readFileSync(join(repoRoot, "packages", "gg-core", "src", "paths.ts"), "utf8"),
+    sidecarPaths: readFileSync(
+      join(repoRoot, "packages", "ggcoder", "src", "app-sidecar-paths.ts"),
+      "utf8",
+    ),
+    appSidecar: readFileSync(
+      join(repoRoot, "packages", "ggcoder", "src", "app-sidecar.ts"),
+      "utf8",
+    ),
+    rustShell: readFileSync(join(srcTauri, "src", "lib.rs"), "utf8"),
+  });
 
   if (!env.GG_NODE_SOURCE) {
     const stagedNode = stagedNodePath();

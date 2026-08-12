@@ -20,9 +20,7 @@ export function resolveRoadmapCommandActions(
   const actions: RoadmapCommandAction[] = [];
   for (const canonicalName of ROADMAP_COMMAND_ORDER) {
     const command = commands.find((candidate) =>
-      [candidate.name, ...candidate.aliases].some(
-        (name) => normalizeName(name) === canonicalName,
-      ),
+      [candidate.name, ...candidate.aliases].some((name) => normalizeName(name) === canonicalName),
     );
     if (!command) continue;
     const commandKey = normalizeName(command.name);

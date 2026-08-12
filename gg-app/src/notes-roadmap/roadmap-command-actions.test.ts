@@ -28,10 +28,7 @@ describe("resolveRoadmapCommandActions", () => {
 
   it("omits missing commands and deduplicates one command matching multiple actions", () => {
     expect(
-      resolveRoadmapCommandActions([
-        command("multi", ["compare", "trace"]),
-        command("unrelated"),
-      ]),
+      resolveRoadmapCommandActions([command("multi", ["compare", "trace"]), command("unrelated")]),
     ).toEqual([{ canonicalName: "compare", label: "Run /compare", invocation: "/multi" }]);
   });
 });

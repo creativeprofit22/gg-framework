@@ -9,7 +9,12 @@ const mocks = vi.hoisted(() => ({
   startLocal: vi.fn(),
   info: vi.fn(),
   error: vi.fn(),
-  buildInfo: { localPatched: true, sourceRoot: "C:/fork", customLabel: "Local Fork", gitSha: "abc123" },
+  buildInfo: {
+    localPatched: true,
+    sourceRoot: "C:/fork",
+    customLabel: "Local Fork",
+    gitSha: "abc123",
+  },
 }));
 
 vi.mock("@tauri-apps/plugin-updater", () => ({ check: mocks.check }));
@@ -47,7 +52,9 @@ describe("useAppUpdate local-fork isolation", () => {
     first.unmount();
     mocks.checkLocal.mockRejectedValueOnce(new Error("offline"));
     const second = renderHook(() => useAppUpdate());
-    await waitFor(() => expect(mocks.error).toHaveBeenCalledWith(expect.stringContaining("offline")));
+    await waitFor(() =>
+      expect(mocks.error).toHaveBeenCalledWith(expect.stringContaining("offline")),
+    );
     expect(second.result.current.phase).toBe("idle");
     expect(mocks.check).not.toHaveBeenCalled();
   });

@@ -2,10 +2,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type OpenAI from "openai";
 import type { Provider, ThinkingLevel } from "../types.js";
 import { ProviderError } from "../errors.js";
-import { streamOpenAI } from "./openai.js";
+import {
+  buildOpenAIRequestDiagnostic,
+  createOpenAIClientCacheKey,
+  OPENAI_REQUEST_LOG_FILENAME,
+  resetOpenAIClientCache,
+  setOpenAIClientCacheKeyRuntimeForTests,
+  streamOpenAI,
+} from "./openai.js";
 import { resetReasoningFieldCache } from "./reasoning-field.js";
 
 const createMock = vi.fn();
+const clientConstructorMock = vi.fn();
 
 interface APIErrorArgs {
   status?: number;
@@ -35,11 +43,13 @@ vi.mock("openai", () => {
   }
   class OpenAIMock {
     static APIError = APIError;
-    chat = {
-      completions: {
-        create: createMock,
-      },
-    };
+
+    chat: { completions: { create: typeof createMock } };
+
+    constructor(options: unknown) {
+      clientConstructorMock(options);
+      this.chat = { completions: { create: createMock } };
+    }
   }
   return { default: OpenAIMock };
 });
@@ -98,6 +108,162 @@ async function collectResponse(provider: Provider, argsJson: string) {
   for await (const event of result) events.push(event);
   return { events, response: await result.response };
 }
+
+describe("OpenAI secret-safe diagnostics and cache identity", () => {
+  afterEach(() => {
+    createMock.mockReset();
+    clientConstructorMock.mockClear();
+    resetOpenAIClientCache();
+  });
+
+  async function consume(options: Parameters<typeof streamOpenAI>[0]): Promise<void> {
+    createMock.mockResolvedValueOnce(createStreamingResult(""));
+    const result = streamOpenAI(options);
+    for await (const _event of result) {
+      /* consume */
+    }
+  }
+
+  const baseOptions = {
+    provider: "openai" as const,
+    model: "test-model",
+    messages: [{ role: "user" as const, content: "hi" }],
+    apiKey: "test-key",
+  };
+
+  it("preserves the stable diagnostic log filename", () => {
+    expect(OPENAI_REQUEST_LOG_FILENAME).toBe("ggai-requests.log");
+  });
+
+  it("omits prompt text and tool arguments from request diagnostics", () => {
+    const promptSecret = "prompt-secret-that-must-not-be-dumped";
+    const toolSecret = "tool-secret-that-must-not-be-dumped";
+    const params = {
+      model: "test-model",
+      stream: true,
+      messages: [{ role: "user", content: promptSecret }],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "run",
+            description: toolSecret,
+            parameters: { type: "object", properties: { secret: { const: toolSecret } } },
+          },
+        },
+      ],
+      tool_choice: "auto",
+    } as unknown as OpenAI.ChatCompletionCreateParams;
+
+    const serialized = JSON.stringify(buildOpenAIRequestDiagnostic(params));
+
+    expect(serialized).not.toContain(promptSecret);
+    expect(serialized).not.toContain(toolSecret);
+    expect(JSON.parse(serialized)).toEqual({
+      model: "test-model",
+      stream: true,
+      messageCount: 1,
+      toolCount: 1,
+      hasToolChoice: true,
+    });
+  });
+
+  it("separates credential, base URL, and header identities without retaining secrets", async () => {
+    const secret = "api-key-that-must-not-be-retained";
+    const common = { ...baseOptions, messages: [], apiKey: secret };
+    const identities = await Promise.all([
+      createOpenAIClientCacheKey(common),
+      createOpenAIClientCacheKey({ ...common, apiKey: `${secret}-changed` }),
+      createOpenAIClientCacheKey({ ...common, baseUrl: "https://other.test/v1" }),
+      createOpenAIClientCacheKey({ ...common, defaultHeaders: { Authorization: "header-secret" } }),
+    ]);
+
+    expect(new Set(identities).size).toBe(identities.length);
+    for (const identity of identities) {
+      expect(identity).not.toContain(secret);
+      expect(identity).not.toContain("header-secret");
+    }
+  });
+
+  it("canonicalizes header order in cache identities", async () => {
+    const first = await createOpenAIClientCacheKey({
+      ...baseOptions,
+      defaultHeaders: { B: "two", A: "one" },
+    });
+    const second = await createOpenAIClientCacheKey({
+      ...baseOptions,
+      defaultHeaders: { A: "one", B: "two" },
+    });
+    expect(first).toBe(second);
+  });
+
+  it("falls back to actual Node SHA-256 when Web Crypto rejects", async () => {
+    const subtle = {
+      digest: vi.fn().mockRejectedValue(new Error("Web Crypto unavailable")),
+    } as unknown as SubtleCrypto;
+    const identity = await createOpenAIClientCacheKey(baseOptions, { subtle });
+    const { createHash } = await import("node:crypto");
+    const expectedIdentity = JSON.stringify({
+      apiKey: baseOptions.apiKey,
+      baseUrl: "",
+      defaultHeaders: [],
+    });
+
+    expect(identity).toBe(createHash("sha256").update(expectedIdentity).digest("hex"));
+    expect(subtle.digest).toHaveBeenCalledOnce();
+  });
+
+  it("constructs separate clients without failing when all hashing is unavailable", async () => {
+    setOpenAIClientCacheKeyRuntimeForTests({ subtle: null, digestWithNode: null });
+    await consume(baseOptions);
+    await consume(baseOptions);
+
+    expect(clientConstructorMock).toHaveBeenCalledTimes(2);
+    expect(createMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses clients for matching identities and invalidates on identity changes", async () => {
+    await consume(baseOptions);
+    await consume(baseOptions);
+    await consume({ ...baseOptions, apiKey: "changed-key" });
+    await consume({ ...baseOptions, baseUrl: "https://other.test/v1" });
+    await consume({ ...baseOptions, defaultHeaders: { "X-Test": "changed" } });
+
+    expect(clientConstructorMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("bypasses the cache whenever a custom fetch is supplied", async () => {
+    const customFetch = vi.fn<typeof fetch>();
+    await consume({ ...baseOptions, fetch: customFetch });
+    await consume({ ...baseOptions, fetch: customFetch });
+
+    expect(clientConstructorMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts the oldest client after eight cached identities", async () => {
+    for (let index = 0; index < 9; index += 1) {
+      await consume({ ...baseOptions, apiKey: `key-${index}` });
+    }
+    await consume({ ...baseOptions, apiKey: "key-0" });
+
+    expect(clientConstructorMock).toHaveBeenCalledTimes(10);
+  });
+
+  it("reuses one client across concurrent matching requests", async () => {
+    createMock.mockImplementation(() => Promise.resolve(createStreamingResult("")));
+    const results = Array.from({ length: 4 }, () => streamOpenAI(baseOptions));
+    await Promise.all(
+      results.map(async (result) => {
+        for await (const _event of result) {
+          /* consume */
+        }
+      }),
+    );
+
+    expect(clientConstructorMock).toHaveBeenCalledTimes(1);
+    expect(createMock).toHaveBeenCalledTimes(4);
+  });
+});
 
 describe("streamOpenAI request shaping", () => {
   afterEach(() => {

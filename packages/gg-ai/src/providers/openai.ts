@@ -99,14 +99,84 @@ function extractOpenAIUsage(usage: OpenAI.CompletionUsage): {
 }
 
 /** Client cache — avoids re-instantiating the OpenAI SDK on every call.
- *  See anthropic.ts for rationale. Keyed by identity-relevant fields. */
+ * See anthropic.ts for rationale. Cache identities are SHA-256 digests so
+ * credentials and custom header values are never retained in Map keys. */
 const openaiClientCache = new Map<string, OpenAI>();
 
-function createClient(options: StreamOptions): OpenAI {
-  const cacheKey = `${options.apiKey ?? ""}|${options.baseUrl ?? ""}|${JSON.stringify(options.defaultHeaders ?? {})}`;
+const OPENAI_CLIENT_CACHE_LIMIT = 8;
 
-  // Skip cache when a custom fetch is provided (tests, React Native, etc.).
-  if (!options.fetch) {
+export const OPENAI_REQUEST_LOG_FILENAME = "ggai-requests.log";
+
+export interface OpenAIClientCacheKeyRuntime {
+  subtle?: SubtleCrypto | null;
+  digestWithNode?: ((value: Uint8Array) => Promise<string | undefined>) | null;
+}
+
+let openAIClientCacheKeyRuntimeOverride: OpenAIClientCacheKeyRuntime | undefined;
+
+async function digestWithNode(value: Uint8Array): Promise<string | undefined> {
+  try {
+    const { createHash } = await import("node:crypto");
+    return createHash("sha256").update(value).digest("hex");
+  } catch {
+    return undefined;
+  }
+}
+
+export async function createOpenAIClientCacheKey(
+  options: StreamOptions,
+  runtime?: OpenAIClientCacheKeyRuntime,
+ ): Promise<string | undefined> {
+  const identity = JSON.stringify({
+    apiKey: options.apiKey ?? "",
+    baseUrl: options.baseUrl ?? "",
+    defaultHeaders: Object.entries(options.defaultHeaders ?? {}).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  });
+  const encodedIdentity = new TextEncoder().encode(identity);
+  const subtle = runtime?.subtle === undefined ? globalThis.crypto?.subtle : runtime.subtle;
+  if (subtle) {
+    try {
+      const digest = await subtle.digest("SHA-256", encodedIdentity);
+      return bytesToHex(new Uint8Array(digest));
+    } catch {
+      // Fall through to Node SHA-256; hashing must never prevent a request.
+    }
+  }
+  const nodeDigest = runtime?.digestWithNode === undefined ? digestWithNode : runtime.digestWithNode;
+  return nodeDigest?.(encodedIdentity);
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** Test isolation for cache-reuse, failure, and eviction behavior. */
+export function resetOpenAIClientCache(): void {
+  openaiClientCache.clear();
+  openAIClientCacheKeyRuntimeOverride = undefined;
+}
+
+export function setOpenAIClientCacheKeyRuntimeForTests(
+  runtime: OpenAIClientCacheKeyRuntime,
+ ): void {
+  openAIClientCacheKeyRuntimeOverride = runtime;
+}
+
+async function createClient(options: StreamOptions): Promise<OpenAI> {
+  // A custom fetch can carry runtime-specific state and must never reuse a client.
+  if (options.fetch) {
+    return new OpenAI({
+      apiKey: options.apiKey,
+      fetch: options.fetch,
+      ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
+      ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
+    });
+  }
+
+  const cacheKey = await createOpenAIClientCacheKey(options, openAIClientCacheKeyRuntimeOverride);
+  if (cacheKey) {
     const cached = openaiClientCache.get(cacheKey);
     if (cached) return cached;
   }
@@ -114,12 +184,13 @@ function createClient(options: StreamOptions): OpenAI {
   const client = new OpenAI({
     apiKey: options.apiKey,
     ...(options.baseUrl ? { baseURL: options.baseUrl } : {}),
-    ...(options.fetch ? { fetch: options.fetch } : {}),
     ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
   });
 
-  if (!options.fetch) {
-    if (openaiClientCache.size >= 8) {
+  // If neither Web Crypto nor Node crypto is available, skip caching rather than
+  // risk credential-crossing collisions from a non-cryptographic fingerprint.
+  if (cacheKey) {
+    if (openaiClientCache.size >= OPENAI_CLIENT_CACHE_LIMIT) {
       const oldest = openaiClientCache.keys().next().value;
       if (oldest) openaiClientCache.delete(oldest);
     }
@@ -132,6 +203,16 @@ export function streamOpenAI(options: StreamOptions): StreamResult {
   return new StreamResult(runStream(options), options.signal);
 }
 
+export function buildOpenAIRequestDiagnostic(params: OpenAI.ChatCompletionCreateParams) {
+  return {
+    model: params.model,
+    stream: params.stream,
+    messageCount: params.messages.length,
+    toolCount: params.tools?.length ?? 0,
+    hasToolChoice: params.tool_choice !== undefined,
+  };
+}
+
 async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, StreamResponse> {
   const providerName = options.provider ?? "openai";
   const useStreaming = options.streaming !== false;
@@ -139,7 +220,7 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   // emitted so the echo-back on the next turn uses the same name.
   const endpointKey = reasoningFieldKey(providerName, options.baseUrl, options.model);
 
-  const client = createClient(options);
+  const client = await createClient(options);
 
   // Kimi K3's effort ladder is server-declared as low/high/max on both the
   // public API (default max) and the Kimi For Coding OAuth endpoint (default
@@ -284,16 +365,25 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
     }
   }
 
-  // Dump request body for stall diagnosis when GGAI_DUMP_REQUEST is set
+  // Dump only non-sensitive request metadata for stall diagnosis. Prompt text,
+  // tool definitions, and tool arguments are deliberately never persisted.
   if (getEnvironment()?.GGAI_DUMP_REQUEST) {
     const fs = await import("fs");
+    const os = await import("os");
+    const path = await import("path");
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
-    const dumpPath = `/tmp/ggai-request-${ts}.json`;
-    fs.writeFileSync(dumpPath, JSON.stringify(params, null, 2));
+    const dumpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ggai-request-"), { encoding: "utf8" });
+    fs.chmodSync(dumpDir, 0o700);
+    const dumpPath = path.join(dumpDir, `${ts}.json`);
+    const dump = buildOpenAIRequestDiagnostic(params);
+    fs.writeFileSync(dumpPath, JSON.stringify(dump, null, 2), { mode: 0o600 });
+    const requestLogPath = path.join(os.tmpdir(), OPENAI_REQUEST_LOG_FILENAME);
     fs.appendFileSync(
-      "/tmp/ggai-requests.log",
-      `[${ts}] ${dumpPath} messages=${params.messages.length}\n`,
+      requestLogPath,
+      `[${ts}] ${dumpPath} messages=${dump.messageCount} tools=${dump.toolCount}\n`,
+      { mode: 0o600 },
     );
+    fs.chmodSync(requestLogPath, 0o600);
   }
 
   // Non-streaming fallback: issue a single request/response and synthesize

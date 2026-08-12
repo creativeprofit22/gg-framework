@@ -138,7 +138,6 @@ Plus built-in workflows that ship with the binary:
 
 ```bash
 /expand        # Compare against current alternatives and report gaps
-/bullet-proof  # Run a defensive security review
 /init          # Generate CLAUDE.md for your project
 /setup-commit  # Generate a /commit command with quality checks
 /setup-tauri-package  # Generate a safe project-scoped Tauri packaging harness
@@ -205,6 +204,14 @@ Reusable behaviors across projects. Drop `.md` files in:
 - `.gg/skills/` for project-specific skills
 
 They get loaded into the system prompt automatically. The agent knows what it can do without you explaining it each session. <kbd>Ctrl+S</kbd> opens a pane to browse and toggle them.
+
+Three ship built in, and route themselves when the work matches:
+
+| Skill              | Fires on                                                                                                                                                                                                                            |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bulletproof`      | Code an attacker will reach — auth, untrusted input, secrets, dependencies, CI/release, agent/MCP tool surfaces — and "is this safe to ship" reviews. Works on any target: web, API, CLI, desktop, mobile, embedded, contracts, ML. |
+| `compliance-guard` | Legal exposure — personal data, payments, UGC, email/SMS, minors, or a licensed/regulated feature.                                                                                                                                  |
+| `evidence-led-ui`  | Broad or design-sensitive UI work — new screens, redesigns, design systems, accessibility passes.                                                                                                                                   |
 
 ---
 

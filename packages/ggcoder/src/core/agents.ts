@@ -208,7 +208,7 @@ export function parseAgentFile(rawInput: string, source: "global" | "project"): 
 }
 
 // ── Bundled agents ─────────────────────────────────────────
-// Shipped with ggcoder (see ./bundled-agents.ts). Used by /bullet-proof and
-// available to any subagent call. User-defined agents with the same name
+// Shipped with ggcoder (see ./bundled-agents.ts). Used by the bundled
+// `bulletproof` skill and available to any subagent call. User-defined agents with the same name
 // override these because they come first in `discoverAgents`.
 export { BUNDLED_AGENTS };

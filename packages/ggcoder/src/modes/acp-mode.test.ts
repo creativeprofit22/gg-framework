@@ -681,8 +681,8 @@ describe("ACP mode over stdio", () => {
     const byName = new Map(commands.map((command) => [command.name, command]));
 
     // A built-in the client could not have discovered by scanning the disk.
-    expect(byName.get("bullet-proof")).toMatchObject({
-      description: "Audit exploitable weaknesses",
+    expect(byName.get("expand")).toMatchObject({
+      description: expect.any(String),
       input: { hint: expect.any(String) },
     });
     // A project file, carried with its own frontmatter description.
@@ -699,8 +699,10 @@ describe("ACP mode over stdio", () => {
     // A registry command with no collision is listed, with a hint parsed from
     // its usage rather than the template hint.
     expect(byName.get("quit")).toEqual({ name: "quit", description: "Exit the agent" });
-    // Aliases are not separate commands.
-    expect(byName.has("bp")).toBe(false);
+    // Aliases are not separate commands: /quit ships `q` and `exit`, and only
+    // the canonical name is advertised.
+    expect(byName.has("q")).toBe(false);
+    expect(byName.has("exit")).toBe(false);
   });
 
   it("switches mode via session/set_mode and tells the client with current_mode_update", async () => {

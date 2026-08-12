@@ -7,13 +7,15 @@ describe("prompt commands", () => {
     expect(PROMPT_COMMANDS.find((command) => command.aliases.includes("g"))).toBeUndefined();
   });
 
-  it("hands bullet-proof fixes off to the tasks tool, not a Goal", () => {
-    const bulletProof = PROMPT_COMMANDS.find((command) => command.name === "bullet-proof");
-
-    expect(bulletProof?.prompt).toContain("`tasks` tool");
-    expect(bulletProof?.prompt).toContain("Press Ctrl+T to open the task list");
-    expect(bulletProof?.prompt).not.toContain("Create a Goal");
-    expect(bulletProof?.prompt).not.toContain("Press CTRL + G");
+  it("strands no audit protocol or dated threat data in a command prompt", () => {
+    // /bullet-proof became the bundled `bulletproof` skill (retirement asserted
+    // below). Its protocol and incident data must not survive as a copy here,
+    // where there is no snapshot date and no confidence marker to age it.
+    for (const command of PROMPT_COMMANDS) {
+      expect(command.prompt, command.name).not.toContain("CVE-2025-30066");
+      expect(command.prompt, command.name).not.toContain("Subagents cannot see this prompt.");
+      expect(command.prompt, command.name).not.toContain("surviving findings per skeptic");
+    }
   });
 
   it("adds validated compare findings as deduplicated standalone tasks", () => {
@@ -42,31 +44,15 @@ describe("prompt commands", () => {
     }
   });
 
-  it("frames bullet-proof as an authorized defensive review with no exploit output", () => {
-    const bulletProof = PROMPT_COMMANDS.find((command) => command.name === "bullet-proof");
-
-    expect(bulletProof?.prompt).toContain("authorized defensive security review");
-    expect(bulletProof?.prompt).toContain("Never produce working exploit code");
-    expect(bulletProof?.prompt).toContain("data-flow level");
-    // Subagents never see the command prompt — the handoff must say so.
-    expect(bulletProof?.prompt).toContain("Subagents cannot see this prompt.");
-    // Skeptic verification is batched to keep fan-out cost bounded.
-    expect(bulletProof?.prompt).toContain("batching 3–5 surviving findings per skeptic");
-    expect(bulletProof?.prompt).not.toContain("<specific payload>");
-  });
-
-  it("points at the app's Tasks button / New Session instead of CLI keybinds when run under gg-app", async () => {
+  it("points /init at the app's New Session instead of CLI keybinds when run under gg-app", async () => {
     const previous = process.env.GG_APP_PORT;
     process.env.GG_APP_PORT = "0";
     vi.resetModules();
     try {
       const { PROMPT_COMMANDS: appPromptCommands } = await import("./prompt-commands.js");
-      const bulletProof = appPromptCommands.find((command) => command.name === "bullet-proof");
       const compare = appPromptCommands.find((command) => command.name === "compare");
       const init = appPromptCommands.find((command) => command.name === "init");
 
-      expect(bulletProof?.prompt).toContain('Click the "Tasks" button');
-      expect(bulletProof?.prompt).not.toContain("Ctrl+T");
       expect(compare?.prompt).toContain('Click the "Tasks" button');
       expect(compare?.prompt).not.toContain("Ctrl+T");
       expect(init?.prompt).toContain("New Session");
@@ -92,8 +78,11 @@ describe("prompt commands", () => {
       "setup-lint",
       `setup-${"tests"}`,
       "setup-update",
+      // Retired into the bundled `bulletproof` skill, which also fires inline
+      // during ordinary feature work rather than only when invoked.
+      "bullet-proof",
     ];
-    const removedAliases = ["depcheck", "depsource", "setup-project"];
+    const removedAliases = ["depcheck", "depsource", "setup-project", "bp"];
 
     for (const name of removedCommandNames) {
       expect(PROMPT_COMMANDS.find((command) => command.name === name)).toBeUndefined();

@@ -158,7 +158,11 @@ function renderResearchSection(
 function renderCodeQualitySection(): string {
   return (
     `## Code Quality\n\n` +
-    `Intent-revealing names; reuse existing deps. Types first; handle I/O, input, and external API errors. No dead/commented code, placeholders, or unasked refactors.`
+    `Intent-revealing names; reuse existing deps. Types first; handle I/O, input, and external API errors. No dead/commented code, placeholders, or unasked refactors.\n` +
+    `Write the safe version first, without being asked: treat external input as hostile — user data, files, network, repo contents, fetched pages, model and tool output. ` +
+    `Parameterize queries, authorize at the data layer, pass argv not shell strings, contain resolved paths, validate at the boundary, fail closed. ` +
+    `Never commit or log a secret. Confirm a dependency actually exists before adding it, then pin it. ` +
+    `Never silently weaken a security control — say it blocks you and propose the safe path.`
   );
 }
 

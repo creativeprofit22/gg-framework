@@ -168,6 +168,66 @@ describe("skill routing prompts", () => {
     }
   });
 
+  it("discovers bulletproof for a fresh user from bundled assets", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skills-"));
+    try {
+      const skills = await discoverSkills({ globalSkillsDir: path.join(root, "global") });
+      const bulletproof = skills.find((candidate) => candidate.name === "bulletproof");
+
+      expect(bulletproof?.source).toBe("bundled");
+      expect(bulletproof?.root).toContain(path.join("assets", "skills", "bulletproof"));
+      expect(bulletproof?.content).toContain("# Bulletproof");
+
+      // Security work is worthless if the model declares victory: absence of
+      // findings is not evidence of safety, and users read "hardened" as a
+      // guarantee.
+      expect(bulletproof?.content).toContain("Never certify");
+
+      // The skill ships defensive guidance. A model that writes exploits to
+      // "prove" a finding has produced attack tooling on the user's machine.
+      expect(bulletproof?.content).toContain("Defensive output only");
+      expect(bulletproof?.content).toContain("Hard stops");
+
+      // Most users never ask for a security review, so the value is in the
+      // inline path writing the safe version during normal feature work.
+      expect(bulletproof?.content).toContain("Inline gate");
+      expect(bulletproof?.content).toContain("Write the safe version the first time");
+
+      // A grep-driven checklist produces noise; reachability is what separates
+      // a finding from a pattern match.
+      expect(bulletproof?.content).toContain("Reachability decides everything");
+
+      // The intake must work for someone who cannot answer security questions.
+      expect(bulletproof?.content).toContain("Default if unanswered");
+
+      // Claiming a fix was verified when it was only read is the failure mode
+      // that makes a security report actively harmful.
+      expect(bulletproof?.content).toContain("RUNTIME");
+      expect(bulletproof?.content).toContain("DEDUCED");
+
+      // Silent scope gaps read as full coverage.
+      expect(bulletproof?.content).toContain("what was not checked");
+
+      // Threat data decays faster than anything else in the bundle; the model
+      // must not assert a stale CVE or version as current.
+      expect(bulletproof?.content).toContain("Date-check before asserting");
+
+      // Every referenced file must exist, since the skill routes the model to them by path.
+      const referenced = [...bulletproof!.content.matchAll(/`(references\/[\w.-]+\.md)`/g)].map(
+        (match) => match[1]!,
+      );
+      expect(referenced.length).toBeGreaterThan(0);
+      const skillRoot = bulletproof?.root ?? "";
+      for (const relative of new Set(referenced)) {
+        await expect(
+          fs.access(path.join(skillRoot, ...relative.split("/"))),
+        ).resolves.toBeUndefined();
+      }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("lets project skills override global and bundled definitions by name", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "skill-precedence-"));
     const globalSkillsDir = path.join(root, "global");

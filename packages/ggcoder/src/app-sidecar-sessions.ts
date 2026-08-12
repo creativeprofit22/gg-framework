@@ -12,7 +12,8 @@ import {
   type RecentSession,
 } from "./core/project-discovery.js";
 
-const CODING_SESSION_LIMIT = 5;
+/** Keep deep coding histories visible in the project picker without an unbounded scan. */
+const CODING_SESSION_LIMIT = 100;
 const CHAT_SESSION_LIMIT = 30;
 /** Foreign rows are additive, so keep them a short tail under the native list. */
 const FOREIGN_SESSION_LIMIT = 5;
@@ -20,7 +21,7 @@ const FOREIGN_SESSION_LIMIT = 5;
 export type SidecarSession = RecentSession & { chatAgent?: ChatAgentId };
 
 /**
- * List coding or chat sessions using the caps exposed by the gg-app sidecar.
+ * List coding or chat sessions using the documented 100/30 caps exposed by the gg-app sidecar.
  *
  * `homeDir` only exists so tests can point the Claude Code / Codex lookup at a
  * fixture home; production always uses the real one.

@@ -108,21 +108,17 @@ describe("gg-app sidecar session listings", () => {
     await fs.rm(tmp, { recursive: true, force: true });
   });
 
-  it("returns up to 30 chat sessions while coding remains capped at 5", async () => {
-    await writeSessions(coderSessionsDir, cwd, "coding", 31);
+  it("returns up to 100 coding sessions and up to 30 chat sessions", async () => {
+    await writeSessions(coderSessionsDir, cwd, "coding", 101);
     await writeSessions(chatAgentSessionsDir(coderSessionsDir, "general"), cwd, "chat", 31);
 
     const codingSessions = await listSidecarSessions(cwd, null, coderSessionsDir);
     const chatSessions = await listSidecarSessions(cwd, "all", coderSessionsDir);
 
-    expect(codingSessions).toHaveLength(5);
-    expect(codingSessions.map((session) => session.id)).toEqual([
-      "coding-30",
-      "coding-29",
-      "coding-28",
-      "coding-27",
-      "coding-26",
-    ]);
+    expect(codingSessions).toHaveLength(100);
+    expect(codingSessions[0]?.id).toBe("coding-100");
+    expect(codingSessions.at(-1)?.id).toBe("coding-1");
+    expect(codingSessions.some((session) => session.id === "coding-95")).toBe(true);
     expect(chatSessions).toHaveLength(30);
     expect(chatSessions[0]).toMatchObject({ id: "chat-30", chatAgent: "general" });
     expect(chatSessions.at(-1)).toMatchObject({ id: "chat-1", chatAgent: "general" });

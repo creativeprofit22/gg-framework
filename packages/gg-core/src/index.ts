@@ -21,3 +21,4 @@ export * from "./auto-update.js";
 export * from "./project-notes.js";
 export * from "./phase-start-protocol.js";
 export * from "./roadmap-workflow.js";
+export * from "./plan-review.js";

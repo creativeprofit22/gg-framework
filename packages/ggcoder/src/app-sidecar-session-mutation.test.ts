@@ -297,7 +297,7 @@ describe("app-sidecar session mutation routes", () => {
       "task-run",
       "prompt-start",
       "manual-plan-accept",
-      "autopilot-plan-accept",
+      "plan-revise",
     ] as const) {
       expect(coordinator.tryAcquire(kind)).toBeNull();
       expect(coordinator.conflictBody()).toEqual({
@@ -306,9 +306,9 @@ describe("app-sidecar session mutation routes", () => {
       });
     }
     phaseStart?.release();
-    expect(coordinator.tryAcquire("autopilot-plan-accept")).toMatchObject({
+    expect(coordinator.tryAcquire("plan-revise")).toMatchObject({
       operationId: "phase-2",
-      kind: "autopilot-plan-accept",
+      kind: "plan-revise",
     });
   });
 
@@ -318,7 +318,7 @@ describe("app-sidecar session mutation routes", () => {
       "task-run",
       "prompt-start",
       "manual-plan-accept",
-      "autopilot-plan-accept",
+      "plan-revise",
     ];
     for (const kind of kinds) {
       const coordinator = new AppSidecarSessionMutationCoordinator(() => kind);

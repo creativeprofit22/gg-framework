@@ -6,7 +6,8 @@ export type SessionMutationKind =
   | "phase-start"
   | "prompt-start"
   | "manual-plan-accept"
-  | "autopilot-plan-accept";
+  | "autopilot-plan-accept"
+  | "plan-revise";
 
 export interface SessionMutationOwner {
   operationId: string;

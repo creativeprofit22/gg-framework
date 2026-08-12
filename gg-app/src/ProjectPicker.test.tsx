@@ -123,6 +123,25 @@ describe("ProjectPicker hide", () => {
 });
 
 describe("ProjectPicker session list", () => {
+  it("shows a retryable error when session listing fails", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValue([PROJECT]);
+    listSessionsMock
+      .mockRejectedValueOnce(new Error("session scan failed"))
+      .mockResolvedValueOnce([NATIVE_SESSION]);
+
+    render(<ProjectPicker onChosen={vi.fn()} />);
+    fireEvent.click(await screen.findByText(PROJECT.name));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn’t load sessions");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText(NATIVE_SESSION.preview)).toBeTruthy();
+    expect(listSessionsMock).toHaveBeenCalledTimes(2);
+  });
+
   it("badges a Claude Code session with its source", async () => {
     await renderSessionList([NATIVE_SESSION, FOREIGN_SESSION]);
 

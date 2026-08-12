@@ -2736,8 +2736,13 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     saveSettings: (projectsRoot) => call("agent_save_settings", { projectsRoot }),
     listProjects: () => safeArray("agent_projects", "projects"),
     searchFiles: (query) => safeArray("agent_files", "files", { query }),
-    listSessions: (cwd, chatAgent) =>
-      safeArray("agent_sessions", "sessions", { cwd, chatAgent: chatAgent ?? null }),
+    async listSessions(cwd, chatAgent) {
+      const response = await call<{ sessions?: RecentSession[] }>("agent_sessions", {
+        cwd,
+        chatAgent: chatAgent ?? null,
+      });
+      return Array.isArray(response.sessions) ? response.sessions : [];
+    },
     async getTelegramStatus() {
       try {
         return await call("agent_telegram_get");

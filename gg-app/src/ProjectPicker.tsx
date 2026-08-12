@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
 import {
@@ -69,6 +69,7 @@ export function ProjectPicker({
   const [selected, setSelected] = useState<DiscoveredProject | null>(null);
   const [sessions, setSessions] = useState<RecentSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [projectsRoot, setProjectsRoot] = useState("");
@@ -160,16 +161,25 @@ export function ProjectPicker({
     });
   }
 
-  function openProject(project: DiscoveredProject): void {
-    setSelected(project);
-    setSessions([]);
-    setResumeError(null);
-    setSessionsLoading(true);
-    void discoverSessions(project.path).then((s) => {
-      setSessions(s);
-      setSessionsLoading(false);
-    });
-  }
+  const openProject = useCallback(
+    (project: DiscoveredProject): void => {
+      setSelected(project);
+      setSessions([]);
+      setResumeError(null);
+      setSessionsError(null);
+      setSessionsLoading(true);
+      void discoverSessions(project.path)
+        .then((nextSessions) => {
+          setSessions(nextSessions);
+          setSessionsLoading(false);
+        })
+        .catch(() => {
+          setSessionsError("Couldn’t load sessions. Please try again.");
+          setSessionsLoading(false);
+        });
+    },
+    [discoverSessions],
+  );
 
   function choose(cwd: string, sessionPath?: string): void {
     if (busy) return;
@@ -366,7 +376,19 @@ export function ProjectPicker({
             </div>
           )}
           {sessionsLoading && <ListSkeleton rows={4} />}
-          {!sessionsLoading && sessions.length === 0 && (
+          {!sessionsLoading && sessionsError && (
+            <div className="picker-error" role="alert">
+              <div>{sessionsError}</div>
+              <button
+                className="btn btn-ghost btn-sm"
+                style={{ marginTop: 8 }}
+                onClick={() => openProject(selected)}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {!sessionsLoading && !sessionsError && sessions.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No previous sessions yet.</span>
               <button

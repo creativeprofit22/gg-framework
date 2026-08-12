@@ -35,6 +35,11 @@
       "import": "./dist/phase-start-protocol.js",
       "require": "./dist/phase-start-protocol.cjs"
     },
+    "./plan-review": {
+      "types": "./dist/plan-review.d.ts",
+      "import": "./dist/plan-review.js",
+      "require": "./dist/plan-review.cjs"
+    },
     "./roadmap-workflow": {
       "types": "./dist/roadmap-workflow.d.ts",
       "import": "./dist/roadmap-workflow.js",

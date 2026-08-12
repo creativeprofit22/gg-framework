@@ -5,6 +5,7 @@ export default defineConfig({
     "src/index.ts",
     "src/model-registry.ts",
     "src/paths.ts",
+    "src/plan-review.ts",
     "src/project-notes.ts",
     "src/phase-start-protocol.ts",
     "src/roadmap-workflow.ts",

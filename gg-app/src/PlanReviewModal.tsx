@@ -1,4 +1,4 @@
-import { PLAN_REVISION_FEEDBACK_MAX_CHARS } from "@kenkaiiii/gg-core";
+import { PLAN_REVISION_FEEDBACK_MAX_CHARS } from "@kenkaiiii/gg-core/plan-review";
 import { useState } from "react";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";

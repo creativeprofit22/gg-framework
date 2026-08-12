@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
+import { builtinModules } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
@@ -56,6 +57,22 @@ function buildEnvDefines(): Record<string, string> {
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => [key, JSON.stringify(value)]),
   );
+}
+
+const nodeBuiltinNames = new Set(builtinModules.map((name) => name.replace(/^node:/, "")));
+
+export function rejectBrowserNodeBuiltins(): Plugin {
+  return {
+    name: "reject-browser-node-builtins",
+    enforce: "pre",
+    resolveId(source, importer) {
+      const builtinName = source.replace(/^node:/, "");
+      if (importer && nodeBuiltinNames.has(builtinName)) {
+        throw new Error(`Node builtin "${source}" reached the browser graph from "${importer}"`);
+      }
+      return null;
+    },
+  };
 }
 
 // https://vite.dev/config/

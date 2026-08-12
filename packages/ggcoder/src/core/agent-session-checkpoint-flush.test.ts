@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Message } from "@kenkaiiii/gg-ai";
 import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as McpModule from "./mcp/index.js";
+import type { AgentSession } from "./agent-session.js";
+import { approvedPlanContentHash } from "./session-manager.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 
 const agentLoopMock = vi.hoisted(() => vi.fn());
@@ -27,6 +29,7 @@ vi.mock("./mcp/index.js", async () => {
 let restoreHome: (() => void) | undefined;
 let tmpHome: string;
 let tmpProject: string;
+const trackedSessions = new Set<AgentSession>();
 
 const usage = { inputTokens: 10, outputTokens: 5 };
 const timing = { startedAt: Date.now(), completedAt: Date.now(), providerDurationMs: 1 };
@@ -74,6 +77,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await Promise.allSettled([...trackedSessions].map((session) => session.dispose()));
+  trackedSessions.clear();
   restoreHome?.();
   await fs.rm(tmpHome, { recursive: true, force: true });
   await fs.rm(tmpProject, { recursive: true, force: true });
@@ -89,6 +94,7 @@ describe("step-boundary persistence", () => {
       cwd: tmpProject,
       systemPrompt: "test system prompt",
     });
+    trackedSessions.add(session);
     await session.initialize();
     const sessionPath = session.getState().sessionPath;
 
@@ -129,6 +135,7 @@ describe("step-boundary persistence", () => {
       cwd: tmpProject,
       systemPrompt: "test system prompt",
     });
+    trackedSessions.add(session);
     await session.initialize();
     const sessionPath = session.getState().sessionPath;
 
@@ -156,6 +163,7 @@ describe("step-boundary persistence", () => {
       cwd: tmpProject,
       systemPrompt: "test system prompt",
     });
+    trackedSessions.add(session);
     await session.initialize();
     const sessionPath = session.getState().sessionPath;
 
@@ -178,6 +186,7 @@ describe("step-boundary persistence", () => {
       systemPrompt: "test system prompt",
       sessionId: sessionPath,
     });
+    trackedSessions.add(resumed);
     await resumed.initialize();
 
     const interrupted = resumed.getAppMarkers().filter((m) => m.kind === "interrupted_run");
@@ -195,10 +204,52 @@ describe("step-boundary persistence", () => {
       systemPrompt: "test system prompt",
       sessionId: sessionPath,
     });
+    trackedSessions.add(reopened);
     await reopened.initialize();
     expect(reopened.getAppMarkers().filter((m) => m.kind === "interrupted_run")).toHaveLength(1);
     await reopened.dispose();
   }, 20_000);
+
+  it("does not restore a completed approved plan after restart", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const content = "# Approved plan that must not return\n\n## Steps\n1. Ship it.";
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+    });
+    trackedSessions.add(session);
+    await session.initialize();
+    const sessionPath = session.getState().sessionPath;
+
+    await session.persistApprovedPlanConsumption({
+      checkpointId: "checkpoint-complete",
+      generation: 1,
+      content,
+      contentHash: approvedPlanContentHash(content),
+      approvedPlanPath: "/plans/completed.md",
+    });
+    await session.setPlanMode(false);
+    expect(session.getApprovedPlanConsumption()?.content).toBe(content);
+
+    await session.completeApprovedPlanConsumption();
+    expect(session.getApprovedPlanConsumption()).toBeUndefined();
+    await session.dispose();
+
+    const resumed = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      sessionId: sessionPath,
+    });
+    trackedSessions.add(resumed);
+    await resumed.initialize();
+
+    expect(resumed.getApprovedPlanConsumption()).toBeUndefined();
+    expect(resumed.getPlanMode()).toBe(false);
+    expect(JSON.stringify(resumed.getMessages())).not.toContain(content);
+    await resumed.dispose();
+  }, 15_000);
 
   it("writes nothing for a transient session", async () => {
     const { AgentSession } = await import("./agent-session.js");
@@ -209,6 +260,7 @@ describe("step-boundary persistence", () => {
       systemPrompt: "test system prompt",
       transient: true,
     });
+    trackedSessions.add(session);
     await session.initialize();
     expect(session.getState().sessionPath).toBe("");
 

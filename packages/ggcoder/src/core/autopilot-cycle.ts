@@ -7,13 +7,9 @@
  *
  * Two branches share one loop:
  *  - PLAN branch (planPending): GG Coder submitted a plan via exit_plan. Ken
- *    reviews the PLAN itself — approve (auto-accept + implement, then the next
- *    round work-reviews the implementation), send revision feedback, or hand a
- *    genuine user-level decision to the human. Verdict mapping for plans:
- *    `all_clear` ⇒ approve, and `ignore` ALSO maps to approve — "nothing to
- *    object to" on a plan means it's sound (autopilot has no user blocker for
- *    plans by design). Unparseable output still stops as HUMAN upstream (the
- *    verdict parser returns HUMAN for garbage) — never a blind loop.
+ *    reviews the PLAN itself — mark it ready for explicit human approval, send
+ *    revision feedback through the durable plan gate, or hand a genuine
+ *    user-level decision to the human. Ken never has approval authority.
  *  - WORK branch: the classic review of a finished turn (ALL_CLEAR / IGNORE /
  *    HUMAN / PROMPT), unchanged.
  *
@@ -73,18 +69,22 @@ export function buildPlanRevisionPrompt(feedback: string): string {
   );
 }
 
+/** Identity of the exact persisted plan generation reviewed by Ken. */
+export interface AutopilotPlanReviewIdentity {
+  checkpointId: string;
+  generation: number;
+}
+
 /** SSE frame types the cycle can emit (matched by the webview). */
 export type AutopilotCycleEmit =
   | { type: "autopilot_done"; data: Record<string, never> }
   | { type: "autopilot_ignored"; data: Record<string, never> }
   | { type: "autopilot_human"; data: { reason: string } }
   | { type: "autopilot_capped"; data: { rounds: number } }
-  | { type: "autopilot_plan_accepted"; data: Record<string, never> };
+  | { type: "autopilot_plan_ready"; data: AutopilotPlanReviewIdentity };
 
 export interface AutopilotCycleDeps {
-  /** Hard cap on review→prompt rounds per user turn (loop safety). The sidecar
-   *  widens this by +2 when the cycle starts plan-pending (approve+implement
-   *  and the post-implement review each consume a round). */
+  /** Hard cap on review→prompt rounds per user turn (loop safety). */
   maxRounds: number;
   /** True once /cancel fires — checked between every step. */
   isCancelled: () => boolean;
@@ -99,14 +99,12 @@ export interface AutopilotCycleDeps {
    *  (failure is already surfaced by the sidecar as autopilot_error). */
   review: () => Promise<AutopilotVerdict | null>;
   /** Run one PLAN review (plan digest, not work digest); null on failure OR
-   *  when the review went stale (user acted mid-review) — both stop silently. */
+   *  when the review went stale because a human acted mid-review. */
   reviewPlan: () => Promise<AutopilotVerdict | null>;
-  /** Auto-accept the pending plan (fresh session + approved-plan prompt).
-   *  Resolves false when the plan generation went stale (a user Accept/Reject
-   *  raced the review and won) — the cycle stops silently. */
-  acceptPlan: () => Promise<boolean>;
-  /** Run the "plan approved — implement it now" prompt on the fresh session. */
-  runImplement: () => Promise<void>;
+  /** Persist Ken's all-clear as readiness and return the committed identity. */
+  markPlanReady: () => Promise<AutopilotPlanReviewIdentity | null>;
+  /** Compare-and-swap the reviewed generation into revision-requested. */
+  requestPlanRevision: (feedback: string) => Promise<boolean>;
   /** Feed a PROMPT verdict's body to GG Coder as an injected run. */
   runPrompt: (body: string) => Promise<void>;
   /** Called BEFORE runPrompt: record the injected body (digest labeling) and
@@ -121,8 +119,8 @@ export interface AutopilotCycleDeps {
  * explicit:
  *  - cancelled                 → silent stop (the /cancel path already broadcast)
  *  - plan mode, no submission  → autopilot_human with the drafting reason
- *  - review failed (null)     → silent stop (autopilot_error already broadcast)
- *  - plan approve, stale accept→ silent stop (user's manual action won)
+ *  - review failed (null)       → silent stop (autopilot_error already broadcast)
+ *  - stale plan transition      → silent stop (a newer gate or human action won)
  *  - ALL_CLEAR                 → autopilot_done
  *  - IGNORE (work)             → autopilot_ignored (renders nothing)
  *  - HUMAN                     → autopilot_human
@@ -141,23 +139,19 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
         return;
       }
       if (verdict.kind === "prompt") {
-        // Rejection with feedback: inject a revision prompt. The sidecar's
-        // acceptPlan-side state clears pendingPlanPath on injection; if the
-        // run resubmits (exit_plan), planPending() is true again next round;
-        // if not, the loop falls through to a normal work review of whatever
-        // the run actually did.
+        const revisionRequested = await deps.requestPlanRevision(verdict.body);
+        if (!revisionRequested) return;
         const body = buildPlanRevisionPrompt(verdict.body);
         deps.onInjected(body, round);
         await deps.runPrompt(body);
         continue;
       }
-      // all_clear — and ignore mapped to approve ("nothing to object to" on a
-      // plan means it's sound; plans never get a silent-ignore user blocker).
-      const ok = await deps.acceptPlan();
-      if (!ok) return; // generation went stale — the user's manual action won
-      await deps.runImplement();
-      // Next round: normal work review of the implementation.
-      continue;
+      // ALL_CLEAR and IGNORE mean Ken found no objection. Persist readiness,
+      // keep the human gate pending, and stop without implementation.
+      const readyIdentity = await deps.markPlanReady();
+      if (!readyIdentity) return;
+      deps.emit({ type: "autopilot_plan_ready", data: readyIdentity });
+      return;
     }
     // The gate blocks a still-in-plan-mode turn up front, so hitting this
     // means an injected run entered plan mode mid-cycle WITHOUT submitting a

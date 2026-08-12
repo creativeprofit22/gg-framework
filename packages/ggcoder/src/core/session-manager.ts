@@ -217,6 +217,8 @@ export interface AppMarkerPayload extends RecordedPosition {
     | "user_hint"
     | "compaction"
     | "agent_handoff"
+    /** Durable server-authority transition for a submitted implementation-plan gate. */
+    | "plan_gate"
     /** Mid-session model/provider change; `data` carries { from, to, provider }. */
     | "model_switch"
     /** Transcript imported from another agent; `data` carries

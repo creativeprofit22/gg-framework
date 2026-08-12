@@ -37,6 +37,9 @@ import {
   KEN_TURN_CUSTOM_KIND,
   AUTOPILOT_MARKER_CUSTOM_KIND,
   APP_MARKER_CUSTOM_KIND,
+  approvedPlanContentHash,
+  type ApprovedPlanConsumptionInput,
+  type ApprovedPlanConsumptionRecord,
   type MessageEntry,
   type BranchInfo,
   type CustomEntry,
@@ -258,7 +261,7 @@ export interface AgentSessionOptions {
    * UI. Omitted by callers that don't want plan mode (CLI wires its own).
    */
   onEnterPlan?: (reason?: string) => void | Promise<void>;
-  onExitPlan?: (planPath: string) => Promise<string>;
+  onExitPlan?: (planPath: string, content: string) => Promise<string>;
   /**
    * If provided, the session's tool set is filtered to ONLY these tool names
    * after `createTools()` runs, and the system prompt's Tools section lists only
@@ -521,6 +524,8 @@ export class AgentSession {
    *  set, the system prompt carries the `[DONE:n]` progress contract so the
    *  model emits step-completion markers the UI's plan-progress widget reads. */
   private approvedPlanPath?: string;
+  private approvedPlanContent?: string;
+  private approvedPlanConsumption?: ApprovedPlanConsumptionRecord;
   /** Extra workspace roots added with `/add-dir` (resolved, de-duplicated). */
   private additionalRoots: string[] = [];
   /** Durable selected Roadmap phase, restored before the next provider turn. */
@@ -2310,6 +2315,7 @@ export class AgentSession {
     await this.rePersistTurnMetrics();
     await this.rePersistKenTurns();
     await this.rePersistAutopilotMarkers();
+    await this.rePersistApprovedPlanConsumption();
     await this.rePersistAppMarkers();
     await this.persistAppMarker("compaction", {
       originalCount: result.originalCount,
@@ -2499,6 +2505,7 @@ export class AgentSession {
     // reconstructs it from durable execution metadata below.
     this.planModeRef.current = false;
     this.approvedPlanPath = undefined;
+    this.approvedPlanConsumption = undefined;
     if (preserveConversation && this.activePhaseContext) {
       this.restorePlanStateFromActivePhase(this.activePhaseContext);
     }
@@ -2871,19 +2878,113 @@ export class AgentSession {
     this.planModeRef.current = active;
     // Entering plan mode discards any prior approved-plan contract (a new plan
     // is about to be drafted); exiting keeps it (set explicitly via accept).
-    if (active) this.approvedPlanPath = undefined;
+    if (active) {
+      this.approvedPlanPath = undefined;
+      this.approvedPlanConsumption = undefined;
+    }
     await this.rebuildSystemPromptInPlace();
   }
 
-  /**
-   * Bake an approved plan into the system prompt so the model is told to emit
-   * `[DONE:n]` markers as it completes each step (the contract the UI's
-   * plan-progress widget reads). Pass `undefined` to clear it. No-op when a
-   * custom system prompt is in force (the host owns the prompt then).
-   */
+  /** Legacy path-based plan activation. Durable app handoffs use the exact-content record below. */
   async setApprovedPlan(approvedPlanPath: string | undefined): Promise<void> {
     this.approvedPlanPath = approvedPlanPath;
+    this.approvedPlanConsumption = undefined;
     await this.rebuildSystemPromptInPlace();
+  }
+
+  async persistApprovedPlanConsumption(
+    input: ApprovedPlanConsumptionInput,
+  ): Promise<ApprovedPlanConsumptionRecord> {
+    if (!this.sessionPath)
+      throw new Error("Approved plan consumption requires a persistent session.");
+    if (approvedPlanContentHash(input.content) !== input.contentHash) {
+      throw new Error("Approved plan content hash does not match its captured content.");
+    }
+    const record: ApprovedPlanConsumptionRecord = {
+      version: 1,
+      ...input,
+      state: "approval-committed",
+    };
+    await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, record);
+    this.approvedPlanConsumption = record;
+    this.approvedPlanPath = record.approvedPlanPath;
+    await this.rebuildSystemPromptInPlace();
+    return structuredClone(record);
+  }
+
+  getApprovedPlanConsumption(): ApprovedPlanConsumptionRecord | undefined {
+    return this.approvedPlanConsumption ? structuredClone(this.approvedPlanConsumption) : undefined;
+  }
+
+  async markApprovedPlanImplementationPromptStarted(): Promise<ApprovedPlanConsumptionRecord> {
+    const current = this.approvedPlanConsumption;
+    if (!current) throw new Error("No approved plan consumption is committed.");
+    if (current.state === "implementation-prompt-started") return structuredClone(current);
+    if (!this.sessionPath)
+      throw new Error("Approved plan consumption requires a persistent session.");
+    const started: ApprovedPlanConsumptionRecord = {
+      ...current,
+      state: "implementation-prompt-started",
+    };
+    await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, started);
+    this.approvedPlanConsumption = started;
+    return structuredClone(started);
+  }
+
+  async completeApprovedPlanConsumption(): Promise<void> {
+    const current = this.approvedPlanConsumption;
+    if (!current) return;
+    if (!this.sessionPath)
+      throw new Error("Completing approved plan consumption requires a persistent session.");
+    const completed: ApprovedPlanConsumptionRecord = {
+      ...current,
+      state: "completed",
+    };
+    await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, completed);
+    this.approvedPlanConsumption = undefined;
+    this.approvedPlanPath = undefined;
+    await this.rebuildSystemPromptInPlace();
+  }
+
+  async runApprovedPlanImplementation(
+    prompt: string,
+    generation: number,
+    run: () => Promise<void> = () => this.runLoop(),
+  ): Promise<void> {
+    const consumption = this.approvedPlanConsumption;
+    if (!consumption) throw new Error("No approved plan consumption is committed.");
+    if (consumption.state === "implementation-prompt-started") return;
+
+    const latest = this.messages.at(-1);
+    const promptAlreadyPersisted = latest?.role === "user" && latest.content === prompt;
+    if (!promptAlreadyPersisted) {
+      const userMessage: Message = {
+        role: "user",
+        content: prompt,
+        provenance: { source: "runtime", kind: "automation", visibility: "transcript" },
+      };
+      this.messages.push(userMessage);
+      await this.persistMessage(userMessage, true);
+      this.lastPersistedIndex = this.messages.length;
+    }
+    if (!this.sessionPath)
+      throw new Error("Approved plan implementation requires a persistent session.");
+    await this.sessionManager.appendRunStartedRequired(this.sessionPath, {
+      version: 1,
+      generation,
+      startedAt: new Date().toISOString(),
+      afterMessageCount: this.persistedTranscriptCount(),
+    });
+    await this.markApprovedPlanImplementationPromptStarted();
+    await run();
+  }
+
+  resumeApprovedPlanImplementation(
+    prompt: string,
+    generation: number,
+    run?: () => Promise<void>,
+  ): Promise<void> {
+    return this.runApprovedPlanImplementation(prompt, generation, run);
   }
 
   /** Extra workspace roots added with `/add-dir`, in the order added. */
@@ -2986,7 +3087,12 @@ export class AgentSession {
       this.cwd,
       this.skills,
       planMode,
-      approvedPlanPath,
+      this.approvedPlanConsumption
+        ? {
+            content: this.approvedPlanConsumption.content,
+            approvedPlanPath: this.approvedPlanConsumption.approvedPlanPath,
+          }
+        : approvedPlanPath,
       toolNames,
       undefined,
       this.provider,
@@ -3336,26 +3442,6 @@ export class AgentSession {
    * attach to the user message about to be pushed by the imminent prompt.
    * No-op persistence for transient sessions.
    */
-  async persistRequiredAppMarker(
-    kind: AppMarkerPayload["kind"],
-    data: Record<string, unknown>,
-    anchorOffset = 0,
-  ): Promise<void> {
-    const afterMessageCount = this.persistedTranscriptCount() + anchorOffset;
-    const payload: AppMarkerPayload = { version: 1, kind, afterMessageCount, data };
-    if (!this.sessionPath) throw new Error("Required app markers need a persistent session.");
-    const entry: CustomEntry = {
-      type: "custom",
-      kind: APP_MARKER_CUSTOM_KIND,
-      id: crypto.randomUUID(),
-      parentId: null,
-      timestamp: new Date().toISOString(),
-      data: payload,
-    };
-    await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
-    this.appMarkers.push(payload);
-  }
-
   async persistAppMarker(
     kind: AppMarkerPayload["kind"],
     data: Record<string, unknown>,
@@ -3376,6 +3462,26 @@ export class AgentSession {
       data: payload,
     };
     await this.sessionManager.appendEntry(this.sessionPath, entry);
+    this.appMarkers.push(payload);
+  }
+
+  async persistRequiredAppMarker(
+    kind: AppMarkerPayload["kind"],
+    data: Record<string, unknown>,
+    anchorOffset = 0,
+  ): Promise<void> {
+    const afterMessageCount = this.persistedTranscriptCount() + anchorOffset;
+    const payload: AppMarkerPayload = { version: 1, kind, afterMessageCount, data };
+    if (!this.sessionPath) throw new Error("Required app markers need a persistent session.");
+    const entry: CustomEntry = {
+      type: "custom",
+      kind: APP_MARKER_CUSTOM_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: payload,
+    };
+    await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
     this.appMarkers.push(payload);
   }
 
@@ -3404,6 +3510,21 @@ export class AgentSession {
       generation,
       outcome,
     });
+  }
+
+  private async rePersistApprovedPlanConsumption(): Promise<void> {
+    if (!this.sessionPath || !this.approvedPlanConsumption) return;
+    const committed: ApprovedPlanConsumptionRecord = {
+      ...this.approvedPlanConsumption,
+      state: "approval-committed",
+    };
+    await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, committed);
+    if (this.approvedPlanConsumption.state === "implementation-prompt-started") {
+      await this.sessionManager.appendApprovedPlanConsumptionRequired(
+        this.sessionPath,
+        this.approvedPlanConsumption,
+      );
+    }
   }
 
   /** Re-append the in-memory app markers to the current session file. Mirrors
@@ -3598,8 +3719,12 @@ export class AgentSession {
     this.activePhaseContext = this.sessionManager.getActivePhaseContext(loaded.entries, {
       projectKey: expectedProjectKey,
     });
-    if (this.activePhaseContext) {
-      this.restorePlanStateFromActivePhase(this.activePhaseContext);
+    if (this.activePhaseContext) this.restorePlanStateFromActivePhase(this.activePhaseContext);
+    this.approvedPlanConsumption = this.sessionManager.getApprovedPlanConsumption(loaded.entries);
+    if (this.approvedPlanConsumption) {
+      this.approvedPlanPath = this.approvedPlanConsumption.approvedPlanPath;
+    }
+    if (this.activePhaseContext || this.approvedPlanConsumption) {
       await this.rebuildSystemPromptInPlace();
       this.refreshSystemPromptTail();
     }

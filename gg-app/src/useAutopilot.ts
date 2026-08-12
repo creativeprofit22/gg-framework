@@ -94,11 +94,9 @@ export function useAutopilot(opts: {
           setAutopilotReviewing(false);
           pushMarker("capped");
           return true;
-        // Ken approved a submitted plan. The plan state (modal, step-count
-        // seeding, the plan_approved marker) lives in useAgentEvents, so only
-        // stop the spinner here and return false so the main handler still
-        // processes the frame — same peek-and-pass-through as run_end below.
-        case "autopilot_plan_accepted":
+        // Ken finished reviewing a submitted plan, but only the human can
+        // approve. Stop the spinner and let useAgentEvents keep the gate open.
+        case "autopilot_plan_ready":
           setAutopilotReviewing(false);
           return false;
         // Not an autopilot event, but a cancel settles the build run WITHOUT a

@@ -2859,7 +2859,12 @@ body {
 }
 .plan-feedback-buttons {
   display: flex;
+  align-items: center;
   gap: 8px;
+}
+.plan-feedback-limit {
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 @media (max-width: 560px) {

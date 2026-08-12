@@ -6,6 +6,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
+import type {
+  PendingPlanReview,
+  PlanAcceptResult,
+  PlanMutationFailure,
+  PlanRevisionResult,
+} from "@kenkaiiii/gg-core";
+export type {
+  PendingPlanReview,
+  PlanAcceptResult,
+  PlanMutationFailure,
+  PlanRevisionResult,
+} from "@kenkaiiii/gg-core";
 import { routePaneEvent, type PaneEventEnvelope } from "./pane-routing";
 import {
   isRoadmapPhaseDraftApprovalResult,
@@ -152,6 +164,22 @@ export interface LocalPatchedUpdateEvent {
   opened?: "installer" | "folder" | "none";
 }
 
+export interface LocalPatchedUpdateStatus {
+  available: boolean;
+  currentSourceSha: string;
+  upstreamIntegrated: boolean;
+}
+
+export async function checkLocalPatchedUpdate(
+  repoRoot: string,
+  builtGitSha: string,
+): Promise<LocalPatchedUpdateStatus> {
+  return invoke<LocalPatchedUpdateStatus>("app_local_patched_update_status", {
+    repoRoot,
+    builtGitSha,
+  });
+}
+
 export async function startLocalPatchedUpdate(repoRoot: string): Promise<void> {
   await invoke("app_local_patched_update_start", { repoRoot });
 }
@@ -255,6 +283,122 @@ export interface JiwaSnapshot {
   hardLimit: number;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parsePendingPlanReview(value: unknown): PendingPlanReview | null | undefined {
+  if (value === null) return null;
+  if (!isRecord(value)) return undefined;
+  if (
+    typeof value.checkpointId !== "string" ||
+    !Number.isSafeInteger(value.generation) ||
+    (value.generation as number) < 1 ||
+    typeof value.planPath !== "string" ||
+    typeof value.content !== "string" ||
+    typeof value.contentHash !== "string" ||
+    (value.state !== "pending-review" && value.state !== "revision-requested") ||
+    (value.reviewStatus !== "unreviewed" && value.reviewStatus !== "ready") ||
+    (value.feedback !== null && typeof value.feedback !== "string")
+  ) {
+    return undefined;
+  }
+  return value as unknown as PendingPlanReview;
+}
+
+function planMutationMessage(payload: PlanMutationFailure, fallback: string): string {
+  const detail = payload.message?.trim();
+  const guidance = payload.guidance?.trim();
+  if (detail && guidance) return `${detail} ${guidance}`;
+  if (detail) return detail;
+  if (guidance) return guidance;
+  switch (payload.error) {
+    case "stale-plan-checkpoint":
+      return "The plan changed before this action completed. Review the latest checkpoint and try again.";
+    case "session_busy":
+      return "The session is busy. Wait for the active run to finish, then try again.";
+    case "session_mutation_in_progress":
+      return "Another session change is still completing. Wait a moment, then try again.";
+    case "cannot accept a plan while the agent is running":
+      return "The agent is still running. Wait for it to finish, then approve the plan.";
+    case "invalid plan approval body":
+    case "invalid plan revision body":
+      return "The plan request was rejected as invalid. Reload the pane before trying again.";
+    default:
+      return payload.error?.trim() || fallback;
+  }
+}
+
+/** Typed plan mutation rejection with any authoritative recovery checkpoint attached. */
+export class PlanMutationError extends Error {
+  readonly pendingPlanReview: PendingPlanReview | null | undefined;
+
+  constructor(
+    message: string,
+    readonly payload: PlanMutationFailure,
+  ) {
+    super(message);
+    this.name = "PlanMutationError";
+    this.pendingPlanReview = Object.prototype.hasOwnProperty.call(payload, "pendingPlanReview")
+      ? payload.pendingPlanReview
+      : undefined;
+  }
+}
+
+function asPlanMutationError(error: unknown, fallback: string): PlanMutationError {
+  if (error instanceof PlanMutationError) return error;
+  let candidate: unknown = error;
+  const serialized =
+    typeof error === "string" ? error : error instanceof Error ? error.message : null;
+  if (serialized !== null) {
+    try {
+      candidate = JSON.parse(serialized);
+    } catch {
+      candidate = error;
+    }
+  }
+  if (isRecord(candidate)) {
+    const payload = { ...candidate } as PlanMutationFailure;
+    if (Object.prototype.hasOwnProperty.call(candidate, "pendingPlanReview")) {
+      const pendingPlanReview = parsePendingPlanReview(candidate.pendingPlanReview);
+      if (pendingPlanReview !== undefined) payload.pendingPlanReview = pendingPlanReview;
+      else delete payload.pendingPlanReview;
+    }
+    return new PlanMutationError(planMutationMessage(payload, fallback), payload);
+  }
+  const message = error instanceof Error ? error.message : fallback;
+  return new PlanMutationError(message || fallback, {});
+}
+
+function requirePlanAcceptResult(value: unknown): PlanAcceptResult {
+  if (!isRecord(value)) throw new Error("invalid plan acceptance response");
+  const planTotal = value.planTotal;
+  const operationId = value.operationId;
+  if (
+    value.ok !== true ||
+    typeof planTotal !== "number" ||
+    !Number.isSafeInteger(planTotal) ||
+    planTotal < 0 ||
+    typeof operationId !== "string" ||
+    operationId.length === 0
+  ) {
+    throw new Error("invalid plan acceptance response");
+  }
+  return { ok: true, planTotal, operationId };
+}
+
+function requirePlanRevisionResult(value: unknown): PlanRevisionResult {
+  if (
+    !isRecord(value) ||
+    value.ok !== true ||
+    typeof value.operationId !== "string" ||
+    value.operationId.length === 0
+  ) {
+    throw new Error("invalid plan revision response");
+  }
+  return { ok: true, operationId: value.operationId };
+}
+
 export interface AgentState {
   provider: string;
   model: string;
@@ -294,6 +438,9 @@ export interface AgentState {
   /** Project-wide Autopilot (auto-review) policy shared live by every pane/window
    *  on this canonical project; absent on frames from older sidecars. */
   autopilot?: boolean;
+  /** Durable submitted-plan gate projected by GET /state and SSE ready snapshots.
+   *  Absent on older sidecars; an explicit null means no server-owned gate. */
+  pendingPlanReview?: PendingPlanReview | null;
   /** Provider of the model Ken (mentor + autopilot) uses next turn. */
   kenProvider?: string;
   /** The model Ken uses next turn — his pin when set, else GG Coder's model.
@@ -794,10 +941,9 @@ export async function retryCancelledRoadmapStatus(): Promise<PhaseCancellationPe
 //   autopilot_ignored {}            — nothing worth reviewing, loop stops SILENTLY (no marker)
 //   autopilot_human { reason }      — Ken needs a human decision, loop stops
 //   autopilot_capped { rounds }     — round cap hit, loop paused
-//   autopilot_plan_accepted {}      — Ken approved a submitted plan; broadcast
-//                                     BEFORE the session_reset that follows so
-//                                     the webview can seed the plan-progress
-//                                     widget from the still-open plan modal
+//   autopilot_plan_ready { checkpointId, generation } — Ken finished review; human
+//                                     approval remains required. Identity prevents
+//                                     a delayed verdict from mutating a newer gate.
 //   autopilot_error { headline, … } — a review failed (structured, like error)
 //   phase_completion_checkpoint_failed { code, recovery, … } — checkpoint recovery
 //   phase_completion_review_failed { code, recovery, … }     — review persistence recovery
@@ -842,18 +988,43 @@ export async function setAutopilot(enabled: boolean): Promise<boolean> {
   }
 }
 
-/**
- * Accept the pending plan: bakes its `## Steps` into the agent's system prompt
- * so it emits `[DONE:n]` progress markers as it implements each step (which the
- * activity bar's "Plan Steps n/total" widget reads). Call this BEFORE sending
- * the "implement it now" prompt. `planPath` comes from the `plan_exit` event.
- */
-export async function acceptPlan(planPath: string | null): Promise<void> {
+/** Approve only the exact server-issued persisted plan checkpoint. */
+export async function acceptPlan(
+  checkpointId: string,
+  generation: number,
+): Promise<PlanAcceptResult> {
   try {
-    await invoke("agent_accept_plan", { paneId: "primary", planPath });
-  } catch (e) {
-    await logError(`agent_accept_plan failed: ${String(e)}`);
-    throw e;
+    return requirePlanAcceptResult(
+      await invoke<PlanAcceptResult>("agent_accept_plan", {
+        paneId: "primary",
+        checkpointId,
+        generation,
+      }),
+    );
+  } catch (error) {
+    await logError(`agent_accept_plan failed: ${String(error)}`);
+    throw asPlanMutationError(error, "Couldn’t approve the plan. The approval gate is still open.");
+  }
+}
+
+/** Request revision of the exact persisted plan generation. */
+export async function revisePlan(
+  checkpointId: string,
+  generation: number,
+  feedback: string,
+): Promise<PlanRevisionResult> {
+  try {
+    return requirePlanRevisionResult(
+      await invoke<PlanRevisionResult>("agent_revise_plan", {
+        paneId: "primary",
+        checkpointId,
+        generation,
+        feedback,
+      }),
+    );
+  } catch (error) {
+    await logError(`agent_revise_plan failed: ${String(error)}`);
+    throw asPlanMutationError(error, "Couldn’t request revision. The approval gate is still open.");
   }
 }
 
@@ -2290,6 +2461,7 @@ export interface PaneAgentClient extends NotesClient {
   subscribe(onEvent: (event: SidecarEvent) => void): () => void;
   getState(): Promise<AgentState>;
   startPhase(phaseId: string): Promise<PhaseStartResult>;
+  startNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
   cancelPhaseRun(phaseId: string): Promise<PhaseRunCancellationResult>;
   getRoadmapPhaseDraft(): Promise<RoadmapPhaseDraft | null>;
   approveRoadmapPhaseDraft(draftId: string): Promise<RoadmapPhaseDraftApprovalResult>;
@@ -2317,7 +2489,12 @@ export interface PaneAgentClient extends NotesClient {
   sendKenPrompt(text: string): Promise<void>;
   cancelKen(): Promise<void>;
   setAutopilot(enabled: boolean): Promise<boolean>;
-  acceptPlan(planPath: string | null): Promise<void>;
+  acceptPlan(checkpointId: string, generation: number): Promise<PlanAcceptResult>;
+  revisePlan(
+    checkpointId: string,
+    generation: number,
+    feedback: string,
+  ): Promise<PlanRevisionResult>;
   listHistory(): Promise<HistoryEntry[]>;
   cancelQueued(id: string): Promise<QueuedMessage[] | null>;
   exportTranscriptName(): Promise<string | null>;
@@ -2528,6 +2705,14 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       if (!isPhaseStartResult(outcome)) throw new Error("invalid phase start response");
       return outcome;
     },
+    async startNextPhase(checkpointId, nextPhaseId) {
+      const outcome = await call<unknown>("agent_phase_advancement_start", {
+        checkpointId,
+        nextPhaseId,
+      });
+      if (!isPhaseStartResult(outcome)) throw new Error("invalid next phase start response");
+      return outcome;
+    },
     async cancelPhaseRun(phaseId) {
       const outcome = await call<unknown>("agent_phase_cancel", { phaseId });
       if (!isPhaseRunCancellationResult(outcome)) {
@@ -2622,7 +2807,34 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
         throw error;
       }
     },
-    acceptPlan: (planPath) => call("agent_accept_plan", { planPath }),
+    async acceptPlan(checkpointId, generation) {
+      try {
+        return requirePlanAcceptResult(
+          await call<PlanAcceptResult>("agent_accept_plan", { checkpointId, generation }),
+        );
+      } catch (error) {
+        throw asPlanMutationError(
+          error,
+          "Couldn’t approve the plan. The approval gate is still open.",
+        );
+      }
+    },
+    async revisePlan(checkpointId, generation, feedback) {
+      try {
+        return requirePlanRevisionResult(
+          await call<PlanRevisionResult>("agent_revise_plan", {
+            checkpointId,
+            generation,
+            feedback,
+          }),
+        );
+      } catch (error) {
+        throw asPlanMutationError(
+          error,
+          "Couldn’t request revision. The approval gate is still open.",
+        );
+      }
+    },
     listHistory: () => safeArray("agent_history", "history"),
     async cancelQueued(id) {
       try {
@@ -2734,7 +2946,10 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
       }
     },
     saveSettings: (projectsRoot) => call("agent_save_settings", { projectsRoot }),
-    listProjects: () => safeArray("agent_projects", "projects"),
+    async listProjects() {
+      const response = await call<{ projects?: DiscoveredProject[] }>("agent_projects");
+      return Array.isArray(response.projects) ? response.projects : [];
+    },
     searchFiles: (query) => safeArray("agent_files", "files", { query }),
     async listSessions(cwd, chatAgent) {
       const response = await call<{ sessions?: RecentSession[] }>("agent_sessions", {

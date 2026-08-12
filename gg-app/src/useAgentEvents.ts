@@ -9,6 +9,7 @@ import {
   type AgentState,
   type BackgroundTask,
   type ModelOption,
+  type PendingPlanReview,
   type ProjectTask,
   type QueuedMessage,
   type SlashCommand,
@@ -71,6 +72,30 @@ function formatElapsed(ms: number): string {
   const m = Math.floor(s / 60);
   const r = s % 60;
   return r > 0 ? `${m}m ${r}s` : `${m}m`;
+}
+
+type PlanReviewEventIdentity = Pick<PendingPlanReview, "checkpointId" | "generation">;
+
+function planReviewEventIdentity(data: Record<string, unknown>): PlanReviewEventIdentity | null {
+  if (
+    typeof data.checkpointId !== "string" ||
+    !data.checkpointId ||
+    typeof data.generation !== "number" ||
+    !Number.isSafeInteger(data.generation) ||
+    data.generation < 1
+  ) {
+    return null;
+  }
+  return { checkpointId: data.checkpointId, generation: data.generation };
+}
+
+function isMatchingPlanReview(
+  current: PendingPlanReview,
+  identity: PlanReviewEventIdentity,
+): boolean {
+  return (
+    current.checkpointId === identity.checkpointId && current.generation === identity.generation
+  );
 }
 
 // Port of packages/ggcoder/src/ui/duration-summary.ts, adapted to the sidecar's
@@ -141,7 +166,7 @@ export interface AgentEventsDeps {
   setThinkingAccumMs: Dispatch<SetStateAction<number>>;
   setPlanTotal: Dispatch<SetStateAction<number>>;
   setPlanDone: Dispatch<SetStateAction<Set<number>>>;
-  setPlanReview: Dispatch<SetStateAction<string | null>>;
+  setPlanReview: Dispatch<SetStateAction<PendingPlanReview | null>>;
   setQueuedCount: Dispatch<SetStateAction<number>>;
   /** Pending queued messages (id + text) for the cancel affordance. */
   setQueuedMessages: Dispatch<SetStateAction<QueuedMessage[]>>;
@@ -167,6 +192,8 @@ export interface AgentEvents {
   pushItem: (item: Item) => void;
   /** Flush buffered assistant text + end the streaming section (used by App too). */
   endStreamingText: () => void;
+  /** Replace the durable approval gate and every private fallback mirror atomically. */
+  replacePlanReview: (review: PendingPlanReview | null) => void;
 }
 
 export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
@@ -254,6 +281,14 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   // canonical live-file count on session_reset; this content supplies the fallback
   // count when connected to an older sidecar.
   const planReviewContentRef = useRef<string | null>(null);
+  const replacePlanReview = useCallback(
+    (review: PendingPlanReview | null) => {
+      planReviewPathRef.current = review?.planPath ?? null;
+      planReviewContentRef.current = review?.content ?? null;
+      setPlanReview(review);
+    },
+    [planReviewPathRef, setPlanReview],
+  );
 
   // Streaming deltas arrive faster than React can usefully render each one.
   // We buffer chunks in a ref and flush every 100ms — imperceptible for prose
@@ -502,6 +537,15 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           setRunning(readyState.running);
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
           setStatus(readyState.runState === "cancelling" ? "cancelling..." : "ready");
+          // Reconnect snapshots are authoritative for the durable gate. Older
+          // sidecars omit this field, so absence preserves the local review;
+          // an explicit null is the only snapshot value that clears it.
+          if (readyState.pendingPlanReview !== undefined) {
+            const pendingReview = readyState.pendingPlanReview;
+            planReviewPathRef.current = pendingReview?.planPath ?? null;
+            planReviewContentRef.current = pendingReview?.content ?? null;
+            setPlanReview(pendingReview);
+          }
           break;
         }
         case "run_start":
@@ -973,38 +1017,61 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         }
         case "plan_exit": {
           setState((s) => (s ? { ...s, planMode: false } : s));
-          // Always stash the submitted plan: autopilot needs the content to
-          // seed the plan-progress widget if Ken approves it, and manual accept
-          // needs the path when autopilot is off.
-          planReviewPathRef.current = typeof d.planPath === "string" ? d.planPath : null;
           const content = String(d.content ?? "");
+          const checkpointId = String(d.checkpointId ?? "");
+          const generation = Number(d.generation);
+          if (!checkpointId || !Number.isSafeInteger(generation) || generation < 1) break;
+          planReviewPathRef.current = typeof d.planPath === "string" ? d.planPath : null;
           planReviewContentRef.current = content;
-          // Approval is a blocking workflow gate even while Autopilot is reviewing.
-          // Keep it visible until either Ken or the user explicitly resolves it.
-          setPlanReview(content);
+          setPlanReview({
+            checkpointId,
+            generation,
+            planPath: planReviewPathRef.current ?? "",
+            content,
+            contentHash: String(d.contentHash ?? ""),
+            state: "pending-review",
+            reviewStatus: "unreviewed",
+            feedback: null,
+          });
           break;
         }
-        case "autopilot_plan_accepted":
-          // Keep an approval-time fallback for older sidecars, close the review
-          // modal, and render the approved marker. Current sidecars override this
-          // fallback with the canonical live-file count on session_reset.
-          pendingPlanTotalRef.current = planReviewContentRef.current
-            ? countPlanSteps(planReviewContentRef.current)
-            : 0;
-          planReviewContentRef.current = null;
-          setPlanReview(null);
-          endStreamingText();
-          pushItem({ kind: "autopilot", id: nextId(), phase: "plan_approved" });
+        case "autopilot_plan_ready": {
+          const identity = planReviewEventIdentity(d);
+          if (!identity) break;
+          setPlanReview((current) =>
+            current && isMatchingPlanReview(current, identity)
+              ? { ...current, reviewStatus: "ready" }
+              : current,
+          );
           break;
+        }
+        case "plan_revision_requested": {
+          const identity = planReviewEventIdentity(d);
+          if (!identity) break;
+          setPlanReview((current) =>
+            current && isMatchingPlanReview(current, identity)
+              ? {
+                  ...current,
+                  state: "revision-requested",
+                  feedback: typeof d.feedback === "string" ? d.feedback : current.feedback,
+                }
+              : current,
+          );
+          break;
+        }
+        case "plan_accepted": {
+          const identity = planReviewEventIdentity(d);
+          if (!identity) break;
+          setPlanReview((current) => {
+            if (!current || !isMatchingPlanReview(current, identity)) return current;
+            pendingPlanTotalRef.current = countPlanSteps(current.content);
+            planReviewContentRef.current = null;
+            return null;
+          });
+          break;
+        }
         case "autopilot_prompted":
-          // Autopilot-only plan revision path: Ken rejected/refined the plan and
-          // the sidecar injected a revision prompt into GG Coder. Close the
-          // stale human review modal so autopilot visibly continues. In
-          // non-autopilot mode this frame never exists, so the normal modal +
-          // manual Accept/Feedback/Reject flow stays unchanged.
-          planReviewContentRef.current = null;
-          planReviewPathRef.current = null;
-          setPlanReview(null);
+          // Revision prompts never consume approval authority.
           break;
         case "tasks":
           setTasks((d.tasks as BackgroundTask[] | undefined) ?? []);
@@ -1217,5 +1284,5 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
     ],
   );
 
-  return { handleEvent, pushItem, endStreamingText };
+  return { handleEvent, pushItem, endStreamingText, replacePlanReview };
 }

@@ -34,6 +34,7 @@ import {
   type WorkspaceMode,
   type ChatAgentId,
   type ModelOption,
+  type PendingPlanReview,
   type SlashCommand,
   type BackgroundTask,
   type ProjectTask,
@@ -45,6 +46,7 @@ import {
   type PaneAgentClient,
   type PaneSessionTarget,
   NewSessionError,
+  PlanMutationError,
 } from "./agent";
 import { createSafeTauriUnlisten, type SafeTauriUnlisten } from "./tauri-listener";
 import { ActivityBar } from "./ActivityBar";
@@ -523,8 +525,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     getServeStatus,
     startServe,
     stopServe,
+    acceptPlan: acceptPlanIPC,
+    revisePlan: revisePlanIPC,
   } = client;
-  const acceptPlanIPC = client.acceptPlan;
   const subscribe = client.subscribe;
   const catalogClient = useMemo(() => createPaneAgentClient("primary"), []);
   const [items, setItems] = useState<Item[]>([]);
@@ -694,7 +697,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const [doneStatus, setDoneStatus] = useState<string | null>(null);
   // Pending plan awaiting an explicit workflow-gate decision. The gate remains
   // inline with the transcript until approval, feedback, or dismissal resolves it.
-  const [planReview, setPlanReview] = useState<string | null>(null);
+  const [planReview, setPlanReview] = useState<PendingPlanReview | null>(null);
   const [planGateBusy, setPlanGateBusy] = useState(false);
   // Exact operation that entered Plan Mode. Kept in webview memory only: approval
   // replays this prompt after the sidecar has accepted the plan.
@@ -1462,7 +1465,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // state (its render + other handlers use it) and passes the setters +
   // cross-cutting refs in. App consumes `handleEvent` (for the SSE subscription)
   // and the two helpers it still calls directly (`pushItem`, `endStreamingText`).
-  const { handleEvent, pushItem, endStreamingText } = useAgentEvents({
+  const { handleEvent, pushItem, endStreamingText, replacePlanReview } = useAgentEvents({
     client,
     setItems,
     nextId,
@@ -1512,6 +1515,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       if (st) {
         setState(st);
         setRunning(st.running);
+        replacePlanReview(st.pendingPlanReview ?? null);
         setStatus(st.runState === "cancelling" ? "cancelling..." : "ready");
       }
       const available = await listModels();
@@ -1649,7 +1653,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       // session is in hand — one fade-in, no staggered reflow.
       setHydrated(true);
     }
-  }, [getState, listCommands, listHistory, listModels, listTasks, waitForReady]);
+  }, [getState, listCommands, listHistory, listModels, listTasks, replacePlanReview, waitForReady]);
 
   useEffect(() => {
     const unsub = subscribe(handleEvent);
@@ -2722,23 +2726,20 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }
 
-  // ── Plan review actions (mirror the ggcoder CLI plan overlay) ──
-  // Each closes the modal, drops a short info line, and drives the agent with
-  // the corresponding instruction via the existing prompt path.
-  function runPlanPrompt(prompt: string, info: string): void {
-    setPlanGateBusy(false);
-    setPlanReview(null);
-    if (!readyRef.current || running) return;
-    pushItem({ kind: "info", id: nextId(), text: info });
-    endStreamingText();
-    void sendPrompt(prompt);
+  // ── Durable plan review actions ──
+
+  function recoverPlanMutation(error: unknown, fallback: string): void {
+    if (error instanceof PlanMutationError && error.pendingPlanReview !== undefined) {
+      replacePlanReview(error.pendingPlanReview);
+    }
+    toast(error instanceof PlanMutationError ? error.message : fallback, "error", 7_000);
   }
 
   async function acceptPlan(): Promise<void> {
     // Capture the approved plan's step count BEFORE the IPC — accepting starts a
     // fresh session on the sidecar, whose session_reset broadcast nulls
     // planReview (and clears the transcript + counters) here.
-    const nextPlanTotal = planReview ? countPlanSteps(planReview) : 0;
+    const nextPlanTotal = planReview ? countPlanSteps(planReview.content) : 0;
     // Stash a fallback for older sidecars. The current sidecar puts its canonical
     // live-file count directly on session_reset, which wins over this snapshot.
     pendingPlanTotalRef.current = nextPlanTotal;
@@ -2749,35 +2750,49 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // content after the await: the plan file may already have changed.
     setPlanGateBusy(true);
     try {
-      await acceptPlanIPC(planReviewPathRef.current);
-      const resumePrompt =
-        planResumePromptRef.current ??
-        "The plan has been approved. Implement it now, following each step in order.";
+      if (!planReview) return;
+      await acceptPlanIPC(planReview.checkpointId, planReview.generation);
       planResumePromptRef.current = null;
-      // Resume the exact operation that entered Plan Mode. In the blocked commit
-      // loop this is `/commit`, not a generic implementation instruction.
-      runPlanPrompt(resumePrompt, "\u2713 Plan accepted. Resuming.");
-    } catch {
-      toast("Couldn’t approve the plan. The approval gate is still open.", "error", 7_000);
+      replacePlanReview(null);
+      pushItem({ kind: "info", id: nextId(), text: "\u2713 Plan accepted. Resuming." });
+    } catch (error) {
+      pendingPlanTotalRef.current = null;
+      recoverPlanMutation(error, "Couldn’t approve the plan. The approval gate is still open.");
     } finally {
       setPlanGateBusy(false);
     }
   }
 
-  function sendPlanFeedback(feedback: string): void {
-    runPlanPrompt(
-      `The plan was not approved. Feedback from the user:\n\n${feedback}\n\n` +
-        "Revise the plan based on this feedback, then call exit_plan again for review.",
-      "\u270e Feedback sent. Revising the plan.",
-    );
+  async function sendPlanFeedback(feedback: string): Promise<void> {
+    if (!planReview) return;
+    setPlanGateBusy(true);
+    try {
+      await revisePlanIPC(planReview.checkpointId, planReview.generation, feedback);
+      setPlanReview((current) =>
+        current ? { ...current, state: "revision-requested", feedback } : current,
+      );
+      pushItem({ kind: "info", id: nextId(), text: "✎ Feedback sent. Revising the plan." });
+    } catch (error) {
+      recoverPlanMutation(error, "Couldn’t request revision. The approval gate is still open.");
+    } finally {
+      setPlanGateBusy(false);
+    }
   }
 
-  function rejectPlan(): void {
-    planResumePromptRef.current = null;
-    runPlanPrompt(
-      "The plan was rejected and dismissed. Do not implement it. Wait for new instructions.",
-      "\u2715 Plan rejected.",
-    );
+  async function retryPlanRevision(): Promise<void> {
+    if (!planReview || planReview.state !== "revision-requested" || !planReview.feedback) return;
+    setPlanGateBusy(true);
+    try {
+      await revisePlanIPC(planReview.checkpointId, planReview.generation, planReview.feedback);
+      pushItem({ kind: "info", id: nextId(), text: "↻ Revision retry started." });
+    } catch (error) {
+      recoverPlanMutation(
+        error,
+        "Couldn’t retry revision. The persisted request is still available.",
+      );
+    } finally {
+      setPlanGateBusy(false);
+    }
   }
 
   // The toolbar and Ken prompt actions share the same correlated reset path.
@@ -3016,6 +3031,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             discoverProjects={catalogClient.listProjects}
             discoverSessions={catalogClient.listSessions}
             bindProject={bindPickerProject}
+            refreshSignal={homeRefreshSignal}
             showWindowControls={kind === "primary"}
             onClose={() => setEntryView("home")}
           />
@@ -3041,6 +3057,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       },
       waitForCatalogReady: catalogClient.waitForReady,
       discoverSessions: catalogClient.listSessions,
+      refreshSignal: homeRefreshSignal,
       showWindowControls: kind === "primary",
     };
     return (
@@ -3186,6 +3203,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                 cwd={state?.cwd ?? null}
                 client={client}
                 onStartPhase={startRoadmapPhase}
+                onStartNextPhase={(checkpointId, nextPhaseId) =>
+                  client.startNextPhase(checkpointId, nextPhaseId)
+                }
+                commands={commands}
+                onRunCommand={(invocation) => submitText(invocation)}
                 onCancelPhase={(phaseId) => client.cancelPhaseRun(phaseId)}
                 onResumePhase={resumeRoadmapPhase}
                 phaseStartUnavailableReason={
@@ -3291,12 +3313,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               </KenPromptActionProvider>
               {workspaceMode === "code" && planReview !== null && (
                 <PlanReviewModal
-                  content={planReview}
+                  content={planReview.content}
                   kenReviewing={autopilotReviewing}
+                  kenReady={planReview.reviewStatus === "ready"}
+                  revisionPending={planReview.state === "revision-requested"}
+                  revisionRunning={running}
                   busy={planGateBusy}
                   onAccept={() => void acceptPlan()}
-                  onFeedback={sendPlanFeedback}
-                  onReject={rejectPlan}
+                  onFeedback={(feedback) => void sendPlanFeedback(feedback)}
+                  onRetryRevision={() => void retryPlanRevision()}
                 />
               )}
             </>

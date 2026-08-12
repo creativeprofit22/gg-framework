@@ -20,7 +20,7 @@ vi.mock("./agent", () => ({
 import { listModels } from "./agent";
 import { useAgentEvents, type AgentEventsDeps } from "./useAgentEvents";
 import type { Item } from "./App";
-import type { AgentState, SidecarEvent } from "./agent";
+import type { AgentState, PendingPlanReview, SidecarEvent } from "./agent";
 import type { LiveToolEntry } from "./LiveToolPanel";
 
 const ev = (type: string, data: Record<string, unknown> = {}): SidecarEvent =>
@@ -49,7 +49,7 @@ function setup(
 
   // Track the outputs the assertions read; spy the rest so nothing throws.
   let liveToolFeed: LiveToolEntry[] = [];
-  let planReview: string | null = null;
+  let planReview: PendingPlanReview | null = null;
   const setLiveToolFeed = vi.fn(
     (u: LiveToolEntry[] | ((p: LiveToolEntry[]) => LiveToolEntry[])) => {
       liveToolFeed = typeof u === "function" ? u(liveToolFeed) : u;
@@ -100,7 +100,9 @@ function setup(
     setThinkingAccumMs: noop as unknown as AgentEventsDeps["setThinkingAccumMs"],
     setPlanTotal: noop as unknown as AgentEventsDeps["setPlanTotal"],
     setPlanDone: noop as unknown as AgentEventsDeps["setPlanDone"],
-    setPlanReview: ((u: string | null | ((p: string | null) => string | null)) => {
+    setPlanReview: ((
+      u: PendingPlanReview | null | ((p: PendingPlanReview | null) => PendingPlanReview | null),
+    ) => {
       planReview = typeof u === "function" ? u(planReview) : u;
     }) as AgentEventsDeps["setPlanReview"],
     setQueuedCount: noop as unknown as AgentEventsDeps["setQueuedCount"],
@@ -641,39 +643,159 @@ describe("useAgentEvents", () => {
     const { hook, getPlanReview } = setup(() => false, { autopilot: false });
     act(() => {
       hook.result.current.handleEvent(
-        ev("plan_exit", { planPath: "/tmp/p.md", content: "# Plan" }),
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
       );
     });
-    expect(getPlanReview()).toBe("# Plan");
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      generation: 1,
+      content: "# Plan",
+    });
+  });
+
+  it("restores the exact persisted plan review from a reconnect ready snapshot", () => {
+    const { hook, getPlanReview, deps } = setup();
+    const persistedReview: PendingPlanReview = {
+      checkpointId: "checkpoint-persisted",
+      generation: 7,
+      planPath: "/tmp/persisted.md",
+      content: "# Persisted plan\n\n1. Resume without reload",
+      contentHash: "persisted-hash",
+      state: "revision-requested",
+      reviewStatus: "ready",
+      feedback: "Keep the durable gate visible",
+    };
+
+    act(() => {
+      // plan_exit was dropped with the disconnected SSE stream. The reconnect
+      // ready frame must recover the server-owned gate by itself.
+      hook.result.current.handleEvent(
+        ev("ready", {
+          provider: "anthropic",
+          model: "claude-opus-5",
+          cwd: "/tmp/proj",
+          running: false,
+          runState: "idle",
+          tasks: [],
+          pendingPlanReview: persistedReview,
+        }),
+      );
+      // A delayed event from the disconnected generation must not clear the
+      // recovered checkpoint.
+      hook.result.current.handleEvent(
+        ev("plan_accepted", { checkpointId: "checkpoint-old", generation: 6 }),
+      );
+    });
+
+    expect(getPlanReview()).toEqual(persistedReview);
+    expect(deps.planReviewPathRef.current).toBe(persistedReview.planPath);
+  });
+
+  it("clears a local plan review only when ready explicitly reports null", () => {
+    const { hook, getPlanReview, deps } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("ready", { running: false, runState: "idle", tasks: [], pendingPlanReview: null }),
+      );
+    });
+
+    expect(getPlanReview()).toBeNull();
+    expect(deps.planReviewPathRef.current).toBeNull();
+  });
+
+  it("preserves a local plan review when a legacy ready snapshot omits the projection", () => {
+    const { hook, getPlanReview, deps } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
+      );
+      hook.result.current.handleEvent(ev("ready", { running: false, runState: "idle", tasks: [] }));
+    });
+
+    expect(getPlanReview()).toMatchObject({ checkpointId: "checkpoint-1", generation: 1 });
+    expect(deps.planReviewPathRef.current).toBe("/tmp/p.md");
   });
 
   it("plan_exit keeps the human review modal available while autopilot reviews", () => {
     const { hook, getPlanReview, deps } = setup(() => false, { autopilot: true });
     act(() => {
       hook.result.current.handleEvent(
-        ev("plan_exit", { planPath: "/tmp/p.md", content: "# Plan" }),
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
       );
     });
     // Plan approval remains a blocking human-visible gate while Ken reviews;
     // either Ken or the user can resolve it, and the submitted path stays available.
-    expect(getPlanReview()).toBe("# Plan");
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      generation: 1,
+      content: "# Plan",
+    });
     expect(deps.planReviewPathRef.current).toBe("/tmp/p.md");
   });
 
-  it("autopilot_plan_accepted seeds the plan step count and pushes the marker", () => {
-    const { hook, deps, getItems } = setup();
-    const plan =
-      "# Plan\n\n## Steps\n\n1. Add the provider config module\n2. Wire the callback route";
+  it("autopilot_plan_ready keeps the modal open for human approval", () => {
+    const { hook, getPlanReview } = setup();
     act(() => {
-      // plan_exit stashes the plan content the accepted-frame reads.
-      hook.result.current.handleEvent(ev("plan_exit", { planPath: "/tmp/p.md", content: plan }));
-      hook.result.current.handleEvent(ev("autopilot_plan_accepted", {}));
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_ready", { checkpointId: "checkpoint-1", generation: 1 }),
+      );
     });
-    // Step count seeded for the accept-driven session_reset to carry over.
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      reviewStatus: "ready",
+      state: "pending-review",
+    });
+  });
+
+  it("plan_accepted seeds step progress and closes the modal", () => {
+    const { hook, deps, getPlanReview } = setup();
+    const plan = "# Plan\n\n## Steps\n\n1. Complete first\n2. Complete second\n\n## Verification";
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: plan,
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_accepted", { checkpointId: "checkpoint-1", generation: 1 }),
+      );
+    });
     expect(deps.pendingPlanTotalRef.current).toBe(2);
-    // The approved marker lands in the transcript (rendered as a Ken bubble).
-    const marker = getItems().find((i) => i.kind === "autopilot");
-    expect(marker).toMatchObject({ kind: "autopilot", phase: "plan_approved" });
+    expect(getPlanReview()).toBeNull();
   });
 
   it("uses sidecar plan progress as the authoritative live-file snapshot", () => {
@@ -704,20 +826,144 @@ describe("useAgentEvents", () => {
     expect(deps.planDoneRef.current.size).toBe(0);
   });
 
-  it("autopilot_prompted closes the stale plan modal after Ken asks for revision", () => {
+  it("revision events keep the durable gate visible", () => {
     const { hook, getPlanReview } = setup();
     act(() => {
       hook.result.current.handleEvent(
-        ev("plan_exit", { planPath: "/tmp/p.md", content: "# Plan" }),
+        ev("plan_exit", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          planPath: "/tmp/p.md",
+          content: "# Plan",
+        }),
       );
-    });
-    expect(getPlanReview()).toBe("# Plan");
-    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_revision_requested", {
+          checkpointId: "checkpoint-1",
+          generation: 1,
+          feedback: "Add restart coverage",
+        }),
+      );
       hook.result.current.handleEvent(ev("autopilot_prompted", { round: 1, body: "revise it" }));
     });
-    // Autopilot-only: a revision prompt means Ken took over the plan review;
-    // the human modal should disappear. Non-autopilot never emits this frame.
-    expect(getPlanReview()).toBeNull();
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-1",
+      state: "revision-requested",
+      feedback: "Add restart coverage",
+    });
+  });
+
+  it("ignores delayed ready events for an older plan generation", () => {
+    const { hook, getPlanReview } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-old",
+          generation: 1,
+          planPath: "/tmp/old.md",
+          content: "# Old plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-new",
+          generation: 2,
+          planPath: "/tmp/new.md",
+          content: "# New plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_ready", { checkpointId: "checkpoint-new", generation: 1 }),
+      );
+      hook.result.current.handleEvent(
+        ev("autopilot_plan_ready", { checkpointId: "checkpoint-old", generation: 2 }),
+      );
+    });
+
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-new",
+      generation: 2,
+      reviewStatus: "unreviewed",
+      state: "pending-review",
+    });
+  });
+
+  it("ignores delayed revision events for an older plan generation", () => {
+    const { hook, getPlanReview } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-old",
+          generation: 1,
+          planPath: "/tmp/old.md",
+          content: "# Old plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-new",
+          generation: 2,
+          planPath: "/tmp/new.md",
+          content: "# New plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_revision_requested", {
+          checkpointId: "checkpoint-new",
+          generation: 1,
+          feedback: "Stale generation feedback",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_revision_requested", {
+          checkpointId: "checkpoint-old",
+          generation: 2,
+          feedback: "Stale checkpoint feedback",
+        }),
+      );
+    });
+
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-new",
+      generation: 2,
+      state: "pending-review",
+      feedback: null,
+    });
+  });
+
+  it("ignores delayed accepted events for an older plan generation", () => {
+    const { hook, deps, getPlanReview } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-old",
+          generation: 1,
+          planPath: "/tmp/old.md",
+          content: "# Old plan",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_exit", {
+          checkpointId: "checkpoint-new",
+          generation: 2,
+          planPath: "/tmp/new.md",
+          content: "# New plan\n\n## Steps\n\n1. Keep this gate",
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_accepted", { checkpointId: "checkpoint-new", generation: 1 }),
+      );
+      hook.result.current.handleEvent(
+        ev("plan_accepted", { checkpointId: "checkpoint-old", generation: 2 }),
+      );
+    });
+
+    expect(getPlanReview()).toMatchObject({
+      checkpointId: "checkpoint-new",
+      generation: 2,
+      state: "pending-review",
+    });
+    expect(deps.pendingPlanTotalRef.current).toBeNull();
   });
 
   it("run_end clears completed plan progress and running state", () => {

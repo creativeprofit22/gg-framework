@@ -1,3 +1,4 @@
+import { PLAN_REVISION_FEEDBACK_MAX_CHARS } from "@kenkaiiii/gg-core";
 import { useState } from "react";
 import { MENTOR_DISPLAY_NAME } from "./brand";
 import { theme } from "./theme";
@@ -8,11 +9,17 @@ interface Props {
   content: string;
   /** True while Autopilot Ken is reviewing this plan himself. */
   kenReviewing?: boolean;
-  /** Locks the resolving controls while approval is crossing the IPC boundary. */
+  /** Ken found no issue, but only the human may approve. */
+  kenReady?: boolean;
+  /** A typed revision request is durable and awaits a replacement generation. */
+  revisionPending?: boolean;
+  /** The revision provider run is currently active, so retry must wait. */
+  revisionRunning?: boolean;
+  /** Locks the resolving controls while authority is crossing the IPC boundary. */
   busy?: boolean;
   onAccept: () => void;
   onFeedback: (feedback: string) => void;
-  onReject: () => void;
+  onRetryRevision?: () => void;
 }
 
 /**
@@ -23,13 +30,27 @@ interface Props {
 export function PlanReviewModal({
   content,
   kenReviewing = false,
+  kenReady = false,
+  revisionPending = false,
+  revisionRunning = false,
   busy = false,
   onAccept,
   onFeedback,
-  onReject,
+  onRetryRevision,
 }: Props): React.ReactElement {
   const [feedbackMode, setFeedbackMode] = useState(false);
   const [feedback, setFeedback] = useState("");
+  const normalizedFeedback = feedback.trim();
+  const feedbackRemaining = PLAN_REVISION_FEEDBACK_MAX_CHARS - feedback.length;
+  const feedbackWithinLimit = feedbackRemaining >= 0;
+  const canSubmitFeedback = normalizedFeedback.length > 0 && feedbackWithinLimit;
+  const feedbackCount = Math.abs(feedbackRemaining);
+  const feedbackLimitStatus = `${feedbackCount.toLocaleString()} ${
+    feedbackCount === 1 ? "character" : "characters"
+  } ${feedbackWithinLimit ? "remaining" : "over limit"}`;
+  const submitFeedback = (): void => {
+    if (canSubmitFeedback) onFeedback(normalizedFeedback);
+  };
 
   return (
     <section className="plan-review" aria-label="Plan approval required" aria-busy={busy}>
@@ -39,7 +60,7 @@ export function PlanReviewModal({
         </span>
         <div>
           <strong>Plan approval required</strong>
-          <p>Approve this plan to resume the operation, or dismiss it to stop here.</p>
+          <p>Only you can approve this persisted plan snapshot.</p>
         </div>
       </div>
 
@@ -50,27 +71,43 @@ export function PlanReviewModal({
         </div>
       </details>
 
-      {kenReviewing && (
+      {(kenReviewing || kenReady || revisionPending) && (
         <div className="plan-review-ken" style={{ color: theme.ken }}>
-          {MENTOR_DISPLAY_NAME} is reviewing this plan… you can still decide now.
+          {revisionPending
+            ? "Revision requested. Waiting for the revised plan snapshot…"
+            : kenReady
+              ? `${MENTOR_DISPLAY_NAME} finished reviewing. Your approval is still required.`
+              : `${MENTOR_DISPLAY_NAME} is reviewing this plan… you can still decide now.`}
         </div>
       )}
 
       <div className="plan-review-actions">
-        {feedbackMode ? (
+        {revisionPending ? (
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={busy || revisionRunning}
+            onClick={onRetryRevision}
+          >
+            {busy || revisionRunning ? "Revising…" : "Retry revision"}
+          </button>
+        ) : feedbackMode ? (
           <div className="plan-feedback">
             <textarea
               className="plan-feedback-input"
               value={feedback}
               placeholder="What should change about this plan?"
+              aria-describedby="plan-feedback-limit"
+              aria-invalid={!feedbackWithinLimit}
               autoFocus
               rows={3}
+              maxLength={PLAN_REVISION_FEEDBACK_MAX_CHARS}
               disabled={busy}
               onChange={(event) => setFeedback(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                   event.preventDefault();
-                  if (feedback.trim()) onFeedback(feedback.trim());
+                  submitFeedback();
                 } else if (event.key === "Escape") {
                   setFeedbackMode(false);
                 }
@@ -81,6 +118,13 @@ export function PlanReviewModal({
                 {"⌘↵ to send · Esc to cancel"}
               </span>
               <span className="plan-feedback-buttons">
+                <span
+                  id="plan-feedback-limit"
+                  className="plan-feedback-limit"
+                  style={{ color: theme.textDim }}
+                >
+                  {feedbackLimitStatus}
+                </span>
                 <button
                   type="button"
                   className="btn btn-ghost btn-sm"
@@ -92,8 +136,8 @@ export function PlanReviewModal({
                 <button
                   type="button"
                   className="btn btn-primary btn-sm"
-                  disabled={busy || !feedback.trim()}
-                  onClick={() => onFeedback(feedback.trim())}
+                  disabled={busy || !canSubmitFeedback}
+                  onClick={submitFeedback}
                 >
                   Send feedback
                 </button>
@@ -112,14 +156,6 @@ export function PlanReviewModal({
               onClick={() => setFeedbackMode(true)}
             >
               Feedback
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost plan-reject"
-              disabled={busy}
-              onClick={onReject}
-            >
-              Dismiss
             </button>
           </>
         )}

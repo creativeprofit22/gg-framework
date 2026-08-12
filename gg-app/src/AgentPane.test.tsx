@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useState, type Dispatch, type SetStateAction } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as AgentModule from "./agent";
@@ -61,10 +61,17 @@ vi.mock("./useAgentEvents", () => ({
     onSessionReset?: (operationId?: string) => void;
     onRoadmapPhaseDraftChange?: (draft: AgentModule.RoadmapPhaseDraftChangeEvent["data"]) => void;
     setItems: Dispatch<SetStateAction<Item[]>>;
-    setPlanReview: Dispatch<SetStateAction<string | null>>;
+    setPlanReview: Dispatch<SetStateAction<AgentModule.PendingPlanReview | null>>;
     planReviewPathRef: { current: string | null };
   }) => {
     nativeMocks.onSessionReset = deps.onSessionReset ?? null;
+    const replacePlanReview = useCallback(
+      (review: AgentModule.PendingPlanReview | null) => {
+        deps.planReviewPathRef.current = review?.planPath ?? null;
+        deps.setPlanReview(review);
+      },
+      [deps.planReviewPathRef, deps.setPlanReview],
+    );
     return {
       handleEvent: (event: AgentModule.SidecarEvent) => {
         if (event.type === "roadmap_phase_draft_change") {
@@ -74,9 +81,19 @@ vi.mock("./useAgentEvents", () => ({
           return true;
         }
         if (event.type === "plan_exit") {
-          const data = event.data as { planPath?: unknown; content?: unknown };
+          const data = event.data as Record<string, unknown>;
           deps.planReviewPathRef.current = typeof data.planPath === "string" ? data.planPath : null;
-          deps.setPlanReview(String(data.content ?? ""));
+          deps.setPlanReview({
+            checkpointId:
+              typeof data.checkpointId === "string" ? data.checkpointId : "checkpoint-1",
+            generation: typeof data.generation === "number" ? data.generation : 1,
+            planPath: deps.planReviewPathRef.current ?? "",
+            content: String(data.content ?? ""),
+            contentHash: "",
+            state: "pending-review",
+            reviewStatus: "unreviewed",
+            feedback: null,
+          });
           return true;
         }
         if (event.type !== "session_reset") return deps.handleAutopilotEvent(event);
@@ -86,6 +103,7 @@ vi.mock("./useAgentEvents", () => ({
       },
       pushItem: (item: Item) => deps.setItems((current) => [...current, item]),
       endStreamingText: vi.fn(),
+      replacePlanReview,
     };
   },
 }));
@@ -150,7 +168,7 @@ vi.mock("./agent", async (importOriginal) => {
 });
 
 import { AgentPane } from "./AgentPane";
-import { NewSessionError } from "./agent";
+import { NewSessionError, PlanMutationError } from "./agent";
 import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type { AgentState, PaneAgentClient, PaneSessionTarget } from "./agent";
 
@@ -267,7 +285,8 @@ function client(paneId: string, generation: number): PaneAgentClient {
     sendKenPrompt: vi.fn(),
     cancelKen: vi.fn(),
     setAutopilot: vi.fn(),
-    acceptPlan: vi.fn(async () => ({ ok: true, planTotal: 0 })),
+    acceptPlan: vi.fn(async () => ({ ok: true, planTotal: 0, operationId: "plan-accept-1" })),
+    revisePlan: vi.fn(async () => ({ ok: true, operationId: "plan-revise-1" })),
     authOAuthStart: vi.fn(),
     authOAuthCode: vi.fn(),
     newSession: vi.fn(async () => ({ operationId: "operation-1" })),
@@ -797,9 +816,200 @@ describe("AgentPane lifecycle", () => {
     expect(screen.getByRole("button", { name: "Create phase" })).toBeTruthy();
   });
 
-  it("keeps ordinary plan acceptance on the webview prompt path", async () => {
+  it("rehydrates a persisted plan review before any SSE event", async () => {
+    const pane = client("pane-plan-restart", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-restart",
+        generation: 5,
+        planPath: "/plans/restart.md",
+        content: "## Steps\n1. Verify restart hydration",
+        contentHash: "hash",
+        state: "pending-review",
+        reviewStatus: "ready",
+        feedback: null,
+      },
+    });
+    render(<AgentPane client={pane} target={target} />);
+
+    expect(await screen.findByText(/Your approval is still required/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("checkpoint-restart", 5));
+  });
+
+  it("replaces a stale accepted checkpoint with the backend checkpoint", async () => {
+    const pane = client("pane-plan-stale-accept", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-old",
+        generation: 2,
+        planPath: "/plans/old.md",
+        content: "## Old plan",
+        contentHash: "old-hash",
+        state: "pending-review",
+        reviewStatus: "unreviewed",
+        feedback: null,
+      },
+    });
+    const latest = {
+      checkpointId: "checkpoint-latest",
+      generation: 3,
+      planPath: "/plans/latest.md",
+      content: "## Latest backend plan",
+      contentHash: "latest-hash",
+      state: "pending-review" as const,
+      reviewStatus: "ready" as const,
+      feedback: null,
+    };
+    vi.mocked(pane.acceptPlan).mockRejectedValue(
+      new PlanMutationError(
+        "The plan changed before this action completed. Review the latest checkpoint and try again.",
+        { error: "stale-plan-checkpoint", pendingPlanReview: latest },
+      ),
+    );
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    expect(await screen.findByText("Latest backend plan")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      expect.stringContaining("Review the latest checkpoint"),
+      "error",
+      7_000,
+    );
+  });
+
+  it("replaces a stale revision request with the backend checkpoint", async () => {
+    const pane = client("pane-plan-stale-revise", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-old",
+        generation: 4,
+        planPath: "/plans/old.md",
+        content: "## Old revision target",
+        contentHash: "old-hash",
+        state: "pending-review",
+        reviewStatus: "unreviewed",
+        feedback: null,
+      },
+    });
+    const latest = {
+      checkpointId: "checkpoint-latest",
+      generation: 5,
+      planPath: "/plans/latest.md",
+      content: "## Latest revision target",
+      contentHash: "latest-hash",
+      state: "revision-requested" as const,
+      reviewStatus: "ready" as const,
+      feedback: "Preserve the recovery contract",
+    };
+    vi.mocked(pane.revisePlan).mockRejectedValue(
+      new PlanMutationError(
+        "The plan changed before this action completed. Review the latest checkpoint and try again.",
+        { error: "stale-plan-checkpoint", pendingPlanReview: latest },
+      ),
+    );
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Feedback" }));
+    fireEvent.change(screen.getByPlaceholderText("What should change about this plan?"), {
+      target: { value: "Revise this plan" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send feedback" }));
+
+    expect(await screen.findByText("Latest revision target")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry revision" })).toBeTruthy();
+    expect(nativeMocks.toast).toHaveBeenCalledWith(
+      expect.stringContaining("Review the latest checkpoint"),
+      "error",
+      7_000,
+    );
+  });
+
+  it("keeps the gate open and shows actionable checkpoint failure guidance", async () => {
+    const pane = client("pane-plan-checkpoint-failure", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-failure",
+        generation: 7,
+        planPath: "/plans/failure.md",
+        content: "## Plan remains authoritative",
+        contentHash: "failure-hash",
+        state: "pending-review",
+        reviewStatus: "ready",
+        feedback: null,
+      },
+    });
+    vi.mocked(pane.acceptPlan).mockRejectedValue(
+      new PlanMutationError(
+        "Could not persist the phase checkpoint. Fix Project Notes permissions, then retry.",
+        {
+          status: "failed",
+          operationId: "operation-7",
+          code: "checkpoint-write-failed",
+          message: "Could not persist the phase checkpoint.",
+          guidance: "Fix Project Notes permissions, then retry.",
+          retryable: true,
+          phaseId: "phase-1",
+        },
+      ),
+    );
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    await waitFor(() =>
+      expect(nativeMocks.toast).toHaveBeenCalledWith(
+        "Could not persist the phase checkpoint. Fix Project Notes permissions, then retry.",
+        "error",
+        7_000,
+      ),
+    );
+    expect(screen.getByText("Plan remains authoritative")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+  });
+
+  it("retries the exact persisted revision after restart while prompts stay blocked", async () => {
+    const pane = client("pane-plan-revision-retry", 8);
+    vi.mocked(pane.getState).mockResolvedValue({
+      ...agentState("gpt-test"),
+      pendingPlanReview: {
+        checkpointId: "checkpoint-revision-retry",
+        generation: 6,
+        planPath: "/plans/retry.md",
+        content: "## Steps\n1. Recover the revision run",
+        contentHash: "hash",
+        state: "revision-requested",
+        reviewStatus: "ready",
+        feedback: "Add crash recovery coverage",
+      },
+    });
+    render(<AgentPane client={pane} target={target} />);
+
+    expect(await screen.findByRole("button", { name: "Retry revision" })).toBeTruthy();
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Retry revision" }));
+    await waitFor(() =>
+      expect(pane.revisePlan).toHaveBeenCalledWith(
+        "checkpoint-revision-retry",
+        6,
+        "Add crash recovery coverage",
+      ),
+    );
+  });
+
+  it("sends checkpoint identity for ordinary plan acceptance without a prompt bypass", async () => {
     const pane = client("pane-1", 7);
-    vi.mocked(pane.acceptPlan).mockResolvedValue(undefined);
+    vi.mocked(pane.acceptPlan).mockResolvedValue({
+      ok: true,
+      planTotal: 2,
+      operationId: "plan-accept-test",
+    });
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
     await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
     await waitFor(() =>
@@ -811,22 +1021,27 @@ describe("AgentPane lifecycle", () => {
     act(() =>
       handleEvent?.({
         type: "plan_exit",
-        data: { planPath: "/plans/ordinary.md", content: "## Steps\n1. Build\n2. Verify" },
+        data: {
+          checkpointId: "checkpoint-ordinary",
+          generation: 4,
+          planPath: "/plans/ordinary.md",
+          content: "## Steps\n1. Build\n2. Verify",
+        },
       }),
     );
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
-    await waitFor(() =>
-      expect(pane.sendPrompt).toHaveBeenCalledWith(
-        "The plan has been approved. Implement it now, following each step in order.",
-      ),
-    );
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("checkpoint-ordinary", 4));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
   it("holds an implemented /commit action at the inline plan gate, then resumes after approval", async () => {
     const pane = client("pane-1", 7);
-    vi.mocked(pane.acceptPlan).mockResolvedValue(undefined);
+    vi.mocked(pane.acceptPlan).mockResolvedValue({
+      ok: true,
+      planTotal: 2,
+      operationId: "plan-accept-test",
+    });
 
     const continueButton = await renderKenPromptPane(pane, false, "/commit");
     const subscriptions = vi.mocked(pane.subscribe).mock.calls;
@@ -840,13 +1055,18 @@ describe("AgentPane lifecycle", () => {
     act(() =>
       handleEvent?.({
         type: "plan_exit",
-        data: { planPath: "/plans/blocked-commit.md", content: "## Steps\n1. Build\n2. Verify" },
+        data: {
+          checkpointId: "checkpoint-commit",
+          generation: 2,
+          planPath: "/plans/blocked-commit.md",
+          content: "## Steps\n1. Build\n2. Verify",
+        },
       }),
     );
 
     expect(await screen.findByRole("region", { name: "Plan approval required" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull();
     expect((continueButton as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole("textbox") as HTMLTextAreaElement).disabled).toBe(true);
 
@@ -854,9 +1074,8 @@ describe("AgentPane lifecycle", () => {
     expect(pane.sendPrompt).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
 
-    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("/plans/blocked-commit.md"));
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith("/commit"));
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("checkpoint-commit", 2));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
     expect(screen.queryByRole("region", { name: "Plan approval required" })).toBeNull();
   });
 
@@ -870,7 +1089,11 @@ describe("AgentPane lifecycle", () => {
     vi.mocked(pane.sendPrompt)
       .mockResolvedValueOnce({ queued: false, count: 0 })
       .mockResolvedValueOnce({ queued: true, count: 1 });
-    vi.mocked(pane.acceptPlan).mockResolvedValue(undefined);
+    vi.mocked(pane.acceptPlan).mockResolvedValue({
+      ok: true,
+      planTotal: 2,
+      operationId: "plan-accept-test",
+    });
 
     render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
     await waitFor(() => expect(pane.subscribe).toHaveBeenCalled());
@@ -890,15 +1113,18 @@ describe("AgentPane lifecycle", () => {
     act(() =>
       handleEvent?.({
         type: "plan_exit",
-        data: { planPath: "/plans/active-commit.md", content: "## Steps\n1. Commit" },
+        data: {
+          checkpointId: "checkpoint-active",
+          generation: 3,
+          planPath: "/plans/active-commit.md",
+          content: "## Steps\n1. Commit",
+        },
       }),
     );
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
-    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("/plans/active-commit.md"));
-    await waitFor(() => expect(pane.sendPrompt).toHaveBeenCalledWith("/commit"));
-    expect(pane.sendPrompt).not.toHaveBeenCalledWith("queued steering");
-    expect(pane.sendPrompt).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(pane.acceptPlan).toHaveBeenCalledWith("checkpoint-active", 3));
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
   });
 
   it("managed panes restore an existing native session without owning its disposal", async () => {

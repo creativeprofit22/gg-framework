@@ -21,6 +21,7 @@ import {
   createPaneAgentClient,
   getState,
   isRoadmapPhaseDraftChangeEvent,
+  PlanMutationError,
   sendPrompt,
 } from "./agent";
 
@@ -43,6 +44,12 @@ describe("pane agent client", () => {
         return { version: 1, prompt: "## Objective\nContinue" };
       }
       if (command === "agent_new_session") return { operationId: "new-session-op" };
+      if (command === "agent_accept_plan") {
+        return { ok: true, planTotal: 2, operationId: "plan-accept-op" };
+      }
+      if (command === "agent_revise_plan") {
+        return { ok: true, operationId: "plan-revise-op" };
+      }
       return {};
     });
   });
@@ -63,7 +70,8 @@ describe("pane agent client", () => {
     await c.sendKenPrompt("k");
     await c.cancelKen();
     await c.setAutopilot(true);
-    await c.acceptPlan("plan");
+    await c.acceptPlan("checkpoint-1", 3);
+    await c.revisePlan("checkpoint-1", 3, "Add recovery tests");
     await c.listHistory();
     await c.authOAuthStart("openai");
     await c.authOAuthCode("code");
@@ -108,10 +116,78 @@ describe("pane agent client", () => {
       paneId: "right",
       nextInstruction: "next exactly",
     });
+    expect(invoke).toHaveBeenCalledWith("agent_accept_plan", {
+      paneId: "right",
+      checkpointId: "checkpoint-1",
+      generation: 3,
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_revise_plan", {
+      paneId: "right",
+      checkpointId: "checkpoint-1",
+      generation: 3,
+      feedback: "Add recovery tests",
+    });
     expect(invoke).toHaveBeenCalledWith("agent_sessions", {
       paneId: "right",
       cwd: "/work",
       chatAgent: "all",
+    });
+  });
+
+  it("parses stale plan mutation recovery into a typed client error", async () => {
+    const pendingPlanReview = {
+      checkpointId: "checkpoint-2",
+      generation: 2,
+      planPath: "/plans/latest.md",
+      content: "## Latest plan",
+      contentHash: "hash",
+      state: "pending-review",
+      reviewStatus: "ready",
+      feedback: null,
+    };
+    invoke.mockRejectedValueOnce(
+      JSON.stringify({ error: "stale-plan-checkpoint", pendingPlanReview }),
+    );
+
+    const error = await createPaneAgentClient("right")
+      .acceptPlan("checkpoint-1", 1)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(PlanMutationError);
+    expect(error).toMatchObject({
+      message: expect.stringContaining("Review the latest checkpoint"),
+      pendingPlanReview,
+      payload: { error: "stale-plan-checkpoint", pendingPlanReview },
+    });
+  });
+
+  it("preserves actionable checkpoint failure fields on revision errors", async () => {
+    invoke.mockRejectedValueOnce(
+      JSON.stringify({
+        status: "failed",
+        operationId: "operation-7",
+        code: "checkpoint-write-failed",
+        message: "Could not persist the phase checkpoint.",
+        guidance: "Fix Project Notes permissions, then retry.",
+        retryable: true,
+        phaseId: "phase-1",
+      }),
+    );
+
+    const error = await createPaneAgentClient("right")
+      .revisePlan("checkpoint-1", 1, "Add recovery")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(PlanMutationError);
+    expect(error).toMatchObject({
+      message: "Could not persist the phase checkpoint. Fix Project Notes permissions, then retry.",
+      payload: {
+        status: "failed",
+        operationId: "operation-7",
+        code: "checkpoint-write-failed",
+        retryable: true,
+        phaseId: "phase-1",
+      },
     });
   });
 

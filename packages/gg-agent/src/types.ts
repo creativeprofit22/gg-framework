@@ -289,6 +289,22 @@ export interface AgentOptions {
   temperature?: number;
   thinking?: StreamOptions["thinking"];
   apiKey?: string;
+  /**
+   * Re-resolve the credential at the start of every turn. A run can span many
+   * minutes, and an OAuth grant refreshed by any process (another app window, a
+   * CLI session, the usage poller) invalidates the access token captured when
+   * the run began — so a pinned `apiKey` goes dead mid-run and every remaining
+   * turn fails with an authentication error. Returning the current credential
+   * here keeps a long run alive across rotations.
+   *
+   * Falls back to `apiKey`/`accountId`/`projectId` when omitted or when the
+   * resolver throws (the provider call then surfaces the real auth error).
+   */
+  resolveCredentials?: () => Promise<{
+    apiKey: string;
+    accountId?: string;
+    projectId?: string;
+  }>;
   baseUrl?: string;
   signal?: AbortSignal;
   accountId?: string;

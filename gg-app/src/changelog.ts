@@ -22,6 +22,49 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.46.1",
+    date: "2026-08-11",
+    items: [
+      "You never have to hunt for what I need from you again. When I get stuck on something only you can decide, that one question now lands in its own highlighted quote block at the very end of my reply. One question, never five. If you see that block, you know instantly that I am waiting on you.",
+      "I stopped burying the answer in a wall of text. My replies now lead with what actually happened, cut the reasoning you cannot act on, and never re-explain something I already told you. Same work, a fraction of the reading.",
+      "Jargon now comes with the stakes attached. I still use the real file name, the real command, the real setting, but the first time it shows up I tell you what it actually does or risks in the same breath. You get the precision without needing to know the codebase.",
+    ],
+  },
+  {
+    version: "0.46.0",
+    date: "2026-08-11",
+    items: [
+      "Find out what you're legally missing *before* you launch, not after a demand letter. Ask GG Coder if your app is safe to ship and the new `compliance-guard` skill reads your actual code \u2014 your schema, your tracking scripts, your checkout, your uploads \u2014 then tells you what you owe in plain English, fixes what code can fix, and ranks the rest by what really gets small apps sued.",
+      "It tells you straight when something can't legally ship. An `AI vet` that prescribes medication, cash prizes for spins, cashing out a wallet balance, cloning someone's voice without asking \u2014 these are licensed or banned, not to-do items, and you get told before the code gets written, with the version you *can* build.",
+      "Skills stay out of your way now. They used to jump in whenever a task merely sounded like their topic; they now match the actual work, skip routine changes, and never reload themselves mid-conversation.",
+    ],
+  },
+  {
+    version: "0.45.4",
+    date: "2026-08-11",
+    items: [
+      "Long runs stop dying halfway through. If anything else refreshed your login while your agent was working, every remaining turn used to fail with an `authentication error` until you restarted. Now each turn picks up your live credentials, and your windows quit logging each other out.",
+      "A slow provider no longer ends your run. `Request timed out` used to escape straight to you as a dead end. Now it quietly replays the turn like any other blip and carries on.",
+      "Your `MCP` tools can finally show pictures. A server sending back a screenshot, chart, or rendered diagram used to arrive as `(empty response)`, so your agent saw nothing at all. Those images now go straight to the model, sized to fit.",
+      "A small touch up in the title bar: when your provider reports only one usage window, the meter stops pretending to be a button. No phantom hover, no click sound for a press that does nothing.",
+    ],
+  },
+  {
+    version: "0.45.3",
+    date: "2026-08-10",
+    items: [
+      "The radio just grew a whole dark side. I added `14` new stations built to drop you into another world while you work: `The Dark Zone` for staring into the abyss, `Cryosleep` for zero-beat deep space, and `Nightride FM` when you want rain on neon. I streamed every single one before shipping it, so nothing in that list is dead air.",
+    ],
+  },
+  {
+    version: "0.45.2",
+    date: "2026-08-10",
+    items: [
+      "When your provider or proxy throttles you, you finally see why. Errors buried inside a `200` response used to surface as a mystery stall, then quietly burn `10` retries that re-billed your whole prompt every time. Now the real reason lands straight away and your credits stay yours.",
+      "Your conversation stops getting thrown away for no reason. A per-minute token limit used to look like a full context overflow, so your agent would compact your history, lose the thread, and still fail. Now it waits the limit out and picks up right where you left off.",
+    ],
+  },
+  {
     version: "0.45.1",
     date: "2026-08-10",
     items: [

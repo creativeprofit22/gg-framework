@@ -157,6 +157,9 @@ export interface AgentLoopOptions {
    *  When `forceRefresh` is true, bypass cache and fetch a new token (used on 401 retry). */
   resolveCredentials?: (opts?: {
     forceRefresh?: boolean;
+    /** Access token the provider just rejected, so the refresh can adopt a
+     *  newer token another process already wrote instead of minting one. */
+    rejectedToken?: string;
   }) => Promise<{ apiKey: string; accountId?: string; projectId?: string }>;
   transformContext?: (
     messages: Message[],
@@ -339,6 +342,9 @@ export function useAgentLoop(
   const thinkingBufferRef = useRef("");
   const thinkingVisibleRef = useRef("");
   const runStartRef = useRef(0);
+  /** Access token most recently handed to the provider, so a 401 retry can name
+   *  the token that was actually rejected. */
+  const lastResolvedApiKey = useRef<string | undefined>(undefined);
   const toolsUsedRef = useRef<Set<string>>(new Set());
   const toolCountsRef = useRef<Map<string, number>>(new Map());
   const idealReviewStatsRef = useRef<IdealReviewStats>({
@@ -467,7 +473,7 @@ export function useAgentLoop(
       /** Run a single user message through the agent loop. Returns true if aborted. */
       const runSingle = async (
         content: UserContent,
-        credentialOpts?: { forceRefresh?: boolean },
+        credentialOpts?: { forceRefresh?: boolean; rejectedToken?: string },
       ): Promise<boolean> => {
         const ac = new AbortController();
         abortRef.current = ac;
@@ -629,6 +635,7 @@ export function useAgentLoop(
             accountId = creds.accountId;
             projectId = creds.projectId;
           }
+          lastResolvedApiKey.current = apiKey;
           log("INFO", "ui", "creds_resolved", {
             ms: String(Date.now() - credsStart),
             sinceRunStartMs: String(Date.now() - runStartRef.current),
@@ -664,6 +671,19 @@ export function useAgentLoop(
             supportsVideo: options.supportsVideo,
             thinking: options.thinking,
             apiKey,
+            // Per-turn credential resolution. A run can span many minutes; any
+            // process sharing auth.json that refreshes this grant invalidates
+            // the token resolved above, which would otherwise kill every
+            // remaining turn with an authentication error.
+            ...(options.resolveCredentials
+              ? {
+                  resolveCredentials: async () => {
+                    const live = await options.resolveCredentials!();
+                    lastResolvedApiKey.current = live.apiKey;
+                    return live;
+                  },
+                }
+              : {}),
             baseUrl: options.baseUrl,
             accountId,
             projectId,
@@ -1243,7 +1263,15 @@ export function useAgentLoop(
         if (err instanceof ProviderError && err.statusCode === 401 && options.resolveCredentials) {
           // Pop the user message we pushed — runSingle will re-push it
           messages.current.pop();
-          await runSingle(userContent, { forceRefresh: true });
+          await runSingle(userContent, {
+            forceRefresh: true,
+            // Name the token the provider rejected so the refresh can adopt a
+            // sibling process's newer token instead of minting one that would
+            // in turn revoke theirs.
+            ...(lastResolvedApiKey.current !== undefined
+              ? { rejectedToken: lastResolvedApiKey.current }
+              : {}),
+          });
         } else {
           throw err;
         }

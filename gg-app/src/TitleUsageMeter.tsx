@@ -95,6 +95,13 @@ export function TitleUsageMeter({ currentProvider }: { currentProvider: string }
       title={title}
       aria-label={title}
       aria-pressed={selectedWindow.kind === "weekly"}
+      // A provider can report a single window (Codex commonly returns
+      // weekly-only). There is nothing to switch to then, so mark the control
+      // non-interactive: that drops the pointer/hover affordance and suppresses
+      // the global UI click sound, which otherwise cues a press that does
+      // nothing. `aria-disabled` rather than `disabled` keeps the usage tooltip
+      // reachable on hover.
+      aria-disabled={!canToggle}
       onClick={() => canToggle && setSelection({ provider: currentProvider, kind: nextKind })}
     >
       <span className="title-usage-window">{shortWindowLabel(selectedWindow)}</span>

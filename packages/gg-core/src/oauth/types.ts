@@ -18,6 +18,15 @@ export interface OAuthCredentials {
 
 export interface OAuthLoginCallbacks {
   onOpenUrl: (url: string) => void;
-  onPromptCode: (message: string) => Promise<string>;
+  /**
+   * Collect a pasted authorization code or callback URL.
+   *
+   * `signal` aborts when the code already arrived another way (the local
+   * callback listener won the race) and the prompt should be torn down.
+   * Implementations may ignore it — an abandoned promise is simply never
+   * awaited — but a terminal prompt should honour it so the line does not
+   * linger after login already succeeded.
+   */
+  onPromptCode: (message: string, signal?: AbortSignal) => Promise<string>;
   onStatus: (message: string) => void;
 }

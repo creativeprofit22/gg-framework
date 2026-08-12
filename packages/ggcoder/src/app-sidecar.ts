@@ -1140,7 +1140,14 @@ async function main(): Promise<void> {
         // A provider can revoke an access token before its stored expiry. Refresh
         // once on 401, matching inference auth recovery, then retry the usage call.
         if (error instanceof SubscriptionUsageError && error.status === 401) {
-          credentials = await auth.resolveCredentials(authKey, { forceRefresh: true });
+          // Name the rejected token. This poller runs on a timer alongside live
+          // agent runs, so an unconditional refresh here would invalidate the
+          // token those runs are holding and fail them mid-turn — a background
+          // status check must never be able to log out the foreground.
+          credentials = await auth.resolveCredentials(authKey, {
+            forceRefresh: true,
+            rejectedToken: credentials.accessToken,
+          });
           const snapshot = {
             ...(await fetchSubscriptionUsage(provider, credentials)),
             connected: true as const,

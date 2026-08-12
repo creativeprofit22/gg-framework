@@ -77,7 +77,9 @@ export function isContextOverflow(err: unknown): boolean {
   if (overflowStatus === 402) return false;
   if (isBillingError(err)) return false;
   const msg = err.message.toLowerCase();
-  return (
+
+  // Explicit overflow wording from the provider always wins.
+  if (
     msg.includes("prompt is too long") ||
     msg.includes("prompt too long") ||
     msg.includes("input is too long") ||
@@ -89,9 +91,32 @@ export function isContextOverflow(err: unknown): boolean {
     msg.includes("content_too_large") ||
     msg.includes("request_too_large") ||
     msg.includes("reduce the length") ||
-    msg.includes("please shorten") ||
-    (msg.includes("token") && msg.includes("exceed"))
-  );
+    msg.includes("please shorten")
+  ) {
+    return true;
+  }
+
+  // Throughput limits are not overflow. A tokens-per-minute 429 ("20000
+  // tokens/min exceeded") satisfies the loose token+exceed heuristic below,
+  // but compacting in response throws away context AND still fails — the quota
+  // is per unit time, not per request. The loop must back off instead.
+  const rateLimited =
+    overflowStatus === 429 ||
+    msg.includes("rate limit") ||
+    msg.includes("rate_limit") ||
+    msg.includes("too many requests");
+  const perUnitTime =
+    msg.includes("per min") ||
+    msg.includes("/min") ||
+    msg.includes("per minute") ||
+    msg.includes("per hour") ||
+    msg.includes("per day") ||
+    msg.includes("tpm") ||
+    msg.includes("rpm");
+  if (rateLimited && perUnitTime) return false;
+
+  // Loose fallback for providers that only say e.g. "token limit exceeded".
+  return msg.includes("token") && msg.includes("exceed");
 }
 
 export interface ContextOverflowDetails {
@@ -298,6 +323,33 @@ export function isMalformedStream(err: unknown): boolean {
 }
 
 /**
+ * Timeouts that arrive with no errno and no undici code.
+ *
+ * Both the Anthropic and OpenAI SDKs throw `APIConnectionTimeoutError`, whose
+ * only distinguishing feature is the message "Request timed out." — it sets no
+ * `code`, no `status`, and leaves `name` at the default "Error". Matching has
+ * to go on the message, so the patterns are deliberately request-scoped:
+ * a bare /timeout/ would also swallow a tool that timed out or a config error
+ * mentioning a timeout option, neither of which should replay the turn.
+ *
+ * `AbortSignal.timeout()` is the other source. It rejects with a DOMException
+ * whose `code` is the numeric legacy constant (23) rather than a string, so it
+ * is identifiable only by `name === "TimeoutError"`.
+ */
+const TIMEOUT_NAMES = new Set(["TimeoutError", "ConnectTimeoutError", "HeadersTimeoutError"]);
+const TIMEOUT_MESSAGES = [
+  /^request timed out\.?$/i,
+  /\brequest to [\w .-]+ timed out\b/i,
+  /\b(?:connection|socket|headers|stream) timed out\b/i,
+];
+
+function isBareTimeout(e: { name?: unknown; message?: unknown }): boolean {
+  if (typeof e.name === "string" && TIMEOUT_NAMES.has(e.name)) return true;
+  if (typeof e.message !== "string") return false;
+  return TIMEOUT_MESSAGES.some((re) => re.test(e.message as string));
+}
+
+/**
  * Detect socket-level transport failures — the remote peer (or an
  * intermediary) closed the TCP connection mid-stream before the response
  * finished.  Surfaces as `TypeError: terminated` from undici/fetch, or as
@@ -337,11 +389,24 @@ export function isTransportFailure(err: unknown): boolean {
   let cur: unknown = err;
   while (cur && typeof cur === "object" && !seen.has(cur)) {
     seen.add(cur);
-    const e = cur as { code?: unknown; message?: unknown; cause?: unknown };
+    const e = cur as {
+      code?: unknown;
+      message?: unknown;
+      cause?: unknown;
+      name?: unknown;
+      status?: unknown;
+    };
     if (typeof e.code === "string" && codes.has(e.code)) return true;
     if (typeof e.message === "string") {
       for (const re of messages) if (re.test(e.message)) return true;
     }
+    // A 4xx is a permanent client error: the request is malformed, unauthorised
+    // or too large, and replaying it five times with backoff costs the user time
+    // and money without any chance of succeeding. Timeout *shape* must not
+    // override an explicit client-error status. 5xx and status-less timeouts
+    // stay on the retry path.
+    const clientError = typeof e.status === "number" && e.status >= 400 && e.status < 500;
+    if (!clientError && isBareTimeout(e)) return true;
     cur = e.cause;
   }
   return false;
@@ -700,6 +765,26 @@ export async function* agentLoop(
         diag("stream_call", { nonStreaming: useNonStreamingFallback });
         streamCallStart = Date.now();
         providerAttemptStartedAt = streamCallStart;
+        // Re-resolve auth per turn. A refresh performed by any process sharing
+        // auth.json invalidates the access token captured when this run began,
+        // so a pinned key silently dies partway through a long run. A resolver
+        // failure is not fatal here: fall back to the captured credential and
+        // let the provider report the real auth error.
+        let liveApiKey = options.apiKey;
+        let liveAccountId = options.accountId;
+        let liveProjectId = options.projectId;
+        if (options.resolveCredentials) {
+          try {
+            const fresh = await options.resolveCredentials();
+            liveApiKey = fresh.apiKey;
+            if (fresh.accountId !== undefined) liveAccountId = fresh.accountId;
+            if (fresh.projectId !== undefined) liveProjectId = fresh.projectId;
+          } catch (credErr) {
+            diag("credential_refresh_failed", {
+              error: (credErr instanceof Error ? credErr.message : String(credErr)).slice(0, 200),
+            });
+          }
+        }
         const result = stream({
           provider: options.provider,
           model: options.model,
@@ -711,12 +796,12 @@ export async function* agentLoop(
           maxTokens: options.maxTokens,
           temperature: options.temperature,
           thinking: options.thinking,
-          apiKey: options.apiKey,
+          apiKey: liveApiKey,
           baseUrl: options.baseUrl,
           signal: streamController.signal,
-          accountId: options.accountId,
+          accountId: liveAccountId,
           transportSessionId: options.transportSessionId,
-          projectId: options.projectId,
+          projectId: liveProjectId,
           cacheRetention: options.cacheRetention,
           promptCacheKey: options.promptCacheKey,
           serviceTier: options.serviceTier,

@@ -211,6 +211,30 @@ describe("isContextOverflow", () => {
     expect(isContextOverflow(new Error("rate limit exceeded"))).toBe(false);
   });
 
+  it("treats a tokens-per-minute 429 as a throughput limit, not overflow", () => {
+    // These satisfy the loose token+exceed heuristic but compacting cannot help:
+    // the quota is per unit time, so the loop must back off and retry instead.
+    const cases = [
+      new ProviderError("openai", "rate limited: 20000 tokens/min exceeded", { statusCode: 429 }),
+      new ProviderError("openai", "Rate limit reached: token quota per minute exceeded", {
+        statusCode: 429,
+      }),
+      new ProviderError("anthropic", "too many requests: input tokens per day exceeded", {
+        statusCode: 429,
+      }),
+    ];
+    for (const err of cases) {
+      expect(isContextOverflow(err), err.message).toBe(false);
+    }
+  });
+
+  it("still detects a real overflow that arrives with a 429 status", () => {
+    const err = new ProviderError("openai", "maximum context length is 128000 tokens", {
+      statusCode: 429,
+    });
+    expect(isContextOverflow(err)).toBe(true);
+  });
+
   it("returns false for non-Error values", () => {
     expect(isContextOverflow("some string")).toBe(false);
     expect(isContextOverflow(null)).toBe(false);
@@ -2290,4 +2314,63 @@ describe("local-backend first-event watchdog", () => {
     await loopPromise;
     vi.useRealTimers();
   }, 30_000);
+});
+
+describe("agentLoop — per-turn credential resolution", () => {
+  beforeEach(() => {
+    mockStream.mockReset();
+  });
+
+  it("re-resolves the token every turn so a mid-run rotation can't kill the run", async () => {
+    // A run spanning several turns can outlive the access token it started with:
+    // any process sharing auth.json that refreshes the grant invalidates it
+    // server-side. Pinning one key made every remaining turn fail with an
+    // authentication error until the user restarted.
+    mockStream
+      .mockReturnValueOnce(
+        mockToolCallResult("context_probe", {
+          inputTokens: 10,
+          outputTokens: 5,
+        }) as unknown as ReturnType<typeof stream>,
+      )
+      .mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+
+    const rotated = ["token-a", "token-b"];
+    let calls = 0;
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "anthropic",
+      model: "test",
+      apiKey: "token-stale",
+      resolveCredentials: async () => ({ apiKey: rotated[calls++] ?? "token-b" }),
+      tools: [
+        {
+          name: "context_probe",
+          description: "continue the test",
+          parameters: emptyParams,
+          execute: () => "ok",
+        },
+      ],
+    });
+
+    expect(mockStream.mock.calls[0]?.[0].apiKey).toBe("token-a");
+    expect(mockStream.mock.calls[1]?.[0].apiKey).toBe("token-b");
+  });
+
+  it("falls back to the captured key when the resolver fails", async () => {
+    // A transient failure reading auth.json must not abort a live run — let the
+    // provider report the real auth error instead.
+    mockStream.mockReturnValueOnce(mockOkResult("Done") as unknown as ReturnType<typeof stream>);
+
+    await collectLoop([{ role: "user", content: "test" }], {
+      provider: "anthropic",
+      model: "test",
+      apiKey: "token-captured",
+      resolveCredentials: async () => {
+        throw new Error("auth.json is temporarily unreadable");
+      },
+    });
+
+    expect(mockStream.mock.calls[0]?.[0].apiKey).toBe("token-captured");
+  });
 });

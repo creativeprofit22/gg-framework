@@ -113,8 +113,13 @@ describe("buildSystemPrompt", () => {
     // The one-approach rule must carve out command flows that ship their own
     // A/B/C option list, or the model second-guesses those prompts.
     expect(prompt).toContain(
-      "Recommend ONE approach, not a menu — unless a command's flow defines its own options.",
+      "ONE recommended approach — default to X, switch to Y only when [condition] — not a menu, unless a command's flow defines its own options.",
     );
+    // The user-facing ask gets a dedicated markdown blockquote (rendered with a
+    // left gutter in both the TUI and GG App), and nothing else may use one, so
+    // a `>` in a reply always means "the agent is waiting on you".
+    expect(prompt).toContain("**Blockquote = the ask.**");
+    expect(prompt).toContain("Blockquote nothing else");
     expect(prompt).not.toContain(
       "Do not default to generic tests, scripts, screenshots, benchmarks, or simulations",
     );
@@ -157,6 +162,36 @@ describe("buildSystemPrompt", () => {
     expect(renderedTools).not.toContain("not_a_tool");
     expect(renderedTools).not.toContain("**read**");
     expect(renderedTools).not.toContain("**edit**");
+  });
+
+  it("keeps the reply-shape rules free of contradictions", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(cwd, undefined, false, undefined, ["read", "edit"]);
+    const talk = prompt.slice(
+      sectionIndex(prompt, "## How to Talk"),
+      sectionIndex(prompt, "## How to Work"),
+    );
+
+    // "never ask permission" and "end with the ask" only coexist if the ask is
+    // gated by one stop list. How to Work owns it; How to Talk must defer to it
+    // instead of publishing a second, drifting list of reasons to stop.
+    expect(talk).toContain("When something in How to Work genuinely stops you");
+    expect(prompt).toContain("Stop only for user decisions, secrets/access, cost");
+
+    // The blockquote is the ask and only the ask, so exactly one blockquote
+    // template may exist anywhere in the prompt — a second one teaches the model
+    // that `>` is general formatting and the "you're up" signal dies.
+    expect(prompt.match(/^\s*`?> /gm) ?? []).toHaveLength(0);
+    expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(1);
+
+    // A hard sentence cap plus a numbered list plus a trailing ask is only
+    // followable if the cap says what it counts.
+    expect(talk).toContain("prose only; a step list or the ask doesn't count");
+
+    // Mid-turn speech and the cut rule must agree: a bare "finding" cannot both
+    // trigger a message and be cut for not changing the next move.
+    expect(talk).toContain("speak only when the plan changes");
+    expect(talk).not.toContain("unless you hit a decision, tradeoff, finding");
   });
 
   it("states rule precedence exactly once and keeps project context before style packs", async () => {
@@ -218,10 +253,15 @@ describe("buildSystemPrompt", () => {
       "works directly in the user's codebase",
       "completing tasks end-to-end",
       "Final replies: 1–2 sentences, hard cap 5",
-      "Do all safe, reversible steps implied by the goal",
-      "never ask permission, merely suggest them, or leave them for the user",
+      "Take every safe, reversible step the goal implies",
+      "never ask permission, merely suggest it, or leave it for the user",
       "ONE action that unblocks you",
-      "State what works now and the blocker or next step",
+      "what already works so finished work is never buried",
+      "conclusion, not investigation",
+      // Jargon stays exact, but never bare: the reader must learn the stake of
+      // a term/file/command in the same breath, without a glossary paragraph.
+      "**Keep the real word, add the stakes.**",
+      "say what it does or risks in the same sentence",
       "Read before `edit`/`write`",
       "re-read after formatters",
       "Compute in bash; write with `edit`/`write`",
@@ -380,9 +420,14 @@ describe("buildSystemPrompt", () => {
 
     console.info(`system prompt size measurements: ${JSON.stringify(measurements)}`);
 
-    expect(measurements.normal.characters).toBeLessThan(5_100);
-    expect(measurements.planMode.characters).toBeLessThan(6_300);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(9_800);
+    // Budget raised once for the "How to Talk" reply-shape rules (blockquote
+    // ask, cut-what-they-can't-act-on, jargon stakes); overlapping lines were
+    // folded to pay for part of it. ~640 chars of cached prefix buys replies the
+    // user can act on without re-reading. Keep these caps tight so drift stays
+    // deliberate.
+    expect(measurements.normal.characters).toBeLessThan(5_800);
+    expect(measurements.planMode.characters).toBeLessThan(7_000);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(10_150);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -420,7 +465,7 @@ describe("buildSystemPrompt", () => {
     console.info(`system prompt audit: ${JSON.stringify(audit)}`);
 
     expect(audit.flags).toEqual([]);
-    expect(audit.size.characters).toBeLessThan(9_500);
+    expect(audit.size.characters).toBeLessThan(9_800);
     expect(audit.size.sections).toBeGreaterThanOrEqual(8);
   });
 

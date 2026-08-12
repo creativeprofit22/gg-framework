@@ -32,6 +32,42 @@ describe("skill routing prompts", () => {
     expect(tool.description).toContain("respect explicit exclusions");
   });
 
+  it("counterbalances invocation pressure in both routing surfaces", () => {
+    // Every pro-invocation instruction needs a brake, or topic overlap alone
+    // pulls a skill in and burns context on work it would not change. The
+    // brake lives here rather than in each skill's description, so it also
+    // covers third-party skills written to maximize their own invocation.
+    const prompt = formatSkillsForPrompt([skill]);
+    expect(prompt).toContain("Match the work, not the topic");
+    expect(prompt).toContain("Skip the skill when the task is routine");
+    expect(prompt).toContain("Invoke at most one skill");
+    expect(prompt).toContain("do not re-invoke a skill");
+
+    const tool = createSkillTool([skill]);
+    expect(tool.description).toContain("Match the work rather than the topic");
+    expect(tool.description).toContain("skip it for routine or narrow changes");
+    expect(tool.description).toContain("do not re-invoke a skill already loaded");
+  });
+
+  it("gives every bundled skill an explicit exclusion clause", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skills-"));
+    try {
+      const skills = await discoverSkills({ globalSkillsDir: path.join(root, "global") });
+      const bundled = skills.filter((candidate) => candidate.source === "bundled");
+      expect(bundled.length).toBeGreaterThan(0);
+
+      for (const candidate of bundled) {
+        // A description that only says when to fire has no off switch, and the
+        // model resolves ambiguity by invoking.
+        expect(candidate.description, `${candidate.name} lacks an exclusion`).toMatch(
+          /Do NOT use|Exclude|excluding/i,
+        );
+      }
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("keeps loaded skill instructions below project and file/module rules", async () => {
     const tool = createSkillTool([skill]);
     const result = await tool.execute(
@@ -55,6 +91,78 @@ describe("skill routing prompts", () => {
       // build the expected fragment the same way instead of hardcoding "/".
       expect(evidenceSkill?.root).toContain(path.join("assets", "skills", "evidence-led-ui"));
       expect(evidenceSkill?.content).toContain("# Evidence-Led UI");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("discovers compliance-guard for a fresh user from bundled assets", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "bundled-skills-"));
+    try {
+      const skills = await discoverSkills({ globalSkillsDir: path.join(root, "global") });
+      const complianceSkill = skills.find((candidate) => candidate.name === "compliance-guard");
+
+      expect(complianceSkill?.source).toBe("bundled");
+      expect(complianceSkill?.root).toContain(path.join("assets", "skills", "compliance-guard"));
+      expect(complianceSkill?.content).toContain("# Compliance Guard");
+      // The skill must never present itself as legal advice or certification.
+      expect(complianceSkill?.content).toContain("Never certify");
+
+      // A beginner will half-answer or ignore the intake questions, so the
+      // defaults ARE the analysis. Promising defaults without stating them
+      // lets the model invent a quieter reading than the user deserves.
+      expect(complianceSkill?.content).toContain("Default if unanswered");
+      expect(complianceSkill?.content).toContain("the cautious reading");
+      // Findings a novice cannot act on produce no fixes.
+      expect(complianceSkill?.content).toContain("never read a statute");
+      // Reading code shows intent; running it shows what ships. A review that
+      // asserts from grep alone misses runtime-injected tags entirely, and a
+      // fix reported without verification is worse than the original finding.
+      // Two-state "observed/inferred" was read as visible-in-code vs deduced,
+      // not ran vs read, so a static review reported itself as verified.
+      expect(complianceSkill?.content).toContain("RUNTIME");
+      expect(complianceSkill?.content).toContain("DEDUCED");
+      expect(complianceSkill?.content).toContain("Never relabel upward");
+      expect(complianceSkill?.content).toContain("Never report a fix you did not verify");
+      // Narrative review silently drops the boring blockers; the sweep is what
+      // turns "did I notice it" into "did I check it".
+      expect(complianceSkill?.content).toContain("coverage ledger");
+      // An item never written down is an item never checked: evaluation showed
+      // blockers 1 and 2 dropped while dramatic findings were reported.
+      expect(complianceSkill?.content).toContain("one row per numbered item");
+      // Audience and product claims live in prose, not in the schema.
+      expect(complianceSkill?.content).toContain("Read the prose, not only the code");
+      // Held-out evaluation: the code sweep reliably missed obligations that
+      // arise from the product model or from two facts combined, and it
+      // downgraded unlicensed-activity gates to BLOCKER.
+      expect(complianceSkill?.content).toContain("second pass on the product model");
+      expect(complianceSkill?.content).toContain("Severity rule for licensed activities");
+      // Held-out evaluation: the review named the first instantiation of a duty
+      // it thought of (DMCA, auto-renewal) and never reached the EU equivalent
+      // (DSA, withdrawal rights) for an EU-established company.
+      expect(complianceSkill?.content).toContain("Name every jurisdiction's version");
+      // Mandatory coverage lived only in the ledger, so a findings-only output
+      // format silently dropped it. Coverage must belong to the findings.
+      expect(complianceSkill?.content).toContain("coverage survives the output format");
+      // A prohibition reported as a disclosure duty authorises the banned
+      // feature; and leading with the wrong jurisdiction sends the user to the
+      // wrong kind of lawyer. Both were observed in evaluation runs.
+      expect(complianceSkill?.content).toContain("Check for an outright ban");
+      expect(complianceSkill?.content).toContain("Lead with the jurisdiction");
+      // A point-in-time register rots; a failing test does not.
+      expect(complianceSkill?.content).toContain("leave the check behind");
+
+      // Every referenced file must exist, since the skill routes the model to them by path.
+      const referenced = [...complianceSkill!.content.matchAll(/`(references\/[\w.-]+\.md)`/g)].map(
+        (match) => match[1]!,
+      );
+      expect(referenced.length).toBeGreaterThan(0);
+      const skillRoot = complianceSkill?.root ?? "";
+      for (const relative of new Set(referenced)) {
+        await expect(
+          fs.access(path.join(skillRoot, ...relative.split("/"))),
+        ).resolves.toBeUndefined();
+      }
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

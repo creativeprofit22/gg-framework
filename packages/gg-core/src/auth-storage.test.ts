@@ -126,6 +126,67 @@ describe("AuthStorage — shared-file concurrency", () => {
     await new AuthStorage(filePath).clearCredentials("xai");
     expect(await daemon.hasProviderAuth("xai")).toBe(false);
   });
+
+  it("serves a sibling process's rotated token instead of a stale cached one", async () => {
+    const filePath = await tempAuthFile();
+    tmpFiles.push(filePath);
+    // A long-lived process (the desktop sidecar runs for days) caches the
+    // credential it resolved at startup.
+    const sidecar = new AuthStorage(filePath);
+    await sidecar.setCredentials("openai", oauthCreds("token-a"));
+    expect((await sidecar.resolveCredentials("openai")).accessToken).toBe("token-a");
+
+    // Any sibling (another window, a CLI session) refreshing the grant
+    // invalidates token-a server-side. Serving it from cache is what surfaced
+    // as a random mid-session authentication_error.
+    await new AuthStorage(filePath).setCredentials("openai", oauthCreds("token-b"));
+
+    expect((await sidecar.resolveCredentials("openai")).accessToken).toBe("token-b");
+    expect(refreshOpenAIToken).not.toHaveBeenCalled();
+  });
+
+  it("adopts a sibling's token on 401 instead of minting one that revokes theirs", async () => {
+    const filePath = await tempAuthFile();
+    tmpFiles.push(filePath);
+    const sessionA = new AuthStorage(filePath);
+    await sessionA.setCredentials("openai", oauthCreds("token-a"));
+    await sessionA.resolveCredentials("openai");
+
+    // Sibling rotates the grant; sessionA's in-flight request 401s as a result.
+    await new AuthStorage(filePath).setCredentials("openai", oauthCreds("token-b"));
+
+    const recovered = await sessionA.resolveCredentials("openai", {
+      forceRefresh: true,
+      rejectedToken: "token-a",
+    });
+
+    // Refreshing here would mint token-c and revoke token-b — breaking the
+    // sibling and starting a mutual-revocation cascade across processes.
+    expect(recovered.accessToken).toBe("token-b");
+    expect(refreshOpenAIToken).not.toHaveBeenCalled();
+  });
+
+  it("still refreshes when the rejected token is the one on disk", async () => {
+    const filePath = await tempAuthFile();
+    tmpFiles.push(filePath);
+    const session = new AuthStorage(filePath);
+    await session.setCredentials("openai", oauthCreds("token-a"));
+    refreshOpenAIToken.mockResolvedValue({
+      accessToken: "token-fresh",
+      refreshToken: "refresh-fresh",
+      expiresAt: Date.now() + 1_000_000,
+    });
+
+    // Nobody else rotated it, so this credential is genuinely dead and a real
+    // refresh is the only recovery.
+    const refreshed = await session.resolveCredentials("openai", {
+      forceRefresh: true,
+      rejectedToken: "token-a",
+    });
+
+    expect(refreshed.accessToken).toBe("token-fresh");
+    expect(refreshOpenAIToken).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("AuthStorage — proactive refresh threshold (kimi-code parity)", () => {

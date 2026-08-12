@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "gg-app"
-version = "0.45.1"
+version = "0.46.1"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",

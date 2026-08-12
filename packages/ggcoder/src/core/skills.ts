@@ -146,6 +146,9 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
     `Before acting, compare the user's request with every skill description below. ` +
     `When the request matches a skill's stated scope, invoke that skill with the **skill** tool before making decisions or edits. ` +
     `Respect explicit exclusions in the description. Matching skill instructions specialize this prompt but do not override project or file/module rules.\n\n` +
+    `Match the work, not the topic: a skill's subject matter appearing in the request is not a match when the actual change falls outside its scope. ` +
+    `Skip the skill when the task is routine, narrow, or already covered by existing patterns in the codebase \u2014 an unnecessary invocation costs context and slows the task. ` +
+    `Invoke at most one skill unless the task genuinely spans two, and do not re-invoke a skill whose instructions are already in this conversation.\n\n` +
     list
   );
 }

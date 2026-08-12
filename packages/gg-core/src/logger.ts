@@ -11,6 +11,19 @@ export type LogLevel = "INFO" | "ERROR" | "WARN" | "DEBUG";
 // scrollback while bounding disk usage.
 const MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 
+/**
+ * Rotate when fewer than this many bytes remain, instead of only at/over the cap.
+ *
+ * A process that hits the cap mid-run stops writing at whatever size it reached,
+ * which can be a hair UNDER MAX_BYTES. Rotating only at `size >= MAX_BYTES` then
+ * wedges the log permanently: every later launch reopens the same near-full file,
+ * has no room for a single line, and disables its own logging immediately — so the
+ * file can never grow enough to qualify for rotation. That silently cost the app
+ * sidecar ~2 weeks of diagnostics (the file sat 4 bytes short of the cap, gaining
+ * one newline per launch). Requiring real headroom guarantees forward progress.
+ */
+const MIN_HEADROOM_BYTES = 64 * 1024; // 64 KB
+
 let fd: number | null = null;
 let bytesWritten = 0;
 let capped = false;
@@ -22,7 +35,7 @@ let exactSecrets: string[] = [];
 function rotateIfNeeded(filePath: string): void {
   try {
     const st = fs.statSync(filePath);
-    if (st.size < MAX_BYTES) return;
+    if (st.size <= MAX_BYTES - MIN_HEADROOM_BYTES) return;
     const rotated = `${filePath}.1`;
     // Replace prior rotation (fs.renameSync overwrites on POSIX; on Windows it
     // fails if dest exists, so unlink first defensively).

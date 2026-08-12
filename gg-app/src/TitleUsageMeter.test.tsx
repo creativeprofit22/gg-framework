@@ -36,6 +36,7 @@ describe("TitleUsageMeter", () => {
     await waitFor(() => expect(screen.getByText("week")).toBeDefined());
     expect(meter.querySelector<HTMLElement>(".title-usage-fill")?.style.width).toBe("48%");
     expect(meter.getAttribute("aria-pressed")).toBe("true");
+    expect(meter.getAttribute("aria-disabled")).toBe("false");
     expect(getUsageMock).toHaveBeenCalledWith("openai");
   });
 
@@ -101,6 +102,30 @@ describe("TitleUsageMeter", () => {
     const meter = await screen.findByRole("button", { name: /Codex Weekly: 11% used/ });
     expect(screen.getByText("week")).toBeDefined();
     expect(screen.queryByText("168h")).toBeNull();
+    expect(meter.querySelector<HTMLElement>(".title-usage-fill")?.style.width).toBe("11%");
+  });
+
+  // Codex regularly reports weekly-only. The toggle is inert then, and the
+  // global click-sound listener in App keys off `aria-disabled` — without it the
+  // meter cued a press that did nothing.
+  it("marks a single-window meter as non-interactive and ignores clicks", async () => {
+    getUsageMock.mockResolvedValue({
+      provider: "openai",
+      displayName: "Codex",
+      connected: true,
+      windows: [{ kind: "weekly", label: "Weekly", usedPercent: 11 }],
+      fetchedAt: Date.now(),
+    });
+
+    render(<TitleUsageMeter currentProvider="openai" />);
+
+    const meter = await screen.findByRole("button", { name: /Codex Weekly: 11% used/ });
+    expect(meter.getAttribute("aria-disabled")).toBe("true");
+    // Nothing to switch to, so the label must not advertise a toggle.
+    expect(meter.getAttribute("title")).not.toContain("Click for");
+
+    fireEvent.click(meter);
+    await waitFor(() => expect(screen.getByText("week")).toBeDefined());
     expect(meter.querySelector<HTMLElement>(".title-usage-fill")?.style.width).toBe("11%");
   });
 

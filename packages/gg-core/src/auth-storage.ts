@@ -496,15 +496,44 @@ export class AuthStorage {
 
   /**
    * Returns valid credentials, auto-refreshing if expired.
+   *
    * If `forceRefresh` is true, refreshes even if the token hasn't expired
-   * (useful when the provider rejects a token with 401 before its stored expiry).
+   * (useful when the provider rejects a token with 401 before its stored
+   * expiry). Callers recovering from a rejection should also pass
+   * `rejectedToken` — see the stampede guard below.
+   *
    * Throws if not logged in.
    */
   async resolveCredentials(
     provider: string,
-    opts?: { forceRefresh?: boolean; storageKeys?: string[] },
+    opts?: {
+      forceRefresh?: boolean;
+      storageKeys?: string[];
+      /**
+       * The access token the provider just rejected. Refreshing an OAuth grant
+       * invalidates the previous access token, so N processes sharing auth.json
+       * (app windows, CLI sessions, the usage poller) can otherwise revoke each
+       * other in a loop: each one force-refreshes on 401, and every refresh kills
+       * the token the others still hold. Naming the rejected token lets the
+       * refresh path tell "this credential is genuinely dead" from "someone else
+       * already rotated it" and simply adopt the newer on-disk credential.
+       */
+      rejectedToken?: string;
+    },
   ): Promise<OAuthCredentials> {
-    await this.ensureLoaded();
+    // Pick up a rotation performed by another process before serving a cached
+    // token. Long-lived processes (the desktop sidecar runs for days) would
+    // otherwise keep handing out an access token that a sibling's refresh
+    // already invalidated — the "it logged me out again" failure.
+    //
+    // Skipped for a forced refresh on purpose: that path compares the caller's
+    // snapshot against the latest file to detect a concurrent re-login, and
+    // refreshing this instance's view first would destroy that evidence.
+    if (opts?.forceRefresh) {
+      await this.ensureLoaded();
+    } else {
+      await this.ensureFresh();
+    }
 
     // A failed refresh removes the credential from this session's cache. If
     // the user then re-logs in through another app session, recover that new
@@ -562,6 +591,7 @@ export class AuthStorage {
         // errors) and throwing NotLoggedInError for OAuth-only users.
         return await this.resolveCredentials(dual.oauthKey, {
           ...(opts?.forceRefresh ? { forceRefresh: true } : {}),
+          ...(opts?.rejectedToken !== undefined ? { rejectedToken: opts.rejectedToken } : {}),
         });
       } catch (err) {
         // OAuth refresh token is dead and was wiped. Fall back to the API key if
@@ -618,8 +648,15 @@ export class AuthStorage {
         latestCreds.accessToken !== creds.accessToken ||
         latestCreds.refreshToken !== creds.refreshToken ||
         latestCreds.expiresAt !== creds.expiresAt;
+      // The caller named the token the provider rejected, and disk now holds a
+      // different one: a sibling process already rotated this grant. Minting
+      // another token here would invalidate the one that sibling is using and
+      // keep the mutual-revocation loop going.
+      const rotatedBySibling =
+        opts?.rejectedToken !== undefined && latestCreds.accessToken !== opts.rejectedToken;
       if (
         credentialWasReplaced ||
+        rotatedBySibling ||
         (!opts?.forceRefresh &&
           Date.now() < latestCreds.expiresAt - refreshThresholdMs(latestCreds))
       ) {
@@ -627,6 +664,13 @@ export class AuthStorage {
         // held the rejected token. Trust that replacement even for a forced
         // refresh; retrying the revoked OLD refresh token would delete the new
         // login that just landed on disk.
+        if (rotatedBySibling && !credentialWasReplaced) {
+          log(
+            "INFO",
+            "auth",
+            `${provider} token was rotated by another gg process — adopting it instead of refreshing again`,
+          );
+        }
         this.data = latest;
         return latestCreds;
       }
@@ -682,6 +726,10 @@ export class AuthStorage {
       return await refreshPromise;
     } finally {
       this.refreshLocks.delete(provider);
+      // The refresh path rewrites auth.json and updates `this.data` in step, so
+      // re-stamp the snapshot: otherwise the next ensureFresh() sees its own
+      // write as a foreign change and re-reads the file on every resolve.
+      await this.rememberSnapshot();
     }
   }
 

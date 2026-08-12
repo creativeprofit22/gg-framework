@@ -918,7 +918,7 @@ export function App(props: AppProps) {
   // Resolve fresh OAuth credentials before each agent loop run.
   // Falls back to the static props when authStorage is not available.
   const resolveCredentials = useCallback(
-    async (opts?: { forceRefresh?: boolean }) => {
+    async (opts?: { forceRefresh?: boolean; rejectedToken?: string }) => {
       if (props.authStorage) {
         const creds = await props.authStorage.resolveCredentials(currentProvider, {
           ...opts,

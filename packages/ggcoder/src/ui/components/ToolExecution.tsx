@@ -309,8 +309,8 @@ export function ToolExecution(props: ToolExecutionProps) {
     props.formatters,
   );
   const body = isDiff
-    ? buildDiffBody(diffText!, args, columns)
-    : buildResultBody(name, result, isError, columns);
+    ? buildDiffBody(diffText!, args, columns, theme)
+    : buildResultBody(name, result, isError, columns, theme);
 
   const headerColor = isError ? theme.error : toolNameColor(theme, name);
 
@@ -823,8 +823,9 @@ function parseDiffWithLineNumbers(result: string): NumberedDiffLine[] {
 
 function buildDiffBody(
   result: string,
-  args?: Record<string, unknown>,
-  _columns?: number,
+  args: Record<string, unknown> | undefined,
+  _columns: number | undefined,
+  theme: Theme,
 ): BodyContent {
   const added = (result.match(/^\+[^+]/gm) ?? []).length;
   const removed = (result.match(/^-[^-]/gm) ?? []).length;
@@ -879,7 +880,7 @@ function buildDiffBody(
 
   return {
     lines: [
-      <Text key="summary" color="#9ca3af">
+      <Text key="summary" color={theme.textMuted}>
         {summaryText}
       </Text>,
       diffFrame,
@@ -893,13 +894,14 @@ function buildResultBody(
   result: string,
   isError: boolean,
   columns: number,
+  theme: Theme,
 ): BodyContent | null {
   if (isError) {
     const lines = result.split("\n");
     const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
     return {
       lines: display.map((l, i) => (
-        <Text key={i} color="#f87171" wrap="wrap">
+        <Text key={i} color={theme.error} wrap="wrap">
           {truncateLine(l, columns)}
         </Text>
       )),
@@ -919,7 +921,7 @@ function buildResultBody(
       const { lines: display, splitAt } = sliceHeadTail(outputLines, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => (
-          <Text key={i} color={exitCode !== "0" ? "#fbbf24" : "#9ca3af"} wrap="wrap">
+          <Text key={i} color={exitCode !== "0" ? theme.warning : theme.textMuted} wrap="wrap">
             {truncateLine(l, columns)}
           </Text>
         )),
@@ -967,7 +969,7 @@ function buildResultBody(
       const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
       return {
         lines: display.map((l, i) => (
-          <Text key={i} color="#9ca3af" wrap="wrap">
+          <Text key={i} color={theme.textMuted} wrap="wrap">
             {truncateLine(l, columns)}
           </Text>
         )),
@@ -981,7 +983,7 @@ function buildResultBody(
       if (result.startsWith("Error")) {
         return {
           lines: [
-            <Text key={0} color="#f87171">
+            <Text key={0} color={theme.error}>
               {result.split("\n")[0]}
             </Text>,
           ],
@@ -998,7 +1000,7 @@ function buildResultBody(
       const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);
       return {
         lines: display.map((line, i) => (
-          <Text key={i} color={i === 0 ? "#60a5fa" : "#9ca3af"} wrap="wrap">
+          <Text key={i} color={i === 0 ? theme.primary : theme.textMuted} wrap="wrap">
             {truncateLine(line, columns)}
           </Text>
         )),
@@ -1045,20 +1047,22 @@ const DiffLine = memo(function DiffLine({
   line: NumberedDiffLine;
   padWidth: number;
 }) {
+  const theme = useTheme();
   const lineNo = String(line.lineNo).padStart(padWidth, " ");
   const marker = line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
 
   if (line.type === "add") {
-    const bgColor = "#16a34a";
-    const wordHighlight = "#bbf7d0";
+    const bgColor = theme.diffAddedBackground;
+    const wordHighlight = theme.diffAddedBackgroundWord;
+    const onBackground = theme.diffAddedBackgroundText;
     return (
       <Box flexDirection="row">
         <NoSelect fromLeftEdge>
-          <Text backgroundColor={bgColor} color="#ffffff" dimColor>
+          <Text backgroundColor={bgColor} color={onBackground} dimColor>
             {lineNo} {marker}{" "}
           </Text>
         </NoSelect>
-        <Text backgroundColor={bgColor} color="#ffffff">
+        <Text backgroundColor={bgColor} color={onBackground}>
           {line.wordSegments
             ? line.wordSegments.map((seg, i) =>
                 seg.type === "added" ? (
@@ -1075,16 +1079,17 @@ const DiffLine = memo(function DiffLine({
     );
   }
   if (line.type === "remove") {
-    const bgColor = "#dc2626";
-    const wordHighlight = "#fecaca";
+    const bgColor = theme.diffRemovedBackground;
+    const wordHighlight = theme.diffRemovedBackgroundWord;
+    const onBackground = theme.diffRemovedBackgroundText;
     return (
       <Box flexDirection="row">
         <NoSelect fromLeftEdge>
-          <Text backgroundColor={bgColor} color="#ffffff" dimColor>
+          <Text backgroundColor={bgColor} color={onBackground} dimColor>
             {lineNo} {marker}{" "}
           </Text>
         </NoSelect>
-        <Text backgroundColor={bgColor} color="#ffffff">
+        <Text backgroundColor={bgColor} color={onBackground}>
           {line.wordSegments
             ? line.wordSegments.map((seg, i) =>
                 seg.type === "removed" ? (
@@ -1103,7 +1108,7 @@ const DiffLine = memo(function DiffLine({
   return (
     <Box flexDirection="row">
       <NoSelect fromLeftEdge>
-        <Text color="#6b7280">
+        <Text color={theme.textDim}>
           {lineNo} {marker}{" "}
         </Text>
       </NoSelect>
@@ -1115,12 +1120,13 @@ const DiffLine = memo(function DiffLine({
 // ── Grep result line ───────────────────────────────────────
 
 const GrepLine = memo(function GrepLine({ line }: { line: string }) {
+  const theme = useTheme();
   // Format: filepath:lineNo:content
   const firstColon = line.indexOf(":");
-  if (firstColon === -1) return <Text color="#9ca3af">{line}</Text>;
+  if (firstColon === -1) return <Text color={theme.textMuted}>{line}</Text>;
 
   const secondColon = line.indexOf(":", firstColon + 1);
-  if (secondColon === -1) return <Text color="#9ca3af">{line}</Text>;
+  if (secondColon === -1) return <Text color={theme.textMuted}>{line}</Text>;
 
   const file = line.slice(0, firstColon);
   const lineNo = line.slice(firstColon + 1, secondColon);
@@ -1132,11 +1138,11 @@ const GrepLine = memo(function GrepLine({ line }: { line: string }) {
 
   return (
     <Text>
-      <Text color="#60a5fa">{file}</Text>
-      <Text color="#6b7280">:</Text>
-      <Text color="#fbbf24">{lineNo}</Text>
-      <Text color="#6b7280">:</Text>
-      <Text color="#9ca3af">{content}</Text>
+      <Text color={theme.primary}>{file}</Text>
+      <Text color={theme.textDim}>:</Text>
+      <Text color={theme.warning}>{lineNo}</Text>
+      <Text color={theme.textDim}>:</Text>
+      <Text color={theme.textMuted}>{content}</Text>
     </Text>
   );
 });
@@ -1144,19 +1150,20 @@ const GrepLine = memo(function GrepLine({ line }: { line: string }) {
 // ── Find result line ───────────────────────────────────────
 
 const FindLine = memo(function FindLine({ line }: { line: string }) {
+  const theme = useTheme();
   const trimmed = line.trim();
   if (trimmed.endsWith("/")) {
-    return <Text color="#60a5fa">{trimmed}</Text>;
+    return <Text color={theme.primary}>{trimmed}</Text>;
   }
   // Highlight the filename, dim the path
   const lastSlash = trimmed.lastIndexOf("/");
   if (lastSlash === -1) {
-    return <Text color="#e5e7eb">{trimmed}</Text>;
+    return <Text color={theme.text}>{trimmed}</Text>;
   }
   return (
     <Text>
-      <Text color="#6b7280">{trimmed.slice(0, lastSlash + 1)}</Text>
-      <Text color="#e5e7eb">{trimmed.slice(lastSlash + 1)}</Text>
+      <Text color={theme.textDim}>{trimmed.slice(0, lastSlash + 1)}</Text>
+      <Text color={theme.text}>{trimmed.slice(lastSlash + 1)}</Text>
     </Text>
   );
 });
@@ -1164,27 +1171,28 @@ const FindLine = memo(function FindLine({ line }: { line: string }) {
 // ── Ls result line ─────────────────────────────────────────
 
 const LsLine = memo(function LsLine({ line }: { line: string }) {
+  const theme = useTheme();
   // Format: "d  -        dirname/" or "f  1.2K     filename"
   const parts = line.match(/^([dfl])\s+(\S+)\s+(.+)$/);
-  if (!parts) return <Text color="#9ca3af">{line}</Text>;
+  if (!parts) return <Text color={theme.textMuted}>{line}</Text>;
 
   const [, type, size, name] = parts;
 
   if (type === "d") {
     return (
       <Text>
-        <Text color="#60a5fa" bold>
+        <Text color={theme.primary} bold>
           {name}
         </Text>
-        <Text color="#6b7280"> {size === "-" ? "" : size}</Text>
+        <Text color={theme.textDim}> {size === "-" ? "" : size}</Text>
       </Text>
     );
   }
   // File or symlink
   return (
     <Text>
-      <Text color="#e5e7eb">{name}</Text>
-      <Text color="#6b7280"> {size}</Text>
+      <Text color={theme.text}>{name}</Text>
+      <Text color={theme.textDim}> {size}</Text>
     </Text>
   );
 });
@@ -1192,9 +1200,10 @@ const LsLine = memo(function LsLine({ line }: { line: string }) {
 // ── Task result line ────────────────────────────────────
 
 const TaskLine = memo(function TaskLine({ line }: { line: string }) {
+  const theme = useTheme();
   // Format: "[✓] Task text  (id: abcd1234, done)" or "[ ] Task text  (id: ..., pending)"
   const match = line.match(/^\[(.)\]\s+(.+?)\s{2}\(id:\s*(\w+),\s*(\S+)\)$/);
-  if (!match) return <Text color="#9ca3af">{line}</Text>;
+  if (!match) return <Text color={theme.textMuted}>{line}</Text>;
 
   const [, check, text, id] = match;
   const isDone = check === "✓";
@@ -1202,9 +1211,11 @@ const TaskLine = memo(function TaskLine({ line }: { line: string }) {
 
   return (
     <Text>
-      <Text color={isDone ? "#4ade80" : isActive ? "#fbbf24" : "#6b7280"}>[{check}]</Text>
-      <Text color={isDone ? "#4ade80" : isActive ? "#fbbf24" : "#e5e7eb"}> {text}</Text>
-      <Text color="#6b7280"> {id}</Text>
+      <Text color={isDone ? theme.success : isActive ? theme.warning : theme.textDim}>
+        [{check}]
+      </Text>
+      <Text color={isDone ? theme.success : isActive ? theme.warning : theme.text}> {text}</Text>
+      <Text color={theme.textDim}> {id}</Text>
     </Text>
   );
 });
@@ -1218,27 +1229,28 @@ function truncLine(s: string, max = MAX_MCP_LINE_LENGTH): string {
 }
 
 const MCPResultLine = memo(function MCPResultLine({ line }: { line: string }) {
+  const theme = useTheme();
   // Key-value pattern: "Repository: value" or "Path: value" or "Title: value"
   const kvMatch = line.match(/^([A-Z][A-Za-z_ ]+):\s+(.+)$/);
   if (kvMatch) {
     return (
       <Text>
-        <Text color="#6b7280">{kvMatch[1]}: </Text>
-        <Text color="#60a5fa">{truncLine(kvMatch[2])}</Text>
+        <Text color={theme.textDim}>{kvMatch[1]}: </Text>
+        <Text color={theme.primary}>{truncLine(kvMatch[2])}</Text>
       </Text>
     );
   }
   // URL on its own line
   if (line.match(/^https?:\/\//)) {
-    return <Text color="#60a5fa">{truncLine(line)}</Text>;
+    return <Text color={theme.primary}>{truncLine(line)}</Text>;
   }
   // Numbered list item: "1. Title" or "- Item"
   const listMatch = line.match(/^(\d+\.\s+|- )(.+)$/);
   if (listMatch) {
     return (
       <Text>
-        <Text color="#6b7280">{listMatch[1]}</Text>
-        <Text color="#e5e7eb">{truncLine(listMatch[2])}</Text>
+        <Text color={theme.textDim}>{listMatch[1]}</Text>
+        <Text color={theme.text}>{truncLine(listMatch[2])}</Text>
       </Text>
     );
   }
@@ -1247,9 +1259,9 @@ const MCPResultLine = memo(function MCPResultLine({ line }: { line: string }) {
   if (dashMatch) {
     return (
       <Text>
-        <Text color="#60a5fa">{truncLine(dashMatch[1], 50)}</Text>
-        <Text color="#6b7280"> — </Text>
-        <Text color="#9ca3af">{truncLine(dashMatch[2], 60)}</Text>
+        <Text color={theme.primary}>{truncLine(dashMatch[1], 50)}</Text>
+        <Text color={theme.textDim}> — </Text>
+        <Text color={theme.textMuted}>{truncLine(dashMatch[2], 60)}</Text>
       </Text>
     );
   }
@@ -1258,14 +1270,14 @@ const MCPResultLine = memo(function MCPResultLine({ line }: { line: string }) {
   if (colonMatch) {
     return (
       <Text>
-        <Text color="#60a5fa">{colonMatch[1]}</Text>
-        <Text color="#6b7280">:</Text>
-        <Text color="#fbbf24">{colonMatch[2]}</Text>
-        <Text color="#6b7280">:</Text>
-        <Text color="#9ca3af">{truncLine(colonMatch[3], 80)}</Text>
+        <Text color={theme.primary}>{colonMatch[1]}</Text>
+        <Text color={theme.textDim}>:</Text>
+        <Text color={theme.warning}>{colonMatch[2]}</Text>
+        <Text color={theme.textDim}>:</Text>
+        <Text color={theme.textMuted}>{truncLine(colonMatch[3], 80)}</Text>
       </Text>
     );
   }
   // Fallback: truncate long plain text
-  return <Text color="#9ca3af">{truncLine(line)}</Text>;
+  return <Text color={theme.textMuted}>{truncLine(line)}</Text>;
 });

@@ -6167,10 +6167,14 @@ body {
     border-color var(--t-fast),
     color var(--t-fast);
 }
-.title-usage-meter:hover {
+.title-usage-meter:hover:not([aria-disabled="true"]) {
   border-color: var(--border);
   background: var(--surface-1);
   color: var(--text-secondary);
+}
+/* Single-window snapshot: read-only status, not a toggle. */
+.title-usage-meter[aria-disabled="true"] {
+  cursor: default;
 }
 .title-usage-window {
   width: 25px;

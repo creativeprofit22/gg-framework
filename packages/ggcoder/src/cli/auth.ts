@@ -59,8 +59,11 @@ export async function runLogin(): Promise<void> {
             "\n",
         );
       },
-      onPromptCode: async (message) => {
-        return rl.question(message + " ");
+      onPromptCode: async (message, signal) => {
+        // `signal` fires when the code already arrived over the loopback
+        // callback, so the competing paste prompt is torn down rather than
+        // holding the terminal open after login has already succeeded.
+        return signal ? rl.question(message + " ", { signal }) : rl.question(message + " ");
       },
       onStatus: (message) => {
         console.log(chalk.hex("#6b7280")(message));

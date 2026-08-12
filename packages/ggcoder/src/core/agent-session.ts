@@ -1769,6 +1769,10 @@ export class AgentSession {
     // Cache for sync callers (see field doc) — kept in step with `creds`
     // through the 401 force-refresh retry below.
     this.lastAccountId = creds.accountId;
+    // The access token most recently handed to the provider. Tracked separately
+    // from `creds` because the per-turn resolver can rotate it mid-run, and the
+    // 401 handler must name the token that was actually rejected.
+    let lastResolvedAccessToken = creds.accessToken;
 
     // Auto-compact if needed. This must happen after credential resolution so
     // OpenAI OAuth/Codex sessions use the Codex product context window instead
@@ -1837,6 +1841,7 @@ export class AgentSession {
     const loopMessages = await this.prepareDynamicContext();
 
     const runAgentLoop = async (apiKey: string, accountId?: string, projectId?: string) => {
+      lastResolvedAccessToken = apiKey;
       const modelInfo = getModel(this.model);
       const effectiveBaseUrl = this.baseUrl ?? creds.baseUrl;
       const generator = agentLoop(loopMessages, {
@@ -1849,6 +1854,23 @@ export class AgentSession {
         maxTurnExtensions: this.opts.maxTurnExtensions,
         thinking: this.thinkingLevel,
         apiKey,
+        // Per-turn credential resolution. A run can span many minutes; if any
+        // process sharing auth.json refreshes this grant meanwhile, the token
+        // captured above is invalidated server-side and every remaining turn
+        // would fail with an authentication error until the user restarted.
+        // Static API keys resolve to the same value, so this is a no-op for them.
+        resolveCredentials: async () => {
+          const live = await this.authStorage.resolveCredentials(this.provider, {
+            storageKeys: this.currentAuthStorageKeys(),
+          });
+          this.lastAccountId = live.accountId;
+          lastResolvedAccessToken = live.accessToken;
+          return {
+            apiKey: live.accessToken,
+            ...(live.accountId !== undefined ? { accountId: live.accountId } : {}),
+            ...(live.projectId !== undefined ? { projectId: live.projectId } : {}),
+          };
+        },
         baseUrl: effectiveBaseUrl,
         signal: this.opts.signal,
         accountId,
@@ -2105,6 +2127,12 @@ export class AgentSession {
         creds = await this.authStorage.resolveCredentials(this.provider, {
           forceRefresh: true,
           storageKeys: this.currentAuthStorageKeys(),
+          // Name the token the provider actually rejected (which the per-turn
+          // resolver may have rotated since the run started). If disk already
+          // holds a newer one, adopt it instead of minting another — a fresh
+          // refresh would invalidate the token every sibling process is using
+          // and turn one 401 into a cascade of them.
+          rejectedToken: lastResolvedAccessToken,
         });
         this.lastAccountId = creds.accountId;
         await runAgentLoop(creds.accessToken, creds.accountId, creds.projectId);

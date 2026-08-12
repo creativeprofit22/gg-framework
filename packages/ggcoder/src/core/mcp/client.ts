@@ -12,7 +12,7 @@ import {
   UnauthorizedError,
 } from "@modelcontextprotocol/client";
 import type { ElicitRequest, ElicitResult } from "@modelcontextprotocol/client";
-import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
+import type { AgentTool, ToolContext, ToolExecuteResult } from "@kenkaiiii/gg-agent";
 import { z } from "zod";
 import http from "node:http";
 import os from "node:os";
@@ -25,6 +25,7 @@ import {
 } from "./oauth-provider.js";
 import { McpOAuthStore } from "./oauth-store.js";
 import { isLocalhost, alternateLoopback, isNetworkError } from "./loopback.js";
+import { toToolResult } from "./content.js";
 import { resolveStdioCommand } from "./resolve-stdio.js";
 import { McpCatalogCache, type ProtocolEra } from "./catalog-cache.js";
 import {
@@ -697,7 +698,7 @@ export class MCPClientManager {
           // The client the attempt actually ran against, so a failure can be
           // attributed to "my client was replaced" vs "the server hung up".
           let attemptClient = liveClient();
-          const callOnce = async (): Promise<string> => {
+          const callOnce = async (): Promise<ToolExecuteResult> => {
             attemptClient = liveClient();
             const result = await attemptClient.callTool(
               { name: tool.name, arguments: args as Record<string, unknown> },
@@ -706,18 +707,7 @@ export class MCPClientManager {
             if (!("content" in result) || !Array.isArray(result.content)) {
               return "(empty response)";
             }
-            const texts: string[] = [];
-            for (const item of result.content) {
-              if (
-                item != null &&
-                typeof item === "object" &&
-                "text" in item &&
-                typeof item.text === "string"
-              ) {
-                texts.push(item.text);
-              }
-            }
-            return texts.join("\n") || "(empty response)";
+            return toToolResult(result.content, toolName);
           };
 
           try {

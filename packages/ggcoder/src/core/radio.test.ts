@@ -72,6 +72,22 @@ describe("radio", () => {
     );
   });
 
+  it("ships the deep-ambient stations with unique ids", () => {
+    const ids = RADIO_STATIONS.map((station) => station.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(
+      expect.arrayContaining([
+        "somafm-dark-zone",
+        "bluemars-cryosleep",
+        "ambient-sleeping-pill",
+        "nightride-chillsynth",
+      ]),
+    );
+    for (const station of RADIO_STATIONS) {
+      expect(station.url).toMatch(/^https?:\/\//);
+    }
+  });
+
   it("keeps the player in the sidecar process group for reliable app-exit cleanup", () => {
     expect(playRadio("somafm-heavyweight-reggae")).toEqual({ ok: true });
     expect(mocks.spawn).toHaveBeenCalledWith(

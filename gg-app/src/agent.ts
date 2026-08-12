@@ -358,7 +358,7 @@ function asPlanMutationError(error: unknown, fallback: string): PlanMutationErro
     }
   }
   if (isRecord(candidate)) {
-    const payload = { ...candidate } as PlanMutationFailure;
+    const payload = candidate as unknown as PlanMutationFailure;
     if (Object.prototype.hasOwnProperty.call(candidate, "pendingPlanReview")) {
       const pendingPlanReview = parsePendingPlanReview(candidate.pendingPlanReview);
       if (pendingPlanReview !== undefined) payload.pendingPlanReview = pendingPlanReview;
@@ -367,7 +367,7 @@ function asPlanMutationError(error: unknown, fallback: string): PlanMutationErro
     return new PlanMutationError(planMutationMessage(payload, fallback), payload);
   }
   const message = error instanceof Error ? error.message : fallback;
-  return new PlanMutationError(message || fallback, {});
+  return new PlanMutationError(message || fallback, { error: message || fallback });
 }
 
 function requirePlanAcceptResult(value: unknown): PlanAcceptResult {

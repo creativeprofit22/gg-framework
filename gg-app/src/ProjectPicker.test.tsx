@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import {
   getSettings,
   importTranscript,
   listProjects,
   listSessions,
+  saveSettings,
   selectProject,
   setProjectHidden,
   waitForReady,
@@ -14,6 +16,7 @@ import {
 } from "./agent";
 import { ProjectPicker } from "./ProjectPicker";
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./agent", () => ({
   arrangeAllWindows: vi.fn(),
   focusWindowByOffset: vi.fn(),
@@ -21,6 +24,7 @@ vi.mock("./agent", () => ({
   importTranscript: vi.fn(),
   listProjects: vi.fn(),
   listSessions: vi.fn(),
+  saveSettings: vi.fn(),
   selectProject: vi.fn(),
   setProjectHidden: vi.fn(),
   waitForReady: vi.fn(),
@@ -29,10 +33,12 @@ vi.mock("./RadioButton", () => ({ RadioButton: () => <button>Radio</button> }));
 vi.mock("./WindowLayoutButton", () => ({ WindowLayoutButton: () => <button>Windows</button> }));
 vi.mock("./NewProjectModal", () => ({ NewProjectModal: () => null }));
 
+const openFolderDialogMock = vi.mocked(openFolderDialog);
 const getSettingsMock = vi.mocked(getSettings);
 const importTranscriptMock = vi.mocked(importTranscript);
 const listProjectsMock = vi.mocked(listProjects);
 const listSessionsMock = vi.mocked(listSessions);
+const saveSettingsMock = vi.mocked(saveSettings);
 const selectProjectMock = vi.mocked(selectProject);
 const setProjectHiddenMock = vi.mocked(setProjectHidden);
 const waitForReadyMock = vi.mocked(waitForReady);
@@ -94,6 +100,73 @@ async function renderProjectList(projects: DiscoveredProject[]): Promise<void> {
   render(<ProjectPicker onChosen={vi.fn()} />);
   await screen.findByText(projects[0]!.name);
 }
+
+describe("ProjectPicker discovery", () => {
+  it("matches a selected Windows project across extended-path and casing forms", async () => {
+    const windowsProject: DiscoveredProject = {
+      ...PROJECT,
+      path: "C:\\ggcoder-projects\\My-App",
+    };
+    getSettingsMock.mockResolvedValue({
+      projectsRoot: "C:\\ggcoder-projects",
+      configured: true,
+    });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValue([windowsProject]);
+    listSessionsMock.mockResolvedValue([NATIVE_SESSION]);
+
+    render(
+      <ProjectPicker
+        onChosen={vi.fn()}
+        initialProjectPath={"\\\\?\\c:\\GGCODER-PROJECTS\\my-app\\"}
+      />,
+    );
+
+    expect(await screen.findByText(NATIVE_SESSION.preview)).toBeTruthy();
+    expect(listSessionsMock).toHaveBeenCalledWith(windowsProject.path);
+  });
+
+  it("shows a retryable error when project listing fails", async () => {
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock
+      .mockRejectedValueOnce(new Error("sidecar unavailable"))
+      .mockResolvedValueOnce([PROJECT]);
+
+    render(<ProjectPicker onChosen={vi.fn()} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn’t load projects");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByText(PROJECT.name)).toBeTruthy();
+    expect(listProjectsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("adds a parent projects folder, saves it, and reloads its direct children", async () => {
+    const child: DiscoveredProject = {
+      name: "direct-child",
+      path: "/Users/workspace/direct-child",
+      lastActiveDisplay: "now",
+      sources: ["ggcoder"],
+    };
+    getSettingsMock.mockResolvedValue({ projectsRoot: "/Users/dev", configured: true });
+    waitForReadyMock.mockResolvedValue();
+    listProjectsMock.mockResolvedValueOnce([PROJECT]).mockResolvedValueOnce([PROJECT, child]);
+    openFolderDialogMock.mockResolvedValue("/Users/workspace");
+    saveSettingsMock.mockResolvedValue();
+
+    render(<ProjectPicker onChosen={vi.fn()} />);
+    await screen.findByText(PROJECT.name);
+
+    expect(screen.getByRole("button", { name: "Open project directly" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add projects folder" }));
+
+    expect(await screen.findByText(child.name)).toBeTruthy();
+    expect(saveSettingsMock).toHaveBeenCalledWith("/Users/workspace");
+    expect(listProjectsMock).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("ProjectPicker hide", () => {
   it("removes the row and persists the decision", async () => {

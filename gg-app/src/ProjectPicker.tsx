@@ -9,6 +9,7 @@ import {
   selectProject,
   importTranscript,
   getSettings,
+  saveSettings,
   focusWindowByOffset,
   arrangeAllWindows,
   type DiscoveredProject,
@@ -30,6 +31,17 @@ function isForeignSession(session: RecentSession): boolean {
   return session.source === "claude-code" || session.source === "codex";
 }
 
+/** Stable comparison across Windows casing, slash, and extended-length forms. */
+function projectPathKey(projectPath: string): string {
+  let normalized = projectPath.trim();
+  const lowerPath = normalized.toLowerCase();
+  if (lowerPath.startsWith("\\\\?\\unc\\")) normalized = `\\\\${normalized.slice(8)}`;
+  else if (lowerPath.startsWith("\\\\?\\")) normalized = normalized.slice(4);
+  const windowsPath = /^[a-z]:[\\/]/i.test(normalized) || normalized.startsWith("\\\\");
+  normalized = normalized.replace(/\\/g, "/").replace(/\/+$/, "");
+  return windowsPath ? normalized.toLowerCase() : normalized;
+}
+
 interface Props {
   /** Called after the agent has been re-pointed at `cwd` (+ optional session). */
   onChosen: (cwd: string) => void;
@@ -45,6 +57,8 @@ interface Props {
   discoverProjects?: () => Promise<DiscoveredProject[]>;
   discoverSessions?: (cwd: string) => Promise<RecentSession[]>;
   bindProject?: (cwd: string, sessionPath?: string) => Promise<unknown>;
+  saveProjectsRoot?: (projectsRoot: string) => Promise<unknown>;
+  refreshSignal?: number;
   showWindowControls?: boolean;
 }
 
@@ -62,10 +76,14 @@ export function ProjectPicker({
   discoverProjects = listProjects,
   discoverSessions = listSessions,
   bindProject = selectProject,
+  saveProjectsRoot = saveSettings,
+  refreshSignal = 0,
   showWindowControls = true,
 }: Props): React.ReactElement {
   const [projects, setProjects] = useState<DiscoveredProject[]>([]);
   const [loading, setLoading] = useState(true);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
   const [selected, setSelected] = useState<DiscoveredProject | null>(null);
   const [sessions, setSessions] = useState<RecentSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -112,29 +130,53 @@ export function ProjectPicker({
     };
   }, []);
 
+  const openProject = useCallback(
+    (project: DiscoveredProject): void => {
+      setSelected(project);
+      setSessions([]);
+      setResumeError(null);
+      setSessionsError(null);
+      setSessionsLoading(true);
+      void discoverSessions(project.path)
+        .then((nextSessions) => {
+          setSessions(nextSessions);
+          setSessionsLoading(false);
+        })
+        .catch(() => {
+          setSessionsError("Couldn’t load sessions. Please try again.");
+          setSessionsLoading(false);
+        });
+    },
+    [discoverSessions],
+  );
+
+  /** Reload the project catalog after startup, a failed request, or a root change. */
+  const reloadProjects = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    setProjectsError(null);
+    try {
+      // The window's sidecar serves project discovery; wait for it before asking.
+      await waitForCatalogReady();
+      const nextProjects = await discoverProjects();
+      setProjects(nextProjects);
+      // Deep-link straight to the current project's sessions when asked.
+      if (initialProjectPath) {
+        const initialPathKey = projectPathKey(initialProjectPath);
+        const match = nextProjects.find(
+          (project) => projectPathKey(project.path) === initialPathKey,
+        );
+        if (match) openProject(match);
+      }
+    } catch {
+      setProjectsError("Couldn’t load projects. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }, [discoverProjects, initialProjectPath, openProject, waitForCatalogReady]);
+
   useEffect(() => {
-    let cancelled = false;
-    // The window's sidecar serves project discovery; wait for it before asking.
-    void waitForCatalogReady()
-      .then(() => discoverProjects())
-      .then((p) => {
-        if (cancelled) return;
-        setProjects(p);
-        setLoading(false);
-        // Deep-link straight to the current project's sessions when asked.
-        if (initialProjectPath) {
-          const match = p.find((proj) => proj.path === initialProjectPath);
-          if (match) openProject(match);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    void reloadProjects();
+  }, [refreshSignal, reloadProjects]);
 
   /**
    * Drop a project from the list and persist the decision. Removed optimistically
@@ -160,26 +202,6 @@ export function ProjectPicker({
       });
     });
   }
-
-  const openProject = useCallback(
-    (project: DiscoveredProject): void => {
-      setSelected(project);
-      setSessions([]);
-      setResumeError(null);
-      setSessionsError(null);
-      setSessionsLoading(true);
-      void discoverSessions(project.path)
-        .then((nextSessions) => {
-          setSessions(nextSessions);
-          setSessionsLoading(false);
-        })
-        .catch(() => {
-          setSessionsError("Couldn’t load sessions. Please try again.");
-          setSessionsLoading(false);
-        });
-    },
-    [discoverSessions],
-  );
 
   function choose(cwd: string, sessionPath?: string): void {
     if (busy) return;
@@ -235,20 +257,49 @@ export function ProjectPicker({
       });
   }
 
-  // Open an existing folder from disk as a project. The native folder picker is
-  // directories-only (that's where projects live); a chosen path re-points this
-  // window's agent exactly like selecting a discovered project.
+  // Open one exact folder as a project, without changing the discovery root.
   function openExisting(): void {
     if (busy) return;
     void openFolderDialog({
       directory: true,
       multiple: false,
-      title: "Open existing project",
+      title: "Open project directly",
     })
       .then((picked) => {
         if (typeof picked === "string") choose(picked);
       })
       .catch(() => {});
+  }
+
+  // Save a parent folder as the discovery root, then immediately refresh so its
+  // direct child projects become visible without restarting the app.
+  function addProjectsFolder(): void {
+    if (busy) return;
+    setFolderError(null);
+    void openFolderDialog({
+      directory: true,
+      multiple: false,
+      title: "Add projects folder",
+    })
+      .then(async (picked) => {
+        if (typeof picked !== "string") return;
+        setBusy(true);
+        try {
+          await saveProjectsRoot(picked);
+          setProjectsRoot(picked);
+          setQuery("");
+          await reloadProjects();
+        } catch (reason: unknown) {
+          const detail = reason instanceof Error ? reason.message : String(reason);
+          setFolderError(`Couldn’t add that projects folder: ${detail}`);
+        } finally {
+          setBusy(false);
+        }
+      })
+      .catch((reason: unknown) => {
+        const detail = reason instanceof Error ? reason.message : String(reason);
+        setFolderError(`Couldn’t open the folder picker: ${detail}`);
+      });
   }
 
   return (
@@ -286,9 +337,17 @@ export function ProjectPicker({
                 className="btn btn-ghost btn-sm"
                 disabled={busy}
                 onMouseDown={(e) => e.stopPropagation()}
+                onClick={addProjectsFolder}
+              >
+                {"Add projects folder"}
+              </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={busy}
+                onMouseDown={(e) => e.stopPropagation()}
                 onClick={openExisting}
               >
-                {"Open existing"}
+                {"Open project directly"}
               </button>
               <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
                 {"+ New project"}
@@ -307,7 +366,24 @@ export function ProjectPicker({
       {!selected ? (
         <div className="picker-list">
           {loading && <ListSkeleton rows={6} />}
-          {!loading && projects.length === 0 && (
+          {!loading && projectsError && (
+            <div className="picker-error" role="alert">
+              <div>{projectsError}</div>
+              <button
+                className="btn btn-ghost btn-sm"
+                style={{ marginTop: 8 }}
+                onClick={() => void reloadProjects()}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {!loading && folderError && (
+            <div className="picker-error" role="alert">
+              {folderError}
+            </div>
+          )}
+          {!loading && !projectsError && projects.length === 0 && (
             <div className="picker-empty">
               <span style={{ color: theme.textMuted }}>No projects yet.</span>
               <span style={{ display: "flex", gap: 8 }}>
@@ -315,9 +391,17 @@ export function ProjectPicker({
                   className="btn btn-ghost btn-sm"
                   disabled={busy}
                   onMouseDown={(e) => e.stopPropagation()}
+                  onClick={addProjectsFolder}
+                >
+                  {"Add projects folder"}
+                </button>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy}
+                  onMouseDown={(e) => e.stopPropagation()}
                   onClick={openExisting}
                 >
-                  {"Open existing"}
+                  {"Open project directly"}
                 </button>
                 <button className="btn btn-primary btn-sm" onClick={() => setShowNew(true)}>
                   {"+ New project"}

@@ -246,6 +246,52 @@ export interface AppMarkerPayload extends RecordedPosition {
  */
 export const RUN_STARTED_CUSTOM_KIND = "run_started";
 export const RUN_FINISHED_CUSTOM_KIND = "run_finished";
+export const APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND = "approved_plan_consumption";
+
+export type ApprovedPlanConsumptionState =
+  | "approval-committed"
+  | "implementation-prompt-started"
+  | "completed";
+
+/** Server/session-owned snapshot of the exact approved plan consumed by the model. */
+export interface ApprovedPlanConsumptionRecord {
+  version: 1;
+  checkpointId: string;
+  generation: number;
+  content: string;
+  contentHash: string;
+  state: ApprovedPlanConsumptionState;
+  approvedPlanPath?: string;
+}
+
+export type ApprovedPlanConsumptionInput = Omit<ApprovedPlanConsumptionRecord, "version" | "state">;
+
+export function approvedPlanContentHash(content: string): string {
+  return crypto.createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function parseApprovedPlanConsumption(value: unknown): ApprovedPlanConsumptionRecord | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const payload = value as Partial<ApprovedPlanConsumptionRecord>;
+  if (
+    payload.version !== 1 ||
+    typeof payload.checkpointId !== "string" ||
+    payload.checkpointId.length === 0 ||
+    !Number.isSafeInteger(payload.generation) ||
+    (payload.generation ?? -1) < 0 ||
+    typeof payload.content !== "string" ||
+    typeof payload.contentHash !== "string" ||
+    !/^[a-f0-9]{64}$/.test(payload.contentHash) ||
+    approvedPlanContentHash(payload.content) !== payload.contentHash ||
+    (payload.state !== "approval-committed" &&
+      payload.state !== "implementation-prompt-started" &&
+      payload.state !== "completed") ||
+    (payload.approvedPlanPath !== undefined && typeof payload.approvedPlanPath !== "string")
+  ) {
+    return undefined;
+  }
+  return payload as ApprovedPlanConsumptionRecord;
+}
 
 export type RunOutcome = "completed" | "failed" | "aborted";
 
@@ -1298,14 +1344,29 @@ export class SessionManager {
     return metrics;
   }
 
-  private async appendEntryUnsafe(sessionPath: string, entry: SessionEntry): Promise<boolean> {
+  private async appendEntryUnsafe(
+    sessionPath: string,
+    entry: SessionEntry,
+    durable = false,
+  ): Promise<boolean> {
     // Persist a sanitized, bounded clone. The live conversation remains
     // untouched so the current turn keeps full tool output and media.
     const safeEntry = redactValue(entry, { secrets: environmentSecrets(process.env) });
     const writablePath = await thawSessionArchive(sessionPath);
     const normalized = await normalizeSessionEntryForStorage(safeEntry, writablePath);
     if (normalized === null) return false;
-    await fs.appendFile(writablePath, `${JSON.stringify(normalized)}\n`, "utf-8");
+    const serialized = `${JSON.stringify(normalized)}\n`;
+    if (durable) {
+      const file = await fs.open(writablePath, "a");
+      try {
+        await file.writeFile(serialized, "utf-8");
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+    } else {
+      await fs.appendFile(writablePath, serialized, "utf-8");
+    }
     return true;
   }
 
@@ -1318,18 +1379,47 @@ export class SessionManager {
   }
 
   async appendRequiredEntry(sessionPath: string, entry: SessionEntry): Promise<void> {
-    if (entry.type !== "custom" || entry.kind !== ACTIVE_PHASE_CONTEXT_KIND) {
-      throw new Error("Only active phase context metadata may use required session persistence.");
+    const requiredCustomKinds = new Set([
+      ACTIVE_PHASE_CONTEXT_KIND,
+      APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND,
+      APP_MARKER_CUSTOM_KIND,
+      RUN_STARTED_CUSTOM_KIND,
+    ]);
+    if (entry.type !== "custom" || !requiredCustomKinds.has(entry.kind)) {
+      throw new Error("This entry kind may not use required session persistence.");
     }
     try {
-      const appended = await this.appendEntryUnsafe(sessionPath, entry);
-      if (!appended) throw new Error("Required active phase context metadata was omitted.");
+      const appended = await this.appendEntryUnsafe(sessionPath, entry, true);
+      if (!appended) throw new Error(`Required ${entry.kind} metadata was omitted.`);
     } catch (error) {
       this.handlePersistError(error, "appendRequiredEntry", true);
       throw new RequiredSessionPersistenceError(
-        "Failed to persist required active phase context.",
-        { cause: error },
+        `Failed to persist required ${entry.kind} metadata.`,
+        {
+          cause: error,
+        },
       );
+    }
+  }
+
+  /** Append a required prompt and advance the message DAG leaf, failing loudly on either write. */
+  async appendRequiredMessage(sessionPath: string, entry: MessageEntry): Promise<void> {
+    try {
+      const writablePath = await thawSessionArchive(sessionPath);
+      const appended = await this.appendEntryUnsafe(writablePath, entry, true);
+      if (!appended) throw new Error("Required prompt message was omitted.");
+      await this.updateLeafUnsafe(writablePath, entry.id);
+      const file = await fs.open(writablePath, "r");
+      try {
+        await file.sync();
+      } finally {
+        await file.close();
+      }
+    } catch (error) {
+      this.handlePersistError(error, "appendRequiredMessage", true);
+      throw new RequiredSessionPersistenceError("Failed to persist required prompt message.", {
+        cause: error,
+      });
     }
   }
 
@@ -1345,9 +1435,36 @@ export class SessionManager {
     await this.appendEntry(sessionPath, entry);
   }
 
+  /** Persist the exact plan snapshot/state transition; this write is correctness-critical. */
+  async appendApprovedPlanConsumptionRequired(
+    sessionPath: string,
+    payload: ApprovedPlanConsumptionRecord,
+  ): Promise<void> {
+    await this.appendRequiredEntry(sessionPath, {
+      type: "custom",
+      kind: APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: payload,
+    });
+  }
+
   /** Open the run journal for one `RunLifecycle` generation. */
   async appendRunStarted(sessionPath: string, payload: RunStartedPayload): Promise<void> {
     await this.appendEntry(sessionPath, {
+      type: "custom",
+      kind: RUN_STARTED_CUSTOM_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: payload,
+    });
+  }
+
+  /** Required variant used before entering an approved-plan implementation run. */
+  async appendRunStartedRequired(sessionPath: string, payload: RunStartedPayload): Promise<void> {
+    await this.appendRequiredEntry(sessionPath, {
       type: "custom",
       kind: RUN_STARTED_CUSTOM_KIND,
       id: crypto.randomUUID(),
@@ -1415,6 +1532,39 @@ export class SessionManager {
       }
     }
     return runs;
+  }
+
+  /** Reduce append-only plan snapshots/transitions in file order. */
+  getApprovedPlanConsumption(entries: SessionEntry[]): ApprovedPlanConsumptionRecord | undefined {
+    let current: ApprovedPlanConsumptionRecord | undefined;
+    for (const entry of entries) {
+      if (entry.type !== "custom" || entry.kind !== APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND) continue;
+      const parsed = parseApprovedPlanConsumption(entry.data);
+      if (!parsed) {
+        log("WARN", "session", "Ignoring malformed approved plan consumption metadata", {
+          entryId: entry.id,
+        });
+        continue;
+      }
+      if (parsed.state === "completed") {
+        current = undefined;
+        continue;
+      }
+      if (parsed.state === "approval-committed") {
+        current = parsed;
+        continue;
+      }
+      if (
+        current &&
+        current.checkpointId === parsed.checkpointId &&
+        current.generation === parsed.generation &&
+        current.contentHash === parsed.contentHash &&
+        current.content === parsed.content
+      ) {
+        current = parsed;
+      }
+    }
+    return current;
   }
 
   /** Runs that opened the journal but never closed it — i.e. crashed mid-flight. */
@@ -1582,7 +1732,8 @@ export class SessionManager {
             kind === "agent_handoff" ||
             kind === "model_switch" ||
             kind === "import" ||
-            kind === "interrupted_run")
+            kind === "interrupted_run" ||
+            kind === "plan_gate")
         ) {
           return [
             {

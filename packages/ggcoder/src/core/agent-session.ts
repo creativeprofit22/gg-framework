@@ -3336,6 +3336,26 @@ export class AgentSession {
    * attach to the user message about to be pushed by the imminent prompt.
    * No-op persistence for transient sessions.
    */
+  async persistRequiredAppMarker(
+    kind: AppMarkerPayload["kind"],
+    data: Record<string, unknown>,
+    anchorOffset = 0,
+  ): Promise<void> {
+    const afterMessageCount = this.persistedTranscriptCount() + anchorOffset;
+    const payload: AppMarkerPayload = { version: 1, kind, afterMessageCount, data };
+    if (!this.sessionPath) throw new Error("Required app markers need a persistent session.");
+    const entry: CustomEntry = {
+      type: "custom",
+      kind: APP_MARKER_CUSTOM_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: payload,
+    };
+    await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
+    this.appMarkers.push(payload);
+  }
+
   async persistAppMarker(
     kind: AppMarkerPayload["kind"],
     data: Record<string, unknown>,
@@ -3694,7 +3714,7 @@ export class AgentSession {
     return this.messages;
   }
 
-  private async persistMessage(message: Message): Promise<void> {
+  private async persistMessage(message: Message, required = false): Promise<void> {
     if (
       !this.sessionPreview &&
       message.role === "user" &&
@@ -3712,9 +3732,13 @@ export class AgentSession {
       timestamp: new Date().toISOString(),
       message,
     };
-    await this.sessionManager.appendEntry(this.sessionPath, entry);
+    if (required) {
+      await this.sessionManager.appendRequiredMessage(this.sessionPath, entry);
+    } else {
+      await this.sessionManager.appendEntry(this.sessionPath, entry);
+      await this.sessionManager.updateLeaf(this.sessionPath, entryId);
+    }
     this.currentLeafId = entryId;
-    await this.sessionManager.updateLeaf(this.sessionPath, entryId);
   }
 
   private createSlashCommandContext(): SlashCommandContext {

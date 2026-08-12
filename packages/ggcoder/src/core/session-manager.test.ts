@@ -10,6 +10,8 @@ import {
   AUTOPILOT_MARKER_CUSTOM_KIND,
   APP_MARKER_CUSTOM_KIND,
   TURN_METRIC_CUSTOM_KIND,
+  APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND,
+  approvedPlanContentHash,
   type SessionEntry,
   type TurnMetricPayload,
   type CustomEntry,
@@ -696,5 +698,67 @@ describe("SessionManager.pruneOldSessions", () => {
     await manager.pruneOldSessions({ maxAgeDays: 30 });
     expect(existsSync(oldPath)).toBe(false);
     expect(await readdir(sessionsDir)).toHaveLength(0);
+  });
+});
+
+describe("approved plan consumption", () => {
+  it("restores the exact committed content and latest valid state", async () => {
+    const manager = new SessionManager(await makeTempDir());
+    const content = "# Human-approved plan\n\n## Steps\n1. Implement it.";
+    const contentHash = approvedPlanContentHash(content);
+    const base = {
+      version: 1 as const,
+      checkpointId: "checkpoint-1",
+      generation: 2,
+      content,
+      contentHash,
+      approvedPlanPath: "/mutable/approved.md",
+    };
+    const entries: SessionEntry[] = [
+      {
+        type: "custom",
+        kind: APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND,
+        id: "committed",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        data: { ...base, state: "approval-committed" },
+      },
+      {
+        type: "custom",
+        kind: APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND,
+        id: "started",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        data: { ...base, state: "implementation-prompt-started" },
+      },
+    ];
+
+    expect(manager.getApprovedPlanConsumption(entries)).toEqual({
+      ...base,
+      state: "implementation-prompt-started",
+    });
+  });
+
+  it("ignores substituted content whose hash no longer matches", async () => {
+    const manager = new SessionManager(await makeTempDir());
+    const entries: SessionEntry[] = [
+      {
+        type: "custom",
+        kind: APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND,
+        id: "tampered",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        data: {
+          version: 1,
+          checkpointId: "checkpoint-1",
+          generation: 2,
+          content: "substituted content",
+          contentHash: approvedPlanContentHash("human-approved content"),
+          state: "approval-committed",
+        },
+      },
+    ];
+
+    expect(manager.getApprovedPlanConsumption(entries)).toBeUndefined();
   });
 });

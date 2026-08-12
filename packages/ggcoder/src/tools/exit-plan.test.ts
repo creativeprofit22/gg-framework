@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AppSidecarPlanGate, hashPlanContent } from "../app-sidecar-plan-gate.js";
 import { createExitPlanTool } from "./exit-plan.js";
 
 const context = () => ({ signal: new AbortController().signal, toolCallId: "exit-plan-test" });
@@ -41,8 +42,42 @@ describe("createExitPlanTool", () => {
     const result = await tool.execute({ plan_path: ".gg/plans/plan.md" }, context());
 
     expect(asText(result)).toBe("Plan submitted.");
-    expect(onExitPlan).toHaveBeenCalledWith(planPath);
+    expect(onExitPlan).toHaveBeenCalledWith(
+      planPath,
+      "# My Plan\n\nContext here.\n\n## Steps\n\n1. Implement the feature in src/a.ts\n2. Add tests for the feature\n",
+    );
   });
+
+  it.each(["replaced", "removed"] as const)(
+    "persists the exact validated bytes when the plan file is %s after validation",
+    async (mutation) => {
+      const planPath = path.join(plansDir, "immutable.md");
+      const validatedContent = "# Immutable Plan\n\n## Steps\n\n1. Persist these exact bytes\n";
+      await fs.writeFile(planPath, validatedContent);
+      const persisted: Array<{ content: string; contentHash: string }> = [];
+      const gate = new AppSidecarPlanGate([], async (checkpoint) => {
+        persisted.push(checkpoint);
+      });
+      const tool = createExitPlanTool(cwd, async (submittedPath, content) => {
+        if (mutation === "replaced") {
+          await fs.writeFile(submittedPath, "# Substituted after validation\n");
+        } else {
+          await fs.rm(submittedPath);
+        }
+        await gate.submit(submittedPath, content);
+        return "Plan submitted.";
+      });
+
+      const result = await tool.execute({ plan_path: ".gg/plans/immutable.md" }, context());
+
+      expect(asText(result)).toBe("Plan submitted.");
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]).toMatchObject({
+        content: validatedContent,
+        contentHash: hashPlanContent(validatedContent),
+      });
+    },
+  );
 
   it("rejects a step-less plan with the remediation message and never calls onExitPlan", async () => {
     await fs.writeFile(

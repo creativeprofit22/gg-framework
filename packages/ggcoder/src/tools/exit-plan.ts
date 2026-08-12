@@ -11,7 +11,7 @@ const ExitPlanParams = z.object({
 
 export function createExitPlanTool(
   cwd: string,
-  onExitPlan: (planPath: string) => Promise<string>,
+  onExitPlan: (planPath: string, content: string) => Promise<string>,
 ): AgentTool<typeof ExitPlanParams> {
   return {
     name: "exit_plan",
@@ -51,7 +51,9 @@ export function createExitPlanTool(
         );
       }
 
-      return onExitPlan(resolved);
+      // Carry the exact validated snapshot across the callback boundary; the path
+      // may be edited or removed before a review checkpoint is persisted.
+      return onExitPlan(resolved, content);
     },
   };
 }

@@ -93,6 +93,42 @@ describe("AppSidecarPlanGate", () => {
     expect(gate.pending()?.content).toBe("second");
   });
 
+  it("keeps plan mode write-protected when exit_plan checkpoint persistence rejects", async () => {
+    const source = await fs.readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
+    const submitIndex = source.indexOf("const checkpoint = await planGate.submit(planPath, content);");
+    const disableIndex = source.indexOf("await created.setPlanMode(false);", submitIndex);
+    expect(submitIndex).toBeGreaterThanOrEqual(0);
+    expect(disableIndex).toBeGreaterThan(submitIndex);
+
+    const planModeRef = { current: true };
+    const persist = vi.fn(async () => {
+      throw new Error("approval persistence rejected");
+    });
+    const gate = new AppSidecarPlanGate(
+      [],
+      persist,
+      () => "checkpoint-regression",
+      () => NOW,
+    );
+    const exitPlan = async () => {
+      const checkpoint = await gate.submit("/plan.md", "# Plan\n\n## Steps\n\n1. Test");
+      planModeRef.current = false;
+      return checkpoint;
+    };
+
+    await expect(exitPlan()).rejects.toThrow("approval persistence rejected");
+    expect(planModeRef.current).toBe(true);
+    expect(gate.current()).toBeNull();
+    expect(persist).toHaveBeenCalledTimes(1);
+
+    const writeTool = createWriteTool(process.cwd(), undefined, undefined, planModeRef);
+    const result = await writeTool.execute(
+      { file_path: "src/should-not-write.ts", content: "export {};\n" },
+      { signal: new AbortController().signal, toolCallId: "exit-plan-regression" },
+    );
+    expect(String(result)).toContain("write is restricted in plan mode");
+  });
+
   it("approves the persisted snapshot instead of caller paths or later file bytes", async () => {
     let diskContent = "original reviewed plan";
     const persisted: PersistedPlanReviewCheckpoint[] = [];

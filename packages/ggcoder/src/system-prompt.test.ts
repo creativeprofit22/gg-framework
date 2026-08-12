@@ -529,6 +529,18 @@ describe("buildSystemPrompt", () => {
     expect(openai.startsWith("You are GG Coder by Ken Kai")).toBe(true);
     expect(openai).not.toContain("You are Claude Code");
   });
+
+  it("renders the exact approved snapshot after its source file is mutated", async () => {
+    const cwd = await makeProject({ ".gg/plans/approved/checkpoint.md": "substituted bytes" });
+    const approvedPlanPath = path.join(cwd, ".gg/plans/approved/checkpoint.md");
+    const prompt = await buildSystemPrompt(cwd, undefined, false, {
+      content: "human-approved bytes",
+      approvedPlanPath,
+    });
+
+    expect(prompt).toContain("human-approved bytes");
+    expect(prompt).not.toContain("substituted bytes");
+  });
 });
 
 describe("collectProjectContext", () => {

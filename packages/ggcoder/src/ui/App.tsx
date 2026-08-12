@@ -245,7 +245,7 @@ export interface AppProps {
   connectInitialMcpTools?: () => Promise<AgentTool[]>;
   planCallbacks?: {
     onEnterPlan?: (reason?: string) => void | Promise<void>;
-    onExitPlan?: (planPath: string) => Promise<string>;
+    onExitPlan?: (planPath: string, content: string) => Promise<string>;
   };
   terminalHistoryPrinter?: TerminalHistoryPrinter;
   /**
@@ -2960,7 +2960,7 @@ export function App(props: AppProps) {
   );
 
   const handleExitPlanMode = useCallback(
-    async (_planPath: string): Promise<string> => {
+    async (_planPath: string, _content: string): Promise<string> => {
       await setPlanModeAndPrompt(false);
       planOverlayPendingRef.current = true;
       setPlanAutoExpand(true);

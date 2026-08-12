@@ -84,13 +84,21 @@ function renderPlanModeSection(): string {
   );
 }
 
-async function renderApprovedPlanSection(
-  approvedPlanPath: string | undefined,
-): Promise<string | null> {
-  if (!approvedPlanPath) return null;
-  const planContent = await fs.readFile(approvedPlanPath, "utf-8").catch(() => null);
-  if (planContent === null) return null;
-  if (!planContent.trim()) return null;
+export interface ApprovedPlanPromptContent {
+  /** Exact immutable content captured when approval committed. */
+  content: string;
+  /** Display/source metadata only; never read while building the prompt. */
+  approvedPlanPath?: string;
+}
+
+function renderApprovedPlanSection(
+  approvedPlan: ApprovedPlanPromptContent | undefined,
+): string | null {
+  if (!approvedPlan?.content.trim()) return null;
+  const planContent = approvedPlan.content;
+  const displaySource = approvedPlan.approvedPlanPath
+    ? ` File: ${approvedPlan.approvedPlanPath}`
+    : "";
   // The `[DONE:n]` progress contract only applies when `extractPlanSteps`
   // actually finds a step section (a `## Steps` heading or a close synonym).
   // Without it there are no tracked steps, so instructing the model to march
@@ -102,7 +110,7 @@ async function renderApprovedPlanSection(
     : "";
   return (
     `## Approved Plan\n\n` +
-    `Follow this plan strictly. File: ${approvedPlanPath}\n\n` +
+    `Follow this plan strictly.${displaySource}\n\n` +
     `<approved_plan>\n${planContent.trim()}\n</approved_plan>\n\n` +
     `- Follow step order. Don't deviate without user confirmation.` +
     stepInstruction
@@ -425,7 +433,7 @@ export async function buildSystemPrompt(
   cwd: string,
   skills?: Skill[],
   planMode?: boolean,
-  approvedPlanPath?: string,
+  approvedPlan?: ApprovedPlanPromptContent | string,
   toolNames?: readonly string[],
   activeLanguages?: Set<LanguageId>,
   provider?: Provider,
@@ -440,7 +448,14 @@ export async function buildSystemPrompt(
 
   if (planMode) sections.push(renderPlanModeSection());
 
-  const approvedPlanSection = await renderApprovedPlanSection(approvedPlanPath);
+  const approvedPlanContent =
+    typeof approvedPlan === "string"
+      ? await fs
+          .readFile(approvedPlan, "utf-8")
+          .then((content) => ({ content, approvedPlanPath: approvedPlan }))
+          .catch(() => undefined)
+      : approvedPlan;
+  const approvedPlanSection = renderApprovedPlanSection(approvedPlanContent);
   if (approvedPlanSection) sections.push(approvedPlanSection);
 
   sections.push(renderResearchSection(toolNames, provider), renderCodeQualitySection());

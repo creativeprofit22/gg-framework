@@ -54,7 +54,7 @@ export interface CreateToolsOptions {
   /** Callback when the LLM enters plan mode. */
   onEnterPlan?: (reason?: string) => void | Promise<void>;
   /** Callback when the LLM submits a plan for review. */
-  onExitPlan?: (planPath: string) => Promise<string>;
+  onExitPlan?: (planPath: string, content: string) => Promise<string>;
   /** Callback after read tool successfully reads a text file. */
   onFileRead?: (filePath: string) => void | Promise<void>;
   /** Callback after write/edit tools successfully mutate a file. */

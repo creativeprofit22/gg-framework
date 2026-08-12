@@ -621,7 +621,7 @@ async function runInkTUI(opts: {
   const planModeRef = { current: false };
   const planToolCallbacks: {
     onEnterPlan?: (reason?: string) => void | Promise<void>;
-    onExitPlan?: (planPath: string) => Promise<string>;
+    onExitPlan?: (planPath: string, content: string) => Promise<string>;
   } = {};
 
   // Holder so the (cwd-bound) tools can snapshot pre-mutation file state for
@@ -651,8 +651,9 @@ async function runInkTUI(opts: {
       }),
       authStorage,
       onEnterPlan: (reason) => planToolCallbacks.onEnterPlan?.(reason),
-      onExitPlan: (planPath) =>
-        planToolCallbacks.onExitPlan?.(planPath) ?? Promise.resolve("Plan review is unavailable."),
+      onExitPlan: (planPath, content) =>
+        planToolCallbacks.onExitPlan?.(planPath, content) ??
+        Promise.resolve("Plan review is unavailable."),
       getProvider: () => activeProvider,
       getModel: () => activeModel,
       getThinkingLevel: () => activeThinking,

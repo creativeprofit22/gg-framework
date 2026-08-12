@@ -282,11 +282,10 @@ class ScriptedSession {
     // with the [DONE:n] markers the approval instruction asks for.
     if (content === "approve a plan") {
       const planFile = path.join(cwd, "plan.md");
-      writeFileSync(
-        planFile,
-        "# Plan\n\n## Steps\n\n1. Wire the transport layer\n2. Render the results\n3. Ship the thing\n",
-      );
-      await this.hooks.onExitPlan(planFile);
+      const planContent =
+        "# Plan\n\n## Steps\n\n1. Wire the transport layer\n2. Render the results\n3. Ship the thing\n";
+      writeFileSync(planFile, planContent);
+      await this.hooks.onExitPlan(planFile, planContent);
       this.eventBus.emit("text_delta", { text: "Transport done. [DONE" });
       // Split across two deltas on purpose: a marker that straddles a chunk
       // boundary must still register.

@@ -139,7 +139,7 @@ export interface AcpAgentSession {
 export interface AcpPlanHooks {
   onEnterPlan: () => Promise<void>;
   /** Returns the instruction handed back to the model after approval. */
-  onExitPlan: (planPath: string) => Promise<string>;
+  onExitPlan: (planPath: string, content: string) => Promise<string>;
 }
 
 export interface AcpModeOptions {
@@ -786,9 +786,9 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
    * that was approved, so carrying completions across a new one would mark
    * steps of the new plan done that nobody has started.
    */
-  function adoptPlan(approvedPath: string): void {
+  function adoptPlan(approvedPath: string, content: string): void {
     planPath = approvedPath;
-    planSteps = extractPlanSteps(readPlanFile(approvedPath));
+    planSteps = extractPlanSteps(content);
     completedSteps.clear();
     notifyPlan();
   }
@@ -1074,13 +1074,13 @@ export async function runAcpMode(options: AcpModeOptions): Promise<void> {
       await session?.setPlanMode(true);
       notifyModeChange(MODE_PLAN);
     },
-    onExitPlan: async (approvedPath) => {
+    onExitPlan: async (approvedPath, content) => {
       await session?.setPlanMode(false);
       await session?.setApprovedPlan(approvedPath);
       notifyModeChange(MODE_DEFAULT);
-      // The approved plan becomes the client's to-do list, which then advances
-      // from the [DONE:n] markers the returned instruction asks for.
-      adoptPlan(approvedPath);
+      // The exact validated snapshot becomes the client's initial to-do list.
+      // Later progress refreshes may still incorporate deliberate implementation edits.
+      adoptPlan(approvedPath, content);
       return "Plan approved. Proceed with implementation, marking each completed step with [DONE:n].";
     },
   };

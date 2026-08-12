@@ -82,7 +82,7 @@ export interface RenderAppConfig {
   onRuntimeStateChange?: (updates: Partial<RuntimeState>) => void;
   planCallbacks?: {
     onEnterPlan?: (reason?: string) => void | Promise<void>;
-    onExitPlan?: (planPath: string) => Promise<string>;
+    onExitPlan?: (planPath: string, content: string) => Promise<string>;
   };
 }
 

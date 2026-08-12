@@ -205,6 +205,22 @@ function renderActivityItem(item: ActivityItem): ReactNode {
       </>
     );
   }
+  if (event.type === "phase-advancement-checkpoint") {
+    return (
+      <>
+        <strong>{roadmapReviewerLabel(event.reviewer)}</strong> {timestamp}
+        <p>Next phase is ready for explicit human confirmation.</p>
+      </>
+    );
+  }
+  if (event.type === "phase-advancement-confirmation") {
+    return (
+      <>
+        <strong>User</strong> {timestamp}
+        <p>Start next phase confirmed.</p>
+      </>
+    );
+  }
   if (event.type === "reference-decision") {
     return (
       <>

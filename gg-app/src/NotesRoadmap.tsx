@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { notesLifecyclePresentation } from "./notes-lifecycle-presentation";
 import { openReferenceUrl, type OpenReferenceUrl } from "./notes-open-source";
 import { referenceSourceLabel } from "./notes-reference";
+import type { SlashCommand } from "./agent";
 import { NotesPhaseDetail } from "./notes-roadmap/NotesPhaseDetail";
+import { resolveRoadmapCommandActions } from "./notes-roadmap/roadmap-command-actions";
 import type { NotesPhaseDetailProps } from "./notes-roadmap/NotesPhaseDetailState";
 import {
   activeRoadmapBlocker,
@@ -12,7 +14,9 @@ import {
   referenceLinkAnnouncement,
   reminderRowLabel,
   roadmapMutationMessage,
-  selectManualRoadmapAdvancement,
+  selectRoadmapAdvancement,
+  isRoadmapPhaseStartProtected,
+  isRoadmapTopologyMutationBlocked,
   statusLabel,
 } from "./notes-roadmap/roadmap-presentation";
 import type { NotesPhaseInput } from "./useProjectNotes";
@@ -76,6 +80,9 @@ interface RoadmapProps {
     expectedOccurrenceKey: string,
   ): Promise<NotesReminderMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onStartNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
+  commands: SlashCommand[];
+  onRunCommand(invocation: string): void;
   onCancelPhase(phaseId: string): Promise<PhaseRunCancellationResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
@@ -113,6 +120,9 @@ export function NotesRoadmap({
   onSnoozeReminder,
   onDismissReminder,
   onStartPhase,
+  onStartNextPhase,
+  commands,
+  onRunCommand,
   onCancelPhase,
   onResumePhase,
   startUnavailableReason,
@@ -133,7 +143,8 @@ export function NotesRoadmap({
   const newPhaseButtonRef = useRef<HTMLButtonElement>(null);
   const phaseTitleRefs = useRef(new Map<string, HTMLButtonElement>());
   const selectedPhase = visiblePhases.find((phase) => phase.id === selectedId) ?? null;
-  const manualAdvancement = useMemo(() => selectManualRoadmapAdvancement(phases), [phases]);
+  const advancement = useMemo(() => selectRoadmapAdvancement(phases), [phases]);
+  const commandActions = useMemo(() => resolveRoadmapCommandActions(commands), [commands]);
   const [nextPhaseStatus, setNextPhaseStatus] = useState("");
 
   useEffect(() => {
@@ -189,18 +200,19 @@ export function NotesRoadmap({
 
   const startNextPhase = async (): Promise<void> => {
     if (
-      !manualAdvancement ||
+      !advancement ||
+      !advancement.ready ||
       pendingPhaseId !== null ||
       actionDisabled ||
       startUnavailableReason !== null
     ) {
       return;
     }
-    const nextPhase = manualAdvancement.nextPhase;
+    const nextPhase = advancement.nextPhase;
     setPendingPhaseId(nextPhase.id);
     setNextPhaseStatus("Starting the next phase…");
     try {
-      const result = await onStartPhase(nextPhase.id);
+      const result = await onStartNextPhase(advancement.checkpoint.id, nextPhase.id);
       if (result.status === "accepted") {
         setNextPhaseStatus("Next phase started. Opening its planning session.");
         setAnnouncement(`Started next phase: ${nextPhase.title}`);
@@ -249,6 +261,7 @@ export function NotesRoadmap({
               : `Changed ${selectedPhase.title} to ${statusLabel(status)}`,
           );
         },
+        isTopologyMutationBlocked: (mutation) => isRoadmapTopologyMutationBlocked(phases, mutation),
         onArchivePhase: () => {
           const selectedIndex = visiblePhases.findIndex((phase) => phase.id === selectedPhase.id);
           const focusId =
@@ -304,7 +317,9 @@ export function NotesRoadmap({
         onDismissReminder,
         onStartPhase,
         onResumePhase,
-        startUnavailableReason,
+        startUnavailableReason: isRoadmapPhaseStartProtected(phases, selectedPhase.id)
+          ? "Use Start next phase to confirm the pending Roadmap advancement."
+          : startUnavailableReason,
         actionDisabled,
         onPendingChange: (pending) => setPendingPhaseId(pending ? selectedPhase.id : null),
         onActionSuccess,
@@ -386,14 +401,20 @@ export function NotesRoadmap({
         </div>
       </form>
 
-      {manualAdvancement && (
+      {advancement && (
         <section className="notes-roadmap-next-phase" aria-labelledby="notes-next-phase-title">
           <div>
-            <p className="notes-roadmap-next-phase-kicker">Phase complete</p>
-            <h3 id="notes-next-phase-title">Ready for {manualAdvancement.nextPhase.title}</h3>
+            <p className="notes-roadmap-next-phase-kicker">
+              {advancement.ready ? "Phase complete" : "Roadmap target needs recovery"}
+            </p>
+            <h3 id="notes-next-phase-title">
+              {advancement.ready
+                ? `Ready for ${advancement.nextPhase.title}`
+                : `Restore ${advancement.nextPhase.title}`}
+            </h3>
             <p>
-              {manualAdvancement.completedPhase.title} is Done. Start the next Roadmap phase when
-              you’re ready.
+              {advancement.recoveryReason ??
+                `${advancement.completedPhase.title} is Done. Start the next Roadmap phase when you’re ready.`}
             </p>
             {nextPhaseStatus && (
               <p className="notes-roadmap-next-phase-status" role="status">
@@ -404,14 +425,35 @@ export function NotesRoadmap({
           <button
             type="button"
             className="notes-roadmap-primary"
-            disabled={pendingPhaseId !== null || actionDisabled || startUnavailableReason !== null}
-            title={startUnavailableReason ?? undefined}
+            disabled={
+              !advancement.ready ||
+              pendingPhaseId !== null ||
+              actionDisabled ||
+              startUnavailableReason !== null
+            }
+            title={advancement.recoveryReason ?? startUnavailableReason ?? undefined}
             onClick={() => void startNextPhase()}
           >
-            {pendingPhaseId === manualAdvancement.nextPhase.id
+            {pendingPhaseId === advancement.nextPhase.id
               ? "Starting next phase…"
               : "Start next phase"}
           </button>
+          {commandActions.length > 0 && (
+            <div className="notes-roadmap-next-phase-commands" aria-label="Review commands">
+              {commandActions.map((action) => (
+                <button
+                  key={action.canonicalName}
+                  type="button"
+                  disabled={
+                    pendingPhaseId !== null || actionDisabled || startUnavailableReason !== null
+                  }
+                  onClick={() => onRunCommand(action.invocation)}
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          )}
         </section>
       )}
 
@@ -518,6 +560,18 @@ export function NotesRoadmapArchive({ phases, onRestorePhase }: ArchiveProps): R
                 <button
                   type="button"
                   aria-label={`Restore phase: ${phase.title}`}
+                  disabled={isRoadmapTopologyMutationBlocked(phases, {
+                    type: "restore",
+                    phaseId: phase.id,
+                  })}
+                  title={
+                    isRoadmapTopologyMutationBlocked(phases, {
+                      type: "restore",
+                      phaseId: phase.id,
+                    })
+                      ? "Restoring this phase would replace the target protected by a pending advancement review."
+                      : undefined
+                  }
                   onClick={() => {
                     onRestorePhase(phase.id);
                     setAnnouncement(`Restored phase: ${phase.title}`);

@@ -42,6 +42,7 @@ import {
   sessionAction,
   unresolvedRoadmapProposals,
   type PhasePrimaryAction,
+  type RoadmapTopologyMutation,
 } from "./roadmap-presentation";
 
 export interface NotesPhaseDetailProps {
@@ -57,6 +58,7 @@ export interface NotesPhaseDetailProps {
   onMovePhase(id: string, direction: "up" | "down"): void;
   onChangePhaseStatus(status: NotesPhaseStatus): void;
   onArchivePhase(): void;
+  isTopologyMutationBlocked(mutation: RoadmapTopologyMutation): boolean;
   onCancelPhase(): Promise<PhaseRunCancellationResult>;
   onLinkReference(referenceId: string): void;
   onUnlinkReference(referenceId: string): void;

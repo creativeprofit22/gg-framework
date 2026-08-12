@@ -3,6 +3,7 @@ import { Modal } from "./Modal";
 import { NotesCurrentFocus } from "./NotesCurrentFocus";
 import { NotesHandoff } from "./NotesHandoff";
 import { NotesReferences } from "./NotesReferences";
+import type { SlashCommand } from "./agent";
 import { NotesRoadmap, NotesRoadmapArchive } from "./NotesRoadmap";
 import { NotesTaskList } from "./NotesTaskList";
 import type { NotesReferenceInput } from "./notes-reference";
@@ -101,6 +102,9 @@ interface Props {
   ): Promise<NotesReminderMutationResult>;
   openSource?: OpenReferenceUrl;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onStartNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
+  commands: SlashCommand[];
+  onRunCommand(invocation: string): void;
   onCancelPhase(phaseId: string): Promise<PhaseRunCancellationResult>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   phaseStartUnavailableReason: string | null;
@@ -162,6 +166,9 @@ export function NotesModal({
   onDismissReminder,
   openSource,
   onStartPhase,
+  onStartNextPhase,
+  commands,
+  onRunCommand,
   onCancelPhase,
   onResumePhase,
   phaseStartUnavailableReason,
@@ -341,6 +348,9 @@ export function NotesModal({
                   onSnoozeReminder={onSnoozeReminder}
                   onDismissReminder={onDismissReminder}
                   onStartPhase={onStartPhase}
+                  onStartNextPhase={onStartNextPhase}
+                  commands={commands}
+                  onRunCommand={onRunCommand}
                   onCancelPhase={onCancelPhase}
                   onResumePhase={onResumePhase}
                   startUnavailableReason={phaseStartUnavailableReason}

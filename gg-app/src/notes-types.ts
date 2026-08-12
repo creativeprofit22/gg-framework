@@ -88,6 +88,8 @@ export type {
   NotesRoadmapCompletionReview,
   NotesRoadmapEvent,
   NotesRoadmapImplementationCheckpoint,
+  NotesRoadmapPhaseAdvancementCheckpoint,
+  NotesRoadmapPhaseAdvancementConfirmation,
   NotesRoadmapOverrideReset,
   NotesRoadmapReferenceDecision,
   NotesRoadmapReferencePolicyOutcome,

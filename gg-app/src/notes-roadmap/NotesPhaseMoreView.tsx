@@ -168,6 +168,7 @@ export function NotesPhaseMoreControls(): ReactElement {
     onChangePhaseStatus,
     onMovePhase,
     onArchivePhase,
+    isTopologyMutationBlocked,
     resumeAutomaticStatus,
     runCancellation,
   } = useNotesPhaseDetail();
@@ -223,14 +224,34 @@ export function NotesPhaseMoreControls(): ReactElement {
             {canPauseAutomation && (
               <button
                 type="button"
-                disabled={controlsDisabled}
+                disabled={
+                  controlsDisabled ||
+                  isTopologyMutationBlocked({ type: "pause-status", phaseId: phase.id })
+                }
+                title={
+                  isTopologyMutationBlocked({ type: "pause-status", phaseId: phase.id })
+                    ? "Confirm or recover the pending Roadmap advancement before pausing this phase."
+                    : undefined
+                }
                 onClick={() => onChangePhaseStatus(phase.status)}
               >
                 Pause automation
               </button>
             )}
             {phase.overrides.status && (
-              <button type="button" disabled={controlsDisabled} onClick={resumeAutomaticStatus}>
+              <button
+                type="button"
+                disabled={
+                  controlsDisabled ||
+                  isTopologyMutationBlocked({ type: "resume-status", phaseId: phase.id })
+                }
+                title={
+                  isTopologyMutationBlocked({ type: "resume-status", phaseId: phase.id })
+                    ? "Resuming this phase would replace the target protected by a pending advancement review."
+                    : undefined
+                }
+                onClick={resumeAutomaticStatus}
+              >
                 {pendingRoadmapAction === "resume-status" ? "Resuming…" : "Resume automation"}
               </button>
             )}
@@ -248,19 +269,48 @@ export function NotesPhaseMoreControls(): ReactElement {
         <div className="notes-phase-secondary-actions">
           <button
             type="button"
-            disabled={controlsDisabled || position === 0}
+            disabled={
+              controlsDisabled ||
+              position === 0 ||
+              isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "up" })
+            }
+            title={
+              isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "up" })
+                ? "This move would change the target protected by a pending advancement review."
+                : undefined
+            }
             onClick={() => onMovePhase(phase.id, "up")}
           >
             Move up
           </button>
           <button
             type="button"
-            disabled={controlsDisabled || position === phaseCount - 1}
+            disabled={
+              controlsDisabled ||
+              position === phaseCount - 1 ||
+              isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "down" })
+            }
+            title={
+              isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "down" })
+                ? "This move would change the target protected by a pending advancement review."
+                : undefined
+            }
             onClick={() => onMovePhase(phase.id, "down")}
           >
             Move down
           </button>
-          <button type="button" disabled={controlsDisabled} onClick={onArchivePhase}>
+          <button
+            type="button"
+            disabled={
+              controlsDisabled || isTopologyMutationBlocked({ type: "archive", phaseId: phase.id })
+            }
+            title={
+              isTopologyMutationBlocked({ type: "archive", phaseId: phase.id })
+                ? "Confirm the pending Roadmap advancement before archiving this phase."
+                : undefined
+            }
+            onClick={onArchivePhase}
+          >
             Archive phase
           </button>
         </div>

@@ -1526,13 +1526,25 @@ describe("ProjectNotes", () => {
     ).toBe(false);
   });
 
-  it("offers the next eligible phase after a manual Done review and starts only on action", async () => {
+  it("offers persisted next-phase and resolved command actions without conflating authority", async () => {
     const cwd = "/work/manual-next-phase";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("manual next phase");
     const completed = phase("completed", "done");
     completed.title = "Completed foundation";
-    completed.roadmapEvents = [completionReview({ reviewer: "ken" })];
+    const review = completionReview({ reviewer: "ken" });
+    completed.roadmapEvents = [
+      review,
+      {
+        type: "phase-advancement-checkpoint",
+        id: "checkpoint-next",
+        completionReviewId: review.id,
+        completedPhaseId: completed.id,
+        nextPhaseId: "next",
+        reviewer: "ken",
+        timestamp: NOW,
+      },
+    ];
     const archived = phase("archived", "not-started");
     archived.order = 1;
     archived.archivedAt = NOW;
@@ -1543,27 +1555,117 @@ describe("ProjectNotes", () => {
     next.order = 3;
     document.phases = [completed, archived, alreadyDone, next];
     client.seed(cwd, document);
-    const onStartPhase = vi.fn(async () => ({
+    const onStartNextPhase = vi.fn(async () => ({
       status: "accepted" as const,
       operationId: "operation-next",
       session: { sessionId: "session-next", sessionPath: "/sessions/next.jsonl" },
       packageTokenCount: 42,
     }));
-    render(<ProjectNotes cwd={cwd} client={client} onStartPhase={onStartPhase} />);
+    const onRunCommand = vi.fn();
+    render(
+      <ProjectNotes
+        cwd={cwd}
+        client={client}
+        onStartNextPhase={onStartNextPhase}
+        commands={[
+          { name: "Diff", aliases: ["compare"], description: "Compare", source: "custom" },
+          { name: "trace", aliases: [], description: "Trace", source: "custom" },
+        ]}
+        onRunCommand={onRunCommand}
+      />,
+    );
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
 
     const advancement = screen.getByRole("region", { name: "Ready for Ship the integration" });
     expect(advancement.textContent).toContain("Completed foundation is Done");
-    expect(onStartPhase).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Start next phase" }));
+    expect(onStartNextPhase).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Run /compare" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Run /trace" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Run /parity" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Run /compare" }));
+    expect(onRunCommand).toHaveBeenCalledExactlyOnceWith("/Diff");
+    expect(screen.getByRole("button", { name: "Start next phase" })).toBeTruthy();
 
-    expect(onStartPhase).toHaveBeenCalledExactlyOnceWith("next");
+    fireEvent.click(screen.getByRole("button", { name: "Start next phase" }));
+    expect(onStartNextPhase).toHaveBeenCalledExactlyOnceWith("checkpoint-next", "next");
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("does not show a manual next-phase action for an Autopilot completion", async () => {
+  it("blocks ordinary Start for a stale successor and exposes target recovery", async () => {
+    const cwd = "/work/stale-next-phase";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("stale next phase");
+    const completed = phase("completed", "done");
+    completed.title = "Completed foundation";
+    const review = completionReview({ reviewer: "ken" });
+    completed.roadmapEvents = [
+      review,
+      {
+        type: "phase-advancement-checkpoint",
+        id: "checkpoint-stale",
+        completionReviewId: review.id,
+        completedPhaseId: completed.id,
+        nextPhaseId: "reviewed-target",
+        reviewer: "ken",
+        timestamp: NOW,
+      },
+    ];
+    const reviewedTarget = phase("reviewed-target", "not-started");
+    reviewedTarget.title = "Reviewed target";
+    reviewedTarget.order = 1;
+    reviewedTarget.archivedAt = NOW;
+    const fallback = phase("fallback", "not-started");
+    fallback.title = "Fallback successor";
+    fallback.order = 2;
+    document.phases = [completed, reviewedTarget, fallback];
+    client.seed(cwd, document);
+    const onStartPhase = vi.fn();
+    const onStartNextPhase = vi.fn(async () => ({
+      status: "accepted" as const,
+      operationId: "operation-recovered",
+      session: { sessionId: "session-recovered", sessionPath: "/sessions/recovered.jsonl" },
+      packageTokenCount: 42,
+    }));
+    render(
+      <ProjectNotes
+        cwd={cwd}
+        client={client}
+        onStartPhase={onStartPhase}
+        onStartNextPhase={onStartNextPhase}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    expect(screen.getByRole("region", { name: "Restore Reviewed target" })).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Start next phase" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start phase: Fallback successor" }));
+    expect(
+      (screen.getByRole("button", { name: "Start phase" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
+    expect(onStartPhase).not.toHaveBeenCalled();
+
+    selectNotesTab("Archive");
+    const restore = screen.getByRole("button", { name: "Restore phase: Reviewed target" });
+    expect((restore as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => {
+      fireEvent.click(restore);
+    });
+    selectNotesTab("Roadmap");
+    await screen.findByRole("region", { name: "Ready for Reviewed target" });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Start next phase" }));
+    });
+    expect(onStartNextPhase).toHaveBeenCalledExactlyOnceWith("checkpoint-stale", "reviewed-target");
+  });
+
+  it("does not infer next-phase authority from an Autopilot completion review alone", async () => {
     const cwd = "/work/autopilot-next-phase";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("autopilot next phase");

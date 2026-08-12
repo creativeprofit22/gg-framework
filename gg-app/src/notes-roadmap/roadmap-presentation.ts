@@ -8,6 +8,7 @@ import type {
   NotesReferenceOperationResult,
   NotesRoadmapActor,
   NotesRoadmapMutationResult,
+  NotesRoadmapPhaseAdvancementCheckpoint,
   NotesRoadmapReferenceProposal,
   NotesRoadmapReviewer,
   NotesRoadmapStatusUpdate,
@@ -43,70 +44,164 @@ const VERIFICATION_LABELS = {
   "exception-requested": "Exception requested",
 } as const satisfies Record<NotesVerificationStatus, string>;
 
-export interface ManualRoadmapAdvancement {
+export interface RoadmapAdvancement {
+  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint;
   completedPhase: NotesPhase;
   nextPhase: NotesPhase;
+  currentEligiblePhase: NotesPhase | null;
+  ready: boolean;
+  recoveryReason: string | null;
 }
 
-export function selectManualRoadmapAdvancement(
-  phases: readonly NotesPhase[],
-): ManualRoadmapAdvancement | null {
+export type RoadmapTopologyMutation =
+  | { type: "move"; phaseId: string; direction: "up" | "down" }
+  | { type: "archive" | "restore" | "pause-status" | "resume-status"; phaseId: string };
+
+export function selectRoadmapAdvancement(phases: readonly NotesPhase[]): RoadmapAdvancement | null {
   const orderedPhases = phases
     .map((phase, documentIndex) => ({ phase, documentIndex }))
     .sort(
       (left, right) =>
         left.phase.order - right.phase.order || left.documentIndex - right.documentIndex,
     );
-  let newestPhase: NotesPhase | null = null;
-  let newestPhaseIndex = -1;
-  let newestReviewTimestamp = "";
-
-  orderedPhases.forEach(({ phase }, roadmapIndex) => {
-    const latestReview = [...phase.roadmapEvents]
-      .reverse()
-      .find((event) => event.type === "completion-review");
-    if (
-      latestReview?.type === "completion-review" &&
-      (latestReview.timestamp > newestReviewTimestamp ||
-        (latestReview.timestamp === newestReviewTimestamp && roadmapIndex > newestPhaseIndex))
-    ) {
-      newestPhase = phase;
-      newestPhaseIndex = roadmapIndex;
-      newestReviewTimestamp = latestReview.timestamp;
-    }
-  });
-
-  const completedPhase = newestPhase as NotesPhase | null;
+  const checkpoints = orderedPhases.flatMap(({ phase }, roadmapIndex) =>
+    phase.roadmapEvents.flatMap((event, eventIndex) =>
+      event.type === "phase-advancement-checkpoint" &&
+      !phase.roadmapEvents.some(
+        (candidate) =>
+          candidate.type === "phase-advancement-confirmation" &&
+          candidate.checkpointId === event.id,
+      )
+        ? [{ phase, checkpoint: event, roadmapIndex, eventIndex }]
+        : [],
+    ),
+  );
+  const latest = checkpoints.sort((left, right) => {
+    const timestampOrder =
+      Date.parse(right.checkpoint.timestamp) - Date.parse(left.checkpoint.timestamp);
+    return (
+      timestampOrder || right.roadmapIndex - left.roadmapIndex || right.eventIndex - left.eventIndex
+    );
+  })[0];
+  if (!latest) return null;
   if (
-    !completedPhase ||
-    completedPhase.archivedAt !== null ||
-    completedPhase.status !== "done" ||
-    completedPhase.overrides.status !== null
+    latest.phase.id !== latest.checkpoint.completedPhaseId ||
+    latest.phase.archivedAt !== null ||
+    latest.phase.status !== "done" ||
+    latest.phase.overrides.status !== null
   ) {
     return null;
   }
-  const latestReview = [...completedPhase.roadmapEvents]
+  const latestReview = [...latest.phase.roadmapEvents]
     .reverse()
     .find((event) => event.type === "completion-review");
   if (
     latestReview?.type !== "completion-review" ||
-    latestReview.reviewer !== "ken" ||
+    latestReview.id !== latest.checkpoint.completionReviewId ||
+    latestReview.reviewer !== latest.checkpoint.reviewer ||
     latestReview.decision !== "accepted" ||
     latestReview.gateOutcome !== "done"
   ) {
     return null;
   }
-  const nextPhase = orderedPhases
-    .slice(newestPhaseIndex + 1)
-    .map(({ phase }) => phase)
-    .find(
-      (phase) =>
-        phase.archivedAt === null &&
-        (phase.status === "not-started" || phase.status === "planning"),
+  const nextPhase = phases.find((phase) => phase.id === latest.checkpoint.nextPhaseId);
+  if (!nextPhase) return null;
+  const sourceOrderIndex = orderedPhases.findIndex(({ phase }) => phase.id === latest.phase.id);
+  const currentEligiblePhase =
+    orderedPhases
+      .slice(sourceOrderIndex + 1)
+      .map(({ phase }) => phase)
+      .find(
+        (phase) =>
+          phase.archivedAt === null &&
+          (phase.status === "not-started" || phase.status === "planning"),
+      ) ?? null;
+  const ready =
+    currentEligiblePhase?.id === nextPhase.id &&
+    nextPhase.session === null &&
+    nextPhase.overrides.status === null;
+  let recoveryReason: string | null = null;
+  if (!ready) {
+    recoveryReason =
+      nextPhase.archivedAt !== null
+        ? `Restore ${nextPhase.title} so it is the first eligible successor before starting another phase.`
+        : currentEligiblePhase && currentEligiblePhase.id !== nextPhase.id
+          ? `Move ${nextPhase.title} ahead of ${currentEligiblePhase.title} to restore the reviewed Roadmap target.`
+          : `Restore ${nextPhase.title} to an unstarted automatic state before confirming advancement.`;
+  }
+  return {
+    checkpoint: latest.checkpoint,
+    completedPhase: latest.phase,
+    nextPhase,
+    currentEligiblePhase,
+    ready,
+    recoveryReason,
+  };
+}
+
+export function isRoadmapPhaseStartProtected(
+  phases: readonly NotesPhase[],
+  phaseId: string,
+): boolean {
+  const advancement = selectRoadmapAdvancement(phases);
+  if (!advancement) return false;
+  const ordered = phases
+    .map((phase, documentIndex) => ({ phase, documentIndex }))
+    .sort(
+      (left, right) =>
+        left.phase.order - right.phase.order || left.documentIndex - right.documentIndex,
     );
-  return nextPhase?.session === null && nextPhase.overrides.status === null
-    ? { completedPhase, nextPhase }
-    : null;
+  const sourceIndex = ordered.findIndex(({ phase }) => phase.id === advancement.completedPhase.id);
+  const candidateIndex = ordered.findIndex(({ phase }) => phase.id === phaseId);
+  return sourceIndex >= 0 && candidateIndex > sourceIndex;
+}
+
+export function isRoadmapTopologyMutationBlocked(
+  phases: readonly NotesPhase[],
+  mutation: RoadmapTopologyMutation,
+): boolean {
+  const current = selectRoadmapAdvancement(phases);
+  if (!current) return false;
+  const nextPhases = applyRoadmapTopologyMutation(phases, mutation);
+  if (!nextPhases) return false;
+  const next = selectRoadmapAdvancement(nextPhases);
+  if (next?.checkpoint.id !== current.checkpoint.id) return true;
+  if (current.ready) return !next.ready;
+  return !next.ready && next.currentEligiblePhase?.id !== current.currentEligiblePhase?.id;
+}
+
+function applyRoadmapTopologyMutation(
+  phases: readonly NotesPhase[],
+  mutation: RoadmapTopologyMutation,
+): NotesPhase[] | null {
+  const next = phases.map((phase) => ({ ...phase }));
+  const phaseIndex = next.findIndex((phase) => phase.id === mutation.phaseId);
+  if (phaseIndex < 0) return null;
+  const phase = next[phaseIndex]!;
+  if (mutation.type === "archive") phase.archivedAt = phase.archivedAt ?? new Date(0).toISOString();
+  if (mutation.type === "restore") phase.archivedAt = null;
+  if (mutation.type === "pause-status") {
+    phase.overrides = {
+      ...phase.overrides,
+      status: { value: phase.status, source: "user", updatedAt: new Date(0).toISOString() },
+    };
+  }
+  if (mutation.type === "resume-status") {
+    phase.overrides = { ...phase.overrides, status: null };
+  }
+  if (mutation.type === "move") {
+    const visible = next.filter((candidate) => candidate.archivedAt === null);
+    const sourceIndex = visible.findIndex((candidate) => candidate.id === mutation.phaseId);
+    const targetIndex = sourceIndex + (mutation.direction === "up" ? -1 : 1);
+    if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= visible.length) return null;
+    [visible[sourceIndex], visible[targetIndex]] = [visible[targetIndex]!, visible[sourceIndex]!];
+    let visibleIndex = 0;
+    const reordered = next.map((candidate) =>
+      candidate.archivedAt === null ? visible[visibleIndex++]! : candidate,
+    );
+    return reordered.map((candidate, order) => ({ ...candidate, order }));
+  }
+  return next;
 }
 
 const IMPLEMENTATION_OUTCOME_LABELS = {

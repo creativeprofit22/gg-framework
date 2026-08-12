@@ -17,8 +17,7 @@ import {
   restorePhaseImplementationPlanEvidence,
 } from "./app-sidecar-phase-completion.js";
 import {
-  findPendingAutopilotRoadmapAdvancement,
-  resolvePendingAutopilotRoadmapAdvancement,
+  selectLatestRoadmapPhaseAdvancement,
   selectNextEligibleRoadmapPhase,
 } from "./app-sidecar-phase-advancement.js";
 import {
@@ -281,11 +280,19 @@ class ProductionPhaseFixture {
     this.failBindingCount = options.failBindingCount ?? 0;
   }
 
-  async start(phaseId = "phase-21"): Promise<ResponseRecord> {
+  async start(
+    phaseId = "phase-21",
+    advancementConfirmation?: {
+      checkpointId: string;
+      nextPhaseId: string;
+      action: "start-next-phase";
+    },
+  ): Promise<ResponseRecord> {
     let responseRecord: ResponseRecord | undefined;
     const repository = this.phaseRepository();
     await launchBoundPhase({
       phaseId,
+      advancementConfirmation,
       mode: this.options.mode ?? "code",
       busyState: this.options.busyState ?? {
         running: false,
@@ -374,6 +381,12 @@ class ProductionPhaseFixture {
           }
           return binding;
         });
+        this.events.push("bind-committed");
+        return outcome;
+      },
+      confirmPhaseAdvancement: async (cwd, request, createBinding) => {
+        this.events.push("bind-started");
+        const outcome = await this.repository.confirmPhaseAdvancement(cwd, request, createBinding);
         this.events.push("bind-committed");
         return outcome;
       },
@@ -1096,7 +1109,19 @@ describe("production launchBoundPhase orchestration", () => {
         phaseId: string,
         options: { blockerAndRejection: boolean },
       ): Promise<{ reviewId: string; snapshot: ProjectNotesSnapshot }> => {
-        const launched = await fixture.start(phaseId);
+        const beforeLaunch = await liveRepository.load(cwd);
+        if (beforeLaunch.status !== "ok") throw new Error("Expected Roadmap before launch");
+        const pendingAdvancement = selectLatestRoadmapPhaseAdvancement(beforeLaunch.snapshot);
+        const launched = await fixture.start(
+          phaseId,
+          pendingAdvancement?.state === "pending" && pendingAdvancement.nextPhase?.id === phaseId
+            ? {
+                checkpointId: pendingAdvancement.checkpoint.id,
+                nextPhaseId: phaseId,
+                action: "start-next-phase",
+              }
+            : undefined,
+        );
         await fixture.promptSettled;
         expect(launched).toMatchObject({ status: 202, body: { status: "accepted" } });
         expect(fixture.currentSession.planMode).toBe(true);
@@ -1315,21 +1340,17 @@ describe("production launchBoundPhase orchestration", () => {
         const restartedRepository = new ProjectNotesRepository(path.join(root, ".gg"));
         const restarted = await restartedRepository.load(cwd);
         if (restarted.status !== "ok") throw new Error("Expected restart recovery snapshot");
-        const pending = findPendingAutopilotRoadmapAdvancement(restarted.snapshot);
+        const pending = selectLatestRoadmapPhaseAdvancement(restarted.snapshot);
         expect(pending).toMatchObject({
-          completedPhaseId: "phase-alpha",
-          reviewId: alpha.reviewId,
+          state: "pending",
+          checkpoint: {
+            completedPhaseId: "phase-alpha",
+            completionReviewId: alpha.reviewId,
+            nextPhaseId: "phase-beta",
+          },
           nextPhase: { id: "phase-beta" },
         });
-        nextPhase = resolvePendingAutopilotRoadmapAdvancement(
-          restarted.snapshot,
-          {
-            completedPhaseId: pending!.completedPhaseId,
-            reviewId: pending!.reviewId,
-            revision: restarted.snapshot.revision,
-          },
-          { enabled: true, cancelled: false },
-        );
+        nextPhase = pending?.nextPhase;
       }
       expect(nextPhase?.id).toBe("phase-beta");
 
@@ -1337,7 +1358,10 @@ describe("production launchBoundPhase orchestration", () => {
       expect(
         selectNextEligibleRoadmapPhase(beta.snapshot, "phase-beta", beta.reviewId, advancementMode),
       ).toBeNull();
-      expect(findPendingAutopilotRoadmapAdvancement(beta.snapshot)).toBeNull();
+      expect(selectLatestRoadmapPhaseAdvancement(beta.snapshot)).toMatchObject({
+        state: "confirmed",
+        checkpoint: { completedPhaseId: "phase-alpha", nextPhaseId: "phase-beta" },
+      });
       expect(beta.snapshot.document.phases.map((phase) => phase.status)).toEqual(["done", "done"]);
       expect(fixture.createCalls).toBe(2);
       await fixture.dispose();

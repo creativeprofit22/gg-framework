@@ -15,6 +15,8 @@ import {
 import type {
   FrozenPhaseLaunchContext,
   NotesSessionLink,
+  ProjectNotesPhaseAdvancementStartOutcome,
+  ProjectNotesPhaseAdvancementStartRequest,
   ProjectNotesPhaseLaunchOutcome,
   ProjectNotesPhaseLifecycleOutcome,
   ProjectNotesSnapshot,
@@ -51,6 +53,14 @@ export interface PhaseLaunchRepository {
       sessionPath: string | null;
     }>,
   ): Promise<ProjectNotesPhaseLaunchOutcome>;
+  confirmPhaseAdvancement(
+    cwd: string,
+    request: ProjectNotesPhaseAdvancementStartRequest,
+    createBinding: (context: FrozenPhaseLaunchContext) => Promise<{
+      sessionId: string;
+      sessionPath: string | null;
+    }>,
+  ): Promise<ProjectNotesPhaseAdvancementStartOutcome>;
   recordPhaseLaunchAttention(
     cwd: string,
     phaseId: string,
@@ -63,6 +73,11 @@ export type PhaseStartResponseBody = PhaseStartResult;
 
 export interface LaunchBoundPhaseDependencies<TSession extends BoundPhaseSession> {
   phaseId: string;
+  advancementConfirmation?: {
+    checkpointId: string;
+    nextPhaseId: string;
+    action: "start-next-phase";
+  };
   mode: "code" | "chat";
   busyState: AppSidecarSessionBusyState;
   mutations: AppSidecarSessionMutationCoordinator;
@@ -154,14 +169,33 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
 
   let attentionExpectedSession: NotesSessionLink | null = null;
   try {
-    const outcome = await dependencies.repository.launchPhase(
-      dependencies.cwd,
-      phaseId,
-      async (frozen) => {
-        attentionExpectedSession = frozen.phase.session ? { ...frozen.phase.session } : null;
-        return createOrReuseCandidate(dependencies, frozen);
-      },
-    );
+    const createBinding = async (frozen: FrozenPhaseLaunchContext) => {
+      attentionExpectedSession = frozen.phase.session ? { ...frozen.phase.session } : null;
+      return createOrReuseCandidate(dependencies, frozen);
+    };
+    const outcome = dependencies.advancementConfirmation
+      ? await dependencies.repository.confirmPhaseAdvancement(
+          dependencies.cwd,
+          {
+            ...dependencies.advancementConfirmation,
+            operationId: mutation.operationId,
+          },
+          createBinding,
+        )
+      : await dependencies.repository.launchPhase(dependencies.cwd, phaseId, createBinding);
+    if (outcome.status === "invalid-confirmation" || outcome.status === "stale") {
+      await dependencies.candidates.disposeCandidate(phaseId);
+      dependencies.respond(outcome.status === "invalid-confirmation" ? 400 : 409, {
+        status: "failed",
+        code: "launch-failed",
+        operationId: mutation.operationId,
+        message:
+          outcome.status === "invalid-confirmation"
+            ? "The Start next phase confirmation was invalid."
+            : "This Roadmap checkpoint is stale. Reopen Roadmap and review the latest state.",
+      } satisfies PhaseStartResponseBody);
+      return;
+    }
     if ("session" in outcome) attentionExpectedSession = outcome.session;
 
     if (outcome.status === "phase-not-found" || outcome.status === "phase-archived") {
@@ -174,6 +208,16 @@ export async function launchBoundPhase<TSession extends BoundPhaseSession>(
           outcome.status === "phase-archived"
             ? "This phase was archived. Reopen Roadmap and choose an active phase."
             : "This phase no longer exists. Reopen Roadmap and try again.",
+      } satisfies PhaseStartResponseBody);
+      return;
+    }
+    if (outcome.status === "advancement-confirmation-required") {
+      await dependencies.candidates.disposeCandidate(phaseId);
+      dependencies.respond(409, {
+        status: "failed",
+        code: "advancement-confirmation-required",
+        operationId: mutation.operationId,
+        message: "Use Start next phase to confirm this Roadmap checkpoint.",
       } satisfies PhaseStartResponseBody);
       return;
     }

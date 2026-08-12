@@ -257,36 +257,20 @@ fn restore_pane_target(
     chat_agent: ChatAgent,
     cwd: PathBuf,
     session_path: Option<String>,
-) -> Result<(u64, bool), String> {
+) -> Result<(u64, bool, Option<String>), String> {
     validate_pane_id(pane_id)?;
     if let Some(existing) = registry
         .get(owner_label)
         .and_then(|panes| panes.get(pane_id))
     {
-        let generated_session_path = existing.session_id.is_some()
-            && existing.session_path.is_none()
-            && session_path.is_some();
-        let bound_runtime_is_authoritative = existing.session_id.is_some();
-        if (!bound_runtime_is_authoritative
-            && (existing.mode != mode || existing.chat_agent != chat_agent))
+        let target_changed = existing.mode != mode
+            || existing.chat_agent != chat_agent
             || existing.cwd.as_ref() != Some(&cwd)
-            || (existing.session_path != session_path && !generated_session_path)
-        {
-            return Err(format!(
-                "pane '{pane_id}' already exists with a different session target"
-            ));
-        }
-        let should_relaunch = existing.session_id.is_none() || existing.startup_error.is_some();
+            || existing.session_path != session_path;
+        let should_relaunch =
+            target_changed || existing.session_id.is_none() || existing.startup_error.is_some();
         if !should_relaunch {
-            let generation = existing.generation;
-            if generated_session_path {
-                registry
-                    .get_mut(owner_label)
-                    .and_then(|panes| panes.get_mut(pane_id))
-                    .expect("pane existence checked")
-                    .session_path = session_path;
-            }
-            return Ok((generation, false));
+            return Ok((existing.generation, false, None));
         }
 
         registry.next_generation = registry.next_generation.saturating_add(1);
@@ -295,13 +279,14 @@ fn restore_pane_target(
             .get_mut(owner_label)
             .and_then(|panes| panes.get_mut(pane_id))
             .expect("pane existence checked");
-        if generated_session_path {
-            existing.session_path = session_path;
-        }
+        let replaced_session_id = existing.session_id.take();
+        existing.mode = mode;
+        existing.chat_agent = chat_agent;
+        existing.cwd = Some(cwd);
+        existing.session_path = session_path;
         existing.generation = generation;
-        existing.session_id = None;
         existing.startup_error = None;
-        return Ok((generation, true));
+        return Ok((generation, true, replaced_session_id));
     }
     create_pane_target(
         registry,
@@ -312,7 +297,7 @@ fn restore_pane_target(
         cwd,
         session_path,
     )
-    .map(|generation| (generation, true))
+    .map(|generation| (generation, true, None))
 }
 
 fn take_pane_session(
@@ -5980,7 +5965,7 @@ fn agent_pane_restore(
     session_path: Option<String>,
 ) -> Result<u64, String> {
     let label = webview.label().to_string();
-    let (generation, created) = {
+    let (generation, created, replaced_session_id) = {
         let windows: State<Windows> = app.state();
         let mut registry = windows.map.lock().unwrap();
         restore_pane_target(
@@ -5993,6 +5978,14 @@ fn agent_pane_restore(
             session_path.clone(),
         )?
     };
+    if let (Some(port), Some(session_id)) = (port_for(&webview), replaced_session_id) {
+        let app_for_dispose = app.clone();
+        // The replacement generation is already authoritative. Disposal is best-effort so a
+        // stale daemon runtime cannot block launching or hydrating the selected saved session.
+        tauri::async_runtime::spawn(async move {
+            let _ = daemon_delete_session(&app_for_dispose, port, &session_id).await;
+        });
+    }
     if created {
         launch_pane_session(
             app,
@@ -10187,6 +10180,46 @@ mod tests {
             .as_nanos();
         std::env::temp_dir().join(format!("gg-app-{label}-{}-{unique}", std::process::id()))
     }
+
+    #[test]
+    fn restoring_a_concrete_session_replaces_a_fresh_runtime() {
+        let mut registry = PaneRegistry::default();
+        record_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("project"),
+            None,
+        );
+        let pane = registry
+            .get_mut("main")
+            .and_then(|panes| panes.get_mut(PRIMARY_PANE_ID))
+            .unwrap();
+        pane.session_id = Some("fresh-runtime".to_string());
+
+        let (generation, should_launch, replaced) = restore_pane_target(
+            &mut registry,
+            "main",
+            PRIMARY_PANE_ID,
+            WorkspaceMode::Code,
+            ChatAgent::General,
+            PathBuf::from("project"),
+            Some("saved-session.jsonl".to_string()),
+        )
+        .unwrap();
+        assert!(should_launch);
+        assert_eq!(replaced.as_deref(), Some("fresh-runtime"));
+        let restored = &registry["main"][PRIMARY_PANE_ID];
+        assert_eq!(restored.generation, generation);
+        assert_eq!(
+            restored.session_path.as_deref(),
+            Some("saved-session.jsonl")
+        );
+        assert!(restored.session_id.is_none());
+    }
+
 
     #[test]
     fn progress_signature_validation_matches_typescript_store() {

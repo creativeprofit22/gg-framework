@@ -776,13 +776,18 @@ export async function listRecentSessions(
 
   const out: RecentSession[] = [];
   const seenConversationIds = new Set<string>();
+  const requestedCwd = discoveryPathKey(stripExtendedLengthPrefix(cwd));
   for (const f of files) {
     if (out.length >= limit) break;
     const parsed = await readSessionSummary(f.path);
     if (!parsed || parsed.messageCount === 0) continue;
+    // encodeCwd is intentionally filesystem-safe but lossy. The transcript
+    // header is authoritative so colliding encoded directories cannot leak a
+    // different project's session into this picker or resume flow.
+    if (discoveryPathKey(stripExtendedLengthPrefix(parsed.cwd)) !== requestedCwd) continue;
     if (seenConversationIds.has(parsed.conversationId)) continue;
     seenConversationIds.add(parsed.conversationId);
-    const { conversationId: _conversationId, ...session } = parsed;
+    const { conversationId: _conversationId, cwd: _cwd, ...session } = parsed;
     out.push(session);
   }
   return out;
@@ -911,6 +916,7 @@ async function readForeignSessionSummary(
 
 interface ParsedRecentSession extends RecentSession {
   conversationId: string;
+  cwd: string;
 }
 
 /** Single-pass parse of one session file: identity + count + activity + preview. */
@@ -925,6 +931,7 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
     let headerPreview = "";
     let preview = "";
     let label = "";
+    let cwd = "";
     let valid = false;
 
     try {
@@ -935,6 +942,7 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
             type?: string;
             id?: string;
             conversationId?: string;
+            cwd?: unknown;
             preview?: unknown;
             timestamp?: string;
             label?: unknown;
@@ -945,6 +953,7 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
             valid = true;
             id = entry.id ?? "";
             conversationId = entry.conversationId ?? id;
+            cwd = typeof entry.cwd === "string" ? entry.cwd : "";
             if (typeof entry.preview === "string") {
               headerPreview = entry.preview.replace(/\s+/g, " ").trim().slice(0, 80);
             }
@@ -974,6 +983,7 @@ async function readSessionSummary(file: string): Promise<ParsedRecentSession | n
       ? {
           id,
           conversationId: conversationId || id,
+          cwd,
           path: resolvedPath,
           preview: label || headerPreview || preview,
           lastActiveDisplay: rel(lastActivity),

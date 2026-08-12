@@ -362,6 +362,39 @@ describe("discoverProjects (ggcoder store)", () => {
     expect(chat[0]?.path.startsWith(chatSessionsDir)).toBe(true);
   });
 
+  it("filters encoded-directory collisions by the session header cwd", async () => {
+    const requestedProject = path.join(tmp, "projects", "a_b", "c");
+    const collidingProject = path.join(tmp, "projects", "a", "b_c");
+    expect(encodeCwd(requestedProject)).toBe(encodeCwd(collidingProject));
+    const timestamp = new Date().toISOString();
+    await writeSessionRecords(collidingProject, "foreign.jsonl", {
+      id: "foreign-project-session",
+      timestamp,
+      records: [
+        {
+          type: "message",
+          timestamp,
+          message: { role: "user", content: "This belongs to another project" },
+        },
+      ],
+    });
+    await writeSessionRecords(requestedProject, "requested.jsonl", {
+      id: "requested-project-session",
+      timestamp,
+      records: [
+        {
+          type: "message",
+          timestamp,
+          message: { role: "user", content: "This belongs here" },
+        },
+      ],
+    });
+
+    const sessions = await listRecentSessions(requestedProject);
+
+    expect(sessions.map((session) => session.id)).toEqual(["requested-project-session"]);
+  });
+
   it("skips compaction summaries and autopilot injections when choosing a preview", async () => {
     const projectPath = path.join(tmp, "projects", "clean-preview");
     await fs.mkdir(projectPath, { recursive: true });

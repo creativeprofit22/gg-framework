@@ -157,9 +157,10 @@ export async function commitPlanApprovalCheckpoint(input: {
   onSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
 }): Promise<PlanApprovalCheckpointResult> {
   const previousActivePhase = input.session.getActivePhaseContext();
-  const planTotal = await input.prepareFreshSession();
+  let planTotal: number;
   let phaseLink: ActivePhaseLinkSyncResult;
   try {
+    planTotal = await input.prepareFreshSession();
     const stage = await persistActivePhaseStage({
       session: input.session,
       executionStage: "implementing",

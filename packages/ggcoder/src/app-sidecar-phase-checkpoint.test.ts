@@ -219,6 +219,33 @@ describe("plan approval checkpoint", () => {
     ]);
   });
 
+  it("restores the owning coding session when fresh-session preparation fails", async () => {
+    const events: string[] = [];
+    const session = createSession(events);
+    const repository = createRepository(events);
+    const preparationError = new Error("fresh session preparation failed");
+
+    await expect(
+      commitPlanApprovalCheckpoint({
+        session,
+        repository,
+        cwd: "/project",
+        planPath: "/plans/phase-21.md",
+        prepareFreshSession: async () => {
+          events.push("fresh-session-replaced");
+          throw preparationError;
+        },
+        restorePreviousSession: async () => {
+          events.push("owning-session-restored");
+        },
+      }),
+    ).rejects.toBe(preparationError);
+
+    expect(events).toEqual(["fresh-session-replaced", "owning-session-restored"]);
+    expect(repository.updatePhaseSessionLink).not.toHaveBeenCalled();
+    expect(vi.mocked(session.updateActivePhaseStage)).not.toHaveBeenCalled();
+  });
+
   it.each(rejectedOutcomes)(
     "keeps the review recoverable and blocks reset/implementation for $code",
     async ({ outcome, code }) => {

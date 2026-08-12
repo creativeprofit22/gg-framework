@@ -19,6 +19,7 @@ import {
   type NotesDocumentV3,
   type ProjectNotesCompletionReviewRequest,
   type ProjectNotesFileSystem,
+  type ProjectNotesRoadmapFinalReviewOutcome,
   type ProjectNotesRoadmapStatusRequest,
   type StoredProjectNotesV1,
 } from "./project-notes-repository.js";
@@ -3276,7 +3277,12 @@ describe("ProjectNotesRepository durability", () => {
 });
 
 describe("ProjectNotesRepository completion transactions", () => {
-  async function completionSetup(name: string, withOverride = false) {
+  async function completionSetup(
+    name: string,
+    withOverride = false,
+    withNextPhase = false,
+    withAdditionalPhase = false,
+  ) {
     const agentDir = await tempAgentDir();
     const cwd = `/work/${name}`;
     const document = notes(name);
@@ -3299,6 +3305,34 @@ describe("ProjectNotesRepository completion transactions", () => {
     });
     phase.updatedAt = "2026-07-25T12:35:00.000Z";
     document.updatedAt = phase.updatedAt;
+    if (withNextPhase) {
+      const nextPhase = structuredClone(phase);
+      nextPhase.id = "phase-2";
+      nextPhase.title = "Ship the next durable phase";
+      nextPhase.goal = "Prove explicit advancement";
+      nextPhase.doneWhen = ["Human confirmation is required"];
+      nextPhase.order = 1;
+      nextPhase.status = "not-started";
+      nextPhase.sourcePrompt = "Implement phase 2";
+      nextPhase.session = null;
+      nextPhase.reminder = null;
+      nextPhase.attentionReason = null;
+      nextPhase.completedAt = null;
+      nextPhase.overrides = { status: null, referenceIds: null };
+      nextPhase.lifecycleEvents = [];
+      nextPhase.roadmapEvents = [];
+      document.phases.push(nextPhase);
+      if (withAdditionalPhase) {
+        const additionalPhase = structuredClone(nextPhase);
+        additionalPhase.id = "phase-3";
+        additionalPhase.title = "Ship the fallback phase";
+        additionalPhase.goal = "Stay gated behind the durable checkpoint";
+        additionalPhase.doneWhen = ["Generic launch cannot bypass confirmation"];
+        additionalPhase.order = 2;
+        additionalPhase.sourcePrompt = "Implement phase 3";
+        document.phases.push(additionalPhase);
+      }
+    }
     const repository = new ProjectNotesRepository(agentDir);
     await repository.migrate(cwd, document);
     const expectedSession = { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" };
@@ -3391,6 +3425,341 @@ describe("ProjectNotesRepository completion transactions", () => {
       },
     });
   }
+
+  it.each(["ken", "ken-autopilot"] as const)(
+    "atomically creates one durable advancement checkpoint for a %s Done review",
+    async (reviewer) => {
+      const { cwd, repository, expectedSession } = await completionSetup(
+        `advancement-${reviewer}`,
+        false,
+        true,
+      );
+      await recordCompleteEvidence(repository, cwd, expectedSession);
+      const committed = await recordReviewThrough(
+        "bundled",
+        repository,
+        cwd,
+        expectedSession,
+        { reviewId: `review-${reviewer}`, reviewer },
+        { updateId: `status-${reviewer}`, actor: reviewer },
+      );
+      expect(committed).toMatchObject({
+        status: "committed",
+        evaluation: { gateOutcome: "done" },
+        advancementCheckpoint: {
+          completionReviewId: `review-${reviewer}`,
+          completedPhaseId: "phase-1",
+          nextPhaseId: "phase-2",
+          reviewer,
+        },
+      });
+      if (committed.status !== "committed" || !("advancementCheckpoint" in committed)) {
+        throw new Error("Expected bundled committed review");
+      }
+      const bundled = committed as Extract<
+        ProjectNotesRoadmapFinalReviewOutcome,
+        { status: "committed" }
+      >;
+      const checkpoint = bundled.advancementCheckpoint;
+      expect(checkpoint).not.toBeNull();
+      expect(
+        committed.phase.roadmapEvents.filter(
+          (event) => event.type === "phase-advancement-checkpoint",
+        ),
+      ).toEqual([checkpoint]);
+
+      const duplicate = await recordReviewThrough(
+        "bundled",
+        repository,
+        cwd,
+        expectedSession,
+        { reviewId: `review-${reviewer}`, reviewer },
+        { updateId: `status-${reviewer}`, actor: reviewer },
+      );
+      expect(duplicate).toMatchObject({
+        status: "duplicate",
+        advancementCheckpoint: { id: checkpoint!.id },
+      });
+      const loaded = await repository.load(cwd);
+      expect(loaded).toMatchObject({ status: "ok", snapshot: { revision: 4 } });
+    },
+  );
+
+  it("rejects generic launch and generic-save authority bypasses for a pending checkpoint", async () => {
+    const { cwd, repository, expectedSession } = await completionSetup(
+      "advancement-authority",
+      false,
+      true,
+    );
+    await recordCompleteEvidence(repository, cwd, expectedSession);
+    const committed = await recordReviewThrough(
+      "bundled",
+      repository,
+      cwd,
+      expectedSession,
+      { reviewId: "review-authority" },
+      { updateId: "status-authority" },
+    );
+    if (
+      committed.status !== "committed" ||
+      !("advancementCheckpoint" in committed) ||
+      !committed.advancementCheckpoint
+    ) {
+      throw new Error("Expected advancement checkpoint");
+    }
+    const bundled = committed as Extract<
+      ProjectNotesRoadmapFinalReviewOutcome,
+      { status: "committed" }
+    >;
+    let bindingCalls = 0;
+    const createBinding = async () => {
+      bindingCalls += 1;
+      return {
+        sessionId: "phase-2-session",
+        sessionPath: "/sessions/phase-2.jsonl",
+      };
+    };
+    await expect(repository.launchPhase(cwd, "phase-2", createBinding)).resolves.toEqual({
+      status: "advancement-confirmation-required",
+      checkpointId: bundled.advancementCheckpoint!.id,
+    });
+    expect(bindingCalls).toBe(0);
+
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Expected loaded Notes");
+    const forged = structuredClone(loaded.snapshot.document);
+    forged.phases[0]!.roadmapEvents.push({
+      type: "phase-advancement-confirmation",
+      id: "forged-confirmation",
+      checkpointId: bundled.advancementCheckpoint!.id,
+      nextPhaseId: "phase-2",
+      actor: "user",
+      operationId: "forged-operation",
+      timestamp: new Date().toISOString(),
+    });
+    await expect(repository.save(cwd, loaded.snapshot.revision, forged)).resolves.toMatchObject({
+      status: "invalid",
+      error: { message: "privileged roadmap events require their dedicated authority path" },
+    });
+  });
+
+  it("atomically confirms and binds once across concurrent Start next phase requests", async () => {
+    const { agentDir, cwd, repository, expectedSession } = await completionSetup(
+      "advancement-confirmation",
+      false,
+      true,
+    );
+    await recordCompleteEvidence(repository, cwd, expectedSession);
+    const committed = await recordReviewThrough(
+      "bundled",
+      repository,
+      cwd,
+      expectedSession,
+      { reviewId: "review-confirmation" },
+      { updateId: "status-confirmation" },
+    );
+    if (
+      committed.status !== "committed" ||
+      !("advancementCheckpoint" in committed) ||
+      !committed.advancementCheckpoint
+    ) {
+      throw new Error("Expected advancement checkpoint");
+    }
+    const bundled = committed as Extract<
+      ProjectNotesRoadmapFinalReviewOutcome,
+      { status: "committed" }
+    >;
+    const checkpoint = bundled.advancementCheckpoint!;
+    let bindingCalls = 0;
+    const createBinding = async () => {
+      bindingCalls += 1;
+      return {
+        sessionId: "phase-2-session",
+        sessionPath: "/sessions/phase-2.jsonl",
+      };
+    };
+    const restarted = new ProjectNotesRepository(agentDir);
+    const [first, second] = await Promise.all([
+      repository.confirmPhaseAdvancement(
+        cwd,
+        {
+          checkpointId: checkpoint.id,
+          nextPhaseId: checkpoint.nextPhaseId,
+          action: "start-next-phase",
+          operationId: "start-one",
+        },
+        createBinding,
+      ),
+      restarted.confirmPhaseAdvancement(
+        cwd,
+        {
+          checkpointId: checkpoint.id,
+          nextPhaseId: checkpoint.nextPhaseId,
+          action: "start-next-phase",
+          operationId: "start-two",
+        },
+        createBinding,
+      ),
+    ]);
+    expect([first.status, second.status].sort()).toEqual(["accepted", "already-bound"]);
+    expect(bindingCalls).toBe(1);
+    const loaded = await restarted.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Expected confirmed Notes");
+    const source = loaded.snapshot.document.phases[0]!;
+    const target = loaded.snapshot.document.phases[1]!;
+    expect(
+      source.roadmapEvents.filter((event) => event.type === "phase-advancement-confirmation"),
+    ).toHaveLength(1);
+    expect(target).toMatchObject({
+      status: "planning",
+      session: { sessionId: "phase-2-session", sessionPath: "/sessions/phase-2.jsonl" },
+    });
+  });
+
+  it("rejects stale checkpoint targets without silently selecting another phase", async () => {
+    const { cwd, repository, expectedSession } = await completionSetup(
+      "advancement-stale",
+      false,
+      true,
+    );
+    await recordCompleteEvidence(repository, cwd, expectedSession);
+    const committed = await recordReviewThrough("bundled", repository, cwd, expectedSession, {
+      reviewId: "review-stale",
+    });
+    if (
+      committed.status !== "committed" ||
+      !("advancementCheckpoint" in committed) ||
+      !committed.advancementCheckpoint
+    ) {
+      throw new Error("Expected advancement checkpoint");
+    }
+    const bundled = committed as Extract<
+      ProjectNotesRoadmapFinalReviewOutcome,
+      { status: "committed" }
+    >;
+    await expect(
+      repository.confirmPhaseAdvancement(
+        cwd,
+        {
+          checkpointId: bundled.advancementCheckpoint!.id,
+          nextPhaseId: "phase-other",
+          action: "start-next-phase",
+          operationId: "start-stale",
+        },
+        async () => ({ sessionId: "never", sessionPath: "/never" }),
+      ),
+    ).resolves.toEqual({ status: "stale", reason: "target-mismatch" });
+  });
+
+  it("freezes checkpoint topology, blocks a stale successor launch, and recovers one target", async () => {
+    const { agentDir, cwd, repository, expectedSession } = await completionSetup(
+      "advancement-topology",
+      false,
+      true,
+      true,
+    );
+    await recordCompleteEvidence(repository, cwd, expectedSession);
+    const committed = await recordReviewThrough("bundled", repository, cwd, expectedSession, {
+      reviewId: "review-topology",
+    });
+    if (
+      committed.status !== "committed" ||
+      !("advancementCheckpoint" in committed) ||
+      !committed.advancementCheckpoint
+    ) {
+      throw new Error("Expected advancement checkpoint");
+    }
+    const bundled = committed as Extract<
+      ProjectNotesRoadmapFinalReviewOutcome,
+      { status: "committed" }
+    >;
+    const checkpoint = bundled.advancementCheckpoint!;
+    const loaded = await repository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Expected loaded Notes");
+
+    const archivedTarget = structuredClone(loaded.snapshot.document);
+    archivedTarget.phases.find((phase) => phase.id === "phase-2")!.archivedAt = NOW;
+    await expect(
+      repository.save(cwd, loaded.snapshot.revision, archivedTarget),
+    ).resolves.toMatchObject({
+      status: "invalid",
+      error: { path: "phases", message: expect.stringContaining(checkpoint.id) },
+    });
+
+    const pausedTarget = structuredClone(loaded.snapshot.document);
+    const pausedPhase = pausedTarget.phases.find((phase) => phase.id === "phase-2")!;
+    pausedPhase.overrides.status = {
+      value: pausedPhase.status,
+      source: "user",
+      updatedAt: NOW,
+    };
+    await expect(
+      repository.save(cwd, loaded.snapshot.revision, pausedTarget),
+    ).resolves.toMatchObject({
+      status: "invalid",
+      error: { path: "phases", message: expect.stringContaining(checkpoint.id) },
+    });
+
+    const reorderedTarget = structuredClone(loaded.snapshot.document);
+    const sourcePhase = reorderedTarget.phases.find((phase) => phase.id === "phase-1")!;
+    const reviewedTarget = reorderedTarget.phases.find((phase) => phase.id === "phase-2")!;
+    const fallbackTarget = reorderedTarget.phases.find((phase) => phase.id === "phase-3")!;
+    reorderedTarget.phases = [sourcePhase, fallbackTarget, reviewedTarget];
+    reorderedTarget.phases.forEach((phase, order) => {
+      phase.order = order;
+    });
+    await expect(
+      repository.save(cwd, loaded.snapshot.revision, reorderedTarget),
+    ).resolves.toMatchObject({
+      status: "invalid",
+      error: { path: "phases", message: expect.stringContaining(checkpoint.id) },
+    });
+
+    const staleCwd = "/work/advancement-topology-stale";
+    const staleRepository = new ProjectNotesRepository(agentDir);
+    await expect(staleRepository.migrate(staleCwd, archivedTarget)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1 },
+    });
+    let bindingCalls = 0;
+    const createBinding = async () => {
+      bindingCalls += 1;
+      return { sessionId: "recovered-session", sessionPath: "/sessions/recovered.jsonl" };
+    };
+    await expect(staleRepository.launchPhase(staleCwd, "phase-3", createBinding)).resolves.toEqual({
+      status: "advancement-confirmation-required",
+      checkpointId: checkpoint.id,
+    });
+    expect(bindingCalls).toBe(0);
+
+    const staleLoaded = await staleRepository.load(staleCwd);
+    if (staleLoaded.status !== "ok") throw new Error("Expected stale Notes");
+    const recovered = structuredClone(staleLoaded.snapshot.document);
+    recovered.phases.find((phase) => phase.id === "phase-2")!.archivedAt = null;
+    await expect(
+      staleRepository.save(staleCwd, staleLoaded.snapshot.revision, recovered),
+    ).resolves.toMatchObject({ status: "ok", snapshot: { revision: 2 } });
+    await expect(
+      staleRepository.confirmPhaseAdvancement(
+        staleCwd,
+        {
+          checkpointId: checkpoint.id,
+          nextPhaseId: "phase-2",
+          action: "start-next-phase",
+          operationId: "recover-topology",
+        },
+        createBinding,
+      ),
+    ).resolves.toMatchObject({ status: "accepted", phase: { id: "phase-2" } });
+    expect(bindingCalls).toBe(1);
+    const confirmed = await staleRepository.load(staleCwd);
+    if (confirmed.status !== "ok") throw new Error("Expected confirmed Notes");
+    expect(
+      confirmed.snapshot.document.phases
+        .find((phase) => phase.id === "phase-1")!
+        .roadmapEvents.filter((event) => event.type === "phase-advancement-confirmation"),
+    ).toHaveLength(1);
+  });
 
   it.each([
     ["direct", "accepted"],

@@ -1,11 +1,19 @@
-import type { NotesPhase, ProjectNotesSnapshot } from "./project-notes-repository.js";
+import type {
+  NotesPhase,
+  NotesRoadmapPhaseAdvancementCheckpoint,
+  NotesRoadmapPhaseAdvancementConfirmation,
+} from "@kenkaiiii/gg-core/project-notes";
+import type { ProjectNotesSnapshot } from "./project-notes-repository.js";
 
 export type RoadmapPhaseAdvancementMode = "manual" | "autopilot";
+export type RoadmapPhaseAdvancementState = "pending" | "confirmed" | "stale";
 
-export interface PendingAutopilotRoadmapAdvancement {
-  completedPhaseId: string;
-  reviewId: string;
-  revision: number;
+export interface RoadmapPhaseAdvancementPresentation {
+  state: RoadmapPhaseAdvancementState;
+  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint;
+  confirmation: NotesRoadmapPhaseAdvancementConfirmation | null;
+  completedPhase: NotesPhase;
+  nextPhase: NotesPhase | null;
 }
 
 function orderedRoadmapPhases(snapshot: ProjectNotesSnapshot): NotesPhase[] {
@@ -22,10 +30,7 @@ function latestCompletionReview(phase: NotesPhase) {
   return [...phase.roadmapEvents].reverse().find((event) => event.type === "completion-review");
 }
 
-/**
- * Select the first unbound, untouched Roadmap phase after a durably completed phase.
- * The supplied completion review must still be the completed phase's latest review.
- */
+/** Select the exact first eligible phase protected by an authoritative completion review. */
 export function selectNextEligibleRoadmapPhase(
   snapshot: ProjectNotesSnapshot,
   completedPhaseId: string,
@@ -40,7 +45,6 @@ export function selectNextEligibleRoadmapPhase(
   if (source.archivedAt !== null || source.status !== "done" || source.overrides.status !== null) {
     return null;
   }
-
   const latestReview = latestCompletionReview(source);
   const expectedReviewer = mode === "manual" ? "ken" : "ken-autopilot";
   if (
@@ -63,62 +67,53 @@ export function selectNextEligibleRoadmapPhase(
     }
     return candidate.session === null && candidate.overrides.status === null ? candidate : null;
   }
-
   return null;
 }
 
-export function resolvePendingAutopilotRoadmapAdvancement(
+/**
+ * Reconstruct the newest durable advancement checkpoint without causing side effects.
+ * Restarts call this selector only to present state; they never launch a phase.
+ */
+export function selectLatestRoadmapPhaseAdvancement(
   snapshot: ProjectNotesSnapshot,
-  pending: PendingAutopilotRoadmapAdvancement,
-  guards: { enabled: boolean; cancelled: boolean },
-): NotesPhase | null {
-  if (!guards.enabled || guards.cancelled || snapshot.revision !== pending.revision) return null;
-  return selectNextEligibleRoadmapPhase(
-    snapshot,
-    pending.completedPhaseId,
-    pending.reviewId,
-    "autopilot",
+): RoadmapPhaseAdvancementPresentation | null {
+  const candidates = orderedRoadmapPhases(snapshot).flatMap((phase, roadmapIndex) =>
+    phase.roadmapEvents.flatMap((event, eventIndex) =>
+      event.type === "phase-advancement-checkpoint"
+        ? [{ phase, checkpoint: event, roadmapIndex, eventIndex }]
+        : [],
+    ),
   );
-}
+  const latest = candidates.sort((left, right) => {
+    const timestampOrder = Date.parse(right.checkpoint.timestamp) - Date.parse(left.checkpoint.timestamp);
+    return timestampOrder || right.roadmapIndex - left.roadmapIndex || right.eventIndex - left.eventIndex;
+  })[0];
+  if (!latest) return null;
 
-/** Recover only the newest durable completion review, never an older superseded outcome. */
-export function findPendingAutopilotRoadmapAdvancement(
-  snapshot: ProjectNotesSnapshot,
-): { completedPhaseId: string; reviewId: string; nextPhase: NotesPhase } | null {
-  let newest: {
-    reviewedAt: number;
-    roadmapIndex: number;
-    completedPhaseId: string;
-    reviewId: string;
-  } | null = null;
-
-  orderedRoadmapPhases(snapshot).forEach((source, roadmapIndex) => {
-    const review = latestCompletionReview(source);
-    if (review?.type !== "completion-review") return;
-    const reviewedAt = Date.parse(review.timestamp);
-    if (
-      newest === null ||
-      reviewedAt > newest.reviewedAt ||
-      (reviewedAt === newest.reviewedAt && roadmapIndex > newest.roadmapIndex)
-    ) {
-      newest = {
-        reviewedAt,
-        roadmapIndex,
-        completedPhaseId: source.id,
-        reviewId: review.id,
-      };
-    }
-  });
-
-  if (newest === null) return null;
-  const source = newest as { completedPhaseId: string; reviewId: string };
-  const nextPhase = selectNextEligibleRoadmapPhase(
+  const confirmation =
+    latest.phase.roadmapEvents.find(
+      (event): event is NotesRoadmapPhaseAdvancementConfirmation =>
+        event.type === "phase-advancement-confirmation" &&
+        event.checkpointId === latest.checkpoint.id,
+    ) ?? null;
+  const mode: RoadmapPhaseAdvancementMode =
+    latest.checkpoint.reviewer === "ken" ? "manual" : "autopilot";
+  const selected = selectNextEligibleRoadmapPhase(
     snapshot,
-    source.completedPhaseId,
-    source.reviewId,
-    "autopilot",
+    latest.checkpoint.completedPhaseId,
+    latest.checkpoint.completionReviewId,
+    mode,
   );
-  return nextPhase
-    ? { completedPhaseId: source.completedPhaseId, reviewId: source.reviewId, nextPhase }
-    : null;
+  const nextPhase = snapshot.document.phases.find(
+    (phase) => phase.id === latest.checkpoint.nextPhaseId,
+  ) ?? null;
+  const targetMatches = selected?.id === latest.checkpoint.nextPhaseId;
+
+  return {
+    state: confirmation ? "confirmed" : targetMatches ? "pending" : "stale",
+    checkpoint: latest.checkpoint,
+    confirmation,
+    completedPhase: latest.phase,
+    nextPhase,
+  };
 }

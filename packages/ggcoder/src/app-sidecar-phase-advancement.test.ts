@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  findPendingAutopilotRoadmapAdvancement,
-  resolvePendingAutopilotRoadmapAdvancement,
+  selectLatestRoadmapPhaseAdvancement,
   selectNextEligibleRoadmapPhase,
   type RoadmapPhaseAdvancementMode,
 } from "./app-sidecar-phase-advancement.js";
@@ -239,143 +238,105 @@ describe("selectNextEligibleRoadmapPhase", () => {
   });
 });
 
-describe("findPendingAutopilotRoadmapAdvancement", () => {
-  it("recovers the newest pending advancement from a restarted snapshot", () => {
-    const olderSource = completedSource(
-      [
-        completionReview({
-          id: "review-older",
-          reviewer: "ken-autopilot",
-          timestamp: NOW,
-        }),
-      ],
-      { id: "source-older", order: 10 },
+describe("selectLatestRoadmapPhaseAdvancement", () => {
+  function checkpointSource(
+    reviewer: "ken" | "ken-autopilot" = "ken",
+    overrides: Partial<NotesPhase> = {},
+  ): NotesPhase {
+    const review = completionReview({ reviewer });
+    return completedSource(
+      [review],
+      {
+        roadmapEvents: [
+          review,
+          {
+            type: "phase-advancement-checkpoint",
+            id: `checkpoint-${reviewer}`,
+            completionReviewId: review.id,
+            completedPhaseId: overrides.id ?? "source",
+            nextPhaseId: "next",
+            reviewer,
+            timestamp: LATER,
+          },
+        ],
+        ...overrides,
+      },
     );
-    const newerSource = completedSource(
-      [
-        completionReview({
-          id: "review-newer",
-          reviewer: "ken-autopilot",
-          timestamp: LATER,
-        }),
-      ],
-      { id: "source-newer", order: 20 },
-    );
-    const nextPhase = phase("next", 30, "planning");
-    const restarted = JSON.parse(
-      JSON.stringify(snapshot([olderSource, newerSource, nextPhase])),
-    ) as ProjectNotesSnapshot;
+  }
 
-    expect(findPendingAutopilotRoadmapAdvancement(restarted)).toEqual({
-      completedPhaseId: "source-newer",
-      reviewId: "review-newer",
-      nextPhase: restarted.document.phases[2],
+  it.each([
+    ["ken", "manual"],
+    ["ken-autopilot", "autopilot"],
+  ] as const)("selects a pending persisted %s checkpoint without launching", (reviewer, _mode) => {
+    const source = checkpointSource(reviewer);
+    const next = phase("next", 20);
+    const launchCount = 0;
+    const restarted = structuredClone(snapshot([source, next]));
+
+    expect(selectLatestRoadmapPhaseAdvancement(restarted)).toMatchObject({
+      state: "pending",
+      checkpoint: { completedPhaseId: "source", nextPhaseId: "next", reviewer },
+      completedPhase: { id: "source" },
+      nextPhase: { id: "next" },
+    });
+    expect(launchCount).toBe(0);
+  });
+
+  it("reports a consumed checkpoint after human confirmation", () => {
+    const source = checkpointSource();
+    source.roadmapEvents.push({
+      type: "phase-advancement-confirmation",
+      id: "confirmation-1",
+      checkpointId: "checkpoint-ken",
+      nextPhaseId: "next",
+      actor: "user",
+      operationId: "operation-1",
+      timestamp: "2026-08-12T12:02:00.000Z",
+    });
+    const next = phase("next", 20, "planning", {
+      session: { sessionId: "next-session", sessionPath: "/sessions/next.jsonl" },
+    });
+
+    expect(selectLatestRoadmapPhaseAdvancement(snapshot([source, next]))).toMatchObject({
+      state: "confirmed",
+      confirmation: { actor: "user", operationId: "operation-1" },
+      nextPhase: { id: "next" },
     });
   });
 
-  it("does not fall back to an older completion after a newer rejected review", () => {
-    const validSource = completedSource(
-      [
-        completionReview({
-          id: "review-valid",
-          reviewer: "ken-autopilot",
-          timestamp: NOW,
-        }),
-      ],
-      { id: "source-valid", order: 10 },
-    );
-    const supersededSource = completedSource(
-      [
-        completionReview({
-          id: "review-old-accepted",
-          reviewer: "ken-autopilot",
-          timestamp: NOW,
-        }),
-        completionReview({
-          id: "review-latest-rejected",
-          reviewer: "ken-autopilot",
-          decision: "rejected",
-          gateOutcome: "review",
-          timestamp: LATER,
-        }),
-      ],
-      { id: "source-superseded", order: 20 },
-    );
-    const nextPhase = phase("next", 30);
+  it.each([
+    ["superseded review", (source: NotesPhase) => source.roadmapEvents.push(completionReview({ id: "later-review", decision: "rejected", gateOutcome: "review", timestamp: "2026-08-12T12:03:00.000Z" }))],
+    ["status override", (source: NotesPhase) => { source.overrides.status = { value: "done", source: "user", updatedAt: LATER }; }],
+    ["bound target", (_source: NotesPhase, next: NotesPhase) => { next.session = { sessionId: "bound", sessionPath: "/bound.jsonl" }; }],
+  ] as const)("reports a stale checkpoint after %s", (_name, mutate) => {
+    const source = checkpointSource();
+    const next = phase("next", 20);
+    mutate(source, next);
 
-    expect(
-      findPendingAutopilotRoadmapAdvancement(snapshot([validSource, supersededSource, nextPhase])),
-    ).toBeNull();
-  });
-
-  it("uses the later Roadmap phase to break equal reviewedAt ties", () => {
-    const first = completedSource(
-      [completionReview({ id: "review-first", reviewer: "ken-autopilot" })],
-      { id: "source-first", order: 10 },
-    );
-    const second = completedSource(
-      [completionReview({ id: "review-second", reviewer: "ken-autopilot" })],
-      { id: "source-second", order: 10 },
-    );
-    const nextPhase = phase("next", 20);
-
-    expect(findPendingAutopilotRoadmapAdvancement(snapshot([first, second, nextPhase]))).toEqual({
-      completedPhaseId: "source-second",
-      reviewId: "review-second",
-      nextPhase,
+    expect(selectLatestRoadmapPhaseAdvancement(snapshot([source, next]))).toMatchObject({
+      state: "stale",
+      checkpoint: { id: "checkpoint-ken" },
     });
   });
 
-  it("drops cancelled and stale runtime advancement requests", () => {
-    const source = completedSource([completionReview({ reviewer: "ken-autopilot" })]);
-    const nextPhase = phase("runtime-next", 20);
-    const current = snapshot([source, nextPhase]);
-    const pending = {
-      completedPhaseId: source.id,
-      reviewId: "review-complete",
-      revision: current.revision,
-    };
+  it("selects the newest checkpoint by timestamp and Roadmap order", () => {
+    const older = checkpointSource("ken", { id: "older", order: 10 });
+    const olderCheckpoint = older.roadmapEvents.find(
+      (event) => event.type === "phase-advancement-checkpoint",
+    )!;
+    olderCheckpoint.id = "checkpoint-older";
+    olderCheckpoint.completedPhaseId = "older";
+    olderCheckpoint.timestamp = NOW;
+    const newer = checkpointSource("ken-autopilot", { id: "newer", order: 15 });
+    const newerCheckpoint = newer.roadmapEvents.find(
+      (event) => event.type === "phase-advancement-checkpoint",
+    )!;
+    newerCheckpoint.id = "checkpoint-newer";
+    newerCheckpoint.completedPhaseId = "newer";
+    newerCheckpoint.timestamp = LATER;
 
     expect(
-      resolvePendingAutopilotRoadmapAdvancement(current, pending, {
-        enabled: true,
-        cancelled: false,
-      }),
-    ).toBe(nextPhase);
-    expect(
-      resolvePendingAutopilotRoadmapAdvancement(current, pending, {
-        enabled: true,
-        cancelled: true,
-      }),
-    ).toBeNull();
-    expect(
-      resolvePendingAutopilotRoadmapAdvancement(current, pending, {
-        enabled: false,
-        cancelled: false,
-      }),
-    ).toBeNull();
-    expect(
-      resolvePendingAutopilotRoadmapAdvancement(
-        current,
-        { ...pending, revision: 11 },
-        {
-          enabled: true,
-          cancelled: false,
-        },
-      ),
-    ).toBeNull();
-  });
-
-  it("returns null when the completed source is at the end of the Roadmap", () => {
-    const finalSource = completedSource([completionReview({ reviewer: "ken-autopilot" })], {
-      id: "final-source",
-      order: 20,
-    });
-
-    expect(
-      findPendingAutopilotRoadmapAdvancement(
-        snapshot([phase("done-before", 10, "done"), finalSource]),
-      ),
-    ).toBeNull();
+      selectLatestRoadmapPhaseAdvancement(snapshot([older, newer, phase("next", 20)])),
+    ).toMatchObject({ checkpoint: { id: "checkpoint-newer" } });
   });
 });

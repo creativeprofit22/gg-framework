@@ -21,7 +21,7 @@ import {
   realpathSync,
   rmSync,
 } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -350,11 +350,36 @@ function packageRoot(name, fromRequire, fromDir) {
 }
 
 /**
+ * Sharp publishes every platform binary as an optional dependency. Windows x64
+ * installers need only their host binary; unrelated packages retain npm's normal
+ * optional-dependency behavior.
+ */
+export function selectedOptionalDependencies(
+  packageName,
+  optionalDependencies,
+  platform = process.platform,
+  arch = process.arch,
+) {
+  const names = Object.keys(optionalDependencies || {});
+  if (packageName !== "sharp" || platform !== "win32") return names;
+  if (arch !== "x64") {
+    throw new Error(`sharp has no supported Windows host selection for ${platform}/${arch}`);
+  }
+  return names.filter((name) => name === "@img/colour" || name === "@img/sharp-win32-x64");
+}
+
+/**
  * Copy a package and its (optional) dependency tree into the flat output
  * node_modules, dereferencing pnpm symlinks. First version of a name wins
  * (npm-style hoist); the smoke test validates the result loads.
  */
-function copyPackage(name, fromRequire, fromDir, copied) {
+export function copyPackage(
+  name,
+  fromRequire,
+  fromDir,
+  copied,
+  { destination = nodeModulesOut, platform = process.platform, arch = process.arch } = {},
+) {
   if (copied.has(name)) return;
   const linkedRoot = packageRoot(name, fromRequire, fromDir);
   if (!linkedRoot) {
@@ -367,19 +392,20 @@ function copyPackage(name, fromRequire, fromDir, copied) {
   // dep of a package found via the symlink — the bundled kencode-search
   // shipped without the MCP SDK's dependency tree and crashed on spawn.
   const root = realpathSync(linkedRoot);
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const deps = [
+    ...Object.keys(pkg.dependencies || {}),
+    ...selectedOptionalDependencies(name, pkg.optionalDependencies, platform, arch),
+  ];
+
   copied.add(name);
-  const dest = join(nodeModulesOut, ...name.split("/"));
+  const dest = join(destination, ...name.split("/"));
   mkdirSync(dirname(dest), { recursive: true });
   cpSync(root, dest, { recursive: true, dereference: true });
 
-  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  const deps = {
-    ...(pkg.dependencies || {}),
-    ...(pkg.optionalDependencies || {}),
-  };
   const childRequire = createRequire(join(root, "package.json"));
-  for (const dep of Object.keys(deps)) {
-    copyPackage(dep, childRequire, root, copied);
+  for (const dep of deps) {
+    copyPackage(dep, childRequire, root, copied, { destination, platform, arch });
   }
 }
 
@@ -522,6 +548,9 @@ function assertPrunedLayout(before, removed, after, selectedOpenSrcBinary) {
     "app-sidecar.mjs",
     "skills/evidence-led-ui/SKILL.md",
     "node_modules/sharp/package.json",
+    ...(process.platform === "win32" && process.arch === "x64"
+      ? ["node_modules/@img/colour/package.json", "node_modules/@img/sharp-win32-x64/package.json"]
+      : []),
     "node_modules/playwright/package.json",
     "node_modules/@huggingface/transformers/dist/transformers.node.mjs",
     "node_modules/unpdf/dist/index.mjs",
@@ -535,6 +564,18 @@ function assertPrunedLayout(before, removed, after, selectedOpenSrcBinary) {
   for (const path of requiredFiles) {
     if (!existsSync(join(outDir, ...path.split("/"))))
       fail(`required sidecar path missing: ${path}`);
+  }
+
+  if (process.platform === "win32" && process.arch === "x64") {
+    const retainedSharpPlatforms = after.entries
+      .map((file) => file.relative.match(/^node_modules\/@img\/(sharp-[^/]+)\//)?.[1])
+      .filter((name, index, names) => name && names.indexOf(name) === index);
+    const foreignSharpPlatforms = retainedSharpPlatforms.filter(
+      (name) => name !== "sharp-win32-x64",
+    );
+    if (foreignSharpPlatforms.length > 0) {
+      fail(`foreign Sharp payloads retained: ${foreignSharpPlatforms.join(", ")}`);
+    }
   }
 
   const releaseTarget =
@@ -614,7 +655,11 @@ async function main() {
   assertPrunedLayout(before, removed, after, opensrc.selectedName);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+const invokedDirectly =
+  process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

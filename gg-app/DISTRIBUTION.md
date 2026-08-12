@@ -89,19 +89,21 @@ top offset on Windows/Linux.
 
 ## Release pipeline
 
-`.github/workflows/release.yml` runs on a `v*` tag: a matrix (`macos-14` arm64,
-`windows-latest`, `ubuntu-latest`) stages node + sidecar, smoke tests, then
-`tauri-apps/tauri-action` bundles, signs the updater artifacts, uploads them to
-a draft GitHub release, and generates `latest.json` for the updater endpoint in
-`tauri.conf.json`. Linux builds `deb` + `rpm` (AppImage is skipped — its
-`linuxdeploy` step reliably hangs on CI for Node-bundling apps).
+`.github/workflows/release.yml` runs on a `v*` tag only after a fail-closed
+preflight proves the exact tagged SHA has a successful `main` push run of
+`.github/workflows/ci.yml`. The required `Release CI gate` job aggregates every
+framework and desktop CI matrix leg; missing, pending, skipped, or failed CI
+stops the release before the protected environment or signing credentials are
+used.
 
-Platform coverage: Apple Silicon macOS (signed + notarized), Windows
-(NSIS `.exe` + `.msi`), and Linux (`deb`/`rpm`). Intel macOS is intentionally
-not built — see the matrix comment in `release.yml`.
+The release matrix (`macos-14` arm64 and `windows-latest`) stages Node plus the
+sidecar, smoke tests, then uses `tauri-apps/tauri-action` to bundle and sign the
+installers. Apple Silicon macOS is signed and notarized; Windows publishes NSIS
+`.exe` and `.msi` artifacts. Intel macOS and Linux are intentionally not
+released.
 
-`.github/workflows/ci.yml`'s `app` job exercises the same cross-OS spawn path on
-every push/PR (stage + bundle + smoke + `cargo test`) without a full bundle.
+The CI `app` matrix exercises the same cross-OS spawn path on every push/PR
+(stage + bundle + smoke + `cargo test`) and runs the Windows packaged MSI smoke.
 
 ### Protected release environment and required secrets
 

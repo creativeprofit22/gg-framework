@@ -229,12 +229,27 @@ stop and say there's nothing to release.
    ```
 5. Commit: `git commit -m "Update gg-app to v<NEW>"`.
 6. Push the commit: `git push`.
-7. Tag and push the tag (this is what fires the release workflow):
+7. **Wait for exact-SHA CI before creating the tag.** The release workflow fails
+   closed on missing, pending, or failed CI, so never race the `main` push:
+   ```bash
+   SHA=$(git rev-parse HEAD)
+   CI_RUN=""
+   for _ in {1..30}; do
+     CI_RUN=$(gh run list --workflow=ci.yml --branch=main --commit "$SHA" \
+       --event=push --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+     [[ -n "$CI_RUN" ]] && break
+     sleep 2
+   done
+   [[ -n "$CI_RUN" ]] || { echo "No main push CI run found for $SHA" >&2; exit 1; }
+   gh run watch "$CI_RUN" --exit-status
+   ```
+   Any failed CI job stops the release. Do not create or push the tag.
+8. Tag and push the tag only after CI succeeds (this fires the release workflow):
    ```bash
    git tag v<NEW>
    git push origin v<NEW>
    ```
-8. Confirm the build kicked off: `gh run list --workflow=release.yml --limit 1`.
+9. Confirm the build kicked off: `gh run list --workflow=release.yml --limit 1`.
 
 ---
 

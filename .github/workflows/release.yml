@@ -30,7 +30,21 @@ on:
       - "v*"
 
 jobs:
+  ci-gate:
+    name: Exact GITHUB_SHA CI gate
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require successful main CI for the release SHA
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verify-release-ci.mjs
+
   preflight:
+    needs: ci-gate
     runs-on: ubuntu-latest
     environment:
       name: desktop-production

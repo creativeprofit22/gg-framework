@@ -3,6 +3,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
 import {
+  checkLocalPatchedUpdate,
   listenLocalPatchedUpdate,
   startLocalPatchedUpdate,
   type LocalPatchedUpdateEvent,
@@ -72,8 +73,29 @@ export function useAppUpdate(): UpdateInfo {
     if (appBuildInfo.localPatched) {
       setUpdate(null);
       setPhase((current) =>
-        current === "installing" || current === "completed" ? current : "available",
+        current === "installing" || current === "completed" ? current : "checking",
       );
+      try {
+        const status = await checkLocalPatchedUpdate(
+          appBuildInfo.sourceRoot ?? "",
+          appBuildInfo.gitSha,
+        );
+        if (!status || typeof status.available !== "boolean") {
+          throw new Error("invalid local update response");
+        }
+        setPhase((current) =>
+          current === "installing" || current === "completed"
+            ? current
+            : status.available
+              ? "available"
+              : "idle",
+        );
+      } catch (error) {
+        setPhase((current) =>
+          current === "installing" || current === "completed" ? current : "idle",
+        );
+        logError(`Local update check failed: ${String(error)}`);
+      }
       return;
     }
     if (devFakeEnabled) {

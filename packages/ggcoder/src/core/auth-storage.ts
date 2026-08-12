@@ -95,7 +95,7 @@ export class AuthStorage extends CoreAuthStorage {
 
   override async resolveCredentials(
     provider: string,
-    options?: { forceRefresh?: boolean; storageKeys?: string[] },
+    options?: Parameters<CoreAuthStorage["resolveCredentials"]>[1],
   ): Promise<OAuthCredentials> {
     if (provider !== AZURE_OPENAI_PROVIDER) {
       return super.resolveCredentials(provider, options);

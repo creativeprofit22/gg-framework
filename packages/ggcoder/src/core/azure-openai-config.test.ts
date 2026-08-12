@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage as CoreAuthStorage } from "@kenkaiiii/gg-core";
 import { MODELS } from "@kenkaiiii/gg-core/models";
 import {
   AuthStorage,
@@ -65,7 +66,7 @@ describe("Azure OpenAI app boundaries", () => {
     try {
       const auth = new AuthStorage(authPath, completeEnvironment);
       await auth.setCredentials("openai", {
-        accessToken: "persisted-openai-key",
+        accessToken: "openai-test-secret",
         refreshToken: "",
         expiresAt: Number.POSITIVE_INFINITY,
       });
@@ -85,6 +86,31 @@ describe("Azure OpenAI app boundaries", () => {
     }
   });
 
+  it("delegates rejected-token recovery for non-Azure providers", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "ggcoder-azure-auth-"));
+    const authPath = join(directory, "auth.json");
+    try {
+      const auth = new AuthStorage(authPath, completeEnvironment);
+      await auth.setCredentials("openai", {
+        accessToken: "token-a",
+        refreshToken: "token-a-refresh",
+        expiresAt: Date.now() + 1_000_000,
+      });
+      await auth.resolveCredentials("openai");
+
+      await new CoreAuthStorage(authPath).setCredentials("openai", {
+        accessToken: "token-b",
+        refreshToken: "token-b-refresh",
+        expiresAt: Date.now() + 1_000_000,
+      });
+
+      await expect(
+        auth.resolveCredentials("openai", { forceRefresh: true, rejectedToken: "token-a" }),
+      ).resolves.toMatchObject({ accessToken: "token-b" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it.each(["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_BASE_URL", "AZURE_OPENAI_DEPLOYMENT"] as const)(
     "rejects config missing %s at both app boundaries",
     async (missing) => {

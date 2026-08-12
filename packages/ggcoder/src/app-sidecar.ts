@@ -1,15 +1,15 @@
 /**
- * gg-app sidecar — bridges the full ggcoder AgentSession to the Tauri webview
+ * gg-app sidecar â€” bridges the full ggcoder AgentSession to the Tauri webview
  * over plain HTTP + Server-Sent Events (zero browser-side dependencies).
  *
  * Transport:
- *   GET  /state    → { provider, model, cwd, ready }
- *   GET  /events   → text/event-stream of forwarded agent + session events
- *   POST /prompt   → { text } ; runs AgentSession.prompt(text)
- *   POST /cancel   → aborts the in-flight run
+ *   GET  /state    â†’ { provider, model, cwd, ready }
+ *   GET  /events   â†’ text/event-stream of forwarded agent + session events
+ *   POST /prompt   â†’ { text } ; runs AgentSession.prompt(text)
+ *   POST /cancel   â†’ aborts the in-flight run
  *
- * The agent spine (gg-ai → gg-agent → gg-core) and every tool are reused
- * unchanged via AgentSession — this file is only a network seam.
+ * The agent spine (gg-ai â†’ gg-agent â†’ gg-core) and every tool are reused
+ * unchanged via AgentSession â€” this file is only a network seam.
  */
 import http from "node:http";
 import fs from "node:fs/promises";
@@ -96,6 +96,9 @@ import {
   toModelInfo as localModelInfo,
   type LocalEndpoint,
   type LocalEndpointProbe,
+  type PlanAcceptResult,
+  type PlanMutationFailure,
+  type PlanRevisionResult,
   type SubscriptionUsageProvider,
   type SubscriptionUsageSnapshot,
 } from "@kenkaiiii/gg-core";
@@ -210,9 +213,21 @@ import {
 } from "./app-sidecar-phase-launch.js";
 import { handlePhaseStartRoute } from "./app-sidecar-phase-route.js";
 import {
-  findPendingAutopilotRoadmapAdvancement,
-  resolvePendingAutopilotRoadmapAdvancement,
-} from "./app-sidecar-phase-advancement.js";
+  AppSidecarPlanGate,
+  hashPlanContent,
+  planGateConflictCode,
+  type PersistedPlanReviewCheckpoint,
+} from "./app-sidecar-plan-gate.js";
+import {
+  executePlanRevisionRequest,
+  isPlanRevisionSessionBusy,
+  parsePlanRevisionBody,
+} from "./app-sidecar-plan-revision.js";
+import {
+  AppSidecarPlanHandoff,
+  type ApprovedPlanConsumptionIdentity,
+} from "./app-sidecar-plan-handoff.js";
+import { AppSidecarJsonBodyError, readJsonBody } from "./app-sidecar-http-json.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import {
   AppSidecarPhaseCompletionCoordinator,
@@ -301,12 +316,12 @@ const ALL_PROVIDERS: Provider[] = [
   "openrouter",
 ];
 
-// ── gg-app settings (~/.gg/gg-app.json) ────────────────────
+// â”€â”€ gg-app settings (~/.gg/gg-app.json) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // App-specific, separate from the shared ggcoder settings file so the desktop
 // app's preferences never collide with the CLI's.
 
 /** Per-project model + thinking preferences. Persisted so each window (one
- *  project cwd) restores its OWN model across app restarts — instead of every
+ *  project cwd) restores its OWN model across app restarts â€” instead of every
  *  window reading the same single global slot that the last writer clobbered. */
 interface ProjectModelPrefs {
   provider: Provider;
@@ -319,13 +334,13 @@ interface AppSettings {
   /** Folder new projects are created inside. Defaults to ~/gg-projects. */
   projectsRoot: string;
   /** Model + thinking prefs keyed by normalized project cwd. A window restores
-   *  its own entry on boot; absent → global settings.json → provider default. */
+   *  its own entry on boot; absent â†’ global settings.json â†’ provider default. */
   projectModels?: Record<string, ProjectModelPrefs>;
   /** Autopilot (auto-review) on/off keyed by normalized project cwd. Per-window
-   *  (one window = one cwd); absent/false → off. Restored on boot. */
+   *  (one window = one cwd); absent/false â†’ off. Restored on boot. */
   autopilot?: Record<string, boolean>;
-  /** Ken's model override keyed by normalized project cwd. Absent → Ken follows
-   *  GG Coder's model (the historical behavior). Set → Ken (chat + autopilot)
+  /** Ken's model override keyed by normalized project cwd. Absent â†’ Ken follows
+   *  GG Coder's model (the historical behavior). Set â†’ Ken (chat + autopilot)
    *  uses this model regardless of GG Coder's. */
   kenModels?: Record<string, KenModelPref>;
   /** Extra folders scanned for projects alongside `projectsRoot`. */
@@ -345,7 +360,7 @@ function defaultProjectsRoot(): string {
 }
 
 /** Normalize a project cwd to a stable settings key so trailing slashes /
- *  relative segments collapse — the same project always maps to one entry. */
+ *  relative segments collapse â€” the same project always maps to one entry. */
 function projectModelKey(cwd: string): string {
   return path.resolve(cwd);
 }
@@ -469,8 +484,8 @@ function isValidProjectName(name: string): boolean {
   return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name);
 }
 
-// ── History reconstruction types ──────────────────────────
-// Mirrors HistoryEntry in gg-app/src/agent.ts — the wire shape the webview
+// â”€â”€ History reconstruction types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Mirrors HistoryEntry in gg-app/src/agent.ts â€” the wire shape the webview
 // receives from GET /history. Fields beyond role/text carry the transcript
 // item kinds that are reconstructed from persisted session data.
 interface HistoryEntryForWire {
@@ -480,7 +495,7 @@ interface HistoryEntryForWire {
   hook?: "ideal" | "loop_break" | "regrounding" | null;
   command?: boolean;
   compacted?: boolean;
-  /** Persisted counts for a compacted row's "N → M messages" summary. */
+  /** Persisted counts for a compacted row's "N â†’ M messages" summary. */
   compactionCounts?: { originalCount: number; newCount: number };
   /** True when this entry is a Ken Kai (mentor) turn: a `user` row is the `@Ken`
    *  question, an `assistant` row is Ken's reply. The webview renders these in
@@ -488,7 +503,7 @@ interface HistoryEntryForWire {
   ken?: boolean;
   /** Present when this entry is a persisted autopilot verdict marker (an
    *  `assistant` row with empty `text`). The webview renders it exactly like
-   *  the live `autopilot` item — never the raw verdict keyword the model
+   *  the live `autopilot` item â€” never the raw verdict keyword the model
    *  actually replied with (e.g. `ALL_CLEAR`). */
   autopilot?: {
     phase: "prompted" | "done" | "human" | "capped" | "plan_approved";
@@ -497,7 +512,7 @@ interface HistoryEntryForWire {
     /** Stable seed derived from persisted marker data for deterministic all-clear copy. */
     copySeed?: string;
   };
-  /** True when this user prompt came from a Ken "Send to GG Coder" button —
+  /** True when this user prompt came from a Ken "Send to GG Coder" button â€”
    *  the webview renders the shimmering label instead of the prompt body. */
   kenSent?: boolean;
   /** Enhancer highlight segments for this user prompt (unedited enhanced sends). */
@@ -507,7 +522,7 @@ interface HistoryEntryForWire {
   /** Task header row (task title), persisted at task_start. */
   task?: { title: string };
   /** Error row (headline/message/guidance), persisted by broadcastError.
-   *  `scope` selects the live prefix (ken_error → "Ken: ", autopilot_error →
+   *  `scope` selects the live prefix (ken_error â†’ "Ken: ", autopilot_error â†’
    *  "Autopilot: "). */
   error?: { scope: string; headline: string; message?: string; guidance?: string };
   /** Webview-copy info row marker (e.g. the video-capability warning). */
@@ -520,7 +535,7 @@ interface HistoryEntryForWire {
   }>;
 }
 
-// ── Chat attachments (images / videos / files dropped into the input) ──────
+// â”€â”€ Chat attachments (images / videos / files dropped into the input) â”€â”€â”€â”€â”€â”€
 // The webview sends base64 payloads; we persist each under .gg/uploads/ so the
 // agent's tools can open files, then hand media to the model as native blocks.
 interface AppAttachment {
@@ -580,9 +595,9 @@ async function prepareAttachments(
   return out;
 }
 
-// ── @-mention file search (chat-input file picker) ─────────────────────────
-// Lists project files for the webview's `@` picker. Empty query → newest files
-// by mtime; a query → fuzzy-ranked basename/path matches. Honors .gitignore and
+// â”€â”€ @-mention file search (chat-input file picker) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Lists project files for the webview's `@` picker. Empty query â†’ newest files
+// by mtime; a query â†’ fuzzy-ranked basename/path matches. Honors .gitignore and
 // skips node_modules/.git so the picker mirrors the agent's `find` tool.
 interface FileHit {
   /** Project-relative POSIX path, e.g. "src/App.tsx". */
@@ -637,7 +652,7 @@ async function searchProjectFiles(cwd: string, rawQuery: string): Promise<FileHi
       .map((l) => l.trim())
       .filter((l) => l && !l.startsWith("#"));
   } catch {
-    // No .gitignore — nothing extra to ignore.
+    // No .gitignore â€” nothing extra to ignore.
   }
   const ig = ignore.default().add(gitignore);
 
@@ -706,9 +721,9 @@ function detectHookKind(text: string): "ideal" | "loop_break" | "regrounding" | 
   return null;
 }
 
-// ── MCP server management (mirrors `ggcoder mcp`) ───────────────────────────
+// â”€â”€ MCP server management (mirrors `ggcoder mcp`) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // The webview's MCP modal lists configured servers with live connection status,
-// adds them via the same paste-a-`claude mcp add …` grammar, and removes them.
+// adds them via the same paste-a-`claude mcp add â€¦` grammar, and removes them.
 // All persistence + connection logic lives in core/mcp (single source of truth);
 // these helpers only shape it for the wire.
 
@@ -759,7 +774,7 @@ async function buildMcpRows(cwd: string): Promise<McpWireRow[]> {
   }
 }
 
-/** Probe a single server's connection before persisting it. Never throws — a
+/** Probe a single server's connection before persisting it. Never throws â€” a
  *  failed probe returns ok:false with a human-readable error so the config can
  *  still be saved. Mirrors the CLI's probeServer. */
 async function probeMcp(
@@ -790,7 +805,7 @@ interface SseClient {
  * sibling `cli.js`), so the subagent tool ends up spawning the sidecar itself.
  * Without this guard that would boot a second HTTP server, emit no NDJSON, and
  * hang until the 10-minute hard timeout. So when invoked with `--json`, behave
- * exactly like `ggcoder --json …`: stream the sub-agent run as NDJSON and exit,
+ * exactly like `ggcoder --json â€¦`: stream the sub-agent run as NDJSON and exit,
  * never starting the HTTP/SSE server. Mirrors the `values.json` branch in cli.ts.
  */
 async function runJsonModeIfRequested(): Promise<boolean> {
@@ -815,7 +830,7 @@ async function runJsonModeIfRequested(): Promise<boolean> {
   const maxTurnsRaw = values["max-turns"];
   // Optional tool allow-list forwarded by the subagent spawner from an agent
   // definition's `tools:` frontmatter. Mirrors the identical parsing in
-  // cli.ts's `values.json` branch — keep both in sync (see subagent.ts).
+  // cli.ts's `values.json` branch â€” keep both in sync (see subagent.ts).
   const parsedTools = values.tools
     ? values.tools
         .split(",")
@@ -855,7 +870,7 @@ async function runJsonModeIfRequested(): Promise<boolean> {
   return true;
 }
 
-// ── Daemon-level HTTP helpers (shared by the session-management routes) ─────
+// â”€â”€ Daemon-level HTTP helpers (shared by the session-management routes) â”€â”€â”€â”€â”€
 // The per-session route table has its own local copies; these serve the
 // daemon's own POST /session / DELETE /session routes.
 function daemonReadBody(
@@ -939,7 +954,7 @@ async function main(): Promise<void> {
   });
 
   // Global last-resort guards, installed as early as the logger allows so they
-  // cover the WHOLE lifecycle — including startup/initialize, the phase the
+  // cover the WHOLE lifecycle â€” including startup/initialize, the phase the
   // "sidecar did not start in time" bug lives in. The sidecar is a long-lived
   // HTTP server the Rust shell can respawn: a stray rejection or thrown error
   // from one request (e.g. an MCP probe spawning a misbehaving child) must not
@@ -962,7 +977,7 @@ async function main(): Promise<void> {
   // omits Homebrew/Cargo/version-manager dirs, so the agent can't find node,
   // git, python, rg, etc. Enrich process.env.PATH from the login shell once,
   // before anything spawns (bash tool, background tasks, LSP, git helpers all
-  // inherit it). Best-effort — never blocks startup beyond its internal cap.
+  // inherit it). Best-effort â€” never blocks startup beyond its internal cap.
   await enrichProcessPath();
 
   // Sweep recoverable full tool outputs (~/.gg/tool-output/) older than 48h.
@@ -1056,7 +1071,7 @@ async function main(): Promise<void> {
     },
   });
 
-  // XP/rank progress — loaded once per daemon; awards fan out to every window.
+  // XP/rank progress â€” loaded once per daemon; awards fan out to every window.
   // Each frame is tagged `origin: true` only for the session that earned the
   // XP, so that window alone plays sounds/chips while the rest just re-render.
   const progress = await createProgressManager(paths.agentDir, (snapshot, originId) => {
@@ -1082,7 +1097,7 @@ async function main(): Promise<void> {
   const usageRequests = new Map<SubscriptionUsageProvider, Promise<UsageResult>>();
   // Last snapshot that actually carried windows, per provider. Replayed while a
   // fetch is failing so the title meter never blinks out of existence. Bounded
-  // by USAGE_LAST_GOOD_MAX_AGE_MS — a provider that never recovers must stop
+  // by USAGE_LAST_GOOD_MAX_AGE_MS â€” a provider that never recovers must stop
   // reporting rather than freeze a percentage (and a long-past reset time) on
   // screen forever. The 429 backoff alone runs to 24h, far past any usefulness.
   const usageLastGood = new Map<SubscriptionUsageProvider, UsageResult>();
@@ -1099,7 +1114,7 @@ async function main(): Promise<void> {
   async function fetchUsageProvider(provider: SubscriptionUsageProvider): Promise<UsageResult> {
     const displayName =
       provider === "anthropic" ? "Anthropic" : provider === "openai" ? "Codex" : "Kimi";
-    // Kimi plan usage is tracked on the OAuth credential specifically — the
+    // Kimi plan usage is tracked on the OAuth credential specifically â€” the
     // Moonshot platform API key is metered per-token, not per plan window.
     const authKey = oauthStorageKey(provider) ?? provider;
     if (!(await auth.hasProviderAuth(authKey))) {
@@ -1158,7 +1173,7 @@ async function main(): Promise<void> {
       // hand out) must not blank the meter. Keep serving the last good
       // snapshot, flagged `stale`, so the bar stays put instead of flickering
       // out for the whole backoff window and back in on the next success.
-      // Past the max age it's dropped — no data beats confidently wrong data.
+      // Past the max age it's dropped â€” no data beats confidently wrong data.
       const lastGood = usageLastGood.get(provider);
       if (lastGood && Date.now() - lastGood.fetchedAt >= USAGE_LAST_GOOD_MAX_AGE_MS) {
         usageLastGood.delete(provider);
@@ -1185,7 +1200,7 @@ async function main(): Promise<void> {
     usageRequests.set(provider, request);
     try {
       const result = await request;
-      // Never re-store a replay — it would keep its original `fetchedAt`, but
+      // Never re-store a replay â€” it would keep its original `fetchedAt`, but
       // writing it back muddies the "last GOOD" contract for no gain.
       if (result.connected && !result.error && !result.stale && result.windows.length > 0) {
         usageLastGood.set(provider, result);
@@ -1216,7 +1231,7 @@ async function main(): Promise<void> {
       const url = req.url ?? "/";
       const method = req.method ?? "GET";
 
-      // CORS preflight — the webview origin differs from 127.0.0.1.
+      // CORS preflight â€” the webview origin differs from 127.0.0.1.
       if (method === "OPTIONS") {
         res.writeHead(204, {
           "access-control-allow-origin": "*",
@@ -1227,7 +1242,7 @@ async function main(): Promise<void> {
         return;
       }
 
-      // ── Daemon-level routes (session lifecycle) ──────────────────────────
+      // â”€â”€ Daemon-level routes (session lifecycle) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // Secret-free two-phase reload: reserve while Rust persists native config,
       // then dispose every session and exit only if no pane has active work.
       if (method === "POST" && url === "/admin/reload/prepare") {
@@ -1264,7 +1279,7 @@ async function main(): Promise<void> {
       res.once("finish", releaseMutation);
       res.once("close", releaseMutation);
 
-      // Create a session for a window: { mode?, cwd, sessionPath? } → { sessionId }.
+      // Create a session for a window: { mode?, cwd, sessionPath? } â†’ { sessionId }.
       // Session UUIDs are capabilities, so minting them requires the native shell secret.
       if (method === "POST" && url === "/session") {
         if (!hasDaemonAuth(req, daemonAuthToken)) {
@@ -1278,7 +1293,7 @@ async function main(): Promise<void> {
           try {
             body = raw ? (JSON.parse(raw) as typeof body) : {};
           } catch {
-            /* empty/invalid body → defaults below */
+            /* empty/invalid body â†’ defaults below */
           }
           const mode: WorkspaceMode = body.mode === "chat" ? "chat" : "code";
           const chatAgent = parseChatAgentId(body.chatAgent);
@@ -1293,6 +1308,7 @@ async function main(): Promise<void> {
             const ctx = await createSession(
               {
                 auth,
+                nativeAuthorityToken: daemonAuthToken,
                 paths,
                 progress,
                 memoryStore,
@@ -1383,7 +1399,7 @@ async function main(): Promise<void> {
         return;
       }
 
-      // ── Per-session delegation ───────────────────────────────────────────
+      // â”€â”€ Per-session delegation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       const isEventStream = method === "GET" && (url === "/events" || url.startsWith("/events?"));
       const ctx = sessions.resolveRequest(req, url, { allowQuery: isEventStream, host });
       if (!ctx) {
@@ -1509,7 +1525,7 @@ async function main(): Promise<void> {
 }
 
 /** MCP servers Ken is allowed to use. kencode-search lets him look into real
- *  public repos / verify against actual code instead of assuming — core to how
+ *  public repos / verify against actual code instead of assuming â€” core to how
  *  he's meant to work. Read-only research; no other MCP server is connected. */
 const KEN_ALLOWED_MCP_SERVERS = ["kencode-search"];
 
@@ -1531,7 +1547,7 @@ function lastAssistantText(messages: ReturnType<AgentSession["getMessages"]>): s
  * Assemble Ken's context digest for one `@Ken` question: git/env + the build
  * session's compaction summary + recent activity. Prepended to the user's
  * question as Ken's prompt body each turn. Project docs (CLAUDE.md/AGENTS.md)
- * are NOT here — they're folded into Ken's cached system prompt once per
+ * are NOT here â€” they're folded into Ken's cached system prompt once per
  * session instead (see ken-prompt.ts), so they hit the provider prompt cache
  * instead of being re-sent uncached on every question. Workflow commands +
  * autopilot-injected prompts are passed through so the digest labels them as
@@ -1555,11 +1571,11 @@ function buildKenContext(
   });
 }
 
-// ── Progress ("Ranks") ──────────────────────────────────────────────────
+// â”€â”€ Progress ("Ranks") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Daemon-level XP/rank manager: one durable file (~/.gg/progress.json), awards
 // applied under a file lock, snapshots broadcast to EVERY session's SSE clients,
 // and an fs.watch on ~/.gg so writes from OTHER daemon processes (dev + packaged
-// app side by side) re-broadcast here too — deduped by the lastEvent nonce.
+// app side by side) re-broadcast here too â€” deduped by the lastEvent nonce.
 // XP failures are debug-log-only; progress must never break a run.
 
 interface ProgressManager {
@@ -1575,7 +1591,7 @@ async function createProgressManager(
   agentDir: string,
   broadcastAll: (snapshot: ProgressSnapshot, originId?: string) => void,
 ): Promise<ProgressManager> {
-  // Boot: recovery chain main → backup → coding + chat session rebuild → empty.
+  // Boot: recovery chain main â†’ backup â†’ coding + chat session rebuild â†’ empty.
   const coderSessionsDir = path.join(agentDir, "sessions");
   let file: ProgressFile = await loadProgress({
     rebuild: () =>
@@ -1667,7 +1683,7 @@ async function createProgressManager(
   }
 
   // Dispose closes the fs.watch handle (baseline #8: it was previously never
-  // closed — a per-daemon leak) and clears any pending debounce timer.
+  // closed â€” a per-daemon leak) and clears any pending debounce timer.
   function dispose(): void {
     if (watchDebounce) {
       clearTimeout(watchDebounce);
@@ -1676,7 +1692,7 @@ async function createProgressManager(
     try {
       progressWatcher?.close();
     } catch {
-      // Already closed / never opened — nothing to do.
+      // Already closed / never opened â€” nothing to do.
     }
     progressWatcher = null;
   }
@@ -1713,12 +1729,13 @@ interface SessionContext {
  * Build one in-process agent session: its AgentSession, SSE client set, event
  * bridge, task runner, auth/login bridge, and the full HTTP route table exposed
  * as a `handle()` method. Many of these live inside one daemon process, fully
- * isolated (separate AgentSession, cwd, history, model) — only the HTTP server,
+ * isolated (separate AgentSession, cwd, history, model) â€” only the HTTP server,
  * logger, PATH, shared auth file, and radio live at the daemon level.
  */
 async function createSession(
   deps: {
     auth: AuthStorage;
+    nativeAuthorityToken: string;
     paths: Awaited<ReturnType<typeof ensureAppDirs>>;
     progress: ProgressManager;
     memoryStore: MemoryStore;
@@ -1749,6 +1766,7 @@ async function createSession(
 ): Promise<SessionContext> {
   const {
     auth,
+    nativeAuthorityToken,
     progress,
     memoryStore,
     jiwaStore,
@@ -1790,7 +1808,7 @@ async function createSession(
   // Per-project model/thinking prefs win over the shared global settings.json:
   // each window (one project cwd) restores its own selection instead of every
   // window reading the same single global slot that the last writer clobbered
-  // (the old bug — switching models in one window reset every other window).
+  // (the old bug â€” switching models in one window reset every other window).
   const projectPrefs = await loadProjectModelPrefs(cwd);
   const preferred: Provider = projectPrefs?.provider ?? saved.provider ?? "anthropic";
   const savedModel = projectPrefs?.model ?? saved.model;
@@ -1805,7 +1823,7 @@ async function createSession(
     savedModel,
   );
   if (!loggedIn) {
-    log("WARN", "app-sidecar", "no provider configured — booting logged-out for login", {
+    log("WARN", "app-sidecar", "no provider configured â€” booting logged-out for login", {
       fallbackProvider: provider,
     });
   }
@@ -1838,7 +1856,7 @@ async function createSession(
     });
   }
 
-  // ── SSE fan-out (declared before the session so plan callbacks can use it) ─
+  // â”€â”€ SSE fan-out (declared before the session so plan callbacks can use it) â”€
   const clients = new Set<SseClient>();
   let clientSeq = 0;
 
@@ -1866,18 +1884,18 @@ async function createSession(
 
   // Replace CLI-specific guidance (slash commands, CLI tool names) with
   // desktop-app equivalents so the webview never shows "run ggcoder login".
-  // Applied to BOTH the message and guidance fields — the auth "Not logged in…
+  // Applied to BOTH the message and guidance fields â€” the auth "Not logged inâ€¦
   // Run "ggcoder login"" string lives in `message`, not `guidance`.
   function desktopGuidance(guidance: string): string {
     return (
       guidance
         // Auth: `Run "ggcoder login"` / `Run 'ggcoder login'` / `Run `ggcoder login``
-        // (any quote style, or none) → button. Do this first so the whole phrase
-        // is rewritten cleanly instead of leaving a dangling `Run "…"`.
+        // (any quote style, or none) â†’ button. Do this first so the whole phrase
+        // is rewritten cleanly instead of leaving a dangling `Run "â€¦"`.
         .replaceAll(/Run ["'`]?ggcoder login["'`]?/gi, "Use the Login to AI Providers button")
         // Any remaining bare mention.
         .replaceAll(/ggcoder login/gi, "the Login to AI Providers button")
-        // /compact: the app has NO manual compact command or button — it only
+        // /compact: the app has NO manual compact command or button â€” it only
         // auto-compacts (and now auto-recovers on overflow). If this guidance is
         // reached, auto-compaction already couldn't reduce enough, so the only
         // real affordance is a fresh session. Don't tell the user to run a
@@ -1933,7 +1951,7 @@ async function createSession(
       .catch(() => {});
   }
 
-  // ── MCP elicitation bridge ─────────────────────────────────
+  // â”€â”€ MCP elicitation bridge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // An MCP server can ask for user input in the middle of a tool call. The
   // bridge parks the promise; we broadcast the prompt over SSE and resolve it
   // when the webview POSTs /mcp/elicit/:id.
@@ -1963,20 +1981,16 @@ async function createSession(
     sharedMcpPool,
     onMcpElicit: elicitations.onElicit,
     // Keep restore-time auto-compaction off the readiness path too: its summary
-    // LLM call (30s timeout) used to freeze waitForReady — and with it the whole
-    // window (project picker, session list) — whenever a resumed session was
+    // LLM call (30s timeout) used to freeze waitForReady â€” and with it the whole
+    // window (project picker, session list) â€” whenever a resumed session was
     // over the context threshold. First prompt compacts instead, with UI events.
     deferLoadCompaction: true,
   };
   let session!: AgentSession;
+  let planGate!: AppSidecarPlanGate;
+  const persistPlanGateMarker = (checkpoint: PersistedPlanReviewCheckpoint) =>
+    session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
   let autopilotFinalReviewSink: ((attempt: AppSidecarFinalReviewAttempt) => void) | null = null;
-  let pendingAutopilotPhaseAdvancement: {
-    completedPhaseId: string;
-    reviewId: string;
-    revision: number;
-  } | null = null;
-  let phaseAdvancementRunning = false;
-  let phaseAdvancementDisposed = false;
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
     cwd,
     repository: notesRepository,
@@ -1986,18 +2000,6 @@ async function createSession(
       actor !== "ken-autopilot" || (!autopilotCancelled && projectAutopilot.isEnabled(cwd)),
     onFinalReview: (attempt) => {
       autopilotFinalReviewSink?.(attempt);
-      if (
-        attempt.actor === "ken-autopilot" &&
-        attempt.result.result === "completion-review-committed" &&
-        attempt.result.gateOutcome === "done" &&
-        typeof attempt.result.revision === "number"
-      ) {
-        pendingAutopilotPhaseAdvancement = {
-          completedPhaseId: attempt.input.phase_id,
-          reviewId: attempt.input.final_review!.review_id,
-          revision: attempt.result.revision,
-        };
-      }
     },
     broadcastNotesSnapshot,
     onError: (error, metadata) =>
@@ -2025,16 +2027,16 @@ async function createSession(
         broadcast("plan_enter", { reason: reason ?? "" });
         void created.persistAppMarker("plan", { reason: reason ?? "" }).catch(() => {});
       },
-      onExitPlan: async (planPath: string) => {
+      onExitPlan: async (planPath: string, content: string) => {
+        const checkpoint = await planGate.submit(planPath, content);
         await created.setPlanMode(false);
-        let content = "";
-        try {
-          content = await fs.readFile(planPath, "utf-8");
-        } catch {
-          // Keep an empty fallback; the review route may still recover the file later.
-        }
-        setPendingPlan(planPath, content);
-        broadcast("plan_exit", { planPath, content });
+        broadcast("plan_exit", {
+          checkpointId: checkpoint.checkpointId,
+          generation: checkpoint.generation,
+          planPath: checkpoint.planPath,
+          content: checkpoint.content,
+          contentHash: checkpoint.contentHash,
+        });
         return "Plan submitted for user review. Wait for the user to approve, reject, or dismiss it before implementing.";
       },
       ...createAppSidecarCodingRoadmapSessionOptions(
@@ -2067,6 +2069,7 @@ async function createSession(
     session = createCodingSession(resumeSessionPath);
   }
   await session.initialize();
+  planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
   if (mode === "code") {
     await reconcileActivePhaseVerificationStage({ cwd, repository: notesRepository, session });
   }
@@ -2099,7 +2102,7 @@ async function createSession(
   }
   log("INFO", "app-sidecar", "session ready", { provider, model, mode, chatAgent, cwd });
 
-  // ── Local models (Ollama / LM Studio / llama.cpp / vLLM) ──
+  // â”€â”€ Local models (Ollama / LM Studio / llama.cpp / vLLM) â”€â”€
   // Probing four HTTP endpoints must never delay readiness, so this runs in the
   // background (same shape as backgroundMcpConnect) and pushes a models_change
   // frame when it lands.
@@ -2180,7 +2183,7 @@ async function createSession(
     const endpoints = await listAllEndpoints();
     const endpoint = endpoints.find((e) => e.id === parsed.endpointId);
     if (!endpoint)
-      return `Unknown local endpoint "${parsed.endpointId}" — re-scan for local models.`;
+      return `Unknown local endpoint "${parsed.endpointId}" â€” re-scan for local models.`;
 
     const probe = await probeEndpoint(endpoint);
     // Keep the cached view honest: this probe is fresher than the last scan.
@@ -2231,7 +2234,7 @@ async function createSession(
   let gitIsRepo: boolean = initialGitIsRepo;
   let gitDirtyFileCount = initialDirtyFileCount;
   // Open issue/PR counts for the origin repo's GitHub slug, via the `gh` CLI's
-  // auth. null = unknown (gh missing/unauthed, non-GitHub origin) → chips hidden.
+  // auth. null = unknown (gh missing/unauthed, non-GitHub origin) â†’ chips hidden.
   const gitHubSlug: string | null = initialGitHubSlug;
   let gitHubIssues: number | null = null;
   let gitHubPRs: number | null = null;
@@ -2261,7 +2264,7 @@ async function createSession(
       gitHubPRs,
       gitHubRepoUrl: gitHubSlug ? `https://github.com/${gitHubSlug}` : null,
       tasks: session.listBackgroundProcesses(),
-      // Roots added with /add-dir — the header shows a badge when non-empty.
+      // Roots added with /add-dir â€” the header shows a badge when non-empty.
       additionalRoots: session.getAdditionalRoots(),
     };
   }
@@ -2273,7 +2276,7 @@ async function createSession(
     })
     .then(() => broadcast("models_change", { local: localStatePayload() }))
     .catch((err: unknown) => {
-      // A discovery failure is never fatal — the user simply has no local
+      // A discovery failure is never fatal â€” the user simply has no local
       // models. Log it; don't push an error row into the transcript.
       log("WARN", "app-sidecar", "local model scan failed", {
         error: err instanceof Error ? err.message : String(err),
@@ -2302,10 +2305,9 @@ async function createSession(
 
   // Approved-plan progress belongs beside the plan file, not in the webview.
   // The implementation can rewrite/expand that file mid-run, so a step count
-  // frozen at approval time becomes dishonest (the exact stale-total bug the
-  // CLI already fixed). Re-read the live file after tools/markers, retain the
-  // last valid step section during transient edits, and send one authoritative
-  // snapshot to the app.
+  // frozen at approval time becomes dishonest for legacy path-only plans. Durable
+  // human approvals always use their server-owned exact snapshot, so edits to the
+  // display file cannot alter either the prompt contract or progress totals.
   let approvedPlanPath: string | null = null;
   let approvedPlanTotal = 0;
   let approvedPlanMarkers = new Set<number>();
@@ -2323,7 +2325,11 @@ async function createSession(
   async function syncApprovedPlanProgress(generation: number): Promise<boolean> {
     const planPath = approvedPlanPath;
     if (planPath === null || generation !== approvedPlanGeneration) return false;
-    const content = await fs.readFile(planPath, "utf-8").catch(() => null);
+    const durableApproval = session.getApprovedPlanConsumption();
+    const content =
+      durableApproval?.approvedPlanPath === planPath
+        ? durableApproval.content
+        : await fs.readFile(planPath, "utf-8").catch(() => null);
     if (approvedPlanPath !== planPath || generation !== approvedPlanGeneration) return false;
     if (content !== null) {
       const freshTotal = extractPlanSteps(content).length;
@@ -2355,11 +2361,15 @@ async function createSession(
     return planProgressSync;
   }
 
-  async function activateApprovedPlan(planPath: string | undefined): Promise<number> {
+  async function activateApprovedPlan(
+    planPath: string | undefined,
+    exactContent?: string,
+  ): Promise<number> {
     deactivateApprovedPlan();
-    await session.setApprovedPlan(planPath);
-    if (!planPath) return 0;
+    if (exactContent === undefined) await session.setApprovedPlan(planPath);
+    if (!planPath) return exactContent ? extractPlanSteps(exactContent).length : 0;
     approvedPlanPath = planPath;
+    approvedPlanTotal = exactContent ? extractPlanSteps(exactContent).length : 0;
     await queueApprovedPlanProgressSync();
     return approvedPlanTotal;
   }
@@ -2374,10 +2384,12 @@ async function createSession(
     if (!options?.retainImplementationEvidence) phaseImplementationPlans.clear();
   }
 
-  const restoredApprovedPlanPath = session.getActivePhaseContext()?.approvedPlanPath;
-  if (restoredApprovedPlanPath) {
+  const restoredApprovedPlan = session.getApprovedPlanConsumption();
+  const restoredApprovedPlanPath =
+    restoredApprovedPlan?.approvedPlanPath ?? session.getActivePhaseContext()?.approvedPlanPath;
+  if (restoredApprovedPlanPath || restoredApprovedPlan) {
     try {
-      await activateApprovedPlan(restoredApprovedPlanPath);
+      await activateApprovedPlan(restoredApprovedPlanPath, restoredApprovedPlan?.content);
       for (const message of session.getMessages()) {
         const text =
           typeof message.content === "string"
@@ -2477,7 +2489,7 @@ async function createSession(
 
   let running = false;
   // Closes the window between `/prompt` deciding to start a run and `runAgent`
-  // flipping `running` — that stretch awaits, so Node yields inside it. See
+  // flipping `running` â€” that stretch awaits, so Node yields inside it. See
   // RunClaim.
   const runClaim = new RunClaim();
   const runLifecycle = new RunLifecycle(
@@ -2505,13 +2517,13 @@ async function createSession(
   );
   const cancelledRunEndGenerations = new Set<number>();
   let pendingCancelDrain: { generation: number; text: string } | null = null;
-  // Bumped by /cancel — a run whose cancel generation changed mid-flight was
+  // Bumped by /cancel â€” a run whose cancel generation changed mid-flight was
   // canceled and earns no XP.
   let cancelGeneration = 0;
   // Autopilot (auto-review) toggle for THIS window's project. Loaded from
   // gg-app.json on boot; flipped via POST /autopilot. When on, POST /prompt runs
-  // runAutopilotCycle after the user's turn settles — Ken auto-reviews the work
-  // and drives the review→prompt→review loop. Ken is the sole verification
+  // runAutopilotCycle after the user's turn settles â€” Ken auto-reviews the work
+  // and drives the reviewâ†’promptâ†’review loop. Ken is the sole verification
   // owner in this mode, so suppress the build session's redundant Ideal hook.
   let autopilot =
     mode === "code" && (await projectAutopilot.initialize(cwd, () => loadAutopilot(cwd)));
@@ -2532,37 +2544,64 @@ async function createSession(
   });
   // Set by /cancel to break out of an in-flight autopilot cycle between steps.
   let autopilotCancelled = false;
-  // Hard cap on review→prompt→review rounds per user turn (loop safety).
+  // Hard cap on reviewâ†’promptâ†’review rounds per user turn (loop safety).
   const MAX_AUTOPILOT_ROUNDS = 3;
   const CANCEL_TIMEOUT_MS = 5_000;
   // Prompt bodies Autopilot Ken injected into the BUILD session this
   // conversation. Passed into every Ken digest so injected prompts render as
-  // "Ken autopilot (injected)" instead of `**User:**` — otherwise multi-round
+  // "Ken autopilot (injected)" instead of `**User:**` â€” otherwise multi-round
   // cycles drift into Ken reviewing against his own last prompt. Cleared
   // whenever the conversation resets (new session / plan accept / task run).
   let injectedAutopilotPrompts: string[] = [];
-  // The plan GG Coder submitted via exit_plan that still awaits a decision
-  // (Ken's auto-review in autopilot, or the user's modal). Path + the content
-  // read at submission time (fallback if the file becomes unreadable).
-  let pendingPlanPath: string | null = null;
-  let pendingPlanContent = "";
-  // Bumped on EVERY pending-plan set/clear. Ken's plan review captures it
-  // before reviewing and re-checks it before acting on the verdict, so a user
-  // Accept/Reject racing an in-flight review always wins — the stale verdict
-  // is discarded silently.
-  let planGeneration = 0;
+  const planGateConflict = () => {
+    const checkpoint = planGate.current();
+    if (!checkpoint) return null;
+    const gateConflict = planGateConflictCode(checkpoint);
+    if (gateConflict) {
+      return {
+        error: gateConflict,
+        checkpointId: checkpoint.checkpointId,
+        generation: checkpoint.generation,
+        state: checkpoint.state,
+      };
+    }
+    const consumption = session.getApprovedPlanConsumption();
+    const handoffCommitted =
+      checkpoint.state === "human-approved" &&
+      consumption?.checkpointId === checkpoint.checkpointId &&
+      consumption.generation === checkpoint.generation &&
+      consumption.state === "implementation-prompt-started";
+    if (handoffCommitted || checkpoint.state !== "human-approved") return null;
+    return {
+      error: "plan-approval-handoff-pending",
+      checkpointId: checkpoint.checkpointId,
+      generation: checkpoint.generation,
+      state: checkpoint.state,
+    };
+  };
 
-  function setPendingPlan(planPath: string, content: string): void {
-    pendingPlanPath = planPath;
-    pendingPlanContent = content;
-    planGeneration++;
-  }
-
-  function clearPendingPlan(): void {
-    if (pendingPlanPath === null) return;
-    pendingPlanPath = null;
-    pendingPlanContent = "";
-    planGeneration++;
+  async function persistApprovedPlanSnapshot(
+    checkpoint: PersistedPlanReviewCheckpoint,
+  ): Promise<string> {
+    const approvedDirectory = path.join(cwd, ".gg", "plans", "approved");
+    const approvedPath = path.join(approvedDirectory, `${checkpoint.checkpointId}.md`);
+    await fs.mkdir(approvedDirectory, { recursive: true });
+    try {
+      await fs.writeFile(approvedPath, checkpoint.content, { encoding: "utf8", flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const existing = await fs.readFile(approvedPath, "utf8");
+      if (hashPlanContent(existing) !== checkpoint.contentHash) {
+        throw new Error("Approved plan snapshot path contains different content.", { cause: error });
+      }
+    }
+    const approvedFile = await fs.open(approvedPath, "r");
+    try {
+      await approvedFile.sync();
+    } finally {
+      await approvedFile.close();
+    }
+    return approvedPath;
   }
 
   // Workflow (prompt-template) commands: built-in + the project's custom
@@ -2577,14 +2616,14 @@ async function createSession(
     ];
   }
 
-  // ── Telegram serve (remote control via Telegram) ───────────
+  // â”€â”€ Telegram serve (remote control via Telegram) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // A single embedded serve session lives in this sidecar process. Only the main
   // window's home screen exposes the controls, so there's one bot per app.
   let serveController: ServeController | null = null;
 
-  // ── Ken Kai (mentor agent) ─────────────────────────────────
+  // â”€â”€ Ken Kai (mentor agent) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // A second, read-only AgentSession on this same window. The user talks to him
-  // with `@Ken …`; he reads GG Coder's transcript (one-way — GG Coder never sees
+  // with `@Ken â€¦`; he reads GG Coder's transcript (one-way â€” GG Coder never sees
   // Ken's) and hands back runnable prompts + mentorship. Created lazily on the
   // first `@Ken` so windows that never use Ken pay zero cost. His events ride the
   // SAME SSE stream with `ken_`-prefixed types, routed to the Ken bubble.
@@ -2594,8 +2633,8 @@ async function createSession(
   let pendingKenModel: { provider: Provider; model: string } | null = null;
   const kenToolCallNames = new Map<string, string>();
 
-  // Ken's per-project model override. null → Ken (chat + autopilot) follows GG
-  // Coder's model, including live switches (the historical behavior). Set → Ken
+  // Ken's per-project model override. null â†’ Ken (chat + autopilot) follows GG
+  // Coder's model, including live switches (the historical behavior). Set â†’ Ken
   // is pinned to his own model and GG Coder switches no longer touch him. A
   // stale persisted pin (model dropped from the registry / provider logged
   // out) validates to null so Ken degrades to following instead of erroring.
@@ -2604,7 +2643,7 @@ async function createSession(
     providerConnected: () => true, // async auth checked below
   });
   if (kenModelOverride && !(await auth.hasProviderAuth(kenModelOverride.provider))) {
-    log("WARN", "app-sidecar", "ken model override provider not connected — following GG", {
+    log("WARN", "app-sidecar", "ken model override provider not connected â€” following GG", {
       provider: kenModelOverride.provider,
       model: kenModelOverride.model,
     });
@@ -2692,11 +2731,11 @@ async function createSession(
     return ken;
   }
 
-  // ── Autopilot Ken (auto-reviewer) ──────────────────────────
+  // â”€â”€ Autopilot Ken (auto-reviewer) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // A THIRD read-only AgentSession, separate from chat Ken. In autopilot mode
   // Ken silently reviews each finished GG Coder turn and returns a verdict
   // (PROMPT / ALL_CLEAR / HUMAN). Its bus is intentionally NOT bridged to the
-  // ken_* chat bubbles — the review is silent; we read its final assistant text
+  // ken_* chat bubbles â€” the review is silent; we read its final assistant text
   // and parse it. Uses the lean autopilot system prompt + the same read-only
   // tools. Created lazily on the first autopilot cycle.
   let kenAutoSession: AgentSession | null = null;
@@ -2754,14 +2793,13 @@ async function createSession(
   function abortOwnedWork(): void {
     cancelGeneration++;
     abort.abort();
-    // An MCP tool call parked on user input is not cancelled by the signal —
+    // An MCP tool call parked on user input is not cancelled by the signal â€”
     // the promise lives in the bridge. Release it, or the aborted turn's tool
     // call never returns.
     elicitations.cancelAll();
     // Stop a run-all sweep and every async child through AgentSession's signal.
     taskRunAll = false;
     autopilotCancelled = true;
-    pendingAutopilotPhaseAdvancement = null;
     kenAutoAbort.abort();
   }
 
@@ -2823,8 +2861,8 @@ async function createSession(
       ? runLifecycle.begin(abortOwnedWork).generation
       : runLifecycle.generation;
     if (ownsGeneration) pendingCancelDrain = null;
-    // Progress (Ranks): completed, non-canceled runs with ≥1 assistant turn earn
-    // XP — prompt + any commits authored during the run window.
+    // Progress (Ranks): completed, non-canceled runs with â‰¥1 assistant turn earn
+    // XP â€” prompt + any commits authored during the run window.
     const runStartedAt = Date.now();
     const cancelGenAtStart = cancelGeneration;
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
@@ -2845,7 +2883,7 @@ async function createSession(
         cancelGeneration === cancelGenAtStart &&
         countAssistantMessages(session.getMessages()) > assistantsBeforeRun
       ) {
-        // Fire-and-forget — XP must never delay or break run teardown.
+        // Fire-and-forget â€” XP must never delay or break run teardown.
         void progress.awardRun(cwd, runStartedAt, opts.id);
       }
       // A run may have switched branches, changed files, or spawned/finished
@@ -2855,7 +2893,7 @@ async function createSession(
         isGitRepo(cwd).catch(() => gitIsRepo),
         getGitDirtyFileCount(cwd).catch(() => gitDirtyFileCount),
       ]);
-      // A run may have opened/closed issues or PRs — refresh fire-and-forget so
+      // A run may have opened/closed issues or PRs â€” refresh fire-and-forget so
       // teardown isn't delayed by the network. Broadcasts itself on change.
       void refreshGitHubCounts();
       // Serialize behind any marker/tool-triggered refresh so the terminal
@@ -2884,7 +2922,7 @@ async function createSession(
       // future system prompts and clear the widget before run_end paints idle.
       if (runSucceeded && !cancelled && approvedPlanPath !== null && terminalPlanComplete) {
         try {
-          await session.setApprovedPlan(undefined);
+          await session.completeApprovedPlanConsumption();
           deactivateApprovedPlan({ retainImplementationEvidence: true });
           broadcast("plan_progress", { total: 0, completed: [] });
         } catch (error) {
@@ -2909,7 +2947,7 @@ async function createSession(
         });
       }
       // Autopilot's review loop is driven explicitly from POST /prompt (see
-      // runAutopilotCycle), NOT from this shared finally — that keeps injected
+      // runAutopilotCycle), NOT from this shared finally â€” that keeps injected
       // runs from recursively entering the same review loop.
       broadcast("tasks_list", { tasks: pruneDoneTasksSync(cwd) });
       broadcast("queued", {
@@ -2920,7 +2958,79 @@ async function createSession(
     }
   }
 
-  // ── Autopilot orchestration ─────────────────────────────────
+  const planHandoff = new AppSidecarPlanHandoff({
+    approve: (checkpointId, generation) => planGate.approve(checkpointId, generation),
+    currentConsumption: (): ApprovedPlanConsumptionIdentity | null => {
+      const consumption = session.getApprovedPlanConsumption();
+      if (!consumption || consumption.state === "completed") return null;
+      return {
+        checkpointId: consumption.checkpointId,
+        generation: consumption.generation,
+        state: consumption.state,
+      };
+    },
+    commitApproval: async (checkpoint) => {
+      const approvedPlanPath = await persistApprovedPlanSnapshot(checkpoint);
+      const previousPhaseSessionPath = session.getActivePhaseContext()?.session.sessionPath;
+      await commitPlanApprovalCheckpoint({
+        session,
+        repository: notesRepository,
+        cwd,
+        planPath: approvedPlanPath,
+        prepareFreshSession: async () => {
+          await session.newSession(true);
+          injectedAutopilotPrompts = [];
+          await session.persistApprovedPlanConsumption({
+            checkpointId: checkpoint.checkpointId,
+            generation: checkpoint.generation,
+            content: checkpoint.content,
+            contentHash: checkpoint.contentHash,
+            approvedPlanPath,
+          });
+          return activateApprovedPlan(approvedPlanPath, checkpoint.content);
+        },
+        restorePreviousSession: previousPhaseSessionPath
+          ? async () => {
+              await session.loadSessionCheckpoint(previousPhaseSessionPath);
+              deactivateApprovedPlan();
+            }
+          : undefined,
+        onSnapshot: broadcastNotesSnapshot,
+      });
+      const consumption = session.getApprovedPlanConsumption();
+      if (!consumption || consumption.state === "completed") {
+        throw new Error("Approved plan consumption was not committed.");
+      }
+      return {
+        checkpointId: consumption.checkpointId,
+        generation: consumption.generation,
+        state: consumption.state,
+      };
+    },
+    launchImplementation: async () => {
+      if (!runClaim.claim()) throw new Error("Another provider run already owns the session.");
+      try {
+        await runAgent(IMPLEMENT_PLAN_PROMPT, async () => {
+          await commitActivePhaseImplementationStart();
+          await session.runApprovedPlanImplementation(
+            IMPLEMENT_PLAN_PROMPT,
+            runLifecycle.generation,
+          );
+        });
+      } finally {
+        runClaim.release();
+      }
+    },
+    onLaunchFailure: (error) => {
+      captureSidecarError(error, "app-sidecar.plan.resume-implementation");
+      log("ERROR", "app-sidecar", "approved plan implementation resume failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+  planHandoff.resumePending();
+
+  // â”€â”€ Autopilot orchestration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // One review = prompt the existing kenAuto session with the normal digest,
   // including any bound Roadmap phase. In Review, only a persisted final_review
   // whose completion gate reports Done can become ALL_CLEAR.
@@ -2978,21 +3088,16 @@ async function createSession(
 
   // One PLAN review: like runAutopilotReview but the digest carries the
   // submitted plan's markdown (`## Plan under review`) and the plan-review
-  // instruction — Ken judges the plan itself, not finished work. Returns null
+  // instruction â€” Ken judges the plan itself, not finished work. Returns null
   // on failure; a failure caused by the user's own action racing the review
-  // (cancel or a manual Accept/Reject that bumped planGeneration) stays
-  // SILENT — no autopilot_error — because the user's decision already won.
+  // SILENT when a human action wins the checkpoint race.
   async function runAutopilotPlanReview(originalRequest: string): Promise<AutopilotVerdict | null> {
-    const planPath = pendingPlanPath;
-    if (planPath === null) return null;
-    const genAtStart = planGeneration;
+    const checkpoint = planGate.current();
+    if (!checkpoint || checkpoint.state !== "pending-review") return null;
     autopilotReviewing = true;
     broadcast("autopilot_review_start", {});
     try {
       const ken = await ensureKenAutoSession();
-      // Re-read the plan file (the run may have revised it in place); fall
-      // back to the content captured at exit_plan time.
-      const planContent = await fs.readFile(planPath, "utf-8").catch(() => pendingPlanContent);
       const digest = buildKenAutopilotPlanContext({
         cwd,
         gitBranch,
@@ -3000,15 +3105,27 @@ async function createSession(
         originalRequest,
         injectedPrompts: [...injectedAutopilotPrompts],
         workflowCommands: await loadWorkflowCommandSpecs(),
-        planContent,
+        planContent: checkpoint.content,
       });
       await ken.prompt(digest);
-      if (autopilotCancelled || planGeneration !== genAtStart) return null;
+      const current = planGate.current();
+      if (
+        autopilotCancelled ||
+        current?.checkpointId !== checkpoint.checkpointId ||
+        current.generation !== checkpoint.generation ||
+        current.state !== "pending-review"
+      )
+        return null;
       return parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
     } catch (err) {
-      // User action mid-review (manual Accept aborts the kenAuto run): drop
-      // the review silently — the user's decision supersedes Ken's.
-      if (autopilotCancelled || planGeneration !== genAtStart) return null;
+      const current = planGate.current();
+      if (
+        autopilotCancelled ||
+        current?.checkpointId !== checkpoint.checkpointId ||
+        current.generation !== checkpoint.generation ||
+        current.state !== "pending-review"
+      )
+        return null;
       broadcastError("autopilot_error", "autopilot plan review failed", err);
       return null;
     } finally {
@@ -3020,7 +3137,7 @@ async function createSession(
     }
   }
 
-  // The prompt fed to the fresh session after a plan is accepted — the SAME
+  // The prompt fed to the fresh session after a plan is accepted â€” the SAME
   // string the webview sends on a manual Accept (see PlanReviewModal's accept
   // handler in gg-app/src/App.tsx). Keep the two in lockstep so auto- and
   // manual approval produce identical implementation turns.
@@ -3030,9 +3147,25 @@ async function createSession(
   async function startRoadmapPhase(
     phaseId: string,
     respond: (status: number, body: PhaseStartResponseBody) => void,
+    advancementConfirmation?: {
+      checkpointId: string;
+      nextPhaseId: string;
+      action: "start-next-phase";
+    },
   ): Promise<void> {
+    const gateConflict = planGateConflict();
+    if (gateConflict) {
+      respond(409, {
+        status: "failed",
+        code: "session-busy",
+        message: "Resolve the pending plan review before replacing this session.",
+        operationId: "plan-gate",
+      });
+      return;
+    }
     await launchBoundPhase({
       phaseId,
+      advancementConfirmation,
       mode,
       busyState: sessionBusyState(),
       mutations: sessionMutations,
@@ -3045,13 +3178,13 @@ async function createSession(
       createSession: (active) => createCodingSession(undefined, active),
       replaceSession: (replacement) => {
         session = replacement;
+        planGate = new AppSidecarPlanGate(replacement.getAppMarkers(), persistPlanGateMarker);
       },
       bindSessionEvents,
       autopilotEnabled: projectAutopilot.isEnabled(cwd),
       broadcastNotesSnapshot,
       broadcast,
       resetSessionState: () => {
-        clearPendingPlan();
         deactivateApprovedPlan();
         injectedAutopilotPrompts = [];
       },
@@ -3078,69 +3211,12 @@ async function createSession(
     });
   }
 
-  // Drive the review→prompt→review loop for one finished user turn. Only ever
+  // Drive the reviewâ†’promptâ†’review loop for one finished user turn. Only ever
   // called after shouldStartAutopilotCycle approves the turn (POST /prompt or
-  // the stranded-queue drain) — never from the task runner, resume, /ken, or
+  // the stranded-queue drain) â€” never from the task runner, resume, /ken, or
   // error paths, so there's no recursion and no guard tangle. The loop's
   // control flow lives in driveAutopilotCycle (core/autopilot-cycle.ts) so
   // every exit path is unit-tested; this only wires the real dependencies.
-  async function launchPendingAutopilotPhaseAdvancement(recovering = false): Promise<void> {
-    if (
-      phaseAdvancementRunning ||
-      phaseAdvancementDisposed ||
-      autopilotCancelled ||
-      !projectAutopilot.isEnabled(cwd) ||
-      mode !== "code"
-    ) {
-      return;
-    }
-    phaseAdvancementRunning = true;
-    try {
-      const loaded = await notesRepository.load(cwd);
-      if (phaseAdvancementDisposed || loaded.status !== "ok") return;
-
-      const pending = pendingAutopilotPhaseAdvancement;
-      if (pending && loaded.snapshot.revision !== pending.revision) {
-        pendingAutopilotPhaseAdvancement = null;
-        log("INFO", "app-sidecar", "skipped stale Roadmap phase advancement", {
-          completedPhaseId: pending.completedPhaseId,
-          expectedRevision: pending.revision,
-          actualRevision: loaded.snapshot.revision,
-        });
-        return;
-      }
-
-      const recovered = pending
-        ? null
-        : recovering
-          ? findPendingAutopilotRoadmapAdvancement(loaded.snapshot)
-          : null;
-      const completedPhaseId = pending?.completedPhaseId ?? recovered?.completedPhaseId;
-      const reviewId = pending?.reviewId ?? recovered?.reviewId;
-      if (!completedPhaseId || !reviewId) return;
-      const nextPhase = pending
-        ? resolvePendingAutopilotRoadmapAdvancement(loaded.snapshot, pending, {
-            enabled: projectAutopilot.isEnabled(cwd),
-            cancelled: autopilotCancelled,
-          })
-        : recovered!.nextPhase;
-      pendingAutopilotPhaseAdvancement = null;
-      if (!nextPhase || autopilotCancelled || !projectAutopilot.isEnabled(cwd)) return;
-
-      await startRoadmapPhase(nextPhase.id, (status, body) => {
-        if (status === 202 || status === 409) return;
-        captureSidecarError(
-          new Error(`Automatic next-phase launch failed with HTTP ${status}`),
-          "app-sidecar.phase.advance",
-          { completedPhaseId, nextPhaseId: nextPhase.id, response: JSON.stringify(body) },
-        );
-      });
-    } catch (error) {
-      captureSidecarError(error, "app-sidecar.phase.advance");
-    } finally {
-      phaseAdvancementRunning = false;
-    }
-  }
 
   async function runAutopilotCycle(originalRequest: string): Promise<void> {
     if (!autopilot || autopilotCancelled) return;
@@ -3148,85 +3224,42 @@ async function createSession(
     pendingCancelDrain = null;
     autopilotActive = true;
     session.setIdealReviewSuppressed(true);
-    // Generation captured by the last plan review; acceptPlan re-checks it so
-    // a user Accept/Reject landing mid-review always wins.
-    let planGenAtReview = -1;
+    let planReviewIdentity: { checkpointId: string; generation: number } | null = null;
     try {
       await driveAutopilotCycle({
-        // A plan-pending cycle needs extra rounds: approve+implement and the
-        // post-implement work review each consume one, so +2 keeps a real fix
-        // round available.
-        maxRounds: pendingPlanPath !== null ? MAX_AUTOPILOT_ROUNDS + 2 : MAX_AUTOPILOT_ROUNDS,
+        maxRounds: MAX_AUTOPILOT_ROUNDS,
         isCancelled: () => autopilotCancelled,
-        // An injected run entering plan mode WITHOUT submitting (enter_plan,
-        // no exit_plan) halts the cycle — Ken never prompts into a read-only
-        // plan-mode session. A submitted plan takes the planPending branch.
         isPlanMode: () => session.getPlanMode(),
-        planPending: () => pendingPlanPath !== null,
+        planPending: () => planGate.pending()?.state === "pending-review",
         reviewPlan: async () => {
-          planGenAtReview = planGeneration;
+          const checkpoint = planGate.current();
+          planReviewIdentity = checkpoint
+            ? { checkpointId: checkpoint.checkpointId, generation: checkpoint.generation }
+            : null;
           return runAutopilotPlanReview(originalRequest);
         },
-        // Auto-accept: the inlined POST /plan/accept body. Returns false when
-        // the plan generation moved since the review (user acted) — the cycle
-        // exits silently and the user's action stands.
-        acceptPlan: async () => {
-          if (pendingPlanPath === null || planGeneration !== planGenAtReview) return false;
-          const planPath = pendingPlanPath;
-          const mutation = sessionMutations.tryAcquire("autopilot-plan-accept");
-          if (!mutation) return false;
-          try {
-            const previousPhaseSessionPath = session.getActivePhaseContext()?.session.sessionPath;
-            const { planTotal } = await commitPlanApprovalCheckpoint({
-              session,
-              repository: notesRepository,
-              cwd,
-              planPath,
-              prepareFreshSession: async () => {
-                await session.newSession(true);
-                injectedAutopilotPrompts = [];
-                return activateApprovedPlan(planPath);
-              },
-              restorePreviousSession: previousPhaseSessionPath
-                ? async () => {
-                    await session.loadSessionCheckpoint(previousPhaseSessionPath);
-                    deactivateApprovedPlan();
-                  }
-                : undefined,
-              onSnapshot: broadcastNotesSnapshot,
-            });
-            clearPendingPlan();
-            // Approval only prepares the durable implementation checkpoint. The
-            // run below performs the planning → in-progress transition.
-            broadcast("autopilot_plan_accepted", { operationId: mutation.operationId });
-            broadcast("session_reset", { planTotal, operationId: mutation.operationId });
-            broadcast("plan_progress", planProgressPayload());
-            void session.persistAutopilotMarker("plan_approved");
-            return true;
-          } catch (err) {
-            if (err instanceof PhaseCheckpointError) {
-              broadcast("autopilot_error", {
-                headline: "Plan approval checkpoint failed",
-                ...phaseCheckpointFailurePayload(err),
-              });
-            } else {
-              broadcastError("autopilot_error", "autopilot plan accept failed", err);
-            }
-            return false;
-          } finally {
-            mutation.release();
-          }
+        markPlanReady: async () => {
+          const identity = planReviewIdentity;
+          if (!identity) return null;
+          const result = await planGate.markReady(identity.checkpointId, identity.generation);
+          return result.status === "committed" ? identity : null;
         },
-        runImplement: () => {
-          // Autopilot-injected run: frame it so GG Coder knows no human is
-          // watching the implementation. Record the framed string so Ken's
-          // digest labels it as injected, not as the user's ask. The run_start
-          // label stays the clean prompt.
-          const framed = frameAutopilotInjection(IMPLEMENT_PLAN_PROMPT);
-          injectedAutopilotPrompts.push(framed);
-          return runAgent(IMPLEMENT_PLAN_PROMPT, () =>
-            promptActiveSession(framed, AUTOMATION_PROVENANCE),
+        requestPlanRevision: async (feedback) => {
+          if (!planReviewIdentity) return false;
+          const result = await planGate.requestRevision(
+            planReviewIdentity.checkpointId,
+            planReviewIdentity.generation,
+            "ken-autopilot",
+            feedback,
           );
+          if (result.status !== "committed") return false;
+          broadcast("plan_revision_requested", {
+            checkpointId: planReviewIdentity.checkpointId,
+            generation: planReviewIdentity.generation,
+            feedback,
+            actor: "ken-autopilot",
+          });
+          return true;
         },
         // Lean context per user turn: wipe prior review history so each new
         // turn starts cheap, while within this cycle the few review messages
@@ -3235,16 +3268,12 @@ async function createSession(
           await kenAutoSession?.newSession().catch(() => {});
         },
         review: () => runAutopilotReview(originalRequest),
-        // prompt → record the injected body (so later digests label it as
+        // prompt â†’ record the injected body (so later digests label it as
         // Ken's, not the user's), show a compact Ken-tinted marker (not the
         // prompt body), then feed GG Coder bracketed by runAgent so the run
         // streams normally; the shared finally never re-triggers autopilot,
         // so this can't recurse.
         onInjected: (body, round) => {
-          // A revision injection supersedes the pending plan — if the run
-          // resubmits via exit_plan, onExitPlan re-sets it (no-op for work-
-          // branch injections, where nothing is pending).
-          clearPendingPlan();
           // Record the FRAMED string (what actually lands in the build session,
           // see runPrompt) so Ken's digest matches and labels it as injected.
           // The webview marker + persisted body stay the CLEAN prompt so the UI
@@ -3266,7 +3295,7 @@ async function createSession(
           if (event.type === "autopilot_done") {
             // Broadcast the SAME copySeed the persisted marker will produce on
             // resume, so the live all-clear wording matches the resumed one.
-            // Must use the PERSISTED count — that's what persistAutopilotMarker
+            // Must use the PERSISTED count â€” that's what persistAutopilotMarker
             // anchors against, and it trails the in-memory list after a run
             // whose messages never made it to disk.
             const seed = autopilotMarkerCopySeed({
@@ -3292,17 +3321,14 @@ async function createSession(
       session.setIdealReviewSuppressed(autopilot);
       finishOwnedGeneration(generation, true);
       queueMicrotask(() => {
-        void (async () => {
-          await launchPendingAutopilotPhaseAdvancement();
-          await runStrandedQueue();
-        })();
+        void runStrandedQueue();
       });
     }
   }
 
-  // ── Stranded-queue drain ───────────────────────────────
+  // â”€â”€ Stranded-queue drain â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // A prompt POSTed while an autopilot cycle is between injected runs (build
-  // idle, Ken reviewing) queues — but the queue only drains INTO a running
+  // idle, Ken reviewing) queues â€” but the queue only drains INTO a running
   // turn as steering. If the cycle ends without another run (ALL_CLEAR /
   // IGNORE / HUMAN / error), that message would sit stranded until the next
   // unrelated prompt, then land mislabeled as "concurrent steering" of an
@@ -3311,7 +3337,7 @@ async function createSession(
   // after the run's last steering drain but before run_end.
   let drainingStrandedQueue = false;
   async function runStrandedQueue(): Promise<void> {
-    if (drainingStrandedQueue) return;
+    if (drainingStrandedQueue || planGate.pending()) return;
     drainingStrandedQueue = true;
     try {
       for (;;) {
@@ -3323,9 +3349,6 @@ async function createSession(
           messages: session.listQueuedMessages(),
         });
         if (!next.text.trim() && next.attachments.length === 0) continue;
-        // A queued message draining as a fresh turn supersedes any pending
-        // plan, exactly like a direct POST /prompt turn.
-        clearPendingPlan();
         const workflowCommand =
           next.attachments.length === 0 &&
           isWorkflowCommandText(next.text, await loadWorkflowCommandSpecs());
@@ -3343,13 +3366,13 @@ async function createSession(
           cancelled: autopilotCancelled,
           planMode: session.getPlanMode(),
           // A submitted plan (exit_plan fired) routes into the PLAN review
-          // branch — the cycle reviews the plan itself instead of skipping.
-          planPending: pendingPlanPath !== null,
+          // branch â€” the cycle reviews the plan itself instead of skipping.
+          planPending: planGate.pending() !== null,
           workflowCommand,
           assistantMessagesAdded: countAssistantMessages(session.getMessages()) - assistantsBefore,
           // Skip the review API call outright for turns that only started a
           // background process (dev server/watcher), ran a read-only lookup, or
-          // committed/pushed — Ken's autopilot contract already IGNOREs these,
+          // committed/pushed â€” Ken's autopilot contract already IGNOREs these,
           // so there's no reason to pay for that verdict.
           mechanicalOnly: isMechanicalOnlyTurn(
             extractTurnToolCalls(session.getMessages(), messagesBefore),
@@ -3371,7 +3394,7 @@ async function createSession(
     }
   }
 
-  // ── Task runner (project task list → sessions) ──────────────
+  // â”€â”€ Task runner (project task list â†’ sessions) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Mirrors the CLI's task flow: each task runs in its OWN fresh session, with a
   // completion hint instructing the agent to mark the task done via the tasks
   // tool. Run-all advances to the next pending task after each run finishes.
@@ -3384,7 +3407,7 @@ async function createSession(
     await session.newSession();
     deactivateApprovedPlan();
     injectedAutopilotPrompts = [];
-    clearPendingPlan();
+    planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
     broadcast("session_reset", {});
     markTaskInProgress(cwd, task.id);
     broadcast("tasks_list", { tasks: loadTasksSync(cwd) });
@@ -3419,7 +3442,7 @@ async function createSession(
     broadcast("tasks_run_done", {});
   }
 
-  // ── Provider auth (login) bridge ───────────────────────────
+  // â”€â”€ Provider auth (login) bridge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // OAuth login functions are interactive (open a URL, sometimes prompt for a
   // pasted code). We run one at a time and surface every step over SSE so the
   // webview can open the URL and collect a code via a modal. `pendingCode`
@@ -3486,7 +3509,7 @@ async function createSession(
           : connectedMethods[0];
 
         // `methodDetails` is the server-side lookup table behind
-        // `methodGuidance` — shipping both would duplicate every string on the
+        // `methodGuidance` â€” shipping both would duplicate every string on the
         // wire for no consumer.
         const { methodDetails: _table, ...wireMeta } = p;
         return {
@@ -3508,7 +3531,7 @@ async function createSession(
   // keeps the webview footer live without a busy render loop. Adaptive cadence:
   // tasks can only change while a run is active (the bash tool spawns them), so
   // poll fast (1500ms) while running or while tasks exist, and back off to
-  // 5000ms when fully idle — fewer wakeups per idle window.
+  // 5000ms when fully idle â€” fewer wakeups per idle window.
   let lastTasksJson = "[]";
   let tasksPoll: NodeJS.Timeout | undefined;
   let tasksPollStopped = false;
@@ -3593,7 +3616,6 @@ async function createSession(
     // ownership invokes the full abort hook exactly once through lifecycle.
     taskRunAll = false;
     autopilotCancelled = true;
-    pendingAutopilotPhaseAdvancement = null;
     if (!runLifecycle.running) {
       kenAutoAbort.abort();
       kenAutoAbort = new AbortController();
@@ -3624,6 +3646,25 @@ async function createSession(
       status: result.status === "idle" && operationWasActive ? "cancelled" : result.status,
       runState: runLifecycle.state,
       drained,
+    };
+  }
+
+  function stateSnapshot(): Record<string, unknown> {
+    const state = session.getState();
+    return {
+      ...state,
+      mode,
+      chatAgent,
+      running,
+      runState: runLifecycle.state,
+      ready: true,
+      thinkingLevel: session.getThinkingLevel() ?? null,
+      supportedThinkingLevels: getSupportedThinkingLevels(state.provider, state.model),
+      supportsVideo: getModel(state.model)?.supportsVideo ?? false,
+      autopilot,
+      ...kenStatePayload(),
+      ...footerExtras(),
+      pendingPlanReview: planGate.pending(),
     };
   }
 
@@ -3677,21 +3718,7 @@ async function createSession(
     }
 
     if (method === "GET" && url === "/state") {
-      const st = session.getState();
-      json(res, 200, {
-        ...st,
-        mode,
-        chatAgent,
-        running,
-        runState: runLifecycle.state,
-        ready: true,
-        thinkingLevel: session.getThinkingLevel() ?? null,
-        supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
-        supportsVideo: getModel(st.model)?.supportsVideo ?? false,
-        autopilot,
-        ...kenStatePayload(),
-        ...footerExtras(),
-      });
+      json(res, 200, stateSnapshot());
       return;
     }
 
@@ -3774,23 +3801,8 @@ async function createSession(
       };
       res.once("error", cleanup);
       res.once("close", cleanup);
-      const st = session.getState();
       try {
-        res.write(
-          sseFrame("ready", {
-            ...st,
-            mode,
-            chatAgent,
-            running,
-            runState: runLifecycle.state,
-            thinkingLevel: session.getThinkingLevel() ?? null,
-            supportedThinkingLevels: getSupportedThinkingLevels(st.provider, st.model),
-            supportsVideo: getModel(st.model)?.supportsVideo ?? false,
-            autopilot,
-            ...kenStatePayload(),
-            ...footerExtras(),
-          }),
-        );
+        res.write(sseFrame("ready", stateSnapshot()));
       } catch {
         cleanup();
       }
@@ -3850,7 +3862,7 @@ async function createSession(
 
     if (method === "GET" && url === "/settings") {
       // `configured` is true only when the user explicitly saved a projects root
-      // (the gg-app.json file exists with a value) — not when we fall back to the
+      // (the gg-app.json file exists with a value) â€” not when we fall back to the
       // default. The home screen gates "Your Projects" on this.
       void (async () => {
         const s = await loadAppSettings();
@@ -4024,7 +4036,7 @@ async function createSession(
 
     // Markdown transcript export for the app's download button. Serialized
     // here rather than in the webview because the webview's transcript model
-    // deliberately keeps tool activity in the LiveToolPanel — exporting from
+    // deliberately keeps tool activity in the LiveToolPanel â€” exporting from
     // there would hand the user a coding session with the coding missing.
     // `?name=1` asks for the suggested filename only (the save dialog needs it
     // before there is a path), so the markdown never crosses IPC twice.
@@ -4059,9 +4071,9 @@ async function createSession(
       // blocks carry sub-agent delegations that must re-appear as group items.
       //
       // The `details` object (imagePreviews with path + downscaled preview) is
-      // event-only and never persisted — we reconstruct from the raw
+      // event-only and never persisted â€” we reconstruct from the raw
       // ImageContent in the tool result, downsampling on the sidecar side and
-      // extracting the path from the text block ("Generated image → /path").
+      // extracting the path from the text block ("Generated image â†’ /path").
       void (async () => {
         const commandCandidates = [...PROMPT_COMMANDS, ...(await loadCustomCommands(cwd))];
         const messages = session.getMessages();
@@ -4121,7 +4133,7 @@ async function createSession(
         };
 
         // Autopilot verdict markers to interleave, same anchor scheme as Ken
-        // turns — each becomes a single assistant row the webview renders
+        // turns â€” each becomes a single assistant row the webview renders
         // exactly like the live `autopilot` item (never a raw verdict string).
         // Normalization pulls anchors left over from an unrebased compaction
         // back to where the marker was actually written, so stale all-clear
@@ -4159,11 +4171,11 @@ async function createSession(
 
         // App transcript markers (plan banner / task header / error rows /
         // user-bubble hints), same anchor scheme. user_hint markers don't
-        // become rows — they decorate the user row at their anchor instead.
+        // become rows â€” they decorate the user row at their anchor instead.
         const appMarkersByCount = new Map<number, AppMarkerPayload[]>();
         const userHintByCount = new Map<number, Record<string, unknown>>();
         // Compaction-count markers pair with compacted summary rows in file
-        // order (FIFO), not by anchor — the summary user message is what
+        // order (FIFO), not by anchor â€” the summary user message is what
         // positions the notice.
         const compactionCounts: Array<{ originalCount: number; newCount: number }> = [];
         for (const marker of normalizeAppMarkersForHistory(
@@ -4217,7 +4229,7 @@ async function createSession(
             } else if (marker.kind === "interrupted_run") {
               // Rendered as an error row: the run's tools already changed the
               // repo, so the user needs to see it and decide what to do. We
-              // never replay it — that would duplicate those changes.
+              // never replay it â€” that would duplicate those changes.
               history.push({
                 role: "assistant",
                 text: "",
@@ -4254,12 +4266,12 @@ async function createSession(
                 if (typeof tr.content === "string") continue;
                 const imageBlocks = tr.content.filter((c) => c.type === "image");
                 if (imageBlocks.length === 0) continue;
-                // Extract the path from the text block (e.g. "Generated image → /path").
+                // Extract the path from the text block (e.g. "Generated image â†’ /path").
                 const textBlock = tr.content.find(
                   (c) => c.type === "text" && "text" in c && typeof c.text === "string",
                 );
                 const textContent = textBlock && textBlock.type === "text" ? textBlock.text : "";
-                const pathMatch = textContent.match(/→\s*(\S+)/);
+                const pathMatch = textContent.match(/â†’\s*(\S+)/);
                 const imgPath = pathMatch?.[1];
 
                 // Downscale each image for the webview preview.
@@ -4274,7 +4286,7 @@ async function createSession(
                       path: imgPath,
                     });
                   } catch {
-                    // Downscale failed — use the raw data.
+                    // Downscale failed â€” use the raw data.
                     toolImages.push({
                       src: `data:${block.mediaType};base64,${block.data}`,
                       path: imgPath,
@@ -4292,7 +4304,7 @@ async function createSession(
               return;
             }
 
-            // User or assistant message — text/hook/command/compacted extraction,
+            // User or assistant message â€” text/hook/command/compacted extraction,
             // plus sub-agent group detection for assistant tool_calls.
             if (msg.role === "user") {
               // Rebuild the live bubble: strip the steering wrapper, drop
@@ -4307,7 +4319,7 @@ async function createSession(
               // The typed invocation persisted alongside the prompt is
               // authoritative. Reversing the expanded body only works while the
               // template is byte-identical, and templates drift (edited
-              // `.gg/commands/*.md`, reworded built-ins, app-vs-CLI phrasing) —
+              // `.gg/commands/*.md`, reworded built-ins, app-vs-CLI phrasing) â€”
               // after which the resumed session dumped the raw multi-KB body
               // instead of the `/name` chip. Older sessions have no hint, so the
               // body match stays as the fallback.
@@ -4319,7 +4331,7 @@ async function createSession(
                       commandCandidates,
                     )
                   : null;
-              // Autopilot injected this turn — live showed only the Ken-tinted
+              // Autopilot injected this turn â€” live showed only the Ken-tinted
               // marker for it, never a user bubble. Emitting one here would print
               // the injected instruction a second time, unstyled.
               //
@@ -4340,7 +4352,7 @@ async function createSession(
                   compacted,
                   // Markers accumulate across continuation files (each rewrite
                   // re-persists prior ones) but only the LATEST summary row
-                  // survives compaction — so consume from the newest end.
+                  // survives compaction â€” so consume from the newest end.
                   ...(compacted && compactionCounts.length > 0
                     ? { compactionCounts: compactionCounts.pop() }
                     : {}),
@@ -4353,7 +4365,7 @@ async function createSession(
                 }
               }
             } else if (!hiddenIdealDrafts.has(msg)) {
-              // Assistant: one wire row per persisted text block — live streaming
+              // Assistant: one wire row per persisted text block â€” live streaming
               // splits bubbles at server_tool_call boundaries, and the persisted
               // content keeps those blocks separate. Ideal-review candidate drafts
               // are intentionally omitted to match the live pre-final hook flow.
@@ -4515,6 +4527,12 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/prompt") {
+      const conflict = planGateConflict();
+      if (conflict) {
+        req.resume();
+        json(res, 409, conflict);
+        return;
+      }
       // Per-request: only the prompt that actually claimed the start may release
       // it. A bare release would let an early-returning request (bad JSON, or a
       // prompt that queued) clear a claim another request is still holding.
@@ -4624,7 +4642,7 @@ async function createSession(
           // Gate inputs captured around the run: whether this turn is a workflow
           // slash command (attachment prompts skip slash expansion entirely), and
           // how many assistant messages the run actually adds. Computed even when
-          // autopilot is currently off — the toggle can flip ON mid-run, and the
+          // autopilot is currently off â€” the toggle can flip ON mid-run, and the
           // gate reads the post-run value.
           const workflowCommand =
             attachments.length === 0 &&
@@ -4633,7 +4651,7 @@ async function createSession(
           // of the session itself, because only it knows whether the command
           // resolves here (name/alias casing, custom `.gg/commands`, non-coder
           // agents that don't expand at all). A looser guess would anchor the
-          // hint at +1 with no message to land on — decorating an unrelated
+          // hint at +1 with no message to land on â€” decorating an unrelated
           // later bubble with the wrong `/name`.
           const expandsToTemplate =
             attachments.length === 0 && (await session.willExpandPromptTemplate(text));
@@ -4646,7 +4664,7 @@ async function createSession(
           // Recording the invocation matters because the agent persists the
           // EXPANDED template as the user message. Resume used to recover
           // `/name` by matching that body against the current templates, which
-          // silently fails the moment a template is edited or reworded — the
+          // silently fails the moment a template is edited or reworded â€” the
           // reopened session then rendered the raw multi-KB prompt instead of
           // the command chip.
           if (
@@ -4668,10 +4686,6 @@ async function createSession(
           // Fresh user turn: clear any cancel flag left from a prior cycle so this
           // turn's autopilot review can run.
           autopilotCancelled = false;
-          // A typed message while a plan modal/review is pending (reject,
-          // feedback, anything) supersedes the pending plan — the bump also
-          // invalidates any in-flight Ken plan review.
-          clearPendingPlan();
           const assistantsBefore = countAssistantMessages(session.getMessages());
           const messagesBefore = session.getMessages().length;
           await runAgent(text, async () => {
@@ -4688,13 +4702,13 @@ async function createSession(
               await promptActiveSession(text);
             }
           });
-          // After the user's run settles, kick off Ken's auto-review loop — but
+          // After the user's run settles, kick off Ken's auto-review loop â€” but
           // only when the turn is actually reviewable (shouldStartAutopilotCycle):
-          // workflow commands (/compare, /bullet-proof, …) end with reports or
+          // workflow commands (/compare, /bullet-proof, â€¦) end with reports or
           // A/B/C choices reserved for the USER; registry commands (/help) and
           // failed runs add no assistant work to judge; a turn that ended in plan
           // mode has a pending Accept/Reject modal Ken must not preempt. This is
-          // the ONLY entry point into the cycle besides the stranded-queue drain —
+          // the ONLY entry point into the cycle besides the stranded-queue drain â€”
           // it drives any follow-up GG Coder runs itself, so the shared runAgent
           // finally never recurses.
           const decision = shouldStartAutopilotCycle({
@@ -4702,14 +4716,14 @@ async function createSession(
             cancelled: autopilotCancelled,
             planMode: session.getPlanMode(),
             // A submitted plan (exit_plan fired) routes into the PLAN review
-            // branch — the cycle reviews the plan itself instead of skipping.
-            planPending: pendingPlanPath !== null,
+            // branch â€” the cycle reviews the plan itself instead of skipping.
+            planPending: planGate.pending() !== null,
             workflowCommand,
             assistantMessagesAdded:
               countAssistantMessages(session.getMessages()) - assistantsBefore,
             // Skip the review API call outright for turns that only started a
             // background process (dev server/watcher), ran a read-only lookup, or
-            // committed/pushed — Ken's autopilot contract already IGNOREs these,
+            // committed/pushed â€” Ken's autopilot contract already IGNOREs these,
             // so there's no reason to pay for that verdict.
             mechanicalOnly: isMechanicalOnlyTurn(
               extractTurnToolCalls(session.getMessages(), messagesBefore),
@@ -4722,7 +4736,7 @@ async function createSession(
             log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });
           }
           // A prompt sent while Ken was reviewing (build idle) queued but had no
-          // run to steer into — run it now as a fresh turn so it never strands.
+          // run to steer into â€” run it now as a fresh turn so it never strands.
           await runStrandedQueue();
         })
         .finally(() => {
@@ -4732,7 +4746,7 @@ async function createSession(
     }
 
     // Ken Kai (mentor): an independent read-only advisory run on the kenSession.
-    // Runs concurrently with a build run — its events are ken_-prefixed so the
+    // Runs concurrently with a build run â€” its events are ken_-prefixed so the
     // webview keeps the bubbles separate. The context digest is assembled fresh
     // from the BUILD session's transcript each turn (one-way mirror).
     if (method === "POST" && url === "/ken/prompt") {
@@ -4754,7 +4768,7 @@ async function createSession(
           return;
         }
         if (kenRunning) {
-          json(res, 409, { error: "Ken is already thinking — wait for his reply." });
+          json(res, 409, { error: "Ken is already thinking â€” wait for his reply." });
           return;
         }
         json(res, 202, { accepted: true });
@@ -4815,7 +4829,6 @@ async function createSession(
         }
         autopilot = enabled;
         projectAutopilot.set(cwd, enabled);
-        if (!enabled) pendingAutopilotPhaseAdvancement = null;
         // A toggle-off during an active cycle takes effect after Ken finishes;
         // until then, injected build runs must not re-enable Ideal self-review.
         session.setIdealReviewSuppressed(enabled || autopilotActive);
@@ -4841,7 +4854,7 @@ async function createSession(
           json(res, 400, { error: "empty prompt" });
           return;
         }
-        // An independent read-only LLM call — touches no session state, so it's
+        // An independent read-only LLM call â€” touches no session state, so it's
         // allowed even while a run is in flight.
         try {
           const result = await session.enhancePrompt(text);
@@ -4861,10 +4874,10 @@ async function createSession(
       return;
     }
 
-    // ── Radio (app-wide) ──────────────────────────────────────
+    // â”€â”€ Radio (app-wide) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Radio is now APP-WIDE: all windows share one daemon process, and the
     // player lives in `core/radio.ts` module-level singletons (one stream for
-    // the whole app). Any window's /radio reads/controls that single stream —
+    // the whole app). Any window's /radio reads/controls that single stream â€”
     // starting a station in one window replaces whatever was playing, and every
     // window's footer reflects the same `current`. This intentionally prevents
     // duplicate audio across windows (the original per-window goal), now for
@@ -4928,6 +4941,12 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/tasks/run") {
+      const conflict = planGateConflict();
+      if (conflict) {
+        req.resume();
+        json(res, 409, conflict);
+        return;
+      }
       void readBody(req, res).then((raw) => {
         if (raw === null) return;
         let id: string | null;
@@ -4988,7 +5007,7 @@ async function createSession(
         for (const p of ALL_PROVIDERS) {
           if (await auth.hasProviderAuth(p)) loggedIn.push(p);
         }
-        // Just the names, grouped by provider in registry order — the UI shows
+        // Just the names, grouped by provider in registry order â€” the UI shows
         // a clean multi-column list of model ids. Local models come from the
         // runtime registry (populated by the background scan) and are always
         // listed: their "login" is the endpoint answering a probe.
@@ -5005,7 +5024,7 @@ async function createSession(
               provider: m.provider,
               local: true,
               endpoint: probed?.endpoint.label ?? parseLocalModelId(m.id)?.endpointId,
-              // A local model that can't call tools can't run the agent — the UI
+              // A local model that can't call tools can't run the agent â€” the UI
               // renders it disabled rather than hiding it, so the user learns why.
               supportsTools: probed?.model.supportsTools ?? true,
               contextWindow: m.contextWindow,
@@ -5076,12 +5095,12 @@ async function createSession(
         // model_change is emitted by switchModel; follow with thinking_change so
         // the footer toggle reflects the new model's supported levels.
         broadcast("thinking_change", payload);
-        // Un-pinned Ken just followed the switch — update his footer chip too.
+        // Un-pinned Ken just followed the switch â€” update his footer chip too.
         // When Ken is pinned, his effective model did not change, so skip the
         // no-op event (keeps footer/event tests from treating a GG switch as a
         // Ken switch).
         if (!kenModelOverride) broadcast("ken_model_change", kenStatePayload());
-        // The new model usually has a different context window — push extras so
+        // The new model usually has a different context window â€” push extras so
         // the footer's context meter rescales immediately.
         broadcast("extras", footerExtras());
         json(res, 200, { provider: target.provider, model: target.id, ...payload });
@@ -5105,13 +5124,13 @@ async function createSession(
           return;
         }
         if (modelId === null) {
-          // Clear the pin → follow GG Coder again, syncing both sessions back.
+          // Clear the pin â†’ follow GG Coder again, syncing both sessions back.
           kenModelOverride = null;
           await saveKenModelPref(cwd, null);
           const st = session.getState();
           await syncKenModel(st.provider, st.model);
           await syncKenAutoModel(st.provider, st.model);
-          log("INFO", "app-sidecar", "ken model pin cleared — following GG", {
+          log("INFO", "app-sidecar", "ken model pin cleared â€” following GG", {
             provider: st.provider,
             model: st.model,
           });
@@ -5192,7 +5211,7 @@ async function createSession(
     }
 
     // Import a Claude Code / Codex / Cursor transcript into a resumable GG
-    // Coder session. The importer never throws — it returns a typed failure so
+    // Coder session. The importer never throws â€” it returns a typed failure so
     // the app can show the reason verbatim.
     if (method === "POST" && url === "/import-transcript") {
       void readBody(req, res).then(async (raw) => {
@@ -5286,6 +5305,39 @@ async function createSession(
       return;
     }
 
+    const advancementRoute = parsePhaseAdvancementStartRoute(method, url);
+    if (advancementRoute) {
+      if (!hasDaemonAuth(req, nativeAuthorityToken)) {
+        req.resume();
+        json(res, 401, { error: "native human authority required" });
+        return;
+      }
+      void (async () => {
+        try {
+          const body = parsePhaseAdvancementStartBody(await readJsonBody(req, 8_192));
+          if (!body) {
+            json(res, 400, { error: "invalid Start next phase confirmation" });
+            return;
+          }
+          await startRoadmapPhase(
+            body.nextPhaseId,
+            (status, responseBody) => json(res, status, responseBody),
+            { checkpointId: advancementRoute.checkpointId, ...body },
+          );
+        } catch (error) {
+          if (error instanceof AppSidecarJsonBodyError) {
+            json(res, error.kind === "too-large" ? 413 : 400, {
+              error: `JSON request body ${error.kind}`,
+            });
+            return;
+          }
+          captureSidecarError(error, "app-sidecar.phase.advancement-confirmation");
+          json(res, 500, { error: "Start next phase failed" });
+        }
+      })();
+      return;
+    }
+
     if (
       handlePhaseStartRoute({
         method,
@@ -5301,6 +5353,12 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/new-session") {
+      const conflict = planGateConflict();
+      if (conflict) {
+        req.resume();
+        json(res, 409, conflict);
+        return;
+      }
       void runAppSidecarNewSessionMutation({
         busyState: sessionBusyState(),
         mutations: sessionMutations,
@@ -5311,7 +5369,7 @@ async function createSession(
           }
           deactivateApprovedPlan();
           injectedAutopilotPrompts = [];
-          clearPendingPlan();
+          planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
           log("INFO", "app-sidecar", "new session accepted", {
             logicalSessionId: opts.id,
             operationId: mutation.operationId,
@@ -5331,26 +5389,36 @@ async function createSession(
     }
 
     // Accept an approved plan and begin implementation in a FRESH session
-    // (mirrors the CLI's handleApprovePlan). The plan-mode conversation — all the
-    // research, file reads, and exploration done while drafting — must NOT bleed
-    // into the build, or it bloats the context and distracts the model. So:
-    //   1. newSession() wipes history + starts a new session file.
-    //   2. setApprovedPlan() bakes the plan into the fresh system prompt so the
-    //      model emits `[DONE:n]` markers the plan-progress widget reads.
-    //   3. session_reset tells the webview to clear its transcript; it then runs
-    //      the "implement it now" prompt in the clean session.
+    // Only a human IPC carrying the exact persisted checkpoint identity may approve.
     if (method === "POST" && url === "/plan/accept") {
+      if (!hasDaemonAuth(req, nativeAuthorityToken)) {
+        req.resume();
+        json(res, 401, { error: "native human authority required" });
+        return;
+      }
       void readBody(req, res).then(async (raw) => {
         if (raw === null) return;
-        let planPath: string | undefined;
+        let checkpointId: string;
+        let generation: number;
         try {
-          planPath = (JSON.parse(raw) as { planPath?: string }).planPath || undefined;
+          const body = JSON.parse(raw) as Record<string, unknown>;
+          if (
+            Object.keys(body).length !== 2 ||
+            typeof body.checkpointId !== "string" ||
+            !Number.isSafeInteger(body.generation)
+          ) {
+            throw new Error("invalid");
+          }
+          checkpointId = body.checkpointId;
+          generation = body.generation as number;
         } catch {
-          json(res, 400, { error: "invalid JSON body" });
+          json(res, 400, { error: "invalid plan approval body" } satisfies PlanMutationFailure);
           return;
         }
-        if (running) {
-          json(res, 409, { error: "cannot accept a plan while the agent is running" });
+        if (running || runClaim.active || autopilotActive || runLifecycle.running) {
+          json(res, 409, {
+            error: "cannot accept a plan while the agent is running",
+          } satisfies PlanMutationFailure);
           return;
         }
         const mutation = sessionMutations.tryAcquire("manual-plan-accept");
@@ -5358,43 +5426,36 @@ async function createSession(
           json(res, 409, sessionMutations.conflictBody());
           return;
         }
-        // Manual accept, possibly racing Ken's autopilot plan review: the user
-        // always wins. Invalidate the review, but retain the pending plan until
-        // the phase/session checkpoint commits successfully.
-        planGeneration++;
-        autopilotCancelled = true;
-        pendingAutopilotPhaseAdvancement = null;
-        kenAutoAbort.abort();
-        kenAutoAbort = new AbortController();
-        kenAutoSession?.setSignal(kenAutoAbort.signal);
-        if (autopilotReviewing) {
-          autopilotReviewing = false;
-          broadcast("autopilot_ignored", {});
-        }
-        const previousPhaseSessionPath = session.getActivePhaseContext()?.session.sessionPath;
         try {
-          const { planTotal } = await commitPlanApprovalCheckpoint({
-            session,
-            repository: notesRepository,
-            cwd,
-            planPath,
-            prepareFreshSession: async () => {
-              await session.newSession(true);
-              injectedAutopilotPrompts = [];
-              return activateApprovedPlan(planPath);
-            },
-            restorePreviousSession: previousPhaseSessionPath
-              ? async () => {
-                  await session.loadSessionCheckpoint(previousPhaseSessionPath);
-                  deactivateApprovedPlan();
-                }
-              : undefined,
-            onSnapshot: broadcastNotesSnapshot,
+          autopilotCancelled = true;
+          kenAutoAbort.abort();
+          kenAutoAbort = new AbortController();
+          kenAutoSession?.setSignal(kenAutoAbort.signal);
+          if (autopilotReviewing) {
+            autopilotReviewing = false;
+            broadcast("autopilot_ignored", {});
+          }
+          const accepted = await planHandoff.accept(checkpointId, generation);
+          if (accepted.status !== "committed") {
+            json(res, 409, {
+              error: "stale-plan-checkpoint",
+              pendingPlanReview: planGate.pending(),
+            } satisfies PlanMutationFailure);
+            return;
+          }
+          const planTotal = approvedPlanTotal;
+          broadcast("plan_accepted", {
+            checkpointId,
+            generation,
+            operationId: mutation.operationId,
           });
-          clearPendingPlan();
           broadcast("session_reset", { planTotal, operationId: mutation.operationId });
           broadcast("plan_progress", planProgressPayload());
-          json(res, 200, { ok: true, planTotal, operationId: mutation.operationId });
+          json(res, 200, {
+            ok: true,
+            planTotal,
+            operationId: mutation.operationId,
+          } satisfies PlanAcceptResult);
         } catch (err) {
           captureSidecarError(err, "app-sidecar.plan.accept");
           if (err instanceof PhaseCheckpointError) {
@@ -5402,7 +5463,7 @@ async function createSession(
               status: "failed",
               operationId: mutation.operationId,
               ...phaseCheckpointFailurePayload(err),
-            });
+            } satisfies PlanMutationFailure);
           } else {
             json(res, 500, { error: err instanceof Error ? err.message : String(err) });
           }
@@ -5413,7 +5474,91 @@ async function createSession(
       return;
     }
 
-    // ── Provider auth (login) ───────────────────────────────
+    if (method === "POST" && url === "/plan/revise") {
+      if (!hasDaemonAuth(req, nativeAuthorityToken)) {
+        req.resume();
+        json(res, 401, { error: "native human authority required" });
+        return;
+      }
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        const body = parsePlanRevisionBody(raw);
+        if (body === null) {
+          json(res, 400, { error: "invalid plan revision body" } satisfies PlanMutationFailure);
+          return;
+        }
+        const { checkpointId, generation, feedback } = body;
+        if (isPlanRevisionSessionBusy({ running, autopilotActive, autopilotReviewing })) {
+          json(res, 409, { error: "session_busy" } satisfies PlanMutationFailure);
+          return;
+        }
+        const mutation = sessionMutations.tryAcquire("plan-revise");
+        if (!mutation) {
+          json(res, 409, sessionMutations.conflictBody());
+          return;
+        }
+        void executePlanRevisionRequest(
+          { checkpointId, generation, actor: "user", feedback },
+          {
+            requestRevision: planGate.requestRevision.bind(planGate),
+            supersedeAutopilot: async () => {
+              if (!autopilotActive) return;
+              // The exact checkpoint transition committed first, so a stale
+              // feedback request can never cancel the authoritative review.
+              // Cancellation then waits for the Autopilot lifecycle owner to
+              // settle and install fresh controllers before runAgent starts.
+              autopilotCancelled = true;
+              if (autopilotReviewing) {
+                autopilotReviewing = false;
+                broadcast("autopilot_ignored", {});
+              }
+              const cancellation = await runLifecycle.cancel(CANCEL_TIMEOUT_MS);
+              if (cancellation.status === "failed") {
+                throw new Error("Autopilot review did not settle before plan revision");
+              }
+            },
+            onCommitted: (checkpoint) => {
+              // Persisted feedback is the run identity. Exact retries reuse it
+              // without writing another authority marker.
+              broadcast("plan_revision_requested", {
+                checkpointId: checkpoint.checkpointId,
+                generation: checkpoint.generation,
+                feedback: checkpoint.feedback,
+              });
+              json(res, 202, {
+                ok: true,
+                operationId: mutation.operationId,
+              } satisfies PlanRevisionResult);
+            },
+            run: async (prompt) => {
+              await runAgent(prompt, async () => {
+                await session.setPlanMode(true);
+                broadcast("plan_enter", { reason: "Revise the submitted plan" });
+                await promptActiveSession(prompt);
+              });
+            },
+          },
+        )
+          .then((result) => {
+            if (result.status === "conflict") {
+              json(res, 409, {
+                error: "stale-plan-checkpoint",
+                pendingPlanReview: planGate.pending(),
+              } satisfies PlanMutationFailure);
+            }
+          })
+          .catch((error) => {
+            captureSidecarError(error, "app-sidecar.plan.revise");
+            if (!res.headersSent) {
+              json(res, 500, { error: "plan-revision-failed" });
+            }
+          })
+          .finally(() => mutation.release());
+      });
+      return;
+    }
+
+    // â”€â”€ Provider auth (login) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (method === "GET" && url === "/auth/status") {
       void authStatusPayload().then((payload) => json(res, 200, payload));
       return;
@@ -5462,11 +5607,11 @@ async function createSession(
         // close their login modals and refresh their provider lists too.
         broadcastAll("auth_done", { provider });
         // `auth_done` means "a login succeeded" (modals close on it).
-        // `auth_change` means "auth.json changed" — which a DISCONNECT also is,
+        // `auth_change` means "auth.json changed" â€” which a DISCONNECT also is,
         // so connection state has one signal that covers both directions.
         broadcastAll("auth_change", { provider });
         // A newly connected provider unlocks its models. `/models` filters on
-        // who is logged in, so every window's picker is now stale — without
+        // who is logged in, so every window's picker is now stale â€” without
         // this the new models don't appear until the session is reopened.
         broadcastAll("models_change", {});
         json(res, 200, { ok: true });
@@ -5496,7 +5641,7 @@ async function createSession(
         // A login writes the shared ~/.gg/auth.json, so two windows racing the
         // same provider means two browser tabs and two token exchanges whose
         // writes clobber each other. The per-session flag above cannot see
-        // that — guard the provider daemon-wide as well.
+        // that â€” guard the provider daemon-wide as well.
         if (oauthInFlightProviders.has(provider)) {
           json(res, 409, {
             error: `a ${meta.label} login is already in progress in another window`,
@@ -5596,7 +5741,7 @@ async function createSession(
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
-        // Unknown id means it already timed out or was cancelled by an abort —
+        // Unknown id means it already timed out or was cancelled by an abort â€”
         // the tool call has moved on, so the answer has nowhere to go.
         if (!elicitations.settle(id, result)) {
           json(res, 409, { error: "no elicitation is awaiting a response" });
@@ -5633,7 +5778,7 @@ async function createSession(
           // Non-dual providers store their only credential under the provider id,
           // so this covers both them and a dual provider's API key.
           await auth.clearCredentials(provider);
-          // Xiaomi's API Credits credential lives under a distinct key — clear it
+          // Xiaomi's API Credits credential lives under a distinct key â€” clear it
           // too so "disconnect" fully removes both the Token Plan and Credits keys.
           if (provider === "xiaomi") await auth.clearCredentials(XIAOMI_CREDITS_KEY);
         }
@@ -5643,8 +5788,8 @@ async function createSession(
       return;
     }
 
-    // ── Telegram config (mirrors `ggcoder telegram`) ─────────
-    // ── Local models ──────────────────────────────────────
+    // â”€â”€ Telegram config (mirrors `ggcoder telegram`) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â”€â”€ Local models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // GET returns the last scan (cheap, no probing) so opening the modal is
     // instant; POST /local/scan is the explicit refresh.
     if (method === "GET" && url === "/local") {
@@ -5660,7 +5805,7 @@ async function createSession(
         })
         .catch((err: unknown) => {
           broadcastError("error", "local model scan failed", err);
-          json(res, 500, { error: "Local model scan failed — see the sidecar log." });
+          json(res, 500, { error: "Local model scan failed â€” see the sidecar log." });
         });
       return;
     }
@@ -5688,14 +5833,14 @@ async function createSession(
             ...localStatePayload(),
           });
         } catch (err) {
-          // Validation errors are the user's typo, not a system fault — 400 with
+          // Validation errors are the user's typo, not a system fault â€” 400 with
           // the exact reason, and nothing in the transcript.
           if (err instanceof LocalEndpointError) {
             json(res, 400, { error: err.message });
             return;
           }
           broadcastError("error", "add local endpoint failed", err);
-          json(res, 500, { error: "Could not save the endpoint — see the sidecar log." });
+          json(res, 500, { error: "Could not save the endpoint â€” see the sidecar log." });
         }
       });
       return;
@@ -5718,7 +5863,7 @@ async function createSession(
             return;
           }
           broadcastError("error", "remove local endpoint failed", err);
-          json(res, 500, { error: "Could not remove the endpoint — see the sidecar log." });
+          json(res, 500, { error: "Could not remove the endpoint â€” see the sidecar log." });
         }
       })();
       return;
@@ -5730,7 +5875,7 @@ async function createSession(
           json(res, 200, { configured: false });
           return;
         }
-        // Never return the raw token to the webview — a short masked preview is
+        // Never return the raw token to the webview â€” a short masked preview is
         // enough to show "already set".
         const t = cfg.botToken;
         const tokenPreview = t.length > 14 ? `${t.slice(0, 10)}\u2026${t.slice(-4)}` : "set";
@@ -5767,7 +5912,7 @@ async function createSession(
         }
         const verified = await verifyBotToken(botToken);
         if (!verified.ok) {
-          json(res, 400, { error: "Invalid bot token — Telegram rejected it." });
+          json(res, 400, { error: "Invalid bot token â€” Telegram rejected it." });
           return;
         }
         await saveTelegramConfig({ botToken, userId });
@@ -5776,7 +5921,7 @@ async function createSession(
       return;
     }
 
-    // ── Serve lifecycle (mirrors `ggcoder serve`) ───────────
+    // â”€â”€ Serve lifecycle (mirrors `ggcoder serve`) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (method === "GET" && url === "/serve") {
       void loadTelegramConfig().then((cfg) =>
         json(res, 200, { running: serveController !== null, configured: cfg !== null }),
@@ -5831,7 +5976,7 @@ async function createSession(
       return;
     }
 
-    // ── MCP server management (mirrors `ggcoder mcp`) ──────────────────
+    // â”€â”€ MCP server management (mirrors `ggcoder mcp`) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // `targetCwd` (project scope) overrides the window cwd so a server can be
     // added/removed for ANY discovered project, not just this window's. Global
     // scope ignores it (always ~/.gg/mcp.json).
@@ -5881,7 +6026,7 @@ async function createSession(
         }
         const config = parsed.value.config;
         try {
-          // Best-effort probe — never blocks the save. A failed connect is
+          // Best-effort probe â€” never blocks the save. A failed connect is
           // surfaced to the UI but the config is still persisted (mirrors the
           // CLI). probeMcp swallows connect errors; the try/catch guards the
           // persist step so a write failure returns a 500 instead of becoming
@@ -6011,8 +6156,6 @@ async function createSession(
   }
 
   async function dispose(): Promise<void> {
-    phaseAdvancementDisposed = true;
-    pendingAutopilotPhaseAdvancement = null;
     reminderCoordinator.unwatchSession(opts.id);
     await phaseCandidates.dispose();
     elicitations.cancelAll();
@@ -6031,8 +6174,6 @@ async function createSession(
     await kenAutoSession?.dispose().catch(() => {});
     await session.dispose().catch(() => {});
   }
-
-  queueMicrotask(() => void launchPendingAutopilotPhaseAdvancement(true));
 
   return {
     id: opts.id,

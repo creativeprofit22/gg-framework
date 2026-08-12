@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isPhaseStartResult, isPhaseStartSession } from "./phase-start-protocol.js";
+import {
+  isPhaseStartResult,
+  isPhaseStartSession,
+  toLegacyPhaseStartResult,
+  type PhaseStartResult,
+} from "./phase-start-protocol.js";
 
 const session = { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" };
 
@@ -35,5 +40,41 @@ describe("phase-start protocol", () => {
         packageTokenCount: 0,
       }),
     ).toBe(false);
+  });
+
+  it("accepts the advancement confirmation failure in the current protocol", () => {
+    expect(
+      isPhaseStartResult({
+        status: "failed",
+        code: "advancement-confirmation-required",
+        operationId: "operation-1",
+        message: "Use Start next phase to confirm this Roadmap checkpoint.",
+      }),
+    ).toBe(true);
+  });
+
+  it("downgrades the new failure code for legacy clients", () => {
+    const result = {
+      status: "failed",
+      code: "advancement-confirmation-required",
+      operationId: "operation-1",
+      message: "Use Start next phase to confirm this Roadmap checkpoint.",
+    } satisfies PhaseStartResult;
+
+    expect(toLegacyPhaseStartResult(result)).toEqual({
+      ...result,
+      code: "phase-inactive",
+    });
+  });
+
+  it("preserves failures understood by legacy clients", () => {
+    const result = {
+      status: "failed",
+      code: "notes-corrupt",
+      operationId: null,
+      message: "Project Notes are corrupt.",
+    } satisfies PhaseStartResult;
+
+    expect(toLegacyPhaseStartResult(result)).toBe(result);
   });
 });

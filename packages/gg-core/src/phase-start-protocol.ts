@@ -17,6 +17,7 @@ export const PHASE_START_FAILURE_CODES = [
   "phase-not-found",
   "phase-archived",
   "phase-inactive",
+  "advancement-confirmation-required",
   "notes-missing",
   "notes-corrupt",
   "launch-failed",
@@ -48,6 +49,31 @@ export type PhaseStartResult =
       operationId: string | null;
       message: string;
     };
+
+export type LegacyPhaseStartFailureCode = Exclude<
+  PhaseStartFailureCode,
+  "advancement-confirmation-required"
+>;
+
+export type LegacyPhaseStartResult =
+  | Exclude<PhaseStartResult, { status: "failed" }>
+  | {
+      status: "failed";
+      code: LegacyPhaseStartFailureCode;
+      operationId: string | null;
+      message: string;
+    };
+
+/** Downgrades the v2-only advancement gate for clients using the original closed code set. */
+export function toLegacyPhaseStartResult(result: PhaseStartResult): LegacyPhaseStartResult {
+  if (result.status !== "failed" || result.code !== "advancement-confirmation-required") {
+    return result as LegacyPhaseStartResult;
+  }
+  return {
+    ...result,
+    code: "phase-inactive",
+  };
+}
 
 const PHASE_START_FAILURE_CODE_SET: ReadonlySet<string> = new Set(PHASE_START_FAILURE_CODES);
 

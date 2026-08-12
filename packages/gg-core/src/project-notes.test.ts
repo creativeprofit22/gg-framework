@@ -40,6 +40,8 @@ import {
   type NotesDocumentV3,
   type NotesPhase,
   type NotesPhaseStatus,
+  type NotesRoadmapPhaseAdvancementCheckpoint,
+  type NotesRoadmapPhaseAdvancementConfirmation,
   type NotesRoadmapStatusUpdate,
   type NotesRoadmapTransition,
   type NotesRoadmapStatusOutcome,
@@ -860,6 +862,100 @@ describe("project Notes contract", () => {
       "phases[0].roadmapEvents[2]",
       "Done requires accepted review evidence, a successful complete implementation checkpoint, passed verification or an accepted verification exception, evidence matching the current phase session, and no unmet gates",
     );
+  });
+
+  it("accepts durable phase advancement checkpoint and human confirmation events", async () => {
+    const document = await fixture();
+    const phase = document.phases[0]!;
+    const checkpoint: NotesRoadmapPhaseAdvancementCheckpoint = {
+      type: "phase-advancement-checkpoint",
+      id: "advancement-checkpoint-1",
+      completionReviewId: "review-schema-contract",
+      completedPhaseId: phase.id,
+      nextPhaseId: document.phases[1]!.id,
+      reviewer: "ken-autopilot",
+      timestamp: NOW,
+    };
+    const confirmation: NotesRoadmapPhaseAdvancementConfirmation = {
+      type: "phase-advancement-confirmation",
+      id: "advancement-confirmation-1",
+      checkpointId: checkpoint.id,
+      nextPhaseId: checkpoint.nextPhaseId,
+      actor: "user",
+      operationId: "start-operation-1",
+      timestamp: NOW,
+    };
+    phase.roadmapEvents.push(checkpoint, confirmation);
+
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+  });
+
+  it.each([
+    ["checkpoint id", (event: Record<string, unknown>) => (event.id = "")],
+    ["checkpoint timestamp", (event: Record<string, unknown>) => (event.timestamp = "today")],
+    ["completion review", (event: Record<string, unknown>) => (event.completionReviewId = "missing")],
+    ["completed phase", (event: Record<string, unknown>) => (event.completedPhaseId = "other")],
+    ["next phase", (event: Record<string, unknown>) => (event.nextPhaseId = "missing")],
+    ["reviewer mode", (event: Record<string, unknown>) => (event.reviewer = "ken")],
+  ])("rejects malformed phase advancement checkpoint %s", async (_name, mutate) => {
+    const document = await fixture();
+    const event: Record<string, unknown> = {
+      type: "phase-advancement-checkpoint",
+      id: "advancement-checkpoint-1",
+      completionReviewId: "review-schema-contract",
+      completedPhaseId: document.phases[0]!.id,
+      nextPhaseId: document.phases[1]!.id,
+      reviewer: "ken-autopilot",
+      timestamp: NOW,
+    };
+    mutate(event);
+    document.phases[0]!.roadmapEvents.push(event as never);
+
+    expect(validateNotesDocumentV3(document).ok).toBe(false);
+  });
+
+  it.each([
+    ["confirmation id", (event: Record<string, unknown>) => (event.id = "")],
+    ["confirmation timestamp", (event: Record<string, unknown>) => (event.timestamp = "today")],
+    ["checkpoint", (event: Record<string, unknown>) => (event.checkpointId = "missing")],
+    ["next phase", (event: Record<string, unknown>) => (event.nextPhaseId = "phase-other")],
+    ["actor", (event: Record<string, unknown>) => (event.actor = "ken")],
+    ["operation", (event: Record<string, unknown>) => (event.operationId = "")],
+  ])("rejects malformed phase advancement confirmation %s", async (_name, mutate) => {
+    const document = await fixture();
+    const checkpoint: NotesRoadmapPhaseAdvancementCheckpoint = {
+      type: "phase-advancement-checkpoint",
+      id: "advancement-checkpoint-1",
+      completionReviewId: "review-schema-contract",
+      completedPhaseId: document.phases[0]!.id,
+      nextPhaseId: document.phases[1]!.id,
+      reviewer: "ken-autopilot",
+      timestamp: NOW,
+    };
+    const event: Record<string, unknown> = {
+      type: "phase-advancement-confirmation",
+      id: "advancement-confirmation-1",
+      checkpointId: checkpoint.id,
+      nextPhaseId: checkpoint.nextPhaseId,
+      actor: "user",
+      operationId: "start-operation-1",
+      timestamp: NOW,
+    };
+    mutate(event);
+    document.phases[0]!.roadmapEvents.push(checkpoint, event as never);
+
+    expect(validateNotesDocumentV3(document).ok).toBe(false);
+  });
+
+  it("retains compatibility with v3 documents that predate advancement events", async () => {
+    const document = await fixture();
+    expect(document.phases.every((phase) =>
+      phase.roadmapEvents.every((event) =>
+        event.type !== "phase-advancement-checkpoint" &&
+        event.type !== "phase-advancement-confirmation",
+      ),
+    )).toBe(true);
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
   });
 
   it("accepts historical non-Done completion evidence from a prior phase session", async () => {

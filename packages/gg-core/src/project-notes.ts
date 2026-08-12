@@ -309,13 +309,35 @@ export interface NotesRoadmapCompletionReview {
   timestamp: string;
 }
 
+export interface NotesRoadmapPhaseAdvancementCheckpoint {
+  type: "phase-advancement-checkpoint";
+  id: string;
+  completionReviewId: string;
+  completedPhaseId: string;
+  nextPhaseId: string;
+  reviewer: NotesRoadmapReviewer;
+  timestamp: string;
+}
+
+export interface NotesRoadmapPhaseAdvancementConfirmation {
+  type: "phase-advancement-confirmation";
+  id: string;
+  checkpointId: string;
+  nextPhaseId: string;
+  actor: "user";
+  operationId: string;
+  timestamp: string;
+}
+
 export type NotesRoadmapEvent =
   | NotesRoadmapStatusUpdate
   | NotesRoadmapBlockerResolution
   | NotesRoadmapReferenceDecision
   | NotesRoadmapOverrideReset
   | NotesRoadmapImplementationCheckpoint
-  | NotesRoadmapCompletionReview;
+  | NotesRoadmapCompletionReview
+  | NotesRoadmapPhaseAdvancementCheckpoint
+  | NotesRoadmapPhaseAdvancementConfirmation;
 
 export interface NotesPhase {
   id: string;
@@ -637,6 +659,24 @@ const ROADMAP_COMPLETION_REVIEW_KEYS = [
   "acceptsVerificationException",
   "gateOutcome",
   "unmetGateCodes",
+  "timestamp",
+];
+const ROADMAP_PHASE_ADVANCEMENT_CHECKPOINT_KEYS = [
+  "type",
+  "id",
+  "completionReviewId",
+  "completedPhaseId",
+  "nextPhaseId",
+  "reviewer",
+  "timestamp",
+];
+const ROADMAP_PHASE_ADVANCEMENT_CONFIRMATION_KEYS = [
+  "type",
+  "id",
+  "checkpointId",
+  "nextPhaseId",
+  "actor",
+  "operationId",
   "timestamp",
 ];
 const LEGACY_ROADMAP_PROPOSAL_KEYS = [
@@ -1075,12 +1115,17 @@ export function validateNotesDocumentV3(value: unknown): NotesValidationResult {
     referenceIdentities.set(identity, index);
   }
 
+  const knownPhaseIds = new Set(
+    value.phases.flatMap((phase) =>
+      isRecord(phase) && isNonEmptyString(phase.id) ? [phase.id] : [],
+    ),
+  );
   const phaseIds = new Set<string>();
   const reminderIdPaths = new Map<string, string>();
   const occurrenceKeyPaths = new Map<string, string>();
   for (let index = 0; index < value.phases.length; index += 1) {
     const phase = value.phases[index];
-    const phaseError = validatePhase(phase, index, referenceIds);
+    const phaseError = validatePhase(phase, index, referenceIds, knownPhaseIds);
     if (phaseError) return { ok: false, error: phaseError };
     const validatedPhase = phase as NotesPhase;
     if (phaseIds.has(validatedPhase.id)) {
@@ -1335,6 +1380,7 @@ function validatePhase(
   value: unknown,
   index: number,
   knownReferenceIds: ReadonlySet<string>,
+  knownPhaseIds: ReadonlySet<string>,
 ): NotesValidationError | null {
   const pathPrefix = `phases[${index}]`;
   if (!isRecordWithKeys(value, PHASE_KEYS)) {
@@ -1406,6 +1452,8 @@ function validatePhase(
     `${pathPrefix}.roadmapEvents`,
     knownReferenceIds,
     value.session as NotesSessionLink | null,
+    value.id,
+    knownPhaseIds,
   );
 }
 
@@ -1676,6 +1724,8 @@ function validateRoadmapEvents(
   pathPrefix: string,
   knownReferenceIds: ReadonlySet<string>,
   phaseSession: NotesSessionLink | null,
+  phaseId: string,
+  knownPhaseIds: ReadonlySet<string>,
 ): NotesValidationError | null {
   if (!Array.isArray(value)) {
     return validationError(pathPrefix, "expected an append-only event array");
@@ -1688,6 +1738,9 @@ function validateRoadmapEvents(
   const implementationCheckpointIndexes = new Map<string, number>();
   const verificationUpdates = new Map<string, NotesRoadmapStatusUpdate>();
   const verificationUpdateIndexes = new Map<string, number>();
+  const completionReviews = new Map<string, NotesRoadmapCompletionReview>();
+  const advancementCheckpoints = new Map<string, NotesRoadmapPhaseAdvancementCheckpoint>();
+  const confirmedAdvancementCheckpoints = new Set<string>();
   const blockedUpdates = new Set<string>();
   const resolvedBlockedUpdates = new Set<string>();
   let latestRejectedReviewIndex = -1;
@@ -2075,6 +2128,81 @@ function validateRoadmapEvents(
         }
       }
       if (record.decision === "rejected") latestRejectedReviewIndex = index;
+      completionReviews.set(record.id, record as unknown as NotesRoadmapCompletionReview);
+      continue;
+    }
+
+    if (record.type === "phase-advancement-checkpoint") {
+      if (!isRecordWithKeys(record, ROADMAP_PHASE_ADVANCEMENT_CHECKPOINT_KEYS)) {
+        return validationError(eventPath, "invalid phase advancement checkpoint");
+      }
+      if (!isNonEmptyString(record.completionReviewId)) {
+        return validationError(`${eventPath}.completionReviewId`, "expected a stable review ID");
+      }
+      const completionReview = completionReviews.get(record.completionReviewId);
+      if (
+        completionReview === undefined ||
+        completionReview.decision !== "accepted" ||
+        completionReview.gateOutcome !== "done"
+      ) {
+        return validationError(
+          `${eventPath}.completionReviewId`,
+          "expected a prior accepted Done completion review ID",
+        );
+      }
+      if (record.completedPhaseId !== phaseId) {
+        return validationError(
+          `${eventPath}.completedPhaseId`,
+          "expected the containing completed phase ID",
+        );
+      }
+      if (
+        !isNonEmptyString(record.nextPhaseId) ||
+        record.nextPhaseId === phaseId ||
+        !knownPhaseIds.has(record.nextPhaseId)
+      ) {
+        return validationError(`${eventPath}.nextPhaseId`, "expected another phase ID in this Roadmap");
+      }
+      if (!isNotesRoadmapReviewer(record.reviewer) || record.reviewer !== completionReview.reviewer) {
+        return validationError(
+          `${eventPath}.reviewer`,
+          "expected the referenced completion review mode",
+        );
+      }
+      advancementCheckpoints.set(
+        record.id,
+        record as unknown as NotesRoadmapPhaseAdvancementCheckpoint,
+      );
+      continue;
+    }
+
+    if (record.type === "phase-advancement-confirmation") {
+      if (!isRecordWithKeys(record, ROADMAP_PHASE_ADVANCEMENT_CONFIRMATION_KEYS)) {
+        return validationError(eventPath, "invalid phase advancement confirmation");
+      }
+      if (!isNonEmptyString(record.checkpointId)) {
+        return validationError(`${eventPath}.checkpointId`, "expected a stable checkpoint ID");
+      }
+      const checkpoint = advancementCheckpoints.get(record.checkpointId);
+      if (checkpoint === undefined) {
+        return validationError(
+          `${eventPath}.checkpointId`,
+          "expected a prior phase advancement checkpoint ID",
+        );
+      }
+      if (confirmedAdvancementCheckpoints.has(record.checkpointId)) {
+        return validationError(`${eventPath}.checkpointId`, "checkpoint is already confirmed");
+      }
+      if (record.nextPhaseId !== checkpoint.nextPhaseId) {
+        return validationError(`${eventPath}.nextPhaseId`, "expected the checkpoint next phase ID");
+      }
+      if (record.actor !== "user") {
+        return validationError(`${eventPath}.actor`, "expected fixed human actor user");
+      }
+      if (!isNonEmptyString(record.operationId)) {
+        return validationError(`${eventPath}.operationId`, "expected a stable operation ID");
+      }
+      confirmedAdvancementCheckpoints.add(record.checkpointId);
       continue;
     }
 

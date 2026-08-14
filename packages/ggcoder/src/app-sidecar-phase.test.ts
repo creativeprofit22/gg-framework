@@ -2,13 +2,17 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { Message } from "@kenkaiiii/gg-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import {
   AppSidecarCancellationPersistence,
   handleCancellationPersistenceRetryRoute,
 } from "./app-sidecar-cancellation.js";
-import { commitPlanApprovalCheckpoint } from "./app-sidecar-phase-checkpoint.js";
+import {
+  commitImplementationRunStart,
+  commitPlanApprovalCheckpoint,
+} from "./app-sidecar-phase-checkpoint.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
 import {
   AppSidecarPhaseCompletionCoordinator,
@@ -158,6 +162,32 @@ class FakePhaseSession implements BoundPhaseSession {
     return this.activeContext ? structuredClone(this.activeContext) : undefined;
   }
 
+  getMessages(): Message[] {
+    return [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "phase-verification",
+            name: "bash",
+            args: { command: "vitest run phase.test.ts" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool_result",
+            toolCallId: "phase-verification",
+            content: "Exit code: 0",
+          },
+        ],
+      },
+    ];
+  }
+
   async updateActivePhaseStage(
     executionStage: ActivePhaseExecutionStage,
     approvedPlanPath?: string,
@@ -167,8 +197,12 @@ class FakePhaseSession implements BoundPhaseSession {
     this.events.push("stage-persisted");
     const updated: ActivePhaseContextV1 = {
       ...activeContext,
+      session: {
+        sessionId: this.state.sessionId,
+        sessionPath: this.state.sessionPath,
+      },
       executionStage,
-      ...(approvedPlanPath ? { approvedPlanPath } : {}),
+      ...(approvedPlanPath ? { approvedPlanPath } : { approvedPlanPath: undefined }),
     };
     this.activeContext = updated;
     return structuredClone(updated);
@@ -424,6 +458,12 @@ async function setup(migrate = true) {
   const repository = new ProjectNotesRepository(path.join(root, ".gg"));
   if (migrate) await repository.migrate(cwd, document());
   return { repository, cwd, root };
+}
+
+async function currentRevision(repository: ProjectNotesRepository, cwd: string): Promise<number> {
+  const loaded = await repository.load(cwd);
+  if (loaded.status !== "ok") throw new Error(`Project Notes load failed: ${loaded.status}`);
+  return loaded.snapshot.revision;
 }
 
 async function updatePhase(
@@ -904,8 +944,9 @@ describe("production launchBoundPhase orchestration", () => {
         host.createSessionTools("coding", () => fixture.currentSession)[0]!,
         roadmapInput("phase-26-verification", {
           transition: "review",
+          expected_revision: await currentRevision(repository, cwd),
           progress: "Phase 26 focused verification passed",
-          evidence: ["Focused Track B tests passed"],
+          evidence: ["Focused Track B passed — vitest run phase.test.ts"],
           verification: { result: "passed" },
         }),
       ),
@@ -970,7 +1011,7 @@ describe("production launchBoundPhase orchestration", () => {
         actor: "gg-coder",
         verification: "passed",
         verificationSession: boundSession,
-        evidence: ["Focused Track B tests passed"],
+        evidence: ["Focused Track B passed — vitest run phase.test.ts"],
       }),
       expect.objectContaining({
         type: "status-update",
@@ -1209,8 +1250,9 @@ describe("production launchBoundPhase orchestration", () => {
             roadmapInput(`${phaseId}-verification-1`, {
               phase_id: phaseId,
               transition: "review",
+              expected_revision: await currentRevision(repository, cwd),
               progress: `${phaseId} verification passed`,
-              evidence: [`${phaseId} focused suite passed`],
+              evidence: [`${phaseId} focused suite passed — vitest run phase.test.ts`],
               verification: { result: "passed" },
             }),
           ),
@@ -1289,8 +1331,9 @@ describe("production launchBoundPhase orchestration", () => {
               roadmapInput(`${phaseId}-verification-2`, {
                 phase_id: phaseId,
                 transition: "review",
+                expected_revision: await currentRevision(repository, cwd),
                 progress: `${phaseId} correction verified`,
-                evidence: [`${phaseId} correction suite passed`],
+                evidence: [`${phaseId} correction suite passed — vitest run phase.test.ts`],
                 verification: { result: "passed" },
               }),
             ),
@@ -1938,6 +1981,77 @@ describe("production launchBoundPhase orchestration", () => {
     });
     expect(restarted.createCalls).toBe(0);
     expect(restarted.currentSession.promptCalls).toBe(0);
+  });
+
+  it("recovers an approved plan from a review-phase fixture before implementation activation", async () => {
+    const { repository, cwd } = await setup();
+    const fixture = new ProductionPhaseFixture(repository, cwd);
+    await fixture.start();
+    await fixture.promptSettled;
+    const session = fixture.currentSession;
+    const before = session.getActivePhaseContext()!;
+    const lifecycle = createApprovalLifecycle(repository, cwd, session);
+    await session.updateActivePhaseStage("implementing");
+    await expect(lifecycle.enqueue({ type: "ideal-review-started" })).resolves.toMatchObject({
+      status: "committed",
+    });
+    await session.updateActivePhaseStage("reviewing");
+
+    await expect(
+      commitPlanApprovalCheckpoint({
+        session,
+        repository,
+        cwd,
+        planPath: "/plans/approved/e750ee71-b874-4a7f-998c-9ff0a9a141c0.md",
+        prepareFreshSession: async () => {
+          await session.newSession(true);
+          return 7;
+        },
+      }),
+    ).resolves.toMatchObject({ planTotal: 7, phaseLink: { status: "synchronized" } });
+
+    const handedOff = await repository.load(cwd);
+    if (handedOff.status !== "ok") throw new Error("Expected recovered approval state");
+    expect(handedOff.snapshot.document.phases[0]).toMatchObject({
+      status: "review",
+      session: {
+        sessionId: session.state.sessionId,
+        sessionPath: session.state.sessionPath,
+      },
+    });
+    expect(session.getActivePhaseContext()).toMatchObject({
+      executionStage: "implementing",
+      approvedPlanPath: "/plans/approved/e750ee71-b874-4a7f-998c-9ff0a9a141c0.md",
+    });
+
+    await expect(
+      commitImplementationRunStart({
+        session,
+        reconcileLifecycle: (signal, active) =>
+          lifecycle.enqueue(signal, {
+            phaseId: active.phase.id,
+            session: active.session,
+            executionStage: active.executionStage,
+          }),
+      }),
+    ).resolves.toMatchObject({ status: "committed" });
+    expect(await repository.load(cwd)).toMatchObject({
+      status: "ok",
+      snapshot: {
+        document: {
+          phases: [
+            expect.objectContaining({
+              id: before.phase.id,
+              status: "in-progress",
+              session: {
+                sessionId: session.state.sessionId,
+                sessionPath: session.state.sessionPath,
+              },
+            }),
+          ],
+        },
+      },
+    });
   });
 
   it.each(["manual", "Autopilot"])(

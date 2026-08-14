@@ -1,4 +1,5 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import type { Message } from "@kenkaiiii/gg-ai";
 import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import type { ActivePhaseContextV1 } from "./phase-context.js";
@@ -13,6 +14,10 @@ import {
   type RoadmapStatusInput,
   type RoadmapStatusToolResult,
 } from "./tools/roadmap-status.js";
+import {
+  evaluateRoadmapVerificationEvidence,
+  partitionVerificationMessagesForRevision,
+} from "./core/verification-evidence.js";
 
 export type AppSidecarRoadmapSessionRole = "coding" | "ken" | "ken-autopilot";
 
@@ -31,6 +36,7 @@ export const APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES = [
 
 export interface AppSidecarRoadmapToolSession {
   getActivePhaseContext(): ActivePhaseContextV1 | undefined;
+  getMessages(): Message[];
   getState(): { sessionId: string; sessionPath: string | null };
   updateActivePhaseStage?(executionStage: "implementing" | "reviewing"): Promise<unknown>;
 }
@@ -102,9 +108,37 @@ export class AppSidecarRoadmapToolHost {
     }
 
     try {
-      const activePhase = getOwningSession ? activePhaseContext(getOwningSession()) : undefined;
+      const owningSession = getOwningSession?.();
+      const activePhase = owningSession ? activePhaseContext(owningSession) : undefined;
       if (actor === "gg-coder" && activePhase?.phaseId !== input.phase_id) {
         return { result: "phase-not-bound", phaseId: input.phase_id };
+      }
+      if (
+        actor === "gg-coder" &&
+        input.transition === "review" &&
+        input.verification?.result === "passed"
+      ) {
+        const messages = owningSession?.getMessages() ?? [];
+        const partition =
+          input.expected_revision === undefined
+            ? { currentMessages: messages, staleMessages: [] }
+            : partitionVerificationMessagesForRevision(messages, input.expected_revision);
+        const verificationEvidence = evaluateRoadmapVerificationEvidence({
+          doneWhen: activePhase?.doneWhen ?? [],
+          evidence: input.evidence,
+          expectedRevision: input.expected_revision,
+          ...partition,
+        });
+        if (!verificationEvidence.ready) {
+          return {
+            result: "verification-incomplete",
+            phaseId: input.phase_id,
+            ...(input.expected_revision === undefined ? {} : { revision: input.expected_revision }),
+            unmetEvidenceCodes: verificationEvidence.unmetEvidenceCodes,
+            message:
+              "Review was not applied. Passed verification requires one distinct, current-revision classifier-approved command for each Done When criterion.",
+          };
+        }
       }
       const statusRequest = {
         updateId: input.update_id,
@@ -156,6 +190,12 @@ export class AppSidecarRoadmapToolHost {
           revision: outcome.status === "committed" ? outcome.snapshot.revision : outcome.revision,
           statusOutcome: outcome.statusOutcome,
           proposals: outcome.proposals,
+          ...(input.transition === "review"
+            ? {
+                message:
+                  "Review submitted and applied. The phase remains in Review until final-review and completion gates pass.",
+              }
+            : {}),
         };
       }
       const result =
@@ -222,6 +262,10 @@ export class AppSidecarRoadmapToolHost {
         proposals: completion.proposals,
         gateOutcome: completion.evaluation.gateOutcome,
         unmetGateCodes: completion.evaluation.unmetGateCodes,
+        message:
+          completion.evaluation.gateOutcome === "done"
+            ? "Final review submitted and applied; the phase is complete."
+            : "Final review submitted and applied; the phase remains in Review because completion gates are unmet.",
       };
     }
     if (completion.status === "duplicate") {
@@ -233,6 +277,10 @@ export class AppSidecarRoadmapToolHost {
         proposals: completion.proposals,
         gateOutcome: completion.evaluation.gateOutcome,
         unmetGateCodes: completion.evaluation.unmetGateCodes,
+        message:
+          completion.evaluation.gateOutcome === "done"
+            ? "Final review submitted and applied; the phase is complete."
+            : "Final review submitted and applied; the phase remains in Review because completion gates are unmet.",
       };
     }
     const result =
@@ -262,6 +310,7 @@ export class AppSidecarRoadmapToolHost {
 function activePhaseContext(session: AppSidecarRoadmapToolSession):
   | {
       phaseId: string;
+      doneWhen: string[];
       session: { sessionId: string; sessionPath: string | null };
     }
   | undefined {
@@ -270,6 +319,7 @@ function activePhaseContext(session: AppSidecarRoadmapToolSession):
   const state = session.getState();
   return {
     phaseId: context.phase.id,
+    doneWhen: [...context.phase.doneWhen],
     session: { sessionId: state.sessionId, sessionPath: state.sessionPath },
   };
 }

@@ -14,6 +14,7 @@ import {
   type NotesRoadmapStatusOutcome,
 } from "@kenkaiiii/gg-core/project-notes";
 import type { ProjectNotesRoadmapProposalOutcome } from "../project-notes-repository.js";
+import type { RoadmapVerificationEvidenceUnmetCode } from "../core/verification-evidence.js";
 
 type JsonSchema = Record<string, unknown>;
 
@@ -334,6 +335,17 @@ export const RoadmapStatusParams = z
       });
     }
     if (
+      report.transition === "review" &&
+      report.verification?.result === "passed" &&
+      report.expected_revision === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["expected_revision"],
+        message: "passed review verification requires the current Project Notes revision",
+      });
+    }
+    if (
       !isNotesVerificationEvidenceSatisfied(report.verification?.result ?? null, report.evidence)
     ) {
       context.addIssue({
@@ -361,6 +373,7 @@ export type RoadmapStatusToolResult =
       revision: number;
       statusOutcome: NotesRoadmapStatusOutcome;
       proposals: ProjectNotesRoadmapProposalOutcome[];
+      message?: string;
     }
   | {
       result: "completion-review-committed" | "completion-review-duplicate";
@@ -370,6 +383,7 @@ export type RoadmapStatusToolResult =
       proposals: ProjectNotesRoadmapProposalOutcome[];
       gateOutcome: NotesCompletionGateOutcome;
       unmetGateCodes: NotesCompletionUnmetGateCode[];
+      message?: string;
     }
   | {
       result:
@@ -392,6 +406,7 @@ export type RoadmapStatusToolResult =
       owner?: { operationId: string; kind: string } | null;
       path?: string;
       message?: string;
+      unmetEvidenceCodes?: RoadmapVerificationEvidenceUnmetCode[];
     };
 
 export function createRoadmapStatusTool(
@@ -405,7 +420,7 @@ export function createRoadmapStatusTool(
       "Report transition: blocked only when work cannot continue without a concrete external decision or action; blocker states why work cannot continue, required_external_action states exactly what a person or external actor must do or decide, and recoverable or transient tool failures are not blockers. " +
       "Send a fresh in-progress report after blocked work actually resumes. Report meaningful milestones promptly, one call at a time. Cite actual checks in evidence, " +
       "reuse IDs only when retrying the same report, and avoid repeating an unchanged report. " +
-      "GG Coder may transition an active phase to review only with verification.result=passed and exactly one evidence item per Done when criterion, in criterion order. " +
+      "GG Coder may transition an active phase to review only with verification.result=passed and exactly one evidence item per Done When criterion, in criterion order; every item must cite verbatim one distinct, current-revision command that the verification classifier approved and observed exiting successfully. " +
       "Failed or incomplete verification stays in-progress (or blocked only for a concrete external dependency). Only Ken or Autopilot Ken may submit final_review; " +
       "the completion gate, not this tool text, decides Done and preserves user overrides.",
     parameters: RoadmapStatusParams,

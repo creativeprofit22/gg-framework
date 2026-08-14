@@ -12,6 +12,7 @@ import {
   isNotesReminderDeliveryChannel,
   isNotesReminderPermission,
   isNotesRoadmapReviewer,
+  isValidNotesRoadmapEvidence,
   isValidNotesReminderDeliveryPair,
   migrateNotesDocumentV2,
   migrateNotesDocumentV3PhaseShape,
@@ -246,6 +247,38 @@ export type ProjectNotesImplementationCheckpointOutcome =
   | { status: "duplicate-id-conflict"; revision: number }
   | { status: "invalid-checkpoint"; message: string }
   | { status: "phase-not-found" | "phase-archived" | "stale-session" }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
+export interface ProjectNotesImplementationRecoveryRequest {
+  recoveryId: string;
+  phaseId: string;
+  expectedRevision: number;
+  expectedSession: NotesSessionLink;
+  sourceCheckpointId: string;
+  planStepTotal: number;
+  completedPlanSteps: number[];
+  evidence: string[];
+  timestamp: string;
+}
+
+export type ProjectNotesImplementationRecoveryOutcome =
+  | { status: "committed"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
+  | { status: "duplicate"; revision: number; phaseId: string }
+  | { status: "duplicate-id-conflict" | "stale-revision"; revision: number }
+  | { status: "invalid-recovery"; message: string }
+  | {
+      status:
+        | "phase-not-found"
+        | "phase-archived"
+        | "phase-not-review"
+        | "stale-session"
+        | "source-checkpoint-missing"
+        | "source-checkpoint-stale"
+        | "source-checkpoint-mismatch"
+        | "source-checkpoint-complete"
+        | "source-run-not-successful";
+    }
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
@@ -987,6 +1020,32 @@ function sameImplementationCheckpointPayload(
   );
 }
 
+function sameImplementationRecoveryPayload(
+  event: NotesRoadmapImplementationCheckpoint,
+  request: ProjectNotesImplementationRecoveryRequest,
+): boolean {
+  return isDeepStrictEqual(
+    {
+      session: event.session,
+      planStepTotal: event.planStepTotal,
+      completedPlanSteps: event.completedPlanSteps,
+      runOutcome: event.runOutcome,
+      recovery: event.recovery,
+    },
+    {
+      session: request.expectedSession,
+      planStepTotal: request.planStepTotal,
+      completedPlanSteps: request.completedPlanSteps,
+      runOutcome: "succeeded",
+      recovery: {
+        sourceCheckpointId: request.sourceCheckpointId,
+        sourceRevision: request.expectedRevision,
+        evidence: request.evidence,
+      },
+    },
+  );
+}
+
 function sameCompletionReviewPayload(
   event: NotesRoadmapCompletionReview,
   request: ProjectNotesCompletionReviewRequest,
@@ -1020,6 +1079,37 @@ function validateImplementationCheckpointRequest(
   if (issue?.code === "not-array") return "Completed plan steps must be an array.";
   if (issue?.code === "invalid-step") {
     return "Completed plan steps must be unique, ascending, and within the plan total.";
+  }
+  return validateSession(request.expectedSession, "expectedSession")?.message ?? null;
+}
+
+function validateImplementationRecoveryRequest(
+  request: ProjectNotesImplementationRecoveryRequest,
+): string | null {
+  if (!isNonEmptyString(request.recoveryId)) return "Recovery ID is required.";
+  if (!Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) {
+    return "Expected revision must be a non-negative integer.";
+  }
+  if (!isNonEmptyString(request.sourceCheckpointId)) return "Source checkpoint ID is required.";
+  if (!isTimestamp(request.timestamp)) return "Recovery timestamp is invalid.";
+  if (!isValidNotesRoadmapEvidence(request.evidence) || request.evidence.length === 0) {
+    return "Recovery requires bounded durable evidence.";
+  }
+  const issue = validateNotesImplementationCheckpointFields({
+    planStepTotal: request.planStepTotal,
+    completedPlanSteps: request.completedPlanSteps,
+    runOutcome: "succeeded",
+  });
+  if (issue?.code === "not-positive-integer") return "Plan step total must be positive.";
+  if (issue?.code === "not-array") return "Completed plan steps must be an array.";
+  if (issue?.code === "invalid-step") {
+    return "Completed plan steps must be unique, ascending, and within the plan total.";
+  }
+  if (
+    request.completedPlanSteps.length !== request.planStepTotal ||
+    request.completedPlanSteps.some((step, index) => step !== index + 1)
+  ) {
+    return "Recovery must prove every canonical plan step; partial evidence is rejected.";
   }
   return validateSession(request.expectedSession, "expectedSession")?.message ?? null;
 }
@@ -2110,6 +2200,94 @@ export class ProjectNotesRepository {
       const next = await this.commitDocument(paths, current, document, {
         validationMode: "validated",
         context: "Implementation checkpoint created invalid Notes",
+      });
+      return {
+        status: "committed",
+        snapshot: toSnapshot(next),
+        phase: structuredClone(phase),
+      };
+    });
+  }
+
+  async recoverImplementationCheckpoint(
+    cwd: string,
+    request: ProjectNotesImplementationRecoveryRequest,
+  ): Promise<ProjectNotesImplementationRecoveryOutcome> {
+    const normalizedRequest: ProjectNotesImplementationRecoveryRequest = {
+      ...request,
+      evidence: request.evidence.map((item) => item.replace(/\s+/g, " ").trim()),
+    };
+    const invalid = validateImplementationRecoveryRequest(normalizedRequest);
+    if (invalid) return { status: "invalid-recovery", message: invalid };
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex(
+        (phase) => phase.id === normalizedRequest.phaseId,
+      );
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const prior = currentPhase.roadmapEvents.find(
+        (event): event is NotesRoadmapImplementationCheckpoint =>
+          event.type === "implementation-checkpoint" && event.id === normalizedRequest.recoveryId,
+      );
+      if (prior) {
+        return sameImplementationRecoveryPayload(prior, normalizedRequest)
+          ? { status: "duplicate", revision, phaseId: normalizedRequest.phaseId }
+          : { status: "duplicate-id-conflict", revision };
+      }
+      if (currentPhase.roadmapEvents.some((event) => event.id === normalizedRequest.recoveryId)) {
+        return { status: "duplicate-id-conflict", revision };
+      }
+      if (revision !== normalizedRequest.expectedRevision) {
+        return { status: "stale-revision", revision };
+      }
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (currentPhase.status !== "review") return { status: "phase-not-review" };
+      if (!notesSessionLinksEqual(currentPhase.session, normalizedRequest.expectedSession)) {
+        return { status: "stale-session" };
+      }
+      const checkpoints = currentPhase.roadmapEvents.filter(
+        (event): event is NotesRoadmapImplementationCheckpoint =>
+          event.type === "implementation-checkpoint",
+      );
+      const source = checkpoints.find(
+        (checkpoint) => checkpoint.id === normalizedRequest.sourceCheckpointId,
+      );
+      if (!source) return { status: "source-checkpoint-missing" };
+      if (checkpoints.at(-1)?.id !== source.id) return { status: "source-checkpoint-stale" };
+      if (!notesSessionLinksEqual(source.session, normalizedRequest.expectedSession)) {
+        return { status: "stale-session" };
+      }
+      if (source.planStepTotal !== normalizedRequest.planStepTotal) {
+        return { status: "source-checkpoint-mismatch" };
+      }
+      if (source.runOutcome !== "succeeded") return { status: "source-run-not-successful" };
+      if (source.completedPlanSteps.length === source.planStepTotal) {
+        return { status: "source-checkpoint-complete" };
+      }
+
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      const timestamp = chronologicalRoadmapTimestamp(phase, normalizedRequest.timestamp);
+      phase.roadmapEvents.push({
+        type: "implementation-checkpoint",
+        id: normalizedRequest.recoveryId,
+        session: { ...normalizedRequest.expectedSession },
+        planStepTotal: normalizedRequest.planStepTotal,
+        completedPlanSteps: [...normalizedRequest.completedPlanSteps],
+        runOutcome: "succeeded",
+        recovery: {
+          sourceCheckpointId: normalizedRequest.sourceCheckpointId,
+          sourceRevision: normalizedRequest.expectedRevision,
+          evidence: [...normalizedRequest.evidence],
+        },
+        timestamp,
+      });
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Implementation recovery created invalid Notes",
       });
       return {
         status: "committed",

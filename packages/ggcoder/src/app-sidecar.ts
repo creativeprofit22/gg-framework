@@ -214,11 +214,11 @@ import {
 import { handlePhaseStartRoute } from "./app-sidecar-phase-route.js";
 import {
   AppSidecarPlanGate,
-  hashPlanContent,
+  hasPlanOnlyBoundary,
   planGateConflictCode,
-  syncApprovedPlanSnapshotForDurability,
   type PersistedPlanReviewCheckpoint,
 } from "./app-sidecar-plan-gate.js";
+import { persistApprovedPlanSnapshot } from "./app-sidecar-approved-plan.js";
 import {
   executePlanRevisionRequest,
   isPlanRevisionSessionBusy,
@@ -2592,30 +2592,6 @@ async function createSession(
     };
   };
 
-  async function persistApprovedPlanSnapshot(
-    checkpoint: PersistedPlanReviewCheckpoint,
-  ): Promise<string> {
-    const approvedDirectory = path.join(cwd, ".gg", "plans", "approved");
-    const approvedPath = path.join(approvedDirectory, `${checkpoint.checkpointId}.md`);
-    await fs.mkdir(approvedDirectory, { recursive: true });
-    try {
-      await fs.writeFile(approvedPath, checkpoint.content, { encoding: "utf8", flag: "wx" });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const existing = await fs.readFile(approvedPath, "utf8");
-      if (hashPlanContent(existing) !== checkpoint.contentHash) {
-        throw new Error("Approved plan snapshot path contains different content.", { cause: error });
-      }
-    }
-    const approvedFile = await fs.open(approvedPath, "r");
-    try {
-      await syncApprovedPlanSnapshotForDurability(() => approvedFile.sync());
-    } finally {
-      await approvedFile.close();
-    }
-    return approvedPath;
-  }
-
   // Workflow (prompt-template) commands: built-in + the project's custom
   // `.gg/commands/*.md`. Used to gate autopilot off command turns and to label
   // expanded templates in Ken's digests. Loaded fresh so a newly added custom
@@ -2974,7 +2950,7 @@ async function createSession(
     approve: (checkpointId, generation) => planGate.approve(checkpointId, generation),
     currentConsumption: (): ApprovedPlanConsumptionIdentity | null => {
       const consumption = session.getApprovedPlanConsumption();
-      if (!consumption || consumption.state === "completed") return null;
+      if (!consumption) return null;
       return {
         checkpointId: consumption.checkpointId,
         generation: consumption.generation,
@@ -2982,7 +2958,43 @@ async function createSession(
       };
     },
     commitApproval: async (checkpoint) => {
-      const approvedPlanPath = await persistApprovedPlanSnapshot(checkpoint);
+      const approvedPlanPath = await persistApprovedPlanSnapshot(cwd, checkpoint);
+      if (hasPlanOnlyBoundary(checkpoint.content)) {
+        const activePhase = session.getActivePhaseContext();
+        if (activePhase) {
+          const checkpointOutcome = await phaseCompletion.checkpoint({
+            checkpointId: checkpoint.checkpointId,
+            phaseId: activePhase.phase.id,
+            expectedSession: activePhase.session,
+            // The phase deliverable is the reviewed plan itself. Its implementation
+            // steps belong to later Roadmap phases and must not gate this contract phase.
+            planStepTotal: 1,
+            completedPlanSteps: [1],
+            runOutcome: "succeeded",
+            timestamp: checkpoint.timestamp,
+          });
+          if (
+            checkpointOutcome.status !== "committed" &&
+            checkpointOutcome.status !== "duplicate"
+          ) {
+            throw new Error(`Plan-only completion checkpoint failed: ${checkpointOutcome.status}`);
+          }
+        }
+        const committed = await session.persistApprovedPlanConsumption({
+          checkpointId: checkpoint.checkpointId,
+          generation: checkpoint.generation,
+          content: checkpoint.content,
+          contentHash: checkpoint.contentHash,
+          approvedPlanPath,
+        });
+        await session.completeApprovedPlanConsumption();
+        return {
+          checkpointId: committed.checkpointId,
+          generation: committed.generation,
+          state: "completed" as const,
+        };
+      }
+
       const previousPhaseSessionPath = session.getActivePhaseContext()?.session.sessionPath;
       await commitPlanApprovalCheckpoint({
         session,
@@ -3040,7 +3052,33 @@ async function createSession(
       });
     },
   });
-  planHandoff.resumePending();
+  const resumedApprovedPlan = planHandoff.resumePending();
+  const recoverableApproval = planGate.current();
+  if (!resumedApprovedPlan) {
+    // Older builds could durably commit the human decision and Draft snapshot,
+    // then fail before consumption/session persistence. There is no remaining UI
+    // action in that state, so finish the idempotent handoff on session restore.
+    void planHandoff
+      .recoverApproved(recoverableApproval)
+      .then((recovered) => {
+        if (!recovered || recoverableApproval?.state !== "human-approved") return;
+        broadcast("plan_accepted", {
+          checkpointId: recoverableApproval.checkpointId,
+          generation: recoverableApproval.generation,
+          recovered: true,
+        });
+        if (!hasPlanOnlyBoundary(recoverableApproval.content)) {
+          broadcast("session_reset", { planTotal: approvedPlanTotal, recovered: true });
+          broadcast("plan_progress", planProgressPayload());
+        }
+      })
+      .catch((error) => {
+        captureSidecarError(error, "app-sidecar.plan.recover-approval");
+        log("ERROR", "app-sidecar", "approved plan handoff recovery failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
 
   // ── Autopilot orchestration ─────────────────────────────────
   // One review = prompt the existing kenAuto session with the normal digest,
@@ -5456,13 +5494,19 @@ async function createSession(
             return;
           }
           const planTotal = approvedPlanTotal;
+          const approvedCheckpoint = planGate.current();
+          const planOnly =
+            approvedCheckpoint?.state === "human-approved" &&
+            hasPlanOnlyBoundary(approvedCheckpoint.content);
           broadcast("plan_accepted", {
             checkpointId,
             generation,
             operationId: mutation.operationId,
           });
-          broadcast("session_reset", { planTotal, operationId: mutation.operationId });
-          broadcast("plan_progress", planProgressPayload());
+          if (!planOnly) {
+            broadcast("session_reset", { planTotal, operationId: mutation.operationId });
+            broadcast("plan_progress", planProgressPayload());
+          }
           json(res, 200, {
             ok: true,
             planTotal,

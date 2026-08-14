@@ -6,7 +6,7 @@ import type {
 export interface ApprovedPlanConsumptionIdentity {
   checkpointId: string;
   generation: number;
-  state: "approval-committed" | "implementation-prompt-started";
+  state: "approval-committed" | "implementation-prompt-started" | "completed";
 }
 
 export type PlanHandoffAcceptResult =
@@ -61,7 +61,7 @@ export class AppSidecarPlanHandoff<Consumption extends ApprovedPlanConsumptionId
       const approval = await this.deps.approve(checkpointId, generation);
       if (approval.status === "conflict") return approval;
       const consumption = await this.deps.commitApproval(approval.checkpoint);
-      this.resume(consumption);
+      if (consumption.state !== "completed") this.resume(consumption);
       return approval;
     });
   }
@@ -71,6 +71,17 @@ export class AppSidecarPlanHandoff<Consumption extends ApprovedPlanConsumptionId
     if (!consumption || consumption.state !== "approval-committed") return false;
     this.resume(consumption);
     return true;
+  }
+
+  /** Finish a durable human approval whose consumption commit was interrupted.
+   * This is intentionally identity-bound and refuses to replay any consumption
+   * record, including one that already completed. */
+  async recoverApproved(checkpoint: PersistedPlanReviewCheckpoint | null): Promise<boolean> {
+    if (checkpoint?.state !== "human-approved" || this.deps.currentConsumption() !== null) {
+      return false;
+    }
+    const result = await this.accept(checkpoint.checkpointId, checkpoint.generation);
+    return result.status === "committed";
   }
 
   private exclusive<T>(operation: () => Promise<T>): Promise<T> {

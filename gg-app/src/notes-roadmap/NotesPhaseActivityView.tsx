@@ -175,7 +175,8 @@ function renderActivityItem(item: ActivityItem): ReactNode {
       <>
         <strong>{roadmapReviewerLabel(event.reviewer)}</strong> {timestamp}
         <p>
-          Final review {event.decision}. Gate outcome: {completionOutcomeLabel(event.gateOutcome)}.
+          Final review submitted: {event.decision}. Applied gate outcome:
+          {` ${completionOutcomeLabel(event.gateOutcome)}.`}
           {event.reason ? ` ${event.reason}` : ""}
         </p>
         {event.evidence.length > 0 && (

@@ -95,6 +95,29 @@ export function hashPlanContent(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+const PLAN_STATUS_FIELD = /^(\s*(?:[-*]\s*)?\*\*Status:\*\*\s*)Draft(\s*)$/gim;
+const DRAFT_PLAN_STATUS_FIELD = /^(\s*(?:[-*]\s*)?\*\*Status:\*\*\s*)Draft\s*$/im;
+const APPROVED_PLAN_MARKER = "<!-- gg-plan-status: approved -->";
+const PLAN_ONLY_BOUNDARY_FIELD =
+  /^\s*(?:[-*]\s*)?\*\*Plan-only boundary:\*\*\s*Yes(?:\s*[—-].*)?$/im;
+
+/** Render the immutable reviewed bytes as an explicitly approved artifact.
+ * The checkpoint retains the original content/hash; only the approved copy gets
+ * approval metadata, so a copied Draft label can never contradict the durable gate. */
+export function approvedPlanArtifactContent(content: string): string {
+  const normalized = content.replace(PLAN_STATUS_FIELD, "$1Approved$2");
+  if (normalized.includes(APPROVED_PLAN_MARKER)) return normalized;
+  return `${APPROVED_PLAN_MARKER}\n${normalized}`;
+}
+
+export function isApprovedPlanArtifact(content: string): boolean {
+  return content.includes(APPROVED_PLAN_MARKER) && !DRAFT_PLAN_STATUS_FIELD.test(content);
+}
+
+export function hasPlanOnlyBoundary(content: string): boolean {
+  return PLAN_ONLY_BOUNDARY_FIELD.test(content);
+}
+
 export async function syncApprovedPlanSnapshotForDurability(
   sync: () => Promise<void>,
   platform: NodeJS.Platform = process.platform,

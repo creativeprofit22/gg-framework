@@ -1,11 +1,13 @@
-import { mkdir, mkdtemp, readFile, rm, utimes, readdir, writeFile } from "node:fs/promises";
+import fs, { mkdir, mkdtemp, readFile, rm, utimes, readdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SessionManager,
+  RequiredSessionPersistenceError,
+  syncRequiredPromptForDurability,
   KEN_TURN_CUSTOM_KIND,
   AUTOPILOT_MARKER_CUSTOM_KIND,
   APP_MARKER_CUSTOM_KIND,
@@ -13,6 +15,7 @@ import {
   APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND,
   approvedPlanContentHash,
   type SessionEntry,
+  type MessageEntry,
   type TurnMetricPayload,
   type CustomEntry,
 } from "./session-manager.js";
@@ -26,6 +29,7 @@ async function makeTempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -275,6 +279,73 @@ describe("SessionManager persistence failure handling", () => {
     const lines = content.trim().split("\n");
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[1] ?? "")).toMatchObject({ type: "message", id: "ok" });
+  });
+
+  it("treats only Windows EPERM fsync on the final read handle as unsupported", async () => {
+    const unsupported = Object.assign(new Error("EPERM: operation not permitted, fsync"), {
+      code: "EPERM",
+      syscall: "fsync",
+    });
+
+    await expect(
+      syncRequiredPromptForDurability(async () => {
+        throw unsupported;
+      }, "win32"),
+    ).resolves.toBeUndefined();
+
+    for (const [platform, code, syscall] of [
+      ["win32", "EIO", "fsync"],
+      ["win32", "EPERM", "write"],
+      ["linux", "EPERM", "fsync"],
+    ] as const) {
+      const failure = Object.assign(new Error(`${code}: ${syscall}`), { code, syscall });
+      await expect(
+        syncRequiredPromptForDurability(async () => {
+          throw failure;
+        }, platform),
+      ).rejects.toBe(failure);
+    }
+  });
+
+  it("still surfaces a real required-prompt open failure", async () => {
+    const manager = new SessionManager(await makeTempDir());
+    const badPath = path.join("/nonexistent-required-prompt-dir", "session.jsonl");
+
+    const failure = manager.appendRequiredMessage(badPath, entry("required") as MessageEntry);
+    await expect(failure).rejects.toBeInstanceOf(RequiredSessionPersistenceError);
+    await expect(failure).rejects.toMatchObject({ cause: { code: "ENOENT" } });
+  });
+
+  it("still surfaces a required-prompt write failure before the final fsync", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const created = await manager.create(sessionsDir, "anthropic", "test-model");
+    const realOpen = fs.open.bind(fs);
+    vi.spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await realOpen(...args);
+      if (args[1] !== "a") return handle;
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "writeFile") {
+            return async () => {
+              throw Object.assign(new Error("ENOSPC: no space left on device, write"), {
+                code: "ENOSPC",
+                syscall: "write",
+              });
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    });
+
+    const failure = manager.appendRequiredMessage(
+      created.path,
+      entry("required-write") as MessageEntry,
+    );
+    await expect(failure).rejects.toBeInstanceOf(RequiredSessionPersistenceError);
+    await expect(failure).rejects.toMatchObject({ cause: { code: "ENOSPC", syscall: "write" } });
   });
 });
 

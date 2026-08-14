@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RoadmapPhaseDraft } from "@kenkaiiii/gg-core/roadmap-workflow";
+import { evaluatePhaseCompletion } from "./project-notes-completion-policy.js";
 import {
   ProjectNotesRepository,
   canonicalProjectKey,
@@ -3282,11 +3283,24 @@ describe("ProjectNotesRepository completion transactions", () => {
     withOverride = false,
     withNextPhase = false,
     withAdditionalPhase = false,
+    identity?: {
+      phaseId: string;
+      nextPhaseId: string;
+      session: { sessionId: string; sessionPath: string | null };
+      doneWhen?: string[];
+    },
   ) {
     const agentDir = await tempAgentDir();
     const cwd = `/work/${name}`;
     const document = notes(name);
     const phase = document.phases[0]!;
+    const expectedSession = identity?.session ?? {
+      sessionId: "session-1",
+      sessionPath: "/sessions/one.jsonl",
+    };
+    phase.id = identity?.phaseId ?? "phase-1";
+    phase.session = { ...expectedSession };
+    if (identity?.doneWhen) phase.doneWhen = [...identity.doneWhen];
     phase.status = "review";
     phase.attentionReason = null;
     phase.completedAt = null;
@@ -3307,7 +3321,7 @@ describe("ProjectNotesRepository completion transactions", () => {
     document.updatedAt = phase.updatedAt;
     if (withNextPhase) {
       const nextPhase = structuredClone(phase);
-      nextPhase.id = "phase-2";
+      nextPhase.id = identity?.nextPhaseId ?? "phase-2";
       nextPhase.title = "Ship the next durable phase";
       nextPhase.goal = "Prove explicit advancement";
       nextPhase.doneWhen = ["Human confirmation is required"];
@@ -3335,7 +3349,6 @@ describe("ProjectNotesRepository completion transactions", () => {
     }
     const repository = new ProjectNotesRepository(agentDir);
     await repository.migrate(cwd, document);
-    const expectedSession = { sessionId: "session-1", sessionPath: "/sessions/one.jsonl" };
     return { agentDir, cwd, repository, expectedSession };
   }
 
@@ -3425,6 +3438,380 @@ describe("ProjectNotesRepository completion transactions", () => {
       },
     });
   }
+
+  it("recovers the exact revision-18 legacy 21-step checkpoint once before one authorized Done review exposes Phase 2", async () => {
+    const phaseId = "e349b4c7-ca8c-43da-8d14-e21f21677249";
+    const nextPhaseId = "69321b8b-cb69-4a19-b7cf-46603f3a47b6";
+    const sourceCheckpointId = "3e18f6ed-b68f-4fbc-bed6-76c92b4b93c6";
+    const expectedSession = {
+      sessionId: "8b4f4663-37bc-4e14-a4b7-9a7f2f34e318",
+      sessionPath:
+        "C:\\Users\\SPARTAN PC\\.gg\\identities\\com.ggcoder.local-fork\\sessions\\E_Projects_new-features-testing\\2026-08-14T07-21-40-796Z_8b4f4663.jsonl",
+    };
+    const { cwd, repository } = await completionSetup(
+      "legacy-recovery-e349b4c7",
+      false,
+      true,
+      false,
+      {
+        phaseId,
+        nextPhaseId,
+        session: expectedSession,
+        doneWhen: [
+          "Profiles and discovery work end to end.",
+          "Mutual likes create one match.",
+          "Realtime messages persist.",
+          "Block and report are enforced.",
+          "The single-process deployment and rate limit are healthy.",
+        ],
+      },
+    );
+    await expect(
+      repository.recordImplementationCheckpoint(cwd, {
+        checkpointId: sourceCheckpointId,
+        phaseId,
+        expectedSession,
+        planStepTotal: 21,
+        completedPlanSteps: [1],
+        runOutcome: "succeeded",
+        timestamp: "2026-08-14T15:59:11.668Z",
+      }),
+    ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 2 } });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        updateId: "phase-complete-2",
+        phaseId,
+        actor: "gg-coder",
+        transition: "review",
+        progress: "All 21 approved steps passed commit, file, test, and browser-smoke audit.",
+        blocker: null,
+        requiredExternalAction: null,
+        evidence: [
+          "Browser smoke passed profile creation, discovery, validation, and photo upload.",
+          "Browser smoke and PostgreSQL assertions passed reciprocal matching.",
+          "WebSocket smoke and PostgreSQL assertions passed realtime message persistence.",
+          "Browser smoke and database assertions passed persisted block/report enforcement.",
+          "Docker health and Redis-backed HTTP 429 rate-limit checks passed.",
+        ],
+        verification: "passed",
+        verificationReason: null,
+        proposedReferences: [],
+        timestamp: "2026-08-14T16:00:02.569Z",
+        expectedSession,
+        requireBoundPhase: true,
+        autopilotEnabled: false,
+      }),
+    ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 3 } });
+    for (let revision = 3; revision < 18; revision += 1) {
+      const loaded = await repository.load(cwd);
+      if (loaded.status !== "ok") throw new Error("Expected legacy recovery fixture");
+      await expect(repository.save(cwd, revision, loaded.snapshot.document)).resolves.toMatchObject(
+        {
+          status: "ok",
+          snapshot: { revision: revision + 1 },
+        },
+      );
+    }
+
+    const atRevision18 = await repository.load(cwd);
+    if (atRevision18.status !== "ok") throw new Error("Expected revision-18 fixture");
+    const phaseBeforeRecovery = atRevision18.snapshot.document.phases[0]!;
+    expect(atRevision18.snapshot.revision).toBe(18);
+    expect(
+      evaluatePhaseCompletion({
+        phase: phaseBeforeRecovery,
+        expectedSession,
+        review: {
+          decision: "accepted",
+          acceptsVerificationException: false,
+          reviewer: "ken-autopilot",
+          reason: null,
+        },
+      }).unmetGateCodes,
+    ).toEqual(["incomplete-plan"]);
+    expect(
+      phaseBeforeRecovery.roadmapEvents.some(
+        (event) => event.type === "phase-advancement-checkpoint",
+      ),
+    ).toBe(false);
+
+    const recovery = {
+      recoveryId: "legacy-plan-recovery-e349b4c7-r18",
+      phaseId,
+      expectedRevision: 18,
+      expectedSession,
+      sourceCheckpointId,
+      planStepTotal: 21,
+      completedPlanSteps: Array.from({ length: 21 }, (_, index) => index + 1),
+      evidence: [
+        "Commits 7475c46 and a6e0e85 plus the changed-file audit prove all 21 approved steps.",
+        "API tests/build, Expo typecheck/export, Docker checks, and Playwright browser smoke passed.",
+        "The completed session run persisted run_finished with outcome=completed.",
+      ],
+      timestamp: "2026-08-14T16:01:00.000Z",
+    };
+    await expect(repository.recoverImplementationCheckpoint(cwd, recovery)).resolves.toMatchObject({
+      status: "committed",
+      snapshot: { revision: 19 },
+      phase: {
+        status: "review",
+        roadmapEvents: expect.arrayContaining([
+          expect.objectContaining({
+            id: recovery.recoveryId,
+            completedPlanSteps: recovery.completedPlanSteps,
+            recovery: {
+              sourceCheckpointId,
+              sourceRevision: 18,
+              evidence: recovery.evidence,
+            },
+          }),
+        ]),
+      },
+    });
+    await expect(repository.recoverImplementationCheckpoint(cwd, recovery)).resolves.toEqual({
+      status: "duplicate",
+      revision: 19,
+      phaseId,
+    });
+    await expect(
+      repository.recoverImplementationCheckpoint(cwd, {
+        ...recovery,
+        evidence: ["Mismatched retry evidence must not reuse the recovery ID."],
+      }),
+    ).resolves.toEqual({ status: "duplicate-id-conflict", revision: 19 });
+
+    const reviewOverrides = {
+      reviewId: "ken-authorized-recovery-review-e349b4c7",
+      phaseId,
+      reviewer: "ken-autopilot" as const,
+      timestamp: "2026-08-14T16:02:00.000Z",
+    };
+    const statusOverrides = {
+      updateId: "ken-authorized-recovery-status-e349b4c7",
+      phaseId,
+      actor: "ken-autopilot" as const,
+      expectedRevision: 19,
+    };
+    const reviewed = await recordReviewThrough(
+      "bundled",
+      repository,
+      cwd,
+      expectedSession,
+      reviewOverrides,
+      statusOverrides,
+    );
+    expect(reviewed).toMatchObject({
+      status: "committed",
+      snapshot: { revision: 20 },
+      phase: { status: "done" },
+      evaluation: { gateOutcome: "done", unmetGateCodes: [] },
+      advancementCheckpoint: { nextPhaseId },
+    });
+    await expect(
+      recordReviewThrough(
+        "bundled",
+        repository,
+        cwd,
+        expectedSession,
+        reviewOverrides,
+        statusOverrides,
+      ),
+    ).resolves.toMatchObject({ status: "duplicate", revision: 20 });
+    const completed = await repository.load(cwd);
+    if (completed.status !== "ok") throw new Error("Expected completed recovery fixture");
+    const completedPhase = completed.snapshot.document.phases[0]!;
+    expect(completed.snapshot.revision).toBe(20);
+    expect(
+      completedPhase.roadmapEvents.filter((event) => event.type === "implementation-checkpoint"),
+    ).toHaveLength(2);
+    expect(
+      completedPhase.roadmapEvents.filter((event) => event.type === "completion-review"),
+    ).toHaveLength(1);
+    expect(
+      completedPhase.roadmapEvents.filter((event) => event.type === "phase-advancement-checkpoint"),
+    ).toHaveLength(1);
+  });
+
+  it("rejects missing, stale, mismatched, unsuccessful, already-complete, and partial recovery evidence without mutation", async () => {
+    async function recoveryFixture(
+      name: string,
+      source: { total: number; completed: number[]; runOutcome: "succeeded" | "failed" },
+      appendNewer = false,
+    ) {
+      const fixture = await completionSetup(name);
+      await fixture.repository.recordImplementationCheckpoint(fixture.cwd, {
+        checkpointId: "source-checkpoint",
+        phaseId: "phase-1",
+        expectedSession: fixture.expectedSession,
+        planStepTotal: source.total,
+        completedPlanSteps: source.completed,
+        runOutcome: source.runOutcome,
+        timestamp: "2026-08-14T16:00:00.000Z",
+      });
+      if (appendNewer) {
+        await fixture.repository.recordImplementationCheckpoint(fixture.cwd, {
+          checkpointId: "newer-checkpoint",
+          phaseId: "phase-1",
+          expectedSession: fixture.expectedSession,
+          planStepTotal: source.total,
+          completedPlanSteps: source.completed,
+          runOutcome: source.runOutcome,
+          timestamp: "2026-08-14T16:01:00.000Z",
+        });
+      }
+      return fixture;
+    }
+    function recoveryRequest(
+      expectedSession: { sessionId: string; sessionPath: string | null },
+      overrides: Record<string, unknown> = {},
+    ) {
+      return {
+        recoveryId: "explicit-recovery",
+        phaseId: "phase-1",
+        expectedRevision: 2,
+        expectedSession,
+        sourceCheckpointId: "source-checkpoint",
+        planStepTotal: 3,
+        completedPlanSteps: [1, 2, 3],
+        evidence: ["Durable commit, file, test, and browser-smoke audit proves every step."],
+        timestamp: "2026-08-14T16:02:00.000Z",
+        ...overrides,
+      };
+    }
+
+    const missingEvidence = await recoveryFixture("recovery-missing-evidence", {
+      total: 3,
+      completed: [1],
+      runOutcome: "succeeded",
+    });
+    await expect(
+      missingEvidence.repository.recoverImplementationCheckpoint(
+        missingEvidence.cwd,
+        recoveryRequest(missingEvidence.expectedSession, { evidence: [] }),
+      ),
+    ).resolves.toMatchObject({ status: "invalid-recovery" });
+
+    const partial = await recoveryFixture("recovery-partial", {
+      total: 3,
+      completed: [1],
+      runOutcome: "succeeded",
+    });
+    await expect(
+      partial.repository.recoverImplementationCheckpoint(
+        partial.cwd,
+        recoveryRequest(partial.expectedSession, { completedPlanSteps: [1, 2] }),
+      ),
+    ).resolves.toMatchObject({ status: "invalid-recovery" });
+
+    const staleRevision = await recoveryFixture("recovery-stale-revision", {
+      total: 3,
+      completed: [1],
+      runOutcome: "succeeded",
+    });
+    await expect(
+      staleRevision.repository.recoverImplementationCheckpoint(
+        staleRevision.cwd,
+        recoveryRequest(staleRevision.expectedSession, { expectedRevision: 1 }),
+      ),
+    ).resolves.toEqual({ status: "stale-revision", revision: 2 });
+
+    const staleSession = await recoveryFixture("recovery-stale-session", {
+      total: 3,
+      completed: [1],
+      runOutcome: "succeeded",
+    });
+    await expect(
+      staleSession.repository.recoverImplementationCheckpoint(
+        staleSession.cwd,
+        recoveryRequest({ sessionId: "wrong-session", sessionPath: null }),
+      ),
+    ).resolves.toEqual({ status: "stale-session" });
+
+    const missingSource = await recoveryFixture("recovery-missing-source", {
+      total: 3,
+      completed: [1],
+      runOutcome: "succeeded",
+    });
+    await expect(
+      missingSource.repository.recoverImplementationCheckpoint(
+        missingSource.cwd,
+        recoveryRequest(missingSource.expectedSession, {
+          sourceCheckpointId: "missing-checkpoint",
+        }),
+      ),
+    ).resolves.toEqual({ status: "source-checkpoint-missing" });
+
+    const staleSource = await recoveryFixture(
+      "recovery-stale-source",
+      { total: 3, completed: [1], runOutcome: "succeeded" },
+      true,
+    );
+    await expect(
+      staleSource.repository.recoverImplementationCheckpoint(
+        staleSource.cwd,
+        recoveryRequest(staleSource.expectedSession, { expectedRevision: 3 }),
+      ),
+    ).resolves.toEqual({ status: "source-checkpoint-stale" });
+
+    const mismatchedTotal = await recoveryFixture("recovery-mismatched-total", {
+      total: 3,
+      completed: [1],
+      runOutcome: "succeeded",
+    });
+    await expect(
+      mismatchedTotal.repository.recoverImplementationCheckpoint(
+        mismatchedTotal.cwd,
+        recoveryRequest(mismatchedTotal.expectedSession, {
+          planStepTotal: 2,
+          completedPlanSteps: [1, 2],
+        }),
+      ),
+    ).resolves.toEqual({ status: "source-checkpoint-mismatch" });
+
+    const unsuccessful = await recoveryFixture("recovery-unsuccessful", {
+      total: 3,
+      completed: [1],
+      runOutcome: "failed",
+    });
+    await expect(
+      unsuccessful.repository.recoverImplementationCheckpoint(
+        unsuccessful.cwd,
+        recoveryRequest(unsuccessful.expectedSession),
+      ),
+    ).resolves.toEqual({ status: "source-run-not-successful" });
+
+    const complete = await recoveryFixture("recovery-complete", {
+      total: 3,
+      completed: [1, 2, 3],
+      runOutcome: "succeeded",
+    });
+    await expect(
+      complete.repository.recoverImplementationCheckpoint(
+        complete.cwd,
+        recoveryRequest(complete.expectedSession),
+      ),
+    ).resolves.toEqual({ status: "source-checkpoint-complete" });
+
+    for (const fixture of [
+      missingEvidence,
+      partial,
+      staleRevision,
+      staleSession,
+      missingSource,
+      mismatchedTotal,
+      unsuccessful,
+      complete,
+    ]) {
+      await expect(fixture.repository.load(fixture.cwd)).resolves.toMatchObject({
+        status: "ok",
+        snapshot: { revision: 2 },
+      });
+    }
+    await expect(staleSource.repository.load(staleSource.cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 3 },
+    });
+  });
 
   it.each(["ken", "ken-autopilot"] as const)(
     "atomically creates one durable advancement checkpoint for a %s Done review",

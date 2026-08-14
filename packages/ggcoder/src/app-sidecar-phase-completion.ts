@@ -12,6 +12,8 @@ import type {
   ProjectNotesCompletionReviewRequest,
   ProjectNotesImplementationCheckpointOutcome,
   ProjectNotesImplementationCheckpointRequest,
+  ProjectNotesImplementationRecoveryOutcome,
+  ProjectNotesImplementationRecoveryRequest,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
 
@@ -45,6 +47,10 @@ export interface PhaseCompletionRepository {
     cwd: string,
     request: ProjectNotesImplementationCheckpointRequest,
   ): Promise<ProjectNotesImplementationCheckpointOutcome>;
+  recoverImplementationCheckpoint(
+    cwd: string,
+    request: ProjectNotesImplementationRecoveryRequest,
+  ): Promise<ProjectNotesImplementationRecoveryOutcome>;
   recordCompletionReview(
     cwd: string,
     request: ProjectNotesCompletionReviewRequest,
@@ -53,6 +59,7 @@ export interface PhaseCompletionRepository {
 
 export type PhaseCompletionCoordinatorOutcome =
   | ProjectNotesImplementationCheckpointOutcome
+  | ProjectNotesImplementationRecoveryOutcome
   | ProjectNotesCompletionReviewOutcome
   | { status: "storage-failure"; error: unknown };
 
@@ -137,7 +144,10 @@ export interface PhaseCompletionCoordinatorOptions {
   cwd: string;
   repository: PhaseCompletionRepository;
   broadcastSnapshot(snapshot: ProjectNotesSnapshot): void;
-  onError?(error: unknown, kind: "implementation-checkpoint" | "completion-review"): void;
+  onError?(
+    error: unknown,
+    kind: "implementation-checkpoint" | "implementation-recovery" | "completion-review",
+  ): void;
 }
 
 export class AppSidecarPhaseCompletionCoordinator {
@@ -153,6 +163,14 @@ export class AppSidecarPhaseCompletionCoordinator {
     );
   }
 
+  recover(
+    request: ProjectNotesImplementationRecoveryRequest,
+  ): Promise<PhaseCompletionCoordinatorOutcome> {
+    return this.enqueue("implementation-recovery", () =>
+      this.options.repository.recoverImplementationCheckpoint(this.options.cwd, request),
+    );
+  }
+
   review(request: ProjectNotesCompletionReviewRequest): Promise<PhaseCompletionCoordinatorOutcome> {
     return this.enqueue("completion-review", () =>
       this.options.repository.recordCompletionReview(this.options.cwd, request),
@@ -160,9 +178,11 @@ export class AppSidecarPhaseCompletionCoordinator {
   }
 
   private enqueue(
-    kind: "implementation-checkpoint" | "completion-review",
+    kind: "implementation-checkpoint" | "implementation-recovery" | "completion-review",
     operation: () => Promise<
-      ProjectNotesImplementationCheckpointOutcome | ProjectNotesCompletionReviewOutcome
+      | ProjectNotesImplementationCheckpointOutcome
+      | ProjectNotesImplementationRecoveryOutcome
+      | ProjectNotesCompletionReviewOutcome
     >,
   ): Promise<PhaseCompletionCoordinatorOutcome> {
     const queued = this.tail.then(async () => {

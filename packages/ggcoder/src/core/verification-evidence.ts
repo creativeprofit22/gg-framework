@@ -14,6 +14,22 @@ export interface VerificationEvidence {
   reason: string;
 }
 
+export type RoadmapVerificationEvidenceUnmetCode =
+  | "missing-expected-revision"
+  | "missing-approved-evidence"
+  | "rejected-evidence"
+  | "unclassified-evidence"
+  | "failed-evidence"
+  | "stale-evidence"
+  | "duplicate-evidence"
+  | "criterion-evidence-mismatch"
+  | "unmatched-evidence";
+
+export interface RoadmapVerificationEvidenceEvaluation {
+  ready: boolean;
+  unmetEvidenceCodes: RoadmapVerificationEvidenceUnmetCode[];
+}
+
 const LONG_RUNNING_FLAGS = new Set([
   "--watch",
   "--watchall",
@@ -307,4 +323,174 @@ export function collectVerificationEvidence(messages: readonly Message[]): Verif
     }
   }
   return evidence;
+}
+
+type ShellEvidence = Omit<VerificationEvidence, "status"> & {
+  status: VerificationEvidence["status"] | "unclassified";
+};
+
+function collectShellEvidence(messages: readonly Message[]): ShellEvidence[] {
+  const calls = new Map<
+    string,
+    { command: string; classification: VerificationCommandClassification; background: boolean }
+  >();
+  const evidence: ShellEvidence[] = [];
+
+  for (const message of messages) {
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      for (const part of message.content as ContentPart[]) {
+        if (part.type !== "tool_call" || part.name !== "bash") continue;
+        const command = typeof part.args.command === "string" ? part.args.command.trim() : "";
+        calls.set(part.id, {
+          command,
+          classification: classifyVerificationCommand(command),
+          background: part.args.run_in_background === true || part.args.persist === true,
+        });
+      }
+    }
+    if (message.role !== "tool") continue;
+    for (const result of message.content as ToolResult[]) {
+      const call = calls.get(result.toolCallId);
+      if (!call) continue;
+      if (call.background) {
+        evidence.push({
+          command: call.command,
+          status: "rejected",
+          reason: "background or persistent commands are not bounded evidence",
+        });
+      } else if (!call.classification.candidate) {
+        evidence.push({
+          command: call.command,
+          status: "unclassified",
+          reason: call.classification.reason,
+        });
+      } else if (!call.classification.accepted) {
+        evidence.push({
+          command: call.command,
+          status: "rejected",
+          reason: call.classification.reason,
+        });
+      } else {
+        const passed =
+          !result.isError && /^Exit code:\s*0(?:\s|$)/i.test(resultText(result).trim());
+        evidence.push({
+          command: call.command,
+          status: passed ? "passed" : "failed",
+          reason: passed ? call.classification.reason : "bounded check did not exit successfully",
+        });
+      }
+    }
+  }
+  return evidence;
+}
+
+export function partitionVerificationMessagesForRevision(
+  messages: readonly Message[],
+  expectedRevision: number,
+): { currentMessages: Message[]; staleMessages: Message[] } {
+  const roadmapCalls = new Set<string>();
+  let boundary = 0;
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      for (const part of message.content as ContentPart[]) {
+        if (part.type === "tool_call" && part.name === "roadmap_status") roadmapCalls.add(part.id);
+      }
+    }
+    if (message.role !== "tool") continue;
+    for (const result of message.content as ToolResult[]) {
+      if (!roadmapCalls.has(result.toolCallId)) continue;
+      try {
+        const parsed = JSON.parse(resultText(result)) as { result?: unknown; revision?: unknown };
+        if (
+          typeof parsed.revision === "number" &&
+          parsed.revision <= expectedRevision &&
+          (parsed.result === "committed" || parsed.result === "completion-review-committed")
+        ) {
+          boundary = index + 1;
+        }
+      } catch {
+        // A malformed/partial tool result is not a trustworthy revision boundary.
+      }
+    }
+  }
+
+  return {
+    staleMessages: messages.slice(0, boundary),
+    currentMessages: messages.slice(boundary),
+  };
+}
+
+function normalizedEvidenceText(value: string): string {
+  return value
+    .replace(/[`'"\r\n]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function referencesCommand(evidence: string, command: string): boolean {
+  const normalizedCommand = normalizedEvidenceText(command);
+  return (
+    normalizedCommand.length > 0 && normalizedEvidenceText(evidence).includes(normalizedCommand)
+  );
+}
+
+/**
+ * Bind a passed Roadmap review handoff to harness-owned shell evidence.
+ * Each Done When item must cite one distinct, current-revision command verbatim.
+ */
+export function evaluateRoadmapVerificationEvidence(input: {
+  doneWhen: readonly string[];
+  evidence: readonly string[];
+  expectedRevision: number | undefined;
+  currentMessages: readonly Message[];
+  staleMessages?: readonly Message[];
+}): RoadmapVerificationEvidenceEvaluation {
+  const unmet = new Set<RoadmapVerificationEvidenceUnmetCode>();
+  if (input.expectedRevision === undefined) unmet.add("missing-expected-revision");
+  if (input.evidence.length !== input.doneWhen.length) unmet.add("criterion-evidence-mismatch");
+
+  const normalizedItems = input.evidence.map(normalizedEvidenceText);
+  if (new Set(normalizedItems).size !== normalizedItems.length) unmet.add("duplicate-evidence");
+
+  const current = collectShellEvidence(input.currentMessages);
+  const stale = collectShellEvidence(input.staleMessages ?? []);
+  const usedCommands = new Set<string>();
+  let approvedMatches = 0;
+
+  for (const item of input.evidence) {
+    const matches = current.filter((candidate) => referencesCommand(item, candidate.command));
+    const passed = [...matches].reverse().find((candidate) => candidate.status === "passed");
+    if (passed) {
+      const commandKey = normalizedEvidenceText(passed.command);
+      if (usedCommands.has(commandKey)) unmet.add("duplicate-evidence");
+      else {
+        usedCommands.add(commandKey);
+        approvedMatches += 1;
+      }
+      continue;
+    }
+    if (matches.some((candidate) => candidate.status === "rejected")) {
+      unmet.add("rejected-evidence");
+      continue;
+    }
+    if (matches.some((candidate) => candidate.status === "failed")) {
+      unmet.add("failed-evidence");
+      continue;
+    }
+    if (matches.some((candidate) => candidate.status === "unclassified")) {
+      unmet.add("unclassified-evidence");
+      continue;
+    }
+    if (stale.some((candidate) => referencesCommand(item, candidate.command))) {
+      unmet.add("stale-evidence");
+      continue;
+    }
+    unmet.add("unmatched-evidence");
+  }
+
+  if (approvedMatches !== input.doneWhen.length) unmet.add("missing-approved-evidence");
+  return { ready: unmet.size === 0, unmetEvidenceCodes: [...unmet] };
 }

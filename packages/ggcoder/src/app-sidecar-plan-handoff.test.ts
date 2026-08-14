@@ -61,6 +61,57 @@ describe("AppSidecarPlanHandoff", () => {
     expect(scheduled).toHaveLength(1);
   });
 
+  it("recovers a human-approved checkpoint whose consumption commit never finished", async () => {
+    let consumption: Consumption | null = null;
+    const commitApproval = vi.fn(async () => (consumption = committed()));
+    const scheduled: Array<() => void> = [];
+    const handoff = new AppSidecarPlanHandoff<Consumption>({
+      approve: vi.fn().mockResolvedValue({ status: "committed", checkpoint }),
+      commitApproval,
+      currentConsumption: () => consumption,
+      launchImplementation: vi.fn(),
+      schedule: (callback) => scheduled.push(callback),
+    });
+
+    await expect(handoff.recoverApproved(checkpoint)).resolves.toBe(true);
+    expect(commitApproval).toHaveBeenCalledOnce();
+    expect(scheduled).toHaveLength(1);
+  });
+
+  it("does not launch implementation for a completed plan-only approval", async () => {
+    const launchImplementation = vi.fn();
+    const schedule = vi.fn();
+    const handoff = new AppSidecarPlanHandoff<Consumption>({
+      approve: vi.fn().mockResolvedValue({ status: "committed", checkpoint }),
+      commitApproval: vi.fn().mockResolvedValue(committed("completed")),
+      currentConsumption: () => null,
+      launchImplementation,
+      schedule,
+    });
+
+    await expect(
+      handoff.accept(checkpoint.checkpointId, checkpoint.generation),
+    ).resolves.toMatchObject({
+      status: "committed",
+    });
+    expect(schedule).not.toHaveBeenCalled();
+    expect(launchImplementation).not.toHaveBeenCalled();
+  });
+
+  it("does not replay recovery over an existing or completed consumption", async () => {
+    const existing = committed("completed");
+    const commitApproval = vi.fn();
+    const handoff = new AppSidecarPlanHandoff<Consumption>({
+      approve: vi.fn(),
+      commitApproval,
+      currentConsumption: () => existing,
+      launchImplementation: vi.fn(),
+    });
+
+    await expect(handoff.recoverApproved(checkpoint)).resolves.toBe(false);
+    expect(commitApproval).not.toHaveBeenCalled();
+  });
+
   it("recovers an ordinary non-Roadmap approval after restart before the queued prompt", async () => {
     let consumption: Consumption | null = null;
     const firstQueue: Array<() => void> = [];

@@ -146,6 +146,21 @@ describe("evaluatePhaseCompletion", () => {
     });
   });
 
+  it("accepts a reviewed plan-only contract checkpoint without incomplete-plan", () => {
+    const planApprovalCheckpoint = checkpoint({
+      id: "e750ee71-b874-4a7f-998c-9ff0a9a141c0",
+      planStepTotal: 1,
+      completedPlanSteps: [1],
+    });
+
+    expect(evaluate(phase([planApprovalCheckpoint, verification()]))).toMatchObject({
+      gateOutcome: "done",
+      unmetGateCodes: [],
+      implementationCheckpointId: "e750ee71-b874-4a7f-998c-9ff0a9a141c0",
+      targetStatus: "done",
+    });
+  });
+
   it.each([
     ["missing implementation", [verification()], "missing-implementation"],
     [
@@ -626,6 +641,7 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
           evaluation: evaluate(phase()),
         };
       }),
+      recoverImplementationCheckpoint: vi.fn(),
       recordCompletionReview: vi.fn(),
     };
     const coordinator = new AppSidecarPhaseCompletionCoordinator({
@@ -714,6 +730,7 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
         order.push("checkpoint");
         throw new Error("disk full");
       }),
+      recoverImplementationCheckpoint: vi.fn(),
       recordCompletionReview: vi.fn(async () => {
         order.push("review");
         return {

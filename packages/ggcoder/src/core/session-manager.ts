@@ -471,6 +471,26 @@ export class RequiredSessionPersistenceError extends Error {
   }
 }
 
+/**
+ * Sync the already-appended required prompt through a read handle. Windows can
+ * reject this otherwise valid fsync with EPERM because the operation is not
+ * supported for that handle; no write/open/append failure reaches this boundary.
+ */
+export async function syncRequiredPromptForDurability(
+  sync: () => Promise<void>,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  try {
+    await sync();
+  } catch (error) {
+    const fsError = error as NodeJS.ErrnoException | null;
+    if (platform === "win32" && fsError?.code === "EPERM" && fsError.syscall === "fsync") {
+      return;
+    }
+    throw error;
+  }
+}
+
 export class SessionManager {
   private static activePathsByRoot = new Map<string, Map<string, number>>();
   private static maintenanceByRoot = new Map<string, Promise<SessionMaintenanceMetrics>>();
@@ -1413,7 +1433,7 @@ export class SessionManager {
       await this.updateLeafUnsafe(writablePath, entry.id);
       const file = await fs.open(writablePath, "r");
       try {
-        await file.sync();
+        await syncRequiredPromptForDurability(() => file.sync());
       } finally {
         await file.close();
       }

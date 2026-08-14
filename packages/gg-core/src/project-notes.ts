@@ -284,6 +284,12 @@ export interface NotesRoadmapOverrideReset {
   timestamp: string;
 }
 
+export interface NotesRoadmapImplementationRecovery {
+  sourceCheckpointId: string;
+  sourceRevision: number;
+  evidence: string[];
+}
+
 export interface NotesRoadmapImplementationCheckpoint {
   type: "implementation-checkpoint";
   id: string;
@@ -291,6 +297,7 @@ export interface NotesRoadmapImplementationCheckpoint {
   planStepTotal: number;
   completedPlanSteps: number[];
   runOutcome: NotesImplementationRunOutcome;
+  recovery?: NotesRoadmapImplementationRecovery;
   timestamp: string;
 }
 
@@ -647,6 +654,11 @@ const ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS = [
   "runOutcome",
   "timestamp",
 ];
+const ROADMAP_RECOVERED_IMPLEMENTATION_CHECKPOINT_KEYS = [
+  ...ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS,
+  "recovery",
+];
+const ROADMAP_IMPLEMENTATION_RECOVERY_KEYS = ["sourceCheckpointId", "sourceRevision", "evidence"];
 const ROADMAP_COMPLETION_REVIEW_KEYS = [
   "type",
   "id",
@@ -1961,8 +1973,39 @@ function validateRoadmapEvents(
     }
 
     if (record.type === "implementation-checkpoint") {
-      if (!isRecordWithKeys(record, ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS)) {
+      const recovered = isRecordWithKeys(record, ROADMAP_RECOVERED_IMPLEMENTATION_CHECKPOINT_KEYS);
+      if (!recovered && !isRecordWithKeys(record, ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS)) {
         return validationError(eventPath, "invalid implementation checkpoint");
+      }
+      if (recovered) {
+        if (!isRecordWithKeys(record.recovery, ROADMAP_IMPLEMENTATION_RECOVERY_KEYS)) {
+          return validationError(`${eventPath}.recovery`, "invalid implementation recovery");
+        }
+        if (!isNonEmptyString(record.recovery.sourceCheckpointId)) {
+          return validationError(
+            `${eventPath}.recovery.sourceCheckpointId`,
+            "a source checkpoint ID is required",
+          );
+        }
+        if (
+          typeof record.recovery.sourceRevision !== "number" ||
+          !Number.isInteger(record.recovery.sourceRevision) ||
+          record.recovery.sourceRevision < 0
+        ) {
+          return validationError(
+            `${eventPath}.recovery.sourceRevision`,
+            "expected a non-negative revision",
+          );
+        }
+        if (
+          !isValidNotesRoadmapEvidence(record.recovery.evidence) ||
+          record.recovery.evidence.length === 0
+        ) {
+          return validationError(
+            `${eventPath}.recovery.evidence`,
+            "recovery requires bounded durable evidence",
+          );
+        }
       }
       const sessionError = validateNotesSessionLink(record.session, `${eventPath}.session`);
       if (sessionError || record.session === null) {
@@ -2161,9 +2204,15 @@ function validateRoadmapEvents(
         record.nextPhaseId === phaseId ||
         !knownPhaseIds.has(record.nextPhaseId)
       ) {
-        return validationError(`${eventPath}.nextPhaseId`, "expected another phase ID in this Roadmap");
+        return validationError(
+          `${eventPath}.nextPhaseId`,
+          "expected another phase ID in this Roadmap",
+        );
       }
-      if (!isNotesRoadmapReviewer(record.reviewer) || record.reviewer !== completionReview.reviewer) {
+      if (
+        !isNotesRoadmapReviewer(record.reviewer) ||
+        record.reviewer !== completionReview.reviewer
+      ) {
         return validationError(
           `${eventPath}.reviewer`,
           "expected the referenced completion review mode",

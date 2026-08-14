@@ -2,7 +2,10 @@ import fs from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import {
   AppSidecarPlanGate,
+  approvedPlanArtifactContent,
   hashPlanContent,
+  hasPlanOnlyBoundary,
+  isApprovedPlanArtifact,
   pendingPlanReview,
   planGateConflictCode,
   reducePlanGateMarkers,
@@ -36,6 +39,35 @@ function checkpoint(
 function marker(value: PersistedPlanReviewCheckpoint) {
   return { kind: "plan_gate", data: value as unknown as Record<string, unknown> };
 }
+
+describe("approved plan artifact state", () => {
+  it("persists an unambiguous approval and cannot retain a logical Draft status", () => {
+    const approved = approvedPlanArtifactContent(
+      "# Plan\n\n**Status:** Draft\n\n## Steps\n\n1. Ship it.\n",
+    );
+
+    expect(approved).toContain("<!-- gg-plan-status: approved -->");
+    expect(approved).toContain("**Status:** Approved");
+    expect(approved).not.toMatch(/^\s*(?:[-*]\s*)?\*\*Status:\*\*\s*Draft\s*$/im);
+    expect(isApprovedPlanArtifact(approved)).toBe(true);
+  });
+
+  it("recognizes the explicit plan-only boundary used by Roadmap contract plans", () => {
+    expect(
+      hasPlanOnlyBoundary(
+        "- **Plan-only boundary:** Yes — implementation is prohibited in this phase\n",
+      ),
+    ).toBe(true);
+    expect(hasPlanOnlyBoundary("- **Plan-only boundary:** No\n")).toBe(false);
+  });
+
+  it("adds machine-readable approval metadata when a plan has no Status field", () => {
+    const approved = approvedPlanArtifactContent("# Plan\n\n## Steps\n\n1. Ship it.\n");
+
+    expect(isApprovedPlanArtifact(approved)).toBe(true);
+    expect(approvedPlanArtifactContent(approved)).toBe(approved);
+  });
+});
 
 describe("approved plan snapshot durability", () => {
   function fsError(code: string, syscall: string): NodeJS.ErrnoException {
@@ -128,7 +160,9 @@ describe("AppSidecarPlanGate", () => {
 
   it("keeps plan mode write-protected when exit_plan checkpoint persistence rejects", async () => {
     const source = await fs.readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
-    const submitIndex = source.indexOf("const checkpoint = await planGate.submit(planPath, content);");
+    const submitIndex = source.indexOf(
+      "const checkpoint = await planGate.submit(planPath, content);",
+    );
     const disableIndex = source.indexOf("await created.setPlanMode(false);", submitIndex);
     expect(submitIndex).toBeGreaterThanOrEqual(0);
     expect(disableIndex).toBeGreaterThan(submitIndex);

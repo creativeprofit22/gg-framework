@@ -6,6 +6,7 @@ import {
   pendingPlanReview,
   planGateConflictCode,
   reducePlanGateMarkers,
+  syncApprovedPlanSnapshotForDurability,
   type PersistedPlanReviewCheckpoint,
 } from "./app-sidecar-plan-gate.js";
 import { createWriteTool } from "./tools/write.js";
@@ -35,6 +36,38 @@ function checkpoint(
 function marker(value: PersistedPlanReviewCheckpoint) {
   return { kind: "plan_gate", data: value as unknown as Record<string, unknown> };
 }
+
+describe("approved plan snapshot durability", () => {
+  function fsError(code: string, syscall: string): NodeJS.ErrnoException {
+    return Object.assign(new Error(`${code}: operation not permitted, ${syscall}`), {
+      code,
+      syscall,
+    });
+  }
+
+  it("accepts the proven Windows EPERM fsync after the snapshot write", async () => {
+    const sync = vi.fn(async () => {
+      throw fsError("EPERM", "fsync");
+    });
+
+    await expect(syncApprovedPlanSnapshotForDurability(sync, "win32")).resolves.toBeUndefined();
+    expect(sync).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["win32", "EIO", "fsync"],
+    ["win32", "EPERM", "write"],
+    ["linux", "EPERM", "fsync"],
+  ] as const)("does not swallow %s %s failures from %s", async (platform, code, syscall) => {
+    const error = fsError(code, syscall);
+
+    await expect(
+      syncApprovedPlanSnapshotForDurability(async () => {
+        throw error;
+      }, platform),
+    ).rejects.toBe(error);
+  });
+});
 
 describe("AppSidecarPlanGate", () => {
   it("reduces persisted transitions and restores the exact immutable snapshot", () => {

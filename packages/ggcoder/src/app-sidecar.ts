@@ -216,6 +216,7 @@ import {
   AppSidecarPlanGate,
   hashPlanContent,
   planGateConflictCode,
+  syncApprovedPlanSnapshotForDurability,
   type PersistedPlanReviewCheckpoint,
 } from "./app-sidecar-plan-gate.js";
 import {
@@ -2608,7 +2609,7 @@ async function createSession(
     }
     const approvedFile = await fs.open(approvedPath, "r");
     try {
-      await approvedFile.sync();
+      await syncApprovedPlanSnapshotForDurability(() => approvedFile.sync());
     } finally {
       await approvedFile.close();
     }

@@ -95,6 +95,21 @@ export function hashPlanContent(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+export async function syncApprovedPlanSnapshotForDurability(
+  sync: () => Promise<void>,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  try {
+    await sync();
+  } catch (error) {
+    const fsError = error as NodeJS.ErrnoException | null;
+    if (platform === "win32" && fsError?.code === "EPERM" && fsError.syscall === "fsync") {
+      return;
+    }
+    throw error;
+  }
+}
+
 /** Reduce append-only markers by generation, then marker order within that generation. */
 export function reducePlanGateMarkers(
   markers: readonly PlanGateMarker[],

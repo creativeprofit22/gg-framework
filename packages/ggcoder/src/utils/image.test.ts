@@ -1,5 +1,18 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs/promises";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
+
+const mocks = vi.hoisted(() => ({ execFileAsync: vi.fn() }));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  const execFile = vi.fn(actual.execFile);
+  Object.defineProperty(execFile, Symbol.for("nodejs.util.promisify.custom"), {
+    value: mocks.execFileAsync,
+  });
+  return { ...actual, execFile };
+});
+
 import { boundedSize, fitsVisualBudget, shrinkToFit } from "./image.js";
 
 const PATCH = 28;
@@ -103,6 +116,9 @@ describe("fitsVisualBudget", () => {
 });
 
 describe("shrinkToFit", () => {
+  afterEach(() => {
+    mocks.execFileAsync.mockReset();
+  });
   it("returns a 1280x800 PNG byte-identical to the input", async () => {
     const original = await makePng(1280, 800);
     const { buffer, mediaType } = await shrinkToFit(original, "image/png");
@@ -138,6 +154,76 @@ describe("shrinkToFit", () => {
     const original = await makePng(1, 1);
     const { buffer } = await shrinkToFit(original, "image/png");
     expect(buffer.equals(original)).toBe(true);
+  });
+
+  it("transcodes AVIF bytes mislabeled as JPEG into a provider-supported PNG", async () => {
+    const avif = await sharp({
+      create: {
+        width: 24,
+        height: 16,
+        channels: 3,
+        background: { r: 40, g: 80, b: 120 },
+      },
+    })
+      .avif()
+      .toBuffer();
+
+    const { buffer, mediaType } = await shrinkToFit(avif, "image/jpeg");
+
+    expect(mediaType).toBe("image/png");
+    expect(buffer.equals(avif)).toBe(false);
+    expect((await sharp(buffer).metadata()).format).toBe("png");
+  });
+
+  it("falls back to bounded argv-based ffmpeg and cleans its temp input", async () => {
+    const unsupported = Buffer.from("valid image bytes unsupported by sharp");
+    const png = await makePng(32, 24);
+    let tempInputPath = "";
+    mocks.execFileAsync.mockImplementationOnce(
+      async (file: string, args: string[], options: Record<string, unknown>) => {
+        expect(file).toBe("ffmpeg");
+        expect(args).toContain("-nostdin");
+        expect(args).toContain("-frames:v");
+        expect(args.at(-1)).toBe("pipe:1");
+        expect(options).toMatchObject({
+          encoding: "buffer",
+          maxBuffer: 16 * 1024 * 1024,
+          timeout: 15_000,
+          windowsHide: true,
+        });
+        tempInputPath = args[args.indexOf("-i") + 1] ?? "";
+        expect(await fs.readFile(tempInputPath)).toEqual(unsupported);
+        return { stdout: png, stderr: Buffer.alloc(0) };
+      },
+    );
+
+    const result = await shrinkToFit(unsupported, "image/jpeg");
+
+    expect(result.mediaType).toBe("image/png");
+    expect((await sharp(result.buffer).metadata()).format).toBe("png");
+    await expect(fs.stat(tempInputPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps a clear failure when ffmpeg is unavailable", async () => {
+    const missingError = Object.assign(new Error("spawn ffmpeg ENOENT"), { code: "ENOENT" });
+    mocks.execFileAsync.mockRejectedValueOnce(missingError);
+
+    await expect(shrinkToFit(Buffer.from("unsupported"), "image/jpeg")).rejects.toThrow(
+      /ffmpeg is not installed/,
+    );
+  });
+
+  it("reports ffmpeg decode failures and cleans its temp input", async () => {
+    let tempInputPath = "";
+    mocks.execFileAsync.mockImplementationOnce(async (_file: string, args: string[]) => {
+      tempInputPath = args[args.indexOf("-i") + 1] ?? "";
+      throw new Error("decoder rejected input");
+    });
+
+    await expect(shrinkToFit(Buffer.from("unsupported"), "image/jpeg")).rejects.toThrow(
+      /ffmpeg image transcode failed: decoder rejected input/,
+    );
+    await expect(fs.stat(tempInputPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("preserves the alpha channel rather than flattening to JPEG", async () => {

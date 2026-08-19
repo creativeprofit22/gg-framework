@@ -34,6 +34,10 @@ async function loadSharp(): Promise<SharpFn> {
 
 /** Anthropic's maximum image size in bytes (5 MB). */
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/** Bound ffmpeg image fallback output before Sharp applies final provider limits. */
+const FFMPEG_IMAGE_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+/** Prevent malformed inputs from holding an ffmpeg child process indefinitely. */
+const FFMPEG_IMAGE_TIMEOUT_MS = 15_000;
 /** Max width (px) for inline terminal-graphics previews so scrollback stays small. */
 const PREVIEW_MAX_WIDTH = 480;
 /**
@@ -427,13 +431,68 @@ export async function validateVisionImage(buffer: Buffer): Promise<string | null
   }
 }
 
+function conciseProcessError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.length > 500 ? `${message.slice(0, 500)}…` : message;
+}
+
+async function transcodeImageToPngWithFfmpeg(buffer: Buffer): Promise<Buffer> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ggcoder-image-transcode-"));
+  const inputPath = path.join(tempDir, "input-image");
+
+  try {
+    await fs.writeFile(inputPath, buffer);
+    const { stdout } = await execFileAsync(
+      "ffmpeg",
+      [
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-threads",
+        "1",
+        "-protocol_whitelist",
+        "file,pipe",
+        "-i",
+        inputPath,
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-c:v",
+        "png",
+        "pipe:1",
+      ],
+      {
+        encoding: "buffer",
+        maxBuffer: FFMPEG_IMAGE_MAX_OUTPUT_BYTES,
+        timeout: FFMPEG_IMAGE_TIMEOUT_MS,
+        windowsHide: true,
+      },
+    );
+    if (!Buffer.isBuffer(stdout) || stdout.length === 0) {
+      throw new Error("ffmpeg produced no image output");
+    }
+    return stdout;
+  } catch (err) {
+    if (isMissingBinary(err)) {
+      throw new Error("ffmpeg is not installed", { cause: err });
+    }
+    throw new Error(`ffmpeg image transcode failed: ${conciseProcessError(err)}`, { cause: err });
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 /**
  * Downscale an image buffer so it fits within both the visual token budget
  * ({@link boundedSize}) and MAX_IMAGE_BYTES. Preserves format (PNG→PNG,
  * JPEG→JPEG, etc.) and aspect ratio — a lossless PNG screenshot of UI stays a
  * lossless PNG with its alpha channel intact.
  */
-export async function shrinkToFit(
+async function shrinkToFitWithSharp(
   buffer: Buffer,
   mediaType: string,
 ): Promise<{ buffer: Buffer; mediaType: string }> {
@@ -448,12 +507,19 @@ export async function shrinkToFit(
   // foo.png but is actually a JPEG, sharp tells the truth and Anthropic
   // rejects mismatched media types with a 400.
   const detected = meta.format ? SHARP_FORMAT_TO_MEDIA[meta.format] : undefined;
+  const requiresVisionTranscode = !detected;
   if (detected && detected !== mediaType) {
     mediaType = detected;
+  } else if (requiresVisionTranscode) {
+    // libvips can decode more formats than vision providers accept. A common case
+    // is CDN AVIF data saved with a .jpg suffix: forwarding the small original
+    // unchanged makes OpenAI reject the entire turn as an invalid JPEG. Convert
+    // unsupported-but-decodable inputs to PNG before applying the normal limits.
+    mediaType = "image/png";
   }
 
-  // Short-circuit: within both limits — return as-is.
-  if (!exceedsDim && buffer.length <= MAX_IMAGE_BYTES) {
+  // Short-circuit only when the original encoding itself is provider-supported.
+  if (!requiresVisionTranscode && !exceedsDim && buffer.length <= MAX_IMAGE_BYTES) {
     return { buffer, mediaType };
   }
 
@@ -517,6 +583,32 @@ export async function shrinkToFit(
     .jpeg({ quality: 60 })
     .toBuffer();
   return { buffer: result, mediaType: "image/jpeg" };
+}
+
+export async function shrinkToFit(
+  buffer: Buffer,
+  mediaType: string,
+): Promise<{ buffer: Buffer; mediaType: string }> {
+  try {
+    return await shrinkToFitWithSharp(buffer, mediaType);
+  } catch (sharpError) {
+    let pngBuffer: Buffer;
+    try {
+      pngBuffer = await transcodeImageToPngWithFfmpeg(buffer);
+    } catch (ffmpegError) {
+      throw new Error(
+        `image decode failed (${conciseProcessError(sharpError)}); ${conciseProcessError(ffmpegError)}`,
+        { cause: ffmpegError },
+      );
+    }
+
+    const fitted = await shrinkToFitWithSharp(pngBuffer, "image/png");
+    const validatedType = await validateVisionImage(fitted.buffer);
+    if (!validatedType) {
+      throw new Error("ffmpeg image transcode produced an invalid image");
+    }
+    return { buffer: fitted.buffer, mediaType: validatedType };
+  }
 }
 
 /**

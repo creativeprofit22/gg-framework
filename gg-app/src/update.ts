@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
@@ -33,6 +33,24 @@ export interface UpdateInfo {
 const POLL_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_PROGRESS_LINES = 8;
 
+interface Deferred {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (reason: unknown) => void;
+}
+
+function createDeferred(): Deferred {
+  let resolve!: () => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  // Registration can fail before install is requested; the effect owns the UI error.
+  void promise.catch(() => undefined);
+  return { promise, resolve, reject };
+}
+
 /** Development-only fake update flow. */
 const DEV_FAKE_UPDATE = false;
 const devFakeEnabled = import.meta.env.DEV && DEV_FAKE_UPDATE;
@@ -66,6 +84,7 @@ export function useAppUpdate(): UpdateInfo {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [progressLines, setProgressLines] = useState<string[]>([]);
   const [installerPath, setInstallerPath] = useState<string | null>(null);
+  const localListenerReady = useRef<Deferred | null>(null);
 
   const runCheck = useCallback(async (): Promise<void> => {
     // Local Fork builds use the reviewed source-merge flow and must never contact
@@ -80,9 +99,7 @@ export function useAppUpdate(): UpdateInfo {
           appBuildInfo.sourceRoot ?? "",
           appBuildInfo.gitSha,
         );
-        if (!status || typeof status.available !== "boolean") {
-          throw new Error("invalid local update response");
-        }
+        logInfo(`Local update status: ${status.origin}`);
         setPhase((current) =>
           current === "installing" || current === "completed"
             ? current
@@ -128,6 +145,8 @@ export function useAppUpdate(): UpdateInfo {
 
   useEffect(() => {
     if (!appBuildInfo.localPatched) return undefined;
+    const listenerReady = createDeferred();
+    localListenerReady.current = listenerReady;
     let cancelled = false;
     let unlisten: SafeTauriUnlisten | undefined;
     void listenLocalPatchedUpdate((payload: LocalPatchedUpdateEvent) => {
@@ -153,14 +172,20 @@ export function useAppUpdate(): UpdateInfo {
     })
       .then((cleanup) => {
         if (cancelled) void cleanup();
-        else unlisten = cleanup;
+        else {
+          unlisten = cleanup;
+          listenerReady.resolve();
+        }
       })
       .catch((error) => {
+        if (cancelled) return;
+        listenerReady.reject(error);
         setPhase("error");
         setStatusMessage(`Could not listen for update progress: ${String(error)}`);
       });
     return () => {
       cancelled = true;
+      if (localListenerReady.current === listenerReady) localListenerReady.current = null;
       void unlisten?.();
     };
   }, []);
@@ -181,6 +206,13 @@ export function useAppUpdate(): UpdateInfo {
       setStatusMessage(
         "Starting protected local merge — the official binary will not be installed.",
       );
+      try {
+        await localListenerReady.current?.promise;
+      } catch (error) {
+        setPhase("error");
+        setStatusMessage(`Could not listen for update progress: ${String(error)}`);
+        return;
+      }
       try {
         await installUpdateForBuild({
           localPatched: true,

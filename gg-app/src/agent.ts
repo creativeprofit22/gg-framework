@@ -164,20 +164,33 @@ export interface LocalPatchedUpdateEvent {
   opened?: "installer" | "folder" | "none";
 }
 
+export type LocalPatchedUpdateStatusOrigin = "fresh" | "cached" | "unavailable";
+
 export interface LocalPatchedUpdateStatus {
   available: boolean;
   currentSourceSha: string;
   upstreamIntegrated: boolean;
+  origin: LocalPatchedUpdateStatusOrigin;
 }
 
 export async function checkLocalPatchedUpdate(
   repoRoot: string,
   builtGitSha: string,
 ): Promise<LocalPatchedUpdateStatus> {
-  return invoke<LocalPatchedUpdateStatus>("app_local_patched_update_status", {
+  const status = await invoke<LocalPatchedUpdateStatus>("app_local_patched_update_status", {
     repoRoot,
     builtGitSha,
   });
+  if (
+    !status ||
+    typeof status.available !== "boolean" ||
+    typeof status.currentSourceSha !== "string" ||
+    typeof status.upstreamIntegrated !== "boolean" ||
+    !["fresh", "cached", "unavailable"].includes(status.origin)
+  ) {
+    throw new Error("invalid local update response");
+  }
+  return status;
 }
 
 export async function startLocalPatchedUpdate(repoRoot: string): Promise<void> {

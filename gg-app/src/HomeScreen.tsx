@@ -165,14 +165,24 @@ export function HomeScreen({
     }
   }
 
+  const showUpdate =
+    appUpdate.phase === "available" ||
+    appUpdate.phase === "installing" ||
+    (appUpdate.localPatched && (appUpdate.phase === "completed" || appUpdate.phase === "error"));
+  const localUpdateStatus =
+    appUpdate.localPatched &&
+    (appUpdate.phase === "installing" ||
+      appUpdate.phase === "completed" ||
+      appUpdate.phase === "error");
+
   return (
     <div className="home" data-tauri-drag-region>
       <HomeBackdrop />
       <MemeLayer />
-      {appUpdate.phase === "available" || appUpdate.phase === "installing" ? (
+      {showUpdate ? (
         <button
           className={`home-update${appUpdate.phase === "installing" ? " home-update-progress" : ""}`}
-          disabled={appUpdate.phase === "installing"}
+          disabled={appUpdate.phase === "installing" || appUpdate.phase === "completed"}
           title={appUpdate.installTitle}
           onClick={() => {
             if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
@@ -186,23 +196,26 @@ export function HomeScreen({
             <span className="home-update-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
           )}
           <Download size={14} strokeWidth={2.25} aria-hidden="true" />
-          {/* Both labels occupy the same grid cell; the inactive one is
-              visibility:hidden, so the pill is ALWAYS sized to the wider of
-              the two and never resizes when the install starts or the
-              percentage climbs. */}
-          <span className="home-update-swap">
-            <span className={appUpdate.phase === "installing" ? "home-update-hidden" : undefined}>
-              {appUpdate.installLabel}
+          {localUpdateStatus ? (
+            <span>
+              {appUpdate.statusMessage ?? appUpdate.installLabel}
+              {appUpdate.phase === "error" && " — Retry"}
             </span>
-            <span className={appUpdate.phase === "installing" ? undefined : "home-update-hidden"}>
-              {appUpdate.localPatched
-                ? (appUpdate.statusMessage ?? appUpdate.installLabel)
-                : "Installing\u2026"}
-              {!appUpdate.localPatched && (
+          ) : (
+            /* Both labels occupy the same grid cell; the inactive one is
+               visibility:hidden, so the pill is ALWAYS sized to the wider of
+               the two and never resizes when the install starts or the
+               percentage climbs. */
+            <span className="home-update-swap">
+              <span className={appUpdate.phase === "installing" ? "home-update-hidden" : undefined}>
+                {appUpdate.installLabel}
+              </span>
+              <span className={appUpdate.phase === "installing" ? undefined : "home-update-hidden"}>
+                Installing…
                 <span className="home-update-pct">{`${appUpdate.progress ?? 0}%`}</span>
-              )}
+              </span>
             </span>
-          </span>
+          )}
         </button>
       ) : (
         version && (

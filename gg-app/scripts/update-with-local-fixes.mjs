@@ -357,6 +357,17 @@ export function normalPushArgs(branch) {
   return ["push", DEFAULT_PUSH_REMOTE, `HEAD:refs/heads/${branch}`];
 }
 
+export const GG_APP_TARGETED_VITEST_PATHS = Object.freeze([
+  "scripts/update-with-local-fixes.test.ts",
+  "scripts/build-local-hotfix.test.ts",
+  "scripts/vite-config.test.ts",
+  "src/brand-static.test.ts",
+  "src/HomeScreen.test.tsx",
+  "src/local-update-confirmation.test.ts",
+  "src/update-policy.test.ts",
+  "src/update.test.tsx",
+]);
+
 export function targetedVitestArgs(packageName, paths) {
   if (paths.length === 0) {
     throw new Error(`Refusing to run the ${packageName} Vitest suite without explicit test files.`);
@@ -380,13 +391,7 @@ function runWorkspaceChecks(options) {
   requireSuccess(
     run(
       pnpm,
-      targetedVitestArgs("gg-app", [
-        "scripts/update-with-local-fixes.test.ts",
-        "scripts/build-local-hotfix.test.ts",
-        "src/brand-static.test.ts",
-        "src/local-update-confirmation.test.ts",
-        "src/update-policy.test.ts",
-      ]),
+      targetedVitestArgs("gg-app", GG_APP_TARGETED_VITEST_PATHS),
       options,
     ),
     "gg-app targeted tests failed.",

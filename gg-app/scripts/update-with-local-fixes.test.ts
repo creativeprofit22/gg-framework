@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  GG_APP_TARGETED_VITEST_PATHS,
   normalPushArgs,
   targetedVitestArgs,
   verifyLocalForkIdentity,
@@ -207,6 +208,27 @@ describe("local-fixes updater", () => {
     expect(args).not.toContain("--");
     expect(args.slice(5)).toEqual(requestedFiles);
     expect(() => targetedVitestArgs("gg-app", [])).toThrow("without explicit test files");
+  });
+
+  it("pins protected gg-app verification to the targeted regression files", () => {
+    expect(GG_APP_TARGETED_VITEST_PATHS).toEqual([
+      "scripts/update-with-local-fixes.test.ts",
+      "scripts/build-local-hotfix.test.ts",
+      "scripts/vite-config.test.ts",
+      "src/brand-static.test.ts",
+      "src/HomeScreen.test.tsx",
+      "src/local-update-confirmation.test.ts",
+      "src/update-policy.test.ts",
+      "src/update.test.tsx",
+    ]);
+    expect(targetedVitestArgs("gg-app", GG_APP_TARGETED_VITEST_PATHS)).toEqual([
+      "--filter",
+      "gg-app",
+      "exec",
+      "vitest",
+      "run",
+      ...GG_APP_TARGETED_VITEST_PATHS,
+    ]);
   });
 
   it("dry-runs without changing a named-branch checkout", () => {

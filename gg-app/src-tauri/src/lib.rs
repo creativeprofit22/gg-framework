@@ -1,9 +1,12 @@
 mod azure_connection;
+mod local_patched_update;
 
 use azure_connection::commands::{
     azure_connection_remove, azure_connection_save, azure_connection_status,
     AzureConnectionMutations,
 };
+#[cfg(test)]
+use local_patched_update::local_patched_update_available;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -711,10 +714,47 @@ fn restore_sibling_windows(window: &tauri::Window) {
     }
 }
 
-/// App-wide guard: only one source rebase/build may run across all windows.
+/// App-wide guards for protected installation and lightweight status refreshes.
 #[derive(Default)]
 struct LocalPatchedUpdate {
     running: Mutex<bool>,
+    status_check: Mutex<LocalPatchedStatusCheck>,
+}
+
+#[derive(Default)]
+struct LocalPatchedStatusCheck {
+    running: bool,
+    last_completed: Option<local_patched_update::LocalPatchedUpdateStatus>,
+}
+
+impl LocalPatchedUpdate {
+    /// Returns `None` to elect a leader, or the immediate follower response.
+    fn begin_status_check(&self) -> Option<local_patched_update::LocalPatchedUpdateStatus> {
+        let mut check = self.status_check.lock().unwrap();
+        if check.running {
+            return Some(check.last_completed.clone().unwrap_or(
+                local_patched_update::LocalPatchedUpdateStatus {
+                    available: false,
+                    current_source_sha: String::new(),
+                    upstream_integrated: false,
+                    origin: local_patched_update::StatusOrigin::Unavailable,
+                },
+            ));
+        }
+        check.running = true;
+        None
+    }
+
+    fn finish_status_check(
+        &self,
+        result: &Result<local_patched_update::LocalPatchedUpdateStatus, String>,
+    ) {
+        let mut check = self.status_check.lock().unwrap();
+        check.running = false;
+        if let Ok(status) = result {
+            check.last_completed = Some(status.clone());
+        }
+    }
 }
 
 fn sidecar_base(port: u16) -> String {
@@ -811,6 +851,51 @@ fn terminate_child(mut child: Child, reason: &'static str) {
             ),
         }
     });
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_child_synchronously(mut child: Child, reason: &'static str) {
+    let pid = child.id() as i32;
+    log::info!(
+        "{}",
+        lifecycle_message(
+            "daemon_termination_requested",
+            &format!(
+                "shell_pid={} daemon_pid={pid} reason={reason}",
+                std::process::id()
+            ),
+        )
+    );
+    // Tree-kill on Windows: /T kills the descendant tree, /F forces it.
+    let _ = hide_console(&mut std::process::Command::new("taskkill"))
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    // Fall back to direct kill if taskkill is unavailable.
+    let _ = child.kill();
+    match child.wait() {
+        Ok(status) => log::info!(
+            "{}",
+            lifecycle_message(
+                "daemon_exit",
+                &format!(
+                    "shell_pid={} daemon_pid={pid} reason={reason} status={status}",
+                    std::process::id()
+                ),
+            )
+        ),
+        Err(error) => log::error!(
+            "{}",
+            lifecycle_message(
+                "daemon_exit_wait_failed",
+                &format!(
+                    "shell_pid={} daemon_pid={pid} reason={reason} error={error}",
+                    std::process::id()
+                ),
+            )
+        ),
+    }
 }
 
 // ── Startup orphan sweeper ─────────────────────────────────────────────────
@@ -5138,85 +5223,36 @@ fn urlencoding(s: &str) -> String {
 
 const LOCAL_PATCHED_UPDATE_EVENT: &str = "local-patched-update";
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LocalPatchedUpdateStatus {
-    available: bool,
-    current_source_sha: String,
-    upstream_integrated: bool,
-}
-
-fn local_patched_update_available(
-    built_git_sha: &str,
-    current_source_sha: &str,
-    upstream_integrated: bool,
-) -> bool {
-    let built_sha = built_git_sha.trim();
-    let built_sha_is_known =
-        built_sha.len() >= 7 && built_sha.bytes().all(|byte| byte.is_ascii_hexdigit());
-    let build_matches_source =
-        current_source_sha.starts_with(built_sha) || built_sha.starts_with(current_source_sha);
-    (built_sha_is_known && !build_matches_source) || !upstream_integrated
-}
-
-fn git_output(repo: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0");
-    hide_console(&mut command);
-    command
-        .output()
-        .map_err(|error| format!("failed to run git in {}: {error}", repo.display()))
-}
-
-/// Check local source state instead of treating every local-patched build as
-/// permanently outdated. This refreshes only the upstream remote-tracking ref;
-/// the protected update workflow remains the sole owner of merges and builds.
+/// Check local source state without blocking Tauri's async command runtime. The
+/// protected update workflow remains the sole owner of merges and builds.
 #[tauri::command]
-fn app_local_patched_update_status(
+async fn app_local_patched_update_status(
+    update_state: State<'_, LocalPatchedUpdate>,
     repo_root: String,
     built_git_sha: String,
-) -> Result<LocalPatchedUpdateStatus, String> {
-    let repo = resolve_local_update_repo_root(repo_root)?;
-    let head = git_output(&repo, &["rev-parse", "HEAD"])?;
-    if !head.status.success() {
-        return Err(String::from_utf8_lossy(&head.stderr).trim().to_string());
+) -> Result<local_patched_update::LocalPatchedUpdateStatus, String> {
+    if built_git_sha.trim().is_empty() {
+        return Err("The Local Fork build SHA is missing.".to_string());
     }
-    let current_source_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
-    let upstream_remote_exists = git_output(&repo, &["remote", "get-url", "upstream"])?
-        .status
-        .success();
-    if upstream_remote_exists {
-        let fetch = git_output(&repo, &["fetch", "--quiet", "upstream", "main"])?;
-        if !fetch.status.success() {
-            return Err(format!(
-                "failed to fetch upstream/main: {}",
-                String::from_utf8_lossy(&fetch.stderr).trim()
-            ));
-        }
+
+    if let Some(status) = update_state.begin_status_check() {
+        return Ok(status);
     }
-    let upstream_exists = git_output(&repo, &["rev-parse", "--verify", "upstream/main"])?
-        .status
-        .success();
-    let upstream_integrated = !upstream_exists
-        || git_output(
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let repo = resolve_local_update_repo_root(repo_root)?;
+        local_patched_update::check_local_patched_update(
+            &local_patched_update::BoundedGitRunner::default(),
             &repo,
-            &["merge-base", "--is-ancestor", "upstream/main", "HEAD"],
-        )?
-        .status
-        .success();
-    Ok(LocalPatchedUpdateStatus {
-        available: local_patched_update_available(
             &built_git_sha,
-            &current_source_sha,
-            upstream_integrated,
-        ),
-        current_source_sha,
-        upstream_integrated,
+        )
     })
+    .await
+    .map_err(|error| format!("Local Fork status worker failed: {error}"))
+    .and_then(|result| result);
+
+    update_state.finish_status_check(&result);
+    result
 }
 
 #[tauri::command]
@@ -8941,18 +8977,32 @@ pub fn run() {
                 app.state::<AppExiting>().0.store(true, Ordering::SeqCst);
                 refresh_live_sessions(app);
                 snapshot_workspace(app);
-                // Terminate the daemon's process group once — reaps every
-                // session's MCP/LSP children in one shot (no orphans).
-                let child = app.state::<Daemon>().child.lock().unwrap().take();
-                if let Some(child) = child {
-                    terminate_child(child, "tauri_exit_requested");
+                // On Windows the daemon must stay owned until `RunEvent::Exit`,
+                // where it is synchronously reaped before bypassing Tauri/Tao cleanup.
+                #[cfg(not(target_os = "windows"))]
+                {
+                    // Terminate the daemon's process group once — reaps every
+                    // session's MCP/LSP children in one shot (no orphans).
+                    let child = app.state::<Daemon>().child.lock().unwrap().take();
+                    if let Some(child) = child {
+                        terminate_child(child, "tauri_exit_requested");
+                    }
                 }
             }
             RunEvent::Exit => {
+                #[cfg(target_os = "windows")]
+                {
+                    let child = app.state::<Daemon>().child.lock().unwrap().take();
+                    if let Some(child) = child {
+                        terminate_child_synchronously(child, "tauri_exit_requested");
+                    }
+                }
                 log::info!(
                     "{}",
                     lifecycle_message("shell_exit", &format!("shell_pid={}", std::process::id()),)
                 );
+                #[cfg(target_os = "windows")]
+                std::process::exit(0);
             }
             _ => {}
         });
@@ -9037,6 +9087,36 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_termination_waits_until_the_daemon_is_reaped() {
+        let child = hide_console(&mut Command::new("cmd"))
+            .args(["/C", "ping -n 30 127.0.0.1 >NUL"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test daemon");
+        let pid = child.id() as i32;
+        let started = std::time::Instant::now();
+
+        terminate_child_synchronously(child, "test");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "termination should not wait for the child to exit naturally"
+        );
+        let tasklist = hide_console(&mut Command::new("tasklist"))
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+            .expect("query test daemon status");
+        let output = String::from_utf8_lossy(&tasklist.stdout);
+        assert!(
+            !output.contains(&format!("\"{pid}\"")),
+            "daemon {pid} was still alive after synchronous termination: {output}"
+        );
+    }
 
     #[test]
     fn lifecycle_diagnostic_includes_event_timestamp_and_process_details() {
@@ -11906,5 +11986,55 @@ mod tests {
         assert!(!dir.join("source-copy-partial.jsonl").exists());
         assert!(!dir.join(".source-copy-partial.tmp").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn local_patched_update_status_guard_is_single_flight_and_reuses_cache() {
+        let state = LocalPatchedUpdate::default();
+        assert!(
+            state.begin_status_check().is_none(),
+            "first caller is leader"
+        );
+        let follower = state
+            .begin_status_check()
+            .expect("follower gets immediate status");
+        assert_eq!(
+            follower.origin,
+            local_patched_update::StatusOrigin::Unavailable
+        );
+
+        let completed = local_patched_update::LocalPatchedUpdateStatus {
+            available: true,
+            current_source_sha: "aaaaaaa".to_string(),
+            upstream_integrated: false,
+            origin: local_patched_update::StatusOrigin::Cached,
+        };
+        state.finish_status_check(&Ok(completed.clone()));
+        assert!(
+            state.begin_status_check().is_none(),
+            "completed check releases guard"
+        );
+        let cached_follower = state
+            .begin_status_check()
+            .expect("next follower gets cache");
+        assert_eq!(cached_follower, completed);
+        state.finish_status_check(&Ok(completed));
+    }
+
+    #[test]
+    fn local_patched_update_spawn_blocking_keeps_async_runtime_responsive() {
+        tauri::async_runtime::block_on(async {
+            let worker = tauri::async_runtime::spawn_blocking(|| {
+                std::thread::sleep(Duration::from_millis(250));
+                1
+            });
+            let sentinel = tauri::async_runtime::spawn(async { 2 });
+            let sentinel_result = tokio::time::timeout(Duration::from_millis(100), sentinel)
+                .await
+                .expect("sentinel must not wait for blocking status work")
+                .expect("sentinel task succeeds");
+            assert_eq!(sentinel_result, 2);
+            assert_eq!(worker.await.unwrap(), 1);
+        });
     }
 }

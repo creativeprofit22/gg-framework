@@ -38,21 +38,46 @@ function isLocalForkCheckout(): boolean {
   return Boolean(origin?.includes("creativeprofit22/gg-framework") || isLocalForkBranch(branch));
 }
 
-function buildEnvDefines(): Record<string, string> {
-  const env = process.env;
-  const detected = isLocalForkCheckout();
+export interface LocalForkBuildEnv {
+  localPatched?: string;
+  sourceRoot?: string;
+  label?: string;
+  gitSha?: string;
+}
+
+export function resolveLocalForkBuildEnv(
+  env: NodeJS.ProcessEnv,
+  detected: boolean,
+  deriveGitSha: () => string | null,
+): LocalForkBuildEnv {
   const localPatched = env.VITE_GG_LOCAL_PATCHED ?? (detected ? "1" : undefined);
   const envSourceRoot = env.VITE_GG_SOURCE_ROOT ?? (detected ? sourceRoot : undefined);
   const label = env.VITE_GG_CUSTOM_BUILD_LABEL ?? (detected ? customBuildLabel : undefined);
-  const shortSha =
-    env.VITE_GG_GIT_SHA ?? (detected ? git(["rev-parse", "--short", "HEAD"]) : undefined);
+  const explicitGitSha = env.VITE_GG_GIT_SHA?.trim() || undefined;
+  const gitSha =
+    explicitGitSha ?? (localPatched === "1" ? deriveGitSha()?.trim() || undefined : undefined);
+
+  if (localPatched === "1" && !gitSha) {
+    throw new Error(
+      "VITE_GG_GIT_SHA is required for a Local Fork build when Git metadata is unavailable. " +
+        "Set it to the source commit SHA (for example, VITE_GG_GIT_SHA=<commit-sha>).",
+    );
+  }
+
+  return { localPatched, sourceRoot: envSourceRoot, label, gitSha };
+}
+
+function buildEnvDefines(): Record<string, string> {
+  const buildEnv = resolveLocalForkBuildEnv(process.env, isLocalForkCheckout(), () =>
+    git(["rev-parse", "--short", "HEAD"]),
+  );
 
   return Object.fromEntries(
     Object.entries({
-      "import.meta.env.VITE_GG_LOCAL_PATCHED": localPatched,
-      "import.meta.env.VITE_GG_SOURCE_ROOT": envSourceRoot,
-      "import.meta.env.VITE_GG_CUSTOM_BUILD_LABEL": label,
-      "import.meta.env.VITE_GG_GIT_SHA": shortSha,
+      "import.meta.env.VITE_GG_LOCAL_PATCHED": buildEnv.localPatched,
+      "import.meta.env.VITE_GG_SOURCE_ROOT": buildEnv.sourceRoot,
+      "import.meta.env.VITE_GG_CUSTOM_BUILD_LABEL": buildEnv.label,
+      "import.meta.env.VITE_GG_GIT_SHA": buildEnv.gitSha,
     })
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => [key, JSON.stringify(value)]),

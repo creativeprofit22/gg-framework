@@ -352,6 +352,29 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe("AgentPane lifecycle", () => {
+  it("rehydrates a durable accessible MCP failure transcript row", async () => {
+    const pane = client("pane-1", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    vi.mocked(pane.listHistory).mockResolvedValue([
+      {
+        role: "assistant",
+        text: "",
+        mcpToolFailure: {
+          name: "mcp__acceptance__fixture_is_error",
+          result: "fixture-is-error",
+        },
+      },
+    ]);
+
+    render(<AgentPane client={pane} target={target} workspaceOwnsSessionLifecycle />);
+
+    const failedRow = await screen.findByRole("status", {
+      name: "Failed MCP tool: acceptance / fixture_is_error",
+    });
+    expect(failedRow.textContent).toContain("Failed");
+    expect(failedRow.textContent).toContain("fixture-is-error");
+  });
+
   it("wires the restored home UI through the pane-scoped catalog client", async () => {
     const pane = client("primary", 1);
     render(<AgentPane client={pane} />);

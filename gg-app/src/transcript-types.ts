@@ -20,6 +20,13 @@ export type Item =
   | { kind: "ken"; id: number; text: string }
   | { kind: "info"; id: number; text: string }
   | {
+      kind: "mcp_tool_failure";
+      id: number;
+      name: string;
+      result: string;
+      displayName?: string;
+    }
+  | {
       kind: "error";
       id: number;
       text?: string;

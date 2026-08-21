@@ -217,9 +217,18 @@ function inlineSummary(name: string, result: string, details: unknown): string {
 export function buildToolLineParts(
   name: string,
   args: Record<string, unknown>,
-  input: { done: boolean; isError?: boolean; result?: string; details?: unknown },
+  input: {
+    done: boolean;
+    isError?: boolean;
+    result?: string;
+    details?: unknown;
+    /** Presentation-only label; behavior still dispatches on `name`. */
+    displayName?: string;
+  },
 ): ToolLinePart[] {
-  const verbs = VERBS[name] ?? humanizeName(name);
+  const verbs = input.displayName
+    ? { running: input.displayName, done: input.displayName }
+    : (VERBS[name] ?? humanizeName(name));
   const tone = getToolTone(name);
   const verb = input.done ? verbs.done : verbs.running;
   const { text: detail, quote } = toolDetail(name, args);

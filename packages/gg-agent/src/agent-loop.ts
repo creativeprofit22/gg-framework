@@ -1781,6 +1781,7 @@ async function executeSingleToolCall(
       const normalized = normalizeToolResult(raw);
       resultContent = redactValue(normalized.content);
       details = redactValue(normalized.details);
+      isError = normalized.isError === true;
       for (const key of options.invalidToolArgumentCounts.keys()) {
         if (key.startsWith(`${toolCall.name}:`)) options.invalidToolArgumentCounts.delete(key);
       }

@@ -17,7 +17,7 @@ import {
   type ImageContent,
   type VideoContent,
 } from "@kenkaiiii/gg-ai";
-import { EventBus } from "./event-bus.js";
+import { EventBus, type McpToolEventIdentity } from "./event-bus.js";
 import {
   SlashCommandRegistry,
   createBuiltinCommands,
@@ -100,6 +100,13 @@ import type { MCPServerConfig } from "./mcp/types.js";
 import type { SharedMcpClientLease, SharedMcpClientPool } from "./mcp/shared-client-pool.js";
 import { DeferredToolCatalog } from "./mcp/deferred-catalog.js";
 import { McpCatalogCache, type CachedTool } from "./mcp/catalog-cache.js";
+import {
+  createMcpToolIdentity,
+  getMcpToolIdentity,
+  sameMcpToolIdentity,
+  withMcpToolIdentity,
+  type McpToolIdentity,
+} from "./mcp/tool-identity.js";
 import {
   describeDropped,
   importForeignSession,
@@ -485,6 +492,10 @@ export class AgentSession {
     void this.subAgentManager?.interruptAll();
   };
   private mcpManager?: MCPClientManager;
+  /** Invalidates asynchronous MCP discovery from an earlier provider lifecycle. */
+  private mcpConnectionGeneration = 0;
+  /** Serializes desktop/config-triggered reloads so one lifecycle cannot dispose another. */
+  private mcpReloadTail: Promise<void> = Promise.resolve();
   private sharedMcpLeases = new Map<string, SharedMcpClientLease>();
   /** Deferred MCP tools awaiting discovery via tool_search. */
   private mcpCatalog?: DeferredToolCatalog;
@@ -497,10 +508,10 @@ export class AgentSession {
   private deferredBuiltinTools = new Map<string, AgentTool>();
   private capabilityPromotedBuiltinNames = new Set<string>();
   private searchedPromotedBuiltinNames = new Set<string>();
-  /** Live (connected) MCP tools by name — the reconcile target for cached stubs. */
+  /** Live (connected) MCP tools by provider alias — the reconcile target for cached stubs. */
   private liveMcpTools = new Map<string, AgentTool>();
-  /** Server name for each cached-only tool, so a stub knows what to wait on. */
-  private cachedMcpToolServers = new Map<string, string>();
+  /** Exact MCP source identity claimed by each provider alias, cached or live. */
+  private mcpToolIdentities = new Map<string, McpToolIdentity>();
   private readonly mcpCatalogCache = new McpCatalogCache();
   private provider: Provider;
   private model: string;
@@ -752,11 +763,7 @@ export class AgentSession {
     // moves the connect off the critical path so the session becomes usable
     // immediately and tools are appended whenever the servers come up.
     if (this.opts.mcpEnabled !== false) {
-      this.mcpManager = new MCPClientManager({
-        catalogCache: this.mcpCatalogCache,
-        modernProtocol: this.settingsManager.get("mcpModernProtocol"),
-        onElicit: this.opts.onMcpElicit,
-      });
+      this.mcpManager = this.createMcpManager();
       if (this.opts.backgroundMcpConnect) {
         void this.connectMcpServers();
       } else {
@@ -867,23 +874,59 @@ export class AgentSession {
   }
 
   /**
-   * Whether a tool name is permitted for this session. With no `allowedTools`
-   * everything passes (default behavior). Otherwise a tool is allowed when its
-   * name is in `allowedTools`, OR it's an MCP tool (`mcp__<server>__<tool>`)
-   * whose `<server>` is in `allowedMcpServers`. The MCP-prefix rule lets a
-   * whitelisted research server (e.g. kencode-search) expose all its tools
-   * without hard-coding each one, while every other tool stays blocked.
+   * Whether a tool name is permitted for this session. With no `allowedTools`,
+   * everything passes (default behavior). Otherwise, the exact provider-facing
+   * name is checked against `allowedTools` first. MCP server allow-listing then
+   * requires an attached or registered `McpToolIdentity` whose `serverName` is in
+   * `allowedMcpServers`; the provider-facing name is never parsed for identity.
+   * An ordinary host tool beginning with `mcp__` is therefore not treated as MCP.
    */
-  private isToolAllowed(name: string): boolean {
+  private isToolAllowed(name: string, identity?: McpToolIdentity): boolean {
     const allowed = this.opts.allowedTools;
     if (!allowed) return true;
     if (allowed.includes(name)) return true;
+    const mcpIdentity = identity ?? this.mcpToolIdentities.get(name);
     const mcpWhitelist = this.opts.allowedMcpServers;
-    if (mcpWhitelist && name.startsWith("mcp__")) {
-      const server = name.slice("mcp__".length).split("__")[0];
-      return mcpWhitelist.includes(server);
+    return mcpIdentity !== undefined && mcpWhitelist?.includes(mcpIdentity.serverName) === true;
+  }
+
+  /**
+   * Reload persisted MCP configuration without rebuilding conversation, provider,
+   * or unrelated host-tool state. MCP registrations are removed synchronously
+   * before teardown awaits, so captured wrappers fail closed during removal.
+   */
+  reloadMcpServers(): Promise<void> {
+    const reload = this.mcpReloadTail.then(
+      () => this.reloadMcpServersNow(),
+      () => this.reloadMcpServersNow(),
+    );
+    this.mcpReloadTail = reload.catch(() => {});
+    return reload;
+  }
+
+  private async reloadMcpServersNow(): Promise<void> {
+    const staleProviderNames = new Set(this.mcpToolIdentities.keys());
+    this.unregisterTools(
+      (toolName, tool) =>
+        getMcpToolIdentity(tool) !== undefined || staleProviderNames.has(toolName),
+    );
+    this.mcpCatalog?.removeWhere((name) => staleProviderNames.has(name));
+    this.liveMcpTools.clear();
+    this.mcpToolIdentities.clear();
+
+    const oldManager = this.mcpManager;
+    const oldLeases = [...this.sharedMcpLeases.values()];
+    this.sharedMcpLeases.clear();
+    const generation = ++this.mcpConnectionGeneration;
+    const newManager =
+      this.opts.mcpEnabled !== false ? this.createMcpManager() : undefined;
+    this.mcpManager = newManager;
+
+    await this.disposeMcpResources(oldManager, oldLeases);
+    if (newManager && this.isCurrentMcpConnection(generation, newManager)) {
+      await this.connectMcpServers();
     }
-    return false;
+    await this.rebuildSystemPromptInPlace();
   }
 
   /**
@@ -896,7 +939,10 @@ export class AgentSession {
    * turn, so background-connected servers become available on the next prompt.
    */
   private async connectMcpServers(): Promise<void> {
-    if (!this.mcpManager) return;
+    const manager = this.mcpManager;
+    if (!manager) return;
+    const generation = this.mcpConnectionGeneration;
+    const acquiredLeases = new Set<SharedMcpClientLease>();
     // Allow-listed (read-only advisory) sessions enforce a fixed tool set by
     // name. An MCP server is only connected when its name is explicitly
     // whitelisted via `allowedMcpServers` (the Ken mentor agent does this for
@@ -914,8 +960,10 @@ export class AgentSession {
         } catch {
           // GLM not configured — skip Z.AI MCP servers
         }
+        if (!this.isCurrentMcpConnection(generation, manager)) return;
       }
       let servers = await getAllMcpServers(this.provider, apiKey, this.cwd);
+      if (!this.isCurrentMcpConnection(generation, manager)) return;
       // Whitelisted allow-listed session: connect ONLY the named servers, never
       // the user's full configured set (which could include mutating tools). The
       // whitelist only restricts in allow-list mode (the documented contract) so
@@ -936,26 +984,46 @@ export class AgentSession {
       for (const server of sharedServers) {
         let lease = this.sharedMcpLeases.get(server.name);
         if (!lease) {
-          lease = pool!.acquire(server, {
-            catalogCache: this.mcpCatalogCache,
-            modernProtocol: this.settingsManager.get("mcpModernProtocol"),
-          });
+          let acquiredLease!: SharedMcpClientLease;
+          acquiredLease = pool!.acquire(
+            server,
+            {
+              catalogCache: this.mcpCatalogCache,
+              modernProtocol: this.settingsManager.get("mcpModernProtocol"),
+            },
+            (change) => {
+              if (this.sharedMcpLeases.get(server.name) !== acquiredLease) return;
+              this.applyMcpServerState(change);
+            },
+          );
+          lease = acquiredLease;
           this.sharedMcpLeases.set(server.name, lease);
         }
+        acquiredLeases.add(lease);
         sharedConnections.push(lease.tools);
       }
 
-      const privateConnection = this.mcpManager.connectAll(privateServers);
+      const privateConnection = manager.connectAll(privateServers);
       // Seed the catalog only after every shared manager is routable. With
       // `backgroundMcpConnect`, this still exposes cached capabilities before
       // the live connection finishes, but never through the wrong manager.
-      await this.seedMcpCatalogFromCache(servers);
+      await this.seedMcpCatalogFromCache(servers, generation, manager);
 
       const connected = (await Promise.all([privateConnection, ...sharedConnections])).flat();
+      if (!this.isCurrentMcpConnection(generation, manager)) {
+        // The old manager may have completed after its first dispose. Dispose it
+        // again now that its connect settled, and release every lease this attempt
+        // acquired; both operations are idempotent.
+        await Promise.all([
+          manager.dispose(),
+          ...[...acquiredLeases].map((lease) => lease.release()),
+        ]);
+        return;
+      }
       // Defense-in-depth: even from a whitelisted server, only push tools that
       // pass the allow-list (no-op when there's no allow-list).
       const mcpTools = this.opts.allowedTools
-        ? connected.filter((t) => this.isToolAllowed(t.name))
+        ? connected.filter((tool) => this.isToolAllowed(tool.name, getMcpToolIdentity(tool)))
         : connected;
       this.addMcpTools(mcpTools);
       // Background connect resolves AFTER initialize() has already built the
@@ -966,16 +1034,31 @@ export class AgentSession {
       // Safe ordering: this method's first await yields before initialize()
       // sets `messages`, and connectAll (process spawn / network) always
       // resolves long after the local-only remainder of init has finished.
-      if (this.opts.backgroundMcpConnect && mcpTools.length > 0) {
+      if (
+        this.opts.backgroundMcpConnect &&
+        mcpTools.length > 0 &&
+        this.isCurrentMcpConnection(generation, manager)
+      ) {
         await this.rebuildSystemPromptInPlace();
       }
     } catch (err) {
+      if (!this.isCurrentMcpConnection(generation, manager)) {
+        await Promise.all([
+          manager.dispose(),
+          ...[...acquiredLeases].map((lease) => lease.release()),
+        ]);
+        return;
+      }
       log(
         "WARN",
         "mcp",
         `MCP initialization failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  private isCurrentMcpConnection(generation: number, manager: MCPClientManager): boolean {
+    return generation === this.mcpConnectionGeneration && manager === this.mcpManager;
   }
 
   /**
@@ -987,23 +1070,58 @@ export class AgentSession {
    * Promotion pushes onto the live `this.tools` array the running agent loop
    * re-reads every turn, so promoted tools are callable on the next step.
    */
+  private claimMcpToolIdentity(tool: AgentTool): McpToolIdentity | undefined {
+    const identity = getMcpToolIdentity(tool);
+    if (!identity) {
+      log("WARN", "mcp", "MCP tool is missing exact identity metadata; omitting tool", {
+        providerName: tool.name,
+      });
+      return undefined;
+    }
+
+    const claimed = this.mcpToolIdentities.get(identity.providerName);
+    if (claimed && !sameMcpToolIdentity(claimed, identity)) {
+      log("WARN", "mcp", "MCP provider alias collision; omitting conflicting tool", {
+        providerName: identity.providerName,
+        existingIdentity: [claimed.serverName, claimed.toolName],
+        conflictingIdentity: [identity.serverName, identity.toolName],
+      });
+      return undefined;
+    }
+
+    const collidesWithHostTool =
+      claimed === undefined &&
+      (this.registeredTools.has(identity.providerName) ||
+        this.deferredBuiltinTools.has(identity.providerName));
+    if (collidesWithHostTool) {
+      log("WARN", "mcp", "MCP provider alias collides with a host tool; omitting MCP tool", {
+        providerName: identity.providerName,
+        mcpIdentity: [identity.serverName, identity.toolName],
+      });
+      return undefined;
+    }
+
+    this.mcpToolIdentities.set(identity.providerName, identity);
+    return identity;
+  }
+
   private addMcpTools(mcpTools: AgentTool[]): void {
     if (mcpTools.length === 0) return;
-    for (const tool of mcpTools) {
-      this.liveMcpTools.set(tool.name, tool);
-      this.cachedMcpToolServers.delete(tool.name);
-    }
+    const acceptedTools = mcpTools.filter((tool) => this.claimMcpToolIdentity(tool) !== undefined);
+    if (acceptedTools.length === 0) return;
+    for (const tool of acceptedTools) this.liveMcpTools.set(tool.name, tool);
+
     const defer = !this.opts.allowedTools && this.settingsManager.get("deferredMcpTools");
     if (!defer) {
-      this.replaceOrPushTools(mcpTools);
+      this.replaceOrPushTools(acceptedTools);
       return;
     }
     this.mcpCatalog ??= new DeferredToolCatalog();
     // `add` is name-keyed, so live definitions replace cached stubs in place.
-    this.mcpCatalog.add(mcpTools);
+    this.mcpCatalog.add(acceptedTools);
     // A stub the model already promoted lives in `this.tools`; swap it for the
     // live tool so later calls dispatch directly instead of through the stub.
-    this.replaceLivePromotedTools(mcpTools);
+    this.replaceLivePromotedTools(acceptedTools);
     this.ensureToolSearchTool();
   }
 
@@ -1033,8 +1151,9 @@ export class AgentSession {
         },
         async (toolName) => {
           if (this.liveMcpTools.has(toolName)) return undefined;
-          const serverName = this.cachedMcpToolServers.get(toolName);
-          if (!serverName) return undefined;
+          const identity = this.mcpToolIdentities.get(toolName);
+          if (!identity) return undefined;
+          const serverName = identity.serverName;
           const outcome = (await this.mcpManagerForServer(serverName)?.whenConnected(
             serverName,
           )) ?? {
@@ -1074,7 +1193,11 @@ export class AgentSession {
    * then dispatches against the real client, or returns a clear error when that
    * server ultimately failed. Live tools replace stubs on connect.
    */
-  private async seedMcpCatalogFromCache(servers: MCPServerConfig[]): Promise<void> {
+  private async seedMcpCatalogFromCache(
+    servers: MCPServerConfig[],
+    generation: number,
+    manager: MCPClientManager,
+  ): Promise<void> {
     if (!this.opts.backgroundMcpConnect) return;
     if (this.opts.allowedTools || !this.settingsManager.get("deferredMcpTools")) return;
     let entries: Awaited<ReturnType<McpCatalogCache["entriesFor"]>>;
@@ -1083,12 +1206,20 @@ export class AgentSession {
     } catch {
       return;
     }
+    if (!this.isCurrentMcpConnection(generation, manager)) return;
     const stubs: AgentTool[] = [];
     for (const [serverName, entry] of entries) {
       for (const cached of entry.tools) {
-        if (this.liveMcpTools.has(cached.name)) continue;
-        this.cachedMcpToolServers.set(cached.name, serverName);
-        stubs.push(this.buildCachedMcpTool(serverName, cached));
+        let identity: McpToolIdentity;
+        try {
+          identity = createMcpToolIdentity(serverName, cached.toolName);
+        } catch {
+          continue;
+        }
+        const live = this.liveMcpTools.get(identity.providerName);
+        if (live && sameMcpToolIdentity(live, identity)) continue;
+        const stub = this.buildCachedMcpTool(identity, cached);
+        if (this.claimMcpToolIdentity(stub)) stubs.push(stub);
       }
     }
     if (stubs.length === 0) return;
@@ -1106,36 +1237,40 @@ export class AgentSession {
     this.ensureToolSearchTool();
   }
 
-  private buildCachedMcpTool(serverName: string, cached: CachedTool): AgentTool {
-    return {
-      name: cached.name,
+  private buildCachedMcpTool(identity: McpToolIdentity, cached: CachedTool): AgentTool {
+    const stub: AgentTool = {
+      name: identity.providerName,
       description: cached.description,
       parameters: z.record(z.string(), z.unknown()),
-      rawInputSchema: cached.rawInputSchema,
+      rawInputSchema: cached.rawInputSchema as Record<string, unknown> | undefined,
       execute: async (args, context) => {
-        const live = this.liveMcpTools.get(cached.name);
-        if (live) return live.execute(args, context);
-        const outcome = (await this.mcpManagerForServer(serverName)?.whenConnected(serverName)) ?? {
+        const live = this.liveMcpTools.get(identity.providerName);
+        if (live && sameMcpToolIdentity(live, identity)) return live.execute(args, context);
+        const outcome = (await this.mcpManagerForServer(identity.serverName)?.whenConnected(
+          identity.serverName,
+        )) ?? {
           ok: false as const,
           error: "MCP is disabled for this session",
         };
         if (!outcome.ok) {
           return (
-            `MCP tool ${cached.name} is unavailable: server "${serverName}" did not connect ` +
-            `(${outcome.error}). This tool was offered from a cached catalog. ` +
+            `MCP tool ${identity.providerName} is unavailable: server "${identity.serverName}" ` +
+            `did not connect (${outcome.error}). This tool was offered from a cached catalog. ` +
             `Use a different approach or ask the user to check their MCP configuration.`
           );
         }
-        const connected = this.liveMcpTools.get(cached.name);
-        if (!connected) {
+        const connected = this.liveMcpTools.get(identity.providerName);
+        if (!connected || !sameMcpToolIdentity(connected, identity)) {
           return (
-            `MCP tool ${cached.name} no longer exists: server "${serverName}" connected but ` +
-            `does not expose it. The cached catalog entry was stale.`
+            `MCP tool ${identity.providerName} no longer exists: server ` +
+            `"${identity.serverName}" connected but does not expose it. ` +
+            `The cached catalog entry was stale.`
           );
         }
         return connected.execute(args, context);
       },
     };
+    return withMcpToolIdentity(stub, identity);
   }
 
   /**
@@ -1351,6 +1486,25 @@ export class AgentSession {
     this.processGateInjected = 0;
     this.compactionOccurred = false;
     this.originalRequest = originalRequest;
+  }
+
+  /**
+   * Enrich presentation events from the session-owned tool registry. The agent
+   * event and provider declaration keep only the provider-facing alias.
+   */
+  private forwardAgentEvent(event: AgentEvent): void {
+    let mcpIdentity: McpToolEventIdentity | undefined;
+    if (event.type === "tool_call_start") {
+      const identity = getMcpToolIdentity(this.registeredTools.get(event.name));
+      if (identity) {
+        mcpIdentity = {
+          displayName: `${identity.serverName} / ${identity.toolName}`,
+          mcpServerName: identity.serverName,
+          mcpToolName: identity.toolName,
+        };
+      }
+    }
+    this.eventBus.forwardAgentEvent(event, mcpIdentity);
   }
 
   /**
@@ -2025,7 +2179,7 @@ export class AgentSession {
       try {
         for await (const event of generator as AsyncIterable<AgentEvent>) {
           await this.trackHookEvent(event);
-          this.eventBus.forwardAgentEvent(event);
+          this.forwardAgentEvent(event);
         }
       } finally {
         this.activeLoopMessages = null;
@@ -2235,18 +2389,34 @@ export class AgentSession {
       // gambling on a `npx` re-spawn that could fail and drop the tools.
       const glmInvolved = this.provider === "glm" || prevProvider === "glm";
       if (this.mcpManager && glmInvolved) {
-        // Remove old MCP tools
-        this.unregisterTools((toolName) => toolName.startsWith("mcp__"));
+        // Remove only identity-bearing MCP tools. Ordinary tools whose valid
+        // host-owned names happen to begin with `mcp__` must survive.
+        this.unregisterTools(
+          (toolName, tool) =>
+            getMcpToolIdentity(tool) !== undefined || this.mcpToolIdentities.has(toolName),
+        );
 
-        // Disconnect private servers and release this session's shared leases.
-        await this.disposeMcpConnections();
+        // A disposed manager is terminal: detach it and invalidate its async
+        // discovery before any teardown await can yield, then give the new
+        // provider a fresh close-reporting lifecycle.
+        const oldManager = this.mcpManager;
+        const oldLeases = [...this.sharedMcpLeases.values()];
+        this.sharedMcpLeases.clear();
+        const generation = ++this.mcpConnectionGeneration;
+        const newManager = this.createMcpManager();
+        this.mcpManager = newManager;
+        await this.disposeMcpResources(oldManager, oldLeases);
+        if (!this.isCurrentMcpConnection(generation, newManager)) return;
 
         // Drop stale MCP tools from both the live set and deferred catalog before
         // reconnecting through the same shared/private ownership path as startup.
-        this.unregisterTools((toolName) => toolName.startsWith("mcp__"));
-        this.mcpCatalog?.removeWhere((name) => name.startsWith("mcp__"));
+        this.unregisterTools(
+          (toolName, tool) =>
+            getMcpToolIdentity(tool) !== undefined || this.mcpToolIdentities.has(toolName),
+        );
+        this.mcpCatalog?.removeWhere((name) => this.mcpToolIdentities.has(name));
         this.liveMcpTools.clear();
-        this.cachedMcpToolServers.clear();
+        this.mcpToolIdentities.clear();
         await this.connectMcpServers();
       }
     }
@@ -2823,8 +2993,28 @@ export class AgentSession {
     }
   }
 
+  private prepareToolRegistration(tool: AgentTool): boolean {
+    const identity = getMcpToolIdentity(tool);
+    if (identity) return this.claimMcpToolIdentity(tool) !== undefined;
+
+    const claimed = this.mcpToolIdentities.get(tool.name);
+    if (claimed) {
+      // Host tools always keep their declared names. Evict the conflicting MCP
+      // identity instead of making registration order choose the implementation.
+      log("WARN", "mcp", "Host tool displaced a colliding MCP provider alias", {
+        providerName: tool.name,
+        mcpIdentity: [claimed.serverName, claimed.toolName],
+      });
+      this.mcpToolIdentities.delete(tool.name);
+      this.liveMcpTools.delete(tool.name);
+      this.mcpCatalog?.removeWhere((name) => name === tool.name);
+    }
+    return true;
+  }
+
   /** Register or replace a host-owned runtime tool under the active capability policy. */
   registerTool(tool: AgentTool): void {
+    if (!this.prepareToolRegistration(tool)) return;
     const guardedTool = this.guardRegisteredTool(tool);
     this.registeredTools.set(tool.name, guardedTool);
     this.reconcileRegisteredTools();
@@ -2832,17 +3022,27 @@ export class AgentSession {
 
   private registerTools(tools: Iterable<AgentTool>): void {
     for (const tool of tools) {
+      if (!this.prepareToolRegistration(tool)) continue;
       this.registeredTools.set(tool.name, this.guardRegisteredTool(tool));
     }
     this.reconcileRegisteredTools();
   }
 
   private guardRegisteredTool(tool: AgentTool): AgentTool {
+    const identity = getMcpToolIdentity(tool);
     const guardedTool: AgentTool = {
       ...tool,
       execute: async (args, context) => {
-        if (this.registeredTools.get(tool.name) !== guardedTool) {
-          throw new Error(`${tool.name} is no longer registered.`);
+        const current = this.registeredTools.get(tool.name);
+        let executionTarget = tool;
+        if (current !== guardedTool) {
+          if (!identity || !current || !sameMcpToolIdentity(current, identity)) {
+            throw new Error(`${tool.name} is no longer registered.`);
+          }
+          // A provider turn may retain the cached wrapper while live discovery
+          // replaces it. Same exact source identity may follow the replacement;
+          // removal or a different identity still fails closed.
+          executionTarget = current;
         }
         if (this.unavailableToolNames.has(tool.name)) {
           throw new Error(`${tool.name} is unavailable under the active host policy.`);
@@ -2853,10 +3053,10 @@ export class AgentSession {
               `${tool.name} is unavailable under the active tool capability policy.`,
           );
         }
-        return tool.execute(args, context);
+        return executionTarget.execute(args, context);
       },
     };
-    return guardedTool;
+    return identity ? withMcpToolIdentity(guardedTool, identity) : guardedTool;
   }
 
   private isToolCapabilityAllowed(toolName: string): boolean {
@@ -2875,9 +3075,9 @@ export class AgentSession {
     this.tools.splice(0, this.tools.length, ...availableTools);
   }
 
-  private unregisterTools(predicate: (toolName: string) => boolean): void {
-    for (const toolName of this.registeredTools.keys()) {
-      if (predicate(toolName)) this.registeredTools.delete(toolName);
+  private unregisterTools(predicate: (toolName: string, tool: AgentTool) => boolean): void {
+    for (const [toolName, tool] of this.registeredTools) {
+      if (predicate(toolName, tool)) this.registeredTools.delete(toolName);
     }
     this.reconcileRegisteredTools();
   }
@@ -3661,10 +3861,75 @@ export class AgentSession {
     return this.getPromptCacheKey();
   }
 
+  private createMcpManager(): MCPClientManager {
+    let manager!: MCPClientManager;
+    manager = new MCPClientManager({
+      catalogCache: this.mcpCatalogCache,
+      modernProtocol: this.settingsManager.get("mcpModernProtocol"),
+      onElicit: this.opts.onMcpElicit,
+      onServerStateChange: (change) => {
+        if (manager !== this.mcpManager) return;
+        this.applyMcpServerState(change);
+      },
+    });
+    return manager;
+  }
+
+  /** Remove one server's exact identities synchronously, then publish only the
+   * replacement connection's freshly filtered wrappers. */
+  private applyMcpServerState(change: {
+    name: string;
+    status: "connected" | "disconnected" | "recovering";
+    tools: AgentTool[];
+    error?: string;
+  }): void {
+    const staleProviderNames = new Set(
+      [...this.mcpToolIdentities.entries()]
+        .filter(([, identity]) => identity.serverName === change.name)
+        .map(([providerName]) => providerName),
+    );
+    this.unregisterTools((_toolName, tool) => {
+      const identity = getMcpToolIdentity(tool);
+      return identity?.serverName === change.name;
+    });
+    this.mcpCatalog?.removeWhere((providerName) => staleProviderNames.has(providerName));
+    for (const providerName of staleProviderNames) {
+      this.liveMcpTools.delete(providerName);
+      this.mcpToolIdentities.delete(providerName);
+    }
+
+    let published: AgentTool[] = [];
+    if (change.status === "connected") {
+      published = this.opts.allowedTools
+        ? change.tools.filter((tool) => this.isToolAllowed(tool.name, getMcpToolIdentity(tool)))
+        : change.tools;
+      this.addMcpTools(published);
+    }
+    this.eventBus.emit("mcp_server_state", {
+      name: change.name,
+      status: change.status,
+      toolCount: published.length,
+      ...(change.error ? { error: change.error } : {}),
+    });
+    if (change.status === "connected" && this.messages.length > 0) {
+      void this.rebuildSystemPromptInPlace();
+    }
+  }
+
+  private async disposeMcpResources(
+    manager: MCPClientManager | undefined,
+    leases: SharedMcpClientLease[],
+  ): Promise<void> {
+    await Promise.all([manager?.dispose(), ...leases.map((lease) => lease.release())]);
+  }
+
   private async disposeMcpConnections(): Promise<void> {
+    ++this.mcpConnectionGeneration;
+    const manager = this.mcpManager;
+    this.mcpManager = undefined;
     const leases = [...this.sharedMcpLeases.values()];
     this.sharedMcpLeases.clear();
-    await Promise.all([this.mcpManager?.dispose(), ...leases.map((lease) => lease.release())]);
+    await this.disposeMcpResources(manager, leases);
   }
 
   async dispose(): Promise<void> {

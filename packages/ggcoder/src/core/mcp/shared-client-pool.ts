@@ -1,5 +1,9 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import { MCPClientManager, type MCPClientManagerOptions } from "./client.js";
+import {
+  MCPClientManager,
+  type MCPClientManagerOptions,
+  type MCPServerStateChange,
+} from "./client.js";
 import type { MCPServerConfig } from "./types.js";
 
 export interface SharedMcpClientLease {
@@ -12,6 +16,7 @@ interface SharedMcpEntry {
   manager: MCPClientManager;
   tools: Promise<AgentTool[]>;
   references: number;
+  listeners: Set<(change: MCPServerStateChange) => void>;
   disposePromise?: Promise<void>;
 }
 
@@ -37,27 +42,37 @@ export class SharedMcpClientPool {
     return config.name === "kencode-search";
   }
 
-  acquire(config: MCPServerConfig, options: MCPClientManagerOptions): SharedMcpClientLease {
+  acquire(
+    config: MCPServerConfig,
+    options: MCPClientManagerOptions,
+    onStateChange?: (change: MCPServerStateChange) => void,
+  ): SharedMcpClientLease {
     if (this.disposed) throw new Error("Shared MCP client pool is disposed");
     if (!this.canShare(config)) throw new Error(`MCP server is not shareable: ${config.name}`);
 
     const key = configKey(config, options.modernProtocol);
     let entry = this.entries.get(key);
     if (!entry) {
+      const listeners = new Set<(change: MCPServerStateChange) => void>();
       const manager = this.createManager({
         ...options,
         // kencode-search is read-only and never elicits. Omitting a per-session
         // handler prevents a shared process from routing prompts to the wrong pane.
         onElicit: undefined,
+        onServerStateChange: (change) => {
+          for (const listener of listeners) listener(change);
+        },
       });
       entry = {
         manager,
         tools: manager.connectAll([config]),
         references: 0,
+        listeners,
       };
       this.entries.set(key, entry);
     }
     entry.references += 1;
+    if (onStateChange) entry.listeners.add(onStateChange);
 
     let released = false;
     return {
@@ -66,6 +81,7 @@ export class SharedMcpClientPool {
       release: async () => {
         if (released) return;
         released = true;
+        if (onStateChange) entry!.listeners.delete(onStateChange);
         entry!.references -= 1;
         if (entry!.references > 0) return;
         if (this.entries.get(key) === entry) this.entries.delete(key);

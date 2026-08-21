@@ -103,6 +103,17 @@ export interface SidecarEvent {
   data: unknown;
 }
 
+export interface ToolCallStartPayload {
+  toolCallId: string;
+  /** Provider-facing alias retained for tool state and behavior dispatch. */
+  name: string;
+  args: Record<string, unknown>;
+  /** Exact MCP source label, present only for identity-bearing MCP tools. */
+  displayName?: string;
+  mcpServerName?: string;
+  mcpToolName?: string;
+}
+
 export interface RoadmapPhaseDraftChangeEvent extends SidecarEvent {
   type: "roadmap_phase_draft_change";
   data: RoadmapPhaseDraft | null;
@@ -1089,6 +1100,8 @@ export interface HistoryEntry {
   /** Tool-produced images rendered inline (same as live `images` items),
    *  reconstructed from ImageContent blocks in persisted tool results. */
   toolImages?: Array<{ src: string; path?: string }>;
+  /** Failed MCP result restored as a durable transcript row. */
+  mcpToolFailure?: { name: string; result: string };
   /** Sub-agent delegation group (same as live `subagent_group` items). */
   subagentGroup?: Array<{
     agentName?: string;
@@ -2240,6 +2253,24 @@ export async function stopServe(): Promise<void> {
 
 // ── MCP server management (mirrors `ggcoder mcp`) ────────────
 
+export interface McpAuthDoneEvent extends SidecarEvent {
+  type: "mcp_auth_done";
+  data: { name: string; toolCount: number };
+}
+
+export function isMcpAuthDoneEvent(event: SidecarEvent): event is McpAuthDoneEvent {
+  if (event.type !== "mcp_auth_done" || typeof event.data !== "object" || event.data === null) {
+    return false;
+  }
+  const data = event.data as { name?: unknown; toolCount?: unknown };
+  return (
+    typeof data.name === "string" &&
+    typeof data.toolCount === "number" &&
+    Number.isSafeInteger(data.toolCount) &&
+    data.toolCount >= 0
+  );
+}
+
 /** One configured MCP server joined with its live connection status. */
 export interface McpServerRow {
   name: string;
@@ -2267,20 +2298,63 @@ export interface AddMcpResult {
   requiresAuth?: boolean;
 }
 
+type McpManagementAction = "load" | "add" | "remove" | "login";
+
+function mcpManagementError(action: McpManagementAction, cause: unknown): Error {
+  const raw = cause instanceof Error ? cause.message : String(cause);
+  const malformed = /MCP config.+malformed/i.test(raw);
+  const messages: Record<McpManagementAction, string> = {
+    load: "Could not load MCP servers. Check the desktop connection, then retry.",
+    add: "Could not add the MCP server. Check the command and retry.",
+    remove: "Could not remove the MCP server. Retry to confirm whether it still exists.",
+    login: "Could not start MCP sign-in. Check the connection, then retry.",
+  };
+  return new Error(
+    malformed ? "An MCP config file is malformed. Fix it, then retry." : messages[action],
+  );
+}
+
+function isMcpServerRow(value: unknown): value is McpServerRow {
+  if (typeof value !== "object" || value === null) return false;
+  const row = value as Partial<McpServerRow>;
+  return (
+    typeof row.name === "string" &&
+    (row.scope === "global" || row.scope === "project") &&
+    typeof row.ok === "boolean" &&
+    typeof row.toolCount === "number" &&
+    Number.isSafeInteger(row.toolCount) &&
+    row.toolCount >= 0 &&
+    (row.kind === "stdio" || row.kind === "http") &&
+    typeof row.summary === "string"
+  );
+}
+
+function decodeMcpServerRows(response: unknown): McpServerRow[] {
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    !("servers" in response) ||
+    !Array.isArray((response as { servers?: unknown }).servers) ||
+    !(response as { servers: unknown[] }).servers.every(isMcpServerRow)
+  ) {
+    throw new TypeError("Malformed MCP server-list response");
+  }
+  return (response as { servers: McpServerRow[] }).servers;
+}
+
 /** List configured MCP servers with live connection status + tool counts.
- *  `cwd` scopes the project servers to a specific project path (global servers
- *  always show); omit for the window's current project. */
+ *  Rejects transport and malformed responses so callers retain their last known list. */
 export async function listMcpServers(cwd?: string): Promise<McpServerRow[]> {
   try {
     await waitForReady();
-    const res = await invoke<{ servers: McpServerRow[] }>("agent_mcp_list", {
+    const res = await invoke<unknown>("agent_mcp_list", {
       paneId: "primary",
       cwd: cwd ?? null,
     });
-    return res.servers ?? [];
+    return decodeMcpServerRows(res);
   } catch (e) {
     await logError(`agent_mcp_list failed: ${String(e)}`);
-    return [];
+    throw mcpManagementError("load", e);
   }
 }
 
@@ -2292,13 +2366,18 @@ export async function addMcpServer(
   scope: "global" | "project",
   cwd?: string,
 ): Promise<AddMcpResult> {
-  await waitForReady();
-  return invoke<AddMcpResult>("agent_mcp_add", {
-    paneId: "primary",
-    line,
-    scope,
-    cwd: cwd ?? null,
-  });
+  try {
+    await waitForReady();
+    return await invoke<AddMcpResult>("agent_mcp_add", {
+      paneId: "primary",
+      line,
+      scope,
+      cwd: cwd ?? null,
+    });
+  } catch (e) {
+    await logError(`agent_mcp_add failed: ${String(e)}`);
+    throw mcpManagementError("add", e);
+  }
 }
 
 /** Begin an interactive OAuth login for a remote (HTTP) MCP server. Returns
@@ -2310,8 +2389,13 @@ export async function loginMcpServer(
   scope: "global" | "project",
   cwd?: string,
 ): Promise<void> {
-  await waitForReady();
-  await invoke("agent_mcp_login", { paneId: "primary", name, scope, cwd: cwd ?? null });
+  try {
+    await waitForReady();
+    await invoke("agent_mcp_login", { paneId: "primary", name, scope, cwd: cwd ?? null });
+  } catch (e) {
+    await logError(`agent_mcp_login failed: ${String(e)}`);
+    throw mcpManagementError("login", e);
+  }
 }
 
 /** Remove an MCP server by name. `cwd` is required for project scope. Returns
@@ -2331,7 +2415,7 @@ export async function removeMcpServer(
     });
   } catch (e) {
     await logError(`agent_mcp_remove failed: ${String(e)}`);
-    return { removed: false };
+    throw mcpManagementError("remove", e);
   }
 }
 
@@ -2999,22 +3083,39 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     },
     listMcpServers: async (cwd) => {
       await ready();
-      return safeArray("agent_mcp_list", "servers", { cwd: cwd ?? null });
+      try {
+        const response = await call<unknown>("agent_mcp_list", { cwd: cwd ?? null });
+        return decodeMcpServerRows(response);
+      } catch (error) {
+        await logError(`agent_mcp_list failed: ${String(error)}`);
+        throw mcpManagementError("load", error);
+      }
     },
     addMcpServer: async (line, scope, cwd) => {
       await ready();
-      return call("agent_mcp_add", { line, scope, cwd: cwd ?? null });
+      try {
+        return await call("agent_mcp_add", { line, scope, cwd: cwd ?? null });
+      } catch (error) {
+        await logError(`agent_mcp_add failed: ${String(error)}`);
+        throw mcpManagementError("add", error);
+      }
     },
     loginMcpServer: async (name, scope, cwd) => {
       await ready();
-      await call("agent_mcp_login", { name, scope, cwd: cwd ?? null });
+      try {
+        await call("agent_mcp_login", { name, scope, cwd: cwd ?? null });
+      } catch (error) {
+        await logError(`agent_mcp_login failed: ${String(error)}`);
+        throw mcpManagementError("login", error);
+      }
     },
     async removeMcpServer(name, scope, cwd) {
       await ready();
       try {
         return await call("agent_mcp_remove", { name, scope, cwd: cwd ?? null });
-      } catch {
-        return { removed: false };
+      } catch (error) {
+        await logError(`agent_mcp_remove failed: ${String(error)}`);
+        throw mcpManagementError("remove", error);
       }
     },
   };

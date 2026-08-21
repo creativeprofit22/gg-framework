@@ -3,11 +3,25 @@ import type { SubAgentSnapshot } from "./subagent-manager.js";
 
 // ── Event Map ──────────────────────────────────────────────
 
+export interface McpToolEventIdentity {
+  /** Exact source identity formatted for presentation only. */
+  displayName: string;
+  /** Exact configured MCP server name; never used as the provider tool key. */
+  mcpServerName: string;
+  /** Exact MCP listTools/callTool name; never used as the provider tool key. */
+  mcpToolName: string;
+}
+
 export interface BusEventMap {
   // Agent events (forwarded from agentLoop)
   text_delta: { text: string };
   thinking_delta: { text: string };
-  tool_call_start: { toolCallId: string; name: string; args: Record<string, unknown> };
+  tool_call_start: {
+    toolCallId: string;
+    /** Provider-facing alias retained for execution and state correlation. */
+    name: string;
+    args: Record<string, unknown>;
+  } & Partial<McpToolEventIdentity>;
   tool_call_update: { toolCallId: string; update: unknown };
   tool_call_end: {
     toolCallId: string;
@@ -55,6 +69,15 @@ export interface BusEventMap {
 
   // Persistent async child lifecycle (bounded metadata/output snapshot).
   subagent_state: SubAgentSnapshot;
+
+  /** Live MCP transport state; disconnected/recovering means no tools from this
+   * server are callable until a later connected event republishes fresh wrappers. */
+  mcp_server_state: {
+    name: string;
+    status: "connected" | "disconnected" | "recovering";
+    toolCount: number;
+    error?: string;
+  };
 
   /** Queued user steering was consumed into the run at a turn boundary.
    *  `count` is the remaining depth. Lets clients clear the "queued" affordance
@@ -131,7 +154,7 @@ export class EventBus {
     this.listeners.clear();
   }
 
-  forwardAgentEvent(event: AgentEvent): void {
+  forwardAgentEvent(event: AgentEvent, mcpIdentity?: McpToolEventIdentity): void {
     switch (event.type) {
       case "text_delta":
         this.emit("text_delta", { text: event.text });
@@ -144,6 +167,7 @@ export class EventBus {
           toolCallId: event.toolCallId,
           name: event.name,
           args: event.args,
+          ...mcpIdentity,
         });
         break;
       case "tool_call_update":

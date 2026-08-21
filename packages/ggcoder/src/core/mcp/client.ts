@@ -29,6 +29,12 @@ import { toToolResult } from "./content.js";
 import { resolveStdioCommand } from "./resolve-stdio.js";
 import { McpCatalogCache, type ProtocolEra } from "./catalog-cache.js";
 import {
+  createMcpToolIdentity,
+  dedupeMcpToolDefinitions,
+  getMcpToolIdentity,
+  withMcpToolIdentity,
+} from "./tool-identity.js";
+import {
   isShareableServer,
   sharedMcpPool,
   type SharedMcpPool,
@@ -40,9 +46,19 @@ interface ConnectedServer {
   client: Client;
   transport: StreamableHTTPClientTransport | SSEClientTransport | StdioClientTransport;
   lastCallTime: number;
-  /** The config this connection was built from, kept so an expired HTTP session
-   *  can be rebuilt without going back to the caller for it. */
+  /** The config this exact connection was built from. Tool wrappers are bound to
+   * this object so replacing the connection makes every captured wrapper stale. */
   config: MCPServerConfig;
+}
+
+export type MCPServerConnectionStatus = "connected" | "disconnected" | "recovering";
+
+/** Live lifecycle update. Connected updates carry only freshly listed, identity-checked tools. */
+export interface MCPServerStateChange {
+  name: string;
+  status: MCPServerConnectionStatus;
+  tools: AgentTool[];
+  error?: string;
 }
 
 /** Per-server connection outcome for the dashboard / non-interactive list. */
@@ -68,6 +84,28 @@ export interface MCPLoginResult {
 type ConnectionOutcome = { ok: true } | { ok: false; error: string };
 
 /**
+ * Apply the same fail-closed source-identity and exact-name duplicate rules to
+ * every listTools result, including temporary OAuth verification clients.
+ */
+function identifyUsableMcpTools<T extends { name: string }>(
+  serverName: string,
+  tools: readonly T[],
+): Array<{ tool: T; identity: ReturnType<typeof createMcpToolIdentity> }> {
+  return dedupeMcpToolDefinitions(tools).flatMap((tool) => {
+    try {
+      return [{ tool, identity: createMcpToolIdentity(serverName, tool.name) }];
+    } catch (err) {
+      log("WARN", "mcp", "MCP server declared an invalid tool identity; omitting tool", {
+        serverName,
+        toolName: tool.name,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  });
+}
+
+/**
  * A server-initiated request for user input, mid tool call. The host resolves
  * it by showing the user a form built from `requestedSchema` and returning
  * their answer — or `decline` / `cancel`.
@@ -89,6 +127,9 @@ export interface MCPClientManagerOptions {
   onElicit?: MCPElicitHandler;
   sharedPool?: SharedMcpPool;
   onServerClosed?: (name: string) => void;
+  /** Synchronous lifecycle hook: owners remove tools on disconnected/recovering
+   * and publish only the fresh wrappers supplied with connected. */
+  onServerStateChange?: (change: MCPServerStateChange) => void;
 }
 
 export class MCPClientManager {
@@ -145,6 +186,7 @@ export class MCPClientManager {
    * connection so the next session rebuilds instead of inheriting a corpse.
    */
   private readonly onServerClosed?: (name: string) => void;
+  private readonly onServerStateChange?: (change: MCPServerStateChange) => void;
 
   /** Set while `dispose` runs, so our own teardown is not reported as a death. */
   private disposing = false;
@@ -155,6 +197,7 @@ export class MCPClientManager {
     this.onElicit = opts.onElicit;
     this.pool = opts.sharedPool ?? sharedMcpPool;
     this.onServerClosed = opts.onServerClosed;
+    this.onServerStateChange = opts.onServerStateChange;
   }
 
   /**
@@ -239,8 +282,10 @@ export class MCPClientManager {
           modernProtocol: opts.modernProtocol,
           onElicit: opts.onElicit,
           sharedPool: this.pool,
-          // Let the pool retire this connection if its server exits.
+          // Let the pool retire this connection if its server exits, while every
+          // current claimant removes the dead stdio server's tools immediately.
           onServerClosed: opts.onClosed,
+          onServerStateChange: opts.onServerStateChange,
         });
         return {
           connect: async (target) => {
@@ -262,6 +307,7 @@ export class MCPClientManager {
         catalogCache: this.catalogCache,
         modernProtocol: this.modernProtocol,
         onElicit: this.onElicit,
+        onServerStateChange: this.onServerStateChange,
       },
     );
     if (!handle.result.ok) {
@@ -276,17 +322,21 @@ export class MCPClientManager {
     // it runs. The pool needs that to answer "which window asked?" when the
     // server elicits mid-call; without it a shared server could only ever
     // cancel its prompts.
-    return handle.result.tools.map((tool) => ({
-      ...tool,
-      execute: async (args: unknown, context?: ToolContext) => {
-        const endCall = handle.beginCall();
-        try {
-          return await tool.execute(args, context as ToolContext);
-        } finally {
-          endCall();
-        }
-      },
-    }));
+    return handle.result.tools.map((tool) => {
+      const wrapped: AgentTool = {
+        ...tool,
+        execute: async (args: unknown, context?: ToolContext) => {
+          const endCall = handle.beginCall();
+          try {
+            return await tool.execute(args, context as ToolContext);
+          } finally {
+            endCall();
+          }
+        },
+      };
+      const identity = getMcpToolIdentity(tool);
+      return identity ? withMcpToolIdentity(wrapped, identity) : wrapped;
+    });
   }
 
   /** Get-or-create the settlement record for one server name. */
@@ -516,8 +566,9 @@ export class MCPClientManager {
         await loginClient.connect(loginTransport);
         // Already authorized (had valid tokens) — nothing more to do.
         const { tools } = await loginClient.listTools();
+        const toolCount = identifyUsableMcpTools(config.name, tools).length;
         await loginClient.close().catch(() => {});
-        return { ok: true, toolCount: tools.length };
+        return { ok: true, toolCount };
       } catch (err) {
         if (!isUnauthorized(err)) throw err;
       }
@@ -535,8 +586,9 @@ export class MCPClientManager {
       const verifyClient = new Client({ name: "ggcoder", version: "1.0.0" });
       await verifyClient.connect(verifyTransport);
       const { tools } = await verifyClient.listTools();
+      const toolCount = identifyUsableMcpTools(config.name, tools).length;
       await verifyClient.close().catch(() => {});
-      return { ok: true, toolCount: tools.length };
+      return { ok: true, toolCount };
     } catch (err) {
       return { ok: false, toolCount: 0, error: formatConnectError(err) };
     } finally {
@@ -636,32 +688,41 @@ export class MCPClientManager {
       }
     }
 
-    this.servers.push({ name: config.name, client, transport, lastCallTime: 0, config });
-
-    // Report an unexpected close. A stdio child that crashes has no recovery
-    // path (`canRecoverSession` excludes stdio deliberately: respawning one
-    // mid-call would be a surprise), so the only safe response is to let the
-    // owner drop this connection and rebuild on the next use. That matters most
-    // for a POOLED connection, where a corpse would otherwise be handed to every
-    // session in the daemon, including ones that connect later.
-    client.onclose = () => {
-      if (this.disposing) return;
-      log("WARN", "mcp", `MCP server "${config.name}" closed unexpectedly`);
-      this.onServerClosed?.(config.name);
+    const connectedServer: ConnectedServer = {
+      name: config.name,
+      client,
+      transport,
+      lastCallTime: 0,
+      config,
     };
+    this.servers.push(connectedServer);
 
-    const { tools } = await client.listTools(undefined, { timeout });
+    // A close retires this exact generation synchronously. HTTP connections then
+    // recover in the background; stdio stays failed closed and is never respawned.
+    client.onclose = () => this.handleUnexpectedClose(connectedServer);
+
+    let listedTools: Awaited<ReturnType<Client["listTools"]>>["tools"];
+    try {
+      ({ tools: listedTools } = await client.listTools(undefined, { timeout }));
+    } catch (err) {
+      this.removeServer(connectedServer);
+      try {
+        await client.close();
+      } catch {
+        // The failed handshake/list may already have closed the transport.
+      }
+      throw err;
+    }
+    const identifiedTools = identifyUsableMcpTools(config.name, listedTools);
 
     // Persist the live tool list so the NEXT cold start can answer tool_search
-    // before this server has finished connecting. Awaited (a small serialized
-    // JSON write) so the entry is on disk before the connect is reported done —
-    // otherwise a session that starts right after would still see a cold cache.
-    // A failed write must never fail the connect.
+    // before this server has finished connecting. A cache failure cannot fail a
+    // healthy live connection.
     try {
       await this.catalogCache.save(
         config,
-        tools.map((tool) => ({
-          name: `mcp__${config.name}__${tool.name}`,
+        identifiedTools.map(({ tool, identity }) => ({
+          toolName: identity.toolName,
           description: tool.description ?? "",
           rawInputSchema: tool.inputSchema as Record<string, unknown> | undefined,
         })),
@@ -671,93 +732,79 @@ export class MCPClientManager {
       // Cache is an optimization; a connected server is still fully usable.
     }
 
-    return tools.map((tool): AgentTool => {
-      const toolName = `mcp__${config.name}__${tool.name}`;
-      return {
-        name: toolName,
+    const freshTools = identifiedTools.map(({ tool, identity }): AgentTool => {
+      const agentTool: AgentTool = {
+        name: identity.providerName,
         description: tool.description ?? "",
         parameters: z.record(z.string(), z.unknown()),
         rawInputSchema: tool.inputSchema as Record<string, unknown>,
         execute: async (args, context) => {
-          const server = this.servers.find((s) => s.name === config.name);
-          if (server) {
-            const elapsed = Date.now() - server.lastCallTime;
-            const minGap = 2_000;
-            if (elapsed < minGap) {
-              await new Promise((r) => setTimeout(r, minGap - elapsed));
-            }
-            server.lastCallTime = Date.now();
+          // Never redirect an old wrapper to a replacement client. Tool schemas
+          // and source identity belong to one listed connection generation.
+          if (!this.servers.includes(connectedServer)) {
+            throw new Error(`MCP tool error: stale tool wrapper for disconnected server "${config.name}"`);
           }
 
-          // Resolve the client from `this.servers` on every attempt rather than
-          // closing over the one from connect time: a session rebuild swaps the
-          // entry, and a stale capture would keep calling the dead client.
-          const liveClient = (): Client =>
-            this.servers.find((s) => s.name === config.name)?.client ?? client;
+          const elapsed = Date.now() - connectedServer.lastCallTime;
+          const minGap = 2_000;
+          if (elapsed < minGap) {
+            await new Promise((resolve) => setTimeout(resolve, minGap - elapsed));
+          }
+          if (!this.servers.includes(connectedServer)) {
+            throw new Error(`MCP tool error: stale tool wrapper for disconnected server "${config.name}"`);
+          }
+          connectedServer.lastCallTime = Date.now();
 
-          // The client the attempt actually ran against, so a failure can be
-          // attributed to "my client was replaced" vs "the server hung up".
-          let attemptClient = liveClient();
-          const callOnce = async (): Promise<ToolExecuteResult> => {
-            attemptClient = liveClient();
-            const result = await attemptClient.callTool(
-              { name: tool.name, arguments: args as Record<string, unknown> },
+          try {
+            const result = await connectedServer.client.callTool(
+              { name: identity.toolName, arguments: args as Record<string, unknown> },
               { timeout: config.timeout ?? 60_000 },
             );
             if (!("content" in result) || !Array.isArray(result.content)) {
-              return "(empty response)";
+              return result.isError
+                ? ({ content: "(empty response)", isError: true } as ToolExecuteResult)
+                : "(empty response)";
             }
-            return toToolResult(result.content, toolName);
-          };
-
-          try {
-            return await callOnce();
+            const toolResult = await toToolResult(result.content, identity.providerName);
+            if (!result.isError) return toolResult;
+            return typeof toolResult === "string"
+              ? ({ content: toolResult, isError: true } as ToolExecuteResult)
+              : ({ ...toolResult, isError: true } as ToolExecuteResult);
           } catch (err) {
-            // An expired HTTP session is recoverable exactly once: rebuild the
-            // connection and replay the call. A second failure is a real error.
-            if (this.canRecoverSession(config, err, attemptClient, context?.signal)) {
-              try {
-                await this.reconnectServer(config);
-                if (!context?.signal?.aborted) return await callOnce();
-              } catch (retryErr) {
-                return `MCP tool error: ${formatConnectError(retryErr)}`;
-              }
+            // HTTP session expiry/closure starts a fresh publication cycle, but
+            // this active call is never replayed: doing so could duplicate work.
+            if (this.canRecoverSession(config, err, context?.signal)) {
+              this.disconnectServer(connectedServer, err);
             }
             const msg = err instanceof Error ? err.message : String(err);
             if (msg.includes("Too Many R") || msg.includes("429")) {
-              return "Rate limited — too many requests. Wait a moment before searching again.";
+              throw new Error("Rate limited — too many requests. Wait a moment before searching again.");
             }
-            return `MCP tool error: ${msg}`;
+            throw new Error(`MCP tool error: ${msg}`);
           }
         },
       };
+      return withMcpToolIdentity(agentTool, identity);
     });
+
+    if (!opts.probe && this.servers.includes(connectedServer)) {
+      this.onServerStateChange?.({
+        name: config.name,
+        status: "connected",
+        tools: freshTools,
+      });
+    }
+    return freshTools;
   }
 
-  /**
-   * Is this failure a recoverable expired HTTP session?
-   *
-   * Stdio servers are excluded: they have no HTTP session to expire, so a 404
-   * from one means something else entirely and respawning the child process
-   * mid-call would be a surprise. An already-aborted call is excluded too —
-   * reconnecting to replay work the user cancelled resurrects it.
-   */
+  /** Is this failure a recoverable HTTP session loss? Never recover cancelled work or stdio. */
   private canRecoverSession(
     config: MCPServerConfig,
     err: unknown,
-    attemptClient: Client,
     signal: AbortSignal | undefined,
   ): boolean {
-    if (config.command) return false;
-    if (signal?.aborted) return false;
-    if (isSessionExpired(err)) return true;
-    // A sibling call that hit the same expired session may already have torn
-    // the transport down underneath us, which surfaces as a generic "connection
-    // closed" rather than the 404. Recover only when the client we called has
-    // genuinely been retired — otherwise this is a real disconnect and a retry
-    // would just fail again.
-    const current = this.servers.find((s) => s.name === config.name)?.client;
-    return current !== attemptClient && this.isConnectionClosed(err);
+    if (config.command || signal?.aborted) return false;
+    return isSessionExpired(err) || this.isConnectionClosed(err);
   }
 
   /** A local "the transport went away mid-request" failure, as the SDK reports it. */
@@ -765,37 +812,56 @@ export class MCPClientManager {
     return SdkError.isInstance(reason) && reason.code === SdkErrorCode.ConnectionClosed;
   }
 
-  /**
-   * Rebuild one server's connection from its stored config, replacing the dead
-   * entry in `this.servers`. Concurrent callers share a single rebuild.
-   *
-   * Rejects if the reconnect itself fails, so the caller reports a real error
-   * rather than retrying against a client that was never replaced.
-   */
-  private async reconnectServer(config: MCPServerConfig): Promise<void> {
+  private removeServer(server: ConnectedServer): boolean {
+    if (!this.servers.includes(server)) return false;
+    this.servers = this.servers.filter((candidate) => candidate !== server);
+    return true;
+  }
+
+  private handleUnexpectedClose(server: ConnectedServer): void {
+    if (this.disposing || !this.servers.includes(server)) return;
+    log("WARN", "mcp", `MCP server "${server.name}" closed unexpectedly`);
+    this.disconnectServer(server, new Error("Connection closed"));
+  }
+
+  /** Retire one exact connection before any await, then recover HTTP only. */
+  private disconnectServer(server: ConnectedServer, reason: unknown): void {
+    if (!this.removeServer(server)) return;
+    const error = formatConnectError(reason);
+    this.onServerStateChange?.({ name: server.name, status: "disconnected", tools: [], error });
+    this.onServerClosed?.(server.name);
+
+    if (server.config.command || this.disposing) return;
+    this.onServerStateChange?.({ name: server.name, status: "recovering", tools: [] });
+    void server.client.close().catch(() => {});
+    void this.recoverServer(server.config);
+  }
+
+  /** Coalesce recovery, publishing only wrappers listed from the replacement client. */
+  private recoverServer(config: MCPServerConfig): Promise<void> {
     const inFlight = this.reconnecting.get(config.name);
     if (inFlight) return inFlight;
 
-    const attempt = (async () => {
-      log("INFO", "mcp", `MCP session expired for "${config.name}", reconnecting`);
-      const dead = this.servers.find((s) => s.name === config.name);
-      if (dead) {
-        this.servers = this.servers.filter((s) => s !== dead);
-        try {
-          await dead.client.close();
-        } catch {
-          // The session is already gone server-side; a failed close is expected.
-        }
-      }
-      await this.connectServer(config);
-    })();
-
+    const attempt = Promise.resolve()
+      .then(async () => {
+        log("INFO", "mcp", `Recovering MCP server "${config.name}"`);
+        await this.connectServer(config);
+      })
+      .catch((err) => {
+        const error = formatConnectError(err);
+        log("WARN", "mcp", `MCP recovery failed for "${config.name}"`, { error });
+        this.onServerStateChange?.({
+          name: config.name,
+          status: "disconnected",
+          tools: [],
+          error,
+        });
+      })
+      .finally(() => {
+        this.reconnecting.delete(config.name);
+      });
     this.reconnecting.set(config.name, attempt);
-    try {
-      await attempt;
-    } finally {
-      this.reconnecting.delete(config.name);
-    }
+    return attempt;
   }
 
   /**

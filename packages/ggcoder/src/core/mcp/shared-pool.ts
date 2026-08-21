@@ -1,6 +1,10 @@
 import { hashServerConfig } from "./catalog-cache.js";
 import type { McpCatalogCache } from "./catalog-cache.js";
-import type { MCPConnectResult, MCPElicitHandler } from "./client.js";
+import type {
+  MCPConnectResult,
+  MCPElicitHandler,
+  MCPServerStateChange,
+} from "./client.js";
 import { log } from "../logger.js";
 import type { MCPServerConfig } from "./types.js";
 
@@ -75,6 +79,8 @@ export interface SharedAcquireOptions {
   modernProtocol?: boolean;
   /** Invoked by the connection when its server exits on its own. */
   onClosed?: () => void;
+  /** Fan-out lifecycle signal for every session holding this shared connection. */
+  onServerStateChange?: (change: MCPServerStateChange) => void;
   /**
    * The acquiring session's elicitation handler. Invoked only while that
    * session has a tool call in flight on this connection (see `dispatchElicit`).
@@ -104,6 +110,7 @@ export interface SharedServerHandle {
 /** One session's participation in a shared connection. */
 interface Caller {
   onElicit?: MCPElicitHandler;
+  onServerStateChange?: (change: MCPServerStateChange) => void;
   /** Tool calls this session currently has in flight on this connection. */
   activeCalls: number;
 }
@@ -154,7 +161,11 @@ export class SharedMcpPool {
     opts: SharedAcquireOptions = {},
   ): Promise<SharedServerHandle> {
     const key = this.keyFor(config, opts);
-    const caller: Caller = { onElicit: opts.onElicit, activeCalls: 0 };
+    const caller: Caller = {
+      onElicit: opts.onElicit,
+      onServerStateChange: opts.onServerStateChange,
+      activeCalls: 0,
+    };
     let entry = this.entries.get(key);
 
     if (!entry) {
@@ -177,6 +188,11 @@ export class SharedMcpPool {
         // a fresh connection. Sessions already holding it still see their calls
         // fail, which is what a dead server means; they recover on reconnect.
         onClosed: () => this.evictDead(key, created),
+        onServerStateChange: (change) => {
+          for (const participant of created.callers) {
+            participant.onServerStateChange?.(change);
+          }
+        },
       });
       created.connected = created.connector.connect(config);
       entry = created;

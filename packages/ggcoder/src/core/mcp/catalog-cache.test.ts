@@ -43,24 +43,57 @@ describe("hashServerConfig", () => {
 });
 
 describe("McpCatalogCache", () => {
-  it("round-trips tools and the negotiated protocol era", async () => {
+  it("round-trips exact source tool names, schemas, and the negotiated protocol era", async () => {
     const cache = new McpCatalogCache(file);
     await cache.save(
       server,
-      [{ name: "mcp__kencode-search__search", description: "search code", rawInputSchema: {} }],
+      [
+        {
+          toolName: "search code:日本語",
+          description: "search code",
+          rawInputSchema: true,
+        },
+      ],
       "legacy",
     );
 
     const entries = await new McpCatalogCache(file).entriesFor([server]);
     expect(entries.get(server.name)?.tools).toEqual([
-      { name: "mcp__kencode-search__search", description: "search code", rawInputSchema: {} },
+      { toolName: "search code:日本語", description: "search code", rawInputSchema: true },
     ]);
     expect(await cache.protocolEraFor(server)).toBe("legacy");
+    expect(JSON.parse(await fs.readFile(file, "utf-8"))).toMatchObject({ version: 2 });
+  });
+
+  it("invalidates an unrecoverable v1 provider-name cache and rewrites v2 on save", async () => {
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        servers: {
+          [server.name]: {
+            configHash: hashServerConfig(server),
+            savedAt: Date.now(),
+            tools: [{ name: "mcp__kencode-search__search", description: "old alias" }],
+          },
+        },
+      }),
+      "utf-8",
+    );
+
+    const cache = new McpCatalogCache(file);
+    expect((await cache.entriesFor([server])).size).toBe(0);
+
+    await cache.save(server, [{ toolName: "search", description: "source identity" }]);
+    expect((await cache.entriesFor([server])).get(server.name)?.tools).toEqual([
+      { toolName: "search", description: "source identity" },
+    ]);
+    expect(JSON.parse(await fs.readFile(file, "utf-8"))).toMatchObject({ version: 2 });
   });
 
   it("invalidates an entry when the server config changes", async () => {
     const cache = new McpCatalogCache(file);
-    await cache.save(server, [{ name: "mcp__kencode-search__search", description: "x" }]);
+    await cache.save(server, [{ toolName: "search", description: "x" }]);
 
     const changed = { ...server, args: ["different.js"] };
     expect((await cache.entriesFor([changed])).size).toBe(0);
@@ -69,7 +102,7 @@ describe("McpCatalogCache", () => {
 
   it("ignores servers that were never cached", async () => {
     const cache = new McpCatalogCache(file);
-    await cache.save(server, [{ name: "mcp__kencode-search__search", description: "x" }]);
+    await cache.save(server, [{ toolName: "search", description: "x" }]);
     expect((await cache.entriesFor([{ name: "other", command: "node" }])).size).toBe(0);
   });
 
@@ -78,14 +111,14 @@ describe("McpCatalogCache", () => {
     const cache = new McpCatalogCache(file);
     expect((await cache.entriesFor([server])).size).toBe(0);
 
-    // And it recovers by overwriting.
-    await cache.save(server, [{ name: "mcp__kencode-search__search", description: "x" }]);
+    await cache.save(server, [{ toolName: "search", description: "x" }]);
     expect((await cache.entriesFor([server])).size).toBe(1);
   });
 
-  it("drops entries with an invalid shape but keeps the valid ones", async () => {
+  it("drops entries with an invalid shape but keeps valid server entries", async () => {
     const other: MCPServerConfig = { name: "other", command: "node", args: ["o.js"] };
-    await new McpCatalogCache(file).save(other, [{ name: "mcp__other__a", description: "a" }]);
+    const cache = new McpCatalogCache(file);
+    await cache.save(other, [{ toolName: "a", description: "a" }]);
     const raw = JSON.parse(await fs.readFile(file, "utf-8")) as {
       servers: Record<string, unknown>;
     };
@@ -97,9 +130,34 @@ describe("McpCatalogCache", () => {
     expect(entries.get(other.name)?.tools).toHaveLength(1);
   });
 
+  it("rejects duplicate and invalid cached source identities", async () => {
+    const cache = new McpCatalogCache(file);
+    await cache.save(server, [
+      { toolName: "search", description: "one" },
+      { toolName: "other", description: "other" },
+    ]);
+    const duplicate = JSON.parse(await fs.readFile(file, "utf-8")) as {
+      servers: Record<string, { tools: unknown[] }>;
+    };
+    duplicate.servers[server.name].tools.push({ toolName: "search", description: "two" });
+    await fs.writeFile(file, JSON.stringify(duplicate), "utf-8");
+    expect((await new McpCatalogCache(file).entriesFor([server])).size).toBe(0);
+
+    await expect(
+      cache.save(server, [
+        { toolName: "same", description: "one" },
+        { toolName: "same", description: "two" },
+      ]),
+    ).rejects.toThrow("duplicate tool name");
+    await expect(cache.save(server, [{ toolName: "", description: "empty" }])).rejects.toThrow(
+      "non-empty string",
+    );
+    await expect(cache.save({ ...server, name: "" }, [])).rejects.toThrow("non-empty string");
+  });
+
   it("ignores entries that have aged out", async () => {
     const cache = new McpCatalogCache(file);
-    await cache.save(server, [{ name: "mcp__kencode-search__search", description: "x" }]);
+    await cache.save(server, [{ toolName: "search", description: "x" }]);
     const raw = JSON.parse(await fs.readFile(file, "utf-8")) as {
       servers: Record<string, { savedAt: number }>;
     };
@@ -109,20 +167,27 @@ describe("McpCatalogCache", () => {
     expect((await cache.entriesFor([server])).size).toBe(0);
   });
 
-  it("does not lose a concurrent save from another server", async () => {
-    const cache = new McpCatalogCache(file);
+  it("preserves exact source identities across concurrent cache instances", async () => {
+    const firstCache = new McpCatalogCache(file);
+    const secondCache = new McpCatalogCache(file);
     const other: MCPServerConfig = { name: "other", command: "node", args: ["o.js"] };
     await Promise.all([
-      cache.save(server, [{ name: "mcp__kencode-search__search", description: "x" }]),
-      cache.save(other, [{ name: "mcp__other__a", description: "a" }]),
+      firstCache.save(server, [{ toolName: "search code:日本語", description: "search" }]),
+      secondCache.save(other, [{ toolName: "lookup:exact/source", description: "lookup" }]),
     ]);
-    const entries = await cache.entriesFor([server, other]);
-    expect([...entries.keys()].sort()).toEqual(["kencode-search", "other"]);
+
+    const entries = await new McpCatalogCache(file).entriesFor([server, other]);
+    expect(entries.get(server.name)?.tools).toEqual([
+      { toolName: "search code:日本語", description: "search" },
+    ]);
+    expect(entries.get(other.name)?.tools).toEqual([
+      { toolName: "lookup:exact/source", description: "lookup" },
+    ]);
   });
 
   it("clears a server's entry", async () => {
     const cache = new McpCatalogCache(file);
-    await cache.save(server, [{ name: "mcp__kencode-search__search", description: "x" }]);
+    await cache.save(server, [{ toolName: "search", description: "x" }]);
     await cache.clear(server.name);
     expect((await cache.entriesFor([server])).size).toBe(0);
   });

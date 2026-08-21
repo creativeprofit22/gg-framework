@@ -1517,6 +1517,76 @@ describe("agentLoop", () => {
     expect(serializedMessages).toContain("[REDACTED]");
   });
 
+  it("marks successful, thrown, and explicit isError tool completions correctly", async () => {
+    mockStream
+      .mockReturnValueOnce({
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+        },
+        response: Promise.resolve({
+          message: {
+            role: "assistant" as const,
+            content: [
+              { type: "tool_call" as const, id: "success-call", name: "success", args: {} },
+              { type: "tool_call" as const, id: "thrown-call", name: "thrown", args: {} },
+              {
+                type: "tool_call" as const,
+                id: "reported-call",
+                name: "mcp__acceptance__fixture_is_error",
+                args: {},
+              },
+            ],
+          },
+          stopReason: "tool_use" as const,
+          usage: { inputTokens: 10, outputTokens: 5 },
+        }),
+      } as unknown as ReturnType<typeof stream>)
+      .mockReturnValueOnce(mockOkResult("done") as unknown as ReturnType<typeof stream>);
+
+    const messages: Message[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "test" },
+    ];
+    const { events } = await collectLoop(messages, {
+      provider: "anthropic",
+      model: "test",
+      tools: [
+        { name: "success", description: "success", parameters: emptyParams, execute: () => "ok" },
+        {
+          name: "thrown",
+          description: "throws",
+          parameters: emptyParams,
+          execute: () => {
+            throw new Error("transport exploded");
+          },
+        },
+        {
+          name: "mcp__acceptance__fixture_is_error",
+          description: "reports an error",
+          parameters: emptyParams,
+          execute: () => ({ content: "fixture-is-error", isError: true }),
+        },
+      ],
+    });
+
+    const completions = events.filter((event) => event.type === "tool_call_end");
+    expect(completions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ toolCallId: "success-call", result: "ok", isError: false }),
+        expect.objectContaining({
+          toolCallId: "thrown-call",
+          result: "transport exploded",
+          isError: true,
+        }),
+        expect.objectContaining({
+          toolCallId: "reported-call",
+          result: "fixture-is-error",
+          isError: true,
+        }),
+      ]),
+    );
+  });
+
   it("redacts failed tool output before events and provider context", async () => {
     const canary = "sk-ant-api03-failuresecret123456";
     mockStream

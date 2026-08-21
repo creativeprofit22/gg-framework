@@ -40,6 +40,7 @@ describe("pane agent client", () => {
         return { ready: true, error: null, generation: 1, sessionId: "session" };
       }
       if (command === "agent_prompt") return { queued: false, count: 0 };
+      if (command === "agent_mcp_list") return { servers: [] };
       if (command === "agent_continuation_handoff") {
         return { version: 1, prompt: "## Objective\nContinue" };
       }

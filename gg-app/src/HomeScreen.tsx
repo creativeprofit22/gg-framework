@@ -17,6 +17,7 @@ import {
   openWhatsNewWindow,
   getProgress,
   setRemoteActive,
+  type PaneAgentClient,
   type ProgressSnapshot,
 } from "./agent";
 import { RankBadge } from "./RankBadge";
@@ -43,6 +44,7 @@ interface Props {
   refreshSignal?: number;
   waitForAgentReady?: () => Promise<unknown>;
   loadProgress?: () => Promise<ProgressSnapshot | null>;
+  mcpClient?: PaneAgentClient;
 }
 
 /**
@@ -56,6 +58,7 @@ export function HomeScreen({
   refreshSignal = 0,
   waitForAgentReady = waitForReady,
   loadProgress = getProgress,
+  mcpClient,
 }: Props): React.ReactElement {
   const [folderSet, setFolderSet] = useState(false);
   const [providerCount, setProviderCount] = useState(0);
@@ -322,7 +325,7 @@ export function HomeScreen({
           onSaved={() => setTelegramConfigured(true)}
         />
       )}
-      {showMcp && <McpModal onClose={() => setShowMcp(false)} />}
+      {showMcp && <McpModal client={mcpClient} onClose={() => setShowMcp(false)} />}
       {showScorecard && progress && (
         <ScorecardModal snapshot={progress} onClose={() => setShowScorecard(false)} />
       )}

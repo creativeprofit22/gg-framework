@@ -15,6 +15,8 @@ import type {
 export interface StructuredToolResult {
   content: ToolResultContent;
   details?: unknown;
+  /** Explicit tool-level failure reported without throwing (for example MCP isError). */
+  isError?: boolean;
 }
 
 export type ToolExecuteResult = string | StructuredToolResult;

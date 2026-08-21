@@ -570,6 +570,72 @@ describe("useAgentEvents", () => {
     expect(feed[0]).toMatchObject({ toolCallId: "t1", status: "done" });
   });
 
+  it("moves MCP isError completions from the temporary panel into durable transcript rows", () => {
+    const { hook, getItems, getLiveToolFeed } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_start", { toolCallId: "thrown", name: "mcp__id__thrown", args: {} }),
+      );
+      hook.result.current.handleEvent(
+        ev("tool_call_start", { toolCallId: "reported", name: "mcp__id__reported", args: {} }),
+      );
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "thrown",
+          result: "transport exploded",
+          isError: true,
+        }),
+      );
+      hook.result.current.handleEvent(
+        ev("tool_call_end", {
+          toolCallId: "reported",
+          result: "fixture-is-error",
+          isError: true,
+        }),
+      );
+    });
+
+    expect(getLiveToolFeed()).toEqual([]);
+    expect(getItems()).toEqual([
+      expect.objectContaining({
+        kind: "mcp_tool_failure",
+        name: "mcp__id__thrown",
+        result: "transport exploded",
+      }),
+      expect.objectContaining({
+        kind: "mcp_tool_failure",
+        name: "mcp__id__reported",
+        result: "fixture-is-error",
+      }),
+    ]);
+  });
+
+  it("retains exact MCP source identity while keying an opaque alias", () => {
+    const { hook, getLiveToolFeed } = setup();
+    act(() => {
+      hook.result.current.handleEvent(
+        ev("tool_call_start", {
+          toolCallId: "opaque-call",
+          name: "mcp__id__opaquehash",
+          args: { query: "needle" },
+          displayName: "server name / tool:name",
+          mcpServerName: "server name",
+          mcpToolName: "tool:name",
+        }),
+      );
+    });
+
+    expect(getLiveToolFeed()[0]).toEqual({
+      toolCallId: "opaque-call",
+      name: "mcp__id__opaquehash",
+      args: { query: "needle" },
+      displayName: "server name / tool:name",
+      mcpServerName: "server name",
+      mcpToolName: "tool:name",
+      status: "running",
+    });
+  });
+
   it("turn_end accumulates output tokens across turns", () => {
     const { hook, setTokens } = setup();
     act(() => {

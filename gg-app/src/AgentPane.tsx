@@ -296,7 +296,7 @@ function shufflePlaceholderFrame(target: string, frame: number): string {
 }
 
 // ── Transcript model ───────────────────────────────────────
-// Tool activity lives in the pinned LiveToolPanel, never in the transcript.
+// Tool activity lives in the pinned LiveToolPanel except durable MCP failures.
 // Exported (type-only) so the Ken mentor hook can produce/typecheck ken + error
 // transcript items without a runtime import cycle.
 export type Item =
@@ -332,6 +332,13 @@ export type Item =
   // streamed from the ken_* SSE events. Never mistaken for GG Coder.
   | { kind: "ken"; id: number; text: string }
   | { kind: "info"; id: number; text: string }
+  | {
+      kind: "mcp_tool_failure";
+      id: number;
+      name: string;
+      result: string;
+      displayName?: string;
+    }
   // Structured error (see gg-ai's formatError): headline always answers "is this
   // me or them", message is the raw detail (omitted when redundant with the
   // headline), guidance is the action line (retry / switch model / log in /
@@ -1544,6 +1551,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           .filter((t, i, a) => t.length > 0 && a[i - 1] !== t);
         setItems(
           history.map((h): Item => {
+            if (h.mcpToolFailure)
+              return {
+                kind: "mcp_tool_failure",
+                id: nextId(),
+                name: h.mcpToolFailure.name,
+                result: h.mcpToolFailure.result,
+              };
             // Tool-produced images (screenshots, generate_image) — reconstructed
             // from persisted ImageContent blocks, downsampled by the sidecar.
             if (h.toolImages && h.toolImages.length > 0)
@@ -3012,6 +3026,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             refreshSignal={homeRefreshSignal}
             waitForAgentReady={catalogClient.waitForReady}
             loadProgress={catalogClient.getProgress}
+            mcpClient={client}
           />
         ) : entryView === "login" ? (
           <LoginScreen onClose={() => setEntryView("home")} />
@@ -3983,6 +3998,16 @@ const TranscriptRow = memo(function TranscriptRow({
           {item.text}
         </div>
       );
+    case "mcp_tool_failure": {
+      const label = item.displayName ?? item.name.replace(/^mcp__/, "").replace("__", " / ");
+      return (
+        <div className="line error" role="status" aria-label={`Failed MCP tool: ${label}`}>
+          <div style={{ color: theme.error, fontWeight: 600 }}>Failed</div>
+          <div style={{ color: theme.text }}>{label}</div>
+          <div style={{ color: theme.textDim, whiteSpace: "pre-wrap" }}>{item.result}</div>
+        </div>
+      );
+    }
     case "error": {
       // Structured errors (see gg-ai's formatError) always answer "is this me or
       // them" and, for usage-limit stops, when it resets — mirrors the CLI's

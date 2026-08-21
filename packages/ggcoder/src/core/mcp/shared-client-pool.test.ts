@@ -5,6 +5,12 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { MCPClientManager, MCPClientManagerOptions } from "./client.js";
 import { AgentSession } from "../agent-session.js";
 import { SharedMcpClientPool } from "./shared-client-pool.js";
+import {
+  createMcpToolIdentity,
+  withMcpToolIdentity,
+  type McpToolIdentity,
+} from "./tool-identity.js";
+import type { CachedTool } from "./catalog-cache.js";
 import type { MCPServerConfig } from "./types.js";
 
 vi.mock("./defaults.js", () => ({
@@ -27,12 +33,16 @@ const sessions: AgentSession[] = [];
 
 function createProcessBackedPool(state: FakeManagerState): SharedMcpClientPool {
   const pool = new SharedMcpClientPool((_options: MCPClientManagerOptions) => {
-    const tool: AgentTool = {
-      name: "mcp__kencode-search__echo",
-      description: "Echo a routing marker",
-      parameters: {} as AgentTool["parameters"],
-      execute: async (args) => String((args as { marker: string }).marker),
-    };
+    const identity = createMcpToolIdentity("kencode-search", "echo");
+    const tool = withMcpToolIdentity<AgentTool>(
+      {
+        name: identity.providerName,
+        description: "Echo a routing marker",
+        parameters: {} as AgentTool["parameters"],
+        execute: async (args) => String((args as { marker: string }).marker),
+      },
+      identity,
+    );
     const manager = {
       connectAll: async () => {
         state.connectCount += 1;
@@ -195,8 +205,10 @@ describe("SharedMcpClientPool", () => {
       const internals = session as unknown as {
         tools: AgentTool[];
         mcpManager?: MCPClientManager;
-        cachedMcpToolServers: Map<string, string>;
+        mcpToolIdentities: Map<string, McpToolIdentity>;
+        claimMcpToolIdentity(tool: AgentTool): McpToolIdentity | undefined;
         addCachedMcpTools(tools: AgentTool[]): void;
+        buildCachedMcpTool(identity: McpToolIdentity, cached: CachedTool): AgentTool;
         seedMcpCatalogFromCache(servers: MCPServerConfig[]): Promise<void>;
       };
       internals.seedMcpCatalogFromCache = async () => {
@@ -208,15 +220,13 @@ describe("SharedMcpClientPool", () => {
             error: "routed through the session-local manager",
           });
         }
-        internals.cachedMcpToolServers.set("mcp__kencode-search__echo", "kencode-search");
-        internals.addCachedMcpTools([
-          {
-            name: "mcp__kencode-search__echo",
-            description: "Echo a routing marker",
-            parameters: {} as AgentTool["parameters"],
-            execute: async () => "cached stub",
-          },
-        ]);
+        const identity = createMcpToolIdentity("kencode-search", "echo");
+        const stub = internals.buildCachedMcpTool(identity, {
+          toolName: identity.toolName,
+          description: "Echo a routing marker",
+        });
+        internals.claimMcpToolIdentity(stub);
+        internals.addCachedMcpTools([stub]);
         const toolSearch = internals.tools.find((tool) => tool.name === "tool_search");
         expect(toolSearch).toBeDefined();
         activations.push(

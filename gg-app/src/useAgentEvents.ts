@@ -6,6 +6,7 @@ import {
   listModels as listPrimaryModels,
   type SidecarEvent,
   type SubAgentStatePayload,
+  type ToolCallStartPayload,
   type AgentState,
   type BackgroundTask,
   type ModelOption,
@@ -249,6 +250,7 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   const ackedQueueTextsRef = useRef<Map<string, number>>(new Map());
   const subagentGroupIdRef = useRef<number | null>(null);
   const subagentGroupByAgentRef = useRef<Map<string, number>>(new Map());
+  const liveToolByIdRef = useRef<Map<string, LiveToolEntry>>(new Map());
   // subagent_state snapshots arrive per tool/turn event PER AGENT — with
   // several parallel agents that's a steady burst of full-transcript setItems,
   // which saturates the main thread and makes scrolling janky mid-run. Buffer
@@ -565,6 +567,8 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
           assistantTextRef.current = "";
           thinkingStartRef.current = null;
           thinkingAccumRef.current = 0;
+          liveToolByIdRef.current.clear();
+          liveToolByIdRef.current.clear();
           setLiveToolFeed([]);
           setTokens(0);
           setDoneStatus(null);
@@ -631,17 +635,33 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
         case "tool_call_start": {
           finalizeThinking();
           endStreamingText();
-          const toolCallId = String(d.toolCallId ?? "");
-          const name = String(d.name ?? "tool");
-          const args = (d.args as Record<string, unknown>) ?? {};
+          const payload = d as Partial<ToolCallStartPayload>;
+          const toolCallId = String(payload.toolCallId ?? "");
+          const name = String(payload.name ?? "tool");
+          const args = payload.args ?? {};
+          const mcpIdentity =
+            typeof payload.displayName === "string" &&
+            typeof payload.mcpServerName === "string" &&
+            typeof payload.mcpToolName === "string"
+              ? {
+                  displayName: payload.displayName,
+                  mcpServerName: payload.mcpServerName,
+                  mcpToolName: payload.mcpToolName,
+                }
+              : {};
           toolsUsedRef.current.add(name);
-          // Tools live ONLY in the pinned panel, never in the transcript. Keep a
-          // bounded tail so memory stays flat across long sessions; the panel
-          // itself renders just the last LIVE_TOOL_PANEL_ROWS.
+          const liveEntry: LiveToolEntry = {
+            toolCallId,
+            name,
+            args,
+            ...mcpIdentity,
+            status: "running",
+          };
+          liveToolByIdRef.current.set(toolCallId, liveEntry);
+          // Tools live in the pinned panel while running. Successful completions
+          // stay there; explicit MCP failures move to one durable transcript row.
           setLiveToolFeed((prev) =>
-            [...prev, { toolCallId, name, args, status: "running" as const }].slice(
-              -(LIVE_TOOL_PANEL_ROWS * 2),
-            ),
+            [...prev, liveEntry].slice(-(LIVE_TOOL_PANEL_ROWS * 2)),
           );
           // Sub-agents also get a persistent, live feed in the transcript so the
           // user can watch parallel delegations by name + what each is doing.
@@ -750,15 +770,33 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               }),
             );
           }
-          // Update the entry in place to its done state — it stays in the pinned
-          // panel (mirrors ggcoder), it does NOT move into the transcript.
-          setLiveToolFeed((prev) =>
-            prev.map((entry) =>
-              entry.toolCallId === id
-                ? { ...entry, status: "done" as const, isError, result, details }
-                : entry,
-            ),
-          );
+          const liveEntry = liveToolByIdRef.current.get(id);
+          liveToolByIdRef.current.delete(id);
+          const isMcpFailure =
+            isError &&
+            liveEntry !== undefined &&
+            (liveEntry.mcpServerName !== undefined || liveEntry.name.startsWith("mcp__"));
+          if (isMcpFailure) {
+            // Replace the temporary panel row instead of duplicating it. The
+            // persisted tool result reconstructs the same transcript item.
+            setLiveToolFeed((prev) => prev.filter((entry) => entry.toolCallId !== id));
+            pushItem({
+              kind: "mcp_tool_failure",
+              id: nextId(),
+              name: liveEntry.name,
+              displayName: liveEntry.displayName,
+              result: result?.trim() || "MCP tool reported a failure.",
+            });
+          } else {
+            // Successful tool rendering remains in the pinned panel unchanged.
+            setLiveToolFeed((prev) =>
+              prev.map((entry) =>
+                entry.toolCallId === id
+                  ? { ...entry, status: "done" as const, isError, result, details }
+                  : entry,
+              ),
+            );
+          }
           // Remove any generating_image placeholders — the tool has finished
           // (success or failure). If it produced images, they're pushed below.
           setItems((prev) => prev.filter((it) => it.kind !== "generating_image"));

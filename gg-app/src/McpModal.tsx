@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { CheckCircle2, XCircle, Lock } from "lucide-react";
 import { theme } from "./theme";
@@ -11,14 +11,39 @@ import {
   loginMcpServer,
   listProjects,
   subscribe,
+  isMcpAuthDoneEvent,
   type McpServerRow,
   type DiscoveredProject,
+  type PaneAgentClient,
   type SidecarEvent,
 } from "./agent";
 import { toast } from "./toast";
 
+type McpPaneClient = Pick<
+  PaneAgentClient,
+  | "listMcpServers"
+  | "addMcpServer"
+  | "loginMcpServer"
+  | "removeMcpServer"
+  | "subscribe"
+>;
+
 interface Props {
   onClose: () => void;
+  client?: McpPaneClient;
+}
+
+const primaryMcpClient: McpPaneClient = {
+  listMcpServers,
+  addMcpServer,
+  loginMcpServer,
+  removeMcpServer,
+  subscribe,
+};
+
+interface McpManagementError {
+  message: string;
+  retry: () => Promise<void>;
 }
 
 /**
@@ -28,10 +53,10 @@ interface Props {
  *
  * Scope: Global writes to ~/.gg/mcp.json (all sessions). Project writes to a
  * chosen project's `.gg/mcp.json` — a project picker appears when Project is
- * selected, since the modal has no inherent project context. Like the CLI, a
- * newly-added server needs an app restart to load (MCP connects once at startup).
+ * selected, since the modal has no inherent project context. Successful changes
+ * reload the pane-scoped AgentSession before the management action completes.
  */
-export function McpModal({ onClose }: Props): React.ReactElement {
+export function McpModal({ onClose, client = primaryMcpClient }: Props): React.ReactElement {
   const [servers, setServers] = useState<McpServerRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [line, setLine] = useState("");
@@ -44,26 +69,32 @@ export function McpModal({ onClose }: Props): React.ReactElement {
   const [listCwd, setListCwd] = useState<string | undefined>(undefined);
   // Name of the server currently mid-login (disables its button + shows status).
   const [loggingIn, setLoggingIn] = useState<string | null>(null);
+  const [managementError, setManagementError] = useState<McpManagementError | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const loginTargetRef = useRef<{ name: string; scope: "global" | "project" } | null>(null);
 
   const refresh = useCallback(async (cwd?: string): Promise<void> => {
     setLoading(true);
     setListCwd(cwd);
     try {
-      setServers(await listMcpServers(cwd));
+      const nextServers = await client.listMcpServers(cwd);
+      setServers(nextServers);
+      setManagementError(null);
+    } catch (error) {
+      setManagementError({
+        message: error instanceof Error ? error.message : "Could not load MCP servers.",
+        retry: () => refresh(cwd),
+      });
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  useEffect(() => {
-    void refresh().catch(() => {});
-  }, [refresh]);
+  }, [client]);
 
   // Stream OAuth login progress for remote MCP servers. `mcp_auth_url` opens the
   // system browser; done/error give the user clear feedback and refresh the list
   // so a freshly-authorized server flips to connected.
   useEffect(() => {
-    const unsub = subscribe((e: SidecarEvent) => {
+    const unsub = client.subscribe((e: SidecarEvent) => {
       const d = e.data as Record<string, unknown>;
       const name = String(d.name ?? "");
       switch (e.type) {
@@ -72,20 +103,27 @@ export function McpModal({ onClose }: Props): React.ReactElement {
           void openUrl(String(d.url ?? ""));
           break;
         case "mcp_auth_done": {
+          if (!isMcpAuthDoneEvent(e)) break;
           setLoggingIn(null);
-          const tools = Number(d.toolCount ?? 0);
-          toast(`Signed in to "${name}" \u2014 ${tools} tools.`, "success");
-          void refresh(listCwd).catch(() => {});
+          toast(`Signed in to "${e.data.name}" \u2014 ${e.data.toolCount} tools.`, "success");
+          void refresh(listCwd);
           break;
         }
         case "mcp_auth_error":
           setLoggingIn(null);
-          toast(`Login failed for "${name}": ${String(d.message ?? "unknown error")}`, "error");
+          setManagementError({
+            message: `Sign-in failed for "${name}". The OAuth flow did not complete. Retry sign-in.`,
+            retry: () =>
+              signIn(
+                name,
+                loginTargetRef.current?.name === name ? loginTargetRef.current.scope : "global",
+              ),
+          });
           break;
       }
     });
     return () => unsub();
-  }, [refresh, listCwd]);
+  }, [client, refresh, listCwd]);
 
   // Load discovered projects (for the Project-scope picker). Done once on mount
   // so switching to Project scope shows the list instantly.
@@ -110,7 +148,7 @@ export function McpModal({ onClose }: Props): React.ReactElement {
     }
     setBusy(true);
     try {
-      const result = await addMcpServer(
+      const result = await client.addMcpServer(
         trimmed,
         scope,
         scope === "project" ? projectPath : undefined,
@@ -128,7 +166,10 @@ export function McpModal({ onClose }: Props): React.ReactElement {
       }
       await refresh(scope === "project" ? projectPath : undefined);
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
+      setManagementError({
+        message: e instanceof Error ? e.message : "Could not add the MCP server.",
+        retry: add,
+      });
     } finally {
       setBusy(false);
     }
@@ -137,18 +178,26 @@ export function McpModal({ onClose }: Props): React.ReactElement {
   async function signIn(name: string, rowScope: "global" | "project"): Promise<void> {
     if (loggingIn) return;
     setLoggingIn(name);
+    loginTargetRef.current = { name, scope: rowScope };
     try {
-      await loginMcpServer(name, rowScope, rowScope === "project" ? listCwd : undefined);
+      await client.loginMcpServer(
+        name,
+        rowScope,
+        rowScope === "project" ? listCwd : undefined,
+      );
       // Outcome arrives via the mcp_auth_* events above.
     } catch (e) {
       setLoggingIn(null);
-      toast(e instanceof Error ? e.message : String(e), "error");
+      setManagementError({
+        message: e instanceof Error ? e.message : "Could not start MCP sign-in.",
+        retry: () => signIn(name, rowScope),
+      });
     }
   }
 
   async function remove(name: string, rowScope: "global" | "project"): Promise<void> {
     try {
-      const { removed } = await removeMcpServer(
+      const { removed } = await client.removeMcpServer(
         name,
         rowScope,
         rowScope === "project" ? listCwd : undefined,
@@ -158,9 +207,23 @@ export function McpModal({ onClose }: Props): React.ReactElement {
         await refresh(listCwd);
       } else {
         toast(`No "${name}" found.`, "warning");
+        setManagementError(null);
       }
     } catch (e) {
-      toast(e instanceof Error ? e.message : String(e), "error");
+      setManagementError({
+        message: e instanceof Error ? e.message : "Could not remove the MCP server.",
+        retry: () => remove(name, rowScope),
+      });
+    }
+  }
+
+  async function retryManagementAction(): Promise<void> {
+    if (!managementError || retrying) return;
+    setRetrying(true);
+    try {
+      await managementError.retry();
+    } finally {
+      setRetrying(false);
     }
   }
 
@@ -172,14 +235,42 @@ export function McpModal({ onClose }: Props): React.ReactElement {
 
   return (
     <Modal title="MCP servers" onClose={onClose}>
-      {loading ? (
+      {managementError && (
+        <div
+          className="login-status"
+          role="alert"
+          aria-live="assertive"
+          style={{
+            color: theme.error,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            marginBottom: 12,
+          }}
+        >
+          <span>{managementError.message}</span>
+          <button
+            className="modal-btn"
+            style={{ flexShrink: 0, whiteSpace: "nowrap", wordBreak: "normal" }}
+            disabled={retrying}
+            onClick={() => void retryManagementAction()}
+          >
+            {retrying ? "Retrying…" : "Retry"}
+          </button>
+        </div>
+      )}
+
+      {loading && servers.length === 0 ? (
         <ListSkeleton rows={3} />
       ) : visible.length === 0 ? (
-        <div className="mcp-empty" style={{ color: theme.textMuted }}>
-          No MCP’s configured.
-        </div>
+        !managementError && (
+          <div className="mcp-empty" style={{ color: theme.textMuted }}>
+            No MCP’s configured.
+          </div>
+        )
       ) : (
-        <div className="mcp-list">
+        <div className="mcp-list" aria-busy={loading}>
           {visible.map((s) => (
             <div className="mcp-item" key={`${s.scope}:${s.name}`}>
               <span

@@ -27,6 +27,9 @@ import { runSubagentWorkerMode } from "./modes/subagent-worker-mode.js";
 import type { MessageProvenance, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { AgentSession } from "./core/agent-session.js";
+import { applyDesktopMcpMutation } from "./app-sidecar-mcp-lifecycle.js";
+import { mcpManagementRouteFailure } from "./app-sidecar-mcp-management.js";
+import { collectPersistedMcpToolFailures } from "./app-sidecar-tool-failures.js";
 import {
   AppSidecarContinuationHandoffService,
   type ContinuationSynthesisSessionOptions,
@@ -533,6 +536,8 @@ interface HistoryEntryForWire {
   /** Webview-copy info row marker (e.g. the video-capability warning). */
   infoKind?: "video_warning";
   toolImages?: Array<{ src: string; path?: string }>;
+  /** Failed MCP result restored as a durable transcript row. */
+  mcpToolFailure?: { name: string; result: string };
   subagentGroup?: Array<{
     agentName?: string;
     status: "done" | "error";
@@ -2494,6 +2499,7 @@ async function createSession(
     target.eventBus.on("model_change", (data) => broadcast("model_change", data));
     target.eventBus.on("hook", (data) => broadcast("hook", data));
     target.eventBus.on("subagent_state", (data) => broadcast("subagent_state", data));
+    target.eventBus.on("mcp_server_state", (data) => broadcast("mcp_server_state", data));
     target.eventBus.on("compaction_start", (data) => broadcast("compaction_start", data));
     target.eventBus.on("compaction_end", (data) => broadcast("compaction_end", data));
   }
@@ -4154,6 +4160,10 @@ async function createSession(
           }
         }
 
+        const persistedMcpFailures = collectPersistedMcpToolFailures(
+          messages,
+          environmentSecrets(process.env),
+        );
         const history: HistoryEntryForWire[] = [];
 
         // Ken (mentor) turns to interleave: group by the non-system message count
@@ -4310,6 +4320,18 @@ async function createSession(
             if (visibility === "hidden") return;
 
             if (msg.role === "tool") {
+              // Explicit MCP failures stay visible after the temporary live-tool
+              // panel clears and after a full session reload.
+              for (const tr of msg.content) {
+                const failure = persistedMcpFailures.get(tr.toolCallId);
+                if (failure) {
+                  history.push({
+                    role: "assistant",
+                    text: "",
+                    mcpToolFailure: { name: failure.name, result: failure.result },
+                  });
+                }
+              }
               // Tool result messages: check for ImageContent blocks (screenshots,
               // generated images) and emit a toolImages entry.
               for (const tr of msg.content) {
@@ -6045,7 +6067,8 @@ async function createSession(
           log("ERROR", "app-sidecar", "buildMcpRows failed", {
             message: err instanceof Error ? err.message : String(err),
           });
-          json(res, 200, { servers: [] });
+          const failure = mcpManagementRouteFailure("list", err);
+          json(res, failure.status, { error: failure.error });
         });
       return;
     }
@@ -6088,7 +6111,11 @@ async function createSession(
           // persist step so a write failure returns a 500 instead of becoming
           // an unhandled rejection that would crash the sidecar.
           const probe = await probeMcp(config);
-          const saved = await addServer(config, scope, targetCwd, true);
+          const saved = await applyDesktopMcpMutation(
+            () => session,
+            () => addServer(config, scope, targetCwd, true),
+            (result) => result.ok,
+          );
           if (!saved.ok) {
             json(res, 400, { error: saved.error });
             return;
@@ -6103,9 +6130,8 @@ async function createSession(
           });
         } catch (err) {
           captureSidecarError(err, "app-sidecar.mcp.add", { server: config.name });
-          json(res, 500, {
-            error: err instanceof Error ? err.message : String(err),
-          });
+          const failure = mcpManagementRouteFailure("add", err);
+          json(res, failure.status, { error: failure.error });
         }
       });
       return;
@@ -6140,10 +6166,24 @@ async function createSession(
           return;
         }
         const targetCwd = bodyCwd ?? cwd;
-        const removed = await removeServer(name, scope, targetCwd);
-        // Drop any saved OAuth tokens for this server so a re-add starts clean.
-        await new McpOAuthStore().clear(name).catch(() => {});
-        json(res, 200, { removed });
+        try {
+          const { removed } = await applyDesktopMcpMutation(
+            () => session,
+            async () => {
+              // Clear OAuth first: if credential cleanup fails, preserve the
+              // server config rather than reporting a partial removal as success.
+              await new McpOAuthStore().clear(name);
+              const removed = await removeServer(name, scope, targetCwd);
+              return { removed };
+            },
+            (result) => result.removed,
+          );
+          json(res, 200, { removed });
+        } catch (err) {
+          captureSidecarError(err, "app-sidecar.mcp.remove", { server: name });
+          const failure = mcpManagementRouteFailure("remove", err);
+          json(res, failure.status, { error: failure.error });
+        }
       });
       return;
     }
@@ -6174,7 +6214,15 @@ async function createSession(
         }
         const scope: MCPScope = scopeValue === "project" ? "project" : "global";
         const targetCwd = bodyCwd ?? cwd;
-        const scoped = await getServer(name, targetCwd);
+        let scoped: Awaited<ReturnType<typeof getServer>>;
+        try {
+          scoped = await getServer(name, targetCwd);
+        } catch (err) {
+          captureSidecarError(err, "app-sidecar.mcp.login.config", { server: name });
+          const failure = mcpManagementRouteFailure("login", err);
+          json(res, failure.status, { error: failure.error });
+          return;
+        }
         if (!scoped || scoped.scope !== scope) {
           json(res, 404, { error: `No "${name}" server found.` });
           return;
@@ -6187,19 +6235,27 @@ async function createSession(
         broadcast("mcp_auth_status", { name, message: "Starting login\u2026" });
         const manager = new MCPClientManager();
         try {
-          const result = await manager.login(scoped.config, (authUrl) => {
-            broadcast("mcp_auth_url", { name, url: authUrl });
-          });
+          const result = await applyDesktopMcpMutation(
+            () => session,
+            () =>
+              manager.login(scoped.config, (authUrl) => {
+                broadcast("mcp_auth_url", { name, url: authUrl });
+              }),
+            (loginResult) => loginResult.ok,
+          );
           if (result.ok) {
             broadcast("mcp_auth_done", { name, toolCount: result.toolCount });
           } else {
-            broadcast("mcp_auth_error", { name, message: result.error ?? "Login failed." });
+            broadcast("mcp_auth_error", {
+              name,
+              message: "The OAuth flow did not complete. Retry sign-in.",
+            });
           }
         } catch (err) {
           captureSidecarError(err, "app-sidecar.mcp.login", { server: name });
           broadcast("mcp_auth_error", {
             name,
-            message: err instanceof Error ? err.message : String(err),
+            message: "The OAuth flow did not complete. Retry sign-in.",
           });
         } finally {
           await manager.dispose().catch(() => {});

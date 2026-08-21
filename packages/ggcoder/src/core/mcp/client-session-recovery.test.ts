@@ -5,7 +5,10 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
-import { MCPClientManager } from "./client.js";
+import {
+  MCPClientManager,
+  type MCPServerStateChange,
+} from "./client.js";
 import { McpCatalogCache } from "./catalog-cache.js";
 import type { MCPServerConfig } from "./types.js";
 
@@ -32,6 +35,7 @@ interface StubServer {
   releaseHeld: () => void;
   /** 404 all tool traffic regardless of session — the server can never recover. */
   breakToolTraffic: (broken: boolean) => void;
+  setTools: (tools: Array<{ name: string; description?: string }>) => void;
   close: () => Promise<void>;
 }
 
@@ -40,6 +44,9 @@ async function startStubServer(): Promise<StubServer> {
   let generation = 0;
   let holding = false;
   let toolTrafficBroken = false;
+  let listedTools: Array<{ name: string; description?: string }> = [
+    { name: "echo", description: "Echo the provided text back to the caller" },
+  ];
   const held: Array<() => void> = [];
 
   const state = {
@@ -122,17 +129,14 @@ async function startStubServer(): Promise<StubServer> {
           return;
         case "tools/list":
           sendResult({
-            tools: [
-              {
-                name: "echo",
-                description: "Echo the provided text back to the caller",
-                inputSchema: {
-                  type: "object",
-                  properties: { text: { type: "string" } },
-                  required: ["text"],
-                },
+            tools: listedTools.map((tool) => ({
+              ...tool,
+              inputSchema: {
+                type: "object",
+                properties: { text: { type: "string" } },
+                required: ["text"],
               },
-            ],
+            })),
           });
           return;
         case "tools/call": {
@@ -175,6 +179,9 @@ async function startStubServer(): Promise<StubServer> {
     breakToolTraffic: (broken: boolean) => {
       toolTrafficBroken = broken;
     },
+    setTools: (tools) => {
+      listedTools = tools;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections?.();
@@ -196,9 +203,10 @@ let dir: string;
 let stub: StubServer;
 const managers: MCPClientManager[] = [];
 
-function manager(): MCPClientManager {
+function manager(onServerStateChange?: (change: MCPServerStateChange) => void): MCPClientManager {
   const instance = new MCPClientManager({
     catalogCache: new McpCatalogCache(path.join(dir, "mcp-catalog.json")),
+    onServerStateChange,
   });
   managers.push(instance);
   return instance;
@@ -219,71 +227,97 @@ afterEach(async () => {
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-describe("MCP HTTP session recovery", () => {
-  it("reconnects once and replays the call when the session has expired", async () => {
-    const mcp = manager();
-    const tools = await mcp.connectAll([httpConfig()]);
-    const echo = tools.find((t) => t.name === "mcp__session-fixture__echo");
-    expect(echo).toBeDefined();
-    expect(stub.initializeCount).toBe(1);
+describe("MCP disconnect and HTTP recovery lifecycle", () => {
+  it("removes idle-disconnected tools before starting HTTP recovery", async () => {
+    const changes: MCPServerStateChange[] = [];
+    const mcp = manager((change) => changes.push(change));
+    const [stale] = await mcp.connectAll([httpConfig()]);
+    changes.length = 0;
 
+    const connected = (mcp as unknown as {
+      servers: Array<{ client: { onclose?: () => void } }>;
+    }).servers[0];
+    connected.client.onclose?.();
+
+    expect(changes.slice(0, 2).map((change) => change.status)).toEqual([
+      "disconnected",
+      "recovering",
+    ]);
+    await expect(runTool(stale, "idle-stale")).rejects.toThrow(/stale tool wrapper/);
+    await waitFor(() => changes.some((change) => change.status === "connected"), 10_000);
+    expect(stub.initializeCount).toBe(2);
+  });
+
+  it("rejects an active call on disconnect and recovers without replaying it", async () => {
+    const changes: MCPServerStateChange[] = [];
+    const mcp = manager((change) => changes.push(change));
+    const [stale] = await mcp.connectAll([httpConfig()]);
+    changes.length = 0;
     stub.expireAll();
 
-    expect(await runTool(echo!, "after-expiry")).toBe("after-expiry");
+    await expect(runTool(stale, "must-not-replay")).rejects.toThrow(/MCP tool error.*Session not found/);
+    expect(changes.slice(0, 2).map((change) => change.status)).toEqual([
+      "disconnected",
+      "recovering",
+    ]);
+    await waitFor(() => changes.some((change) => change.status === "connected"), 10_000);
     expect(stub.initializeCount).toBe(2);
-  }, 30_000);
+  }, 20_000);
 
-  it("coalesces concurrent expiries into exactly one reconnect", async () => {
-    const mcp = manager();
-    const tools = await mcp.connectAll([httpConfig()]);
-    const echo = tools.find((t) => t.name === "mcp__session-fixture__echo")!;
-
-    // Park the 404s so all three calls are in flight at once. The manager
-    // paces calls to one server 2s apart, so without parking the first would
-    // have finished recovering long before the others even started.
+  it("rejects a captured wrapper after successful recovery and publishes a fresh one", async () => {
+    const changes: MCPServerStateChange[] = [];
+    const mcp = manager((change) => changes.push(change));
+    const [stale] = await mcp.connectAll([httpConfig()]);
+    changes.length = 0;
     stub.expireAll();
-    stub.holdExpired(true);
 
-    const calls = Promise.all([runTool(echo, "a"), runTool(echo, "b"), runTool(echo, "c")]);
+    await expect(runTool(stale, "trigger")).rejects.toThrow(/Session not found/);
+    await waitFor(() => changes.some((change) => change.status === "connected"), 10_000);
+    const fresh = [...changes].reverse().find((change) => change.status === "connected")!.tools[0];
 
-    await waitFor(() => stub.heldCount === 3, 15_000);
-    stub.releaseHeld();
+    await expect(runTool(stale, "stale")).rejects.toThrow(/stale tool wrapper/);
+    expect(await runTool(fresh, "fresh")).toBe("fresh");
+  }, 20_000);
 
-    expect(await calls).toEqual(["a", "b", "c"]);
-    // 1 initial + 1 shared reconnect. Three would mean the coalescing map leaked.
-    expect(stub.initializeCount).toBe(2);
-  }, 30_000);
-
-  it("fails after a single retry against a permanently expired server", async () => {
-    const mcp = manager();
-    const tools = await mcp.connectAll([httpConfig()]);
-    const echo = tools.find((t) => t.name === "mcp__session-fixture__echo")!;
-
-    // The handshake still works, but the server 404s all tool traffic — so a
-    // rebuilt session is no better than the old one.
+  it("stays disconnected when HTTP recovery fails", async () => {
+    const changes: MCPServerStateChange[] = [];
+    const mcp = manager((change) => changes.push(change));
+    const [tool] = await mcp.connectAll([httpConfig()]);
+    changes.length = 0;
     stub.breakToolTraffic(true);
 
-    const result = await runTool(echo, "doomed");
-    expect(result).toContain("MCP tool error");
-    expect(result).toContain("404");
-    // Exactly one recovery attempt — a retry loop would keep climbing.
-    expect(stub.initializeCount).toBe(2);
-  }, 30_000);
+    await expect(runTool(tool, "doomed")).rejects.toThrow(/MCP tool error.*Session not found/);
+    await waitFor(
+      () => changes.at(-1)?.status === "disconnected" && Boolean(changes.at(-1)?.error),
+      10_000,
+    );
+    expect(changes.map((change) => change.status)).toContain("recovering");
+    expect(changes.at(-1)?.tools).toEqual([]);
+    await expect(runTool(tool, "still-stale")).rejects.toThrow(/stale tool wrapper/);
+  }, 20_000);
 
-  it("does not resurrect a call that was aborted while in flight", async () => {
-    const mcp = manager();
-    const tools = await mcp.connectAll([httpConfig()]);
-    const echo = tools.find((t) => t.name === "mcp__session-fixture__echo")!;
-
-    const controller = new AbortController();
-    controller.abort();
+  it("reapplies identity and exact-name duplicate filtering after reconnect", async () => {
+    const changes: MCPServerStateChange[] = [];
+    const mcp = manager((change) => changes.push(change));
+    const [tool] = await mcp.connectAll([httpConfig()]);
+    changes.length = 0;
+    stub.setTools([
+      { name: "echo", description: "first exact duplicate wins" },
+      { name: "echo", description: "must be omitted" },
+      { name: "", description: "invalid identity must be omitted" },
+      { name: "fresh", description: "new valid tool" },
+    ]);
     stub.expireAll();
 
-    const result = await runTool(echo, "cancelled", controller.signal);
-    expect(result).toContain("MCP tool error");
-    // No reconnect: the user cancelled, so replaying the work would be wrong.
-    expect(stub.initializeCount).toBe(1);
-  }, 30_000);
+    await expect(runTool(tool, "trigger")).rejects.toThrow(/Session not found/);
+    await waitFor(() => changes.some((change) => change.status === "connected"), 10_000);
+    const published = [...changes].reverse().find((change) => change.status === "connected")!.tools;
+
+    expect(published.map((candidate) => candidate.name)).toEqual([
+      "mcp__session-fixture__fresh",
+    ]);
+    expect(published[0].description).toBe("new valid tool");
+  }, 20_000);
 });
 
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {

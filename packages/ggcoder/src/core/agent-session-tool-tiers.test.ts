@@ -188,7 +188,7 @@ describe("AgentSession built-in tool tiering", () => {
     }
   }, 20_000);
 
-  it("keeps allow-listed, additional, and MCP tools eager while guarding late registration", async () => {
+  it("keeps allow-listed and additional tools eager while guarding late registration", async () => {
     const requested = [
       "read",
       "grep",
@@ -213,14 +213,18 @@ describe("AgentSession built-in tool tiering", () => {
 
       session.registerTool(stubTool("late_allowed"));
       session.registerTool(stubTool("late_blocked"));
+      // Prefix-like ordinary tools carry no MCP identity metadata and must not
+      // inherit an MCP server allow-list merely by choosing a matching name.
       session.registerTool(stubTool("mcp__safe-search__query"));
       session.registerTool(stubTool("mcp__unsafe-search__query"));
 
-      expect(liveToolNames(session)).toEqual(
-        expect.arrayContaining(["late_allowed", "mcp__safe-search__query"]),
-      );
+      expect(liveToolNames(session)).toContain("late_allowed");
       expect(liveToolNames(session)).not.toEqual(
-        expect.arrayContaining(["late_blocked", "mcp__unsafe-search__query"]),
+        expect.arrayContaining([
+          "late_blocked",
+          "mcp__safe-search__query",
+          "mcp__unsafe-search__query",
+        ]),
       );
 
       const registered = (session as unknown as { registeredTools: Map<string, AgentTool> })
@@ -228,6 +232,9 @@ describe("AgentSession built-in tool tiering", () => {
       await expect(registered.get("late_blocked")?.execute({}, TOOL_CONTEXT)).rejects.toThrow(
         "late_blocked is unavailable",
       );
+      await expect(
+        registered.get("mcp__safe-search__query")?.execute({}, TOOL_CONTEXT),
+      ).rejects.toThrow("mcp__safe-search__query is unavailable");
       await expect(
         registered.get("mcp__unsafe-search__query")?.execute({}, TOOL_CONTEXT),
       ).rejects.toThrow("mcp__unsafe-search__query is unavailable");

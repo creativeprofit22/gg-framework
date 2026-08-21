@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import { getAppPaths } from "@kenkaiiii/gg-core";
+import path from "node:path";
+import { getAppPaths, withFileLock } from "@kenkaiiii/gg-core";
 import { log } from "../logger.js";
+import { createMcpToolIdentity } from "./tool-identity.js";
 import type { MCPServerConfig } from "./types.js";
 
 /**
@@ -26,9 +28,10 @@ import type { MCPServerConfig } from "./types.js";
 export type ProtocolEra = "legacy" | "modern";
 
 export interface CachedTool {
-  name: string;
+  /** Exact original MCP listTools/callTool name. */
+  toolName: string;
   description: string;
-  rawInputSchema?: Record<string, unknown>;
+  rawInputSchema?: unknown;
 }
 
 export interface CachedServerEntry {
@@ -39,7 +42,7 @@ export interface CachedServerEntry {
 }
 
 interface CatalogFile {
-  version: 1;
+  version: 2;
   servers: Record<string, CachedServerEntry>;
 }
 
@@ -72,28 +75,61 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Validate one persisted entry; unknown/partial shapes are dropped, not trusted. */
-function parseEntry(value: unknown): CachedServerEntry | undefined {
-  if (!isRecord(value)) return undefined;
+function parseEntry(serverName: string, value: unknown): CachedServerEntry | undefined {
+  if (serverName.length === 0 || !isRecord(value)) return undefined;
   const { configHash, savedAt, protocolEra, tools } = value;
   if (typeof configHash !== "string" || !configHash) return undefined;
   if (typeof savedAt !== "number" || !Number.isFinite(savedAt)) return undefined;
   if (!Array.isArray(tools)) return undefined;
+
   const parsedTools: CachedTool[] = [];
+  const seenToolNames = new Set<string>();
   for (const tool of tools) {
-    if (!isRecord(tool)) continue;
-    if (typeof tool.name !== "string" || !tool.name) continue;
+    if (!isRecord(tool)) return undefined;
+    if (typeof tool.toolName !== "string" || tool.toolName.length === 0) return undefined;
+    if (typeof tool.description !== "string") return undefined;
+    try {
+      createMcpToolIdentity(serverName, tool.toolName);
+    } catch {
+      return undefined;
+    }
+    if (seenToolNames.has(tool.toolName)) return undefined;
+    seenToolNames.add(tool.toolName);
     parsedTools.push({
-      name: tool.name,
-      description: typeof tool.description === "string" ? tool.description : "",
-      rawInputSchema: isRecord(tool.rawInputSchema) ? tool.rawInputSchema : undefined,
+      toolName: tool.toolName,
+      description: tool.description,
+      ...(Object.hasOwn(tool, "rawInputSchema") ? { rawInputSchema: tool.rawInputSchema } : {}),
     });
   }
+
   return {
     configHash,
     savedAt,
     protocolEra: protocolEra === "legacy" || protocolEra === "modern" ? protocolEra : undefined,
     tools: parsedTools,
   };
+}
+
+function validateToolsForSave(serverName: string, tools: readonly CachedTool[]): CachedTool[] {
+  if (typeof serverName !== "string" || serverName.length === 0) {
+    throw new TypeError("MCP serverName must be a non-empty string");
+  }
+  const seenToolNames = new Set<string>();
+  return tools.map((tool) => {
+    createMcpToolIdentity(serverName, tool.toolName);
+    if (seenToolNames.has(tool.toolName)) {
+      throw new TypeError(`MCP catalog contains duplicate tool name: ${tool.toolName}`);
+    }
+    seenToolNames.add(tool.toolName);
+    if (typeof tool.description !== "string") {
+      throw new TypeError("MCP cached tool description must be a string");
+    }
+    return {
+      toolName: tool.toolName,
+      description: tool.description,
+      ...(Object.hasOwn(tool, "rawInputSchema") ? { rawInputSchema: tool.rawInputSchema } : {}),
+    };
+  });
 }
 
 /**
@@ -103,7 +139,7 @@ function parseEntry(value: unknown): CachedServerEntry | undefined {
  * Malformed files are treated as empty — a broken cache must never break a run.
  */
 export class McpCatalogCache {
-  /** Serializes read-modify-write cycles within one process. */
+  /** Serializes read-modify-write cycles within this cache instance. */
   private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly filePath: string = getAppPaths().mcpCatalogFile) {}
@@ -112,26 +148,32 @@ export class McpCatalogCache {
     try {
       const raw = await fs.readFile(this.filePath, "utf-8");
       const parsed: unknown = JSON.parse(raw);
-      if (!isRecord(parsed) || !isRecord(parsed.servers)) return { version: 1, servers: {} };
+      if (!isRecord(parsed) || parsed.version !== 2 || !isRecord(parsed.servers)) {
+        return { version: 2, servers: {} };
+      }
       const servers: Record<string, CachedServerEntry> = {};
       for (const [name, value] of Object.entries(parsed.servers)) {
-        const entry = parseEntry(value);
+        const entry = parseEntry(name, value);
         if (entry) servers[name] = entry;
       }
-      return { version: 1, servers };
+      return { version: 2, servers };
     } catch {
       // Missing or malformed: an empty cache is always a safe answer.
-      return { version: 1, servers: {} };
+      return { version: 2, servers: {} };
     }
   }
 
   private async writeAll(data: CatalogFile): Promise<void> {
+    const tempPath = `${this.filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
-      await fs.writeFile(this.filePath, JSON.stringify(data, null, 2), {
+      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+      await fs.writeFile(tempPath, JSON.stringify(data, null, 2), {
         encoding: "utf-8",
         mode: 0o600,
       });
+      await fs.rename(tempPath, this.filePath);
     } catch (err) {
+      await fs.rm(tempPath, { force: true }).catch(() => undefined);
       log("WARN", "mcp", "failed to persist MCP catalog cache", {
         message: err instanceof Error ? err.message : String(err),
       });
@@ -169,32 +211,33 @@ export class McpCatalogCache {
     tools: readonly CachedTool[],
     protocolEra?: ProtocolEra,
   ): Promise<void> {
-    const run = this.writeQueue.then(async () => {
-      const all = await this.readAll();
-      all.servers[config.name] = {
-        configHash: hashServerConfig(config),
-        savedAt: Date.now(),
-        protocolEra: protocolEra ?? all.servers[config.name]?.protocolEra,
-        tools: tools.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          ...(tool.rawInputSchema ? { rawInputSchema: tool.rawInputSchema } : {}),
-        })),
-      };
-      await this.writeAll(all);
-    });
+    const normalizedTools = validateToolsForSave(config.name, tools);
+    const run = this.writeQueue.then(() =>
+      withFileLock(this.filePath, async () => {
+        const all = await this.readAll();
+        all.servers[config.name] = {
+          configHash: hashServerConfig(config),
+          savedAt: Date.now(),
+          protocolEra: protocolEra ?? all.servers[config.name]?.protocolEra,
+          tools: normalizedTools,
+        };
+        await this.writeAll(all);
+      }),
+    );
     this.writeQueue = run.catch(() => undefined);
     await run;
   }
 
   /** Drop a server's cached tools (removal, or a connect that found none). */
   async clear(name: string): Promise<void> {
-    const run = this.writeQueue.then(async () => {
-      const all = await this.readAll();
-      if (!all.servers[name]) return;
-      delete all.servers[name];
-      await this.writeAll(all);
-    });
+    const run = this.writeQueue.then(() =>
+      withFileLock(this.filePath, async () => {
+        const all = await this.readAll();
+        if (!all.servers[name]) return;
+        delete all.servers[name];
+        await this.writeAll(all);
+      }),
+    );
     this.writeQueue = run.catch(() => undefined);
     await run;
   }

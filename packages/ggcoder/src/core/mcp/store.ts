@@ -1,5 +1,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { withFileLock } from "@kenkaiiii/gg-core";
 import { z } from "zod";
 import { getAppPaths } from "../../config.js";
 import { log } from "../logger.js";
@@ -54,30 +56,61 @@ export function projectMcpPath(cwd: string): string {
 }
 
 /**
- * Read + validate one mcp.json file. On missing file → empty. On malformed
- * JSON/schema → log + treat as empty (don't crash), matching SettingsManager.
+ * Read + validate one mcp.json file. A genuinely missing file is empty; every
+ * other read/parse/schema failure is surfaced so management cannot report a
+ * broken config as a successful empty list.
  */
 async function readMcpFile(filePath: string): Promise<McpFile> {
   let content: string;
   try {
     content = await fs.readFile(filePath, "utf-8");
-  } catch {
-    return { mcpServers: {} };
+  } catch (err) {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      (err as { code?: unknown }).code === "ENOENT"
+    ) {
+      return { mcpServers: {} };
+    }
+    throw new Error(`Could not read MCP config at ${filePath}.`, { cause: err });
   }
   try {
     const raw: unknown = JSON.parse(content);
     return McpFileSchema.parse(raw);
   } catch (err) {
-    log("WARN", "mcp", `Ignoring malformed MCP config at ${filePath}`, {
+    log("WARN", "mcp", `Malformed MCP config at ${filePath}`, {
       error: err instanceof Error ? err.message : String(err),
     });
-    return { mcpServers: {} };
+    throw new Error(`MCP config at ${filePath} is malformed. Fix the file, then retry.`, {
+      cause: err,
+    });
   }
 }
 
 async function writeMcpFile(filePath: string, file: McpFile): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  await fs.writeFile(filePath, JSON.stringify(file, null, 2) + "\n", "utf-8");
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(file, null, 2) + "\n", {
+      encoding: "utf-8",
+      mode: 0o600,
+      flag: "wx",
+    });
+    await fs.rename(tempPath, filePath);
+  } finally {
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Every server-config mutation, across global and project scopes, uses the
+ * same process-safe lock. Callers must re-read their target file inside it.
+ */
+async function withMcpMutationLock<T>(mutation: () => Promise<T>): Promise<T> {
+  const lockTarget = globalMcpPath();
+  await fs.mkdir(path.dirname(lockTarget), { recursive: true, mode: 0o700 });
+  return withFileLock(lockTarget, mutation);
 }
 
 /** Map an on-disk entry to a runtime MCPServerConfig. */
@@ -153,26 +186,30 @@ export async function addServer(
   overwrite = false,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const filePath = scope === "global" ? globalMcpPath() : projectMcpPath(cwd);
-  const file = await readMcpFile(filePath);
-  if (file.mcpServers[entry.name] && !overwrite) {
-    return {
-      ok: false,
-      error: `A "${entry.name}" server already exists in ${scope} scope. Remove it first or use a different name.`,
-    };
-  }
-  file.mcpServers[entry.name] = toStoredEntry(entry);
-  await writeMcpFile(filePath, file);
-  return { ok: true };
+  return withMcpMutationLock(async () => {
+    const file = await readMcpFile(filePath);
+    if (file.mcpServers[entry.name] && !overwrite) {
+      return {
+        ok: false as const,
+        error: `A "${entry.name}" server already exists in ${scope} scope. Remove it first or use a different name.`,
+      };
+    }
+    file.mcpServers[entry.name] = toStoredEntry(entry);
+    await writeMcpFile(filePath, file);
+    return { ok: true as const };
+  });
 }
 
 /** Remove a server from a scope. Returns true if it existed. */
 export async function removeServer(name: string, scope: MCPScope, cwd: string): Promise<boolean> {
   const filePath = scope === "global" ? globalMcpPath() : projectMcpPath(cwd);
-  const file = await readMcpFile(filePath);
-  if (!file.mcpServers[name]) return false;
-  delete file.mcpServers[name];
-  await writeMcpFile(filePath, file);
-  return true;
+  return withMcpMutationLock(async () => {
+    const file = await readMcpFile(filePath);
+    if (!file.mcpServers[name]) return false;
+    delete file.mcpServers[name];
+    await writeMcpFile(filePath, file);
+    return true;
+  });
 }
 
 /** Look up a single server across both scopes (project wins). */

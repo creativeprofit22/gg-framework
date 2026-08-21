@@ -6,7 +6,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { McpCatalogCache } from "./catalog-cache.js";
-import { MCPClientManager, type MCPConnectResult } from "./client.js";
+import {
+  MCPClientManager,
+  type MCPConnectResult,
+  type MCPServerStateChange,
+} from "./client.js";
 import { DEFAULT_MCP_SERVERS } from "./defaults.js";
 import {
   isShareableServer,
@@ -49,10 +53,14 @@ function newPool(): SharedMcpPool {
 }
 
 /** A manager wired to a test-local pool, standing in for one session. */
-function session(pool: SharedMcpPool): MCPClientManager {
+function session(
+  pool: SharedMcpPool,
+  onServerStateChange?: (change: MCPServerStateChange) => void,
+): MCPClientManager {
   const instance = new MCPClientManager({
     catalogCache: new McpCatalogCache(cachePath),
     sharedPool: pool,
+    onServerStateChange,
   });
   managers.push(instance);
   return instance;
@@ -414,7 +422,8 @@ describe.skipIf(process.platform === "win32")(
       const config = sharedFixture();
       const pool = newPool();
 
-      const first = session(pool);
+      const lifecycle: MCPServerStateChange[] = [];
+      const first = session(pool, (change) => lifecycle.push(change));
       const [connected] = await first.connectAllDetailed([config]);
       expect(connected?.ok).toBe(true);
       expect(pool.size).toBe(1);
@@ -435,10 +444,16 @@ describe.skipIf(process.platform === "win32")(
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
 
-      // The dead entry is gone rather than cached forever...
+      // The dead entry is gone rather than cached forever. Existing claimants
+      // are told to remove tools, and stdio is never respawned behind their call.
       expect(pool.size).toBe(0);
+      expect(lifecycle.at(-1)?.status).toBe("disconnected");
+      expect(lifecycle.some((change) => change.status === "recovering")).toBe(false);
+      await expect(
+        connected!.tools[0]!.execute({ text: "stale" }, toolContext()),
+      ).rejects.toThrow(/stale tool wrapper|Connection closed/);
 
-      // ...so a session connecting afterwards gets a working server again.
+      // A NEW session may deliberately establish a new child afterwards.
       const second = session(pool);
       const [reconnected] = await second.connectAllDetailed([config]);
       expect(reconnected?.ok).toBe(true);

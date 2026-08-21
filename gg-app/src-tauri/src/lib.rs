@@ -4966,9 +4966,9 @@ async fn agent_mcp_list(
         req = req.query(&[("cwd", c)]);
     }
     let res = req.send().await.map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    let status = res.status();
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: add an MCP server from a pasted `claude mcp add …` line. Returns
@@ -5028,9 +5028,9 @@ async fn agent_mcp_remove(
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    res.json::<serde_json::Value>()
-        .await
-        .map_err(|e| e.to_string())
+    let status = res.status();
+    let body = res.text().await.map_err(|e| e.to_string())?;
+    parse_sidecar_json_response(status, &body)
 }
 
 /// Proxy: begin an interactive OAuth login for a remote (HTTP) MCP server.

@@ -777,4 +777,68 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
     expect(errors).toEqual(["implementation-checkpoint"]);
     expect(broadcasts).toEqual([2]);
   });
+
+  it("propagates accepted gate blocks without broadcasting and still broadcasts rejected feedback", async () => {
+    const blockedEvaluation = {
+      gateOutcome: "review" as const,
+      unmetGateCodes: ["incomplete-plan" as const],
+      implementationCheckpointId: "checkpoint-incomplete",
+      verificationStatusUpdateId: "verification-passed",
+      targetStatus: "review" as const,
+      reason: "Not every canonical plan step is complete.",
+    };
+    const repository: PhaseCompletionRepository = {
+      recordImplementationCheckpoint: vi.fn(),
+      recoverImplementationCheckpoint: vi.fn(),
+      recordCompletionReview: vi
+        .fn()
+        .mockResolvedValueOnce({
+          status: "completion-gate-blocked" as const,
+          revision: 7,
+          phaseId: "phase-24",
+          evaluation: blockedEvaluation,
+        })
+        .mockResolvedValueOnce({
+          status: "committed" as const,
+          snapshot: snapshot(8),
+          phase: phase(),
+          evaluation: { ...blockedEvaluation, unmetGateCodes: [] },
+        }),
+    };
+    const broadcasts: number[] = [];
+    const coordinator = new AppSidecarPhaseCompletionCoordinator({
+      cwd: "/project",
+      repository,
+      broadcastSnapshot: (value) => broadcasts.push(value.revision),
+    });
+    const request = {
+      reviewId: "review",
+      phaseId: "phase-24",
+      expectedSession: session,
+      reviewer: "ken" as const,
+      decision: "accepted" as const,
+      evidence: ["Reviewed"],
+      reason: null,
+      acceptsVerificationException: false,
+      timestamp: LATER,
+    };
+
+    await expect(coordinator.review(request)).resolves.toEqual({
+      status: "completion-gate-blocked",
+      revision: 7,
+      phaseId: "phase-24",
+      evaluation: blockedEvaluation,
+    });
+    expect(broadcasts).toEqual([]);
+
+    await expect(
+      coordinator.review({
+        ...request,
+        reviewId: "rejected-review",
+        decision: "rejected",
+        reason: "Repair the checkpoint.",
+      }),
+    ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 8 } });
+    expect(broadcasts).toEqual([8]);
+  });
 });

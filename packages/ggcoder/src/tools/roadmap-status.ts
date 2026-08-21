@@ -386,6 +386,14 @@ export type RoadmapStatusToolResult =
       message?: string;
     }
   | {
+      result: "completion-gate-blocked";
+      phaseId: string;
+      revision: number;
+      gateOutcome: NotesCompletionGateOutcome;
+      unmetGateCodes: NotesCompletionUnmetGateCode[];
+      message: string;
+    }
+  | {
       result:
         | "reviewer-not-authorized"
         | "reconciliation-in-progress"

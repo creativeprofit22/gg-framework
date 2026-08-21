@@ -254,6 +254,7 @@ export interface ProjectNotesImplementationRecoveryRequest {
   recoveryId: string;
   phaseId: string;
   expectedRevision: number;
+  sourceRevision: number;
   expectedSession: NotesSessionLink;
   sourceCheckpointId: string;
   planStepTotal: number;
@@ -275,7 +276,6 @@ export type ProjectNotesImplementationRecoveryOutcome =
         | "stale-session"
         | "source-checkpoint-missing"
         | "source-checkpoint-stale"
-        | "source-checkpoint-mismatch"
         | "source-checkpoint-complete"
         | "source-run-not-successful";
     }
@@ -303,6 +303,12 @@ export type ProjectNotesCompletionReviewOutcome =
     }
   | {
       status: "duplicate";
+      revision: number;
+      phaseId: string;
+      evaluation: PhaseCompletionEvaluation;
+    }
+  | {
+      status: "completion-gate-blocked";
       revision: number;
       phaseId: string;
       evaluation: PhaseCompletionEvaluation;
@@ -339,6 +345,12 @@ export type ProjectNotesRoadmapFinalReviewOutcome =
       proposals: ProjectNotesRoadmapProposalOutcome[];
       evaluation: PhaseCompletionEvaluation;
       advancementCheckpoint: NotesRoadmapPhaseAdvancementCheckpoint | null;
+    }
+  | {
+      status: "completion-gate-blocked";
+      revision: number;
+      phaseId: string;
+      evaluation: PhaseCompletionEvaluation;
     }
   | { status: "duplicate-id-conflict" | "stale-revision"; revision: number }
   | { status: "invalid-review"; message: string }
@@ -1039,7 +1051,7 @@ function sameImplementationRecoveryPayload(
       runOutcome: "succeeded",
       recovery: {
         sourceCheckpointId: request.sourceCheckpointId,
-        sourceRevision: request.expectedRevision,
+        sourceRevision: request.sourceRevision,
         evidence: request.evidence,
       },
     },
@@ -1089,6 +1101,12 @@ function validateImplementationRecoveryRequest(
   if (!isNonEmptyString(request.recoveryId)) return "Recovery ID is required.";
   if (!Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) {
     return "Expected revision must be a non-negative integer.";
+  }
+  if (!Number.isInteger(request.sourceRevision) || request.sourceRevision < 0) {
+    return "Source revision must be a non-negative integer.";
+  }
+  if (request.sourceRevision > request.expectedRevision) {
+    return "Source revision must not exceed the expected revision.";
   }
   if (!isNonEmptyString(request.sourceCheckpointId)) return "Source checkpoint ID is required.";
   if (!isTimestamp(request.timestamp)) return "Recovery timestamp is invalid.";
@@ -2103,6 +2121,18 @@ export class ProjectNotesRepository {
       if (!appended.ok) {
         return { status: "invalid-review", message: appended.message };
       }
+      if (
+        reviewRequest.decision === "accepted" &&
+        appended.evaluation.gateOutcome !== "done" &&
+        appended.evaluation.unmetGateCodes.length > 0
+      ) {
+        return {
+          status: "completion-gate-blocked",
+          revision,
+          phaseId: reviewRequest.phaseId,
+          evaluation: appended.evaluation,
+        };
+      }
       let advancementCheckpoint: NotesRoadmapPhaseAdvancementCheckpoint | null = null;
       if (appended.evaluation.gateOutcome === "done") {
         const nextPhaseIndex = selectNextEligibleRoadmapPhaseIndex(
@@ -2258,9 +2288,6 @@ export class ProjectNotesRepository {
       if (!notesSessionLinksEqual(source.session, normalizedRequest.expectedSession)) {
         return { status: "stale-session" };
       }
-      if (source.planStepTotal !== normalizedRequest.planStepTotal) {
-        return { status: "source-checkpoint-mismatch" };
-      }
       if (source.runOutcome !== "succeeded") return { status: "source-run-not-successful" };
       if (source.completedPlanSteps.length === source.planStepTotal) {
         return { status: "source-checkpoint-complete" };
@@ -2278,7 +2305,7 @@ export class ProjectNotesRepository {
         runOutcome: "succeeded",
         recovery: {
           sourceCheckpointId: normalizedRequest.sourceCheckpointId,
-          sourceRevision: normalizedRequest.expectedRevision,
+          sourceRevision: normalizedRequest.sourceRevision,
           evidence: [...normalizedRequest.evidence],
         },
         timestamp,
@@ -2346,6 +2373,18 @@ export class ProjectNotesRepository {
       );
       if (!appended.ok) {
         return { status: "invalid-review", message: appended.message };
+      }
+      if (
+        reviewRequest.decision === "accepted" &&
+        appended.evaluation.gateOutcome !== "done" &&
+        appended.evaluation.unmetGateCodes.length > 0
+      ) {
+        return {
+          status: "completion-gate-blocked",
+          revision,
+          phaseId: reviewRequest.phaseId,
+          evaluation: appended.evaluation,
+        };
       }
       const next = await this.commitDocument(paths, current, appended.document, {
         validationMode: "validated",

@@ -26,6 +26,7 @@ function attempt(
       | "stale-revision"
       | "completion-checkpoint-blocked";
     gateOutcome?: "done" | "review";
+    unmetGateCodes?: string[];
   } = {},
 ): AppSidecarFinalReviewAttempt {
   const decision = options.decision ?? "accepted";
@@ -58,20 +59,72 @@ function attempt(
             statusOutcome: "applied",
             proposals: [],
             gateOutcome: options.gateOutcome ?? "done",
-            unmetGateCodes: [],
+            unmetGateCodes: options.unmetGateCodes ?? [],
           }
         : { result, phaseId: reviewPhase.id, revision: reviewPhase.revision },
   } as AppSidecarFinalReviewAttempt;
 }
 
 describe("Autopilot phase completion review", () => {
-  it("advances only when the existing completion gate reports Done", () => {
+  it("throws when text claims ALL_CLEAR without a final_review attempt", () => {
+    expect(() => phaseCompletionVerdict(reviewPhase, [], { kind: "all_clear" })).toThrowError(
+      "Autopilot completion review failed for phase phase-review: no relevant roadmap_status final_review call was recorded.",
+    );
+  });
+
+  it.each(["stale-revision", "completion-checkpoint-blocked"] as const)(
+    "throws when the final_review result does not commit: %s",
+    (result) => {
+      expect(() =>
+        phaseCompletionVerdict(reviewPhase, [attempt({ result })], { kind: "all_clear" }),
+      ).toThrowError(
+        `Autopilot completion review failed for phase phase-review: final_review did not commit or duplicate (result: ${result}).`,
+      );
+    },
+  );
+
+  it.each([
+    ["completion-review-committed", "stale-revision"],
+    ["completion-review-duplicate", "completion-checkpoint-blocked"],
+  ] as const)(
+    "throws using the latest result when an earlier attempt succeeded: %s then %s",
+    (earlierResult, latestResult) => {
+      expect(() =>
+        phaseCompletionVerdict(
+          reviewPhase,
+          [attempt({ result: earlierResult }), attempt({ result: latestResult })],
+          { kind: "all_clear" },
+        ),
+      ).toThrowError(
+        `Autopilot completion review failed for phase phase-review: final_review did not commit or duplicate (result: ${latestResult}).`,
+      );
+    },
+  );
+
+  it("throws when an accepted final_review leaves the completion gate in Review", () => {
+    expect(() =>
+      phaseCompletionVerdict(
+        reviewPhase,
+        [attempt({ gateOutcome: "review", unmetGateCodes: ["verification-evidence-missing"] })],
+        { kind: "all_clear" },
+      ),
+    ).toThrowError(
+      "Autopilot completion review failed for phase phase-review: accepted final_review left the completion gate in Review (verification-evidence-missing).",
+    );
+  });
+
+  it("advances committed and duplicate reviews only when the completion gate reports Done", () => {
     expect(
       phaseCompletionVerdict(reviewPhase, [attempt()], { kind: "human", reason: "text drift" }),
     ).toEqual({ kind: "all_clear" });
+    expect(
+      phaseCompletionVerdict(reviewPhase, [attempt({ result: "completion-review-duplicate" })], {
+        kind: "ignore",
+      }),
+    ).toEqual({ kind: "all_clear" });
   });
 
-  it("routes a rejected final review through the existing correction loop", () => {
+  it("routes a committed rejected final review through the existing correction loop", () => {
     expect(
       phaseCompletionVerdict(reviewPhase, [attempt({ decision: "rejected" })], {
         kind: "all_clear",
@@ -79,49 +132,17 @@ describe("Autopilot phase completion review", () => {
     ).toEqual({ kind: "prompt", body: "Fix the failing edge case." });
   });
 
-  it("leaves accepted work with missing evidence in Review", () => {
-    expect(
-      phaseCompletionVerdict(reviewPhase, [attempt({ gateOutcome: "review" })], {
-        kind: "all_clear",
-      }),
-    ).toBeNull();
+  it("trusts the parsed text verdict for phases outside Review", () => {
+    const activePhase = { ...reviewPhase, status: "in-progress" as const };
+    const textVerdict = { kind: "human", reason: "Needs a product decision." } as const;
+
+    expect(phaseCompletionVerdict(activePhase, [], textVerdict)).toEqual(textVerdict);
   });
 
-  it("honors an idempotent duplicate but rejects stale review output", () => {
-    expect(
-      phaseCompletionVerdict(reviewPhase, [attempt({ result: "completion-review-duplicate" })], {
-        kind: "all_clear",
-      }),
-    ).toEqual({ kind: "all_clear" });
-    expect(
-      phaseCompletionVerdict(reviewPhase, [attempt({ result: "stale-revision" })], {
-        kind: "all_clear",
-      }),
-    ).toBeNull();
-  });
-
-  it("is restart-safe because a fresh loop trusts the persisted duplicate gate result", () => {
-    const afterRestart = structuredClone(reviewPhase);
-    expect(
-      phaseCompletionVerdict(afterRestart, [attempt({ result: "completion-review-duplicate" })], {
-        kind: "ignore",
-      }),
-    ).toEqual({ kind: "all_clear" });
-  });
-
-  it("leaves Review on interruption or disabled autopilot", () => {
-    expect(phaseCompletionVerdict(reviewPhase, [], { kind: "all_clear" })).toBeNull();
-    expect(
-      phaseCompletionVerdict(reviewPhase, [attempt({ result: "completion-checkpoint-blocked" })], {
-        kind: "all_clear",
-      }),
-    ).toBeNull();
-  });
-
-  it("ignores manual Ken attempts inside the Autopilot Ken loop", () => {
-    expect(
+  it("ignores manual Ken attempts when requiring an Autopilot final_review", () => {
+    expect(() =>
       phaseCompletionVerdict(reviewPhase, [attempt({ actor: "ken" })], { kind: "all_clear" }),
-    ).toBeNull();
+    ).toThrowError("no relevant roadmap_status final_review call was recorded");
   });
 
   it("loads the bound goal, criteria, status, and latest verification evidence", () => {

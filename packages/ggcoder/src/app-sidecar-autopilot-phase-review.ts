@@ -51,14 +51,23 @@ export function phaseCompletionVerdict(
       attempt.input.phase_id === phase.id &&
       attempt.input.final_review !== null,
   );
-  const completed = [...relevant]
-    .reverse()
-    .find(
-      (attempt) =>
-        attempt.result.result === "completion-review-committed" ||
-        attempt.result.result === "completion-review-duplicate",
+  if (relevant.length === 0) {
+    throw new Error(
+      `Autopilot completion review failed for phase ${phase.id}: no relevant roadmap_status final_review call was recorded.`,
     );
-  if (!completed || completed.input.final_review === null) return null;
+  }
+
+  const completed = relevant.at(-1)!;
+  const completionResult = completed.result;
+  if (
+    completed.input.final_review === null ||
+    (completionResult.result !== "completion-review-committed" &&
+      completionResult.result !== "completion-review-duplicate")
+  ) {
+    throw new Error(
+      `Autopilot completion review failed for phase ${phase.id}: final_review did not commit or duplicate (result: ${completionResult.result}).`,
+    );
+  }
 
   if (completed.input.final_review.decision === "rejected") {
     return {
@@ -69,15 +78,14 @@ export function phaseCompletionVerdict(
     };
   }
 
-  if (
-    (completed.result.result === "completion-review-committed" ||
-      completed.result.result === "completion-review-duplicate") &&
-    completed.result.gateOutcome === "done"
-  ) {
+  if (completionResult.gateOutcome === "done") {
     return { kind: "all_clear" };
   }
 
-  // Accepted with missing evidence, a stale/non-committed attempt, interruption,
-  // or disabled autopilot all stop here and leave the persisted phase in Review.
-  return null;
+  const unmetGateCodes = completionResult.unmetGateCodes;
+  const gateDetails =
+    unmetGateCodes.length > 0 ? unmetGateCodes.join(", ") : "no unmet gate codes reported";
+  throw new Error(
+    `Autopilot completion review failed for phase ${phase.id}: accepted final_review left the completion gate in Review (${gateDetails}).`,
+  );
 }

@@ -283,6 +283,23 @@ export class AppSidecarRoadmapToolHost {
             : "Final review submitted and applied; the phase remains in Review because completion gates are unmet.",
       };
     }
+    if (completion.status === "completion-gate-blocked") {
+      const unmetGateCodes = completion.evaluation.unmetGateCodes;
+      const result = "completion-gate-blocked" as const;
+      this.dependencies.onNonCommit?.({
+        result,
+        phaseId: input.phase_id,
+        updateId: input.update_id,
+      });
+      return {
+        result,
+        phaseId: input.phase_id,
+        revision: completion.revision,
+        gateOutcome: completion.evaluation.gateOutcome,
+        unmetGateCodes,
+        message: `Final review was not committed because completion gates are unmet: ${unmetGateCodes.join(", ")}.`,
+      };
+    }
     const result =
       completion.status === "missing"
         ? "notes-missing"

@@ -2453,7 +2453,7 @@ describe("production launchBoundPhase orchestration", () => {
     );
   });
 
-  it("forwards manual-review proposals for committed and duplicate final reviews", async () => {
+  it("blocks instead of forwarding manual-review proposals when completion gates are unmet", async () => {
     const { repository, cwd } = await setup();
     const fixture = new ProductionPhaseFixture(repository, cwd);
     await fixture.start();
@@ -2487,28 +2487,23 @@ describe("production launchBoundPhase orchestration", () => {
       },
     });
 
-    const committed = await executeRoadmap(tool, input);
-    expect(committed).toMatchObject({
-      result: "completion-review-committed",
-      statusOutcome: "evidence-only",
-      proposals: [
-        {
-          proposalId: expect.any(String),
-          outcome: "pending",
-          policyOutcome: "manual-review",
-          referenceId: null,
-        },
-      ],
+    const blocked = await executeRoadmap(tool, input);
+    expect(blocked).toEqual({
+      result: "completion-gate-blocked",
+      phaseId: "phase-21",
+      revision: 2,
+      gateOutcome: "review",
+      unmetGateCodes: ["inactive-phase", "missing-implementation", "missing-verification"],
+      message:
+        "Final review was not committed because completion gates are unmet: " +
+        "inactive-phase, missing-implementation, missing-verification.",
     });
-    expect(committed).not.toHaveProperty("statusUpdate");
-    await expect(executeRoadmap(tool, input)).resolves.toEqual({
-      ...committed,
-      result: "completion-review-duplicate",
-    });
-    expect(snapshots).toHaveLength(1);
+    expect(blocked).not.toHaveProperty("statusUpdate");
+    await expect(executeRoadmap(tool, input)).resolves.toEqual(blocked);
+    expect(snapshots).toHaveLength(0);
   });
 
-  it("forwards Autopilot accepted and reused proposals for committed and duplicate final reviews", async () => {
+  it("blocks instead of forwarding Autopilot accepted proposals when completion gates are unmet", async () => {
     const { repository, cwd } = await setup();
     const fixture = new ProductionPhaseFixture(repository, cwd);
     await fixture.start();
@@ -2557,31 +2552,20 @@ describe("production launchBoundPhase orchestration", () => {
       },
     });
 
-    const committed = await executeRoadmap(tool, input);
-    expect(committed).toMatchObject({
-      result: "completion-review-committed",
-      statusOutcome: "evidence-only",
-      proposals: [
-        {
-          proposalId: expect.any(String),
-          outcome: "accepted",
-          policyOutcome: "accepted",
-          referenceId: expect.any(String),
-        },
-        {
-          proposalId: expect.any(String),
-          outcome: "reused",
-          policyOutcome: "reused",
-          referenceId: "ref-1",
-        },
-      ],
+    const blocked = await executeRoadmap(tool, input);
+    expect(blocked).toEqual({
+      result: "completion-gate-blocked",
+      phaseId: "phase-21",
+      revision: 2,
+      gateOutcome: "review",
+      unmetGateCodes: ["inactive-phase", "missing-implementation", "missing-verification"],
+      message:
+        "Final review was not committed because completion gates are unmet: " +
+        "inactive-phase, missing-implementation, missing-verification.",
     });
-    expect(committed).not.toHaveProperty("statusUpdate");
-    await expect(executeRoadmap(tool, input)).resolves.toEqual({
-      ...committed,
-      result: "completion-review-duplicate",
-    });
-    expect(snapshots).toHaveLength(1);
+    expect(blocked).not.toHaveProperty("statusUpdate");
+    await expect(executeRoadmap(tool, input)).resolves.toEqual(blocked);
+    expect(snapshots).toHaveLength(0);
   });
 
   it("keeps roadmap_status out of ordinary CLI createTools", async () => {

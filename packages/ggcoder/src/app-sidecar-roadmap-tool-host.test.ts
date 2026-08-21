@@ -9,6 +9,7 @@ import {
   type AppSidecarRoadmapSessionRole,
 } from "./app-sidecar-roadmap-tool-host.js";
 import { AgentSession } from "./core/agent-session.js";
+import { RoadmapStatusParams } from "./tools/roadmap-status.js";
 
 const originalAzureApiKey = process.env.AZURE_OPENAI_API_KEY;
 const originalAzureBaseUrl = process.env.AZURE_OPENAI_BASE_URL;
@@ -175,7 +176,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     );
   });
 
-  it("keeps phase completion review isolated to Autopilot Ken", async () => {
+  it("keeps phase completion review isolated to Autopilot Ken and reports verdict failures", async () => {
     const source = await fs.readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
     const loop = source.match(
       /async function runAutopilotReview[\s\S]*?async function runAutopilotPlanReview/,
@@ -183,7 +184,9 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
 
     expect(loop).toContain("ensureKenAutoSession()");
     expect(loop).not.toContain("ensureKenSession()");
-    expect(loop).toContain("phaseCompletionVerdict");
+    expect(loop).toMatch(
+      /try \{[\s\S]*?return phaseCompletionVerdict\([\s\S]*?\} catch \(err\) \{[\s\S]*?broadcastError\("autopilot_error", "autopilot review failed", err\)/,
+    );
   });
 
   it("persists the settled implementation checkpoint before run_end and Autopilot review", async () => {
@@ -211,4 +214,64 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       await exerciseReviewerSession(role);
     },
   );
+
+  it("reports accepted completion gate failures as visible non-commits", async () => {
+    const broadcastNotesSnapshot = vi.fn();
+    const onNonCommit = vi.fn();
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: {
+        recordRoadmapStatusUpdate: vi.fn(async () => ({ status: "missing" as const })),
+        recordRoadmapFinalReview: vi.fn(async () => ({
+          status: "completion-gate-blocked" as const,
+          revision: 31,
+          phaseId: "phase-incomplete",
+          evaluation: {
+            gateOutcome: "review" as const,
+            unmetGateCodes: ["incomplete-plan" as const],
+            implementationCheckpointId: "checkpoint-1-of-9",
+            verificationStatusUpdateId: "verification-passed",
+            targetStatus: "review" as const,
+            reason: "Not every canonical plan step is complete.",
+          },
+        })),
+      },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => true },
+      broadcastNotesSnapshot,
+      onNonCommit,
+      now: () => "2026-08-15T01:00:00.000Z",
+    });
+    const tool = host.createSessionTools("ken-autopilot")[0]!;
+    const input = RoadmapStatusParams.parse({
+      update_id: "status-incomplete",
+      phase_id: "phase-incomplete",
+      transition: "review",
+      progress: "Autopilot reviewed the phase.",
+      evidence: ["Independent verification passed"],
+      final_review: {
+        review_id: "review-incomplete",
+        decision: "accepted",
+        evidence: ["The implementation was reviewed"],
+      },
+    });
+    const output = await tool.execute(input, {} as never);
+    if (typeof output !== "string") throw new Error("roadmap_status returned non-text output");
+
+    expect(JSON.parse(output)).toEqual({
+      result: "completion-gate-blocked",
+      phaseId: "phase-incomplete",
+      revision: 31,
+      gateOutcome: "review",
+      unmetGateCodes: ["incomplete-plan"],
+      message:
+        "Final review was not committed because completion gates are unmet: incomplete-plan.",
+    });
+    expect(broadcastNotesSnapshot).not.toHaveBeenCalled();
+    expect(onNonCommit).toHaveBeenCalledWith({
+      result: "completion-gate-blocked",
+      phaseId: "phase-incomplete",
+      updateId: "status-incomplete",
+    });
+  });
 });

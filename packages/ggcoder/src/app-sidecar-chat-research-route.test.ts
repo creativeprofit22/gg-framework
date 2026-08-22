@@ -42,6 +42,34 @@ interface HarnessState {
 
 const openServers: http.Server[] = [];
 
+function isFetchForbiddenPortError(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    error.cause instanceof Error &&
+    error.cause.message === "bad port"
+  );
+}
+
+async function closeTestServer(server: http.Server): Promise<void> {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+}
+
+async function listenOnFetchCompatiblePort(server: http.Server): Promise<string> {
+  while (true) {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const candidateBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    try {
+      const probe = await fetch(`${candidateBaseUrl}/__fixture-port-check`);
+      await probe.body?.cancel();
+      return candidateBaseUrl;
+    } catch (error) {
+      await closeTestServer(server);
+      if (!isFetchForbiddenPortError(error)) throw error;
+    }
+  }
+}
+
 afterEach(async () => {
   await Promise.all(
     openServers.splice(0).map(
@@ -217,9 +245,7 @@ async function startRouteHarness(
   });
 
   openServers.push(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address() as AddressInfo;
-  return { baseUrl: `http://127.0.0.1:${port}`, state };
+  return { baseUrl: await listenOnFetchCompatiblePort(server), state };
 }
 
 async function getJson(baseUrl: string, path: string): Promise<{ status: number; body: unknown }> {

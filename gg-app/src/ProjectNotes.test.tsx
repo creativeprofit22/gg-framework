@@ -1767,7 +1767,9 @@ describe("ProjectNotes", () => {
     selectPhaseView("Activity");
     fireEvent.click(screen.getByText(/Activity history/));
     expect(screen.getByText(/Implementation checkpoint: 1 of 2 plan steps/)).toBeTruthy();
-    expect(screen.getByText(/Final review rejected/)).toBeTruthy();
+    expect(
+      screen.getByText(/Final review submitted: rejected\. Applied gate outcome: Needs attention\./),
+    ).toBeTruthy();
   });
 
   it("labels an accepted verification exception with requester and reviewer timestamps", async () => {

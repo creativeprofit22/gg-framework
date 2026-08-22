@@ -16,6 +16,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   minimax: "MiniMax",
   xiaomi: "Xiaomi (MiMo)",
   deepseek: "DeepSeek",
+  huggingface: "Hugging Face",
   sakana: "Sakana (Fugu)",
   openrouter: "OpenRouter",
   local: "Local",
@@ -36,6 +37,7 @@ const PROVIDER_ORDER = [
   "minimax",
   "xiaomi",
   "deepseek",
+  "huggingface",
   "sakana",
   "openrouter",
 ];

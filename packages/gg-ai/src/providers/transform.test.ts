@@ -7,6 +7,7 @@ import {
   toAnthropicThinking,
   toAnthropicTools,
   toOpenAIMessages,
+  toGlmReasoningEffort,
   toLocalReasoningEffort,
   toOpenAIReasoningEffort,
 } from "./transform.js";
@@ -676,6 +677,17 @@ describe("toOpenAIReasoningEffort", () => {
   it("clamps client-only max and ultra levels to OpenAI's xhigh effort", () => {
     expect(toOpenAIReasoningEffort("max", "gpt-5.5")).toBe("xhigh");
     expect(toOpenAIReasoningEffort("ultra", "gpt-5.6-sol")).toBe("xhigh");
+  });
+});
+
+describe("toGlmReasoningEffort", () => {
+  it("keeps max as max — GLM spells its top rung `max`, not xhigh", () => {
+    expect(toGlmReasoningEffort("max")).toBe("max");
+    // Only `ultra` has no GLM counterpart; everything else is server-declared
+    // (`none, minimal, low, medium, high, xhigh, max`) and passes through.
+    expect(toGlmReasoningEffort("ultra")).toBe("max");
+    expect(toGlmReasoningEffort("xhigh")).toBe("xhigh");
+    expect(toGlmReasoningEffort("low")).toBe("low");
   });
 });
 

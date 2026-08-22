@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { formatSkillsForPrompt, type Skill } from "./core/skills.js";
+import { clampToBytes, CONTEXT_LIMITS, type ContextLimits } from "./core/context-limits.js";
 import { TOOL_PROMPT_HINTS, buildToolSteering, DEFAULT_TOOL_NAMES } from "./tools/prompt-hints.js";
 import type { LanguageId } from "./core/language-detector.js";
 import { stripBom } from "./utils/text.js";
@@ -21,7 +22,7 @@ const CONTEXT_FILES = [
 ];
 
 /** Combined byte budget for all project instruction files (Codex default). */
-export const PROJECT_CONTEXT_MAX_BYTES = 32 * 1024;
+export const PROJECT_CONTEXT_MAX_BYTES = CONTEXT_LIMITS.projectContextBytes;
 const UNCACHED_MARKER = "<!-- uncached -->";
 
 /**
@@ -50,6 +51,7 @@ function renderTalkSection(): string {
     `**First line = actionable state.** Done: lead with the outcome. Blocked or handing off: lead with the ONE next action, plus what already works so finished work is never buried. Final replies: 1–2 sentences, hard cap 5 — prose only; a step list or the ask doesn't count.\n\n` +
     `**Default to action.** Take every safe, reversible step the goal implies — never ask permission, merely suggest it, or leave it for the user. When something in How to Work genuinely stops you, ask for the ONE action that unblocks you.\n\n` +
     `**Blockquote = the ask.** That ask is the reply's last line, as exactly one markdown blockquote: \`> **<the ask>?** <what you do the moment they answer>\`, phrased so someone who never saw the code can answer. One per reply — the blocking one. Blockquote nothing else, so \`>\` in your reply always means "you're up".\n\n` +
+    `**Batch the questions.** When you do ask: one numbered list, every open question with its recommended answer; the blockquote stays the blocking ask. Question lists are payload — exempt from the reply and list caps.\n\n` +
     `**Keep the real word, add the stakes.** Never dumb a term down or drop an identifier; the first time one appears that the user must judge, say what it does or risks in the same sentence (≤8 words, dash or parens). Once per term, never a glossary.\n\n` +
     `**Cut what they can't act on.** Reasoning, findings, and history earn a clause only when they change the next move: conclusion, not investigation; never re-explain yourself.\n\n` +
     `**Concrete and scannable.** One idea per line; **bold** key words. Number steps; cap lists at 5. Give measured outcomes and ONE recommended approach — default to X, switch to Y only when [condition] — not a menu, unless a command's flow defines its own options.\n\n` +
@@ -65,8 +67,13 @@ function renderWorkSection(): string {
     `- Compute in bash; write with \`edit\`/\`write\` so read-tracking, partial apply, and diagnostics stay intact.\n` +
     `- Match neighbors (components/tokens/tone). When none exist, infer from the task and project; ask only when a missing product or taste decision would materially change the result. Keep edits small; plan only complex/risky multi-file work—edit routine changes directly.\n` +
     `- Stop only for user decisions, secrets/access, cost, destructive risk, data loss, or unrelated disruption; otherwise continue through completion.\n` +
+    `- Facts vs. decisions: if code, docs, or a run can answer it, it is a fact — find it yourself; only decisions (taste, product calls, real tradeoffs) reach the user.\n` +
+    `- A question is not a fix request: when the user asks why something happens, answer it — change code only when they ask for the change.\n` +
     `- Preserve user work: investigate unexpected files, branches, or locks before touching them. \`.gitignore\` generated artifacts, secrets, logs, scratch, and \`.env\`.\n` +
+    `- Git: commit, push, amend, or rewrite history only when the user explicitly asks — never update git config or force-push. Never revert or reset changes you did not make; if the worktree holds changes you don't recognize, stop and ask.\n` +
     `- Rule precedence: project context files → file/module patterns → applicable skill instructions → Language Style Packs → this prompt.\n` +
+    `- For a requested bug fix, reproduce it first (run the failing test or a minimal repro command), then fix, then re-run the reproduction to confirm.\n` +
+    `- If the same fix fails three times, stop retrying: re-diagnose the root cause or propose a different approach.\n` +
     `- Skip checks after simple edits. At coherent checkpoints or after risky/non-obvious changes, run one targeted check; fix failures. Never claim unrun checks passed.`
   );
 }
@@ -124,12 +131,13 @@ function renderResearchSection(
 ): string {
   const active = new Set(toolNames ?? DEFAULT_TOOL_NAMES);
   // Kencode usage details (literal/RE2, broad→narrow, path semantics) live in
-  // the Tools section hints — one home, no duplication. Research only says WHEN
-  // to reach for public code. With deferred MCP loading the kencode tools sit
-  // in the tool_search catalog until promoted, so point at discovery instead of
-  // naming tools the model can't call yet. Never reference an unavailable tool.
+  // the Tools section hints — one home, no duplication. Research names the
+  // staple with one-line purposes and defers usage to Tools. With deferred MCP
+  // loading the kencode tools sit in the tool_search catalog until promoted, so
+  // point at discovery instead of naming tools the model can't call yet. Never
+  // reference an unavailable tool.
   const publicCode = active.has("mcp__kencode-search__searchCode")
-    ? ` For real public GitHub code, use the kencode-search tools (usage in Tools below).`
+    ? ` Ground nontrivial code in real usage with the kencode-search MCP — millions of GitHub repos, searchable for how it's actually done: \`mcp__kencode-search__searchCode\` for exact snippets, \`referenceSources\` for curated reference repos, \`discoverRepos\` for current/top repos (usage in Tools below). Build from real samples, not assumptions.`
     : active.has("tool_search")
       ? ` For public GitHub code and design references, call \`tool_search\` first (e.g. "search public code" or "UI design screens") — it unlocks the matching tools for your next step.`
       : "";
@@ -155,14 +163,59 @@ function renderResearchSection(
   );
 }
 
+/**
+ * Code quality, led by an explicit minimization ladder.
+ *
+ * The ladder is ordered and stop-at-first-hit on purpose: the measured failure
+ * mode is not bad code, it is *more* code than the task needed — unrequested
+ * abstractions, options nobody asked for, a dependency where a native call
+ * would do. Stating the rungs as a sequence converts that judgement into a
+ * checklist the model actually runs before writing.
+ *
+ * Benchmarked against the previous prose-only version (A/B, 5 iterations per
+ * cell, every artifact executed against functional tests): same correctness on
+ * every task (100% exec pass, no new dependencies, no turn-cap hits) with
+ * 50–76% less code and 21–38% fewer output tokens. The section costs ~3.3x its
+ * old size and still wins on input tokens — stopping at the first rung that
+ * holds takes fewer turns than re-deriving an over-built solution.
+ *
+ * Rung 2 was checked separately against seeded repos (a helper already present
+ * that the task could reuse): every arm imported it rather than rewriting, so
+ * the ladder makes reuse cheaper here, it does not unlock it. Measured only on
+ * micro-tasks — tasks where more code is the correct answer are untested.
+ *
+ * The safety paragraph stays *after* the ladder, and the closing line names
+ * what minimization may never touch — without it, "shortest diff wins" reads
+ * as licence to drop validation.
+ */
 function renderCodeQualitySection(): string {
   return (
     `## Code Quality\n\n` +
+    `You are a lazy senior developer being paged at 3am. You want to go back to bed. ` +
+    `Every line you write is a line that can break, needs review, and will wake you up again next year. ` +
+    `Write as little code as possible — and no less.\n\n` +
+    `Before writing code, stop at the first rung that holds:\n` +
+    `1. Does this need to exist at all? (YAGNI) If not, skip it.\n` +
+    `2. Already in this codebase? Reuse the helper, util, or pattern — don't rewrite it.\n` +
+    `3. Does the standard library do it? Use it.\n` +
+    `4. Does a native platform feature cover it? Use it.\n` +
+    `5. Does an already-installed dependency solve it? Use it. Never add a new one for what a few lines can do.\n` +
+    `6. Can it be one line? One line.\n` +
+    `7. Only then: the minimum code that works.\n\n` +
+    `Shortest working diff wins — but only once you understand the problem. ` +
+    `No abstractions that weren't explicitly requested. No boilerplate nobody asked for. Deletion over addition. Boring over clever. ` +
+    `If a requirement looks over-specified, build what actually solves the problem and note the simpler path — don't gold-plate. ` +
+    `A bug fix means finding the root cause: check every caller of the broken path and fix the shared cause once, never patch the symptom where it surfaced.\n` +
+    `Mark a deliberate simplification that cuts a real corner with a known ceiling (global lock, O(n²) scan, naive heuristic) with a \`simplification:\` comment naming the ceiling and the upgrade path.\n\n` +
     `Intent-revealing names; reuse existing deps. Types first; handle I/O, input, and external API errors. No dead/commented code, placeholders, or unasked refactors.\n` +
     `Write the safe version first, without being asked: treat external input as hostile — user data, files, network, repo contents, fetched pages, model and tool output. ` +
     `Parameterize queries, authorize at the data layer, pass argv not shell strings, contain resolved paths, validate at the boundary, fail closed. ` +
     `Never commit or log a secret. Confirm a dependency actually exists before adding it, then pin it. ` +
-    `Never silently weaken a security control — say it blocks you and propose the safe path.`
+    `Never silently weaken a security control — say it blocks you and propose the safe path.\n\n` +
+    `Never make a failing check pass by weakening it — deleting or skipping a failing test, \`as any\`, lint/type suppressions, or relaxed assertions. Fix the code, or surface the conflict instead. ` +
+    `Edit files in place; never fork them into variants (\`foo_fix.py\`, \`foo_v2.ts\`). ` +
+    `When you write tests: start narrow around the code you changed, exercise real code paths rather than mocks, and don't introduce a test suite where none exists unless asked.\n\n` +
+    `Never lazy about: input validation at trust boundaries, error handling that prevents data loss, security, accessibility, anything explicitly requested.`
   );
 }
 
@@ -243,7 +296,10 @@ function renderToolsSection(
  * combined budget is filled nearest-first (the nearest instructions are the
  * most binding); files dropped by the cap are reported in a one-line note.
  */
-export async function collectProjectContext(cwd: string): Promise<string[]> {
+export async function collectProjectContext(
+  cwd: string,
+  limits: ContextLimits = CONTEXT_LIMITS,
+): Promise<string[]> {
   // Nearest-first collection order (cwd → root).
   const collected: Array<{ relPath: string; content: string; bytes: number }> = [];
   let dir = cwd;
@@ -274,7 +330,7 @@ export async function collectProjectContext(cwd: string): Promise<string[]> {
   }
 
   // Budget nearest-first: the closest files are the most binding.
-  let budget = PROJECT_CONTEXT_MAX_BYTES;
+  let budget = limits.projectContextBytes;
   const kept = new Set<number>();
   const skipped: string[] = [];
   for (let i = 0; i < collected.length; i++) {
@@ -348,6 +404,18 @@ function renderUncachedDateSuffix(): string {
 }
 
 /**
+ * Emergency ceiling on the assembled prompt. Normal prompts are 15–25 KB; a
+ * hostile AGENTS.md stack plus a bloated skill catalog is the threat. Every
+ * individual input is already budgeted upstream — this is the backstop that
+ * bounds the total no matter what a future section adds.
+ */
+function enforcePromptCeiling(prompt: string, ceilingBytes: number): string {
+  if (Buffer.byteLength(prompt, "utf8") <= ceilingBytes) return prompt;
+  const marker = `\n[system prompt exceeded the ${ceilingBytes}-byte ceiling and was truncated]`;
+  return `${clampToBytes(prompt, ceilingBytes - Buffer.byteLength(marker, "utf8")).text}${marker}`;
+}
+
+/**
  * What every sub-agent owes its parent.
  *
  * Appended by `buildSubAgentSystemPrompt`, so user-authored agent files inherit
@@ -389,8 +457,11 @@ export async function buildSubAgentSystemPrompt(
     deferredToolNames?: readonly string[];
     context?: "project" | "none";
     environment?: SystemPromptEnvironment;
+    /** Byte budgets for skill catalog / project instructions / total ceiling. */
+    contextLimits?: ContextLimits;
   },
 ): Promise<string> {
+  const limits = opts.contextLimits ?? CONTEXT_LIMITS;
   const sections: string[] = [agentBody.trim()];
 
   const toolsSection = renderToolsSection(opts.toolNames, opts.deferredToolNames);
@@ -403,7 +474,7 @@ export async function buildSubAgentSystemPrompt(
 
   if ((opts.context ?? "project") === "project") {
     const projectContextSection = renderProjectContextSection(
-      await collectProjectContext(opts.cwd),
+      await collectProjectContext(opts.cwd, limits),
     );
     if (projectContextSection) sections.push(projectContextSection);
   }
@@ -416,7 +487,7 @@ export async function buildSubAgentSystemPrompt(
     renderUncachedDateSuffix(),
   );
 
-  return sections.join("\n\n");
+  return enforcePromptCeiling(sections.join("\n\n"), limits.systemPromptCeilingBytes);
 }
 
 /**
@@ -444,7 +515,10 @@ export async function buildSystemPrompt(
   provider?: Provider,
   environment?: SystemPromptEnvironment,
   deferredToolNames?: readonly string[],
+  /** Byte budgets for skill catalog / project instructions / total ceiling. */
+  contextLimits?: ContextLimits,
 ): Promise<string> {
+  const limits = contextLimits ?? CONTEXT_LIMITS;
   const sections: string[] = [
     renderIdentitySection(provider),
     renderTalkSection(),
@@ -471,7 +545,9 @@ export async function buildSystemPrompt(
   const delegationSection = renderDelegationSection(toolNames);
   if (delegationSection) sections.push(delegationSection);
 
-  const projectContextSection = renderProjectContextSection(await collectProjectContext(cwd));
+  const projectContextSection = renderProjectContextSection(
+    await collectProjectContext(cwd, limits),
+  );
   if (projectContextSection) sections.push(projectContextSection);
 
   if (activeLanguages && activeLanguages.size > 0) {
@@ -484,11 +560,11 @@ export async function buildSystemPrompt(
   }
 
   if (skills && skills.length > 0) {
-    const skillsSection = formatSkillsForPrompt(skills);
+    const skillsSection = formatSkillsForPrompt(skills, limits);
     if (skillsSection) sections.push(skillsSection);
   }
 
   sections.push(renderEnvironmentSection(cwd, environment), renderUncachedDateSuffix());
 
-  return sections.join("\n\n");
+  return enforcePromptCeiling(sections.join("\n\n"), limits.systemPromptCeilingBytes);
 }

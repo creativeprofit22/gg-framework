@@ -2,7 +2,7 @@
 
 How a small app actually gets sued or extorted, ranked by real base rate rather than statutory maximum. Snapshot **11 Aug 2026** — verify any date, amount, or case posture before stating it as current.
 
-**The core asymmetry:** most regulators do not chase solo developers. Private plaintiffs and demand-letter mills do, because the process is automated: a bot scans public sites for a technical fingerprint, a letter goes out, and settling is cheaper than defending. Optimise against *fingerprints*, not against theoretical liability.
+**The core asymmetry:** most regulators do not chase solo developers. Private plaintiffs and demand-letter mills do, because the process is automated: a bot scans public sites for a technical fingerprint, a letter goes out, and settling is cheaper than defending. Optimise against _fingerprints_, not against theoretical liability.
 
 ---
 
@@ -19,6 +19,7 @@ How a small app actually gets sued or extorted, ranked by real base rate rather 
 **Counter-intuitive finding: accessibility overlay widgets increase risk.** A large share of 2025 filings targeted sites running overlays, and the leading overlay vendor faced a regulatory action over its claims **[V]**. Overlays are a beacon, not a shield.
 
 **Engineering fix**
+
 - `@axe-core/playwright` (or `axe-core` + Puppeteer) as a **blocking** CI gate on the top 10 routes; fail on `critical` and `serious`.
 - Manual keyboard pass on every flow that takes money or data: tab order, focus visible, escape closes, focus returns.
 - Remove any overlay widget and fix the DOM instead.
@@ -40,6 +41,7 @@ How a small app actually gets sued or extorted, ranked by real base rate rather 
 **Fingerprint:** any third-party request firing on page load before consent — Meta/TikTok/LinkedIn pixels, GA, session replay, chat widgets, A/B tools. Server-side tagging does **not** cure it if the third party still receives the data.
 
 **Engineering fix**
+
 - Consent-before-load, enforced technically: no third-party tag may execute until an explicit signal. Test it — a CI check asserting **zero third-party network requests on first paint** is the single highest-value guard.
 - Google Consent Mode v2 defaulting to `denied` for ad and analytics storage.
 - Strict CSP `connect-src`/`script-src` so an accidental tag cannot phone home.
@@ -55,7 +57,7 @@ How a small app actually gets sued or extorted, ranked by real base rate rather 
 
 **Damages:** $1,000 negligent / $5,000 intentional **per person**, plus fees. A 2024 amendment limits recovery to a single accrual per person rather than per scan, which materially reduced exposure but not filing volume **[V]**.
 
-**Fingerprint in code:** face detection or recognition SDKs, `face_embedding`/`descriptor`/`template` columns, voice embeddings, liveness checks, photo auto-tagging, avatar generation from a selfie. Face *detection* without identification is contested **[U]** — do not rely on it as a defence.
+**Fingerprint in code:** face detection or recognition SDKs, `face_embedding`/`descriptor`/`template` columns, voice embeddings, liveness checks, photo auto-tagging, avatar generation from a selfie. Face _detection_ without identification is contested **[U]** — do not rely on it as a defence.
 
 **Engineering fix:** run matching on-device and return a boolean; never persist a template server-side. If you must, obtain a written release before capture, publish the retention schedule, set a hard deletion job, and treat Illinois/Texas/Washington users as in scope regardless of where you are.
 
@@ -73,7 +75,7 @@ How a small app actually gets sued or extorted, ranked by real base rate rather 
 
 ## 5. Subscription / auto-renewal class actions
 
-**Trigger:** auto-renewal or free-trial conversion with disclosures that are not clear and conspicuous *adjacent to the enrolment control*, no separate affirmative consent, or a cancellation path harder than the signup path **[V]**. California's amended auto-renewal law broadened what is actionable **[V]**; a federal click-to-cancel rule was vacated in 2025, so **state law and general deception rules are the live risk** — do not tell a user the federal rule saves them **[V]**.
+**Trigger:** auto-renewal or free-trial conversion with disclosures that are not clear and conspicuous _adjacent to the enrolment control_, no separate affirmative consent, or a cancellation path harder than the signup path **[V]**. California's amended auto-renewal law broadened what is actionable **[V]**; a federal click-to-cancel rule was vacated in 2025, so **state law and general deception rules are the live risk** — do not tell a user the federal rule saves them **[V]**.
 
 **Fingerprint:** trial logic with no reminder job; a cancel flow that emails support; terms shown behind a link rather than adjacent to the button; no stored record of what the user was shown.
 
@@ -92,6 +94,7 @@ Typical sources of the problem: images pulled from search results, assets suppli
 **Your own code may not be protectable.** US Copyright Office guidance holds that purely AI-generated output is not copyrightable and that prompting alone does not create authorship **[V]**. For a vibe-coded product this weakens IP claims and must be disclosed in diligence — keep human-authored commits, review history, and meaningful human editing.
 
 **Engineering fix**
+
 - Blocking licence scan in CI (`license-checker`, `syft` + `grant`, ScanCode). Deny AGPL, SSPL, GPL-2.0/3.0, CC-BY-SA, BUSL, Commons Clause, UNLICENSED, UNKNOWN. Fail, don't warn.
 - Generate an SBOM per release (CycloneDX) and keep it as an artifact.
 - Ship the attribution notices MIT/BSD/Apache actually require at an in-app "Open source licences" route.
@@ -113,7 +116,7 @@ Typical sources of the problem: images pulled from search results, assets suppli
 
 ## 8. Platform and structural risks
 
-- **DMCA safe harbour** requires a registered designated agent *and* a reasonably implemented repeat-infringer policy. The registration **expires after three years** unless renewed — a lapse silently converts every user upload into direct liability **[V]**. Fix: register, calendar the renewal well before expiry, publish the agent contact, and implement `takedown_notices` + `strikes` tables with an actual `terminated_at` column and a counter-notice flow.
+- **DMCA safe harbour** requires a registered designated agent _and_ a reasonably implemented repeat-infringer policy. The registration **expires after three years** unless renewed — a lapse silently converts every user upload into direct liability **[V]**. Fix: register, calendar the renewal well before expiry, publish the agent contact, and implement `takedown_notices` + `strikes` tables with an actual `terminated_at` column and a counter-notice flow.
 - **Contractor IP:** without a signed assignment before the first commit, the contractor may own the copyright — "work made for hire" does not apply to most software by default **[V]**.
 - **Single-platform dependency:** an app-store or payment-processor termination is unappealable in practice. Keep a web fallback, a data-export path, and a second processor behind a flag.
 - **Accidental data-broker status:** selling or making available personal information about people who never interacted with you triggers registration and deletion-mechanism duties with per-day penalties, and enforcement has already hit companies of exactly this size **[V]**.

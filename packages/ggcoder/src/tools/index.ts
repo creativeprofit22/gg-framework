@@ -1,5 +1,6 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
+import type { ContextLimits } from "../core/context-limits.js";
 import { SubAgentManager, type SubAgentSnapshot } from "../core/subagent-manager.js";
 import { ProcessManager } from "../core/process-manager.js";
 import { LspManager } from "../core/lsp/manager.js";
@@ -45,6 +46,8 @@ export { BUILTIN_TOOL_NAMES } from "./prompt-hints.js";
 export interface CreateToolsOptions {
   agents?: AgentDefinition[];
   skills?: Skill[];
+  /** Byte budgets for skill catalog / MCP descriptions in tool schemas. */
+  contextLimits?: ContextLimits;
   provider?: Provider;
   model?: string;
   /** Custom I/O operations for remote execution (SSH, Docker, etc.). Defaults to local filesystem. */
@@ -254,7 +257,7 @@ export async function createTools(
   }
 
   if (opts?.skills && opts.skills.length > 0) {
-    tools.push(createSkillTool(opts.skills));
+    tools.push(createSkillTool(opts.skills, opts.contextLimits));
   }
 
   if (opts?.onEnterPlan) {

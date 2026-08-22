@@ -63,12 +63,12 @@ If the project you are hardening is itself an agent, a tool server, or ships an 
 
 ## 5. Speed and economics
 
-- **Median time from CVE publication to confirmed exploitation fell from about 120 days (2025) to about 80 days (1H 2026)** [V]. Roughly a quarter of newly-exploited CVEs showed exploitation on or before publication day. Absolute early-exploitation counts are flat while CVE issuance grew sharply — so the *rate* is falling even as the *speed* rises.
+- **Median time from CVE publication to confirmed exploitation fell from about 120 days (2025) to about 80 days (1H 2026)** [V]. Roughly a quarter of newly-exploited CVEs showed exploitation on or before publication day. Absolute early-exploitation counts are flat while CVE issuance grew sharply — so the _rate_ is falling even as the _speed_ rises.
 - **Leaked credentials are used, not archived.** Assume any secret that touched a public surface, a build log, a paste, or a third-party service is compromised at the moment of exposure. Rotation is the fix; deleting the commit is not.
 - **Patch aggressively where there is evidence of exploitation.** Guidance in 2026 [S] points toward days, not weeks, for vulnerabilities that are automatable, exploited, and reachable in your deployment.
 
 ## How to use this file
 
-1. Pick the two or three items above that plausibly apply to *this* project and write them into the threat model as concrete scenarios with named actors and objectives.
+1. Pick the two or three items above that plausibly apply to _this_ project and write them into the threat model as concrete scenarios with named actors and objectives.
 2. Skip the rest. A threat model that lists every incident of the last two years is not a threat model.
 3. Re-verify anything marked [S] or [U] before putting it in front of the user as current fact.

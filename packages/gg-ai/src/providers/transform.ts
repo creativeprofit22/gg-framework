@@ -971,6 +971,20 @@ export function toLocalReasoningEffort(level: ThinkingLevel): "low" | "medium" |
   return level;
 }
 
+/**
+ * Reasoning effort for Z.AI's GLM endpoint. Its accepted set is declared by
+ * the API itself — an unknown value 400s with `reasoning_effort must be one of:
+ * none, minimal, low, medium, high, xhigh, max` (verified against glm-5.3) —
+ * so every ThinkingLevel except `ultra` passes through unchanged. Crucially
+ * `max` must NOT be remapped to `xhigh` the way {@link toOpenAIReasoningEffort}
+ * does: GLM spells its top rung `max` and treats it as the default.
+ */
+export function toGlmReasoningEffort(
+  level: ThinkingLevel,
+): "low" | "medium" | "high" | "xhigh" | "max" {
+  return level === "ultra" ? "max" : level;
+}
+
 export function toOpenAIReasoningEffort(
   level: ThinkingLevel,
   model: string,

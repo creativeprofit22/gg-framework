@@ -742,7 +742,9 @@ export class MCPClientManager {
           // Never redirect an old wrapper to a replacement client. Tool schemas
           // and source identity belong to one listed connection generation.
           if (!this.servers.includes(connectedServer)) {
-            throw new Error(`MCP tool error: stale tool wrapper for disconnected server "${config.name}"`);
+            throw new Error(
+              `MCP tool error: stale tool wrapper for disconnected server "${config.name}"`,
+            );
           }
 
           const elapsed = Date.now() - connectedServer.lastCallTime;
@@ -751,7 +753,9 @@ export class MCPClientManager {
             await new Promise((resolve) => setTimeout(resolve, minGap - elapsed));
           }
           if (!this.servers.includes(connectedServer)) {
-            throw new Error(`MCP tool error: stale tool wrapper for disconnected server "${config.name}"`);
+            throw new Error(
+              `MCP tool error: stale tool wrapper for disconnected server "${config.name}"`,
+            );
           }
           connectedServer.lastCallTime = Date.now();
 
@@ -778,9 +782,14 @@ export class MCPClientManager {
             }
             const msg = err instanceof Error ? err.message : String(err);
             if (msg.includes("Too Many R") || msg.includes("429")) {
-              throw new Error("Rate limited — too many requests. Wait a moment before searching again.");
+              throw new Error(
+                "Rate limited — too many requests. Wait a moment before searching again.",
+                {
+                  cause: err,
+                },
+              );
             }
-            throw new Error(`MCP tool error: ${msg}`);
+            throw new Error(`MCP tool error: ${msg}`, { cause: err });
           }
         },
       };

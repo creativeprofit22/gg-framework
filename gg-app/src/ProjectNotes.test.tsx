@@ -1768,7 +1768,9 @@ describe("ProjectNotes", () => {
     fireEvent.click(screen.getByText(/Activity history/));
     expect(screen.getByText(/Implementation checkpoint: 1 of 2 plan steps/)).toBeTruthy();
     expect(
-      screen.getByText(/Final review submitted: rejected\. Applied gate outcome: Needs attention\./),
+      screen.getByText(
+        /Final review submitted: rejected\. Applied gate outcome: Needs attention\./,
+      ),
     ).toBeTruthy();
   });
 

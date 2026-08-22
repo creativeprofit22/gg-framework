@@ -381,4 +381,30 @@ describe("prompt commands", () => {
     expect(prompt).toContain("`git status --short` before and after that second render");
     expect(prompt).toContain("Never report a successful package");
   });
+  it("defines /setup-ci as a dual-mode, stack-agnostic, hardened-by-construction command", () => {
+    const setupCi = PROMPT_COMMANDS.find((command) => command.name === "setup-ci");
+
+    expect(setupCi).toBeDefined();
+    // Dual mode: generate from scratch OR audit + harden existing workflows.
+    expect(setupCi?.prompt).toContain("Mode A: generate");
+    expect(setupCi?.prompt).toContain("Mode B: audit + harden");
+    // Stack-agnostic: manifests decide, and the detector spans more than Node.
+    expect(setupCi?.prompt).toContain("never assume a stack");
+    expect(setupCi?.prompt).toContain("Detect the stack (manifests only)");
+    expect(setupCi?.prompt).toContain("pyproject.toml");
+    expect(setupCi?.prompt).toContain("go.mod");
+    expect(setupCi?.prompt).toContain("Cargo.toml");
+    // Hardened by construction: every cost/safety rule present.
+    expect(setupCi?.prompt).toContain("contents: read");
+    expect(setupCi?.prompt).toContain("ubuntu-latest");
+    expect(setupCi?.prompt).toContain("10x billing");
+    expect(setupCi?.prompt).toContain("cancel-in-progress: true");
+    expect(setupCi?.prompt).toContain("timeout-minutes: 15");
+    // Publish workflows must never be cancelled mid-flight.
+    expect(setupCi?.prompt).toContain("cancelling mid-publish is worse than waiting");
+    // Never weakens existing checks; rulesets degrade gracefully; doesn't auto-commit.
+    expect(setupCi?.prompt).toContain("NEVER weaken a check to make it pass");
+    expect(setupCi?.prompt).toContain("not an error");
+    expect(setupCi?.prompt).toContain("Do NOT commit anything");
+  });
 });

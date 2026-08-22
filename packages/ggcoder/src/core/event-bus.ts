@@ -30,6 +30,8 @@ export interface BusEventMap {
     durationMs: number;
     /** Tool-specific extras (e.g. screenshot/read image previews). */
     details?: unknown;
+    /** Consecutive count for a repeated schema-validation failure; see AgentToolCallEndEvent. */
+    invalidArgAttempt?: number;
   };
   turn_end: {
     turn: number;
@@ -52,20 +54,30 @@ export interface BusEventMap {
   max_turns: { totalTurns: number; maxTurns: number };
   /** Turn budget was exhausted but extended because the run showed progress. */
   turn_budget_extended: { turn: number; grantedTurns: number; extension: number };
-  truncated: { reason: "max_tokens" | "refusal" | "provider_error"; continued: boolean };
+  truncated: {
+    reason: "max_tokens" | "refusal" | "provider_error" | "empty_response";
+    continued: boolean;
+  };
   error: { error: Error };
 
   // Server tool events
   server_tool_call: { id: string; name: string; input: unknown };
   server_tool_result: { toolUseId: string; resultType: string; data: unknown };
 
-  // Agent self-correction hooks (ideal review / loop-break / re-grounding).
-  // Carries only the semantic kind; the presentation layer owns text + color.
+  // Agent self-correction hooks (ideal review / verification / loop-break /
+  // re-grounding). Carries only the semantic kind; the presentation layer owns
+  // text + color.
   hook: {
-    kind: "ideal" | "loop_break" | "regrounding";
+    kind: "ideal" | "verification" | "loop_break" | "regrounding";
     coverageExpected?: string[];
     coverageMissing?: string[];
   };
+
+  /** A pre-final hook would fire if the agent stopped right now: the Ideal
+   *  review, or the verification gate. Emitted as soon as the run crosses the
+   *  gate — i.e. BEFORE the candidate final answer streams — so a client can
+   *  hold that answer back instead of painting a draft the hook then discards. */
+  hook_armed: { kind: "ideal" | "verification"; armed: boolean };
 
   // Persistent async child lifecycle (bounded metadata/output snapshot).
   subagent_state: SubAgentSnapshot;
@@ -183,6 +195,7 @@ export class EventBus {
           isError: event.isError,
           durationMs: event.durationMs,
           details: event.details,
+          invalidArgAttempt: event.invalidArgAttempt,
         });
         break;
       case "turn_end":

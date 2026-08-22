@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { Cpu } from "lucide-react";
 import { theme } from "./theme";
 import { authStatus, subscribe, type AuthProvider, type SidecarEvent } from "./agent";
 import { Badge } from "./Badge";
 import { BackButton } from "./BackButton";
 import { ProviderLoginModal } from "./ProviderLoginModal";
 import { LocalModelsModal } from "./LocalModelsModal";
+import { HfPullModal } from "./HfPullModal";
 import { providerLogo } from "./provider-logos";
 
 interface Props {
@@ -22,6 +22,13 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
   const [loading, setLoading] = useState(true);
   const [active, setActive] = useState<AuthProvider | null>(null);
   const [localOpen, setLocalOpen] = useState(false);
+  // Swapped in place (never stacked) so Escape closes exactly one modal.
+  const [hfOpen, setHfOpen] = useState(false);
+  const openHfPull = useCallback((): void => {
+    setActive(null);
+    setLocalOpen(false);
+    setHfOpen(true);
+  }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
     const list = await authStatus();
@@ -127,23 +134,37 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
               </button>
             );
           })}
-          {/* Local models aren't a provider you log into — they're whatever the
-              user already runs. Same tile shape so the hub stays one grid. */}
+          {/* Ollama's official mark (dark-icon-64 from ollama.com), same 48px
+              logo box as every provider tile. */}
           {!loading && (
             <button
               className="login-tile"
               onClick={() => setLocalOpen(true)}
-              title="Ollama, LM Studio, llama.cpp, vLLM — running on this machine"
+              title="Ollama — models running on this machine"
             >
-              {/* A chip, not a house: these models run on this machine's own
-                  hardware. Sized to fill the 48px logo box like the provider
-                  logos, instead of a glyph sized for a single letter. */}
               <span className="login-tile-logo">
-                <Cpu size={44} strokeWidth={1.25} color={theme.text} aria-hidden="true" />
+                <img className="login-logo" src={providerLogo("ollama")} alt="" />
               </span>
-              <span className="login-tile-name">Local models</span>
+              <span className="login-tile-name">Ollama</span>
               <span className="login-tile-methods">
                 <Badge>No key needed</Badge>
+              </span>
+            </button>
+          )}
+          {/* The local twin: search the Hub and download models straight into
+              Ollama — no token, no account. */}
+          {!loading && (
+            <button
+              className="login-tile"
+              onClick={() => setHfOpen(true)}
+              title="Hugging Face — download models to Ollama"
+            >
+              <span className="login-tile-logo">
+                <img className="login-logo" src={providerLogo("huggingface")} alt="" />
+              </span>
+              <span className="login-tile-name">Hugging Face</span>
+              <span className="login-tile-methods">
+                <Badge>Download models</Badge>
               </span>
             </button>
           )}
@@ -155,10 +176,13 @@ export function LoginScreen({ onClose }: Props): React.ReactElement {
           provider={active}
           onClose={() => setActive(null)}
           onChanged={() => void refresh()}
+          {...(active.value === "huggingface" ? { onOpenHfPull: openHfPull } : {})}
         />
       )}
 
       {localOpen && <LocalModelsModal onClose={() => setLocalOpen(false)} />}
+
+      {hfOpen && <HfPullModal onClose={() => setHfOpen(false)} />}
     </div>
   );
 }

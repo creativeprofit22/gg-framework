@@ -1,5 +1,131 @@
 # @kenkaiiii/gg-core
 
+## 5.49.3
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.49.3
+
+## 5.49.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.49.2
+
+## 5.49.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.49.1
+
+## 5.49.0
+
+### Minor Changes
+
+- 05685fe: Add Gemini 3.7 Flash (`gemini-3.7-flash`, released 2026-08-13) and retarget `deepseek-v4-pro` to DeepSeek-V4-Pro-0813 under the same API id. 3.7 Flash is Google's most capable Flash for coding and agents — 1M context, 64K output, thinking low/medium/high, video input (20 MB inline cap) — listed as a selectable option for Gemini but kept non-default because it ships on our Code Assist transport ahead of gemini-cli (issue #28802 tracks upstream); free/personal accounts get the existing account-gated 404 guidance while entitled Code Assist Standard/Enterprise accounts can use it. DeepSeek's `deepseek-v4-pro` alias now serves the first stable V4 Pro (0813, supersedes the April preview, calling name unchanged): max output corrected to 393,216 and costTier dropped to `medium` to match the ~$0.43/$0.87 per-MTok pricing; saved sessions keep working since the id is unchanged.
+- 05685fe: Add Grok 4.6 (`grok-4.6`, released 2026-08-12) to the model registry and make it the xAI default — 500K context, image input, $2/$6 MTok (under 200K prompt tokens), and a `reasoning_effort` ladder that adds a new `xhigh` top rung (`low`/`medium`/`high` default/`xhigh`), which `XAI_THINKING_LEVELS` now exposes; thinking starts at `xhigh`. Grok 4.5 stays registered as a legacy option, still capped at `high` since it rejects `xhigh`. The OpenAI-compatible transport needs no changes — `xhigh` passes through `toOpenAIReasoningEffort` unchanged — so both the public API and the Grok CLI OAuth proxy serve the new model; CLI/app login defaults point at `grok-4.6`.
+- 05685fe: Add a first-class `huggingface` provider backed by Hugging Face's Inference Providers router (`https://router.huggingface.co/v1`, OpenAI-compatible Chat Completions, one HF token with "Make calls to Inference Providers" permission). Model ids are Hub repo paths: `Qwen/Qwen3-Coder-480B-A35B-Instruct` (default; 262K context, tool-native, non-thinking Coder line) and `openai/gpt-oss-120b` (low-tier sibling for summaries and scout sub-agents; reasoning effort low/medium/high). Auth is a static API key wired through the existing apikey login flow in both TUI and desktop app, with label/logo/order entries everywhere providers are enumerated (`config`/`settings-manager`/`app-sidecar`/`auth-providers`/`ModelSelector`/`login`/`provider-labels`/`provider-logos`). Local-weight users keep the existing routes: Ollama `hf.co/...` pulls and any self-hosted OpenAI-compatible server via local endpoints.
+- 05685fe: Simplify local models to Ollama. The Connect AI Providers tile and its modal are renamed "Ollama", the tile carries Ollama's official mark, and `DEFAULT_LOCAL_ENDPOINTS` drops the LM Studio, llama.cpp, and vLLM auto-probes — the modal showed four rows when usually only Ollama exists. Those servers still work: "Add endpoint" adds any OpenAI-compatible URL as a custom endpoint (removable, as before), and the model picker's "Local" group is unchanged. Empty-state and scan copy now points at Ollama and the new "Add from Hugging Face" download flow. Login copy is also refreshed across both UIs: provider descriptions now match the model registry (Grok 4.6, Gemini 3.7 Flash), and the dual-auth guidance and priority notes are cut to one line each.
+
+### Patch Changes
+
+- Updated dependencies [05685fe]
+- Updated dependencies [05685fe]
+- Updated dependencies [05685fe]
+  - @kenkaiiii/gg-ai@5.49.0
+
+## 5.48.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.48.0
+
+## 5.47.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.47.0
+
+## 5.46.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.46.2
+
+## 5.46.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.46.1
+
+## 5.46.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.46.0
+
+## 5.45.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.45.0
+
+## 5.44.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @kenkaiiii/gg-ai@5.44.3
+
+## 5.44.2
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.44.2
+
+## 5.44.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.44.1
+
+## 5.44.0
+
+### Minor Changes
+
+- bc99e74: **GLM-5.3 is now the only GLM model.** Z.AI's new coding-first flagship (released 2026-08-14) replaces GLM-5.2, and GLM-5.1 / GLM-4.7 / GLM-4.7 Flash are retired from the registry — they routed to strictly worse coding for the same plan quota, and the coding endpoint already answers `glm-5.2` requests as glm-5.3. Sessions saved on any retired id fall back to the provider default.
+
+  Same GLM-5 base as 5.2 with every gain from post-training: Z.AI reports ~50% better coding and open-source SOTA on Terminal-Bench 3.0 and Agent's Last Exam. Context window (1M) and max output (131K) are unchanged, so compaction budgeting is untouched.
+
+  **GLM thinking is now a real effort ladder, not an on/off toggle.** ggcoder previously sent only `thinking: { type: "enabled" }`, which silently ran Z.AI's `max` default at every setting. The endpoint in fact declares `none, minimal, low, medium, high, xhigh, max` (an unknown value 400s with that list), so `low / medium / high / xhigh / max` are now selectable and sent as `reasoning_effort` alongside the toggle. Measured end-to-end on one hard reasoning prompt: `low` → 0.8K reasoning chars in 15s, `high` → 3.2K in 28s, `max` → 24.9K in 129s. The default stays `max`, matching what the server was already doing, so existing behaviour is unchanged — but dialing effort _down_ is now possible for the first time.
+
+  Note `max` is kept as `max` on the wire for GLM rather than remapped to `xhigh` the way OpenAI-compatible efforts are: GLM spells its own top rung `max`.
+
+  With no low-cost GLM sibling left, compaction-summary and scout sub-agent routing keep GLM-5.3 instead of downshifting — the existing graceful fallback, no crash and no cross-provider jump.
+
+### Patch Changes
+
+- Updated dependencies [bc99e74]
+  - @kenkaiiii/gg-ai@5.44.0
+
+## 5.43.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.43.0
+
+## 5.42.0
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.42.0
+
+## 5.41.1
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.41.1
+
 ## 5.41.0
 
 ### Patch Changes

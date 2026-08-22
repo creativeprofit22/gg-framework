@@ -98,7 +98,8 @@ import { MCPClientManager, getAllMcpServers } from "./mcp/index.js";
 import type { MCPElicitHandler } from "./mcp/index.js";
 import type { MCPServerConfig } from "./mcp/types.js";
 import type { SharedMcpClientLease, SharedMcpClientPool } from "./mcp/shared-client-pool.js";
-import { DeferredToolCatalog } from "./mcp/deferred-catalog.js";
+import { clampMcpToolDescription, DeferredToolCatalog } from "./mcp/deferred-catalog.js";
+import { CONTEXT_LIMITS, resolveContextLimits, type ContextLimits } from "./context-limits.js";
 import { McpCatalogCache, type CachedTool } from "./mcp/catalog-cache.js";
 import {
   createMcpToolIdentity,
@@ -143,6 +144,7 @@ import {
 import { buildRegroundingMessage } from "./regrounding.js";
 import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
+import { VerificationGate, isCodeFilePath, isVerificationCommand } from "./verification-gate.js";
 
 import { findUserSessionPrompt, getUserSessionPrompt } from "./session-preview.js";
 import { normalizeMessageImages } from "./message-images.js";
@@ -450,6 +452,14 @@ export class AgentSession {
   private activePhaseVerificationInjected = false;
   /** Runtime-only suppression while Ken owns verification in autopilot mode. */
   private idealReviewSuppressed = false;
+  /** Mirror of the last `hook_armed` value broadcast this run, so the event
+   *  fires only on a real edge. */
+  private idealReviewArmed = false;
+  /** Cached test-drift probe, keyed by the size of the edited-file set. Drift
+   *  depends only on WHICH files were edited and that set only grows, so this
+   *  keeps the arming check off the filesystem on most tool results — the probe
+   *  is several sync existsSync calls per edited file. */
+  private idealDriftProbe: { files: number; drifted: boolean } | null = null;
   private readonly reviewCoverage: ReviewCoverageTracker;
   /** Coverage follow-ups spent this run, capped by MAX_REVIEW_COVERAGE_INJECTIONS. */
   private reviewCoverageInjected = 0;
@@ -460,6 +470,11 @@ export class AgentSession {
   private runStartedAt = 0;
   /** Gate injections spent this run, capped by MAX_PROCESS_GATE_INJECTIONS. */
   private processGateInjected = 0;
+  /** Verification gate: code edited this run, nothing proved it since. */
+  private readonly verificationGate = new VerificationGate();
+  /** Mirror of the last verification `hook_armed` value, so the event fires
+   *  only on a real edge. */
+  private verificationArmed = false;
   private compactionOccurred = false;
   private lastCompactionCompacted = false;
   private compactionRetryAfter = 0;
@@ -499,6 +514,8 @@ export class AgentSession {
   private sharedMcpLeases = new Map<string, SharedMcpClientLease>();
   /** Deferred MCP tools awaiting discovery via tool_search. */
   private mcpCatalog?: DeferredToolCatalog;
+  /** Resolved prompt-injection byte budgets (contextLimits setting). */
+  private contextLimits: ContextLimits = CONTEXT_LIMITS;
   /**
    * Built-in tools held in the catalog instead of the live toolset. Their names
    * still render as one-line hints in the prompt's Tools section, so the model
@@ -624,6 +641,7 @@ export class AgentSession {
     // Load settings & auth
     this.settingsManager = new SettingsManager(paths.settingsFile);
     await this.settingsManager.load();
+    this.contextLimits = resolveContextLimits(this.settingsManager.get("contextLimits"));
 
     this.authStorage = new AuthStorage(paths.authFile);
     await this.authStorage.load();
@@ -666,6 +684,7 @@ export class AgentSession {
     } = await createTools(this.cwd, {
       agents,
       skills: this.skills,
+      contextLimits: this.contextLimits,
       provider: this.provider,
       model: this.model,
       lspDiagnostics: this.settingsManager.get("lspDiagnostics"),
@@ -740,7 +759,7 @@ export class AgentSession {
       if (deferred.length > 0) {
         this.deferredBuiltinToolNames = deferred.map((tool) => tool.name);
         this.deferredBuiltinTools = new Map(deferred.map((tool) => [tool.name, tool]));
-        this.mcpCatalog ??= new DeferredToolCatalog();
+        this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
         this.mcpCatalog.add(deferred);
         this.ensureToolSearchTool();
         this.promoteCapabilityAllowedDeferredBuiltins();
@@ -918,8 +937,7 @@ export class AgentSession {
     const oldLeases = [...this.sharedMcpLeases.values()];
     this.sharedMcpLeases.clear();
     const generation = ++this.mcpConnectionGeneration;
-    const newManager =
-      this.opts.mcpEnabled !== false ? this.createMcpManager() : undefined;
+    const newManager = this.opts.mcpEnabled !== false ? this.createMcpManager() : undefined;
     this.mcpManager = newManager;
 
     await this.disposeMcpResources(oldManager, oldLeases);
@@ -962,7 +980,9 @@ export class AgentSession {
         }
         if (!this.isCurrentMcpConnection(generation, manager)) return;
       }
-      let servers = await getAllMcpServers(this.provider, apiKey, this.cwd);
+      let servers = await getAllMcpServers(this.provider, apiKey, this.cwd, {
+        allowProjectScope: this.settingsManager.isProjectTrusted(this.cwd),
+      });
       if (!this.isCurrentMcpConnection(generation, manager)) return;
       // Whitelisted allow-listed session: connect ONLY the named servers, never
       // the user's full configured set (which could include mutating tools). The
@@ -984,8 +1004,7 @@ export class AgentSession {
       for (const server of sharedServers) {
         let lease = this.sharedMcpLeases.get(server.name);
         if (!lease) {
-          let acquiredLease!: SharedMcpClientLease;
-          acquiredLease = pool!.acquire(
+          const acquiredLease = pool!.acquire(
             server,
             {
               catalogCache: this.mcpCatalogCache,
@@ -1041,6 +1060,9 @@ export class AgentSession {
       ) {
         await this.rebuildSystemPromptInPlace();
       }
+      // Detect project-scope servers excluded because the repo isn't trusted,
+      // so the host can offer a per-repo "Trust" button. Computed after the
+      // connect so the blocked list reflects the same connect attempt.
     } catch (err) {
       if (!this.isCurrentMcpConnection(generation, manager)) {
         await Promise.all([
@@ -1059,6 +1081,11 @@ export class AgentSession {
 
   private isCurrentMcpConnection(generation: number, manager: MCPClientManager): boolean {
     return generation === this.mcpConnectionGeneration && manager === this.mcpManager;
+  }
+
+  /** Persist explicit per-project trust for project-scope MCP servers. */
+  async trustProject(cwd: string): Promise<void> {
+    await this.settingsManager.trustProject(cwd);
   }
 
   /**
@@ -1113,10 +1140,13 @@ export class AgentSession {
 
     const defer = !this.opts.allowedTools && this.settingsManager.get("deferredMcpTools");
     if (!defer) {
-      this.replaceOrPushTools(acceptedTools);
+      // Eager registration retains identity filtering and enforces description budgets.
+      this.replaceOrPushTools(
+        acceptedTools.map((tool) => clampMcpToolDescription(tool, this.contextLimits)),
+      );
       return;
     }
-    this.mcpCatalog ??= new DeferredToolCatalog();
+    this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
     // `add` is name-keyed, so live definitions replace cached stubs in place.
     this.mcpCatalog.add(acceptedTools);
     // A stub the model already promoted lives in `this.tools`; swap it for the
@@ -1135,7 +1165,7 @@ export class AgentSession {
    * registration on an existing catalog would leave those tools unreachable.
    */
   private ensureToolSearchTool(): void {
-    this.mcpCatalog ??= new DeferredToolCatalog();
+    this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
     if (this.tools.some((t) => t.name === "tool_search")) return;
     this.registerTool(
       createToolSearchTool(
@@ -1166,6 +1196,7 @@ export class AgentSession {
         },
         (toolName) =>
           !this.unavailableToolNames.has(toolName) && this.isToolCapabilityAllowed(toolName),
+        this.contextLimits,
       ),
     );
   }
@@ -1232,7 +1263,7 @@ export class AgentSession {
 
   /** Catalog-only registration for cached stubs — never marks them live. */
   private addCachedMcpTools(stubs: AgentTool[]): void {
-    this.mcpCatalog ??= new DeferredToolCatalog();
+    this.mcpCatalog ??= new DeferredToolCatalog(this.contextLimits);
     this.mcpCatalog.add(stubs);
     this.ensureToolSearchTool();
   }
@@ -1480,10 +1511,15 @@ export class AgentSession {
     this.reviewCoverage.reset();
     this.reviewCoverageInjected = 0;
     this.idealReviewPhase = "idle";
+    // No event here: clients reset their own hold on run_start.
+    this.idealReviewArmed = false;
+    this.verificationArmed = false;
+    this.idealDriftProbe = null;
     this.loopBreakInjected = 0;
     this.regroundingInjected = false;
     this.runStartedAt = Date.now();
     this.processGateInjected = 0;
+    this.verificationGate.reset();
     this.compactionOccurred = false;
     this.originalRequest = originalRequest;
   }
@@ -1548,10 +1584,46 @@ export class AgentSession {
           const removed = (diff.match(/^-[^-]/gm) ?? []).length;
           this.hookStats.changedLines += added + removed;
         }
+        // Verification-gate bookkeeping: successful code mutations and completed
+        // foreground verification commands, in occurrence order.
+        if (!event.isError && args) {
+          if (
+            (name === "edit" || name === "write") &&
+            isCodeFilePath(String((args as { file_path?: unknown }).file_path ?? ""))
+          ) {
+            this.verificationGate.recordMutation(
+              String((args as { file_path?: unknown }).file_path),
+            );
+          }
+          if (
+            name === "bash" &&
+            !(args as { run_in_background?: unknown }).run_in_background &&
+            isVerificationCommand(String((args as { command?: unknown }).command ?? ""))
+          ) {
+            this.verificationGate.recordVerification();
+          }
+          // Reading the final output of an EXITED background verification run
+          // counts: the process gate forces this read anyway, so without it the
+          // gate would demand a redundant foreground re-run of tests the agent
+          // already watched finish.
+          if (name === "task_output") {
+            const proc = this.processManager
+              ?.list()
+              .find((p) => p.id === (args as { id?: unknown }).id);
+            if (proc && proc.exitCode !== null && isVerificationCommand(proc.command)) {
+              this.verificationGate.recordVerification();
+            }
+          }
+        }
+        // Tool results are what push the run over the review gate, and they all
+        // land before the model writes its candidate final answer — so this is
+        // the point where arming still beats the draft's first token.
+        this.refreshHookArming();
         break;
       }
       case "turn_end":
         this.hookStats.turns = event.turn;
+        this.refreshHookArming();
         for (let index = this.messages.length - 1; index >= 0; index--) {
           const anchor = this.messages[index];
           if (anchor?.role === "assistant") {
@@ -1748,6 +1820,72 @@ export class AgentSession {
   }
 
   /**
+   * Would the stop AFTER the current turn inject the Ideal review? Same inputs
+   * as the pre-stop gate below, evaluated early so clients know a candidate
+   * final answer is a review draft BEFORE it streams.
+   *
+   * The turn count is looked ahead by one on purpose. `hookStats.turns` only
+   * advances at `turn_end`, so while the model is writing the draft the counter
+   * still reads the PREVIOUS turn; the real gate sees one more. Without the
+   * lookahead a run sitting on score 3 crosses to 4 on the draft's own
+   * `turn_end` — after the text already streamed — which is precisely the
+   * appear-then-vanish flash. Over-arming by one turn point costs only live
+   * token streaming on a final answer that then shows whole; under-arming costs
+   * the flash, so this errs toward arming.
+   */
+  private wouldInjectIdealReview(): boolean {
+    if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return false;
+    if (this.idealReviewPhase !== "idle") return false;
+    if (!this.settingsManager.get("idealReviewEnabled")) return false;
+    if (evaluateIdealReview({ ...this.hookStats, turns: this.hookStats.turns + 1 }).shouldReview) {
+      return true;
+    }
+    const files = this.hookFileEditCounts.size;
+    if (files === 0) return false;
+    if (this.idealDriftProbe?.files !== files) {
+      this.idealDriftProbe = {
+        files,
+        drifted: detectTestDrift(this.hookFileEditCounts.keys(), this.cwd).length > 0,
+      };
+    }
+    return this.idealDriftProbe.drifted;
+  }
+
+  /** Would a stop right now inject the verification gate? Same conditions as
+   *  the pre-stop branch below, so arming and injection cannot disagree. */
+  private wouldInjectVerification(): boolean {
+    if (this.opts.selfCorrectionHooks === false) return false;
+    if (!this.settingsManager.get("verificationGateEnabled")) return false;
+    if (this.opts.allowedTools && !this.opts.allowedTools.includes("bash")) return false;
+    return this.verificationGate.willInject();
+  }
+
+  /** Broadcast pre-final hook arming on change. Both edges matter: armed=false
+   *  after the hook fires is what lets a client stream the REVIEWED final
+   *  answer live again.
+   *
+   *  Callable before `initialize()`: the sidecar sets Ken's review suppression
+   *  on a freshly constructed session, and every arming predicate below reads
+   *  settings that `initialize()` has not loaded yet. Nothing can be armed
+   *  before the session can run a turn, and the first `tool_result`/`turn_end`
+   *  recomputes both edges — so skipping is the correct answer, not a patch. */
+  private refreshHookArming(): void {
+    if (!this.settingsManager) return;
+    this.refreshIdealReviewArmed();
+    const armed = this.wouldInjectVerification();
+    if (armed === this.verificationArmed) return;
+    this.verificationArmed = armed;
+    this.eventBus.emit("hook_armed", { kind: "verification", armed });
+  }
+
+  private refreshIdealReviewArmed(): void {
+    const armed = this.wouldInjectIdealReview();
+    if (armed === this.idealReviewArmed) return;
+    this.idealReviewArmed = armed;
+    this.eventBus.emit("hook_armed", { kind: "ideal", armed });
+  }
+
+  /**
    * Pre-stop Ideal review phase machine. Once review starts, completion is
    * blocked until harness-owned post-injection reads cover every changed file.
    */
@@ -1790,6 +1928,22 @@ export class AgentSession {
       ];
     };
     if (this.activePhaseContext?.executionStage === "reviewing") return null;
+
+    // Run verification before phase and Ideal-review gates.
+    if (
+      this.opts.selfCorrectionHooks !== false &&
+      this.settingsManager.get("verificationGateEnabled") &&
+      (!this.opts.allowedTools || this.opts.allowedTools.includes("bash"))
+    ) {
+      const verificationFollowUp = this.verificationGate.followUp();
+      if (verificationFollowUp) {
+        log("INFO", "verification-gate", "Injecting verification follow-up", {});
+        this.eventBus.emit("hook", { kind: "verification" });
+        this.refreshHookArming();
+        return verificationFollowUp;
+      }
+    }
+
     if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) {
       return phaseVerificationFollowUp();
     }
@@ -1840,6 +1994,11 @@ export class AgentSession {
       coverageExpected: coverage.expected,
       coverageMissing: coverage.missing,
     });
+    // Disarm strictly AFTER the hook event. Clients release held text on
+    // disarm, so the reverse order would paint the draft and then delete it —
+    // the exact flash arming exists to prevent. Leaving `idle` is what lets the
+    // reviewed final answer stream live instead of being held.
+    this.refreshIdealReviewArmed();
     log("INFO", "ideal", "Injecting ideal review before final response", {
       coverageExpected: coverage.expected,
       coverageMissing: coverage.missing,
@@ -2408,8 +2567,8 @@ export class AgentSession {
         await this.disposeMcpResources(oldManager, oldLeases);
         if (!this.isCurrentMcpConnection(generation, newManager)) return;
 
-        // Drop stale MCP tools from both the live set and deferred catalog before
-        // reconnecting through the same shared/private ownership path as startup.
+        // Drop stale identity-bearing MCP tools, then reconnect through the same
+        // trust-gated shared/private ownership path used during initialization.
         this.unregisterTools(
           (toolName, tool) =>
             getMcpToolIdentity(tool) !== undefined || this.mcpToolIdentities.has(toolName),
@@ -2873,6 +3032,9 @@ export class AgentSession {
       this.activePhaseVerificationInjected = false;
       this.reviewCoverage.reset();
     }
+    // Suppression flips mid-run (autopilot takes over verification), so a client
+    // holding a draft under a stale arming must be released.
+    this.refreshHookArming();
   }
 
   /** Queue a user message (optionally with attachments) to be injected mid-run
@@ -3309,6 +3471,7 @@ export class AgentSession {
         deferredToolNames,
         context: this.opts.agentContext,
         environment: this.promptEnvironment(),
+        contextLimits: this.contextLimits,
       });
     }
     return buildSystemPrompt(
@@ -3326,6 +3489,7 @@ export class AgentSession {
       this.provider,
       this.promptEnvironment(),
       deferredToolNames,
+      this.contextLimits,
     );
   }
 
@@ -3862,8 +4026,7 @@ export class AgentSession {
   }
 
   private createMcpManager(): MCPClientManager {
-    let manager!: MCPClientManager;
-    manager = new MCPClientManager({
+    const manager = new MCPClientManager({
       catalogCache: this.mcpCatalogCache,
       modernProtocol: this.settingsManager.get("mcpModernProtocol"),
       onElicit: this.opts.onMcpElicit,

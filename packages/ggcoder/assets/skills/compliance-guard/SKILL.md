@@ -11,12 +11,12 @@ Catch the legal, privacy, and regulatory exposure in a shipped product before a 
 
 ## Governing rules
 
-1. **Exposure drives obligations, not stack.** What the product *does*, *who can reach it*, and *whose data it touches* decide what applies. A CLI that never leaves the laptop owes almost nothing. A one-page site with a contact form and an ad pixel owes a surprising amount.
-2. **Never certify.** Do not write or say "compliant", "GDPR compliant", "ADA compliant", "fully legal", or "you're covered". Produce a risk register, implemented controls, residual risk, and an explicit *get a lawyer for this* list. This is engineering guidance, not legal advice, and must be labelled as such in every report.
+1. **Exposure drives obligations, not stack.** What the product _does_, _who can reach it_, and _whose data it touches_ decide what applies. A CLI that never leaves the laptop owes almost nothing. A one-page site with a contact form and an ad pixel owes a surprising amount.
+2. **Never certify.** Do not write or say "compliant", "GDPR compliant", "ADA compliant", "fully legal", or "you're covered". Produce a risk register, implemented controls, residual risk, and an explicit _get a lawyer for this_ list. This is engineering guidance, not legal advice, and must be labelled as such in every report.
 3. **Date-check before asserting.** The references are a snapshot dated **11 August 2026**. Effective dates, thresholds, injunctions, and penalty amounts move. Before stating a date, a threshold, or "this is in force", re-verify with web access if available; if unavailable, say the claim is from a dated snapshot and needs confirmation. Never invent a citation, statute section, or deadline.
-4. **Say it plainly when it is illegal.** If the requested build is unlawful, licensed, or criminal as described, state that clearly and early — before writing code, not after. Name the specific regime, the concrete red line, the safe subset that *can* be built, and what authorization would change the answer. Do not soften it into a vague caution, and do not silently build it.
+4. **Say it plainly when it is illegal.** If the requested build is unlawful, licensed, or criminal as described, state that clearly and early — before writing code, not after. Name the specific regime, the concrete red line, the safe subset that _can_ be built, and what authorization would change the answer. Do not soften it into a vague caution, and do not silently build it.
 5. **Fix, do not just flag.** Anything code can fix, fix: consent gating, security P0s, opt-out plumbing, deletion propagation, disclosure strings, accessibility defects. Draft documents as clearly-marked templates with `[PLACEHOLDER]` fields. Never invent the user's legal facts — entity name, registered address, DPO, retention periods, or vendor list must come from the user or the repo.
-6. **Proportionality.** A weekend prototype with no users does not need 60 findings. Gate on *launch-blocking* first, rank by probability × severity, and keep the tail as a backlog. Overwhelming a solo dev produces zero fixes.
+6. **Proportionality.** A weekend prototype with no users does not need 60 findings. Gate on _launch-blocking_ first, rank by probability × severity, and keep the tail as a backlog. Overwhelming a solo dev produces zero fixes.
 7. **Jurisdictions are a matrix, not a country.** "Where the company is" rarely limits exposure; "who can reach the app" usually sets it. A US-only startup with EU visitors and an unblocked signup form is in scope for EU law.
 
 ## Two modes
@@ -47,13 +47,13 @@ Do this before asking the user anything. `references/exposure-triage.md` has the
 
 Cap at **five questions**, batched in one message, in plain language, each stating the default you will assume if unanswered. Assume the user does not know what GDPR, CCPA, or an "entity" is — ask about facts they know, not about law.
 
-| Ask | Default if unanswered |
-|---|---|
-| 1. Who can use it — anyone on the internet, invite-only, your company, or just you? | **Anyone on the internet** |
-| 2. Any countries you block, or can anyone anywhere sign up? | **Reachable worldwide → US + EU/UK all apply** |
-| 3. Real people's data yet, or still test data? | **Real, if a deploy config or live domain exists; otherwise test** |
-| 4. Could under-18s realistically use it? Any age check? | **Possible, no age gate** |
-| 5. Is there a registered company, or is this you personally? | **No company — the user is personally exposed** |
+| Ask                                                                                 | Default if unanswered                                              |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| 1. Who can use it — anyone on the internet, invite-only, your company, or just you? | **Anyone on the internet**                                         |
+| 2. Any countries you block, or can anyone anywhere sign up?                         | **Reachable worldwide → US + EU/UK all apply**                     |
+| 3. Real people's data yet, or still test data?                                      | **Real, if a deploy config or live domain exists; otherwise test** |
+| 4. Could under-18s realistically use it? Any age check?                             | **Possible, no age gate**                                          |
+| 5. Is there a registered company, or is this you personally?                        | **No company — the user is personally exposed**                    |
 
 Never interrogate, never send a second round. If the user does not answer, proceed on these defaults, say which ones you used, and label the findings as assumption-based. **The defaults are deliberately the cautious reading** — a novice who ignores the questions must not get a quieter report than one who answers.
 
@@ -89,27 +89,25 @@ Items 1 and 2 of that list — **committed secrets and `.gitignore` gaps**, and 
 
 Other habitual casualties: webhook signature verification, rate limits on expensive or abusable endpoints, storage bucket permissions and client-supplied filenames, precise geolocation as a sensitive class in its own right, and fabricated or placeholder testimonials left in the landing page.
 
-**Then do a second pass on the product model, not the files.** The code sweep finds defects that live in a line. It reliably misses obligations that arise from **what the product is**, or from *two facts combined*, because neither fact looks wrong on its own. Ask these five explicitly, every time:
+**Then do a second pass on the product model, not the files.** The code sweep finds defects that live in a line. It reliably misses obligations that arise from **what the product is**, or from _two facts combined_, because neither fact looks wrong on its own. Ask these five explicitly, every time:
 
 1. **Does value move?** Balances, credits, in-app currency, tips, wallets, payouts, cash-out to a bank. Currency in + cash out = a money-transmission question no matter how small, and it is a **licensing gate**, not a to-do.
-2. **Is it a platform?** If users publish, upload, or message each other, intermediary duties attach as a matter of status: notice-and-action, a contact point, moderation terms, a DMCA agent, illegal-content and child-safety processes. These never appear as a code defect — they appear as *absence*.
+2. **Is it a platform?** If users publish, upload, or message each other, intermediary duties attach as a matter of status: notice-and-action, a contact point, moderation terms, a DMCA agent, illegal-content and child-safety processes. These never appear as a code defect — they appear as _absence_.
 3. **Does it generate or manipulate media?** Synthetic audio, video, images, or a persona needs provenance marking and user-facing labelling — and this is **a second, separate finding from whether generating it was permitted at all**. Both runs of an evaluation caught unconsented voice cloning as illegal and then omitted the labelling duty entirely, because the dramatic finding felt like it had covered the topic. Consent to generate and disclosure of what was generated are different obligations owed to different people; emit both.
 
-3b. **Where do credentials and financial identifiers live?** Bank account numbers, IBANs, tax identifiers, government IDs and payout details are high-value data whose storage is routinely written without any access control, encryption, or retention rule because they read as ordinary columns. Check them explicitly whenever a schema contains a payout, KYC, or identity field.
-4. **Do people get tracked across contexts?** Then opt-out preference signals must be honoured server-side and the opt-out must actually sever the recipient. Nothing in the code will look broken; the handler simply will not exist.
-5. **What two features combine into a third regime?** Video content **plus** an ad pixel is a distinct video-privacy claim, not just a tracking issue. In-app currency **plus** withdrawal is money movement. Biometrics **plus** a minor is a different statute. User uploads **plus** adult content is age assurance. Look for pairs, not just items.
+3b. **Where do credentials and financial identifiers live?** Bank account numbers, IBANs, tax identifiers, government IDs and payout details are high-value data whose storage is routinely written without any access control, encryption, or retention rule because they read as ordinary columns. Check them explicitly whenever a schema contains a payout, KYC, or identity field. 4. **Do people get tracked across contexts?** Then opt-out preference signals must be honoured server-side and the opt-out must actually sever the recipient. Nothing in the code will look broken; the handler simply will not exist. 5. **What two features combine into a third regime?** Video content **plus** an ad pixel is a distinct video-privacy claim, not just a tracking issue. In-app currency **plus** withdrawal is money movement. Biometrics **plus** a minor is a different statute. User uploads **plus** adult content is age assurance. Look for pairs, not just items.
 
 **Name every jurisdiction's version of the same duty.** Most obligations exist in both regimes under different names, and a review reliably names the first one it thinks of and stops — so the EU version goes missing from US-shaped reasoning and vice versa. Once a duty fires, ask "what is this called in the other regime, and does it add anything?" and emit a row for each:
 
-| Duty | US instantiation | EU/UK instantiation |
-|---|---|---|
-| Hosting user content | DMCA agent + repeat-infringer policy, CSAM reporting, NCII takedown | **DSA** notice-and-action, contact point, moderation terms, minors' protection; UK Online Safety duties |
-| Selling to consumers | ROSCA and state auto-renewal, junk-fee rules | **Pre-contract information, 14-day withdrawal right and the digital-content waiver**, unfair-terms limits, VAT/OSS |
-| Tracking | CIPA and state opt-out, GPC | ePrivacy prior consent, GDPR lawful basis |
-| Biometrics | BIPA written release + retention schedule | GDPR Art 9 basis, AI Act biometric-categorisation duties |
-| Automated decisions | ADMT notice and opt-out, FCRA, ECOA | AI Act risk tier, GDPR Art 22 |
-| Accessibility | ADA Title III, WCAG in practice | EAA and EN 301 549 |
-| Synthetic media | State provenance and disclosure laws | AI Act Art 50 marking and labelling |
+| Duty                 | US instantiation                                                    | EU/UK instantiation                                                                                                |
+| -------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Hosting user content | DMCA agent + repeat-infringer policy, CSAM reporting, NCII takedown | **DSA** notice-and-action, contact point, moderation terms, minors' protection; UK Online Safety duties            |
+| Selling to consumers | ROSCA and state auto-renewal, junk-fee rules                        | **Pre-contract information, 14-day withdrawal right and the digital-content waiver**, unfair-terms limits, VAT/OSS |
+| Tracking             | CIPA and state opt-out, GPC                                         | ePrivacy prior consent, GDPR lawful basis                                                                          |
+| Biometrics           | BIPA written release + retention schedule                           | GDPR Art 9 basis, AI Act biometric-categorisation duties                                                           |
+| Automated decisions  | ADMT notice and opt-out, FCRA, ECOA                                 | AI Act risk tier, GDPR Art 22                                                                                      |
+| Accessibility        | ADA Title III, WCAG in practice                                     | EAA and EN 301 549                                                                                                 |
+| Synthetic media      | State provenance and disclosure laws                                | AI Act Art 50 marking and labelling                                                                                |
 
 An EU-established company gets the EU column as the headline. That is the row a regulator in its own country will open with, and the one a US-shaped review is most likely to omit entirely.
 
@@ -121,16 +119,16 @@ An EU-established company gets the EU column as the headline. That is the row a 
 
 Severity ladder — use these exact labels in the report:
 
-| Label | Meaning |
-|---|---|
-| **ILLEGAL** | Cannot lawfully ship as described. Requires a licence, an authorization the user does not have, or is criminal. Stop and redirect. |
+| Label       | Meaning                                                                                                                                                                                                                                                                      |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **ILLEGAL** | Cannot lawfully ship as described. Requires a licence, an authorization the user does not have, or is criminal. Stop and redirect.                                                                                                                                           |
 | **BLOCKER** | Ship this and harm is likely and hard to undo: exposed keys, no authorization checks, public write access to user data, no consent before tracking in a consent jurisdiction, children's data with no COPPA path, a private-right-of-action fingerprint sitting in the code. |
-| **HIGH** | Realistic regulator or plaintiff exposure within months. Fix before or immediately after launch. |
-| **MEDIUM** | Real obligation, low near-term probability, or straightforward to add later. |
-| **BACKLOG** | Applies at scale or on a future trigger (enterprise sales, EU expansion, headcount, revenue thresholds). |
-| **LAWYER** | Cannot be resolved by code or template. Name it, do not guess it. |
+| **HIGH**    | Realistic regulator or plaintiff exposure within months. Fix before or immediately after launch.                                                                                                                                                                             |
+| **MEDIUM**  | Real obligation, low near-term probability, or straightforward to add later.                                                                                                                                                                                                 |
+| **BACKLOG** | Applies at scale or on a future trigger (enterprise sales, EU expansion, headcount, revenue thresholds).                                                                                                                                                                     |
+| **LAWYER**  | Cannot be resolved by code or template. Name it, do not guess it.                                                                                                                                                                                                            |
 
-Rank the top items by *probability the fingerprint is actually detected in the wild*, not by statutory maximum. A missing form label produces more real letters than an exotic treaty issue.
+Rank the top items by _probability the fingerprint is actually detected in the wild_, not by statutory maximum. A missing form label produces more real letters than an exotic treaty issue.
 
 **Lead with the jurisdiction the product actually operates in.** Worldwide reachability means other regimes apply, but it does not make them equally likely. For an EU company selling to EU customers, the EU regime is the headline and US exposure is a secondary section — and the reverse for a US product. Framing an EU-only product's central finding under a US statute is a real error: it buries the rule that will actually be enforced and sends the user to the wrong kind of lawyer. State the primary regime, then list the others as "also applies if you have users in X".
 
@@ -146,26 +144,26 @@ For documents, generate templates with placeholders, mark them clearly as templa
 
 This is what separates a real review from a plausible-sounding one. **Reading code tells you what someone intended; running it tells you what ships.**
 
-**Observe before asserting.** Static detection has false negatives that matter more than its false positives: tags injected at runtime by a tag manager, scripts added through a hosting dashboard and absent from the repo entirely, a framework's script component whose loading strategy decides whether consent is respected, a vendor SDK that phones home from inside a dependency. Grepping for `fbq(` finds none of those. Where the app can be run, verify the behaviour directly — load a page and record which third-party origins are contacted before any consent interaction, sign in as one user and request another user's object by id, submit the form and read what actually reaches the network. Label every finding with exactly one of three states — the distinction is between *running* and *reading*, not between certain and uncertain:
+**Observe before asserting.** Static detection has false negatives that matter more than its false positives: tags injected at runtime by a tag manager, scripts added through a hosting dashboard and absent from the repo entirely, a framework's script component whose loading strategy decides whether consent is respected, a vendor SDK that phones home from inside a dependency. Grepping for `fbq(` finds none of those. Where the app can be run, verify the behaviour directly — load a page and record which third-party origins are contacted before any consent interaction, sign in as one user and request another user's object by id, submit the form and read what actually reaches the network. Label every finding with exactly one of three states — the distinction is between _running_ and _reading_, not between certain and uncertain:
 
-| Label | Means | Example |
-|---|---|---|
-| **RUNTIME** | You executed it and watched the result | Loaded the page, saw `connect.facebook.net` requested before any consent click |
-| **CODE** | You read it in the source; you did not run it | The pixel snippet is in `layout.tsx` with no consent check around it |
-| **DEDUCED** | You concluded it from absence or from context | No privacy policy route exists anywhere in the repo |
+| Label       | Means                                         | Example                                                                        |
+| ----------- | --------------------------------------------- | ------------------------------------------------------------------------------ |
+| **RUNTIME** | You executed it and watched the result        | Loaded the page, saw `connect.facebook.net` requested before any consent click |
+| **CODE**    | You read it in the source; you did not run it | The pixel snippet is in `layout.tsx` with no consent check around it           |
+| **DEDUCED** | You concluded it from absence or from context | No privacy policy route exists anywhere in the repo                            |
 
 Never relabel upward. A `CODE` finding does not become `RUNTIME` because you are confident. Where you could not run the app at all, say so once at the top of the report rather than repeating it per finding — and note that the review therefore cannot see runtime-injected tags, dashboard-added scripts, or anything outside the repo.
 
 **Then make the fix self-enforcing.** A register is a snapshot that starts rotting the moment someone adds a feature; a failing test is not. For every BLOCKER and HIGH you fix, leave a check that fails if it regresses, and wire it into the project's existing test or CI setup rather than inventing a parallel one:
 
-| Fix | Guard that keeps it fixed |
-|---|---|
-| Consent gating | Test asserting **zero third-party network requests before consent** on first paint. The single highest-value check in this file. |
-| Accessibility | `axe-core` run over the top routes, failing on `serious` and `critical` |
-| Secrets | Secret scanner on commits, plus a test that the client bundle contains no key pattern |
-| Authorization | A test that user A cannot read or write user B's object by id |
-| Marketing email | A test that every send path goes through the one gate and includes an unsubscribe header |
-| Licence contamination | Dependency licence scan that **fails**, not warns, on copyleft and unknown |
+| Fix                   | Guard that keeps it fixed                                                                                                        |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Consent gating        | Test asserting **zero third-party network requests before consent** on first paint. The single highest-value check in this file. |
+| Accessibility         | `axe-core` run over the top routes, failing on `serious` and `critical`                                                          |
+| Secrets               | Secret scanner on commits, plus a test that the client bundle contains no key pattern                                            |
+| Authorization         | A test that user A cannot read or write user B's object by id                                                                    |
+| Marketing email       | A test that every send path goes through the one gate and includes an unsubscribe header                                         |
+| Licence contamination | Dependency licence scan that **fails**, not warns, on copyleft and unknown                                                       |
 
 If the project has no test runner at all, say so plainly and add the one check with the highest ratio of protection to setup cost rather than building a test harness they did not ask for.
 
@@ -177,17 +175,23 @@ Write or update **`COMPLIANCE.md`** at the repo root (or extend an existing regi
 
 ```markdown
 # Compliance Register
+
 Snapshot: <date> · Reviewed by: GG Coder compliance-guard · NOT LEGAL ADVICE
 
 ## Assumed exposure profile
+
 <reach, jurisdictions, data classes, minors, money, domain, third parties — mark each Confirmed or Assumed>
 
 ## Findings
+
 | ID | Severity | Trigger | Evidence (RUNTIME / CODE / DEDUCED) | Obligation | Status | Guard |
 
 ## Implemented in this pass
+
 ## Open — needs a decision from you
+
 ## Needs a lawyer
+
 ## Re-verify before relying (date-sensitive)
 ```
 
@@ -206,11 +210,11 @@ The register is the artifact; the message to the user is what actually gets acte
 3. **What it takes to fix** — who does it and roughly how long. "I already fixed it" / "20 minutes of your time" / "a lawyer, a few hundred dollars".
 4. **What happens if you ignore it** — honestly, including "probably nothing for a while" where that is true.
 
-**Language rules.** Lead with the plain-English name, and put the statute in parentheses only if it helps them search — "tracking people before they agree to it (CIPA)", not "CIPA §631 exposure". Never use an unexplained acronym. Never say "you may wish to consider" when you mean "do this before launch". Translate every legal term the first time you use it: a *processor* is a company that handles your users' data for you; a *lawful basis* is your reason for being allowed to hold the data at all.
+**Language rules.** Lead with the plain-English name, and put the statute in parentheses only if it helps them search — "tracking people before they agree to it (CIPA)", not "CIPA §631 exposure". Never use an unexplained acronym. Never say "you may wish to consider" when you mean "do this before launch". Translate every legal term the first time you use it: a _processor_ is a company that handles your users' data for you; a _lawful basis_ is your reason for being allowed to hold the data at all.
 
 **Give them a ranked, finite next action.** End with at most three things to do next, in order, with the first one being the smallest. A user who reads "you have 47 issues" fixes zero. A user who reads "do this one thing today, these two this week" fixes three.
 
-**Say what is already done.** Separate *"I fixed these while I was in here"* from *"you have to decide these"* from *"this one needs a real lawyer"*. Confusing the three is what makes people give up.
+**Say what is already done.** Separate _"I fixed these while I was in here"_ from _"you have to decide these"_ from _"this one needs a real lawyer"_. Confusing the three is what makes people give up.
 
 **Do not moralise and do not catastrophise.** State the base rate. "Small apps get sued over this regularly" and "this almost never gets enforced against someone your size, but it is cheap to fix" are both useful; "you could be fined €20 million" is not, because they will stop reading.
 

@@ -84,4 +84,16 @@ describe("LoginScreen cross-window auth", () => {
     // A re-read per streamed token would be absurd.
     expect(authStatus).toHaveBeenCalledTimes(1);
   });
+
+  it("shows the Ollama tile by name and the Hugging Face download tile", async () => {
+    vi.mocked(authStatus).mockResolvedValue(providers([]));
+    await act(async () => {
+      render(<LoginScreen onClose={vi.fn()} />);
+    });
+    // Not clicking them: the real modals would call agent functions this test's
+    // minimal mock doesn't define. The tiles themselves are what need pinning.
+    expect(screen.getByText("Ollama")).toBeTruthy();
+    expect(screen.queryByText("Local models")).toBeNull();
+    expect(screen.getByTitle("Hugging Face — download models to Ollama")).toBeTruthy();
+  });
 });

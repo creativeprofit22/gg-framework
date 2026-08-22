@@ -1,10 +1,6 @@
 import { hashServerConfig } from "./catalog-cache.js";
 import type { McpCatalogCache } from "./catalog-cache.js";
-import type {
-  MCPConnectResult,
-  MCPElicitHandler,
-  MCPServerStateChange,
-} from "./client.js";
+import type { MCPConnectResult, MCPElicitHandler, MCPServerStateChange } from "./client.js";
 import { log } from "../logger.js";
 import type { MCPServerConfig } from "./types.js";
 

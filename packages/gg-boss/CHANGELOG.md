@@ -1,5 +1,43 @@
 # @kenkaiiii/gg-boss
 
+## 5.49.3
+
+## 5.49.2
+
+## 5.49.1
+
+## 5.49.0
+
+### Minor Changes
+
+- 05685fe: Add Grok 4.6 (`grok-4.6`, released 2026-08-12) to the model registry and make it the xAI default — 500K context, image input, $2/$6 MTok (under 200K prompt tokens), and a `reasoning_effort` ladder that adds a new `xhigh` top rung (`low`/`medium`/`high` default/`xhigh`), which `XAI_THINKING_LEVELS` now exposes; thinking starts at `xhigh`. Grok 4.5 stays registered as a legacy option, still capped at `high` since it rejects `xhigh`. The OpenAI-compatible transport needs no changes — `xhigh` passes through `toOpenAIReasoningEffort` unchanged — so both the public API and the Grok CLI OAuth proxy serve the new model; CLI/app login defaults point at `grok-4.6`.
+
+## 5.48.0
+
+## 5.47.0
+
+## 5.46.2
+
+## 5.46.1
+
+## 5.46.0
+
+## 5.45.0
+
+## 5.44.3
+
+## 5.44.2
+
+## 5.44.1
+
+## 5.44.0
+
+## 5.43.0
+
+## 5.42.0
+
+## 5.41.1
+
 ## 5.41.0
 
 ## 5.40.1

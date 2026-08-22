@@ -244,24 +244,21 @@ describe("selectLatestRoadmapPhaseAdvancement", () => {
     overrides: Partial<NotesPhase> = {},
   ): NotesPhase {
     const review = completionReview({ reviewer });
-    return completedSource(
-      [review],
-      {
-        roadmapEvents: [
-          review,
-          {
-            type: "phase-advancement-checkpoint",
-            id: `checkpoint-${reviewer}`,
-            completionReviewId: review.id,
-            completedPhaseId: overrides.id ?? "source",
-            nextPhaseId: "next",
-            reviewer,
-            timestamp: LATER,
-          },
-        ],
-        ...overrides,
-      },
-    );
+    return completedSource([review], {
+      roadmapEvents: [
+        review,
+        {
+          type: "phase-advancement-checkpoint",
+          id: `checkpoint-${reviewer}`,
+          completionReviewId: review.id,
+          completedPhaseId: overrides.id ?? "source",
+          nextPhaseId: "next",
+          reviewer,
+          timestamp: LATER,
+        },
+      ],
+      ...overrides,
+    });
   }
 
   it.each([
@@ -305,9 +302,30 @@ describe("selectLatestRoadmapPhaseAdvancement", () => {
   });
 
   it.each([
-    ["superseded review", (source: NotesPhase) => source.roadmapEvents.push(completionReview({ id: "later-review", decision: "rejected", gateOutcome: "review", timestamp: "2026-08-12T12:03:00.000Z" }))],
-    ["status override", (source: NotesPhase) => { source.overrides.status = { value: "done", source: "user", updatedAt: LATER }; }],
-    ["bound target", (_source: NotesPhase, next: NotesPhase) => { next.session = { sessionId: "bound", sessionPath: "/bound.jsonl" }; }],
+    [
+      "superseded review",
+      (source: NotesPhase) =>
+        source.roadmapEvents.push(
+          completionReview({
+            id: "later-review",
+            decision: "rejected",
+            gateOutcome: "review",
+            timestamp: "2026-08-12T12:03:00.000Z",
+          }),
+        ),
+    ],
+    [
+      "status override",
+      (source: NotesPhase) => {
+        source.overrides.status = { value: "done", source: "user", updatedAt: LATER };
+      },
+    ],
+    [
+      "bound target",
+      (_source: NotesPhase, next: NotesPhase) => {
+        next.session = { sessionId: "bound", sessionPath: "/bound.jsonl" };
+      },
+    ],
   ] as const)("reports a stale checkpoint after %s", (_name, mutate) => {
     const source = checkpointSource();
     const next = phase("next", 20);

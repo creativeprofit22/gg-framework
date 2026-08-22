@@ -30,6 +30,8 @@ interface Props {
   onClose: () => void;
   /** Called after a successful connect/disconnect so the list can refresh. */
   onChanged: () => void;
+  /** Hugging Face only: opens the search-and-pull modal for local models. */
+  onOpenHfPull?: () => void;
 }
 
 /**
@@ -38,7 +40,12 @@ interface Props {
  * or the interactive OAuth flow (opens the browser, collects a pasted code when
  * the provider needs one). Mirrors `ggcoder login`.
  */
-export function ProviderLoginModal({ provider, onClose, onChanged }: Props): React.ReactElement {
+export function ProviderLoginModal({
+  provider,
+  onClose,
+  onChanged,
+  onOpenHfPull,
+}: Props): React.ReactElement {
   const single = provider.methods.length === 1 ? provider.methods[0] : null;
   const [method, setMethod] = useState<AuthMethod | null>(single);
   const [apiKey, setApiKey] = useState("");
@@ -294,6 +301,30 @@ export function ProviderLoginModal({ provider, onClose, onChanged }: Props): Rea
       {error && (
         <div className="login-status" style={{ color: theme.error }}>
           {error}
+        </div>
+      )}
+
+      {/* Hugging Face is the one provider with a local twin: same Hub, run on
+          your machine via Ollama instead of the hosted router. Offer it here so
+          people who came looking for open weights find the download path. */}
+      {onOpenHfPull && (
+        <div className="login-method-note">
+          Want to run a model locally instead?{" "}
+          <button
+            className="link-btn"
+            style={{
+              color: theme.accent,
+              padding: 0,
+              font: "inherit",
+              border: "none",
+              background: "none",
+              cursor: "pointer",
+              textDecoration: "underline",
+            }}
+            onClick={onOpenHfPull}
+          >
+            Search Hugging Face and download with Ollama
+          </button>
         </div>
       )}
 

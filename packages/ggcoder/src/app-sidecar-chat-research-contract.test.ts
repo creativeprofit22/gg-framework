@@ -100,22 +100,22 @@ describe("app sidecar Research capability contract", () => {
       stubTool("mcp__unknown-mutator__write", "mutate external code"),
     ]);
 
-    let session!: AgentSession;
+    const sessionHolder: { current?: AgentSession } = {};
     const toolSearch = createToolSearchTool(
       catalog,
       (tools) => {
-        for (const tool of tools) session.registerTool(tool);
+        for (const tool of tools) sessionHolder.current!.registerTool(tool);
       },
       undefined,
       (name) =>
         (
-          session as unknown as {
+          sessionHolder.current as unknown as {
             isToolCapabilityAllowed(toolName: string): boolean;
           }
         ).isToolCapabilityAllowed(name),
     );
     const roadmapTools = [stubTool("roadmap_inspect"), stubTool("roadmap_phase_draft")];
-    session = createChatAgent("general", {
+    const session = createChatAgent("general", {
       provider: "anthropic",
       model: "claude-test",
       cwd: tempProject,
@@ -130,6 +130,7 @@ describe("app sidecar Research capability contract", () => {
       ],
       ...createAppSidecarChatRoadmapSessionOptions(roadmapTools),
     });
+    sessionHolder.current = session;
 
     try {
       await session.initialize();

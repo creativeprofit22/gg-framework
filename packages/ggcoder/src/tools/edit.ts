@@ -74,9 +74,10 @@ const EditItem = z.object({
     ),
 });
 
-// Some models (Opus 4.6, GLM-5.1) occasionally send `edits` as a JSON string
-// instead of a real array, which trips Zod and makes the model fall back to
-// sed/python. Coerce the string back into an array before validation.
+// Several models (opus-5, sonnet-5, fable-5, glm-5.x) occasionally send `edits`
+// as a JSON string instead of a real array, which trips Zod and makes the model
+// fall back to sed/python. Coerce the well-formed case back into an array before
+// validation.
 const coerceStringifiedEdits = (v: unknown): unknown => {
   if (typeof v !== "string") return v;
   try {
@@ -87,10 +88,48 @@ const coerceStringifiedEdits = (v: unknown): unknown => {
   }
 };
 
+// Reaching the array schema with a string means the coercion above could not
+// parse it. Every observed case is a hand-serialized array whose inner escaping
+// broke, whose `new_text` key went missing, or that was truncated mid-write.
+//
+// A lenient repair stage (the `jsonrepair` package, as used by several agent
+// runtimes) was measured against 41 real failures from ~/.gg session logs: it
+// parses 11, but only 2 faithfully. The rest pass this schema while silently
+// dropping content -- it closes the JSON at the first error, so a truncated
+// stream yields a short `new_text` and one 8.8KB payload came back with 11% of
+// its characters. Those write partial code over a real file. Recovering 2 in 41
+// is not worth 4 corrupted files, so this stays a hard rejection.
+//
+// What was actually costing turns is the message: Zod's stock "expected array,
+// received string" never tells the model what it did, so it re-sends the
+// identical payload until the agent loop's repeat counter turns the turn fatal.
+// Name the mistake and the way out instead.
+const STRINGIFIED_EDITS_ERROR =
+  "`edits` arrived as a JSON-encoded string and could not be parsed back into an array. " +
+  "Send `edits` as a real JSON array of objects, never as a string. " +
+  "Re-sending the same large payload usually breaks the same way: split the work into " +
+  "several `edit` calls carrying one or two smaller edits each.";
+
 const EditParams = z.object({
   file_path: z.string().describe("The file path to edit"),
   edits: z
-    .preprocess(coerceStringifiedEdits, z.array(EditItem).min(1))
+    .preprocess(
+      coerceStringifiedEdits,
+      z
+        .array(EditItem, {
+          // Narrow to "an array was expected, a string arrived" so a nested
+          // string-typed mistake (`anchor: "x"`, `replace_all: "true"`) keeps
+          // its own accurate message. Any non-matching issue returns undefined
+          // and falls through to Zod's default.
+          error: (issue) =>
+            issue.code === "invalid_type" &&
+            issue.expected === "array" &&
+            typeof issue.input === "string"
+              ? STRINGIFIED_EDITS_ERROR
+              : undefined,
+        })
+        .min(1),
+    )
     .describe(
       "One or more edits applied in order. Each edit operates on the result of the previous one.",
     ),

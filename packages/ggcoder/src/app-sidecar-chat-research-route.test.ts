@@ -44,9 +44,7 @@ const openServers: http.Server[] = [];
 
 function isFetchForbiddenPortError(error: unknown): boolean {
   return (
-    error instanceof TypeError &&
-    error.cause instanceof Error &&
-    error.cause.message === "bad port"
+    error instanceof TypeError && error.cause instanceof Error && error.cause.message === "bad port"
   );
 }
 

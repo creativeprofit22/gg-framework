@@ -14,9 +14,7 @@ export function parsePhaseAdvancementStartRoute(
   requestUrl: string | undefined,
 ): PhaseAdvancementStartRoute | null {
   if (method !== "POST" || !requestUrl) return null;
-  const match = /^\/notes\/roadmap\/advancement\/([^/]+)\/start$/.exec(
-    requestPathname(requestUrl),
-  );
+  const match = /^\/notes\/roadmap\/advancement\/([^/]+)\/start$/.exec(requestPathname(requestUrl));
   if (!match) return null;
   try {
     const checkpointId = decodeURIComponent(match[1]!);

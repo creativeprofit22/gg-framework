@@ -11,12 +11,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
 }));
 vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
-import {
-  addMcpServer,
-  listMcpServers,
-  loginMcpServer,
-  removeMcpServer,
-} from "./agent";
+import { addMcpServer, listMcpServers, loginMcpServer, removeMcpServer } from "./agent";
 
 const ready = { ready: true, error: null, generation: 1, sessionId: "session-1" };
 
@@ -66,10 +61,18 @@ describe("desktop MCP client failures", () => {
   it.each([
     ["add", () => addMcpServer("claude mcp add bad", "global"), "agent_mcp_add", "Could not add"],
     ["remove", () => removeMcpServer("bad", "global"), "agent_mcp_remove", "Could not remove"],
-    ["OAuth", () => loginMcpServer("bad", "global"), "agent_mcp_login", "Could not start MCP sign-in"],
-  ])("rejects %s failures instead of reporting success", async (_label, operation, command, message) => {
-    respondToMcp(command, new Error("sidecar unavailable"), true);
+    [
+      "OAuth",
+      () => loginMcpServer("bad", "global"),
+      "agent_mcp_login",
+      "Could not start MCP sign-in",
+    ],
+  ])(
+    "rejects %s failures instead of reporting success",
+    async (_label, operation, command, message) => {
+      respondToMcp(command, new Error("sidecar unavailable"), true);
 
-    await expect(operation()).rejects.toThrow(message);
-  });
+      await expect(operation()).rejects.toThrow(message);
+    },
+  );
 });

@@ -142,8 +142,14 @@ describe("tool tiering in the system prompt", () => {
     const indexBlock = prompt.slice(indexBlockStart, prompt.indexOf("\n\n", indexBlockStart));
     expect(indexBlock.length).toBeLessThan(1_200);
     // Raised with the "How to Talk" reply-shape rules, then again for the
-    // always-on security defaults in Code Quality; the index block cap above
-    // is the one that guards tiering itself.
-    expect(prompt.length).toBeLessThan(9_200);
+    // always-on security defaults in Code Quality, then again for the Code
+    // Quality minimization ladder (benchmarked: same correctness, 50–76% less
+    // generated code); the index block cap above is the one that guards
+    // tiering itself, and it is unchanged. Raised again with the 2026-08
+    // guardrail additions (git safety, anti-fake-green, reproduce-first,
+    // circuit-breaker, question-vs-fix, no-variants, test guidance). Raised
+    // again for the alignment guardrails (facts-vs-decisions, batched
+    // questions) — see the size-budget test in system-prompt.test.ts.
+    expect(prompt.length).toBeLessThan(12_200);
   });
 });

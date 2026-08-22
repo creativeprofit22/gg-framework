@@ -8,6 +8,7 @@ import {
   SUB_AGENT_TIMEOUT_MS,
 } from "../tools/subagent-shared.js";
 import { captureSidecarError, flushSidecarErrors } from "../core/sidecar-error-reporter.js";
+import { writeTurnRecord } from "../core/subagent-turn-record.js";
 
 const TIMEOUT_RECOVERY_GRACE_MS = 60_000;
 const TIMEOUT_RECOVERY_PROMPT = `Your execution time limit was reached and the active operation was stopped.
@@ -72,8 +73,17 @@ type WorkerCommand =
 
 type WorkerState = "uninitialized" | "idle" | "running" | "interrupted" | "closed";
 
+/** Set once our stdout pipe dies (parent restart). See runSubagentWorkerMode. */
+let orphaned = false;
+
 function emit(frame: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify(frame)}\n`);
+  if (orphaned) return;
+  try {
+    process.stdout.write(`${JSON.stringify(frame)}\n`);
+  } catch {
+    // A racing pipe teardown between the guard and the write — the error
+    // handler below flips `orphaned` for subsequent frames.
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -81,6 +91,21 @@ function errorMessage(error: unknown): string {
 }
 
 export async function runSubagentWorkerMode(): Promise<void> {
+  // Detached child outliving its parent: a parent restart kills our stdout
+  // pipe, and the first write after that would crash us mid-turn (EPIPE).
+  // Swallow it, stop emitting, and keep running — the durable session
+  // transcript plus the turn record written beside it are what the
+  // rehydrated parent adopts.
+  const pipeError = (error: NodeJS.ErrnoException) => {
+    if (error.code === "EPIPE") {
+      orphaned = true;
+      return;
+    }
+    throw error;
+  };
+  process.stdout.on("error", pipeError);
+  process.stderr.on("error", pipeError);
+
   let session: AgentSession | undefined;
   let initializeOptions: SubagentWorkerInitialize | undefined;
   let state: WorkerState = "uninitialized";
@@ -92,6 +117,11 @@ export async function runSubagentWorkerMode(): Promise<void> {
   let recoveryOutput = "";
   let recoveringAfterTimeout = false;
   let producedToolCall = false;
+  // This worker's LIFETIME totals — one initialize = one agent_id = one
+  // worker lifetime, so the durable turn record carries authoritative
+  // cumulative numbers an adopting parent can trust.
+  let turnCount = 0;
+  const tokenUsage = { input: 0, output: 0 };
 
   const setState = (next: WorkerState, extra: Record<string, unknown> = {}) => {
     state = next;
@@ -122,6 +152,13 @@ export async function runSubagentWorkerMode(): Promise<void> {
     for (const event of forwarded) {
       activeSession.eventBus.on(event, (payload) => {
         if (event === "tool_call_start") producedToolCall = true;
+        if (event === "turn_end") {
+          turnCount++;
+          const usage = (payload as { usage?: { inputTokens?: number; outputTokens?: number } })
+            .usage;
+          tokenUsage.input += usage?.inputTokens ?? 0;
+          tokenUsage.output += usage?.outputTokens ?? 0;
+        }
         emit({ type: "event", event, payload });
       });
     }
@@ -212,8 +249,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
         controller.signal.aborted || (abortReason !== undefined && abortReason !== "timeout");
       const timedOut = abortReason === "timeout" && !recoveredAfterTimeout;
       setState(interrupted && !timedOut ? "interrupted" : "idle");
-      emit({
-        type: "turn_complete",
+      completeTurn({
         status: recoveredAfterTimeout
           ? "completed"
           : timedOut
@@ -245,8 +281,7 @@ export async function runSubagentWorkerMode(): Promise<void> {
           });
         }
         setState(interrupted && !timedOut ? "interrupted" : "idle");
-        emit({
-          type: "turn_complete",
+        completeTurn({
           status: timedOut ? "failed" : interrupted ? "interrupted" : "failed",
           output: boundSubAgentOutput(output),
           error: timedOut
@@ -260,6 +295,21 @@ export async function runSubagentWorkerMode(): Promise<void> {
       .finally(() => {
         activeTurn = undefined;
       });
+  };
+
+  /** Durably record the turn, then announce it. Record FIRST: an adopting
+   * parent must never observe a terminal frame with no record behind it. */
+  const completeTurn = (frame: Record<string, unknown>): void => {
+    void writeTurnRecord(initializeOptions?.childSessionPath, {
+      status: (frame.status as "completed" | "interrupted" | "failed") ?? "failed",
+      output: typeof frame.output === "string" ? frame.output : undefined,
+      error: typeof frame.error === "string" ? frame.error : undefined,
+      model: typeof frame.model === "string" ? frame.model : undefined,
+      turn_count: turnCount,
+      token_usage: { input: tokenUsage.input, output: tokenUsage.output },
+      completed_at: Date.now(),
+    });
+    emit({ type: "turn_complete", ...frame });
   };
 
   const acknowledge = (requestId: string, result: Record<string, unknown> = {}) =>
@@ -333,9 +383,17 @@ export async function runSubagentWorkerMode(): Promise<void> {
     void handle(command);
   });
   await new Promise<void>((resolve) => lines.once("close", resolve));
-  abortReason = "stdin_closed";
-  controller.abort();
-  await activeTurn?.catch(() => undefined);
+  if (activeTurn) {
+    // Stdin closed mid-turn: the parent is gone. Finish the turn so its
+    // result lands in the durable turn record (the rehydrated parent adopts
+    // it); emit() is a no-op by then. The turn's own SUB_AGENT_TIMEOUT_MS
+    // still bounds it — the process cannot linger past that.
+    orphaned = true;
+    await activeTurn.catch(() => undefined);
+  } else {
+    abortReason = "stdin_closed";
+    controller.abort();
+  }
   await session?.dispose();
   await flushSidecarErrors();
 }

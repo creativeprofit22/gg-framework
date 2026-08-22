@@ -180,8 +180,35 @@ describe("useAgentEvents", () => {
 
       const users = getItems().filter((it) => it.kind === "user");
       expect(users[0]?.queued).toBe(false);
+      // Marked for the queued→sent morph, so the bubble animates out of the dim
+      // dashed look instead of snapping.
+      expect(users[0]?.promoted).toBe(true);
       // The still-pending one keeps its pill.
       expect(users[1]?.queued).toBe(true);
+      expect(users[1]?.promoted).toBeUndefined();
+    });
+
+    it("drops the morph flag once the animation beat is over", async () => {
+      const { hook, getItems, pushUserItem, setRunning } = setup();
+      act(() => setRunning(true));
+      pushUserItem("only queued", true);
+
+      act(() => {
+        hook.result.current.handleEvent(
+          ev("queued", { count: 1, messages: [{ id: "a", text: "only queued" }] }),
+        );
+      });
+      act(() => {
+        hook.result.current.handleEvent(ev("queued", { count: 0, messages: [] }));
+      });
+      expect(getItems().find((it) => it.kind === "user")?.promoted).toBe(true);
+
+      // Left set, the flag would replay the collapse whenever the transcript
+      // remounts (a picker view taking the window and coming back).
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 400));
+      });
+      expect(getItems().find((it) => it.kind === "user")?.promoted).toBe(false);
     });
 
     it("clears the rest once the queue fully drains, still mid-run", () => {
@@ -444,7 +471,7 @@ describe("useAgentEvents", () => {
     expect(items[0]).toMatchObject({ kind: "assistant", text: "Hello world" });
   });
 
-  it("discards the candidate draft before showing the Ideal hook and reviewed final", () => {
+  it("discards a draft the late-arming fallback could not hold back", () => {
     const { hook, getItems } = setup();
 
     act(() => {
@@ -518,6 +545,105 @@ describe("useAgentEvents", () => {
         headline: "The phase could not be launched. Review its attention note and retry.",
       }),
     ]);
+  });
+
+  it("never paints the draft while the Ideal review is armed", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unreviewed draft" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: " tail" }));
+    });
+    // Held, never rendered: the user cannot read text the review will replace.
+    expect(getItems()).toEqual([]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: false }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "ideal" })]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Reviewed final" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+      expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
+    ]);
+  });
+
+  it("keeps holding the draft when one of two armed hooks disarms", () => {
+    const { hook, getItems } = setup();
+
+    // Both pre-final hooks armed in the same run: verification is owed AND the
+    // ideal review would fire. The sidecar arms each once, on its own edge.
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: true }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unverified draft" }));
+    });
+    expect(getItems()).toEqual([]);
+
+    // Verification fires and disarms. Ideal is still armed and will NOT be
+    // re-armed (edge-triggered), so releasing here would paint a draft the
+    // review is about to delete.
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: false }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Verified draft" }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "verification" })]);
+
+    // Only the last disarm releases.
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: false }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Reviewed final" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "verification" }),
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+      expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
+    ]);
+  });
+
+  it("never paints the draft while the verification gate is armed", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Unverified draft" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "verification", armed: false }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "verification" })]);
+  });
+
+  it("releases text held under arming when the turn calls a tool instead of stopping", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Checking the file" }));
+      hook.result.current.handleEvent(ev("tool_call_start", { toolCallId: "t1", name: "read" }));
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "assistant", text: "Checking the file" }),
+    ]);
+  });
+
+  it("releases held text when the run ends without the review firing", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook_armed", { kind: "ideal", armed: true }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Done here" }));
+      hook.result.current.handleEvent(ev("agent_done", { totalTurns: 3 }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "assistant", text: "Done here" })]);
   });
 
   it("error with a structured payload (headline/message/guidance) pushes a structured error item", () => {

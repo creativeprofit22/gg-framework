@@ -893,7 +893,10 @@ describe("project Notes contract", () => {
   it.each([
     ["checkpoint id", (event: Record<string, unknown>) => (event.id = "")],
     ["checkpoint timestamp", (event: Record<string, unknown>) => (event.timestamp = "today")],
-    ["completion review", (event: Record<string, unknown>) => (event.completionReviewId = "missing")],
+    [
+      "completion review",
+      (event: Record<string, unknown>) => (event.completionReviewId = "missing"),
+    ],
     ["completed phase", (event: Record<string, unknown>) => (event.completedPhaseId = "other")],
     ["next phase", (event: Record<string, unknown>) => (event.nextPhaseId = "missing")],
     ["reviewer mode", (event: Record<string, unknown>) => (event.reviewer = "ken")],
@@ -949,12 +952,15 @@ describe("project Notes contract", () => {
 
   it("retains compatibility with v3 documents that predate advancement events", async () => {
     const document = await fixture();
-    expect(document.phases.every((phase) =>
-      phase.roadmapEvents.every((event) =>
-        event.type !== "phase-advancement-checkpoint" &&
-        event.type !== "phase-advancement-confirmation",
+    expect(
+      document.phases.every((phase) =>
+        phase.roadmapEvents.every(
+          (event) =>
+            event.type !== "phase-advancement-checkpoint" &&
+            event.type !== "phase-advancement-confirmation",
+        ),
       ),
-    )).toBe(true);
+    ).toBe(true);
     expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
   });
 

@@ -9,6 +9,8 @@ compatibility: Works offline from the bundled references, which are a snapshot d
 
 Make software hold up against a real attacker — one that is now partly automated, reads your public code end-to-end, and moves in minutes. Built for solo developers and small teams, who get breached through a short list of boring mistakes, not exotic ones.
 
+**This skill is on from the first line of code.** The default mode is the inline gate below — write the safe version while building, in the main thread. Nothing here requires spawning subagents or scheduling an audit.
+
 ## Governing rules
 
 1. **Reachability decides everything.** A vulnerability class only matters if untrusted data can actually reach the dangerous operation. Trace the path before you rank the risk — source, hops, sink. No path, no finding. Conversely: if a path exists, the framework's reputation does not save it.
@@ -16,7 +18,7 @@ Make software hold up against a real attacker — one that is now partly automat
 3. **Assume a machine-speed adversary.** Public code is continuously read by automated scanners on both sides. Leaked credentials get used, not filed. Design so that one mistake is survivable: scope credentials, cap blast radius, make rotation possible. See `references/threat-landscape.md`.
 4. **Fix, do not just flag.** Inline, build the control into the feature as you write it. In a full review, report first — then fix what the user selects. A list of findings nobody implements has done nothing.
 5. **Never certify.** Do not write or say "secure", "hardened", "unhackable", "bulletproof", "audited", or "no vulnerabilities". State what you checked, what you fixed, what you could not verify, and what remains. Absence of findings is absence of findings.
-6. **Defensive output only.** Describe risk at the data-flow level — where untrusted data enters, what it reaches, why that is fixable. No working exploits, no weaponized payloads, no attack tooling, in any mode, including inside subagent tasks. If you cannot explain a risk without writing an exploit, describe the flow and the fix instead.
+6. **Defensive output only.** Describe risk at the data-flow level — where untrusted data enters, what it reaches, why that is fixable. No working exploits, no weaponized payloads, no attack tooling, in any mode. If you cannot explain a risk without writing an exploit, describe the flow and the fix instead.
 7. **Proportionality.** Rank by realistic exposure: probability × blast radius. A prototype with no users and no secrets does not need forty findings. Five real fixes beat forty ignored ones.
 8. **Date-check before asserting.** The references are a snapshot dated **12 August 2026**. CVEs, versions, defaults, and incident details move weekly. Re-verify with web access when available; when unavailable, say the claim is from a dated snapshot. Never invent a CVE number, a version, or an advisory.
 
@@ -26,7 +28,7 @@ Make software hold up against a real attacker — one that is now partly automat
 
 This mode matters most, because the users who need this skill will never ask for it. They ask for a login page, a file upload, an admin route, a Stripe webhook, a CLI that runs a command. **Write the safe version the first time** — parameterize the query, enforce authorization at the data layer, resolve the path and check containment, pass argv instead of a shell string, pin the dependency after verifying it exists. Do not stop the build to deliver a lecture, and do not ship the unsafe version intending to flag it later.
 
-**Full review** — triggered by "is this safe to ship", a hardening pass, pre-launch, suspected compromise, or first use of this skill on a project. Run the workflow below; the full multi-agent protocol, audit catalog, false-positive filter, and report template live in `references/audit-protocol.md`.
+**Full review** — triggered by "is this safe to ship", a hardening pass, pre-launch, suspected compromise, or first use of this skill on a project. Run the workflow below yourself, in the main thread; the full protocol, audit catalog, false-positive filter, and report template live in `references/audit-protocol.md`.
 
 ## Workflow
 
@@ -47,12 +49,12 @@ Do this before asking the user anything.
 
 Cap at **five questions**, batched in one message, each stating the default you will assume if unanswered. Assume the user does not know security vocabulary — ask about facts they know.
 
-| Ask | Default if unanswered |
-|---|---|
-| Is this reachable from the public internet, or only your machine / a private network? | Public, if any deploy config or hosting file exists; local-only for a bare script |
-| Do real people's accounts or data live in it, or is it test data? | Real data once there is a users/accounts table, auth, or a payment path |
-| Can users see each other's data if they are meant to be separated (multi-tenant, teams, orgs)? | Assume separation is required wherever a tenant/org/user foreign key exists |
-| Who is trusted to run privileged actions — is there an admin role, and who has it? | Assume an admin surface exists if any route, flag, or column implies one |
+| Ask                                                                                               | Default if unanswered                                                                            |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Is this reachable from the public internet, or only your machine / a private network?             | Public, if any deploy config or hosting file exists; local-only for a bare script                |
+| Do real people's accounts or data live in it, or is it test data?                                 | Real data once there is a users/accounts table, auth, or a payment path                          |
+| Can users see each other's data if they are meant to be separated (multi-tenant, teams, orgs)?    | Assume separation is required wherever a tenant/org/user foreign key exists                      |
+| Who is trusted to run privileged actions — is there an admin role, and who has it?                | Assume an admin surface exists if any route, flag, or column implies one                         |
 | Has anything already gone wrong — leaked key, odd logins, unexpected charges, a dependency alert? | Assume no active incident, but treat any exposed secret found in the repo as already compromised |
 
 If the user says a surface is out of scope, record it as their stated assumption and report it as not-checked rather than silently dropping it.
@@ -61,16 +63,16 @@ If the user says a surface is out of scope, record it as their stated assumption
 
 For this population, findings cluster hard. Work the list in this order unless recon says otherwise — this ordering reflects what is actually being exploited at scale, not what is most interesting.
 
-| Rank | Failure | Why it is first |
-|---|---|---|
-| 1 | **Secrets in code, history, bundles, logs, or CI** | Highest-volume real-world compromise. A committed key is a live key; treat any exposure as burned and rotate. `references/secure-defaults.md` |
-| 2 | **Missing or wrong authorization at the data layer** | IDOR/BOLA, disabled or permissive row-level security, tenant checks only in the UI. Public API keys plus an open table is the standard indie breach. `references/platform-playbooks.md` |
-| 3 | **Supply chain and install-time execution** | Dependencies, lockfiles, postinstall hooks, CI workflows, release signing, editor extensions, MCP servers. `references/supply-chain.md` |
-| 4 | **Injection into an interpreter** | SQL, shell, template, deserialization, dynamic code load — and XSS, which is injection into an HTML parser. XSS and SQL injection are ranks 1 and 2 of the 2025 CWE Top 25. |
-| 5 | **Agent and AI surfaces** | Prompt injection reaching a tool with credentials and an egress path. `references/agent-surface.md` |
-| 6 | **Auth, session, and crypto correctness** | Token validation, session lifecycle, password storage, signature verification. `references/secure-defaults.md` |
-| 7 | **Platform-specific exposure** | Deep links, exported components, IPC, loopback servers, updater integrity, debug interfaces, proxy admin keys. `references/platform-playbooks.md` |
-| 8 | **Everything else** | Backlog unless recon shows a concrete path. |
+| Rank | Failure                                              | Why it is first                                                                                                                                                                         |
+| ---- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | **Secrets in code, history, bundles, logs, or CI**   | Highest-volume real-world compromise. A committed key is a live key; treat any exposure as burned and rotate. `references/secure-defaults.md`                                           |
+| 2    | **Missing or wrong authorization at the data layer** | IDOR/BOLA, disabled or permissive row-level security, tenant checks only in the UI. Public API keys plus an open table is the standard indie breach. `references/platform-playbooks.md` |
+| 3    | **Supply chain and install-time execution**          | Dependencies, lockfiles, postinstall hooks, CI workflows, release signing, editor extensions, MCP servers. `references/supply-chain.md`                                                 |
+| 4    | **Injection into an interpreter**                    | SQL, shell, template, deserialization, dynamic code load — and XSS, which is injection into an HTML parser. XSS and SQL injection are ranks 1 and 2 of the 2025 CWE Top 25.             |
+| 5    | **Agent and AI surfaces**                            | Prompt injection reaching a tool with credentials and an egress path. `references/agent-surface.md`                                                                                     |
+| 6    | **Auth, session, and crypto correctness**            | Token validation, session lifecycle, password storage, signature verification. `references/secure-defaults.md`                                                                          |
+| 7    | **Platform-specific exposure**                       | Deep links, exported components, IPC, loopback servers, updater integrity, debug interfaces, proxy admin keys. `references/platform-playbooks.md`                                       |
+| 8    | **Everything else**                                  | Backlog unless recon shows a concrete path.                                                                                                                                             |
 
 ### 4. Build the control, do not describe it
 
@@ -111,12 +113,12 @@ Whatever the mode, the report must state **what was not checked**. A review that
 
 Rank by what the attacker ends up holding, not by how clever the bug is.
 
-| Severity | Meaning |
-|---|---|
-| **Critical** | Remote code execution, full authentication bypass, credential or signing-key theft, any user's data readable by any other, loss of funds, supply-chain compromise of a shipped artifact |
-| **High** | Privilege escalation, cross-tenant access requiring some authentication, exposure of a live secret, unauthenticated access to an admin or internal surface, integrity failure in an update channel |
-| **Medium** | Scoped information disclosure, weakened crypto with no direct break, partial bypass needing an unlikely precondition, missing defense-in-depth on a path with another working control |
-| **Low** | Hardening gaps with no demonstrated path. Backlog them; do not lead with them. |
+| Severity     | Meaning                                                                                                                                                                                            |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Critical** | Remote code execution, full authentication bypass, credential or signing-key theft, any user's data readable by any other, loss of funds, supply-chain compromise of a shipped artifact            |
+| **High**     | Privilege escalation, cross-tenant access requiring some authentication, exposure of a live secret, unauthenticated access to an admin or internal surface, integrity failure in an update channel |
+| **Medium**   | Scoped information disclosure, weakened crypto with no direct break, partial bypass needing an unlikely precondition, missing defense-in-depth on a path with another working control              |
+| **Low**      | Hardening gaps with no demonstrated path. Backlog them; do not lead with them.                                                                                                                     |
 
 Downgrade one level when a working compensating control sits in the path. Upgrade one level when the asset is a credential, a signing key, or an update channel — those turn one bug into every user's bug.
 
@@ -147,8 +149,8 @@ Building detection, hardening, monitoring, honeypots on your own systems, and CT
 Resolve every path from the installed skill root. Load only what the profile triggered.
 
 - `references/threat-landscape.md` — who is attacking this class of software in 2026, how automation changed the economics, named incidents with defensive fingerprints. Read once per full review.
-- `references/audit-protocol.md` — the full-review protocol: recon agents, audit catalog, subagent briefs, false-positive filter, hard exclusions, report template. Read for any full review.
-- `references/platform-playbooks.md` — per-platform controls and grep targets: web/API, mobile, desktop, CLI/dev tooling, embedded, smart contracts, ML pipelines, games. Read the sections the profile triggered.
+- `references/audit-protocol.md` — the full-review protocol, run single-threaded: recon lenses, audit catalog, false-positive filter, hard exclusions, report template. Read for any full review.
+- `references/platform-playbooks.md` — per-platform controls and grep targets: web/API (including the bypass sweeps for SSRF, open redirect, file upload, XXE, XSS sources, GraphQL), mobile, desktop, CLI/dev tooling, embedded, smart contracts, ML pipelines, games. Read the sections the profile triggered.
 - `references/supply-chain.md` — dependencies, install-time execution, registries, CI/CD, signing and provenance, editor extensions, update channels.
 - `references/agent-surface.md` — LLM, agent, and MCP security: prompt injection, the lethal trifecta, tool poisoning, sandbox escapes, context and memory poisoning.
 - `references/secure-defaults.md` — the values to write the first time: crypto, password storage, tokens and sessions, secrets handling, HTTP headers, cloud and container defaults.

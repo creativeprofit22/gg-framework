@@ -71,7 +71,7 @@ import type { Message, Provider, ThinkingLevel } from "@kenkaiiii/gg-ai";
 import type { ThemeName } from "./ui/theme/theme.js";
 import { AuthStorage, readStoredBaseUrlSync } from "./core/auth-storage.js";
 import { SessionManager, type TurnMetricPayload } from "./core/session-manager.js";
-import { ensureAppDirs, getAppPaths, loadSavedSettings } from "./config.js";
+import { ensureAppDirs, getAppPaths, loadSavedSettings, projectScopeAllowed } from "./config.js";
 import { initLogger, log, closeLogger } from "./core/logger.js";
 import { setStreamDiagnostic } from "@kenkaiiii/gg-agent";
 import { setProviderDiagnostic } from "@kenkaiiii/gg-ai";
@@ -400,13 +400,14 @@ function main(): void {
   function getHardcodedDefault(p: string): string {
     if (p === "openai") return "gpt-5.5";
     if (p === "gemini") return "gemini-3.1-flash-lite";
-    if (p === "glm") return "glm-5.2";
+    if (p === "glm") return "glm-5.3";
     if (p === "moonshot") return "kimi-k3";
     if (p === "minimax") return "MiniMax-M3";
     if (p === "deepseek") return "deepseek-v4-pro";
+    if (p === "huggingface") return "Qwen/Qwen3-Coder-480B-A35B-Instruct";
     if (p === "openrouter") return "qwen/qwen3.6-plus";
     if (p === "sakana") return "fugu";
-    if (p === "xai") return "grok-4.5";
+    if (p === "xai") return "grok-4.6";
     return "claude-opus-5";
   }
 
@@ -669,7 +670,13 @@ async function runInkTUI(opts: {
     initialMcpConnectPromise ??= (async () => {
       const providerApiKey =
         provider === "glm" ? credentialsByProvider["glm"]?.accessToken : undefined;
-      const servers = await getAllMcpServers(provider, providerApiKey, cwd);
+      const servers = await getAllMcpServers(provider, providerApiKey, cwd, {
+        allowProjectScope: projectScopeAllowed(
+          savedSettings.trustProjectMcpServers,
+          savedSettings.trustedProjects,
+          cwd,
+        ),
+      });
       return mcpManager.connectAll(servers);
     })();
     return initialMcpConnectPromise;
@@ -1003,12 +1010,13 @@ async function runSessions(): Promise<void> {
   function getDefault(p: string): string {
     if (p === "openai") return "gpt-5.5";
     if (p === "gemini") return "gemini-3.1-flash-lite";
-    if (p === "glm") return "glm-5.2";
+    if (p === "glm") return "glm-5.3";
     if (p === "moonshot") return "kimi-k3";
     if (p === "minimax") return "MiniMax-M3";
     if (p === "deepseek") return "deepseek-v4-pro";
+    if (p === "huggingface") return "Qwen/Qwen3-Coder-480B-A35B-Instruct";
     if (p === "sakana") return "fugu";
-    if (p === "xai") return "grok-4.5";
+    if (p === "xai") return "grok-4.6";
     return "claude-opus-5";
   }
 

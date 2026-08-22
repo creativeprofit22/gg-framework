@@ -5,10 +5,7 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
-import {
-  MCPClientManager,
-  type MCPServerStateChange,
-} from "./client.js";
+import { MCPClientManager, type MCPServerStateChange } from "./client.js";
 import { McpCatalogCache } from "./catalog-cache.js";
 import type { MCPServerConfig } from "./types.js";
 
@@ -234,9 +231,11 @@ describe("MCP disconnect and HTTP recovery lifecycle", () => {
     const [stale] = await mcp.connectAll([httpConfig()]);
     changes.length = 0;
 
-    const connected = (mcp as unknown as {
-      servers: Array<{ client: { onclose?: () => void } }>;
-    }).servers[0];
+    const connected = (
+      mcp as unknown as {
+        servers: Array<{ client: { onclose?: () => void } }>;
+      }
+    ).servers[0];
     connected.client.onclose?.();
 
     expect(changes.slice(0, 2).map((change) => change.status)).toEqual([
@@ -255,7 +254,9 @@ describe("MCP disconnect and HTTP recovery lifecycle", () => {
     changes.length = 0;
     stub.expireAll();
 
-    await expect(runTool(stale, "must-not-replay")).rejects.toThrow(/MCP tool error.*Session not found/);
+    await expect(runTool(stale, "must-not-replay")).rejects.toThrow(
+      /MCP tool error.*Session not found/,
+    );
     expect(changes.slice(0, 2).map((change) => change.status)).toEqual([
       "disconnected",
       "recovering",
@@ -313,9 +314,7 @@ describe("MCP disconnect and HTTP recovery lifecycle", () => {
     await waitFor(() => changes.some((change) => change.status === "connected"), 10_000);
     const published = [...changes].reverse().find((change) => change.status === "connected")!.tools;
 
-    expect(published.map((candidate) => candidate.name)).toEqual([
-      "mcp__session-fixture__fresh",
-    ]);
+    expect(published.map((candidate) => candidate.name)).toEqual(["mcp__session-fixture__fresh"]);
     expect(published[0].description).toBe("new valid tool");
   }, 20_000);
 });

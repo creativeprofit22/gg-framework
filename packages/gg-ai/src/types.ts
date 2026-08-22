@@ -16,6 +16,8 @@ export type Provider =
   | "sakana"
   | "xai"
   | "palsu"
+  /** Hugging Face Inference Providers router (OpenAI-compatible). */
+  | "huggingface"
   /** Locally hosted OpenAI-compatible server (Ollama, LM Studio, llama.cpp, vLLM). */
   | "local";
 

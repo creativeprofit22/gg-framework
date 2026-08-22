@@ -298,7 +298,10 @@ export function useAgentLoop(
     onRetry?: () => void;
     /** Called when a turn ended on a non-clean stop (max_tokens/refusal/error)
      *  so the UI can warn instead of presenting truncated output as done. */
-    onTruncated?: (reason: "max_tokens" | "refusal" | "provider_error", continued: boolean) => void;
+    onTruncated?: (
+      reason: "max_tokens" | "refusal" | "provider_error" | "empty_response",
+      continued: boolean,
+    ) => void;
     /** Polled when the agent would otherwise stop. Return a user message to
      *  inject and continue the loop (e.g. "continue with the next plan step"). */
     getFollowUpMessages?: () => Message[] | null;

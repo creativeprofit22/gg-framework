@@ -492,6 +492,18 @@ describe("AuthStorage — Moonshot dual credential (Kimi OAuth vs. API key)", ()
     expect(creds.accessToken).toBe("xai-api-key");
   });
 
+  it("treats the Hugging Face token as a static, never-refreshed API key", async () => {
+    const storage = await makeStorage();
+    await storage.setCredentials("huggingface", {
+      accessToken: "hf-token",
+      refreshToken: "",
+      expiresAt: Date.now() + 1_000_000,
+    });
+    expect(await storage.isStaticApiKey("huggingface")).toBe(true);
+    const creds = await storage.resolveCredentials("huggingface");
+    expect(creds.accessToken).toBe("hf-token");
+  });
+
   it("persists the exhaustion mark so a new process (or another app window) sees it", async () => {
     const filePath = await tempAuthFile();
     tmpFiles.push(filePath);

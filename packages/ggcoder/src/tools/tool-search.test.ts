@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
+import { resolveContextLimits } from "../core/context-limits.js";
 import { DeferredToolCatalog } from "../core/mcp/deferred-catalog.js";
 import { createToolSearchTool, type CachedToolResolution } from "./tool-search.js";
 
@@ -115,6 +116,77 @@ describe("tool_search", () => {
     const catalog = new DeferredToolCatalog();
     catalog.add([stub("mcp__figma__get_screens", "fetch design screenshots")]);
     const tool = createToolSearchTool(catalog, () => {});
+    expect(await search(tool, "design screenshots")).toContain("1 tool(s) now available");
+  });
+
+  it("refuses promotion of a tool whose schema exceeds the byte budget", async () => {
+    const catalog = new DeferredToolCatalog();
+    const huge = z.object({
+      blob: z.string().describe("x".repeat(200 * 1024)), // 200KB serialized schema
+    });
+    catalog.add([
+      {
+        name: "mcp__big__blob",
+        description: "fetch design screenshots",
+        parameters: huge,
+        execute: async () => "ok",
+      },
+      stub("mcp__figma__get_screens", "fetch design screenshots"),
+    ]);
+    const promotedNames: string[] = [];
+    const tool = createToolSearchTool(catalog, (tools) =>
+      promotedNames.push(...tools.map((t) => t.name)),
+    );
+
+    const result = await search(tool, "design screenshots");
+    // The fit tool promoted; the oversized one was refused and named.
+    expect(result).toContain("1 tool(s) now available");
+    expect(result).toContain("mcp__figma__get_screens");
+    expect(result).toContain("Refused (schema byte budget)");
+    expect(result).toContain("mcp__big__blob");
+    expect(result).toContain("contextLimits.mcpToolSchemaBytes");
+    expect(promotedNames).toEqual(["mcp__figma__get_screens"]);
+    // Refused tool stays in the catalog, not the live toolset.
+    expect(catalog.names()).toContain("mcp__big__blob");
+  });
+
+  it("fails closed when EVERY match exceeds the schema budget", async () => {
+    const catalog = new DeferredToolCatalog();
+    catalog.add([
+      {
+        name: "mcp__big__blob",
+        description: "fetch design screenshots",
+        parameters: z.object({ blob: z.string().describe("x".repeat(200 * 1024)) }),
+        execute: async () => "ok",
+      },
+    ]);
+    const promotedNames: string[] = [];
+    const tool = createToolSearchTool(catalog, (tools) =>
+      promotedNames.push(...tools.map((t) => t.name)),
+    );
+
+    const result = await search(tool, "design screenshots");
+    expect(result).toContain("No tools promoted");
+    expect(result).toContain("mcp__big__blob");
+    expect(promotedNames).toEqual([]);
+  });
+
+  it("honors a raised schema budget from limits", async () => {
+    const catalog = new DeferredToolCatalog();
+    catalog.add([
+      {
+        name: "mcp__big__blob",
+        description: "fetch design screenshots",
+        parameters: z.object({ blob: z.string().describe("x".repeat(8 * 1024)) }), // ~8KB
+        execute: async () => "ok",
+      },
+    ]);
+    const tool = createToolSearchTool(
+      catalog,
+      () => {},
+      undefined,
+      resolveContextLimits({ mcpToolSchemaBytes: 16 * 1024 }),
+    );
     expect(await search(tool, "design screenshots")).toContain("1 tool(s) now available");
   });
 });

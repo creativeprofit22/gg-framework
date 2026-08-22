@@ -104,7 +104,9 @@ describe("McpModal management failures", () => {
       eventHandler?.({ type: "mcp_auth_done", data: { name: "example", toolCount: 2 } });
     });
 
-    expect((await screen.findByRole("alert")).textContent).toContain("Could not refresh MCP servers");
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Could not refresh MCP servers",
+    );
     expect(screen.getByText("example")).toBeTruthy();
     expect(screen.getByText("2 tools")).toBeTruthy();
   });
@@ -115,7 +117,9 @@ describe("McpModal management failures", () => {
     );
     render(<McpModal onClose={vi.fn()} />);
 
-    expect((await screen.findByRole("alert")).textContent).toContain("MCP config file is malformed");
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "MCP config file is malformed",
+    );
     expect(screen.getByRole<HTMLButtonElement>("button", { name: "Retry" }).disabled).toBe(false);
   });
 

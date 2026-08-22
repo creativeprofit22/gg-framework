@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
+import { spawn, type ChildProcess } from "node:child_process";
 import { environmentSecrets, redactValue, type ToolResultContent } from "@kenkaiiii/gg-ai";
 import type { AddressInfo } from "node:net";
 import { runJsonMode } from "./modes/json-mode.js";
@@ -83,6 +84,16 @@ import {
   type ToolDetail,
 } from "./core/session-export.js";
 import { AuthStorage } from "./core/auth-storage.js";
+import {
+  explainPullFailure,
+  isValidHfRepoId,
+  parseOllamaPullLine,
+  pickGgufQuant,
+  toHfSearchRow,
+  type GgufFile,
+  type HfSearchRow,
+  type PullPhase,
+} from "./hf-pull.js";
 import { cleanupToolOutputs } from "./tools/overflow.js";
 import { readCappedBody } from "./utils/http-body.js";
 import {
@@ -126,7 +137,7 @@ import {
   type AuthMethodMeta,
   type AuthProviderMeta,
 } from "./core/auth-providers.js";
-import { ensureAppDirs, loadSavedSettings } from "./config.js";
+import { ensureAppDirs, loadSavedSettings, projectScopeAllowed } from "./config.js";
 import { SettingsManager, type Settings } from "./core/settings-manager.js";
 import {
   installPlugin,
@@ -319,6 +330,8 @@ const ALL_PROVIDERS: Provider[] = [
   "minimax",
   "xiaomi",
   "deepseek",
+  // Open-community gateway, before the provider-agnostic one
+  "huggingface",
   // Japan, then provider-agnostic gateway last
   "sakana",
   "openrouter",
@@ -758,27 +771,58 @@ function mcpRowSummary(config: MCPServerConfig): string {
 
 /** Load + connect every server, returning one wire row per server. Mirrors the
  *  CLI dashboard's buildRows (connectAllDetailed, then dispose). Empty list
- *  short-circuits before spawning any stdio process / opening any HTTP conn. */
-async function buildMcpRows(cwd: string): Promise<McpWireRow[]> {
+ *  short-circuits before spawning any stdio process / opening any HTTP conn.
+ *  Project-scope servers run repo-controlled commands, so unless the user
+ *  trusts them (trustProjectMcpServers) they are reported blocked WITHOUT
+ *  being connected — even a status probe would spawn the process. */
+async function buildMcpRows(cwd: string, settingsFile: string): Promise<McpWireRow[]> {
   const scoped = await loadServers(cwd);
   if (scoped.length === 0) return [];
 
+  const settings = loadSavedSettings(settingsFile);
+  const allowProject = projectScopeAllowed(
+    settings.trustProjectMcpServers,
+    settings.trustedProjects,
+    cwd,
+  );
+  const connectable = scoped.filter((s) => allowProject || s.scope !== "project");
+  const blocked = scoped.filter((s) => !allowProject && s.scope === "project");
+
   const manager = new MCPClientManager();
   try {
-    const results = await manager.connectAllDetailed(scoped.map((s) => s.config));
-    return scoped.map((s): McpWireRow => {
-      const result = results.find((r) => r.name === s.config.name);
-      return {
-        name: s.config.name,
-        scope: s.scope,
-        ok: result?.ok ?? false,
-        toolCount: result?.toolCount ?? 0,
-        error: result?.error,
-        kind: s.config.url ? "http" : "stdio",
-        summary: mcpRowSummary(s.config),
-        requiresAuth: result?.requiresAuth,
-      };
-    });
+    const results =
+      connectable.length > 0
+        ? await manager.connectAllDetailed(connectable.map((s) => s.config))
+        : [];
+    return [
+      ...connectable.map((s): McpWireRow => {
+        const result = results.find((r) => r.name === s.config.name);
+        return {
+          name: s.config.name,
+          scope: s.scope,
+          ok: result?.ok ?? false,
+          toolCount: result?.toolCount ?? 0,
+          error: result?.error,
+          kind: s.config.url ? "http" : "stdio",
+          summary: mcpRowSummary(s.config),
+          requiresAuth: result?.requiresAuth,
+        };
+      }),
+      ...blocked.map(
+        (s): McpWireRow => ({
+          name: s.config.name,
+          scope: s.scope,
+          ok: false,
+          toolCount: 0,
+          error:
+            "Project-scope server not connected — this repo's .gg/mcp.json runs " +
+            "repo-controlled commands. Add or re-add a server in this project via " +
+            "the MCP modal to trust it.",
+          kind: (s.config.url ? "http" : "stdio") as "http" | "stdio",
+          summary: mcpRowSummary(s.config),
+        }),
+      ),
+    ];
   } finally {
     await manager.dispose();
   }
@@ -891,9 +935,10 @@ function daemonReadBody(
 }
 
 function daemonJson(res: http.ServerResponse, status: number, body: unknown): void {
+  // No CORS headers: only the Rust proxy (no Origin) should call this daemon.
+  // Granting origins would let any web page read responses from loopback.
   res.writeHead(status, {
     "content-type": "application/json",
-    "access-control-allow-origin": "*",
   });
   res.end(JSON.stringify(body));
 }
@@ -921,6 +966,16 @@ async function main(): Promise<void> {
   // Never leak the bootstrap credential to MCP servers, shells, or other child processes.
   delete process.env.GG_APP_AUTH_TOKEN;
   if (!daemonAuthToken) throw new Error("GG_APP_AUTH_TOKEN is required");
+
+  // Per-launch bearer token. The Rust shell generates one and passes it via
+  // GG_APP_TOKEN; spawned any other way (dev, tests, smoke) we mint our own
+  // and report it on the GG_APP_LISTENING line. Every request must carry it
+  // as x-gg-token: this daemon creates sessions for arbitrary cwds, runs
+  // prompts, and installs plugins, so an unauthenticated loopback port lets
+  // any local process drive the agent as the user.
+  const configuredAuthToken = process.env.GG_APP_TOKEN?.trim();
+  delete process.env.GG_APP_TOKEN;
+  const authToken = configuredAuthToken || randomUUID();
 
   const paths = await ensureAppDirs();
   // The shell scopes this filename to its Tauri product identity so production
@@ -1248,14 +1303,26 @@ async function main(): Promise<void> {
       const url = req.url ?? "/";
       const method = req.method ?? "GET";
 
-      // CORS preflight — the webview origin differs from 127.0.0.1.
+      // Answer preflights with a bare 204 but grant NO origins — the webview
+      // reaches the daemon through the Rust proxy, never cross-origin, so any
+      // browser page's preflight must fail here.
       if (method === "OPTIONS") {
-        res.writeHead(204, {
-          "access-control-allow-origin": "*",
-          "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-          "access-control-allow-headers": "content-type, x-gg-session",
-        });
+        res.writeHead(204);
         res.end();
+        return;
+      }
+
+      // Host allowlist. The daemon binds 127.0.0.1 only; rejecting any other
+      // Host blocks DNS rebinding, where a web page's request arrives with
+      // the attacker's hostname (browsers cannot spoof Host).
+      const reqHost = req.headers.host ?? "";
+      if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqHost)) {
+        daemonJson(res, 403, { error: "forbidden host" });
+        return;
+      }
+
+      if (req.headers["x-gg-token"] !== authToken) {
+        daemonJson(res, 401, { error: "unauthorized" });
         return;
       }
 
@@ -1449,8 +1516,9 @@ async function main(): Promise<void> {
   );
   server.listen(port, host, () => {
     const addr = server.address() as AddressInfo;
-    // The Rust shell reads this line to learn the daemon port.
-    process.stdout.write(`GG_APP_LISTENING ${addr.port}\n`);
+    // The Rust shell reads this line to learn the daemon port (it already
+    // knows the token — it set GG_APP_TOKEN; the field serves other spawners).
+    process.stdout.write(`GG_APP_LISTENING ${addr.port} ${authToken}\n`);
     log("INFO", "app-sidecar", "daemon listening", { port: String(addr.port), host });
   });
 
@@ -2119,8 +2187,8 @@ async function createSession(
   }
   log("INFO", "app-sidecar", "session ready", { provider, model, mode, chatAgent, cwd });
 
-  // ── Local models (Ollama / LM Studio / llama.cpp / vLLM) ──
-  // Probing four HTTP endpoints must never delay readiness, so this runs in the
+  // ── Local models (Ollama, plus user-added custom endpoints) ──
+  // Probing endpoints must never delay readiness, so this runs in the
   // background (same shape as backgroundMcpConnect) and pushes a models_change
   // frame when it lands.
   let localProbes: LocalEndpointProbe[] = [];
@@ -2186,6 +2254,200 @@ async function createSession(
         })),
       })),
     };
+  }
+
+  // ── Hugging Face → Ollama pulls (the "Add from Hugging Face" modal) ──
+  // One pull at a time: multi-GB downloads, one progress surface. State lives
+  // here (not in the webview) so a closed modal or app restart mid-pull keeps
+  // streaming; the terminal state is kept until the next pull so reopening the
+  // modal shows how the last one ended.
+  interface HfPullState {
+    repo: string;
+    model: string;
+    tag: string | null;
+    file: string;
+    sizeBytes: number;
+    phase: PullPhase;
+    percent: number;
+    detail?: string;
+    error?: string;
+    child: ChildProcess | null;
+  }
+  let hfPull: HfPullState | null = null;
+
+  const hfPullPayload = (s: HfPullState): Record<string, unknown> => ({
+    repo: s.repo,
+    model: s.model,
+    tag: s.tag,
+    file: s.file,
+    sizeBytes: s.sizeBytes,
+    phase: s.phase,
+    percent: s.percent,
+    ...(s.detail ? { detail: s.detail } : {}),
+    ...(s.error ? { error: s.error } : {}),
+  });
+
+  /** Stored HF token, if the user connected the huggingface provider. */
+  async function hfToken(): Promise<string | undefined> {
+    try {
+      const auth = new AuthStorage(paths.authFile);
+      const creds = await auth.resolveCredentials("huggingface");
+      return creds.accessToken || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function hfHubJson(pathname: string): Promise<unknown> {
+    const token = await hfToken();
+    const res = await fetch(`https://huggingface.co${pathname}`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`Hugging Face responded ${res.status}`);
+    return res.json();
+  }
+
+  /** Search the Hub for GGUF repos (what Ollama can pull). */
+  async function hfSearch(query: string): Promise<HfSearchRow[]> {
+    const params = new URLSearchParams({
+      search: query,
+      library: "gguf",
+      sort: "downloads",
+      direction: "-1",
+      limit: "8",
+    });
+    const data = (await hfHubJson(`/api/models?${params.toString()}`)) as {
+      id?: unknown;
+      downloads?: unknown;
+      likes?: unknown;
+      lastModified?: unknown;
+    }[];
+    return (Array.isArray(data) ? data : [])
+      .map(toHfSearchRow)
+      .filter((r): r is HfSearchRow => r !== null);
+  }
+
+  /**
+   * Start `ollama pull hf.co/<repo>[:quant]`. Resolves once the child is
+   * spawned; progress streams as `hf_pull` events. The chosen quant comes from
+   * the repo's real file list — the client only ever sends a repo id, so there
+   * is no injection surface into argv.
+   */
+  async function startHfPull(repo: string): Promise<Record<string, unknown>> {
+    if (hfPull?.child) {
+      throw Object.assign(new Error("A download is already running."), { status: 409 });
+    }
+    const tree = (await hfHubJson(`/api/models/${repo}/tree/main`)) as unknown[];
+    const files: GgufFile[] = (Array.isArray(tree) ? tree : []).flatMap((entry) => {
+      const e = entry as { path?: unknown; size?: unknown; lfs?: { size?: unknown } };
+      if (typeof e.path !== "string" || !e.path.toLowerCase().endsWith(".gguf")) return [];
+      const size = Number(e.lfs?.size ?? e.size ?? 0);
+      return [{ path: e.path, sizeBytes: Number.isFinite(size) ? size : 0 }];
+    });
+    const choice = pickGgufQuant(files);
+    if (!choice) {
+      throw Object.assign(new Error("That repo has no GGUF file for Ollama to pull."), {
+        status: 400,
+      });
+    }
+    const model = `hf.co/${repo}${choice.tag ? `:${choice.tag}` : ""}`;
+    const token = await hfToken();
+    const state: HfPullState = {
+      repo,
+      model,
+      tag: choice.tag,
+      file: choice.file.path,
+      sizeBytes: choice.file.sizeBytes,
+      phase: "preparing",
+      percent: 0,
+      child: null,
+    };
+    hfPull = state;
+    broadcast("hf_pull", hfPullPayload(state));
+
+    // ollama prints progress to stderr (stdout on some builds); parse both.
+    let stderrTail = "";
+    const feed = (chunk: string): void => {
+      // Once the pull is terminal (success, failure, or user cancel) stop
+      // parsing: a killed ollama dumps a burst of stderr that would otherwise
+      // spam the modal with garbage frames after the outcome is already shown.
+      if (state.phase === "success" || state.phase === "error") return;
+      for (const line of chunk.split(/\r\n|\r|\n/)) {
+        const parsed = parseOllamaPullLine(line);
+        if (!parsed) continue;
+        if (parsed.phase !== "error") {
+          state.phase = parsed.phase;
+          if (parsed.percent !== undefined) state.percent = parsed.percent;
+          state.detail = parsed.detail;
+        }
+        broadcast("hf_pull", hfPullPayload(state));
+      }
+    };
+
+    try {
+      const child = spawn("ollama", ["pull", model], {
+        env: { ...process.env, ...(token ? { HF_TOKEN: token } : {}) },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      state.child = child;
+      child.stdout?.setEncoding("utf8");
+      child.stderr?.setEncoding("utf8");
+      child.stdout?.on("data", feed);
+      child.stderr?.on("data", (d: string) => {
+        stderrTail = (stderrTail + d).slice(-2000);
+        feed(d);
+      });
+      child.on("error", (err: NodeJS.ErrnoException) => {
+        state.child = null;
+        state.phase = "error";
+        state.error =
+          err.code === "ENOENT"
+            ? "Ollama isn't installed (or isn't on PATH). Install it from ollama.com, then retry."
+            : `Could not start Ollama: ${err.message}`;
+        broadcast("hf_pull", hfPullPayload(state));
+      });
+      child.on("close", (code: number | null) => {
+        state.child = null;
+        if (state.phase === "success" || state.phase === "error") return; // cancelled
+        if (code === 0) {
+          state.phase = "success";
+          state.percent = 100;
+          state.detail = undefined;
+          broadcast("hf_pull", hfPullPayload(state));
+          // The new model only exists to the app once Ollama lists it.
+          void scanLocalModels(true)
+            .then(() => broadcast("models_change", { local: localStatePayload() }))
+            .catch(() => undefined);
+        } else {
+          state.phase = "error";
+          state.error = state.error ?? explainPullFailure(stderrTail);
+          broadcast("hf_pull", hfPullPayload(state));
+        }
+      });
+    } catch (err) {
+      state.child = null;
+      state.phase = "error";
+      state.error = `Could not start Ollama: ${err instanceof Error ? err.message : String(err)}`;
+      broadcast("hf_pull", hfPullPayload(state));
+    }
+    return hfPullPayload(state);
+  }
+
+  function cancelHfPull(): boolean {
+    const child = hfPull?.child;
+    if (!child) return false;
+    // Terminal state FIRST, then the kill: the child's death rattle must not
+    // overwrite the clean "cancelled" outcome with raw stderr.
+    if (hfPull) {
+      hfPull.phase = "error";
+      hfPull.error = "Download cancelled.";
+      hfPull.detail = undefined;
+      hfPull.child = null;
+      broadcast("hf_pull", hfPullPayload(hfPull));
+    }
+    child.kill("SIGTERM");
+    return true;
   }
 
   /**
@@ -2461,7 +2723,7 @@ async function createSession(
     if (changed) void queueApprovedPlanProgressSync();
   }
 
-  // Bind the upstream event surface to both the initial and phase-replacement sessions.
+  // Bind the complete event surface to both initial and phase-replacement sessions.
   function bindSessionEvents(target: AgentSession): void {
     target.eventBus.on("text_delta", (data) => {
       broadcast("text_delta", data);
@@ -2487,6 +2749,9 @@ async function createSession(
         durationMs: String(data.durationMs),
         isError: String(data.isError),
         ...(data.isError ? { result: data.result.slice(0, 500) } : {}),
+        ...(data.invalidArgAttempt === undefined
+          ? {}
+          : { invalidArgAttempt: String(data.invalidArgAttempt) }),
       });
       broadcast("tool_call_end", data);
       if (approvedPlanPath !== null) void queueApprovedPlanProgressSync();
@@ -2494,10 +2759,21 @@ async function createSession(
     target.eventBus.on("server_tool_call", (data) => broadcast("server_tool_call", data));
     target.eventBus.on("turn_end", (data) => broadcast("turn_end", data));
     target.eventBus.on("agent_done", (data) => broadcast("agent_done", data));
-    target.eventBus.on("truncated", (data) => broadcast("truncated", data));
+    target.eventBus.on("truncated", (data) => {
+      if (data.reason === "empty_response") {
+        broadcastError(
+          "error",
+          "empty response",
+          new Error("The model returned an empty response after retries — try sending again."),
+        );
+        return;
+      }
+      broadcast("truncated", data);
+    });
     target.eventBus.on("error", (data) => broadcastError("error", "agent error", data.error));
     target.eventBus.on("model_change", (data) => broadcast("model_change", data));
     target.eventBus.on("hook", (data) => broadcast("hook", data));
+    target.eventBus.on("hook_armed", (data) => broadcast("hook_armed", data));
     target.eventBus.on("subagent_state", (data) => broadcast("subagent_state", data));
     target.eventBus.on("mcp_server_state", (data) => broadcast("mcp_server_state", data));
     target.eventBus.on("compaction_start", (data) => broadcast("compaction_start", data));
@@ -3657,7 +3933,6 @@ async function createSession(
     const payload = JSON.stringify(redactValue(body, { secrets: environmentSecrets(process.env) }));
     res.writeHead(status, {
       "content-type": "application/json",
-      "access-control-allow-origin": "*",
     });
     res.end(payload);
   }
@@ -3843,7 +4118,6 @@ async function createSession(
         "content-type": "text/event-stream",
         "cache-control": "no-cache",
         connection: "keep-alive",
-        "access-control-allow-origin": "*",
       });
       res.write(`retry: 1000\n\n`);
       const client: SseClient = { id: ++clientSeq, res };
@@ -5195,6 +5469,14 @@ async function createSession(
           json(res, 400, { error: "invalid JSON body" });
           return;
         }
+        // Same lock as POST /model, for the same reason: this retargets Ken's
+        // chat session AND the autopilot reviewer, and `switchModel` on a
+        // session mid-turn races the stream it is already consuming. The
+        // footer picker is disabled to match; this is the enforcement.
+        if (running || kenRunning || autopilotReviewing) {
+          json(res, 409, { error: "cannot switch Ken's model while running" });
+          return;
+        }
         if (modelId === null) {
           // Clear the pin → follow GG Coder again, syncing both sessions back.
           kenModelOverride = null;
@@ -5309,6 +5591,14 @@ async function createSession(
     }
 
     if (method === "POST" && url === "/thinking") {
+      // The in-flight request already carries its reasoning config, so a
+      // mid-run cycle cannot affect the turn the user is watching — it just
+      // persists a level the footer then reports for a run that never used it.
+      // Locked like POST /model; the footer button is disabled to match.
+      if (running) {
+        json(res, 409, { error: "cannot change reasoning level while running" });
+        return;
+      }
       const st = session.getState();
       const previous = session.getThinkingLevel();
       const next = getNextThinkingLevel(st.provider, st.model, previous);
@@ -5947,6 +6237,78 @@ async function createSession(
       return;
     }
 
+    // ── Hugging Face search & pull (the "Add from Hugging Face" modal) ──
+    if (method === "GET" && url === "/hf/pull") {
+      json(res, 200, hfPull ? { active: hfPullPayload(hfPull) } : { active: null });
+      return;
+    }
+
+    if (method === "POST" && url === "/hf/search") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { query?: unknown };
+        try {
+          body = JSON.parse(raw) as typeof body;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        // Strip control characters and cap length — this goes into a URL query.
+        const query = String(body.query ?? "")
+          // eslint-disable-next-line no-control-regex -- stripping control characters is the point
+          .replace(/[\u0000-\u001f]/g, "")
+          .trim()
+          .slice(0, 100);
+        if (!query) {
+          json(res, 400, { error: "Type something to search for." });
+          return;
+        }
+        try {
+          json(res, 200, { models: await hfSearch(query) });
+        } catch (err) {
+          broadcastError("error", "hugging face search failed", err);
+          json(res, 502, {
+            error: `Hugging Face search failed — ${err instanceof Error ? err.message : "network error"}.`,
+          });
+        }
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/hf/pull") {
+      void readBody(req, res).then(async (raw) => {
+        if (raw === null) return;
+        let body: { repo?: unknown };
+        try {
+          body = JSON.parse(raw) as typeof body;
+        } catch {
+          json(res, 400, { error: "invalid JSON body" });
+          return;
+        }
+        const repo = String(body.repo ?? "").trim();
+        if (!isValidHfRepoId(repo)) {
+          json(res, 400, { error: 'Expected a Hugging Face repo like "org/model".' });
+          return;
+        }
+        try {
+          json(res, 200, await startHfPull(repo));
+        } catch (err) {
+          const status =
+            err instanceof Error && "status" in err && typeof err.status === "number"
+              ? err.status
+              : 502;
+          if (status >= 500) broadcastError("error", "hugging face pull failed", err);
+          json(res, status, { error: err instanceof Error ? err.message : "Pull failed." });
+        }
+      });
+      return;
+    }
+
+    if (method === "POST" && url === "/hf/pull/cancel") {
+      json(res, 200, { ok: cancelHfPull() });
+      return;
+    }
+
     if (method === "GET" && url === "/telegram") {
       void loadTelegramConfig().then((cfg) => {
         if (!cfg) {
@@ -6060,7 +6422,7 @@ async function createSession(
     // scope ignores it (always ~/.gg/mcp.json).
     if (method === "GET" && (url === "/mcp" || url.startsWith("/mcp?"))) {
       const targetCwd = new URL(url, `http://${host}`).searchParams.get("cwd") ?? cwd;
-      void buildMcpRows(targetCwd)
+      void buildMcpRows(targetCwd, paths.settingsFile)
         .then((servers) => json(res, 200, { servers }))
         .catch((err) => {
           captureSidecarError(err, "app-sidecar.mcp.list");
@@ -6119,6 +6481,12 @@ async function createSession(
           if (!saved.ok) {
             json(res, 400, { error: saved.error });
             return;
+          }
+          // Adding a project-scope server is an explicit trust signal — the
+          // user chose to put a server in this repo's .gg/mcp.json. Auto-trust
+          // the project so all project-scope servers connect on next load.
+          if (scope === "project") {
+            await session.trustProject(targetCwd);
           }
           json(res, 200, {
             ok: true,

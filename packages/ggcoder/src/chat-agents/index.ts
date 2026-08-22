@@ -79,7 +79,6 @@ export function createChatAgent(
   delegationEnabled = true,
 ): AgentSession {
   let session!: AgentSession;
-  let controller!: ChatAgentController;
   const { additionalToolsByAgent = {}, getSystemPromptTailForAgent, ...baseOptions } = options;
   const specialistSourceTools = new Map<string, AgentTool>();
   const specialistAgentsByTool = new Map<string, Set<ChatAgentId>>();
@@ -149,7 +148,7 @@ export function createChatAgent(
         : undefined,
     );
   };
-  controller = {
+  const controller: ChatAgentController = {
     current: agentId,
     async switchTo(nextAgent, notify) {
       if (nextAgent === controller.current) return false;

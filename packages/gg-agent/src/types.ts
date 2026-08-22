@@ -86,6 +86,13 @@ export interface AgentToolCallEndEvent {
   details?: unknown;
   isError: boolean;
   durationMs: number;
+  /**
+   * Set only when the call failed schema validation: how many consecutive
+   * times this tool produced this same validation error. 1 means the model
+   * still has room to self-correct; 3 is the threshold that ends the turn.
+   * Logged so a retry loop shows up as a count instead of identical lines.
+   */
+  invalidArgAttempt?: number;
 }
 
 export interface AgentTurnTiming {
@@ -171,7 +178,7 @@ export interface AgentTurnBudgetExtendedEvent {
  */
 export interface AgentTruncatedEvent {
   type: "truncated";
-  reason: "max_tokens" | "refusal" | "provider_error";
+  reason: "max_tokens" | "refusal" | "provider_error" | "empty_response";
   /** True when the loop injected a continuation and will keep going. */
   continued: boolean;
 }

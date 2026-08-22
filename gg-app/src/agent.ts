@@ -549,7 +549,7 @@ export interface ModelOption {
   id: string;
   name: string;
   provider: string;
-  /** True for a locally hosted model (Ollama / LM Studio / llama.cpp / vLLM). */
+  /** True for a locally hosted model (Ollama, or a user-added endpoint). */
   local?: boolean;
   /** Display name of the local endpoint serving it, e.g. "Ollama". */
   endpoint?: string;
@@ -2109,7 +2109,7 @@ export async function onWindowOrder(cb: (e: WindowOrderEvent) => void): Promise<
   return listenAppWindow<WindowOrderEvent>("window-order", (e) => cb(e.payload));
 }
 
-// ── Local models (Ollama / LM Studio / llama.cpp / vLLM) ──
+// ── Local models (Ollama + user-added endpoints) ───────────
 
 /** One model as reported by a local server, with its probed capabilities. */
 export interface LocalModelRow {
@@ -2192,6 +2192,76 @@ export async function removeLocalEndpoint(id: string): Promise<LocalModelsState>
   await waitForReady();
   const res = await invoke<LocalModelsState>("agent_local_endpoint_remove", { id });
   return unwrapLocalState(res);
+}
+
+// ── Hugging Face search & pull ("Add from Hugging Face" modal) ───
+
+/** One Hub repo in the search dropdown. */
+export interface HfSearchResult {
+  id: string;
+  downloads: number;
+  likes: number;
+  updatedAt: string | null;
+}
+
+/** Live state of the one `ollama pull` the sidecar runs at a time. */
+export interface HfPullState {
+  repo: string;
+  /** Full local model id once pulled, e.g. `hf.co/org/repo:Q4_K_M`. */
+  model: string;
+  tag: string | null;
+  file: string;
+  sizeBytes: number;
+  phase: "preparing" | "downloading" | "verifying" | "success" | "error";
+  percent: number;
+  detail?: string;
+  error?: string;
+}
+
+/** Progress event for the active pull; same shape as `HfPullState`. */
+export interface HfPullEvent extends SidecarEvent {
+  type: "hf_pull";
+  data: HfPullState;
+}
+
+export function isHfPullEvent(event: SidecarEvent): event is HfPullEvent {
+  return (
+    event.type === "hf_pull" &&
+    typeof event.data === "object" &&
+    event.data !== null &&
+    typeof (event.data as { repo?: unknown }).repo === "string" &&
+    typeof (event.data as { phase?: unknown }).phase === "string"
+  );
+}
+
+/** Search Hugging Face for GGUF repos Ollama can pull. Throws on network failure. */
+export async function hfSearch(query: string): Promise<HfSearchResult[]> {
+  await waitForReady();
+  const res = await invoke<{ models?: HfSearchResult[] }>("agent_hf_search", { query });
+  return res.models ?? [];
+}
+
+/** Start pulling `repo` via Ollama; progress arrives as `hf_pull` events. */
+export async function hfPull(repo: string): Promise<HfPullState> {
+  await waitForReady();
+  return invoke<HfPullState>("agent_hf_pull", { repo });
+}
+
+/** Current (or last finished) pull state; null when none ever ran. */
+export async function hfPullStatus(): Promise<HfPullState | null> {
+  try {
+    await waitForReady();
+    const res = await invoke<{ active?: HfPullState | null }>("agent_hf_pull_status");
+    return res.active ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Cancel the running pull (no-op when none). Partial bytes are kept by Ollama. */
+export async function hfPullCancel(): Promise<void> {
+  await waitForReady();
+  await invoke("agent_hf_pull_cancel");
 }
 
 // ── Telegram serve (remote control via Telegram) ───────────

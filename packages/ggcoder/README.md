@@ -72,7 +72,7 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 | **Anthropic**     | Claude Opus 5, Sonnet 5, Haiku 4.5                                 | OAuth            |
 | **OpenAI**        | GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex                       | OAuth            |
 | **Moonshot**      | Kimi K3, Kimi K2.7 Code                                            | OAuth or API key |
-| **Z.AI (GLM)**    | GLM-5.1, GLM-4.7, GLM-4.7 Flash                                    | API key          |
+| **Z.AI (GLM)**    | GLM-5.3                                                            | API key          |
 | **MiniMax**       | MiniMax M3 (image + video)                                         | API key          |
 | **Xiaomi (MiMo)** | MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 (image + video) | API key          |
 | **DeepSeek**      | DeepSeek V4 Pro, V4 Flash                                          | API key          |
@@ -205,13 +205,20 @@ Reusable behaviors across projects. Drop `.md` files in:
 
 They get loaded into the system prompt automatically. The agent knows what it can do without you explaining it each session. <kbd>Ctrl+S</kbd> opens a pane to browse and toggle them.
 
-Three ship built in, and route themselves when the work matches:
+Ten ship built in, and route themselves when the work matches:
 
-| Skill              | Fires on                                                                                                                                                                                                                            |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bulletproof`      | Code an attacker will reach — auth, untrusted input, secrets, dependencies, CI/release, agent/MCP tool surfaces — and "is this safe to ship" reviews. Works on any target: web, API, CLI, desktop, mobile, embedded, contracts, ML. |
-| `compliance-guard` | Legal exposure — personal data, payments, UGC, email/SMS, minors, or a licensed/regulated feature.                                                                                                                                  |
-| `evidence-led-ui`  | Broad or design-sensitive UI work — new screens, redesigns, design systems, accessibility passes.                                                                                                                                   |
+| Skill              | Fires on                                                                                                                                                                                                                                                                                                                            |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bulletproof`      | Code an attacker will reach — auth, untrusted input, secrets, dependencies, CI/release, agent/MCP tool surfaces — and "is this safe to ship" reviews. Works on any target: web, API, CLI, desktop, mobile, embedded, contracts, ML.                                                                                                 |
+| `clarify`          | Requirements or a design genuinely unsettled — interrogating or stress-testing a plan before building, or a mid-build decision that materially changes the result.                                                                                                                                                                  |
+| `code-review`      | Reviewing written work — a diff, PR, or branch — on both what was asked for and how well it is built.                                                                                                                                                                                                                               |
+| `compliance-guard` | Legal exposure — personal data, payments, UGC, email/SMS, minors, or a licensed/regulated feature.                                                                                                                                                                                                                                  |
+| `durable`          | User data must not be lost — first database/table, migrations, backfills/imports, destructive operations, backups and recovery; any store (Postgres, MySQL, SQLite, Mongo, serverless).                                                                                                                                             |
+| `evidence-led-ui`  | Broad or design-sensitive UI work — new screens, redesigns, design systems, accessibility passes.                                                                                                                                                                                                                                   |
+| `lean`             | Speed and resource efficiency — slow loading/startup, jank, high CPU, memory leaks and hogging, zombie/orphan processes, bundle bloat, dead code/styles, Core Web Vitals; while building anything that should stay fast, or a perf pass on an existing project. Any stack: web, backend, Electron, Tauri, mobile, native, game, ML. |
+| `root-cause`       | A bug that resists the obvious fix, makes no sense, or keeps coming back — gated diagnosis from red repro to ranked hypotheses to regression test.                                                                                                                                                                                  |
+| `shared-language`  | Fuzzy or drifting domain vocabulary, recurring naming decisions, and hard-to-reverse decisions worth recording (glossary + decision records).                                                                                                                                                                                       |
+| `tdd`              | Test-driven development — red-green-refactor with pre-agreed seams, when the user asks for test-first work.                                                                                                                                                                                                                         |
 
 ---
 

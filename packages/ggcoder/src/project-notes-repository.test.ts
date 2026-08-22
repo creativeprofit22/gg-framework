@@ -3923,17 +3923,17 @@ describe("ProjectNotesRepository completion transactions", () => {
   });
 
   it("persists source revision 31 while using current revision 32 for audited recovery concurrency", async () => {
-    const { cwd, repository, expectedSession } = await completionSetup(
-      "canonical-shape-recovery",
-    );
+    const { cwd, repository, expectedSession } = await completionSetup("canonical-shape-recovery");
     const canonicalPlanSteps = Array.from({ length: 18 }, (_, index) => index + 1);
     for (let revision = 1; revision < 30; revision += 1) {
       const loaded = await repository.load(cwd);
       if (loaded.status !== "ok") throw new Error("Expected canonical recovery fixture");
-      await expect(repository.save(cwd, revision, loaded.snapshot.document)).resolves.toMatchObject({
-        status: "ok",
-        snapshot: { revision: revision + 1 },
-      });
+      await expect(repository.save(cwd, revision, loaded.snapshot.document)).resolves.toMatchObject(
+        {
+          status: "ok",
+          snapshot: { revision: revision + 1 },
+        },
+      );
     }
     await expect(
       repository.recordImplementationCheckpoint(cwd, {
@@ -3984,9 +3984,10 @@ describe("ProjectNotesRepository completion transactions", () => {
       ],
       timestamp: "2026-08-15T01:02:00.000Z",
     };
-    await expect(
-      repository.recoverImplementationCheckpoint(cwd, recovery),
-    ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 33 } });
+    await expect(repository.recoverImplementationCheckpoint(cwd, recovery)).resolves.toMatchObject({
+      status: "committed",
+      snapshot: { revision: 33 },
+    });
     await expect(repository.recoverImplementationCheckpoint(cwd, recovery)).resolves.toEqual({
       status: "duplicate",
       revision: 33,
@@ -4181,7 +4182,6 @@ describe("ProjectNotesRepository completion transactions", () => {
         recoveryRequest(staleSource.expectedSession, { expectedRevision: 3 }),
       ),
     ).resolves.toEqual({ status: "source-checkpoint-stale" });
-
 
     const unsuccessful = await recoveryFixture("recovery-unsuccessful", {
       total: 3,

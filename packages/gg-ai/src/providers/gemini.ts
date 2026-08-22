@@ -27,7 +27,9 @@ const SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
 // Mirrors VALID_GEMINI_MODELS in the official gemini-cli
 // (packages/core/src/config/models.ts). Preview flash-lite went GA and was
 // renamed to `gemini-3.1-flash-lite`; `gemini-3.5-flash` (and its backend alias
-// `gemini-3-flash`) are now served over Code Assist.
+// `gemini-3-flash`) are now served over Code Assist. `gemini-3.7-flash` is
+// AHEAD of upstream: gemini-cli hasn't listed it yet (issue #28802), but the
+// model is GA on the Gemini API and entitled Code Assist accounts serve it.
 const CODE_ASSIST_SUPPORTED_MODELS = new Set([
   "gemini-3-pro-preview",
   "gemini-3.1-pro-preview",
@@ -36,6 +38,7 @@ const CODE_ASSIST_SUPPORTED_MODELS = new Set([
   "gemini-3.5-flash",
   "gemini-3-flash",
   "gemini-3.1-flash-lite",
+  "gemini-3.7-flash",
   "gemini-2.5-pro",
   "gemini-2.5-flash",
   "gemma-4-31b-it",
@@ -179,6 +182,7 @@ const ACCOUNT_GATED_MODELS = new Set([
   "gemini-3.5-flash",
   "gemini-3.1-pro-preview",
   "gemini-3.1-pro-preview-customtools",
+  "gemini-3.7-flash",
 ]);
 
 // The user-facing account-gated message is split so the error UI (gg-app + TUI)
@@ -193,7 +197,7 @@ function accountGatedMessage(model: string): string {
 
 function accountGatedHint(): string {
   return (
-    `Newer Gemini models (3.5 Flash, 3.1 Pro Preview) are available only to Code Assist ` +
+    `Newer Gemini models (3.7 Flash, 3.5 Flash, 3.1 Pro Preview) are available only to Code Assist ` +
     `Standard/Enterprise accounts with preview/GA access enabled by a cloud admin — ` +
     `free/personal accounts usually can't call them. Switch to Gemini 3.1 Flash Lite ` +
     `(it works on this account) with /model, or sign in with a Code Assist ` +

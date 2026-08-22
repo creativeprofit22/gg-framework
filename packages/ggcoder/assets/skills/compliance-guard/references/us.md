@@ -10,7 +10,7 @@ Snapshot **11 Aug 2026**. Markers: **[V]** verified against a primary/first-tier
 
 Most **comprehensive state privacy laws will not apply** to a pre-scale product — they need tens of thousands of residents' data or large revenue. But four categories apply **at any size**:
 
-1. FTC Act §5 and state unfair-and-deceptive-practices analogues (most state UDAPs *do* have a PRA).
+1. FTC Act §5 and state unfair-and-deceptive-practices analogues (most state UDAPs _do_ have a PRA).
 2. Breach-notification statutes in every state.
 3. Sector laws: COPPA, HIPAA, GLBA, TCPA, BIPA, consumer-health-data laws.
 4. No-threshold plaintiff statutes: CIPA, BIPA, MHMDA, TCPA, VPPA.
@@ -35,6 +35,7 @@ Treat as an opt-out of sale/share + targeted advertising.
 Apply BEFORE firing any ad pixel. Persist server-side against the user/device.
 Disclose signal handling in the privacy notice.
 ```
+
 Honouring GPC for **every** visitor is the safe default: it satisfies the strictest state and violates none **[V]**.
 
 **Why an ordinary ad pixel triggers everything.** "Sale" requires no money — any disclosure for other valuable consideration counts — and "sharing" expressly covers cross-context behavioural advertising **[V]**. Meta Pixel, GA4 with ad features, TikTok, Reddit and LinkedIn tags are a sale/share/targeted ad in nearly every state. Build: a tag inventory, consent-gated loading, and an opt-out that actually severs the pixel rather than filing a form.
@@ -56,11 +57,12 @@ Honouring GPC for **every** visitor is the safe default: it satisfies the strict
 **Applicability:** for-profit doing business in CA meeting any one of — annual gross revenue over ~$26.6M (CPI-adjusted), buying/selling/sharing PI of 100,000+ CA consumers or households a year, or 50%+ of revenue from selling/sharing PI **[V]**. Penalties per violation with a higher tier for intentional violations or those involving minors. **Consumers may sue only over certain breaches** ($107–$799 per consumer per incident) — there is no general PRA for policy or opt-out-link failures **[V]**.
 
 **2026 regulations package (effective 1 Jan 2026)** **[V]**:
-- *Risk assessments* — begin 1 Jan 2026, complete for ongoing activities by 31 Dec 2027, first certified reports 1 Apr 2028. Triggered by sensitive PI, targeted ads to minors, ADMT for significant decisions, or training ADMT.
-- *ADMT* — pre-use notice, access, and opt-out for automated decision-making about significant decisions (including employees, contractors, applicants). **Compliance deadline 1 Jan 2027.**
-- *Cyber audits* — only above revenue plus scale thresholds; first certifications from 2028. A pre-revenue startup is out of scope.
 
-**Delete Act / DROP** — if you sell PI of consumers you have no direct relationship with, you are a data broker. **No revenue threshold.** Registration plus, **from 1 Aug 2026**, processing consumer deletion requests through the state mechanism every 45 days with downstream deletion directives; per-day penalties apply whether or not you registered **[V]**. Enforcement has already hit companies of exactly this size. Ask at design review: *do we sell PI of people who never used us?*
+- _Risk assessments_ — begin 1 Jan 2026, complete for ongoing activities by 31 Dec 2027, first certified reports 1 Apr 2028. Triggered by sensitive PI, targeted ads to minors, ADMT for significant decisions, or training ADMT.
+- _ADMT_ — pre-use notice, access, and opt-out for automated decision-making about significant decisions (including employees, contractors, applicants). **Compliance deadline 1 Jan 2027.**
+- _Cyber audits_ — only above revenue plus scale thresholds; first certifications from 2028. A pre-revenue startup is out of scope.
+
+**Delete Act / DROP** — if you sell PI of consumers you have no direct relationship with, you are a data broker. **No revenue threshold.** Registration plus, **from 1 Aug 2026**, processing consumer deletion requests through the state mechanism every 45 days with downstream deletion directives; per-day penalties apply whether or not you registered **[V]**. Enforcement has already hit companies of exactly this size. Ask at design review: _do we sell PI of people who never used us?_
 
 **Breach notice (SB 446)** — since 1 Jan 2026, notify affected California residents within **30 calendar days** of discovery, and report to the AG within **15 calendar days** of notifying individuals **[V]**.
 
@@ -98,7 +100,7 @@ Honouring GPC for **every** visitor is the safe default: it satisfies the strict
 
 ## 4. Health, biometric, genetic, location
 
-**HIPAA usually does *not* cover a direct-to-consumer wellness app** — it reaches covered entities and their business associates. You become a business associate the moment you handle PHI *on behalf of* a covered entity, which requires a BAA, Security Rule compliance, and 60-day breach notice **[V]**. If you are not HIPAA, you are in the consumer-health-data regime below.
+**HIPAA usually does _not_ cover a direct-to-consumer wellness app** — it reaches covered entities and their business associates. You become a business associate the moment you handle PHI _on behalf of_ a covered entity, which requires a BAA, Security Rule compliance, and 60-day breach notice **[V]**. If you are not HIPAA, you are in the consumer-health-data regime below.
 
 **Washington My Health My Data Act — the top small-company landmine.** **No revenue or volume threshold**, in effect since 2024 **[V]**. "Consumer health data" is defined broadly enough to include precise location that could indicate seeking health services. Requires a **standalone** consumer-health-data privacy policy at its own link, **separate consent for collection**, **separate consent for sharing**, and a **distinct signed authorisation to sell**, plus a geofencing prohibition and processor contracts. **PRA: YES**, via the state consumer-protection act, up to $7,500 per violation **[V]**. The first class action targeted an ordinary ad SDK collecting location. Any period tracker, fitness, mental-health, or symptom app — or anything collecting precise location — is squarely in scope. Nevada has a similar regime without a PRA **[V]**.
 
@@ -116,7 +118,7 @@ Honouring GPC for **every** visitor is the safe default: it satisfies the strict
 
 - **Colorado** — the original AI Act was delayed and then repealed/replaced with a narrower automated-decision framework; assume a scaled-back regime effective **1 Jan 2027** and verify the enrolled text before building **[U]**.
 - **Texas TRAIGA** — effective 1 Jan 2026, reaching out-of-state developers whose AI is accessible to Texas users. Intent-based liability for AI that promotes self-harm, facilitates crime, discriminates, or produces prohibited deepfakes. AG-only with a 60-day cure; **safe harbour for documented NIST AI RMF-aligned compliance** **[V]**. Practical step for a small dev: a one-page RMF-aligned policy plus retained prompt/eval logs.
-- **Illinois HB 3773** — from 1 Jan 2026, using AI with a discriminatory *effect* in employment violates the state human-rights act; intent is no defence **[V]**.
+- **Illinois HB 3773** — from 1 Jan 2026, using AI with a discriminatory _effect_ in employment violates the state human-rights act; intent is no defence **[V]**.
 - **NYC Local Law 144** — annual independent bias audit plus published summary and candidate notice for automated employment decision tools used for NYC roles **[V]**.
 - **Mental-health AI** — Illinois bans AI delivering mental-health treatment or clinical decisions outright; Nevada, Utah and Tennessee restrict or require disclosure; treat "AI therapist" as a **hard gate** **[V]**.
 - **Companion chatbots** — California (PRA), New York (AG-only), Oregon (PRA, from 2027), Washington (from 2027) **[V]**. **Baseline build for any consumer LLM chat:** persistent non-human disclosure, self-harm detection with a crisis interstitial, minor-mode content restrictions and break reminders, retained incident logs.

@@ -107,7 +107,7 @@ export class AppSidecarContinuationHandoffService {
       maxTurnExtensions: 0,
     });
 
-    let synthesisFailed = false;
+    let prepared: PreparedContinuationHandoff;
     try {
       await synthesisSession.initialize();
       await synthesisSession.prompt(
@@ -118,20 +118,20 @@ export class AppSidecarContinuationHandoffService {
       const response = lastAssistantText(synthesisSession.getMessages());
       if (!response.trim()) throw new Error("Continuation handoff synthesis returned no response.");
       const handoff = parseContinuationHandoff(response);
-      return {
+      prepared = {
         version: CONTINUATION_HANDOFF_VERSION,
         prompt: renderContinuationPrompt(handoff, nextInstruction),
         handoff,
       };
     } catch (error) {
-      synthesisFailed = true;
-      throw error;
-    } finally {
       try {
         await synthesisSession.dispose();
-      } catch (error) {
-        if (!synthesisFailed) throw error;
+      } catch {
+        // Preserve the synthesis failure; disposal is best-effort on this path.
       }
+      throw error;
     }
+    await synthesisSession.dispose();
+    return prepared;
   }
 }

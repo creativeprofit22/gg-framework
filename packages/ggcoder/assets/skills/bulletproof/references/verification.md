@@ -27,17 +27,17 @@ Then, where the surface justifies it: property or fuzz tests over parsers and de
 
 Pick one per row. Running one scanner in CI beats evaluating five.
 
-| Job | Options |
-|---|---|
-| Secret scanning | gitleaks, trufflehog — as a pre-commit hook **and** in CI. Also scan git history once, at the start |
-| Dependency vulnerabilities | the package manager's own audit, OSV-Scanner, Dependabot or Renovate with a review gate |
-| Static analysis | Semgrep (with its registry rules), CodeQL on public repositories, plus the language's own linters with security rules enabled |
-| Container | Trivy or Grype against the built image; pin base images by digest |
-| IaC | Checkov or tfsec for Terraform, Kubernetes manifests, and Dockerfiles |
-| Fuzzing | OSS-Fuzz for eligible open-source projects; cargo-fuzz, atheris, Jazzer, or Go's built-in fuzzing locally |
-| Contracts | Slither failing on high/medium, Foundry invariant suites, Echidna |
-| Mobile | MASTG test IDs as the checklist; the platform's own build-time warnings |
-| Web runtime | ZAP baseline scan against a staging deployment |
+| Job                        | Options                                                                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Secret scanning            | gitleaks, trufflehog — as a pre-commit hook **and** in CI. Also scan git history once, at the start                           |
+| Dependency vulnerabilities | the package manager's own audit, OSV-Scanner, Dependabot or Renovate with a review gate                                       |
+| Static analysis            | Semgrep (with its registry rules), CodeQL on public repositories, plus the language's own linters with security rules enabled |
+| Container                  | Trivy or Grype against the built image; pin base images by digest                                                             |
+| IaC                        | Checkov or tfsec for Terraform, Kubernetes manifests, and Dockerfiles                                                         |
+| Fuzzing                    | OSS-Fuzz for eligible open-source projects; cargo-fuzz, atheris, Jazzer, or Go's built-in fuzzing locally                     |
+| Contracts                  | Slither failing on high/medium, Foundry invariant suites, Echidna                                                             |
+| Mobile                     | MASTG test IDs as the checklist; the platform's own build-time warnings                                                       |
+| Web runtime                | ZAP baseline scan against a staging deployment                                                                                |
 
 **Rules for tooling, learned the hard way:** run scanners in CI on pull requests, not on a schedule nobody reads; fail the build only on high-confidence, reachable findings, or the team disables the gate within a month; triage the first run's backlog once and suppress with a written reason, in the repo, so suppressions are reviewable.
 

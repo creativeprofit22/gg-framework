@@ -41,7 +41,6 @@
 
   /* Button system — glossy capsule pills. Vertical light→dark gradient and a
      white inner top-highlight for sheen. No colored glow behind the pill. */
-  --grad-primary: linear-gradient(135deg, #4d9dff 0%, #9b8cf7 100%);
   --gloss-primary: linear-gradient(180deg, #6fb1ff 0%, #7d7bf3 100%);
   --gloss-neutral: linear-gradient(180deg, #2a2e3a 0%, #1a1d26 100%);
   --gloss-success: linear-gradient(180deg, #4ad69b 0%, #2fb87f 100%);
@@ -2232,6 +2231,77 @@ body {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Hugging Face pull modal: search dropdown + progress. Same density as the
+   local-model rows; the progress bar is the modal's one focal element. */
+.hf-modal {
+  min-width: 460px;
+}
+.hf-results {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.hf-result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  margin-bottom: 2px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hf-result-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hf-result-meta {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.hf-empty {
+  padding: 14px 4px;
+  font-size: 12px;
+}
+.hf-install-name {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-all;
+}
+.hf-install-sub {
+  margin-top: 2px;
+  font-size: 11px;
+}
+.hf-progress {
+  height: 8px;
+  border-radius: 4px;
+  margin-top: 12px;
+  overflow: hidden;
+}
+.hf-progress-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: #9b8cf7;
+  transition: width 240ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hf-progress-fill {
+    transition: none;
+  }
+}
+.hf-progress-line {
+  margin-top: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
 .mcp-list {
   display: flex;
   flex-direction: column;
@@ -2293,15 +2363,6 @@ body {
   font-family: var(--sans);
   font-size: 12px;
   line-height: 1.4;
-}
-.mcp-summary {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-family: var(--mono);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .mcp-delete {
   flex: 0 0 auto;
@@ -2473,45 +2534,6 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* Action clusters sit in the padded row BELOW the overlay title bar (matching
-   .picker-head), aligned to the bar's bottom edge — NOT crammed onto the
-   native overlay. */
-.titlebar-actions {
-  position: absolute;
-  right: 16px;
-  bottom: 10px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-/* Mirror cluster pinned to the left edge (the "‹ Sessions" back affordance). */
-.titlebar-actions.left {
-  right: auto;
-  left: 16px;
-}
-
-.commit-button {
-  background: transparent;
-  border: 1px solid;
-  border-radius: var(--radius-button);
-  font-family: var(--sans);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 2px 9px;
-  cursor: pointer;
-  transition:
-    color var(--t-fast),
-    background-color var(--t-fast),
-    border-color var(--t-fast);
-}
-.commit-button:hover:not(:disabled) {
-  background: var(--surface-1);
-}
-.commit-button:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 
 /* Multi-window layout control: looks like the old icon button, but a
@@ -2924,6 +2946,10 @@ body {
   font-size: 15px;
   white-space: pre-wrap;
   word-break: break-word;
+  /* Reserved, invisible border. The queued state only recolors it, so leaving
+     the queue never changes the bubble's box by 2px — which otherwise nudges
+     the text and every bubble below it at the moment the message is sent. */
+  border: 1px solid transparent;
 }
 /* `@Ken` prompt bubble: tinted in Ken's color (matching his replies + the input
    highlight) so the transcript shows this message went to the mentor, not GG
@@ -2939,21 +2965,80 @@ body {
 }
 
 /* ── Queued steering message: still waiting to be injected mid-run. Dim it
-   and pulse a soft "queued" pill so it reads as not-yet-sent vs a live send. ── */
+   and pulse a soft "queued" pill so it reads as not-yet-sent vs a live send.
+
+   The pulse lives on the PILL, not the bubble. Pulsing the bubble left its
+   opacity at an arbitrary point in the cycle (measured 0.43–0.62), so the
+   promote keyframe's hard start at 0.5 jumped by up to 0.12 in one frame — a
+   snap at exactly the moment this animation exists to smooth. A static 0.5 hands
+   the promote a continuous start. It also matches the composer strip, where only
+   `.queued-dot` breathes, and composites a 14px label instead of the whole
+   bubble on every frame for as long as the message sits in the queue. ── */
 .user-msg.queued {
   position: relative;
   opacity: 0.5;
-  border: 1px dashed var(--border, rgba(255, 255, 255, 0.18));
-  animation: ggqueuedpulse 2s ease-in-out infinite;
+  border-style: dashed;
+  border-color: var(--border, rgba(255, 255, 255, 0.18));
+}
+/* Queued → sent. The agent taking a message off the queue used to swap three
+   things in a single frame (dim→solid, dashed→none, pill gone), which read as a
+   pop mid-transcript. This plays them as one motion, paced to overlap the
+   composer strip's own 220ms exit so the message reads as moving from the input
+   into the thread. `border-style` stays dashed for the whole beat while the
+   color fades out under it, so the discrete style flip lands on an already
+   invisible border. */
+.user-msg.promoted {
+  border-style: dashed;
+  animation: ggqueuedpromote 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes ggqueuedpromote {
+  from {
+    opacity: 0.5;
+    border-color: var(--border, rgba(255, 255, 255, 0.18));
+  }
+  to {
+    opacity: 1;
+    border-color: transparent;
+  }
 }
 .queued-pill {
   display: block;
   font-family: var(--mono);
   font-size: 9px;
+  /* Explicit line-height so the collapse below starts at the pill's REAL height.
+     `max-height: 2em` overshot the rendered 13.9px by 22%, and that slack is
+     dead time: the label sits still through the first fifth of the beat, then
+     drops. Pinning both to the same number makes the collapse start moving on
+     frame one. */
+  line-height: 14px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  opacity: 0.75;
   margin-bottom: 6px;
+  /* Resting value under the pulse, so the label still reads as secondary when
+     the animation is suppressed for reduced motion. */
+  opacity: 0.52;
+  /* Collapsed by height (not unmounted) on promotion, so the bubble shrinks
+     over the beat instead of losing a whole line in one frame. */
+  overflow: hidden;
+  max-height: 14px;
+  animation: ggqueuedpulse 2s ease-in-out infinite;
+}
+.user-msg.promoted .queued-pill {
+  animation: ggqueuedpillout 300ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+@keyframes ggqueuedpillout {
+  from {
+    /* Midpoint of the pulse it takes over from, so the handoff is at worst half
+       an amplitude rather than a jump to full brightness. */
+    opacity: 0.52;
+    max-height: 14px;
+    margin-bottom: 6px;
+  }
+  to {
+    opacity: 0;
+    max-height: 0;
+    margin-bottom: 0;
+  }
 }
 @keyframes ggqueuedpulse {
   0%,
@@ -4918,8 +5003,11 @@ body {
 
 /* Footer clusters reveal as one faded unit once the session has hydrated,
    instead of cwd/git/thinking/model popping in piecemeal and reflowing. The
-   skeleton occupies the same box first, so this is a true crossfade in place. */
-.footer-reveal {
+   skeleton occupies the same box first, so this is a true crossfade in place.
+   The transcript's own hydration reveal is the same motion, so both share one
+   rule — they were identical declarations sitting either side of the keyframe. */
+.footer-reveal,
+.transcript-reveal {
   animation: reveal-up 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
@@ -4934,9 +5022,6 @@ body {
     opacity: 1;
     transform: translateY(0);
   }
-}
-.transcript-reveal {
-  animation: reveal-up 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 /* ── "Show full output" control ──
@@ -5034,17 +5119,12 @@ body {
     var(--surface-1) 100%
   );
   background-size: 220% 100%;
-  animation: skeleton-sweep 1.4s linear infinite;
+  /* Same sweep as the shimmer text, just slower and over a fill instead of a
+     text clip — both scroll a 220%-wide gradient by the same distance, so they
+     share one keyframe rather than defining it twice. */
+  animation: ggshimmer 1.4s linear infinite;
   /* Each skeleton group fades in so the placeholders themselves don't pop. */
   vertical-align: middle;
-}
-@keyframes skeleton-sweep {
-  0% {
-    background-position: 180% 0;
-  }
-  100% {
-    background-position: -80% 0;
-  }
 }
 
 /* Transcript history placeholder: message-shaped rows. */
@@ -5161,8 +5241,13 @@ body {
   line-height: 1.55;
   transition: color var(--t-fast);
 }
-.thinking-toggle:hover {
+.thinking-toggle:hover:not(:disabled) {
   text-decoration: underline;
+}
+/* Locked mid-run: drop the hover affordance and the pointer, so the control
+   reads as unavailable before the click. Mirrors `.model-select:disabled`. */
+.thinking-toggle:disabled {
+  cursor: default;
 }
 
 /* ── Footer: context percentage ── */
@@ -5206,12 +5291,6 @@ body {
   z-index: 100;
   min-width: 280px;
   max-width: min(440px, 90vw);
-}
-.bgtasks-title {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 6px 6px;
 }
 .bgtasks-empty {
   padding: 6px;
@@ -5392,24 +5471,6 @@ body {
 .model-menu-item:hover,
 .model-menu-item:focus-visible {
   background: var(--surface-1) !important;
-}
-
-.meter {
-  display: inline-block;
-  width: 90px;
-  height: 10px;
-  background: var(--border);
-  border-radius: 2px;
-  overflow: hidden;
-  position: relative;
-}
-
-.meter-bar {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 6px;
 }
 
 /* ── Gaze focus (webcam eye/head tracking) ────────────────────────────────
@@ -6771,8 +6832,16 @@ body {
   .queued-bar,
   .queued-bar.leaving,
   .queued-list,
-  .queued-list-item {
+  .queued-list-item,
+  .user-msg.promoted,
+  .queued-pill {
     animation: none;
+  }
+  /* No animation means no `forwards` fill, so collapse the pill outright —
+     otherwise a promoted bubble keeps its "queued" label forever. */
+  .user-msg.promoted .queued-pill {
+    animation: none;
+    display: none;
   }
 }
 .queued-index {

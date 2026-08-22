@@ -67,11 +67,20 @@ function MatrixRain(): React.ReactElement {
     function resize() {
       const parent = canvas.parentElement;
       if (!parent) return;
-      width = parent.clientWidth;
-      height = parent.clientHeight;
+      const w = parent.clientWidth;
+      const h = parent.clientHeight;
+      // macOS reports 0×0 for a webview while its window is minimized or fully
+      // occluded by siblings. Measuring into that collapses the canvas and resets
+      // the rain field against the wrong size — exactly what bunches it into the
+      // corner once the window is restored. Hold the last-good layout instead,
+      // and skip no-op resizes so the drops don't visibly jump on every tick.
+      if (w < 2 || h < 2) return;
+      if (w === width && h === height) return;
+      width = w;
+      height = h;
       dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.max(1, Math.floor(width * dpr));
-      canvas.height = Math.max(1, Math.floor(height * dpr));
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -97,7 +106,9 @@ function MatrixRain(): React.ReactElement {
       // Trail fade — translucent wash over the prior frame.
       ctx.fillStyle = "rgba(15, 17, 21, 0.18)";
       ctx.fillRect(0, 0, width, height);
-      ctx.font = `${FONT_SIZE}px var(--mono, monospace)`;
+      // Canvas 2D cannot resolve CSS var(), so spell out the mono stack (matches
+      // the --mono token) instead of silently falling back to the default font.
+      ctx.font = `${FONT_SIZE}px "Geist Mono Variable", ui-monospace, monospace`;
 
       for (let i = 0; i < columns; i++) {
         const ch = GLYPHS[Math.floor(Math.random() * GLYPHS.length)];
@@ -110,11 +121,38 @@ function MatrixRain(): React.ReactElement {
         else drops[i]++;
       }
     }
-    raf = requestAnimationFrame(frame);
+    // Run the loop ONLY while this window is focused + visible. With multiple
+    // project windows, letting every window run its canvas at 60fps starves the
+    // GPU compositor and causes intermittent multi-window rendering failures
+    // (black frames, frozen/bunched canvases). Pausing unfocused windows cuts
+    // concurrent rendering from N to 1.
+    function startLoop(): void {
+      if (raf === 0) raf = requestAnimationFrame(frame);
+    }
+    function stopLoop(): void {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+    startLoop();
+
+    function onVisible(): void {
+      if (document.visibilityState === "visible") {
+        resize();
+        startLoop();
+      } else {
+        stopLoop();
+      }
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", startLoop);
+    window.addEventListener("blur", stopLoop);
 
     return () => {
-      cancelAnimationFrame(raf);
+      stopLoop();
       ro.disconnect();
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", startLoop);
+      window.removeEventListener("blur", stopLoop);
     };
   }, []);
 

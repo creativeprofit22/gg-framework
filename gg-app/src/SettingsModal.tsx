@@ -18,6 +18,7 @@ import { toast } from "./toast";
 import { SoundButton } from "./SoundButton";
 import { formatBuildIdentity } from "./build-info";
 import { AzureConnectionSettings } from "./AzureConnectionSettings";
+import { MemesButton } from "./MemesButton";
 
 interface Props {
   onClose: () => void;
@@ -151,10 +152,11 @@ export function SettingsModal({
         </>
       )}
       <div className="modal-label" style={{ color: theme.textMuted }}>
-        Sound effects
+        Effects
       </div>
       <div className="modal-row">
         <SoundButton variant="settings" />
+        <MemesButton variant="settings" />
       </div>
       <div className="modal-label" style={{ color: theme.textMuted }}>
         Agent plugins

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentDefinition } from "./agents.js";
 import { buildSubAgentCompletionFollowUp, SubAgentManager } from "./subagent-manager.js";
 import { SubAgentStore, type PersistedSubAgentRecord } from "./subagent-store.js";
+import { readTurnRecord, writeTurnRecord } from "./subagent-turn-record.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
 
 const workerEntry = fileURLToPath(
@@ -40,6 +41,7 @@ function manager(
     sessionRootDir?: string;
     maxPerModel?: number;
     notifications?: AgentNotificationQueue;
+    adoptionPollMs?: number;
   } = {},
 ) {
   const instance = new SubAgentManager({
@@ -55,6 +57,7 @@ function manager(
     idleTimeoutMs: options.idleTimeoutMs,
     store: options.store,
     sessionRootDir: options.sessionRootDir,
+    adoptionPollMs: options.adoptionPollMs,
   });
   managers.push(instance);
   return instance;
@@ -465,5 +468,181 @@ describe("SubAgentManager", () => {
     await instance.resetParentSession("parent-new");
     expect(instance.list()).toEqual([]);
     expect(await store.load(cwd, "parent-new")).toEqual([]);
+  });
+});
+
+describe("durable turn-record adoption on hydrate", () => {
+  const PARENT = "parent-adopt-1";
+
+  async function adoptionFixture() {
+    const root = await tempDir();
+    const sessionRootDir = path.join(root, "sessions");
+    const childPath = path.join(sessionRootDir, "child-1.jsonl");
+    const record: PersistedSubAgentRecord = {
+      agent_id: "a1",
+      task_name: "orphan-task",
+      state: "running",
+      started_at: 1000,
+      updated_at: 2000,
+      elapsed_ms: 1000,
+      turn_count: 2,
+      tool_use_count: 1,
+      token_usage: { input: 10, output: 2 },
+      child_session_id: "child-1",
+      child_session_path: childPath,
+      collected: false,
+    };
+    return { root, sessionRootDir, childPath, record };
+  }
+
+  it("adopts a completed record newer than the parent's last observation", async () => {
+    const { root, sessionRootDir, childPath, record } = await adoptionFixture();
+    const store = new SubAgentStore(path.join(root, "store"));
+    await store.save(root, PARENT, [record]);
+    await writeTurnRecord(childPath, {
+      status: "completed",
+      output: "orphan result",
+      model: "fast",
+      turn_count: 4,
+      token_usage: { input: 30, output: 8 },
+      completed_at: 2500, // after the store's updated_at=2000
+    });
+    const notifications = new AgentNotificationQueue();
+    const instance = manager({
+      cwd: root,
+      store,
+      sessionRootDir,
+      notifications,
+      adoptionPollMs: 20,
+    });
+
+    await instance.hydrate(PARENT);
+    const snapshot = instance.list().find((s) => s.agent_id === "a1")!;
+    expect(snapshot.state).toBe("completed");
+    expect(snapshot.output).toBe("orphan result");
+    expect(snapshot.error).toBeUndefined();
+    expect(snapshot.turn_count).toBe(4);
+    expect(snapshot.token_usage).toMatchObject({ input: 30, output: 8 });
+    // One-shot adoption: the record is consumed.
+    expect(await readTurnRecord(childPath)).toBeUndefined();
+    const [notification] = notifications.drain();
+    expect(notification?.text).toContain("finished during a parent restart");
+    expect(notification?.terminal).toBe(true);
+  });
+
+  it("keeps a stale record out (older than the parent's last observation)", async () => {
+    const { root, sessionRootDir, childPath, record } = await adoptionFixture();
+    const store = new SubAgentStore(path.join(root, "store"));
+    await store.save(root, PARENT, [record]);
+    await writeTurnRecord(childPath, {
+      status: "completed",
+      output: "stale result from an earlier turn",
+      turn_count: 1,
+      token_usage: { input: 5, output: 1 },
+      completed_at: 1500, // BEFORE the store's updated_at=2000
+    });
+    const instance = manager({ cwd: root, store, sessionRootDir, adoptionPollMs: 20 });
+
+    await instance.hydrate(PARENT);
+    const snapshot = instance.list().find((s) => s.agent_id === "a1")!;
+    expect(snapshot.state).toBe("interrupted");
+    expect(snapshot.output).toBeUndefined();
+    // Record preserved — it belongs to a turn the parent already observed.
+    expect(await readTurnRecord(childPath)).toBeDefined();
+  });
+
+  it("adopts an interrupted record's partial output and error", async () => {
+    const { root, sessionRootDir, childPath, record } = await adoptionFixture();
+    const store = new SubAgentStore(path.join(root, "store"));
+    await store.save(root, PARENT, [record]);
+    await writeTurnRecord(childPath, {
+      status: "interrupted",
+      output: "partial findings",
+      error: "Interrupted",
+      turn_count: 3,
+      token_usage: { input: 20, output: 5 },
+      completed_at: Date.now(),
+    });
+    const instance = manager({ cwd: root, store, sessionRootDir, adoptionPollMs: 20 });
+
+    await instance.hydrate(PARENT);
+    const snapshot = instance.list().find((s) => s.agent_id === "a1")!;
+    expect(snapshot.state).toBe("interrupted");
+    expect(snapshot.output).toBe("partial findings");
+    expect(snapshot.error).toBe("Interrupted");
+  });
+
+  it("preserves a failed record's terminal state instead of masking it as interrupted", async () => {
+    const { root, sessionRootDir, childPath, record } = await adoptionFixture();
+    const store = new SubAgentStore(path.join(root, "store"));
+    await store.save(root, PARENT, [record]);
+    await writeTurnRecord(childPath, {
+      status: "failed",
+      output: "partial findings",
+      error: "Timed out after 30 minutes; recovery summary failed",
+      turn_count: 6,
+      token_usage: { input: 25, output: 6 },
+      completed_at: Date.now(),
+    });
+    const instance = manager({ cwd: root, store, sessionRootDir, adoptionPollMs: 20 });
+
+    await instance.hydrate(PARENT);
+    const snapshot = instance.list().find((s) => s.agent_id === "a1")!;
+    expect(snapshot.state).toBe("failed");
+    expect(snapshot.error).toBe("Timed out after 30 minutes; recovery summary failed");
+  });
+
+  it("adopts a late record that lands while the watcher is running", async () => {
+    const { root, sessionRootDir, childPath, record } = await adoptionFixture();
+    const store = new SubAgentStore(path.join(root, "store"));
+    await store.save(root, PARENT, [record]);
+    const notifications = new AgentNotificationQueue();
+    const instance = manager({
+      cwd: root,
+      store,
+      sessionRootDir,
+      notifications,
+      adoptionPollMs: 20,
+    });
+    await instance.hydrate(PARENT);
+    // No record yet: pessimistic interrupted, watcher armed.
+    expect(instance.list().find((s) => s.agent_id === "a1")!.state).toBe("interrupted");
+
+    await writeTurnRecord(childPath, {
+      status: "completed",
+      output: "late orphan result",
+      turn_count: 5,
+      token_usage: { input: 50, output: 9 },
+      completed_at: Date.now(),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const snapshot = instance.list().find((s) => s.agent_id === "a1")!;
+    expect(snapshot.state).toBe("completed");
+    expect(snapshot.output).toBe("late orphan result");
+    expect(
+      notifications.drain().some((n) => n.text.includes("late") || n.text.includes("restart")),
+    ).toBe(true);
+  });
+
+  it("leaves terminal snapshots alone", async () => {
+    const { root, sessionRootDir, childPath, record } = await adoptionFixture();
+    const store = new SubAgentStore(path.join(root, "store"));
+    await store.save(root, PARENT, [
+      { ...record, state: "completed", output: "done before crash" },
+    ]);
+    await writeTurnRecord(childPath, {
+      status: "completed",
+      output: "should not overwrite",
+      turn_count: 9,
+      token_usage: { input: 1, output: 1 },
+      completed_at: Date.now(),
+    });
+    const instance = manager({ cwd: root, store, sessionRootDir, adoptionPollMs: 20 });
+
+    await instance.hydrate(PARENT);
+    const snapshot = instance.list().find((s) => s.agent_id === "a1")!;
+    expect(snapshot.state).toBe("completed");
+    expect(snapshot.output).toBe("done before crash");
   });
 });

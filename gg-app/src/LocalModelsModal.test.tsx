@@ -67,11 +67,11 @@ const STATE: LocalModelsState = {
       ],
     },
     {
-      id: "lmstudio",
+      id: "lmstudio-custom",
       label: "LM Studio",
       baseUrl: "http://127.0.0.1:1234/v1",
       kind: "lmstudio",
-      custom: false,
+      custom: true,
       reachable: false,
       reason: "Not running at http://127.0.0.1:1234/v1",
       models: [],
@@ -148,11 +148,13 @@ describe("LocalModelsModal", () => {
     expect(switchModelMock).not.toHaveBeenCalled();
   });
 
-  it("points at the footer model selector for choosing a model", async () => {
+  it("keeps the hint to one short line about tool calling and unknown context", async () => {
     render(<LocalModelsModal onClose={vi.fn()} />);
     await screen.findByText("Ollama");
 
-    expect(screen.getByText(/model selector at the bottom of the window/)).toBeTruthy();
+    expect(screen.getByText(/No tool calling = can’t run the agent/)).toBeTruthy();
+    // The old three-sentence hint (including how to pick a model) was cut.
+    expect(screen.queryByText(/model selector at the bottom/)).toBeNull();
   });
 
   it("re-probes on Scan", async () => {
@@ -184,8 +186,19 @@ describe("LocalModelsModal", () => {
     render(<LocalModelsModal onClose={vi.fn()} />);
     await screen.findByText("Ollama");
 
-    // Both built-in endpoints render, neither with a remove button.
+    // Ollama is the one built-in endpoint: no remove button. The custom LM
+    // Studio endpoint (how non-Ollama servers appear now) does get one.
     expect(screen.queryByTitle('Remove "Ollama"')).toBeNull();
-    expect(screen.queryByTitle('Remove "LM Studio"')).toBeNull();
+    expect(screen.getByTitle('Remove "LM Studio"')).toBeTruthy();
+  });
+
+  it("keeps the footer to three actions (HF download lives in the Connect-page tile)", () => {
+    // The in-modal HF button was removed (it crowded the footer to four
+    // buttons); the Connect-page tile is the entry point now.
+    render(<LocalModelsModal onClose={vi.fn()} />);
+    expect(screen.queryByText("Add from Hugging Face")).toBeNull();
+    expect(screen.getByText("Add endpoint")).toBeTruthy();
+    expect(screen.getByText("Close")).toBeTruthy();
+    expect(screen.getByText("Scan")).toBeTruthy();
   });
 });

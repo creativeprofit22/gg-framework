@@ -4,17 +4,17 @@ What each required document or flow must actually contain, as a skeleton to gene
 
 **Rule for every document here:** generate it with `[PLACEHOLDER]` fields for facts only the user has, never invent entity names, addresses, retention periods, or vendor lists, and mark the output as a template that needs review. State plainly which artifacts a competent developer can safely template and which genuinely need a lawyer.
 
-| Artifact | Safe to template | Needs a lawyer |
-|---|---|---|
-| Privacy policy | Yes, if it is generated *from the actual data map* | If sensitive data, children, health, or ad-tech sharing is involved |
-| Cookie/consent implementation | Yes — this is engineering | No |
-| DSAR/DSR flow | Yes | No |
-| Accessibility statement | Yes | No |
-| AI disclosures | Yes | If high-risk classification is arguable |
-| Email/SMS compliance | Yes | No |
-| Terms of service | Skeleton only | **Yes** — liability, indemnity, arbitration, and consumer-law limits are where templates fail |
-| DPAs, transfer documentation | Sign the vendor's | If you are the processor offering one |
-| Anything sector-gated | No | **Yes** |
+| Artifact                      | Safe to template                                   | Needs a lawyer                                                                                |
+| ----------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Privacy policy                | Yes, if it is generated _from the actual data map_ | If sensitive data, children, health, or ad-tech sharing is involved                           |
+| Cookie/consent implementation | Yes — this is engineering                          | No                                                                                            |
+| DSAR/DSR flow                 | Yes                                                | No                                                                                            |
+| Accessibility statement       | Yes                                                | No                                                                                            |
+| AI disclosures                | Yes                                                | If high-risk classification is arguable                                                       |
+| Email/SMS compliance          | Yes                                                | No                                                                                            |
+| Terms of service              | Skeleton only                                      | **Yes** — liability, indemnity, arbitration, and consumer-law limits are where templates fail |
+| DPAs, transfer documentation  | Sign the vendor's                                  | If you are the processor offering one                                                         |
+| Anything sector-gated         | No                                                 | **Yes**                                                                                       |
 
 ---
 
@@ -40,6 +40,7 @@ Generate it **from the code's data map**, not from a template. A policy that des
 14. **Effective date and last-updated date.**
 
 **Fatal mistakes**
+
 - A copied template naming the wrong company (regulators and plaintiffs check this first).
 - Promising encryption, deletion, or "we never share your data" that the code contradicts.
 - No effective date, or one that is years stale — annual review is expected.
@@ -91,6 +92,7 @@ Timing: apply BEFORE any ad tag loads on the same page view.
 Persist: server-side against the user record; do not rely on a cookie alone.
 Disclose: state in the privacy policy that you honour it.
 ```
+
 Honour it for all visitors regardless of state — it satisfies the strictest requirement and violates none.
 
 ---
@@ -153,6 +155,7 @@ Do not publish a conformance claim you have not tested. Claiming conformance you
 ## 8. Email and SMS in code
 
 **Email**
+
 - Accurate headers and non-deceptive subject lines.
 - A **valid physical postal address** in every commercial message.
 - A working unsubscribe, honoured within the statutory window, functional for a period after send.
@@ -161,6 +164,7 @@ Do not publish a conformance claim you have not tested. Claiming conformance you
 - Separate transactional from marketing sends in code so an unsubscribe never suppresses a password reset and a marketing blast never bypasses suppression.
 
 **SMS**
+
 - One `canSend()` chokepoint owning the provider credentials.
 - Consent record capturing the exact disclosure text shown, timestamp, and source.
 - Suppression list processed on any opt-out keyword received on any channel.

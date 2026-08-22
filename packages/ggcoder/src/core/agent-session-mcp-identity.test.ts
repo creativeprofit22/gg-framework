@@ -7,7 +7,7 @@ import type { AgentEvent, AgentTool, ToolContext } from "@kenkaiiii/gg-agent";
 import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import type * as McpModule from "./mcp/index.js";
 import { useFakeHome } from "../test-support/fake-home.js";
-import { DeferredToolCatalog } from "./mcp/deferred-catalog.js";
+import type { DeferredToolCatalog } from "./mcp/deferred-catalog.js";
 import type { CachedTool } from "./mcp/catalog-cache.js";
 import {
   createMcpToolIdentity,
@@ -406,9 +406,7 @@ describe("AgentSession MCP identity boundary", () => {
       expect(internals.registeredTools.has(identity.providerName)).toBe(false);
 
       const toolSearch = internals.registeredTools.get("tool_search");
-      const discovery = String(
-        await toolSearch?.execute({ query: "live-tool" }, TOOL_CONTEXT),
-      );
+      const discovery = String(await toolSearch?.execute({ query: "live-tool" }, TOOL_CONTEXT));
       expect(discovery).toContain(identity.providerName);
       const added = internals.registeredTools.get(identity.providerName);
       expect(added).toBeDefined();

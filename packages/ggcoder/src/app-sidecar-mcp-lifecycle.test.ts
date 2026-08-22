@@ -16,10 +16,13 @@ describe("desktop MCP mutation boundary", () => {
       }),
     };
 
-    const completion = applyDesktopMcpMutation(() => session, async () => {
-      order.push("persist");
-      return { ok: true };
-    }).then((result) => {
+    const completion = applyDesktopMcpMutation(
+      () => session,
+      async () => {
+        order.push("persist");
+        return { ok: true };
+      },
+    ).then((result) => {
       order.push("respond");
       return result;
     });
@@ -34,7 +37,11 @@ describe("desktop MCP mutation boundary", () => {
   it("reloads only successful add, removal, or OAuth mutations", async () => {
     const session = { reloadMcpServers: vi.fn(async () => {}) };
 
-    await applyDesktopMcpMutation(() => session, async () => ({ ok: false }), (result) => result.ok);
+    await applyDesktopMcpMutation(
+      () => session,
+      async () => ({ ok: false }),
+      (result) => result.ok,
+    );
     await applyDesktopMcpMutation(
       () => session,
       async () => ({ removed: false }),
@@ -42,7 +49,11 @@ describe("desktop MCP mutation boundary", () => {
     );
     expect(session.reloadMcpServers).not.toHaveBeenCalled();
 
-    await applyDesktopMcpMutation(() => session, async () => ({ ok: true }), (result) => result.ok);
+    await applyDesktopMcpMutation(
+      () => session,
+      async () => ({ ok: true }),
+      (result) => result.ok,
+    );
     await applyDesktopMcpMutation(
       () => session,
       async () => ({ removed: true }),

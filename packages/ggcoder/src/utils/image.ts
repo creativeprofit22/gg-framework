@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type SharpNamespace from "sharp";
+import type sharp from "sharp";
+import type { FormatEnum } from "sharp";
 
 const execFileAsync = promisify(execFile);
 
@@ -19,7 +20,7 @@ const execFileAsync = promisify(execFile);
  * Cached after first call so repeated image operations don't re-hit the
  * dynamic import resolver.
  */
-type SharpFn = typeof SharpNamespace;
+type SharpFn = typeof sharp;
 let sharpFn: SharpFn | null = null;
 async function loadSharp(): Promise<SharpFn> {
   if (sharpFn) return sharpFn;
@@ -524,7 +525,7 @@ async function shrinkToFitWithSharp(
   }
 
   // Determine output format from mediaType
-  const formatMap: Record<string, keyof SharpNamespace.FormatEnum> = {
+  const formatMap: Record<string, keyof FormatEnum> = {
     "image/png": "png",
     "image/jpeg": "jpeg",
     "image/gif": "gif",
@@ -605,7 +606,7 @@ export async function shrinkToFit(
     const fitted = await shrinkToFitWithSharp(pngBuffer, "image/png");
     const validatedType = await validateVisionImage(fitted.buffer);
     if (!validatedType) {
-      throw new Error("ffmpeg image transcode produced an invalid image");
+      throw new Error("ffmpeg image transcode produced an invalid image", { cause: sharpError });
     }
     return { buffer: fitted.buffer, mediaType: validatedType };
   }

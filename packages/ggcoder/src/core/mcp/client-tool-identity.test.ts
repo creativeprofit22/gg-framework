@@ -99,7 +99,10 @@ async function startStubServer(): Promise<StubServer> {
         });
         const value = (message.params?.arguments as { value?: unknown } | undefined)?.value;
         if (value === "mcp-error") {
-          sendResult({ content: [{ type: "text", text: "server rejected the call" }], isError: true });
+          sendResult({
+            content: [{ type: "text", text: "server rejected the call" }],
+            isError: true,
+          });
           return;
         }
         if (value === "thrown-error") {
@@ -152,7 +155,10 @@ describe("MCPClientManager tool identities", () => {
   it("dispatches an unsafe alias by its exact source name and omits duplicate declarations", async () => {
     const tools = await manager.connectAll([config]);
 
-    expect(tools.map((tool) => tool.name)).toEqual([UNSAFE_TOOL_ALIAS, "mcp__identity-fixture__unrelated"]);
+    expect(tools.map((tool) => tool.name)).toEqual([
+      UNSAFE_TOOL_ALIAS,
+      "mcp__identity-fixture__unrelated",
+    ]);
     expect(tools.every((tool) => /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(tool.name))).toBe(true);
 
     const args = { value: "exact argument 日本語", nested: { enabled: true } };
@@ -165,7 +171,10 @@ describe("MCPClientManager tool identities", () => {
 
     expect(stub.calls).toEqual([{ name: UNSAFE_TOOL_NAME, arguments: args }]);
     expect((await cache.entriesFor([config])).get(SERVER_NAME)?.tools).toEqual([
-      expect.objectContaining({ toolName: UNSAFE_TOOL_NAME, description: "Unsafe source identity" }),
+      expect.objectContaining({
+        toolName: UNSAFE_TOOL_NAME,
+        description: "Unsafe source identity",
+      }),
       expect.objectContaining({ toolName: "unrelated", description: "kept" }),
     ]);
   });

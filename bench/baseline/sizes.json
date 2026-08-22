@@ -1,0 +1,18 @@
+{
+  "artifacts": {
+    "dist:ggcoder": {
+      "bytes": 9624063,
+      "recorded_at": "2026-08-20T20:12:18.314Z"
+    },
+    "sidecar": {
+      "bytes": 8157676,
+      "recorded_at": "2026-08-20T20:12:18.316Z"
+    }
+  },
+  "startup": {
+    "cli-version": {
+      "ms": 477.40045799999996,
+      "recorded_at": "2026-08-20T20:12:20.767Z"
+    }
+  }
+}

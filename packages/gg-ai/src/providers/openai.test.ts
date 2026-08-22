@@ -272,9 +272,11 @@ describe("streamOpenAI request shaping", () => {
 
   it.each<[Provider, Record<string, unknown>]>([
     ["openai", { reasoning_effort: "high", prompt_cache_key: "ggcoder", thinking: undefined }],
+    // GLM takes BOTH: the toggle turns reasoning on, reasoning_effort picks
+    // the rung. Toggle-only silently ran Z.AI's `max` default at every level.
     [
       "glm",
-      { thinking: { type: "enabled" }, reasoning_effort: undefined, prompt_cache_key: undefined },
+      { thinking: { type: "enabled" }, reasoning_effort: "high", prompt_cache_key: undefined },
     ],
     [
       "moonshot",
@@ -559,32 +561,37 @@ describe("streamOpenAI tool argument parsing", () => {
     createMock.mockReset();
   });
 
-  it.each<Provider>(["openai", "glm", "moonshot", "xiaomi", "deepseek", "openrouter"])(
-    "preserves streamed function call arguments for %s",
-    async (provider) => {
-      const { events, response } = await collectResponse(provider, '{"command":"echo ok"}');
+  it.each<Provider>([
+    "openai",
+    "glm",
+    "moonshot",
+    "xiaomi",
+    "deepseek",
+    "openrouter",
+    "huggingface",
+  ])("preserves streamed function call arguments for %s", async (provider) => {
+    const { events, response } = await collectResponse(provider, '{"command":"echo ok"}');
 
-      expect(response).toMatchObject({
-        message: {
-          content: [
-            {
-              type: "tool_call",
-              id: "call_1",
-              name: "bash",
-              args: { command: "echo ok" },
-            },
-          ],
-        },
-        stopReason: "tool_use",
-      });
-      expect(events).toContainEqual({
-        type: "toolcall_done",
-        id: "call_1",
-        name: "bash",
-        args: { command: "echo ok" },
-      });
-    },
-  );
+    expect(response).toMatchObject({
+      message: {
+        content: [
+          {
+            type: "tool_call",
+            id: "call_1",
+            name: "bash",
+            args: { command: "echo ok" },
+          },
+        ],
+      },
+      stopReason: "tool_use",
+    });
+    expect(events).toContainEqual({
+      type: "toolcall_done",
+      id: "call_1",
+      name: "bash",
+      args: { command: "echo ok" },
+    });
+  });
 
   it("unwraps double-encoded streamed function call arguments", async () => {
     const { response } = await collectResponse("glm", JSON.stringify('{"command":"echo ok"}'));

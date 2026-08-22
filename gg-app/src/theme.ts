@@ -2,9 +2,12 @@
 // Mirrors the :root custom properties in App.css so inline-style consumers and
 // the stylesheet share one source of truth. Existing key names are kept as
 // aliases (new hex values) to minimize component churn.
+//
+// `borderStrong`, `userText` and `userBackground` have no `theme.X` reader — they
+// are consumed through their CSS vars. Keep them: completeness of the mirror is
+// this file's job. An alias with neither a `theme.X` reader nor a CSS var is
+// simply dead.
 export const theme = {
-  name: "dark",
-
   // Surfaces — cool charcoal ramp, elevation by ΔL only (no shadows).
   background: "#0f1115",
   surface1: "#161922",
@@ -28,14 +31,10 @@ export const theme = {
 
   // Aliases mapped onto the accent family for existing consumers.
   accent: "#9b8cf7",
-  toolName: "#4d9dff",
-  toolSuccess: "#36c489",
-  toolError: "#f2716e",
   code: "#e3a23f",
   language: "#2dd4bf",
   footerText: "#9aa3b2",
   commandColor: "#9b8cf7",
-  link: "#4d9dff",
 
   inputBackground: "#161922",
 

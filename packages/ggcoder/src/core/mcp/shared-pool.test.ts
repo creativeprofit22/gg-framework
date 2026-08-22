@@ -6,11 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { McpCatalogCache } from "./catalog-cache.js";
-import {
-  MCPClientManager,
-  type MCPConnectResult,
-  type MCPServerStateChange,
-} from "./client.js";
+import { MCPClientManager, type MCPConnectResult, type MCPServerStateChange } from "./client.js";
 import { DEFAULT_MCP_SERVERS } from "./defaults.js";
 import {
   isShareableServer,
@@ -449,9 +445,9 @@ describe.skipIf(process.platform === "win32")(
       expect(pool.size).toBe(0);
       expect(lifecycle.at(-1)?.status).toBe("disconnected");
       expect(lifecycle.some((change) => change.status === "recovering")).toBe(false);
-      await expect(
-        connected!.tools[0]!.execute({ text: "stale" }, toolContext()),
-      ).rejects.toThrow(/stale tool wrapper|Connection closed/);
+      await expect(connected!.tools[0]!.execute({ text: "stale" }, toolContext())).rejects.toThrow(
+        /stale tool wrapper|Connection closed/,
+      );
 
       // A NEW session may deliberately establish a new child afterwards.
       const second = session(pool);

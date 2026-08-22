@@ -16,7 +16,9 @@ import glm from "./assets/providers/glm.svg";
 import minimax from "./assets/providers/minimax.svg";
 import xiaomi from "./assets/providers/xiaomi.svg";
 import deepseek from "./assets/providers/deepseek.svg";
+import huggingface from "./assets/providers/huggingface.svg";
 import sakana from "./assets/providers/sakana.png";
+import ollama from "./assets/providers/ollama.png";
 import openrouter from "./assets/providers/openrouter.svg";
 
 export const PROVIDER_LOGOS: Record<string, string> = {
@@ -29,7 +31,9 @@ export const PROVIDER_LOGOS: Record<string, string> = {
   minimax,
   xiaomi,
   deepseek,
+  huggingface,
   sakana,
+  ollama,
   openrouter,
 };
 

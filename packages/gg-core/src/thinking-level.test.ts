@@ -57,6 +57,20 @@ describe("thinking-level helpers", () => {
     expect(isThinkingLevelSupported("xai", "grok-4.5", "xhigh")).toBe(false);
   });
 
+  it("cycles xAI Grok 4.6 through low, medium, high, and its new xhigh rung", () => {
+    expect(getSupportedThinkingLevels("xai", "grok-4.6")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+    expect(getNextThinkingLevel("xai", "grok-4.6", undefined)).toBe("low");
+    expect(getNextThinkingLevel("xai", "grok-4.6", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("xai", "grok-4.6", "xhigh")).toBeUndefined();
+    expect(isThinkingLevelSupported("xai", "grok-4.6", "xhigh")).toBe(true);
+    expect(isThinkingLevelSupported("xai", "grok-4.6", "max")).toBe(false);
+  });
+
   it("cycles Sakana Fugu through high and xhigh", () => {
     expect(getSupportedThinkingLevels("sakana", "fugu")).toEqual(["high", "xhigh"]);
     expect(getSupportedThinkingLevels("sakana", "fugu-ultra")).toEqual(["high", "xhigh"]);
@@ -73,6 +87,24 @@ describe("thinking-level helpers", () => {
     expect(getNextThinkingLevel("moonshot", "kimi-k3", "high")).toBe("max");
     expect(getNextThinkingLevel("moonshot", "kimi-k3", "max")).toBeUndefined();
     expect(isThinkingLevelSupported("moonshot", "kimi-k3", "medium")).toBe(false);
+  });
+
+  it("cycles GLM-5.3 through the endpoint's declared effort ladder", () => {
+    // Verified live: an unlisted effort 400s with `none, minimal, low, medium,
+    // high, xhigh, max`. `none` is what the thinking toggle already does and
+    // `minimal` has no ThinkingLevel counterpart, so five rungs are exposed.
+    expect(getSupportedThinkingLevels("glm", "glm-5.3")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(getNextThinkingLevel("glm", "glm-5.3", undefined)).toBe("low");
+    expect(getNextThinkingLevel("glm", "glm-5.3", "high")).toBe("xhigh");
+    expect(getNextThinkingLevel("glm", "glm-5.3", "xhigh")).toBe("max");
+    expect(getNextThinkingLevel("glm", "glm-5.3", "max")).toBeUndefined();
+    expect(isThinkingLevelSupported("glm", "glm-5.3", "ultra")).toBe(false);
   });
 
   it("keeps non-cycling providers at their model's sole supported effort", () => {

@@ -10,6 +10,11 @@ import { SessionManager } from "./session-manager.js";
 import { log } from "./logger.js";
 import type { AgentNotificationQueue } from "./agent-notifications.js";
 import {
+  clearTurnRecord,
+  readTurnRecord,
+  type SubagentTurnRecord,
+} from "./subagent-turn-record.js";
+import {
   boundSubAgentOutput,
   childSubAgentEnv,
   childThinkingLevel,
@@ -74,6 +79,9 @@ export interface SubAgentManagerOptions {
   notifications?: AgentNotificationQueue;
   workerEntry?: string;
   idleTimeoutMs?: number;
+  /** Poll interval for adopting turn records of children orphaned mid-turn.
+   *  Test-only knob; production default 5s. */
+  adoptionPollMs?: number;
   store?: SubAgentStore;
   sessionRootDir?: string;
 }
@@ -159,6 +167,9 @@ export class SubAgentManager {
   private readonly sessionRootDir: string;
   private parentSessionId?: string;
   private persistQueue: Promise<void> = Promise.resolve();
+  /** Bounded watcher for turn records of children orphaned mid-turn. */
+  private adoptionWatcher?: NodeJS.Timeout;
+  private adoptionDeadline = 0;
   private persistPending = false;
   private persistScheduled = false;
 
@@ -185,10 +196,15 @@ export class SubAgentManager {
     this.parentSessionId = parentSessionId;
     this.snapshots.clear();
     const records = await this.store.load(this.options.cwd, parentSessionId);
+    // Snapshots that were mid-turn at parent death. Their detached child may
+    // still be finishing (stdin-close → orphan mode → durable turn record),
+    // so adoption is checked now AND watched for a bounded window.
+    const adoptable: Array<{ snapshot: SubAgentSnapshot; lastObservedAt: number }> = [];
     for (const persisted of records) {
+      const wasActive = persisted.state === "starting" || persisted.state === "running";
       const snapshot: SubAgentSnapshot = {
         ...persisted,
-        ...(persisted.state === "starting" || persisted.state === "running"
+        ...(wasActive
           ? {
               state: "interrupted" as const,
               error: "Interrupted by process restart",
@@ -197,12 +213,16 @@ export class SubAgentManager {
             }
           : { recovered: true }),
       };
+      if (wasActive && snapshot.child_session_path) {
+        adoptable.push({ snapshot, lastObservedAt: persisted.updated_at });
+      }
       this.snapshots.set(snapshot.agent_id, snapshot);
       this.options.onState?.(snapshot);
       for (const listener of this.listeners) listener(snapshot);
     }
     this.queuePersist();
     await this.waitForPersistence();
+    await this.settleAdoptableTurns(adoptable);
     const referencedChildSessions = await this.store.listChildSessionPaths();
     await new SessionManager(this.sessionRootDir)
       .pruneOldSessions({
@@ -214,6 +234,87 @@ export class SubAgentManager {
           error: error instanceof Error ? error.message : String(error),
         });
       });
+  }
+
+  /**
+   * Adopt durable turn records for snapshots that were mid-turn at restart.
+   * A record newer than the parent's last observation of that child is the
+   * child's own terminal verdict — it outranks the pessimistic "interrupted".
+   * Still-running orphans get a bounded watcher: the record usually lands
+   * within one turn timeout, and adoption then notifies the parent's next
+   * turn like any other completion.
+   */
+  private async settleAdoptableTurns(
+    adoptable: Array<{ snapshot: SubAgentSnapshot; lastObservedAt: number }>,
+  ): Promise<void> {
+    clearInterval(this.adoptionWatcher);
+    if (adoptable.length === 0) return;
+    const pending = new Map(adoptable.map((entry) => [entry.snapshot.agent_id, entry]));
+    const settle = async () => {
+      for (const [agentId, entry] of pending) {
+        // Skip anything re-spawned or already terminal via another path.
+        const current = this.snapshots.get(agentId);
+        if (!current || current.state !== "interrupted" || this.workers.has(agentId)) {
+          pending.delete(agentId);
+          continue;
+        }
+        const record = await readTurnRecord(current.child_session_path);
+        if (!record || record.completed_at <= entry.lastObservedAt) continue;
+        pending.delete(agentId);
+        this.adoptTurnRecord(current, record);
+      }
+      if (pending.size === 0 || Date.now() > this.adoptionDeadline) {
+        clearInterval(this.adoptionWatcher);
+        this.adoptionWatcher = undefined;
+      }
+    };
+    this.adoptionDeadline = Date.now() + SUB_AGENT_TIMEOUT_MS + 60_000;
+    await settle();
+    if (pending.size > 0) {
+      this.adoptionWatcher = setInterval(() => void settle(), this.options.adoptionPollMs ?? 5_000);
+      this.adoptionWatcher.unref?.();
+    }
+  }
+
+  /** Fold a durable turn record into the snapshot and announce the adoption. */
+  private adoptTurnRecord(snapshot: SubAgentSnapshot, record: SubagentTurnRecord): void {
+    const adopted: SubAgentSnapshot = {
+      ...snapshot,
+      state: record.status === "completed" ? "completed" : record.status,
+      output: record.output,
+      error:
+        record.status === "completed"
+          ? undefined
+          : (record.error ?? "Turn ended during a parent restart"),
+      model: record.model ?? snapshot.model,
+      turn_count: record.turn_count,
+      token_usage: {
+        ...snapshot.token_usage,
+        input: record.token_usage.input,
+        output: record.token_usage.output,
+      },
+      updated_at: Date.now(),
+      recovered: true,
+    };
+    this.snapshots.set(adopted.agent_id, adopted);
+    this.options.onState?.(adopted);
+    for (const listener of this.listeners) listener(adopted);
+    this.queuePersist();
+    // One record is adopted once; clearing prevents a re-hydrate double-adoption
+    // racing a persist that has not landed yet.
+    void clearTurnRecord(adopted.child_session_path);
+    log("INFO", "subagent", "Adopted child turn record after restart", {
+      agent_id: adopted.agent_id,
+      status: record.status,
+    });
+    this.options.notifications?.enqueue(
+      "subagent",
+      adopted.agent_id,
+      `Child agent "${adopted.task_name}" (${adopted.agent_id}) finished during a parent ` +
+        `restart and its result was recovered (${record.status}). ` +
+        `Collect the full output with wait_agent agent_ids ["${adopted.agent_id}"].`,
+      { terminal: true },
+    );
   }
 
   /** Rebind durable child history after parent compaction creates a continuation. */
@@ -496,6 +597,8 @@ export class SubAgentManager {
   }
 
   async shutdownAll(): Promise<void> {
+    clearInterval(this.adoptionWatcher);
+    this.adoptionWatcher = undefined;
     if (!this.shutdownPromise) {
       this.shuttingDown = true;
       this.shutdownPromise = Promise.allSettled(
@@ -508,6 +611,8 @@ export class SubAgentManager {
   /** Synchronous process-exit fallback: terminate detached process groups immediately. */
   shutdownAllNow(): void {
     this.shuttingDown = true;
+    clearInterval(this.adoptionWatcher);
+    this.adoptionWatcher = undefined;
     for (const worker of this.workers.values()) this.kill(worker);
   }
 

@@ -34,7 +34,6 @@ describe("EventBus tool-call presentation identity", () => {
     const bus = new EventBus();
     const listener = vi.fn();
     bus.on("tool_call_end", listener);
-
     bus.forwardAgentEvent({
       type: "tool_call_end",
       toolCallId: "fixture-error-call",
@@ -42,12 +41,12 @@ describe("EventBus tool-call presentation identity", () => {
       isError: true,
       durationMs: 12,
     });
-
     expect(listener).toHaveBeenCalledWith({
       toolCallId: "fixture-error-call",
       result: "fixture-is-error: rejected [REDACTED]",
       isError: true,
       durationMs: 12,
+      invalidArgAttempt: undefined,
       details: undefined,
     });
   });
@@ -56,18 +55,42 @@ describe("EventBus tool-call presentation identity", () => {
     const bus = new EventBus();
     const listener = vi.fn();
     bus.on("tool_call_start", listener);
-
     bus.forwardAgentEvent({
       type: "tool_call_start",
       toolCallId: "ordinary-call",
       name: "read",
       args: { file_path: "a.ts" },
     });
-
     expect(listener).toHaveBeenCalledWith({
       toolCallId: "ordinary-call",
       name: "read",
       args: { file_path: "a.ts" },
     });
+  });
+});
+
+describe("EventBus.forwardAgentEvent", () => {
+  it("carries invalidArgAttempt through to listeners", () => {
+    const bus = new EventBus();
+    const seen: (number | undefined)[] = [];
+    bus.on("tool_call_end", (data) => seen.push(data.invalidArgAttempt));
+
+    bus.forwardAgentEvent({
+      type: "tool_call_end",
+      toolCallId: "t1",
+      result: "Invalid arguments for tool `edit`",
+      isError: true,
+      durationMs: 0,
+      invalidArgAttempt: 2,
+    });
+    bus.forwardAgentEvent({
+      type: "tool_call_end",
+      toolCallId: "t2",
+      result: "applied",
+      isError: false,
+      durationMs: 5,
+    });
+
+    expect(seen).toEqual([2, undefined]);
   });
 });

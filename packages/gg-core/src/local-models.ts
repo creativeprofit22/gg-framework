@@ -61,14 +61,12 @@ export interface LocalEndpointProbe {
 // ── Defaults ───────────────────────────────────────────────
 
 /**
- * The servers we look for without being asked. Ports are each project's
- * documented default; users who moved a port add a custom endpoint instead.
+ * The server we look for without being asked. LM Studio, llama.cpp and vLLM
+ * are no longer auto-probed — one honest row beats four mostly-dead ones;
+ * anything else is one "Add endpoint" away (custom kind keeps working).
  */
 export const DEFAULT_LOCAL_ENDPOINTS: readonly LocalEndpoint[] = [
   { id: "ollama", label: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", kind: "ollama" },
-  { id: "lmstudio", label: "LM Studio", baseUrl: "http://127.0.0.1:1234/v1", kind: "lmstudio" },
-  { id: "llamacpp", label: "llama.cpp", baseUrl: "http://127.0.0.1:8080/v1", kind: "llamacpp" },
-  { id: "vllm", label: "vLLM", baseUrl: "http://127.0.0.1:8000/v1", kind: "vllm" },
 ];
 
 /**

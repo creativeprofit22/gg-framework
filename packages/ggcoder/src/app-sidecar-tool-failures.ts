@@ -9,8 +9,9 @@ export interface PersistedMcpToolFailure {
 function toolResultText(content: ToolResultContent): string {
   if (typeof content === "string") return content;
   return content
-    .filter((block): block is Extract<(typeof content)[number], { type: "text" }> =>
-      block.type === "text",
+    .filter(
+      (block): block is Extract<(typeof content)[number], { type: "text" }> =>
+        block.type === "text",
     )
     .map((block) => block.text)
     .join("\n");

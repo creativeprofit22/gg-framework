@@ -22,6 +22,159 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.53.3",
+    date: "2026-08-23",
+    items: [
+      "`Autopilot` is back, and it is bulletproof. Yesterday's build had a bug that killed every single review the instant it started, so Ken never got to check your work and you just got an error. I found it, crushed it, and locked it down with a test so it can never come back.",
+      "Your settings no longer lie to you mid task. The `Ken` model picker and the `Thinking` level looked clickable while GG Coder was working, but changing them did nothing to the run you were watching. Now they dim politely and tell you exactly why, so what you see is always what you get.",
+    ],
+  },
+  {
+    version: "0.53.2",
+    date: "2026-08-23",
+    items: [
+      "GG Coder stops repeating itself at the end of a task. It used to hand you an answer, quietly send itself back to work, then hand you a second and even a third version of the same thing. Now you get one answer, once, and a clear `Hook engaged` note whenever it goes back to double-check its work.",
+      "Answers land a lot faster too. GG Coder ran your tests with commands like `cd project && npm test` and then failed to notice it had run them at all, so it kept re-checking work it had already proven. That blind spot is gone, and the wait at the end of every task went with it.",
+    ],
+  },
+  {
+    version: "0.53.1",
+    date: "2026-08-21",
+    items: [
+      "Your model picker never gets stuck again. If the model list lost a race while the app was booting, the dropdown could stay greyed out for the whole session with no way back. Now I retry until it loads, and if it ever is locked I tell you exactly why instead of just ignoring your click.",
+      "Windows just got a lot smoother. I taught GG Coder to read the `Git Bash` style paths Windows hands back, so files it finds are files it can actually open. No more mystery failures on paths that looked perfectly fine.",
+      "Reading the web is now dramatically cheaper. The new `outline` mode turns a page into a tight numbered map and follows links by number, cutting a six page research run from `16,402` tokens down to `1,936`. That is money straight back in your pocket.",
+      "I hardened the sandbox. A sneaky repo could plant a shortcut in a cache folder and trick a later run into handing over write access to your whole machine, including your `SSH` keys. That door is now shut and locked.",
+    ],
+  },
+  {
+    version: "0.53.0",
+    date: "2026-08-21",
+    items: [
+      "You can now fill your machine with models without leaving the app. Hit the new `Hugging Face` tile on the Connect page, search anything, click once, and I download it straight into `Ollama` with a live progress bar you can cancel. Fresh models appear in your picker instantly, no restart.",
+      "Three heavyweights joined the roster: `Grok 4.6` with a new extra-deep thinking mode, `Gemini 3.7 Flash` at a full `1M` context, and the stable `DeepSeek V4 Pro 0813` build.",
+      "Hugging Face accounts now plug in directly. One token unlocks hosted `Qwen3 Coder 480B` and `GPT-OSS 120B` with zero setup.",
+      "The Connect page got a strict diet. One clean `Ollama` tile with its real logo, one-line descriptions everywhere, and none of the dead servers nobody used.",
+    ],
+  },
+  {
+    version: "0.52.0",
+    date: "2026-08-20",
+    items: [
+      "New projects now launch fully loaded. Hit `Initialize Git` and I create your GitHub repo plus a hardened `CI` pipeline, `Dependabot` updates, branch protection, and an `AGENTS.md`, all matched to your exact stack. Any language, one click, zero config.",
+      "Existing repos got a fast pass too. The new `/setup-ci` command audits what you already have or generates it fresh: leaner runners, quicker builds, tighter security. I even collapse expensive matrix legs and cancel stale runs so your CI bill stays tiny.",
+    ],
+  },
+  {
+    version: "0.51.0",
+    date: "2026-08-19",
+    items: [
+      "GG Coder just got five new built-in superpowers, and they switch on by themselves. When a plan is fuzzy it reaches for `clarify`, builds test-first with `tdd` when you ask for it, chases stubborn bugs from red repro to real fix with `root-cause`, keeps your project's vocabulary tight with `shared-language`, and checks both what you asked for and how well it's built with `code-review`. No setup, no config, they just show up when the work needs them.",
+      "It asks you better questions, way less often. I taught it the difference between facts and decisions: facts it now digs up on its own, and real decisions come to you as one batched list with a recommended answer next to each. The one-question-at-a-time interrogation drip is dead.",
+    ],
+  },
+  {
+    version: "0.50.3",
+    date: "2026-08-18",
+    items: [
+      "GG Coder got a fresh set of guardrails, and it shows. It now treats your git history like the precious thing it is: no surprise commits, no force pushes, and it stops to ask instead of touching changes it doesn't recognize. It also refuses to make a failing test pass by weakening it, reproduces a bug before fixing it, and knows the difference between you asking a question and asking for a fix.",
+      "The `kencode` superpower is now front and center. When building something nontrivial, GG Coder reaches for real code from `millions of GitHub repos` to see how it's actually done before writing a single line, instead of guessing from memory.",
+    ],
+  },
+  {
+    version: "0.50.2",
+    date: "2026-08-18",
+    items: [
+      "GG Coder just dropped `120 MB` of dead weight. I found the installer quietly shipping a pile of files nothing ever reads and cut every last one, so each download is smaller and the app takes up way less room on your disk. Same power, way lighter on its feet.",
+    ],
+  },
+  {
+    version: "0.50.1",
+    date: "2026-08-17",
+    items: [
+      "Big cleanup runs no longer stop dead halfway. I caught the `lean` specialist shutting down the very engine it runs inside, taking your session with it mid-task, and taught it to never touch its own host again. Long jobs now run to the end, every time.",
+    ],
+  },
+  {
+    version: "0.50.0",
+    date: "2026-08-17",
+    items: [
+      "Two new specialists joined the crew. `lean` hunts down slow loads, memory leaks, and zombie processes in any stack, so everything I build stays fast and light. `durable` makes sure one bad migration or runaway script can't wipe you out, with verified backups and a guard on every destructive operation.",
+      "The whole team got more proactive. Skills like `bulletproof` and the new duo now engage while I'm building, not just when you ask for a checkup, so the right patterns land from the very first line. Less rework, fewer surprises, better software.",
+    ],
+  },
+  {
+    version: "0.49.0",
+    date: "2026-08-17",
+    items: [
+      "Finished now means proven. If the agent edits code, it literally cannot wrap up until it has run the tests or the typecheck after the last change, so `done` means `verified`, not `trust me`.",
+      "Background builds stopped needing babysitters. The agent now gets woken the instant a build prints an `error`, a dev server says `listening`, or a task goes quiet on its own, instead of checking every few seconds. Faster reactions, fewer wasted turns, smaller bills.",
+      "`Plan mode` got real teeth. Destructive commands like `git branch -D` and `find -delete` used to sneak past the read-only guard wearing a harmless disguise. I shut every door I could find, including sneaky flag clusters like `sort -ro`.",
+    ],
+  },
+  {
+    version: "0.48.3",
+    date: "2026-08-17",
+    items: [
+      "Armor under the hood. I added release guardrails that prove prompt caching and session replay stay intact on every build, so long chats keep hitting the cache and cost less, and a resumed chat always replays exactly what really happened. Every release now clears `2,400+` automated checks before it reaches you.",
+    ],
+  },
+  {
+    version: "0.48.2",
+    date: "2026-08-15",
+    items: [
+      "No more prompts that just vanish into thin air. Once in a while a model would come back with literally nothing, and GG Coder would quietly stop like nothing happened, leaving you staring at a dead chat. Now I retry it for you, and if the model truly ghosts, you get a clear `empty response` warning instead of silence. Even better, that blank reply used to poison the whole session so every message after it came back empty too. That is gone for good.",
+    ],
+  },
+  {
+    version: "0.48.1",
+    date: "2026-08-15",
+    items: [
+      "Edits that used to kill a run now recover on the spot. Roughly `1%` of file edits came back garbled, and GG Coder would resend the exact same broken payload until `three strikes` ended your whole turn. I made the error tell it precisely what broke, so a long task stops collapsing seconds from the finish line.",
+    ],
+  },
+  {
+    version: "0.48.0",
+    date: "2026-08-15",
+    items: [
+      "`GLM-5.3` just landed and it is a monster at coding. Z.AI says it is `50%` better at code than the model it replaces, and it is the strongest open model out there right now on real terminal work. I made it the one and only GLM you get, so picking a weaker sibling by accident is no longer a thing. Same `1M` context, same login, way more firepower.",
+      "GLM thinking levels are finally real. Every level you picked used to secretly run at full blast, burning your quota and your patience on questions that never needed it. Now `low` truly is a quick think and `max` truly is a deep one, so you can spend big on the hard stuff and fly through the easy stuff. Nothing gets slower by default, you just got the dial you thought you already had.",
+    ],
+  },
+  {
+    version: "0.47.4",
+    date: "2026-08-14",
+    items: [
+      "GG Coder now writes dramatically less code to do the exact same job. I taught it to think like a lazy senior dev getting paged at 3am: reuse what your repo already has, reach for the standard library, never bolt on a dependency for something a few lines can do. I benchmarked it head to head against the old brain with every single result executed against real tests, and it holds a `100%` pass rate while shipping `50-76%` less code and up to `38%` fewer output tokens. Smaller diffs, cheaper runs, far less to review. The one thing it will never trim is your safety net: validation, error handling, security and accessibility stay untouchable.",
+      "No more watching an answer appear and then vanish. When GG Coder decides to double check its own work, it now knows that before it starts typing, so you only ever see the final reviewed answer land whole. `Zero` ghost drafts.",
+      "Your queued messages now glide into the conversation instead of snapping into place, and the view stays pinned to your newest message while everything settles. I also fixed the chat box landing at the wrong height when you zoom with `Cmd +/-` or resize the window.",
+    ],
+  },
+  {
+    version: "0.47.3",
+    date: "2026-08-13",
+    items: [
+      "You can now switch the meme GIFs on your home screen on or off whenever you want. Pop into `Settings` and you will find a new toggle right next to the sound effects switch. Your pick sticks across restarts, so your home screen stays exactly how you like it.",
+    ],
+  },
+  {
+    version: "0.47.2",
+    date: "2026-08-13",
+    items: [
+      "Your home screen and wake screen no longer choke when you have multiple project windows open. I made each window pause its canvas the moment it loses focus, so only the window you are looking at is doing the work. No more black frames, frozen star fields, or matrix rain bunched into a corner when you restore a minimized window.",
+      "Those meme cards on your home screen actually show up now. They were loading from a remote CDN that your app's own security policy blocks, so you were staring at blank cards. I bundled every `GIF` locally so they load instantly every time with zero network calls.",
+      "Project-scoped MCP servers just got way less annoying. Adding a server to a repo's `.gg/mcp.json` now trusts that one project automatically. You never have to flip the global `trustProjectMcpServers` toggle and trust every repo on your machine just to use one project's tools.",
+    ],
+  },
+  {
+    version: "0.47.1",
+    date: "2026-08-13",
+    items: [
+      "Your agent now has a locked front door. I sealed the internal connection between GG Coder and its engine so no other app or website on your machine can silently drive it, run commands, or touch your keys. What happens in your workspace stays in your workspace.",
+      "Opening a project is now safe from booby-trapped repos. A repo's config files can no longer launch commands the moment you open them. If a project needs that kind of power, you flip it on yourself with `trustProjectMcpServers`.",
+    ],
+  },
+  {
     version: "0.47.0",
     date: "2026-08-12",
     items: [

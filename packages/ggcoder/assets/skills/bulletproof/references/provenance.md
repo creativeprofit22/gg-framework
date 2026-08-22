@@ -6,11 +6,11 @@
 
 Used throughout the reference files. Preserve them when repeating a claim to the user.
 
-| Marker | Meaning | How to treat it |
-|---|---|---|
-| **[V]** | Verified against a primary source (standards body, vendor advisory, official documentation, CVE record) at snapshot time | State it plainly, with the date if it matters |
-| **[S]** | Snapshot-accurate but volatile — versions, adoption status, statistics, vendor defaults | Re-verify before asserting as current; otherwise attribute to the snapshot |
-| **[U]** | Single-sourced, secondary, or methodology not published | Do not build a recommendation on it alone; say it is uncertain |
+| Marker  | Meaning                                                                                                                  | How to treat it                                                            |
+| ------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| **[V]** | Verified against a primary source (standards body, vendor advisory, official documentation, CVE record) at snapshot time | State it plainly, with the date if it matters                              |
+| **[S]** | Snapshot-accurate but volatile — versions, adoption status, statistics, vendor defaults                                  | Re-verify before asserting as current; otherwise attribute to the snapshot |
+| **[U]** | Single-sourced, secondary, or methodology not published                                                                  | Do not build a recommendation on it alone; say it is uncertain             |
 
 Unmarked engineering guidance (parameterize queries, fail closed, least privilege) is durable practice, not a dated claim.
 

@@ -54,15 +54,14 @@ function modelTooltip(model: LocalModelRow, endpointLabel: string): string {
 }
 
 /**
- * Local endpoint manager — which servers are running on this machine and what
- * they serve. Ollama, LM Studio, llama.cpp and vLLM are probed on their
- * documented default ports without any setup; "Add endpoint" covers a moved port
- * or a self-hosted box.
+ * Ollama manager — the one local server we auto-discover and what it serves.
+ * "Add endpoint" covers a moved Ollama port or a self-hosted box (LM Studio,
+ * llama.cpp, vLLM all still work as custom endpoints).
  *
  * Read-only by design: models are **chosen in the footer model selector** like
  * every other model, so there's exactly one selection surface in the app. This
- * screen answers "is my server up, and what can these models do" — capabilities
- * come from each server rather than from guesses, so a model that can't call
+ * screen answers "is Ollama up, and what can these models do" — capabilities
+ * come from the server rather than from guesses, so a model that can't call
  * tools is flagged here instead of failing on the first prompt.
  */
 export function LocalModelsModal({ onClose }: Props): React.ReactElement {
@@ -106,7 +105,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
       const found = state.endpoints.reduce((total, e) => total + e.models.length, 0);
       toast(
         found === 0
-          ? "No local models found. Start Ollama or LM Studio and scan again."
+          ? "No models found. Start Ollama and scan again."
           : `Found ${found} local model${found === 1 ? "" : "s"}.`,
         found === 0 ? "warning" : "success",
       );
@@ -149,13 +148,13 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
   const totalModels = endpoints.reduce((total, e) => total + e.models.length, 0);
 
   return (
-    <Modal title="Local models" onClose={onClose}>
+    <Modal title="Ollama" onClose={onClose}>
       {/* The "nothing found" line belongs with the instruction that fixes it,
           above the endpoint rows — not stranded at the bottom of a scroll area
           the user has to reach to learn why the list looks empty. */}
       {!loading && totalModels === 0 && (
         <div className="mcp-empty" style={{ color: theme.textMuted, marginBottom: 6 }}>
-          No local models yet. Start Ollama (or LM Studio) and scan.
+          No models yet. Start Ollama and scan, or download one from the Hugging Face tile.
         </div>
       )}
 
@@ -270,9 +269,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
             overflowWrap: "break-word",
           }}
         >
-          Pick a local model from the model selector at the bottom of the window. Models with no
-          tool calling can’t run the agent. A “?” on the context size means the server didn’t report
-          one.
+          No tool calling = can’t run the agent. “?” context = server didn’t report one.
         </div>
       )}
 

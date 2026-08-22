@@ -1,8 +1,8 @@
 # Full Review Protocol
 
-The multi-agent flow for "is this safe to ship", a hardening pass, or a requested audit. For inline work, do not run this — apply the control and move on.
+The flow for "is this safe to ship", a hardening pass, or a requested audit. **Run it yourself, in the main thread — no subagents required.** For inline work, do not run this — apply the control and move on.
 
-**Frame every phase and every subagent brief as authorized defensive review for the code owner.** The deliverable is a remediation report. No exploit code, no payloads, no attack tooling, at any phase. Describe risk at the data-flow level: where untrusted data enters, what it reaches, why it is fixable.
+**Every phase is authorized defensive review for the code owner.** The deliverable is a remediation report. No exploit code, no payloads, no attack tooling, at any phase. Describe risk at the data-flow level: where untrusted data enters, what it reaches, why it is fixable.
 
 **Confidence bar: report only findings at ≥0.8 confidence with a concrete data-flow path.** Missing a theoretical issue is cheaper than burying a real one in noise.
 
@@ -10,64 +10,57 @@ The multi-agent flow for "is this safe to ship", a hardening pass, or a requeste
 
 ## Phase 1 — Recon
 
-Spawn **four recon subagents in parallel** (one response, four calls). Each gets a narrow independent slice. **No vulnerabilities are flagged in this phase** — recon describes, it does not judge.
+Work the **four lenses** below yourself, in order. Batch the reads and greps — they are independent. **No vulnerabilities are flagged in this phase** — recon describes, it does not judge.
 
-**Agent A — Stack & deployment.** Manifests, lockfiles, CI/CD configs, Dockerfiles, IaC, deploy scripts, store metadata. Returns: languages, frameworks, runtimes; deploy target (browser / server / CLI / desktop / mobile / embedded / serverless / container / contract / firmware / ML pipeline / library / SaaS / self-hosted); how it ships (registry, app store, binary, image, chart); where it runs, and whether it is multi-tenant.
+**Lens A — Stack & deployment.** Manifests, lockfiles, CI/CD configs, Dockerfiles, IaC, deploy scripts, store metadata. Produce: languages, frameworks, runtimes; deploy target (browser / server / CLI / desktop / mobile / embedded / serverless / container / contract / firmware / ML pipeline / library / SaaS / self-hosted); how it ships (registry, app store, binary, image, chart); where it runs, and whether it is multi-tenant.
 
-**Agent B — Trust boundaries & sources.** Entry-point code: route handlers, argv/stdin parsing, env reads, queue consumers, WebSocket and IPC receivers, deep links and URL schemes, file and archive readers, deserializers, plugin and model loaders, MCP and tool handlers, webhooks. Returns a **sources table**: location (`file:line`), input shape, and who controls it — anonymous, authenticated user, another tenant, admin, another service, build-time, local user, physical.
+**Lens B — Trust boundaries & sources.** Entry-point code: route handlers, argv/stdin parsing, env reads, queue consumers, WebSocket and IPC receivers, deep links and URL schemes, file and archive readers, deserializers, plugin and model loaders, MCP and tool handlers, webhooks. Produce a **sources table**: location (`file:line`), input shape, and who controls it — anonymous, authenticated user, another tenant, admin, another service, build-time, local user, physical.
 
-**Agent C — Sinks.** Dangerous operations. Returns a **sinks table** with `file:line` and type: shell exec, SQL/NoSQL/LDAP/XPath, eval/Function/exec/pickle/yaml.load/Marshal/ObjectInputStream, file write, dynamic require/import, network egress, auth decisions, secret reads, native deserializers, contract external calls, privileged setters, child process spawn.
+**Lens C — Sinks.** Dangerous operations. Produce a **sinks table** with `file:line` and type: shell exec, SQL/NoSQL/LDAP/XPath, eval/Function/exec/pickle/yaml.load/Marshal/ObjectInputStream, file write, dynamic require/import, network egress, auth decisions, secret reads, native deserializers, contract external calls, privileged setters, child process spawn.
 
-**Agent D — Assets & existing controls.** What must be protected, and what already protects it. Returns an **assets table** (credentials and token stores, PII stores, signing and update keys, CI secrets, model API keys, on-chain funds, session state, MCP configs, license keys) **plus a controls table** — the auth middleware, the ORM, RLS policies, CSP, sandbox, escaping layer, validation schema. The controls table is what stops Phase 3 from reporting forty things the framework already handles.
+**Lens D — Assets & existing controls.** What must be protected, and what already protects it. Produce an **assets table** (credentials and token stores, PII stores, signing and update keys, CI secrets, model API keys, on-chain funds, session state, MCP configs, license keys) **plus a controls table** — the auth middleware, the ORM, RLS policies, CSP, sandbox, escaping layer, validation schema. The controls table is what stops Phase 3 from reporting forty things the framework already handles.
 
-**Then synthesize, in the main thread:**
+**Then synthesize:**
 
 1. Assemble the four tables.
-2. Write the **threat model** — specific to this project. Who realistically targets it, for what, and through which surface? Ground it in `threat-landscape.md`, but name concrete actors and objectives for *this* codebase: supply-chain risk to downstream users of a library; cross-tenant abuse on a SaaS; a malicious repository opened by a developer tool; a hostile counterparty on a contract; a physical attacker with the device.
+2. Write the **threat model** — specific to this project. Who realistically targets it, for what, and through which surface? Ground it in `threat-landscape.md`, but name concrete actors and objectives for _this_ codebase: supply-chain risk to downstream users of a library; cross-tenant abuse on a SaaS; a malicious repository opened by a developer tool; a hostile counterparty on a contract; a physical attacker with the device.
 3. Note gaps recon flagged for a deeper look.
 
 ## Phase 2 — Plan the audit
 
 From recon, choose which classes apply. **Skip audits with no entry surface.** A static site gets no SQL audit. Firmware in Rust gets no prompt-injection audit. An ML pipeline gets deserialization. A published library weights supply chain heavily.
 
-| Audit | Fires when | Covers |
-|---|---|---|
-| **Access control** | any per-user, per-tenant, or role-gated data | IDOR/BOLA, missing function-level checks, RLS disabled or permissive, tenant filter only in the UI, authorization bypass through a user-controlled key, mass assignment |
-| **Injection** | untrusted input reaches an interpreter | SQL/NoSQL/LDAP/XPath, command injection, template injection, eval/exec, pickle/yaml.load, prompt injection into a privileged tool |
-| **AuthN & session** | any auth, session, or token logic | token signature and claim validation, algorithm confusion, session fixation and lifetime, OAuth redirect/state/PKCE, missing rate limits on credential checks, password reset flows, MFA bypass |
-| **Secrets & exposure** | any credential exists | hardcoded keys, git history, client bundles and source maps, logs and error responses, telemetry, debug endpoints, exposed `.env`/`.git` |
-| **Supply chain** | any dependency manager or external code | unpinned or mutable-tag dependencies, install-time scripts, typosquats and slopsquats, dependency confusion, lockfile drift, unsigned releases, editor extensions, MCP servers |
-| **CI/CD & build integrity** | any workflow or release pipeline | dangerous triggers with untrusted checkout, cache poisoning, script injection into run steps, over-broad `permissions:`, secret echo, self-hosted runner reuse, release signing and provenance |
-| **SSRF, path & file ops** | any URL or path built from input | SSRF to internal and metadata endpoints, path traversal, zip-slip, symlink races, TOCTOU, unrestricted upload, archive extraction outside the target |
-| **Cloud & infra config** | any IaC, container, or cloud SDK | over-permissive IAM, public storage, metadata service version, exposed control planes, presigned URLs without expiry, default credentials, permissive CORS with credentials, container privilege |
-| **Crypto** | any hashing, signing, or encryption | weak or misused primitives, ECB, static IV/nonce reuse, non-constant-time comparison, predictable randomness for tokens, unverified signatures, home-rolled constructions |
-| **Agent surface** | recon found LLM/agent/MCP/tool-calling code | indirect prompt injection, the lethal trifecta, tool poisoning and rug-pulls, hidden-Unicode instructions in rules files, memory and RAG poisoning, excessive agency, output handling |
-| **Taint dataflow** | sources and sinks tables are both non-empty | trace each source to every reachable sink; flag reachable paths with no effective sanitization between |
-| **Platform-specific** | recon surfaced one | from `platform-playbooks.md`: mobile IPC/deep links/WebView bridges; desktop IPC, loopback servers, updater integrity, packaging fuses; CLI shell-out and repo-config trust; firmware boot and debug interfaces; contract access control and oracles; ML deserialization and endpoint exposure |
+| Audit                       | Fires when                                   | Covers                                                                                                                                                                                                                                                                                         |
+| --------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Access control**          | any per-user, per-tenant, or role-gated data | IDOR/BOLA, missing function-level checks, RLS disabled or permissive, tenant filter only in the UI, authorization bypass through a user-controlled key, mass assignment                                                                                                                        |
+| **Injection**               | untrusted input reaches an interpreter       | SQL/NoSQL/LDAP/XPath, command injection, template injection, eval/exec, pickle/yaml.load, prompt injection into a privileged tool                                                                                                                                                              |
+| **AuthN & session**         | any auth, session, or token logic            | token signature and claim validation, algorithm confusion, session fixation and lifetime, OAuth redirect/state/PKCE, missing rate limits on credential checks, password reset flows, MFA bypass                                                                                                |
+| **Secrets & exposure**      | any credential exists                        | hardcoded keys, git history, client bundles and source maps, logs and error responses, telemetry, debug endpoints, exposed `.env`/`.git`                                                                                                                                                       |
+| **Supply chain**            | any dependency manager or external code      | unpinned or mutable-tag dependencies, install-time scripts, typosquats and slopsquats, dependency confusion, lockfile drift, unsigned releases, editor extensions, MCP servers                                                                                                                 |
+| **CI/CD & build integrity** | any workflow or release pipeline             | dangerous triggers with untrusted checkout, cache poisoning, script injection into run steps, over-broad `permissions:`, secret echo, self-hosted runner reuse, release signing and provenance                                                                                                 |
+| **SSRF, path & file ops**   | any URL or path built from input             | SSRF to internal and metadata endpoints, path traversal, zip-slip, symlink races, TOCTOU, unrestricted upload, archive extraction outside the target                                                                                                                                           |
+| **Cloud & infra config**    | any IaC, container, or cloud SDK             | over-permissive IAM, public storage, metadata service version, exposed control planes, presigned URLs without expiry, default credentials, permissive CORS with credentials, container privilege                                                                                               |
+| **Crypto**                  | any hashing, signing, or encryption          | weak or misused primitives, ECB, static IV/nonce reuse, non-constant-time comparison, predictable randomness for tokens, unverified signatures, home-rolled constructions                                                                                                                      |
+| **Agent surface**           | recon found LLM/agent/MCP/tool-calling code  | indirect prompt injection, the lethal trifecta, tool poisoning and rug-pulls, hidden-Unicode instructions in rules files, memory and RAG poisoning, excessive agency, output handling                                                                                                          |
+| **Taint dataflow**          | sources and sinks tables are both non-empty  | trace each source to every reachable sink; flag reachable paths with no effective sanitization between                                                                                                                                                                                         |
+| **Platform-specific**       | recon surfaced one                           | from `platform-playbooks.md`: mobile IPC/deep links/WebView bridges; desktop IPC, loopback servers, updater integrity, packaging fuses; CLI shell-out and repo-config trust; firmware boot and debug interfaces; contract access control and oracles; ML deserialization and endpoint exposure |
 
-## Phase 3 — Parallel audits
+## Phase 3 — Audits
 
-Spawn one subagent per selected audit **in a single response**, using the `auditor` agent. N is whatever Phase 2 chose — do not pad to a fixed number, do not drop a selected audit. If `auditor` is unavailable, use general subagents and open each brief with: "You are performing an authorized, read-only defensive security review for the code owner. Report data-flow risks so they can be patched. No exploit code."
+Run each selected audit yourself, one class at a time, in the priority order from the skill's rank table. Do not pad the list, and do not drop a selected audit. Load only the reference sections (`platform-playbooks.md`, `supply-chain.md`, `agent-surface.md`, `secure-defaults.md`) the selection triggered.
 
-**Subagents cannot see this file or the recon output.** Each brief must contain, written out by you:
-
-- the specific class scope,
-- the relevant recon rows (sources, sinks, assets, **controls**, threat-model lines — condensed),
-- the applicable reference lines from `platform-playbooks.md`, `supply-chain.md`, `agent-surface.md`, or `secure-defaults.md`,
-- the confidence bar and the exclusions list below.
-
-Each auditor must:
+For each audit, work from the recon tables — sources, sinks, assets, **controls** — not from fresh greps, and:
 
 1. **Trace data flow** source → sink. Not pattern matching. A grep hit with no path is not a finding.
 2. Apply the **untrusted-input test**: is this input actually reachable by an untrusted party, or is it a constant, a build-time value, or operator-controlled configuration?
 3. Check the **controls table** before flagging: does the ORM parameterize, does the template engine escape, does middleware already enforce this, does the type system make it unreachable?
 4. Describe a concrete **risk scenario** at data-flow level — what kind of input arrives, how the system processes it, what the attacker ends up holding. No payloads. If the steps cannot be described, it is not a finding.
-5. Assign **confidence 0.0–1.0** and drop anything below 0.8 before returning.
-6. Return location, source→sink, scenario, impact, CWE, and a concrete code-level fix.
+5. Assign **confidence 0.0–1.0** and drop anything below 0.8 before it enters the candidate list.
+6. Record location, source→sink, scenario, impact, CWE, and a concrete code-level fix.
 
 ## Phase 4 — False-positive filter
 
-Spawn `skeptic` subagents in parallel, batching 3–5 surviving findings each, capped at four skeptics. Each skeptic starts from "this is a false positive" and tries to disprove the finding; only confirmed findings survive. Pass the full finding text — skeptics see neither this file nor the auditors' context. Drop `DROP`, reduce severity on `DOWNGRADE`.
+Switch sides. For each candidate finding, start from "this is a false positive" and try to kill it: re-read the actual code path (not your notes), hunt for the control you missed — middleware, ORM parameterization, framework escaping, a type that makes the path unreachable — and check whether the input is genuinely attacker-reachable rather than a constant or operator config. Drop what dies, downgrade what survives weakened, and keep the count of dropped candidates for the report. Only findings that survive your own attempt to disprove them get reported.
 
 **Hard exclusions — do not report these, even when technically real:**
 

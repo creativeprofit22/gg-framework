@@ -749,6 +749,214 @@ describe("createWebFetchTool", () => {
   });
 });
 
+describe("web_fetch outline format", () => {
+  const article = (links: string) => `
+    <html><head><title>Outline Docs</title></head>
+    <body>
+      <nav><a href="/nav-noise">Navigation noise</a></nav>
+      <article>
+        <h1>Outline Docs</h1>
+        <p>This introductory paragraph is deliberately long enough that the Readability
+        extractor treats the page as a genuine article and emits structured markdown
+        containing the hyperlinks that outline mode is expected to number for us.</p>
+        <p>${links}</p>
+        <p>Another descriptive paragraph that adds enough body length to clear the minimum
+        article-length threshold comfortably during extraction in this unit test.</p>
+      </article>
+      <footer>Terms Privacy</footer>
+    </body></html>`;
+
+  function htmlResponse(body: string): Response {
+    return new Response(body, { status: 200, headers: { "content-type": "text/html" } });
+  }
+
+  it("numbers links, resolves relative URLs, and appends a numbered index", async () => {
+    const html = article(
+      `See the <a href="guide/intro">Intro Guide</a>, the
+       <a href="https://other.example.com/spec">External Spec</a>, and
+       <a href="#section">this section</a>.`,
+    );
+    globalThis.fetch = vi.fn(async () => htmlResponse(html)) as typeof fetch;
+
+    const result = (await createWebFetchTool().execute(
+      { url: "https://docs.example.com/reference/api", format: "outline" },
+      context(),
+    )) as string;
+
+    expect(result).toContain("Intro Guide [1]");
+    expect(result).toContain("External Spec [2]");
+    // Relative href resolved against the page URL; fragment-only link left as text.
+    expect(result).toContain("[1] https://docs.example.com/reference/guide/intro");
+    expect(result).toContain("[2] https://other.example.com/spec");
+    expect(result).toContain("Links (fetch one with `follow`):");
+    expect(result).not.toContain("[3]");
+    expect(result).not.toContain("](");
+    expect(result).not.toContain("Terms Privacy");
+  });
+
+  it("is far more compact than the markdown render of the same page", async () => {
+    const html = article(`<a href="/a">A</a> <a href="/b">B</a>`);
+    globalThis.fetch = vi.fn(async () => htmlResponse(html)) as typeof fetch;
+    const tool = createWebFetchTool();
+
+    const outline = (await tool.execute(
+      { url: "https://docs.example.com/page", format: "outline" },
+      context(),
+    )) as string;
+
+    expect(outline.length).toBeLessThanOrEqual(2000 + 200);
+  });
+
+  it("caps the link index at 100 and says so", async () => {
+    const links = Array.from(
+      { length: 120 },
+      (_, i) => `<a href="/page-${i}">Link number ${i}</a>`,
+    ).join(" ");
+    globalThis.fetch = vi.fn(async () => htmlResponse(article(links))) as typeof fetch;
+
+    const result = (await createWebFetchTool().execute(
+      { url: "https://docs.example.com/many", format: "outline", max_length: 50000 },
+      context(),
+    )) as string;
+
+    expect(result).toContain("[100] https://docs.example.com/page-99");
+    expect(result).not.toContain("[101]");
+    expect(result).toContain("link index truncated at 100");
+    // Links past the cap keep their anchor text, just without a number.
+    expect(result).toContain("Link number 119");
+  });
+
+  it("serves a repeat fetch of the same URL from the session cache", async () => {
+    const fetchMock = vi.fn(async () => htmlResponse(article(`<a href="/a">A</a>`)));
+    globalThis.fetch = fetchMock as typeof fetch;
+    const tool = createWebFetchTool();
+
+    const first = await tool.execute(
+      { url: "https://docs.example.com/cached", format: "outline" },
+      context(),
+    );
+    const second = await tool.execute(
+      { url: "https://docs.example.com/cached", format: "outline" },
+      context(),
+    );
+
+    expect(second).toBe(first);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("caches under the post-redirect URL too", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "https://docs.example.com/old") {
+        return new Response(null, {
+          status: 301,
+          headers: { location: "https://docs.example.com/new" },
+        });
+      }
+      return htmlResponse(article(`<a href="/a">A</a>`));
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+    const tool = createWebFetchTool();
+
+    await tool.execute({ url: "https://docs.example.com/old", format: "outline" }, context());
+    const callsAfterFirst = fetchMock.mock.calls.length;
+    await tool.execute({ url: "https://docs.example.com/new", format: "outline" }, context());
+
+    expect(callsAfterFirst).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts least-recently-used pages so the cache stays bounded", async () => {
+    const fetchMock = vi.fn(async () => htmlResponse(article(`<a href="/a">A</a>`)));
+    globalThis.fetch = fetchMock as typeof fetch;
+    const tool = createWebFetchTool();
+
+    // 33 distinct pages > the 32-entry cap, so page 0 must be evicted.
+    for (let i = 0; i < 33; i++) {
+      await tool.execute({ url: `https://docs.example.com/p${i}`, format: "outline" }, context());
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(33);
+
+    await tool.execute({ url: "https://docs.example.com/p32", format: "outline" }, context());
+    expect(fetchMock).toHaveBeenCalledTimes(33); // still hot
+
+    await tool.execute({ url: "https://docs.example.com/p0", format: "outline" }, context());
+    expect(fetchMock).toHaveBeenCalledTimes(34); // evicted, refetched
+  });
+
+  it("fetches a link by number from the last outline", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === "https://docs.example.com/reference/guide/intro") {
+        return htmlResponse(
+          article(`<a href="/deeper">Deeper</a>`).replace("Outline Docs", "Intro Page"),
+        );
+      }
+      return htmlResponse(article(`<a href="guide/intro">Intro Guide</a>`));
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+    const tool = createWebFetchTool();
+
+    const first = (await tool.execute(
+      { url: "https://docs.example.com/reference/api", format: "outline" },
+      context(),
+    )) as string;
+    expect(first).toContain("[1] https://docs.example.com/reference/guide/intro");
+
+    const followed = (await tool.execute({ follow: 1, format: "outline" }, context())) as string;
+
+    expect(followed).toContain("Intro Page");
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain(
+      "https://docs.example.com/reference/guide/intro",
+    );
+  });
+
+  it("reports an unknown link number without fetching", async () => {
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const result = await createWebFetchTool().execute({ follow: 7 }, context());
+
+    expect(result).toContain("no numbered links available");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("still blocks a followed link that points at a private/metadata address", async () => {
+    const fetchMock = vi.fn(async () =>
+      htmlResponse(
+        article(`<a href="http://169.254.169.254/latest/meta-data/iam/">Cloud metadata</a>`),
+      ),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    const tool = createWebFetchTool();
+
+    const page = (await tool.execute(
+      { url: "https://docs.example.com/evil", format: "outline" },
+      context(),
+    )) as string;
+    expect(page).toContain("[1] http://169.254.169.254/latest/meta-data/iam/");
+
+    const fetchesBefore = fetchMock.mock.calls.length;
+    const followed = await tool.execute({ follow: 1, format: "outline" }, context());
+
+    expect(followed).toContain("URL blocked");
+    expect(fetchMock).toHaveBeenCalledTimes(fetchesBefore);
+  });
+
+  it("applies the network allowlist to followed links", async () => {
+    const fetchMock = vi.fn(async () =>
+      htmlResponse(article(`<a href="https://evil.example/payload">Payload</a>`)),
+    );
+    globalThis.fetch = fetchMock as typeof fetch;
+    const tool = createWebFetchTool(() => ({ mode: "allowlist", allow: ["docs.example.com"] }));
+
+    await tool.execute({ url: "https://docs.example.com/start", format: "outline" }, context());
+    const fetchesBefore = fetchMock.mock.calls.length;
+    const followed = await tool.execute({ follow: 1, format: "outline" }, context());
+
+    expect(followed).toContain("network allowlist");
+    expect(fetchMock).toHaveBeenCalledTimes(fetchesBefore);
+  });
+});
+
 describe("web_fetch network allowlist", () => {
   const allowlist = () => ({ mode: "allowlist" as const, allow: ["docs.example.com"] });
 

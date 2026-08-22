@@ -139,6 +139,7 @@ const PROVIDER_DISPLAY: Record<string, string> = {
   openrouter: "OpenRouter",
   sakana: "Sakana",
   xai: "xAI (Grok)",
+  huggingface: "Hugging Face",
   xiaomi: "Xiaomi (MiMo)",
   minimax: "MiniMax",
 };

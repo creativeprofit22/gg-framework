@@ -71,10 +71,18 @@ export async function getAllMcpServers(
   provider: Provider,
   apiKey: string | undefined,
   cwd: string,
+  opts?: { allowProjectScope?: boolean },
 ): Promise<MCPServerConfig[]> {
   const defaults = getMCPServers(provider, apiKey);
   const defaultNames = new Set(defaults.map((s) => s.name));
   const scoped = await loadServers(cwd);
-  const userServers = scoped.map((s) => s.config).filter((c) => !defaultNames.has(c.name));
+  // Project scope (<repo>/.gg/mcp.json) is repo-controlled: a malicious repo
+  // can declare a stdio `command` that would execute the moment the project
+  // opens. Only include those when explicitly trusted (trustProjectMcpServers);
+  // global ~/.gg/mcp.json is the user's own file and always connects.
+  const userServers = scoped
+    .filter((s) => opts?.allowProjectScope === true || s.scope !== "project")
+    .map((s) => s.config)
+    .filter((c) => !defaultNames.has(c.name));
   return [...defaults, ...userServers];
 }

@@ -15,6 +15,9 @@ interface ReviewInternals {
   subAgentManager?: { completionGateMessage(): string | undefined };
   activePhaseContext?: ActivePhaseContextV1;
   getHookFollowUpMessages(): Message[] | null;
+  refreshIdealReviewArmed(): void;
+  eventBus: AgentSession["eventBus"];
+  setIdealReviewSuppressed(suppressed: boolean): void;
 }
 
 // Coverage is filesystem-backed: a changed file must still exist to be gated,
@@ -142,6 +145,65 @@ describe("AgentSession Ideal review coverage gate", () => {
 
     session.setIdealReviewSuppressed(false);
     expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Ideal?");
+  });
+
+  it("arms before the draft streams and disarms only after the review hook fires", () => {
+    // Arming is what lets a client hold the candidate final answer back instead
+    // of painting a draft the review then deletes, so both edges must fire — and
+    // disarm MUST trail the hook, or the client releases the draft into the
+    // transcript one render before the hook removes it again.
+    const cwd = makeWorkspace(["src/a.ts"]);
+    const internal = makeReviewSession(cwd, ["src/a.ts"]);
+    const seen: string[] = [];
+    internal.eventBus.on("hook_armed", (d) => seen.push(`armed:${d.armed}`));
+    internal.eventBus.on("hook", (d) => seen.push(`hook:${d.kind}`));
+
+    internal.refreshIdealReviewArmed();
+    expect(seen).toEqual(["armed:true"]);
+    // Only edges are broadcast, not every stat update.
+    internal.refreshIdealReviewArmed();
+    expect(seen).toEqual(["armed:true"]);
+
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Ideal?");
+    expect(seen).toEqual(["armed:true", "hook:ideal", "armed:false"]);
+  });
+
+  it("arms for a run that only crosses the gate on the draft turn's own turn_end", () => {
+    // `turns` advances at turn_end, so a run sitting one point below the gate
+    // would otherwise arm only AFTER the draft streamed — the appear-then-vanish
+    // flash. Score here is 3 (60 changed lines + 8 tool calls + 2 mutation
+    // calls) until the turn point lands, so arming must predict the crossing.
+    const cwd = makeWorkspace(["src/a.ts"]);
+    const internal = makeReviewSession(cwd, []);
+    internal.hookStats = {
+      changedLines: 60,
+      toolCalls: 8,
+      toolFailures: 0,
+      turns: 5,
+      writeCalls: 1,
+      editCalls: 1,
+      bashCalls: 0,
+    };
+    const armed: boolean[] = [];
+    internal.eventBus.on("hook_armed", (d) => armed.push(d.armed));
+
+    internal.refreshIdealReviewArmed();
+    expect(armed).toEqual([true]);
+
+    // And the real gate does fire once that turn is counted.
+    internal.hookStats.turns = 6;
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Ideal?");
+  });
+
+  it("stays disarmed while Ken owns autopilot verification", () => {
+    const cwd = makeWorkspace(["src/a.ts"]);
+    const internal = makeReviewSession(cwd, ["src/a.ts"]);
+    const armed: boolean[] = [];
+
+    internal.setIdealReviewSuppressed(true);
+    internal.eventBus.on("hook_armed", (d) => armed.push(d.armed));
+    internal.refreshIdealReviewArmed();
+    expect(armed).toEqual([]);
   });
 
   it("prioritizes the child completion gate before Ideal review", () => {

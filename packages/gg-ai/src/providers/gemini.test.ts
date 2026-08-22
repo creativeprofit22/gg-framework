@@ -358,7 +358,7 @@ describe("streamGemini", () => {
       error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" },
     });
 
-    for (const model of ["gemini-3-flash", "gemini-3.1-pro-preview"]) {
+    for (const model of ["gemini-3-flash", "gemini-3.1-pro-preview", "gemini-3.7-flash"]) {
       globalThis.fetch = vi.fn().mockResolvedValue(new Response(body, { status: 404 }));
       const result = streamGemini({
         provider: "gemini",

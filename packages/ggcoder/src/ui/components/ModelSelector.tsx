@@ -23,6 +23,7 @@ const PROVIDER_LABEL: Record<string, string> = {
   minimax: "MiniMax",
   deepseek: "DeepSeek",
   openrouter: "OpenRouter",
+  huggingface: "Hugging Face",
   sakana: "Sakana",
   xai: "xAI",
 };

@@ -114,9 +114,7 @@ export function isPendingPlanReview(value: unknown): value is PendingPlanReview 
 }
 
 function isPlanMutationOwner(value: unknown): value is PlanMutationOwner {
-  return (
-    isRecord(value) && isNonEmptyString(value.operationId) && isNonEmptyString(value.kind)
-  );
+  return isRecord(value) && isNonEmptyString(value.operationId) && isNonEmptyString(value.kind);
 }
 
 function isOptionalNonEmptyString(value: unknown): value is string | undefined {

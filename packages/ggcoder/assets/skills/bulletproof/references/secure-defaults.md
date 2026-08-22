@@ -32,6 +32,7 @@ Implementation:
 - Session tokens from a CSPRNG, ≥128 bits. Rotate the session identifier on login and on privilege change. Server-side revocation must exist — a stateless token you cannot revoke is an outage during an incident.
 - Constant-time comparison for tokens, signatures, and MFA codes — but **validate the shape before you compare**. A stored credential whose hex/base64 decodes to the wrong length, or whose scheme/salt/hash does not parse, must be rejected as malformed and fail closed; never fall through to the comparison. `timingSafeEqual` on two empty buffers returns true, so an unparsed record can verify any password.
 - Rate-limit and lock out on login, reset, MFA, and token exchange. Generic failure messages: never reveal whether the account exists.
+- **JWTs, when used:** pin the verification algorithm from your own config — never read `alg` from the token header, reject `none`. HMAC secrets ≥256 bits from a CSPRNG, never a passphrase. Always set and validate `exp` (minutes, not days) and include `jti` so revocation is possible. In a browser, the token lives in an `HttpOnly`/`Secure`/`SameSite` cookie — localStorage is readable by any XSS. Rotate refresh tokens on use; a reused refresh token means theft — revoke the whole family.
 
 ## Authorization
 
@@ -40,22 +41,25 @@ Implementation:
 - Authorize on the **object**, not just the route: `canRead(user, invoice)`, never "the route is under `/admin` so it is fine".
 - Never accept a client-supplied user, tenant, role, or price. Derive them from the session server-side.
 - Re-check on every request; a permission granted at login can be revoked mid-session.
+- **Removal is revocation.** Leaving an org, a role downgrade, or account deletion must invalidate that user's sessions, refresh tokens, and API keys immediately — not at next login.
+- Return the same 404 for "does not exist" and "not yours" — a 403 confirms the resource exists and invites enumeration. Non-guessable IDs (UUIDv4) are defense-in-depth on top; authorization is still the control.
+- Check the **parent chain**: accessing a comment means verifying ownership of the post it belongs to, not just that the comment ID resolves.
 - Test it: the cross-user access test (user B requests user A's resource, expect 403/404) is the highest-value security test a small team can write.
 
 ## Cryptography
 
 Do not invent constructions. Use a vetted library's high-level API.
 
-| Need | Default | Notes |
-|---|---|---|
-| Password hashing | argon2id | Never a fast hash |
-| Symmetric encryption | AES-256-GCM or XChaCha20-Poly1305 | Always AEAD. **Never reuse a nonce with GCM** — random 96-bit nonces are only safe under a key-rotation bound; XChaCha's 192-bit nonce is safer for high volume |
-| Hashing | SHA-256 or SHA-512 | MD5 and SHA-1 are dead for anything security-relevant |
-| MAC | HMAC-SHA-256 | Verify with a constant-time compare — only after both operands are known well-formed (a malformed operand can make an empty-empty compare return true) |
-| Signatures | Ed25519, or ECDSA P-256 | Verify the algorithm from your own policy, not from the token header |
-| Randomness | The OS CSPRNG (`crypto.randomBytes`, `secrets`, `getrandom`) | Never `Math.random`, `rand()`, or a seeded PRNG for tokens, IDs, or salts |
-| Transport | TLS 1.3, HSTS with a long max-age | TLS 1.0/1.1 gone; 1.2 only for legacy peers |
-| Tokens | Short-lived, audience-bound, revocable | Reject `alg: none`; pin the expected algorithm |
+| Need                 | Default                                                      | Notes                                                                                                                                                           |
+| -------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Password hashing     | argon2id                                                     | Never a fast hash                                                                                                                                               |
+| Symmetric encryption | AES-256-GCM or XChaCha20-Poly1305                            | Always AEAD. **Never reuse a nonce with GCM** — random 96-bit nonces are only safe under a key-rotation bound; XChaCha's 192-bit nonce is safer for high volume |
+| Hashing              | SHA-256 or SHA-512                                           | MD5 and SHA-1 are dead for anything security-relevant                                                                                                           |
+| MAC                  | HMAC-SHA-256                                                 | Verify with a constant-time compare — only after both operands are known well-formed (a malformed operand can make an empty-empty compare return true)          |
+| Signatures           | Ed25519, or ECDSA P-256                                      | Verify the algorithm from your own policy, not from the token header                                                                                            |
+| Randomness           | The OS CSPRNG (`crypto.randomBytes`, `secrets`, `getrandom`) | Never `Math.random`, `rand()`, or a seeded PRNG for tokens, IDs, or salts                                                                                       |
+| Transport            | TLS 1.3, HSTS with a long max-age                            | TLS 1.0/1.1 gone; 1.2 only for legacy peers                                                                                                                     |
+| Tokens               | Short-lived, audience-bound, revocable                       | Reject `alg: none`; pin the expected algorithm                                                                                                                  |
 
 **Post-quantum** [V]: FIPS 203 (ML-KEM), 204 (ML-DSA) and 205 (SLH-DSA) were finalised Aug 2024. Hybrid key exchange **X25519MLKEM768 is the de facto browser default in 2026** — Chrome since v131, Firefox since v132, with Apple platform support from the 2025 OS releases. Certificates remain classical; only the key exchange is PQ-protected. Practical guidance for an app developer: enable the hybrid group on your servers (prefer `X25519MLKEM768`, fall back to `X25519`), and treat **harvest-now-decrypt-later** as real only for data that must stay confidential for a decade or more. Do not hand-roll PQC. CNSA 2.0 dates matter only for national-security systems [V].
 

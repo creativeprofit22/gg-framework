@@ -12,6 +12,13 @@ describe("providerLabel", () => {
   it("falls back to the raw id for an unknown provider", () => {
     expect(providerLabel("brand-new-vendor")).toBe("brand-new-vendor");
   });
+
+  it("labels and orders the Hugging Face group alongside the other gateways", () => {
+    expect(providerLabel("huggingface")).toBe("Hugging Face");
+    // Sits with the gateway cluster, after DeepSeek and before Sakana/OpenRouter.
+    expect(providerRank("deepseek")).toBeLessThan(providerRank("huggingface"));
+    expect(providerRank("huggingface")).toBeLessThan(providerRank("sakana"));
+  });
 });
 
 describe("providerRank", () => {

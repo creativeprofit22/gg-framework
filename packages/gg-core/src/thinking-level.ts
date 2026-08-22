@@ -15,8 +15,11 @@ const OPENAI_GPT_56_THINKING_LEVELS: readonly ThinkingLevel[] = [
 // of being forced into all-or-nothing xhigh.
 const SAKANA_THINKING_LEVELS: readonly ThinkingLevel[] = ["high", "xhigh"];
 // Grok reasoning models take reasoning_effort low/medium/high (server default
-// high; reasoning can't be fully disabled — "off" just omits the param).
-const XAI_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high"];
+// high; reasoning can't be fully disabled — "off" just omits the param). Grok
+// 4.6 adds an `xhigh` top rung (docs: low/medium/high default/xhigh); 4.5
+// keeps its `high` ceiling because each model slices this ladder by its
+// registry maxThinkingLevel.
+const XAI_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh"];
 // Opus 5 / 4.7 expose the full ladder including xhigh ("extended capability for
 // long-horizon work"). Other adaptive Anthropic models omit xhigh and would 400.
 const ANTHROPIC_XHIGH_THINKING_LEVELS: readonly ThinkingLevel[] = [
@@ -37,6 +40,14 @@ const ANTHROPIC_ADAPTIVE_THINKING_LEVELS: readonly ThinkingLevel[] = [
 // Coding OAuth endpoint (default high) — verified live 2026-07-21. Unlisted
 // efforts are rejected with a 400, so expose exactly the declared rungs.
 const MOONSHOT_K3_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "high", "max"];
+// GLM's ladder is declared by the endpoint itself: an unknown effort 400s with
+// `reasoning_effort must be one of: none, minimal, low, medium, high, xhigh,
+// max` (verified live against glm-5.3, 2026-08-14). `none` is the thinking
+// toggle's job and `minimal` has no ThinkingLevel counterpart, so expose the
+// five rungs we can actually name. Effort is real, not cosmetic — measured
+// end-to-end on one hard reasoning prompt: low 0.8K reasoning chars / 15s,
+// high 3.2K / 28s, max 24.9K / 129s.
+const GLM_THINKING_LEVELS: readonly ThinkingLevel[] = ["low", "medium", "high", "xhigh", "max"];
 /**
  * Effort ladder for locally hosted models. `xhigh`/`ultra` are deliberately
  * absent: no local server defines them (Ollama 0.32 answers
@@ -68,6 +79,10 @@ function isXaiModel(provider: Provider): boolean {
 
 function isMoonshotK3Model(provider: Provider, model: string): boolean {
   return provider === "moonshot" && model === "kimi-k3";
+}
+
+function isGlmModel(provider: Provider): boolean {
+  return provider === "glm";
 }
 
 function isAnthropicXhighModel(provider: Provider, model: string): boolean {
@@ -127,6 +142,12 @@ export function getSupportedThinkingLevels(
 
   if (isMoonshotK3Model(provider, model)) return MOONSHOT_K3_THINKING_LEVELS;
 
+  if (isGlmModel(provider)) {
+    const maxIndex = GLM_THINKING_LEVELS.indexOf(maxLevel);
+    if (maxIndex === -1) return GLM_THINKING_LEVELS;
+    return GLM_THINKING_LEVELS.slice(0, maxIndex + 1);
+  }
+
   if (!isOpenAIGptModel(provider, model)) return [maxLevel];
 
   const identity = resolvedModelIdentity(model);
@@ -158,6 +179,7 @@ export function getNextThinkingLevel(
     isSakanaModel(provider) ||
     isXaiModel(provider) ||
     isMoonshotK3Model(provider, model) ||
+    isGlmModel(provider) ||
     // Local servers take a real effort level, not just on/off: Ollama accepts
     // low/medium/high on `reasoning_effort` (verified against 0.32) and the
     // other OpenAI-compatible servers use the same three. A model that can't

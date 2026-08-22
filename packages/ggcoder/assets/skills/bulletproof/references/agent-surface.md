@@ -18,11 +18,11 @@ Documented outcomes when all three are present [V]: a malicious issue in a publi
 
 **Break one leg, deliberately:**
 
-| Leg | How to break it |
-|---|---|
-| Private data | Scope credentials per end-user, never a service-role key. The agent should hold exactly the access of the person it acts for |
-| Untrusted content | Cannot usually be removed — but mark provenance, and never let fetched content enter a context that also holds a privileged tool |
-| Egress | Default-deny outbound network. Most tasks need none. Allowlist specific hosts; block DNS, image loading, and markdown link rendering as exfiltration paths |
+| Leg               | How to break it                                                                                                                                            |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Private data      | Scope credentials per end-user, never a service-role key. The agent should hold exactly the access of the person it acts for                               |
+| Untrusted content | Cannot usually be removed — but mark provenance, and never let fetched content enter a context that also holds a privileged tool                           |
+| Egress            | Default-deny outbound network. Most tasks need none. Allowlist specific hosts; block DNS, image loading, and markdown link rendering as exfiltration paths |
 
 Egress is the leg most often left intact and the easiest to close. Exfiltration in real incidents has ridden ordinary channels: an outbound HTTP request, a DNS lookup, an image URL rendered by the client, a markdown link the user clicks, a comment posted back to a public thread.
 

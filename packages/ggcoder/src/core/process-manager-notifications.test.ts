@@ -32,10 +32,38 @@ async function bgDir(): Promise<string> {
   return directory;
 }
 
-async function manager(notifications: AgentNotificationQueue): Promise<ProcessManager> {
-  const instance = new ProcessManager({ notifications, bgDir: await bgDir() });
+async function manager(
+  notifications: AgentNotificationQueue,
+  watchIntervalMs?: number,
+): Promise<ProcessManager> {
+  const instance = new ProcessManager({ notifications, bgDir: await bgDir(), watchIntervalMs });
   managers.push(instance);
   return instance;
+}
+
+/**
+ * Wait for the progress watcher to retire, draining reports as they land.
+ *
+ * The watcher disposes itself the instant the report budget is spent, so
+ * retirement IS the end state under test — waiting for it needs no assumption
+ * about how long three reports take. The timeout is a stuck-test backstop, not
+ * the thing being measured: an assertion that depends on a wall-clock budget
+ * fails whenever the machine is busy, which is exactly how this test used to
+ * break under `pnpm test` while passing on its own.
+ */
+async function drainUntilWatcherRetires(
+  instance: ProcessManager,
+  queue: AgentNotificationQueue,
+  timeoutMs = 60_000,
+): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  let progressCount = 0;
+  while (instance.activeWatchers().length > 0) {
+    if (Date.now() >= deadline) throw new Error("watcher never retired");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    progressCount += queue.drain().filter((entry) => !entry.terminal).length;
+  }
+  return progressCount + queue.drain().filter((entry) => !entry.terminal).length;
 }
 
 async function tempDir(): Promise<string> {
@@ -237,7 +265,10 @@ describe("ProcessManager progress notifications", () => {
 
   it("stops pushing progress entirely once the report budget is spent", async () => {
     const queue = new AgentNotificationQueue();
-    const instance = await manager(queue);
+    // 200ms base cadence: reports land at ~0.2s/0.6s/1.4s instead of
+    // ~5s/15s/35s. Same code path, same budget, no dependence on how fast the
+    // machine drains three real reports.
+    const instance = await manager(queue, 200);
     const cwd = await tempDir();
 
     // A dev server: logs continuously, never exits. Without a budget this kept
@@ -250,16 +281,10 @@ describe("ProcessManager progress notifications", () => {
       cwd,
     );
 
-    // Reports land at ~5s/15s/35s; the 4th would be at ~75s. Rather than idle
-    // until then, assert the structural end state: the watcher RETIRES, so no
-    // further tick can exist to fire. That is stronger than any wait.
-    let progressCount = 0;
-    const until = Date.now() + 50_000;
-    while (Date.now() < until && instance.activeWatchers().length > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      progressCount += queue.drain().filter((entry) => !entry.terminal).length;
-    }
-    progressCount += queue.drain().filter((entry) => !entry.terminal).length;
+    // Assert the structural end state: the watcher RETIRES, so no further tick
+    // can exist to fire. That is stronger than any wait, and unlike a fixed
+    // deadline it cannot report "2 of 3" merely because the CPU was busy.
+    const progressCount = await drainUntilWatcherRetires(instance, queue);
 
     expect(progressCount).toBe(WATCH_MAX_REPORTS_EXPECTED);
     // Process is still very much alive — this is retirement, not exit.

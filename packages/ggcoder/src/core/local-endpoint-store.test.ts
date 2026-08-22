@@ -156,9 +156,6 @@ describe("custom endpoints", () => {
 
     expect((await listAllEndpoints(opts)).map((e) => e.id)).toEqual([
       "ollama",
-      "lmstudio",
-      "llamacpp",
-      "vllm",
       "custom-localhost-9999",
     ]);
   });
@@ -168,12 +165,7 @@ describe("syncEndpointCredentials", () => {
   it("writes a baseUrl-carrying credential for every endpoint", async () => {
     await syncEndpointCredentials(await listAllEndpoints(opts), opts);
 
-    expect((await auth.listLocalEndpointIds()).sort()).toEqual([
-      "llamacpp",
-      "lmstudio",
-      "ollama",
-      "vllm",
-    ]);
+    expect((await auth.listLocalEndpointIds()).sort()).toEqual(["ollama"]);
     expect(await auth.getCredentials("local:ollama")).toMatchObject({
       baseUrl: "http://127.0.0.1:11434/v1",
       accessToken: "local",

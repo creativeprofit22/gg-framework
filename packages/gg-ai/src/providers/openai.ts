@@ -22,6 +22,7 @@ import {
   downgradeUnsupportedVideos,
   normalizeOpenAIStopReason,
   toOpenAIMessages,
+  toGlmReasoningEffort,
   toLocalReasoningEffort,
   toOpenAIReasoningEffort,
   toOpenAIToolChoice,
@@ -126,7 +127,7 @@ async function digestWithNode(value: Uint8Array): Promise<string | undefined> {
 export async function createOpenAIClientCacheKey(
   options: StreamOptions,
   runtime?: OpenAIClientCacheKeyRuntime,
- ): Promise<string | undefined> {
+): Promise<string | undefined> {
   const identity = JSON.stringify({
     apiKey: options.apiKey ?? "",
     baseUrl: options.baseUrl ?? "",
@@ -144,7 +145,8 @@ export async function createOpenAIClientCacheKey(
       // Fall through to Node SHA-256; hashing must never prevent a request.
     }
   }
-  const nodeDigest = runtime?.digestWithNode === undefined ? digestWithNode : runtime.digestWithNode;
+  const nodeDigest =
+    runtime?.digestWithNode === undefined ? digestWithNode : runtime.digestWithNode;
   return nodeDigest?.(encodedIdentity);
 }
 
@@ -158,9 +160,7 @@ export function resetOpenAIClientCache(): void {
   openAIClientCacheKeyRuntimeOverride = undefined;
 }
 
-export function setOpenAIClientCacheKeyRuntimeForTests(
-  runtime: OpenAIClientCacheKeyRuntime,
- ): void {
+export function setOpenAIClientCacheKeyRuntimeForTests(runtime: OpenAIClientCacheKeyRuntime): void {
   openAIClientCacheKeyRuntimeOverride = runtime;
 }
 
@@ -356,6 +356,15 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
   if (usesThinkingParam) {
     if (options.thinking) {
       (params as unknown as Record<string, unknown>).thinking = { type: "enabled" };
+      // GLM pairs the toggle with a real effort ladder (verified: an unknown
+      // value 400s listing `none, minimal, low, medium, high, xhigh, max`).
+      // The toggle alone silently runs Z.AI's `max` default, which made every
+      // rung below the ceiling a lie in the UI.
+      if (options.provider === "glm") {
+        (params as unknown as Record<string, unknown>).reasoning_effort = toGlmReasoningEffort(
+          options.thinking,
+        );
+      }
     } else {
       // The providers/models routed through this block support explicit disabled.
       // MiMo is an always-on reasoning model — without { type: "disabled" } it

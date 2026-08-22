@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
+import { useMemesEnabled } from "./memes";
 
-// Home-screen meme cards. Each has a real GIF `src` plus an emoji/caption that
-// double as the offline fallback if the GIF fails to load (onError swap), so a
-// dead URL never leaves a blank card. Swap `src` for your own hosted GIFs any
-// time — the layout/rotation is URL-agnostic.
+// Home-screen meme cards. Each has a bundled GIF `src` plus an emoji/caption
+// that double as the offline fallback if the GIF fails to load (onError swap),
+// so a dead file never leaves a blank card. GIFs are bundled locally (200px
+// Giphy downsized) so the CSP `img-src 'self'` policy doesn't block them.
 interface Meme {
   id: number;
   src: string;
@@ -11,138 +12,149 @@ interface Meme {
   caption: string;
 }
 
-// Giphy public CDN (i.giphy.com) — designed for hotlink/embedding. Classic
-// programmer-humor GIFs.
+// Eager-load every bundled GIF. Vite resolves these to hashed asset URLs that
+// are served from the same origin, so they pass the strict CSP img-src 'self'.
+const gifModules = import.meta.glob("./assets/memes/*.gif", {
+  eager: true,
+  query: "?url",
+  import: "default",
+}) as Record<string, string>;
+
+/** Resolve `./assets/memes/<id>.gif` to its bundled URL. */
+function memeUrl(id: number): string {
+  return gifModules[`./assets/memes/${id}.gif`] ?? "";
+}
+
 const MEMES: Meme[] = [
   {
     id: 1,
-    src: "https://i.giphy.com/media/3oEjI6SIIHBdRxXI40/giphy.gif",
+    src: memeUrl(1),
     emoji: "🔥🐶☕",
     caption: "This is fine.",
   },
   {
     id: 2,
-    src: "https://i.giphy.com/media/13HgwGsXF0aiGY/giphy.gif",
+    src: memeUrl(2),
     emoji: "🤖",
     caption: "It works on my machine",
   },
   {
     id: 3,
-    src: "https://i.giphy.com/media/ZVik7pBtu9dNS/giphy.gif",
+    src: memeUrl(3),
     emoji: "🧠💥",
     caption: "git push --force",
   },
   {
     id: 4,
-    src: "https://i.giphy.com/media/LmNwrBhejkK9EFP504/giphy.gif",
+    src: memeUrl(4),
     emoji: "👀",
     caption: "// TODO: fix later",
   },
   {
     id: 5,
-    src: "https://i.giphy.com/media/l3q2K5jinAlChoCLS/giphy.gif",
+    src: memeUrl(5),
     emoji: "🚢🐛",
     caption: "Ship it.",
   },
   {
     id: 6,
-    src: "https://i.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif",
+    src: memeUrl(6),
     emoji: "♻️",
     caption: "Ctrl+C → Ctrl+V",
   },
   {
     id: 7,
-    src: "https://i.giphy.com/media/xT9IgG50Fb7Mi0prBC/giphy.gif",
+    src: memeUrl(7),
     emoji: "😴",
     caption: "99 little bugs…",
   },
   {
     id: 8,
-    src: "https://i.giphy.com/media/mlvseq9yvZhba/giphy.gif",
+    src: memeUrl(8),
     emoji: "🦆",
     caption: "Rubber duck debugging",
   },
   {
     id: 9,
-    src: "https://i.giphy.com/media/QMHoU66sBXqqLqYvGO/giphy.gif",
+    src: memeUrl(9),
     emoji: "💀",
     caption: "Compiles. Don't touch.",
   },
   {
     id: 10,
-    src: "https://i.giphy.com/media/NTur7XlVDUdqM/giphy.gif",
+    src: memeUrl(10),
     emoji: "🎉",
     caption: "Fixed one bug, made three",
   },
   {
     id: 11,
-    src: "https://i.giphy.com/media/nYI8SmmChYXK0/giphy.gif",
+    src: memeUrl(11),
     emoji: "🤷🤖",
     caption: "The AI wrote it, not me",
   },
   {
     id: 12,
-    src: "https://i.giphy.com/media/26ufdipQqU2lhNA4g/giphy.gif",
+    src: memeUrl(12),
     emoji: "🫡",
     caption: "Accept all. Read nothing.",
   },
   {
     id: 13,
-    src: "https://i.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
+    src: memeUrl(13),
     emoji: "✅🚀",
     caption: "Vibe check passed. Ship it.",
   },
   {
     id: 14,
-    src: "https://i.giphy.com/media/3oKIPnAiaMCws8nOsE/giphy.gif",
+    src: memeUrl(14),
     emoji: "🙏📦",
     caption: "npm install && pray",
   },
   {
     id: 15,
-    src: "https://i.giphy.com/media/l46Cy1rHbQ92uuLXa/giphy.gif",
+    src: memeUrl(15),
     emoji: "🧠📜",
     caption: "Context window full again",
   },
   {
     id: 16,
-    src: "https://i.giphy.com/media/l3q2XhfQ8oCkm1Ts4/giphy.gif",
+    src: memeUrl(16),
     emoji: "👨‍🍳🔥",
     caption: "My agent is cooking",
   },
   {
     id: 17,
-    src: "https://i.giphy.com/media/xT0xezQGU5xCDJuCPe/giphy.gif",
+    src: memeUrl(17),
     emoji: "⏳💀",
     caption: "Rate limited mid-vibe",
   },
   {
     id: 18,
-    src: "https://i.giphy.com/media/l1J9u3TZfpmeDLkD6/giphy.gif",
+    src: memeUrl(18),
     emoji: "🤫",
     caption: "It compiled. Don't ask how.",
   },
   {
     id: 19,
-    src: "https://i.giphy.com/media/3oEduSbSGpGaRX2Vri/giphy.gif",
+    src: memeUrl(19),
     emoji: "👍👀",
     caption: "LGTM (did not read)",
   },
   {
     id: 20,
-    src: "https://i.giphy.com/media/26tn33aiTi1jkl6H6/giphy.gif",
+    src: memeUrl(20),
     emoji: "🤝🤖",
     caption: "Merge conflict? Ask the AI.",
   },
   {
     id: 21,
-    src: "https://i.giphy.com/media/3o7btPCcdNniyf0ArS/giphy.gif",
+    src: memeUrl(21),
     emoji: "💪⌨️",
     caption: "Prompt harder.",
   },
   {
     id: 22,
-    src: "https://i.giphy.com/media/xUPGcguWZHRC2HyBRS/giphy.gif",
+    src: memeUrl(22),
     emoji: "💸🪙",
     caption: "Tokens are my whole budget",
   },
@@ -201,18 +213,21 @@ function pickFour(): Placed[] {
  * per corner), rotating every few seconds with a fade. Purely for flair;
  * pointer-events disabled so it never blocks the buttons.
  */
-export function MemeLayer(): React.ReactElement {
+export function MemeLayer(): React.ReactElement | null {
+  const on = useMemesEnabled();
   const [picks, setPicks] = useState<Placed[]>(() => pickFour());
   // Re-roll the set on an interval; keyed remount drives the fade-in.
   const [cycle, setCycle] = useState(0);
 
   useEffect(() => {
+    // No rotation timer while the GIF layer is hidden.
+    if (!on) return;
     const id = setInterval(() => {
       setPicks(pickFour());
       setCycle((c) => c + 1);
     }, 6000);
     return () => clearInterval(id);
-  }, []);
+  }, [on]);
 
   const cards = useMemo(
     () =>
@@ -235,6 +250,8 @@ export function MemeLayer(): React.ReactElement {
       )),
     [picks, cycle],
   );
+
+  if (!on) return null;
 
   return (
     <div className="meme-layer" aria-hidden="true">

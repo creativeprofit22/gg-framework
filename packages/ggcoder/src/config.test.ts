@@ -4,7 +4,12 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadSavedSettings, seedDefaultAgents, SHADOWING_SEEDED_AGENT_HASHES } from "./config.js";
+import {
+  loadSavedSettings,
+  projectScopeAllowed,
+  seedDefaultAgents,
+  SHADOWING_SEEDED_AGENT_HASHES,
+} from "./config.js";
 import { BUNDLED_AGENTS } from "./core/agents.js";
 
 const fixturesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "__fixtures__");
@@ -24,6 +29,32 @@ afterEach(() => {
 });
 
 describe("loadSavedSettings", () => {
+  it("defaults trustedProjects to an empty array", () => {
+    const settings = loadSavedSettings(tempSettingsPath());
+    expect(settings.trustedProjects).toEqual([]);
+  });
+
+  it("parses trustedProjects from settings JSON", () => {
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ trustedProjects: ["/tmp/proj-a", "/tmp/proj-b"] }),
+      "utf-8",
+    );
+    const settings = loadSavedSettings(settingsPath);
+    expect(settings.trustedProjects).toEqual(["/tmp/proj-a", "/tmp/proj-b"]);
+  });
+
+  it("filters non-string entries from trustedProjects", () => {
+    const settingsPath = tempSettingsPath();
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ trustedProjects: ["/tmp/ok", 42, null, { bad: true }] }),
+      "utf-8",
+    );
+    const settings = loadSavedSettings(settingsPath);
+    expect(settings.trustedProjects).toEqual(["/tmp/ok"]);
+  });
   it("defaults ideal review and shared compaction policy", () => {
     const settings = loadSavedSettings(tempSettingsPath());
 
@@ -151,5 +182,28 @@ describe("seedDefaultAgents shadowing-agent cleanup", () => {
     await seedDefaultAgents(dir);
 
     expect(fs.readFileSync(path.join(dir, "owl.md"), "utf-8")).toBe("mine");
+  });
+});
+
+describe("projectScopeAllowed", () => {
+  it("returns true when the global trust toggle is on", () => {
+    expect(projectScopeAllowed(true, [], "/some/path")).toBe(true);
+  });
+
+  it("returns true when the cwd is in trustedProjects", () => {
+    const trusted = path.resolve("/trusted/repo");
+    expect(projectScopeAllowed(false, [trusted], trusted)).toBe(true);
+  });
+
+  it("returns false when neither global nor per-repo trust applies", () => {
+    const other = path.resolve("/other/repo");
+    const here = path.resolve("/this/repo");
+    expect(projectScopeAllowed(false, [other], here)).toBe(false);
+    expect(projectScopeAllowed(false, [], here)).toBe(false);
+  });
+
+  it("resolves relative paths before checking trustedProjects", () => {
+    const abs = path.resolve("relative/dir");
+    expect(projectScopeAllowed(false, [abs], "relative/dir")).toBe(true);
   });
 });

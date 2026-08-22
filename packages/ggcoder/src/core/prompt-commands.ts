@@ -392,6 +392,101 @@ If any support file changes after a check, repeat all terminal checks affected b
 Do not modify repository files outside the six support destinations. Runtime commands may create or update only the audited generated build outputs and declared owned work/staging/output roots described above.`,
   },
   {
+    name: "setup-ci",
+    aliases: [],
+    description: "Set up or harden CI for any stack",
+    prompt: `# /setup-ci — set up CI from scratch OR harden what exists, any stack
+
+You configure CI for THIS project. Completely stack-agnostic: manifests on disk decide
+everything — never assume a stack, never copy GitHub's starter workflows (they are stale
+and unhardened: no permissions, no concurrency, no timeouts, naive matrices).
+
+## Step 0: Preconditions
+
+- Not a git repository? STOP: tell the user to initialize git first (GG App's Initialize
+  Git button, or \`git init\` + a remote).
+- Look at \`git remote\`. Not GitHub? Adapt: GitLab -> \`.gitlab-ci.yml\` equivalents of the
+  same rules and skip the ruleset step. Other CI providers already configured -> leave
+  them alone and say so.
+
+## Step 1: Detect the stack (manifests only)
+
+- \`package.json\` -> Node; the lockfile picks the package manager (pnpm-lock.yaml ->
+  pnpm, yarn.lock -> yarn, package-lock.json -> npm, bun.lock/b -> bun).
+- \`pyproject.toml\` / \`requirements.txt\` / \`uv.lock\` / \`poetry.lock\` -> Python.
+- \`go.mod\` -> Go. \`Cargo.toml\` -> Rust. \`composer.json\` -> PHP. \`Gemfile\` -> Ruby.
+- \`*.csproj\`/\`*.sln\` -> .NET. \`pubspec.yaml\` -> Flutter/Dart. \`mix.exs\` -> Elixir.
+- \`Dockerfile\` and none of the above -> container build check.
+- Nothing detected -> static site: generate CI only if a build/lint tool exists;
+  otherwise say honestly that CI adds nothing and skip generation.
+
+## Step 2: Pick the mode
+
+- \`.github/workflows/\` empty (or no real CI) -> **Mode A: generate.**
+- Workflows exist -> **Mode B: audit + harden** (still add missing extras below).
+
+## Mode A — generate
+
+Write \`.github/workflows/ci.yml\`. EVERY rule is required:
+
+- \`on:\` push + pull_request targeting the default branch (detect it, don't assume main).
+- \`permissions:\n  contents: read\` at workflow level (least privilege).
+- ONE job on \`ubuntu-latest\` — never macOS (10x billing) or Windows (2x) unless the
+  project has OS-specific native code.
+- \`concurrency\` group \`\${{ github.workflow }}-\${{ github.head_ref || github.run_id }}\`
+  with \`cancel-in-progress: true\`.
+- \`timeout-minutes: 15\` on the job.
+- Install + build + test using ONLY commands that exist in the project's
+  manifest/scripts; no test command -> build only, and say so in the report.
+- Stack setup actions (verify the CURRENT major version against official docs before
+  writing): pnpm -> \`pnpm/action-setup\` + \`actions/setup-node\` with \`cache: pnpm\`;
+  npm/yarn/bun -> \`actions/setup-node\`/\`actions/setup-bun\` with cache for the lockfile;
+  Python -> \`astral-sh/setup-uv\` + \`uv sync\` (fall back to pip when there is no uv
+  lockfile); Go -> \`actions/setup-go\` (cache on by default); Rust -> minimal stable
+  toolchain + \`Swatinem/rust-cache\`; PHP / Ruby / .NET / Flutter -> the canonical setup
+  action for that stack, verified the same way.
+- \`paths-ignore\` for \`**/*.md\` and docs folders if the repo has them.
+- No artifact uploads.
+
+## Mode B — audit + harden existing workflows
+
+For EVERY file in \`.github/workflows/\`, apply and report one line per change:
+
+1. Add top-level \`permissions: contents: read\` if missing. A job that legitimately
+   needs more keeps its own narrower block — note why, never widen globally.
+2. Add \`concurrency\` + \`cancel-in-progress: true\` if missing — EXCEPT on
+   publish/deploy/release workflows, where cancelling mid-publish is worse than waiting.
+3. Add \`timeout-minutes\` if missing (15 for test jobs; more for release jobs).
+4. macOS/Windows matrix legs: keep ONLY if the project genuinely tests OS-specific
+   behavior (native modules, installers, cross-platform bugs). Otherwise collapse to
+   \`ubuntu-latest\` and state the minutes saved (macOS bills 10x, Windows 2x).
+5. Ensure the package manager's dependency cache is enabled.
+6. Bump actions to the current major version (verify against official docs). Do not
+   SHA-pin unless asked — Dependabot keeps majors fresh once added.
+7. NEVER weaken a check to make it pass. If an existing workflow is already stricter
+   than these rules (e.g. a release job needing \`contents: write\`), leave it and say so.
+
+## Both modes — extras
+
+- \`.github/dependabot.yml\` if missing: version updates for \`github-actions\` plus the
+  ecosystem from Step 1 (npm, pip, cargo, go, ...), weekly cadence.
+- Branch protection (GitHub repos only): if no ruleset protects the default branch, run
+  \`gh api -X POST /repos/{owner}/{repo}/rulesets\` with \`enforcement: active\`,
+  \`conditions.ref_name.include: ["~DEFAULT_BRANCH"]\`, and rules \`deletion\` +
+  \`non_fast_forward\`. Do NOT require pull requests. On failure (no admin, or private
+  repo on a free plan): one line, continue — not an error.
+- \`AGENTS.md\` at the repo root if missing: build/test/lint commands for this stack,
+  a pointer that CI lives in \`.github/workflows/\` and must stay green, and a rule to
+  never commit with \`--no-verify\`. If \`CLAUDE.md\` exists, keep AGENTS.md short and
+  point to it.
+
+## Finish
+
+- Do NOT commit anything — the user reviews the diff first. Point them at /commit.
+- Report bottom line first: mode chosen + stack detected, files written/changed, what CI
+  now runs, rough minutes impact, and anything skipped with the reason.`,
+  },
+  {
     name: "compare",
     aliases: [],
     description: "Compare real-world code",

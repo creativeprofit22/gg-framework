@@ -52,11 +52,19 @@ export function HomeBackdrop(): React.ReactElement {
     function build() {
       const parent = canvas.parentElement;
       if (!parent) return;
-      width = parent.clientWidth;
-      height = parent.clientHeight;
+      const w = parent.clientWidth;
+      const h = parent.clientHeight;
+      // macOS reports 0×0 for a minimized/occluded webview. Rebuilding into that
+      // wipes the node field and a later restore leaves it blank or bunched, so
+      // hold the last-good layout. Skip no-op resizes so the constellation
+      // doesn't visibly reset whenever the window regains visibility.
+      if (w < 2 || h < 2) return;
+      if (w === width && h === height) return;
+      width = w;
+      height = h;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.max(1, Math.floor(width * dpr));
-      canvas.height = Math.max(1, Math.floor(height * dpr));
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -112,6 +120,21 @@ export function HomeBackdrop(): React.ReactElement {
     });
     if (canvas.parentElement) ro.observe(canvas.parentElement);
 
+    // The ResizeObserver skips the minimize/occlude→restore transition (those
+    // sizes are degenerate and ignored above), so re-measure when the page is
+    // revealed again — otherwise the canvas stays stale until the next paint.
+    // The same hook resumes/pauses the animation loop (see below).
+    function onVisible(): void {
+      if (document.visibilityState !== "visible") {
+        if (!reduced) stopLoop();
+        return;
+      }
+      build();
+      if (reduced) draw();
+      else startLoop();
+    }
+    document.addEventListener("visibilitychange", onVisible);
+
     function step() {
       for (const n of nodes) {
         n.x += n.vx;
@@ -126,20 +149,43 @@ export function HomeBackdrop(): React.ReactElement {
 
     if (reduced) {
       draw(); // single static frame
-      return () => ro.disconnect();
+      return () => {
+        ro.disconnect();
+        document.removeEventListener("visibilitychange", onVisible);
+      };
+    }
+
+    // Start/stop helpers referenced by onVisible above. Declared here (after
+    // the reduced-motion early return) so they only exist when the loop runs.
+    function startLoop(): void {
+      if (raf === 0) raf = requestAnimationFrame(frame);
+    }
+    function stopLoop(): void {
+      cancelAnimationFrame(raf);
+      raf = 0;
     }
 
     let raf = 0;
-    function frame() {
+    function frame(): void {
       raf = requestAnimationFrame(frame);
       step();
       draw();
     }
-    raf = requestAnimationFrame(frame);
+    // Run ONLY while this window is focused + visible. With multiple project
+    // windows open, letting all of them run a canvas at 60fps starves the GPU
+    // compositor and causes intermittent rendering failures (black frames,
+    // frozen/bunched canvases). Pausing unfocused windows cuts concurrent
+    // rendering from N to 1.
+    startLoop();
+    window.addEventListener("focus", startLoop);
+    window.addEventListener("blur", stopLoop);
 
     return () => {
-      cancelAnimationFrame(raf);
+      stopLoop();
       ro.disconnect();
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", startLoop);
+      window.removeEventListener("blur", stopLoop);
     };
   }, []);
 

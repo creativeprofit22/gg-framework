@@ -56,7 +56,7 @@ export async function commitChatResearchTransition<Session, Agent>(
   operations: ChatResearchTransitionOperations<Session, Agent>,
 ): Promise<void> {
   const { session } = operations;
-  let changed = false;
+  let changed: boolean;
   try {
     changed = await operations.switchAgent(session, operations.researchAgent);
     await operations.persistAgentHandoff(session);
@@ -67,6 +67,7 @@ export async function commitChatResearchTransition<Session, Agent>(
       throw new AggregateError(
         [transitionError, rollbackError],
         "Research agent transition failed and could not restore the previous agent",
+        { cause: rollbackError },
       );
     }
     throw transitionError;

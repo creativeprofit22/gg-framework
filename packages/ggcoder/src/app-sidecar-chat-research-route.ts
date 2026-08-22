@@ -1,9 +1,9 @@
 import {
   APP_SIDECAR_CHAT_COMMANDS,
   executeChatResearchHandoff,
-  resolveChatResearchCommandRoute,
   type ChatResearchHandoffOperations,
 } from "./app-sidecar-chat-research-handoff.js";
+import type { resolveChatResearchCommandRoute } from "./app-sidecar-chat-research-handoff.js";
 
 export interface ChatResearchHttpResponse {
   status: number;

@@ -1,5 +1,7 @@
 import { z } from "zod";
+import { resolveToolSchema } from "@kenkaiiii/gg-ai";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { CONTEXT_LIMITS, type ContextLimits } from "../core/context-limits.js";
 import type { DeferredToolCatalog } from "../core/mcp/deferred-catalog.js";
 
 const ToolSearchParams = z.object({
@@ -34,8 +36,14 @@ export function createToolSearchTool(
   catalog: DeferredToolCatalog,
   onPromote: (tools: AgentTool[]) => unknown | Promise<unknown>,
   resolveCached?: (toolName: string) => Promise<CachedToolResolution | undefined>,
-  isVisible: (toolName: string) => boolean = () => true,
+  isVisibleOrLimits: ((toolName: string) => boolean) | ContextLimits = () => true,
+  configuredLimits: ContextLimits = CONTEXT_LIMITS,
 ): AgentTool<typeof ToolSearchParams> {
+  // Fourth-argument compatibility: local capability policy and upstream limits
+  // both remain supported; callers needing both pass the limits fifth.
+  const isVisible =
+    typeof isVisibleOrLimits === "function" ? isVisibleOrLimits : (_toolName: string) => true;
+  const limits = typeof isVisibleOrLimits === "function" ? configuredLimits : isVisibleOrLimits;
   return {
     name: "tool_search",
     description:
@@ -65,10 +73,16 @@ export function createToolSearchTool(
           if (resolution && !resolution.ok) unavailable.set(name, resolution);
         }
       }
-
-      // Keep unreachable cache entries in the catalog and out of the live
-      // registry. A later search can retry after the backing server recovers.
-      const promoted = catalog.promote(matchedNames.filter((name) => !unavailable.has(name)));
+      // Fail closed on both backing-server reachability and serialized schema size.
+      const oversized: Array<{ name: string; bytes: number }> = [];
+      const promotableNames: string[] = [];
+      for (const tool of matches) {
+        if (unavailable.has(tool.name)) continue;
+        const bytes = Buffer.byteLength(JSON.stringify(resolveToolSchema(tool)), "utf8");
+        if (bytes > limits.mcpToolSchemaBytes) oversized.push({ name: tool.name, bytes });
+        else promotableNames.push(tool.name);
+      }
+      const promoted = catalog.promote(promotableNames);
       await onPromote(promoted);
       const available = promoted;
       const failures = [...unavailable].map(
@@ -77,13 +91,22 @@ export function createToolSearchTool(
       );
 
       if (available.length === 0) {
-        return `No usable tools matched "${query}". Offered from a cached catalog but unreachable:\n${failures.join("\n")}`;
+        const refused = oversized.map(
+          (tool) =>
+            `- ${tool.name}: schema is ${Math.round(tool.bytes / 1024)}KB (budget ${Math.round(limits.mcpToolSchemaBytes / 1024)}KB)`,
+        );
+        return `No usable tools matched "${query}". No tools promoted.${failures.length ? `\nUnreachable:\n${failures.join("\n")}` : ""}${refused.length ? `\nRefused (schema byte budget):\n${refused.join("\n")}` : ""}`;
       }
       const lines = available.map(
         (t) => `- ${t.name}: ${t.description.split("\n")[0].slice(0, 200)}`,
       );
       const body = `${available.length} tool(s) now available:\n${lines.join("\n")}`;
-      return failures.length > 0 ? `${body}\n\nUnreachable:\n${failures.join("\n")}` : body;
+      const refused =
+        oversized.length > 0
+          ? `\n\nRefused (schema byte budget):\n${oversized.map((t) => `- ${t.name} (${Math.round(t.bytes / 1024)}KB schema)`).join("\n")}\nRaise the contextLimits.mcpToolSchemaBytes setting if a refused tool is trusted.`
+          : "";
+      const unreachable = failures.length > 0 ? `\n\nUnreachable:\n${failures.join("\n")}` : "";
+      return `${body}${refused}${unreachable}`;
     },
   };
 }

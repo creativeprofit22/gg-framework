@@ -8,6 +8,8 @@ import {
   collectProjectContext,
   PROJECT_CONTEXT_MAX_BYTES,
 } from "./system-prompt.js";
+import { buildKenSystemPrompt } from "./core/ken-prompt.js";
+import { resolveContextLimits } from "./core/context-limits.js";
 import type { LanguageId } from "./core/language-detector.js";
 
 const tempDirs: string[] = [];
@@ -122,6 +124,21 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("Blockquote nothing else");
     expect(prompt).not.toContain(
       "Do not default to generic tests, scripts, screenshots, benchmarks, or simulations",
+    );
+    // The ladder's value is the *order* and the stop-at-first-hit rule, not the
+    // individual rungs — "reuse what this repo already has" ranking above
+    // stdlib, and both above reaching for a dependency, is what stops the model
+    // rewriting a helper that already exists. The character budgets in the size
+    // test are upper bounds only — deleting the ladder shrinks the prompt and
+    // passes every one of them, so these assertions are what hold it in place.
+    expect(prompt).toContain("stop at the first rung that holds");
+    expect(prompt).toContain("Already in this codebase? Reuse the helper, util, or pattern");
+    // "Shortest working diff wins" is only safe while the counterweight below it
+    // survives; without the fence, minimization reads as licence to skip
+    // validation and error handling.
+    expect(prompt).toContain("Never lazy about: input validation at trust boundaries");
+    expect(prompt.indexOf("Shortest working diff wins")).toBeLessThan(
+      prompt.indexOf("Write the safe version first"),
     );
     // Security has to be a default of normal feature work, not a mode the user
     // has to know to ask for: nearly nobody runs a review, and the safe version
@@ -292,13 +309,31 @@ describe("buildSystemPrompt", () => {
       "Do not rely on memory for APIs",
       "Use `source_path`",
       "web_search` then `web_fetch",
-      "use the kencode-search tools (usage in Tools below)",
+      "mcp__kencode-search__searchCode",
+      "Build from real samples, not assumptions",
       "curated, categorized reference repos",
       "Search GitHub repos live",
       "literal text or RE2 regex; NOT semantic",
       "Skip checks after simple edits",
       "At coherent checkpoints or after risky/non-obvious changes",
       "run one targeted check",
+      // Guardrails added in the 2026-08 prompt audit (P1/P2):
+      "A question is not a fix request",
+      "only when the user explicitly asks — never update git config or force-push",
+      "Never revert or reset changes you did not make",
+      "reproduce it first",
+      "If the same fix fails three times, stop retrying",
+      "Never make a failing check pass by weakening it",
+      "never fork them into variants",
+      "exercise real code paths rather than mocks",
+      // Facts-vs-decisions + batched questions (alignment guardrails):
+      // asking is sanctioned for decisions only, and asking well means one
+      // batched, recommendation-annotated list instead of an interrogation drip.
+      "only decisions (taste, product calls, real tradeoffs) reach the user",
+      "one numbered list, every open question",
+      // The exemption must name both caps: a batched question list that
+      // violates the 5-item list cap would put the two rules in conflict.
+      "exempt from the reply and list caps",
     ]) {
       expect(prompt).toContain(required);
     }
@@ -444,9 +479,27 @@ describe("buildSystemPrompt", () => {
     // queries, secrets, dependency existence, never weakening a control) have
     // to live in the prefix instead. Keep these caps tight so drift stays
     // deliberate.
-    expect(measurements.normal.characters).toBeLessThan(6_300);
-    expect(measurements.planMode.characters).toBeLessThan(7_500);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(10_650);
+    //
+    // Raised again (~1.6k chars) for the Code Quality minimization ladder.
+    // This spend is the rare one that pays for itself inside the same budget:
+    // A/B benchmarked at 5 iterations per cell with every generated artifact
+    // executed against functional tests, the ladder held correctness flat
+    // (100% exec pass, no new dependencies, no turn-cap hits) while cutting
+    // generated code 50–76% and output tokens 21–38%. Input tokens fell too,
+    // despite the longer prefix: stopping at the first rung that holds costs
+    // fewer turns than re-deriving an over-built solution.
+    // Raised with the 2026-08 guardrail additions (git safety, anti-fake-green,
+    // reproduce-first, circuit-breaker, question-vs-fix, no-variants, test
+    // guidance) — each line field-verified as load-bearing across Tier-1 agents.
+    // Raised once more for the explicit kencode-search staple sentence in
+    // Research (names the MCP tools + build-from-samples philosophy).
+    // Raised for the alignment guardrails (facts-vs-decisions sorting,
+    // batched questions with recommended answers) — misalignment is the most
+    // common failure mode, and these two lines are the always-on floor the
+    // `clarify` skill then deepens on demand.
+    expect(measurements.normal.characters).toBeLessThan(9_600);
+    expect(measurements.planMode.characters).toBeLessThan(10_800);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(14_000);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -484,7 +537,12 @@ describe("buildSystemPrompt", () => {
     console.info(`system prompt audit: ${JSON.stringify(audit)}`);
 
     expect(audit.flags).toEqual([]);
-    expect(audit.size.characters).toBeLessThan(10_300);
+    // Raised with the Code Quality minimization ladder — see the size-budget
+    // test above for the measured return that justifies the spend.
+    // Raised again with the 2026-08 guardrail additions (see size-budget test).
+    // And again for the kencode-search staple sentence in Research.
+    // And again for the alignment guardrails (see size-budget test).
+    expect(audit.size.characters).toBeLessThan(13_700);
     expect(audit.size.sections).toBeGreaterThanOrEqual(8);
   });
 
@@ -604,6 +662,52 @@ describe("buildSystemPrompt", () => {
 
     expect(prompt).toContain("human-approved bytes");
     expect(prompt).not.toContain("substituted bytes");
+  });
+  it("is byte-stable across builds in one process (prefix-cache safety)", async () => {
+    // Deterministic arm of bench/baseline/04-prefix-stability.mjs, promoted to
+    // a unit test so a volatile section landing in the cached prefix fails
+    // `pnpm test`, not a manual bench run. The live cache-hit e2e
+    // (core/provider-cache.e2e.test.ts) guards the same property end-to-end.
+    const cwd = await makeProject({
+      "CLAUDE.md": "Project rules win.",
+      "package.json": JSON.stringify({ scripts: { check: "tsc --noEmit" } }),
+    });
+    const args = {
+      skills: [],
+      planMode: false,
+      approvedPlanPath: undefined,
+      toolNames: ["read", "edit", "bash"],
+      activeLanguages: new Set<LanguageId>(["typescript"]),
+    };
+    const a = await buildSystemPrompt(
+      cwd,
+      args.skills,
+      args.planMode,
+      args.approvedPlanPath,
+      args.toolNames,
+      args.activeLanguages,
+    );
+    const b = await buildSystemPrompt(
+      cwd,
+      args.skills,
+      args.planMode,
+      args.approvedPlanPath,
+      args.toolNames,
+      args.activeLanguages,
+    );
+    expect(a).toBe(b);
+    // Same for the Ken advisor prompt — its marker must also partition
+    // volatile bytes out of the cached prefix (ken-prompt.ts pins the marker
+    // as byte-identical to the build prompt's).
+    const kenA = await buildKenSystemPrompt(cwd);
+    const kenB = await buildKenSystemPrompt(cwd);
+    expect(kenA).toBe(kenB);
+    for (const prompt of [a, kenA]) {
+      expect(prompt).toContain("<!-- uncached -->");
+      // All volatile content (currently only the date) sits AFTER the marker.
+      const markerAt = prompt.indexOf("<!-- uncached -->");
+      expect(prompt.slice(markerAt)).toMatch(/Today's date: \d{1,2} \w+ \d{4}/);
+    }
   });
 });
 
@@ -770,5 +874,43 @@ describe("buildSubAgentSystemPrompt", () => {
 
     expect(prompt).toContain("## Delegation");
     expect(prompt).toContain("sees none of this conversation");
+  });
+});
+
+describe("system prompt byte ceiling", () => {
+  it("bounds a hostile AGENTS.md + skill catalog by per-input budgets, not the ceiling", async () => {
+    const cwd = await makeProject({
+      "AGENTS.md": `# Hostile\n\n${"inject ".repeat(20_000)}`, // ~120KB
+    });
+    const skills = Array.from({ length: 80 }, (_, i) => ({
+      name: `skill-${i}`,
+      description: "y".repeat(2_000), // 160KB raw descriptions
+      content: "x",
+      source: "global",
+    }));
+    const prompt = await buildSystemPrompt(cwd, skills);
+    // Per-input budgets do the work: well under the 1MB ceiling regardless.
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(64 * 1024);
+    expect(prompt).toContain("Skipped (context budget)");
+  });
+
+  it("enforces the emergency ceiling when sections overflow it", async () => {
+    const cwd = await makeProject({
+      "AGENTS.md": `${"a".repeat(31 * 1024)}`, // just under the 32KB file budget
+    });
+    const prompt = await buildSystemPrompt(
+      cwd,
+      [],
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      resolveContextLimits({ systemPromptCeilingBytes: 16 * 1024 }),
+    );
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(16 * 1024);
+    expect(prompt).toContain("system prompt exceeded the 16384-byte ceiling");
   });
 });

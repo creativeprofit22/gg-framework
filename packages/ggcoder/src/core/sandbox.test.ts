@@ -71,6 +71,88 @@ describe("buildSandboxSettings", () => {
     expect(settings.filesystem.allowWrite).not.toContain(os.homedir());
   });
 
+  it("refuses a write root a sandboxed command redirected at the filesystem root", () => {
+    // Every tool-cache dir is writable BY the sandboxed process, so a command
+    // can delete one and leave a symlink: `rm -rf ~/.deno && ln -s / ~/.deno`.
+    // Resolving that root would hand the next run write access to all of `/` —
+    // an escape that outlives the run that planted it.
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "gg-sandbox-home-"));
+    const planted = path.join(fakeHome, ".deno");
+    fs.symlinkSync(path.parse(os.tmpdir()).root, planted);
+    const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+    try {
+      const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gg-sandbox-workspace-"));
+      const settings = buildSandboxSettings(
+        cwd,
+        { mode: "workspace", allowedDomains: [] },
+        "darwin",
+      );
+
+      // Neither the symlink nor its target may be writable: writing through the
+      // symlink lands on the target, so keeping either one is the same escape.
+      expect(settings.filesystem.allowWrite).not.toContain(path.parse(os.tmpdir()).root);
+      expect(settings.filesystem.allowWrite).not.toContain(planted);
+      // The legitimate roots survive — this must not fail closed on everything.
+      expect(settings.filesystem.allowWrite).toEqual(
+        expect.arrayContaining([fs.realpathSync(path.resolve(cwd))]),
+      );
+    } finally {
+      homeSpy.mockRestore();
+    }
+  });
+
+  it("refuses a tool cache repointed at the SSH keys", () => {
+    // The subtler version of the same trick, and the reason $HOME is not a
+    // blanket-allowed landing zone: ~/.ssh sits inside the home directory, so
+    // treating "anywhere under $HOME" as intended authority would accept it.
+    // This list governs WRITES, so the ~/.ssh read denial does not cover it,
+    // and a writable authorized_keys is persistence.
+    // The fake home must sit outside `/tmp`, which is itself an intended zone.
+    // os.tmpdir() IS /tmp on Linux, so building the home under it would put
+    // ~/.ssh legitimately inside a permitted zone and the assertion would fail
+    // for the wrong reason (it passed on macOS only because os.tmpdir() there
+    // is /var/folders/…). node_modules is writable, git-ignored, and never a
+    // zone. Real machines put $HOME outside /tmp, which is the case under test.
+    const base = fs.mkdtempSync(
+      path.join(import.meta.dirname, "..", "..", "node_modules", ".gg-sandbox-base-"),
+    );
+    const fakeHome = path.join(base, "home");
+    const fakeTmp = path.join(base, "tmp");
+    const ssh = path.join(fakeHome, ".ssh");
+    fs.mkdirSync(ssh, { recursive: true });
+    fs.mkdirSync(fakeTmp);
+    fs.symlinkSync(ssh, path.join(fakeHome, ".deno"));
+    const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
+    const tmpSpy = vi.spyOn(os, "tmpdir").mockReturnValue(fakeTmp);
+    try {
+      const cwd = path.join(base, "workspace");
+      fs.mkdirSync(cwd);
+      const settings = buildSandboxSettings(
+        cwd,
+        { mode: "workspace", allowedDomains: [] },
+        "darwin",
+      );
+
+      expect(settings.filesystem.allowWrite).not.toContain(ssh);
+      expect(settings.filesystem.allowWrite).not.toContain(fs.realpathSync(ssh));
+    } finally {
+      homeSpy.mockRestore();
+      tmpSpy.mockRestore();
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("still follows the OS temp alias, so writes to /tmp are not silently denied", () => {
+    // The guard above must not break the reason withRealPath exists: macOS
+    // reaches the temp dir through /var → /private/var.
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gg-sandbox-workspace-"));
+    const settings = buildSandboxSettings(cwd, { mode: "workspace", allowedDomains: [] }, "darwin");
+
+    expect(settings.filesystem.allowWrite).toEqual(
+      expect.arrayContaining([fs.realpathSync(path.resolve(os.tmpdir()))]),
+    );
+  });
+
   it("honors the outside-workspace opt-out instead of contradicting the user", () => {
     const settings = buildSandboxSettings(
       path.join(os.tmpdir(), "gg-sandbox-workspace"),

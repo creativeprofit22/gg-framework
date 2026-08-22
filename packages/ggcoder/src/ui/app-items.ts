@@ -91,6 +91,11 @@ export const UPDATE_NOTICE_TEXT = "KEN HAS PUSHED A NEW GG CODER UPDATE";
 /** Copy shown when the automatic pre-final ideal-review hook engages. */
 export const IDEAL_HOOK_NOTICE_TEXT = "Hook engaged — running an ideal review before finalizing.";
 
+/** Copy shown when the verification gate holds the final answer back because
+ *  code changed and nothing has been run since. */
+export const VERIFICATION_HOOK_NOTICE_TEXT =
+  "Hook engaged — running the project's verification before finalizing.";
+
 /** Copy shown when the loop-breaker hook fires because the agent looks stuck. */
 export const LOOP_BREAK_NOTICE_TEXT =
   "Hook engaged — breaking a stuck loop and rethinking the approach.";
@@ -116,6 +121,10 @@ export const TRUNCATED_REFUSAL_NOTICE_TEXT =
 /** Copy shown when the provider reported an error stop mid-response. */
 export const TRUNCATED_PROVIDER_ERROR_NOTICE_TEXT =
   "The provider reported an error mid-response — the response may be incomplete.";
+
+/** Copy shown when the provider returned no content after all retries. */
+export const TRUNCATED_EMPTY_RESPONSE_NOTICE_TEXT =
+  "The model returned an empty response after retries — try sending again.";
 
 /**
  * Semantic tone for an agent-hook notice. Each maps to a theme color so the

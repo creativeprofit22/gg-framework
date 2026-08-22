@@ -139,6 +139,48 @@ function withRealPath(target: string): string[] {
   }
 }
 
+/** `candidate` is `zone` or sits underneath it. */
+function isInside(candidate: string, zone: string): boolean {
+  return candidate === zone || candidate.startsWith(zone + path.sep);
+}
+
+/**
+ * Resolve one WRITE root, refusing to let a symlink widen our own authority.
+ *
+ * {@link withRealPath} grants write access to wherever a path resolves to. That
+ * is required for OS aliases (/tmp → /private/tmp) but is unsafe for roots the
+ * sandbox itself hands over to untrusted code: every {@link toolCacheDirs}
+ * entry is writable *by the sandboxed process*, so a command could delete one
+ * and leave a symlink behind (`rm -rf ~/.deno && ln -s / ~/.deno`). The next
+ * policy build would resolve that root to `/` and grant write access to the
+ * whole filesystem — a persistent escape that outlives the run that planted it.
+ *
+ * So a resolved root is only accepted while it stays inside a zone we already
+ * intended to expose. Anything else is an authority expansion rather than a
+ * path alias, and BOTH forms are dropped: keeping the symlink itself would
+ * still write through to the target. Losing a tool cache costs a slower
+ * install; keeping it can cost the machine.
+ */
+function safeWriteRoots(target: string, zones: readonly string[]): string[] {
+  let real: string;
+  try {
+    real = realpathSync(target);
+  } catch {
+    // Not created yet (common for tool caches) — nothing to resolve, and a
+    // path that does not exist cannot be pointing anywhere dangerous yet.
+    return [target];
+  }
+  if (real === target) return [target];
+  if (!zones.some((zone) => isInside(real, zone))) {
+    log("WARN", "sandbox", "refusing write root that resolves outside the sandbox", {
+      target,
+      real,
+    });
+    return [];
+  }
+  return [target, real];
+}
+
 /** Pure policy builder, exported so the security boundary is regression-tested. */
 export function buildSandboxSettings(
   cwd: string,
@@ -155,6 +197,31 @@ export function buildSandboxSettings(
         .filter(Boolean),
     ),
   ].sort();
+  // Where a write root is allowed to LAND once symlinks are resolved. These are
+  // the areas we already intended to expose, so an alias inside them is just an
+  // alias; a root resolving anywhere else is an escape attempt (see
+  // safeWriteRoots). Anchors are themselves resolved so the comparison works on
+  // macOS, where the workspace and temp dir are usually reached via /var.
+  const writeZones = [
+    ...new Set(
+      [
+        temp,
+        workspace,
+        ...(policy.additionalRoots ?? []).map((root) => path.resolve(root)),
+        path.resolve(getAppPaths().agentDir),
+        // Only when the user opted in. Listing $HOME unconditionally would
+        // accept a tool cache repointed at ~/.ssh — writing authorized_keys is
+        // persistence, and this list governs WRITES, so the ~/.ssh READ denial
+        // below would not stop it.
+        ...(policy.allowOutsideWorkspaceWrites ? [home] : []),
+        ...(platform === "win32" ? [] : ["/tmp"]),
+        // NB: the macOS /private aliases need no entry of their own — each
+        // anchor above is expanded through withRealPath, so /var/folders/… and
+        // /private/var/folders/… are both already zones. Listing bare /private
+        // would be far wider than intended (it also holds /private/etc).
+      ].flatMap(withRealPath),
+    ),
+  ];
   // Mirror resolveWriteGuard's roots. The sandbox must never be stricter than
   // the write guard the user already controls, or bash silently loses
   // multi-root workspaces and the documented outside-workspace opt-out.
@@ -169,7 +236,7 @@ export function buildSandboxSettings(
         path.resolve(getAppPaths().agentDir),
         ...toolCacheDirs(home),
         ...(policy.allowOutsideWorkspaceWrites ? [home] : []),
-      ].flatMap(withRealPath),
+      ].flatMap((target) => safeWriteRoots(target, writeZones)),
     ),
   ];
 

@@ -85,8 +85,11 @@ export function selectLatestRoadmapPhaseAdvancement(
     ),
   );
   const latest = candidates.sort((left, right) => {
-    const timestampOrder = Date.parse(right.checkpoint.timestamp) - Date.parse(left.checkpoint.timestamp);
-    return timestampOrder || right.roadmapIndex - left.roadmapIndex || right.eventIndex - left.eventIndex;
+    const timestampOrder =
+      Date.parse(right.checkpoint.timestamp) - Date.parse(left.checkpoint.timestamp);
+    return (
+      timestampOrder || right.roadmapIndex - left.roadmapIndex || right.eventIndex - left.eventIndex
+    );
   })[0];
   if (!latest) return null;
 
@@ -104,9 +107,8 @@ export function selectLatestRoadmapPhaseAdvancement(
     latest.checkpoint.completionReviewId,
     mode,
   );
-  const nextPhase = snapshot.document.phases.find(
-    (phase) => phase.id === latest.checkpoint.nextPhaseId,
-  ) ?? null;
+  const nextPhase =
+    snapshot.document.phases.find((phase) => phase.id === latest.checkpoint.nextPhaseId) ?? null;
   const targetMatches = selected?.id === latest.checkpoint.nextPhaseId;
 
   return {

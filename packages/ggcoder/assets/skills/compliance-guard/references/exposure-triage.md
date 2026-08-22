@@ -6,14 +6,14 @@ Determine what the product actually is before deciding what applies. Everything 
 
 Obligations scale almost entirely with reach. Establish it first.
 
-| Class | Signals | Baseline exposure |
-|---|---|---|
-| **Local-only** | CLI, no server, no network calls with user data, no deploy config, no telemetry | Near zero. Licence hygiene and secrets hygiene only. Do not generate a compliance program. |
-| **Internal / self-hosted, no third parties** | Docker compose for one org, no public DNS, SSO to one tenant | Security baseline, employment/monitoring rules if it watches staff, vendor terms |
-| **Private beta / invite-only** | Auth required, invite table, no public signup | Full privacy stack applies to real users; volume-threshold laws mostly do not |
-| **Public app** | Open signup, public marketing page, app-store listing | Everything in `trigger-map.md` |
-| **Public + UGC** | Uploads, comments, profiles, messaging | Adds intermediary/safe-harbour, CSAM, NCII, moderation duties |
-| **Public + money** | Checkout, subscriptions, payouts | Adds payments, auto-renewal, tax, consumer law |
+| Class                                        | Signals                                                                         | Baseline exposure                                                                          |
+| -------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **Local-only**                               | CLI, no server, no network calls with user data, no deploy config, no telemetry | Near zero. Licence hygiene and secrets hygiene only. Do not generate a compliance program. |
+| **Internal / self-hosted, no third parties** | Docker compose for one org, no public DNS, SSO to one tenant                    | Security baseline, employment/monitoring rules if it watches staff, vendor terms           |
+| **Private beta / invite-only**               | Auth required, invite table, no public signup                                   | Full privacy stack applies to real users; volume-threshold laws mostly do not              |
+| **Public app**                               | Open signup, public marketing page, app-store listing                           | Everything in `trigger-map.md`                                                             |
+| **Public + UGC**                             | Uploads, comments, profiles, messaging                                          | Adds intermediary/safe-harbour, CSAM, NCII, moderation duties                              |
+| **Public + money**                           | Checkout, subscriptions, payouts                                                | Adds payments, auto-renewal, tax, consumer law                                             |
 
 Deploy signals: `vercel.json`, `netlify.toml`, `fly.toml`, `render.yaml`, `app.yaml`, `wrangler.toml`, `Procfile`, Dockerfile with exposed ports, Terraform/Pulumi with public ingress, GitHub Actions deploy jobs, `CNAME`, custom-domain config, `robots.txt`, sitemap, `apple-app-site-association`, `.well-known/assetlinks.json`, Fastlane, EAS config, `Info.plist`, `AndroidManifest.xml`.
 
@@ -23,15 +23,15 @@ Absence of deploy config does not prove absence of a deployment. If it looks lik
 
 The greps in this file lean JavaScript because that is what most of these apps are built in. **They are examples of a pattern, not the pattern itself.** Before concluding "not applicable", restate the signature in the project's own idiom:
 
-| Signature | JS/TS | Python | Ruby | Go / Rust / PHP / mobile |
-|---|---|---|---|---|
-| Dependency manifest | `package.json`, lockfile | `requirements.txt`, `pyproject.toml`, `poetry.lock` | `Gemfile`, `Gemfile.lock` | `go.mod`, `Cargo.toml`, `composer.json`, `Podfile`, `build.gradle` |
-| Secret leaked to the client | `NEXT_PUBLIC_*`, `VITE_*`, `REACT_APP_*` | hardcoded literal in source; a default in `os.environ.get("KEY", "sk-...")`; committed `settings.py` | mis-scoped credentials, hardcoded literal | `EXPO_PUBLIC_*`, `Info.plist`, `AndroidManifest`, strings compiled into a shipped binary |
-| Injection sink | template literal in a query | f-string / `%` / `.format()` into `text()` or `execute()` | interpolation into `where("...")` | any concatenated query in any language |
-| Missing object authorization | handler reading `params.id` | FastAPI/Flask/Django view trusting a query or body field | controller trusting `params[:id]` | any handler trusting a client-supplied id |
-| Mass assignment | `{...req.body}` spread | `Model(**payload)`, `setattr` loops, unrestricted serializer | `update_attributes(params)` without strong params | any bulk bind of request data to a model |
-| Licence/vuln scanning | `npm audit`, licence checker | `pip-audit`, `pip-licenses` | `bundler-audit` | `govulncheck`, `cargo audit`, `cargo deny` |
-| Tracking/tags | `<script src>`, tag manager | server-rendered template blocks, or a separate frontend repo | ERB/HAML layouts | native SDK init in the app delegate |
+| Signature                    | JS/TS                                    | Python                                                                                               | Ruby                                              | Go / Rust / PHP / mobile                                                                 |
+| ---------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Dependency manifest          | `package.json`, lockfile                 | `requirements.txt`, `pyproject.toml`, `poetry.lock`                                                  | `Gemfile`, `Gemfile.lock`                         | `go.mod`, `Cargo.toml`, `composer.json`, `Podfile`, `build.gradle`                       |
+| Secret leaked to the client  | `NEXT_PUBLIC_*`, `VITE_*`, `REACT_APP_*` | hardcoded literal in source; a default in `os.environ.get("KEY", "sk-...")`; committed `settings.py` | mis-scoped credentials, hardcoded literal         | `EXPO_PUBLIC_*`, `Info.plist`, `AndroidManifest`, strings compiled into a shipped binary |
+| Injection sink               | template literal in a query              | f-string / `%` / `.format()` into `text()` or `execute()`                                            | interpolation into `where("...")`                 | any concatenated query in any language                                                   |
+| Missing object authorization | handler reading `params.id`              | FastAPI/Flask/Django view trusting a query or body field                                             | controller trusting `params[:id]`                 | any handler trusting a client-supplied id                                                |
+| Mass assignment              | `{...req.body}` spread                   | `Model(**payload)`, `setattr` loops, unrestricted serializer                                         | `update_attributes(params)` without strong params | any bulk bind of request data to a model                                                 |
+| Licence/vuln scanning        | `npm audit`, licence checker             | `pip-audit`, `pip-licenses`                                                                          | `bundler-audit`                                   | `govulncheck`, `cargo audit`, `cargo deny`                                               |
+| Tracking/tags                | `<script src>`, tag manager              | server-rendered template blocks, or a separate frontend repo                                         | ERB/HAML layouts                                  | native SDK init in the app delegate                                                      |
 
 **If the repo is backend-only, say so and check whether a separate frontend exists** rather than silently reporting the tracking and accessibility sections as clean. "No frontend in this repo" and "no frontend in this product" are different findings, and only the second one is good news.
 
@@ -59,7 +59,7 @@ age|birthday|minor|child|parent_consent|guardian|grade|school|student
 
 Classify each hit into: **basic** (name/email), **identifier** (IP/device/cookie), **sensitive** (health, biometric, precise location, sexual life, race, religion, union, immigration, criminal, genetic, financial account), **children's**, **credential**. Sensitive and children's data change the legal analysis more than volume ever does.
 
-Also record for each class: where it is stored, who it is sent to, how long it is kept, and whether deletion actually removes it. Most vibe-coded apps have no answer to the last two — that gap *is* a finding.
+Also record for each class: where it is stored, who it is sent to, how long it is kept, and whether deletion actually removes it. Most vibe-coded apps have no answer to the last two — that gap _is_ a finding.
 
 ## 3. Third-party recipients
 
@@ -118,6 +118,7 @@ diffusion|stable-?diffusion|dall-?e|midjourney|tts|voice_?clone|speech_?synth|av
 ```
 
 Then classify:
+
 - **AI-assisted internal tooling** — low external exposure.
 - **User-facing chatbot** — disclosure duties (EU AI Act Art 50, several US state laws); companion/emotional framing pulls in far stricter rules.
 - **Generated synthetic media** — marking/provenance duties.
@@ -127,7 +128,7 @@ Then classify:
 
 ## 9. Domain signal scan
 
-Route names, table names, and README copy reveal the regulated domain faster than asking. Match against the red-flag phrase table in `sector-gates.md`. Any hit escalates immediately — the domain gate is evaluated *before* the privacy checklist, because if the product cannot lawfully exist as described, the cookie banner is irrelevant.
+Route names, table names, and README copy reveal the regulated domain faster than asking. Match against the red-flag phrase table in `sector-gates.md`. Any hit escalates immediately — the domain gate is evaluated _before_ the privacy checklist, because if the product cannot lawfully exist as described, the cookie banner is irrelevant.
 
 ## 10. Jurisdiction inference
 
@@ -142,11 +143,11 @@ Do not assume the company's country limits exposure.
 
 Only ask what the repo cannot answer. Always state the default you will assume.
 
-1. **Reach** — "Public signup, invite-only, internal, or just you?" *(default: public if a deploy target and open signup exist)*
-2. **Geography** — "Which countries can sign up? Anything blocked today?" *(default: worldwide, nothing blocked → EU/UK/US all in scope)*
-3. **Real data** — "Real users and real data, or test data only?" *(default: real if there is a production deploy)*
-4. **Minors** — "Could under-18s (or under-13s) realistically use it? Any age gate?" *(default: no age gate present → treat general-audience unless the product is clearly workplace-only)*
-5. **Entity** — "Company entity and country, or personal/no entity yet?" *(default: unknown → flag as a LAWYER item, do not fill in documents)*
+1. **Reach** — "Public signup, invite-only, internal, or just you?" _(default: public if a deploy target and open signup exist)_
+2. **Geography** — "Which countries can sign up? Anything blocked today?" _(default: worldwide, nothing blocked → EU/UK/US all in scope)_
+3. **Real data** — "Real users and real data, or test data only?" _(default: real if there is a production deploy)_
+4. **Minors** — "Could under-18s (or under-13s) realistically use it? Any age gate?" _(default: no age gate present → treat general-audience unless the product is clearly workplace-only)_
+5. **Entity** — "Company entity and country, or personal/no entity yet?" _(default: unknown → flag as a LAWYER item, do not fill in documents)_
 
 Ask a sixth only if a domain gate fired and the answer determines legality (e.g. "do you hold a licence for X?").
 

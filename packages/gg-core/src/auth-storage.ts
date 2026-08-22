@@ -198,6 +198,7 @@ const STATIC_API_KEY_PROVIDERS = new Set([
   "minimax",
   "deepseek",
   "openrouter",
+  "huggingface",
   "sakana",
   "xai",
   // Local endpoints: a fixed (usually placeholder) key, never refreshable.

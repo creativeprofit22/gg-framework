@@ -164,6 +164,205 @@ export function htmlToCleanText(html: string): string {
     .trim();
 }
 
+// ── Outline rendering (compact numbered view) ────────────────
+
+/** Hard cap on how many links one tool call will number. */
+const MAX_OUTLINE_LINKS = 100;
+/** ~500 tokens of body: the whole point of the outline format. */
+const OUTLINE_DEFAULT_MAX_LENGTH = 2000;
+/** Per-session render cache size (pages, not bytes). */
+const MAX_CACHED_PAGES = 32;
+const OUTLINE_INDEX_HEADER = "Links (fetch one with `follow`):";
+const BLOCKED_URL_MESSAGE =
+  "Error: URL blocked — requests to private/internal network addresses are not allowed.";
+
+/** A hyperlink shown in an outline render as `anchor text [number]`. */
+export interface OutlineLink {
+  number: number;
+  url: string;
+}
+
+/**
+ * Allocates the small stable numbers that replace hyperlinks in an outline
+ * render. Scoped to a single tool call, deduped by absolute URL, and capped at
+ * {@link MAX_OUTLINE_LINKS} so a link-farm page cannot grow the index (or the
+ * session's follow map) without bound.
+ */
+class LinkNumbers {
+  private readonly byUrl = new Map<string, number>();
+  private readonly used = new Set<number>();
+  private readonly ordered: OutlineLink[] = [];
+  private next = 1;
+
+  get size(): number {
+    return this.byUrl.size;
+  }
+
+  /** Adopt the numbers baked into a cached render so they stay resolvable. */
+  reserve(links: readonly OutlineLink[]): void {
+    for (const link of links) {
+      if (this.used.has(link.number)) continue;
+      this.used.add(link.number);
+      this.byUrl.set(link.url, link.number);
+      this.ordered.push(link);
+    }
+  }
+
+  /** Number for `url`, or null once the per-call cap is reached. */
+  numberFor(url: string): number | null {
+    const existing = this.byUrl.get(url);
+    if (existing !== undefined) return existing;
+    if (this.byUrl.size >= MAX_OUTLINE_LINKS) return null;
+    while (this.used.has(this.next)) this.next++;
+    const number = this.next++;
+    this.used.add(number);
+    this.byUrl.set(url, number);
+    this.ordered.push({ number, url });
+    return number;
+  }
+
+  all(): readonly OutlineLink[] {
+    return this.ordered;
+  }
+}
+
+/** Absolute http(s) form of `href` relative to `base`, or null if unusable. */
+function absoluteHttpUrl(href: string, base: string): string | null {
+  const trimmed = href.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+  let resolved: URL;
+  try {
+    resolved = new URL(trimmed, base);
+  } catch {
+    return null;
+  }
+  if (resolved.protocol !== "http:" && resolved.protocol !== "https:") return null;
+  // Fragments only move within a page we already have: drop them so anchors
+  // into the same document collapse onto one number, and spend no number at
+  // all on links back into the page being rendered.
+  resolved.hash = "";
+  let self: URL;
+  try {
+    self = new URL(base);
+  } catch {
+    return resolved.toString();
+  }
+  self.hash = "";
+  if (resolved.href === self.href) return null;
+  return resolved.href;
+}
+
+const MARKDOWN_LINK = /(!?)\[([^\]]*)\]\(\s*<?([^)<>\s]*)>?(?:\s+"[^"]*")?\s*\)/g;
+const HTML_ANCHOR = /<a\b[^>]*\bhref\s*=\s*["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+/** Rewrite markdown links to `text [n]`; drop images, which carry no text. */
+function numberMarkdownLinks(markdown: string, base: string, numbers: LinkNumbers): string {
+  return markdown.replace(MARKDOWN_LINK, (_match, image: string, text: string, href: string) => {
+    if (image) return "";
+    const url = absoluteHttpUrl(href, base);
+    if (!url) return text;
+    const number = numbers.numberFor(url);
+    return number === null ? text : `${text} [${number}]`;
+  });
+}
+
+/** Same rewrite for raw HTML, used when the markdown extractor is unavailable. */
+function numberHtmlAnchors(html: string, base: string, numbers: LinkNumbers): string {
+  return html.replace(HTML_ANCHOR, (_match, href: string, inner: string) => {
+    const url = absoluteHttpUrl(decodeHTMLEntities(href), base);
+    if (!url) return inner;
+    const number = numbers.numberFor(url);
+    return number === null ? inner : `${inner} [${number}]`;
+  });
+}
+
+function compactBlankLines(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, ""))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Render a fetched document as main content with every hyperlink replaced by a
+ * number, followed by a compact number → absolute URL index. The body reuses
+ * the existing `max_length` budget; only links still visible in the (possibly
+ * truncated) body are indexed.
+ */
+async function renderOutline(
+  text: string,
+  isHtml: boolean,
+  finalUrl: string,
+  opts: FetchOptions,
+): Promise<string> {
+  const numbers = opts.numbers ?? new LinkNumbers();
+  let heading = "";
+  let body: string;
+
+  if (!isHtml) {
+    body = numberMarkdownLinks(text, finalUrl, numbers);
+  } else {
+    let extracted: { markdown: string; title?: string } | null;
+    try {
+      extracted = await extractToMarkdown(text, finalUrl);
+    } catch {
+      extracted = null;
+    }
+    if (extracted) {
+      heading = extracted.title ? `# ${extracted.title}\n\n` : "";
+      body = numberMarkdownLinks(extracted.markdown, finalUrl, numbers);
+    } else {
+      body = htmlToCleanText(numberHtmlAnchors(removeBoilerplateElements(text), finalUrl, numbers));
+    }
+  }
+
+  const rendered = truncate(compactBlankLines(heading + body), opts.maxLength);
+  const shown = numbers.all().filter((link) => rendered.includes(`[${link.number}]`));
+
+  let output = rendered;
+  if (shown.length > 0) {
+    const index = shown.map((link) => `[${link.number}] ${link.url}`).join("\n");
+    output += `\n\n${OUTLINE_INDEX_HEADER}\n${index}`;
+    if (numbers.size >= MAX_OUTLINE_LINKS) {
+      output += `\n[link index truncated at ${MAX_OUTLINE_LINKS}; further links left as plain text]`;
+    }
+  }
+
+  opts.onRender?.(finalUrl, output, [...shown]);
+  return output;
+}
+
+/** A page already rendered in this session, keyed by URL + budget. */
+interface CachedPage {
+  text: string;
+  links: OutlineLink[];
+}
+
+function cacheKey(url: string, maxLength: number): string {
+  return `${maxLength}\u0000${url}`;
+}
+
+function cacheGet(cache: Map<string, CachedPage>, key: string): CachedPage | undefined {
+  const hit = cache.get(key);
+  if (!hit) return undefined;
+  // Re-insert so Map iteration order stays least-recently-used first.
+  cache.delete(key);
+  cache.set(key, hit);
+  return hit;
+}
+
+function cacheSet(cache: Map<string, CachedPage>, key: string, entry: CachedPage): void {
+  cache.delete(key);
+  cache.set(key, entry);
+  while (cache.size > MAX_CACHED_PAGES) {
+    const oldest = cache.keys().next();
+    if (oldest.done) break;
+    cache.delete(oldest.value);
+  }
+}
+
 // ── Fetch configuration ──────────────────────────────────────
 
 const MAX_REDIRECTS = 5;
@@ -185,7 +384,7 @@ const DOC_ROOT_SEGMENTS = new Set(["docs", "doc", "reference", "api", "guide", "
 const LONG_LLMS_THRESHOLD = 20000;
 const DEFAULT_LLMS_CANDIDATE_LIMIT = 6;
 
-type FetchFormat = "markdown" | "text" | "html";
+type FetchFormat = "markdown" | "text" | "html" | "outline";
 type LlmsCandidateKind = "llms" | "llms-full" | "llms-ctx" | "page-md";
 
 interface LlmsCandidate {
@@ -201,6 +400,10 @@ interface FetchOptions {
   preferLlmsTxt: boolean;
   /** Network allowlist policy, read lazily (undefined = unrestricted). */
   getNetworkPolicy?: GetNetworkPolicy;
+  /** Link-number allocator shared by every page rendered in one tool call. */
+  numbers?: LinkNumbers;
+  /** Called with each finished outline render so the caller can cache it. */
+  onRender?: (finalUrl: string, rendered: string, links: OutlineLink[]) => void;
 }
 
 interface RawResponse {
@@ -223,7 +426,7 @@ type FetchOneResult = { ok: true; response: RawResponse } | { ok: false; error: 
  */
 function headersForFormat(format: FetchFormat, honestUserAgent = false): Record<string, string> {
   const accept =
-    format === "html"
+    format === "html" || format === "outline"
       ? "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"
       : format === "markdown"
         ? "text/markdown,text/plain;q=0.9,text/html;q=0.8,*/*;q=0.5"
@@ -412,6 +615,9 @@ async function processHtmlOrText(
     response.contentType.includes("html") ||
     (genericContentType && /^(?:<!doctype\s+html|<html\b|<head\b|<body\b)/i.test(prefix));
 
+  if (opts.format === "outline") {
+    return await renderOutline(text, isHtml, response.finalUrl, opts);
+  }
   if (opts.format === "html") {
     return truncate(text, opts.maxLength);
   }
@@ -447,7 +653,7 @@ async function fetchAndProcess(
   signal: AbortSignal,
 ): Promise<string> {
   if (isBlockedUrl(url)) {
-    return "Error: URL blocked — requests to private/internal network addresses are not allowed.";
+    return BLOCKED_URL_MESSAGE;
   }
 
   try {
@@ -637,31 +843,117 @@ async function fetchWithPreferredDocs(
   opts: FetchOptions,
   signal: AbortSignal,
 ): Promise<string> {
-  if (opts.format !== "html" && opts.preferLlmsTxt && !isBlockedUrl(url) && isDocish(url)) {
+  if (
+    opts.format !== "html" &&
+    opts.format !== "outline" &&
+    opts.preferLlmsTxt &&
+    !isBlockedUrl(url) &&
+    isDocish(url)
+  ) {
     const llms = await tryLlmsResource(url, opts, signal);
     if (llms) return llms;
   }
   return await fetchAndProcess(url, opts, signal);
 }
 
+/**
+ * Outline-mode wrapper around {@link fetchWithPreferredDocs} that serves
+ * repeat views of a page from the per-session cache. The URL is re-validated
+ * *before* the cache is consulted, so a cached render can never resurrect a
+ * host the current SSRF/allowlist policy forbids.
+ */
+async function fetchPage(
+  url: string,
+  opts: FetchOptions,
+  signal: AbortSignal,
+  cache: Map<string, CachedPage>,
+): Promise<string> {
+  if (opts.format !== "outline") return await fetchWithPreferredDocs(url, opts, signal);
+
+  if (isBlockedUrl(url)) return BLOCKED_URL_MESSAGE;
+  const policyError = checkUrlPolicy(url, opts.getNetworkPolicy);
+  if (policyError) return `Error: ${policyError}`;
+
+  const requestKey = cacheKey(url, opts.maxLength);
+  const hit = cacheGet(cache, requestKey);
+  if (hit) {
+    opts.numbers?.reserve(hit.links);
+    return hit.text;
+  }
+
+  let rendered: CachedPage | undefined;
+  const result = await fetchWithPreferredDocs(
+    url,
+    {
+      ...opts,
+      onRender: (finalUrl, text, links) => {
+        rendered = { text, links };
+        // Keyed by the post-redirect URL, plus the requested URL below.
+        cacheSet(cache, cacheKey(finalUrl, opts.maxLength), rendered);
+      },
+    },
+    signal,
+  );
+  if (rendered) cacheSet(cache, requestKey, rendered);
+  return result;
+}
+
 export function createWebFetchTool(
   getNetworkPolicy?: GetNetworkPolicy,
 ): AgentTool<typeof parameters> {
+  // Per-session state, both bounded: the render cache evicts least-recently
+  // used pages past MAX_CACHED_PAGES, and the follow map is replaced (not
+  // grown) by each outline call, itself capped at MAX_OUTLINE_LINKS entries.
+  const pageCache = new Map<string, CachedPage>();
+  let followTargets = new Map<number, string>();
+
   return {
     name: "web_fetch",
     description:
       "Fetch and read web page content. Accepts a single `url` or a `urls` array (up to 10, " +
-      "fetched concurrently). Returns clean Markdown by default (`format`: markdown|text|html) via " +
-      "main-content extraction. Extracts text from PDFs, follows safe redirects automatically, and " +
-      "prefers a site's curated /llms.txt for docs pages when available.",
+      "fetched concurrently). Returns clean Markdown by default (`format`: markdown|text|html|outline) " +
+      "via main-content extraction. Extracts text from PDFs, follows safe redirects automatically, and " +
+      "prefers a site's curated /llms.txt for docs pages when available.\n" +
+      '`format: "outline"` is the cheap mode: main content only, every hyperlink replaced by a ' +
+      "number (`anchor text [12]`) with a numbered URL index at the end, and a small default " +
+      "`max_length`. Use it when hunting for the right page; then pass `follow: 12` " +
+      "(instead of `url`) to fetch link 12 from the last outline. Repeat views of a page in the " +
+      "same session are served from cache. Outline mode skips the /llms.txt probe.",
     parameters,
     async execute(args, context: ToolContext) {
-      const maxLength = args.max_length ?? 10000;
       const format: FetchFormat = args.format ?? "markdown";
+      const maxLength =
+        args.max_length ?? (format === "outline" ? OUTLINE_DEFAULT_MAX_LENGTH : 10000);
       const preferLlmsTxt = args.prefer_llms_txt !== false;
+      const numbers = format === "outline" ? new LinkNumbers() : undefined;
+
+      // A followed link is attacker-controlled page content: it resolves to a
+      // plain URL here and then travels the exact same validation path as a
+      // user-supplied one (isBlockedUrl + allowlist + per-redirect-hop checks).
+      let followUrl: string | undefined;
+      if (args.follow !== undefined) {
+        followUrl = followTargets.get(args.follow);
+        if (!followUrl) {
+          return followTargets.size === 0
+            ? 'Error: no numbered links available — fetch a page with format: "outline" first.'
+            : `Error: link [${args.follow}] is not in the last outline (known: ${[...followTargets.keys()].join(", ")}).`;
+        }
+      }
+
+      // Every outline render replaces the follow map, even when the page had no
+      // links: keeping the previous page's numbers would make `follow: 3` fetch
+      // from a page the user already moved past, while the error text and the
+      // tool description both promise "the last outline". Non-outline fetches
+      // leave the map alone, so a markdown read does not discard usable numbers.
+      const remember = <T>(output: T): T => {
+        if (numbers) {
+          followTargets = new Map(numbers.all().map((link) => [link.number, link.url]));
+        }
+        return output;
+      };
 
       // Multi-URL path: bounded-concurrency pool, per-URL budget, ordered output.
-      if (args.urls && args.urls.length > 0) {
+      if (!followUrl && args.urls && args.urls.length > 0) {
         const urls = args.urls;
         const perUrlBudget = Math.max(PER_URL_MIN_BUDGET, Math.floor(maxLength / urls.length));
         const opts: FetchOptions = {
@@ -669,20 +961,21 @@ export function createWebFetchTool(
           format,
           preferLlmsTxt,
           getNetworkPolicy,
+          numbers,
         };
         const sections = await runPool(urls, MAX_CONCURRENCY, (u) =>
-          fetchWithPreferredDocs(u, opts, context.signal),
+          fetchPage(u, opts, context.signal, pageCache),
         );
-        return urls.map((u, i) => `## ${u}\n${sections[i]}`).join("\n\n");
+        return remember(urls.map((u, i) => `## ${u}\n${sections[i]}`).join("\n\n"));
       }
 
-      const url = args.url;
+      const url = followUrl ?? args.url;
       if (!url) {
-        return "Error: provide either `url` or `urls`.";
+        return "Error: provide either `url`, `urls`, or `follow`.";
       }
 
-      const opts: FetchOptions = { maxLength, format, preferLlmsTxt, getNetworkPolicy };
-      return await fetchWithPreferredDocs(url, opts, context.signal);
+      const opts: FetchOptions = { maxLength, format, preferLlmsTxt, getNetworkPolicy, numbers };
+      return remember(await fetchPage(url, opts, context.signal, pageCache));
     },
   };
 }
@@ -719,16 +1012,37 @@ const parameters = z
       .max(MAX_URLS)
       .optional()
       .describe(`Fetch multiple URLs concurrently (up to ${MAX_URLS}); returns a sectioned digest`),
-    max_length: z.number().optional().describe("Maximum characters to return (default: 10000)"),
-    format: z
-      .enum(["markdown", "text", "html"])
+    follow: z
+      .number()
+      .int()
+      .positive()
       .optional()
-      .describe("Output format: markdown (default, main-content extraction), text, or html"),
+      .describe(
+        "Fetch link N from the most recent outline render, instead of `url`. " +
+          "Followed links are SSRF/allowlist-checked exactly like a supplied URL.",
+      ),
+    max_length: z
+      .number()
+      .optional()
+      .describe(
+        `Maximum characters to return (default: 10000; ${OUTLINE_DEFAULT_MAX_LENGTH} for outline)`,
+      ),
+    format: z
+      .enum(["markdown", "text", "html", "outline"])
+      .optional()
+      .describe(
+        "Output format: markdown (default, main-content extraction), text, html, or outline " +
+          `(compact main content with each link replaced by a number plus a numbered URL index, ` +
+          `capped at ${MAX_OUTLINE_LINKS} links — cheapest; follow links with \`follow\`)`,
+      ),
     prefer_llms_txt: z
       .boolean()
       .optional()
       .describe("Prefer a site's curated /llms.txt for documentation pages (default: true)"),
   })
-  .refine((v) => Boolean(v.url) !== Boolean(v.urls && v.urls.length > 0), {
-    message: "Provide exactly one of `url` or `urls`.",
-  });
+  .refine(
+    (v) =>
+      [Boolean(v.url), Boolean(v.urls && v.urls.length > 0), v.follow !== undefined].filter(Boolean)
+        .length === 1,
+    { message: "Provide exactly one of `url`, `urls`, or `follow`." },
+  );

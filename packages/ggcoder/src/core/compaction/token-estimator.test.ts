@@ -152,7 +152,7 @@ describe("setEstimatorModel", () => {
     setEstimatorModel("gpt-4.1");
     const gptTokens = estimateTokens(text); // 100/3.7 = 28
 
-    setEstimatorModel("glm-5.1");
+    setEstimatorModel("glm-5.3");
     const glmTokens = estimateTokens(text); // 100/2.5 = 40
 
     // GLM should estimate MORE tokens (smaller chars/token ratio = more tokens per char)

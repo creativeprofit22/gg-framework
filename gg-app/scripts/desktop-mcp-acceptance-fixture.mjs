@@ -58,13 +58,19 @@ export async function startDesktopMcpAcceptanceFixture({ port = 0, tls } = {}) {
         if (outputs.length > 0 && lastFunctionName !== "tool_search") {
           return sendSse(res, [
             { type: "response.output_text.delta", delta: "Fixture turn complete." },
-            { type: "response.completed", response: { usage: { input_tokens: 20, output_tokens: 4 } } },
+            {
+              type: "response.completed",
+              response: { usage: { input_tokens: 20, output_tokens: 4 } },
+            },
           ]);
         }
         if (prompt.includes("NO_TOOL")) {
           return sendSse(res, [
             { type: "response.output_text.delta", delta: "No tool requested." },
-            { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 3 } } },
+            {
+              type: "response.completed",
+              response: { usage: { input_tokens: 10, output_tokens: 3 } },
+            },
           ]);
         }
         const desiredTool = prompt.includes("DISPLAY_ERROR")
@@ -82,10 +88,32 @@ export async function startDesktopMcpAcceptanceFixture({ port = 0, tls } = {}) {
             : { text: prompt.includes("AFTER_RECOVERY") ? "after-recovery" : "acceptance-ok" },
         );
         return sendSse(res, [
-          { type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: `fc_${id}`, call_id: `call_${id}`, name: toolName } },
-          { type: "response.function_call_arguments.done", output_index: 0, item_id: `fc_${id}`, arguments: args },
-          { type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: `fc_${id}`, call_id: `call_${id}`, name: toolName, arguments: args } },
-          { type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 3 } } },
+          {
+            type: "response.output_item.added",
+            output_index: 0,
+            item: { type: "function_call", id: `fc_${id}`, call_id: `call_${id}`, name: toolName },
+          },
+          {
+            type: "response.function_call_arguments.done",
+            output_index: 0,
+            item_id: `fc_${id}`,
+            arguments: args,
+          },
+          {
+            type: "response.output_item.done",
+            output_index: 0,
+            item: {
+              type: "function_call",
+              id: `fc_${id}`,
+              call_id: `call_${id}`,
+              name: toolName,
+              arguments: args,
+            },
+          },
+          {
+            type: "response.completed",
+            response: { usage: { input_tokens: 10, output_tokens: 3 } },
+          },
         ]);
       }
       if (req.method !== "POST" || url.pathname !== "/mcp") {
@@ -98,33 +126,76 @@ export async function startDesktopMcpAcceptanceFixture({ port = 0, tls } = {}) {
       if (method === "initialize") {
         const id = `acceptance-session-${nextSession++}`;
         sessions.add(id);
-        return sendJson(res, 200, {
-          jsonrpc: "2.0", id: body.id,
-          result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "acceptance", version: "1.0.0" } },
-        }, { "mcp-session-id": id });
+        return sendJson(
+          res,
+          200,
+          {
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              protocolVersion: "2025-03-26",
+              capabilities: { tools: {} },
+              serverInfo: { name: "acceptance", version: "1.0.0" },
+            },
+          },
+          { "mcp-session-id": id },
+        );
       }
       if (method === "notifications/initialized") {
-        res.writeHead(202); return res.end();
+        res.writeHead(202);
+        return res.end();
       }
       if (typeof sessionId !== "string" || !sessions.has(sessionId)) {
-        return sendJson(res, 404, { jsonrpc: "2.0", id: body.id, error: { code: -32001, message: "Session not found" } });
+        return sendJson(res, 404, {
+          jsonrpc: "2.0",
+          id: body.id,
+          error: { code: -32001, message: "Session not found" },
+        });
       }
       if (method === "tools/list") {
-        return sendJson(res, 200, { jsonrpc: "2.0", id: body.id, result: { tools: [
-          { name: "echo", description: "Return deterministic acceptance text", inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] } },
-          { name: "fail", description: "Return a deterministic MCP tool error", inputSchema: { type: "object", properties: { text: { type: "string" } } } },
-        ] } });
+        return sendJson(res, 200, {
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            tools: [
+              {
+                name: "echo",
+                description: "Return deterministic acceptance text",
+                inputSchema: {
+                  type: "object",
+                  properties: { text: { type: "string" } },
+                  required: ["text"],
+                },
+              },
+              {
+                name: "fail",
+                description: "Return a deterministic MCP tool error",
+                inputSchema: { type: "object", properties: { text: { type: "string" } } },
+              },
+            ],
+          },
+        });
       }
       if (method === "tools/call") {
         const name = body.params?.name;
         const text = String(body.params?.arguments?.text ?? "");
         const failed = name === "fail";
         record({ kind: "tool-call", name, text, failed });
-        return sendJson(res, 200, { jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: failed ? "fixture-is-error" : `fixture-echo:${text}` }], isError: failed } });
+        return sendJson(res, 200, {
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [{ type: "text", text: failed ? "fixture-is-error" : `fixture-echo:${text}` }],
+            isError: failed,
+          },
+        });
       }
       return sendJson(res, 200, { jsonrpc: "2.0", id: body.id, result: {} });
     } catch (error) {
-      record({ kind: "fixture-error", message: error instanceof Error ? error.message : String(error) });
+      record({
+        kind: "fixture-error",
+        message: error instanceof Error ? error.message : String(error),
+      });
       sendJson(res, 500, { error: "fixture failure" });
     }
   };
@@ -141,7 +212,10 @@ export async function startDesktopMcpAcceptanceFixture({ port = 0, tls } = {}) {
     port: address.port,
     url: `${tls ? "https" : "http"}://127.0.0.1:${address.port}`,
     records,
-    close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+    close: () =>
+      new Promise((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      ),
   };
 }
 
@@ -150,7 +224,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     port: Number(process.env.MCP_ACCEPTANCE_PORT ?? 0),
   });
   process.stdout.write(`${JSON.stringify({ port: fixture.port, url: fixture.url })}\n`);
-  const stop = async () => { await fixture.close(); process.exit(0); };
+  const stop = async () => {
+    await fixture.close();
+    process.exit(0);
+  };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 }

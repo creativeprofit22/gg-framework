@@ -389,11 +389,7 @@ function runWorkspaceChecks(options) {
     );
   }
   requireSuccess(
-    run(
-      pnpm,
-      targetedVitestArgs("gg-app", GG_APP_TARGETED_VITEST_PATHS),
-      options,
-    ),
+    run(pnpm, targetedVitestArgs("gg-app", GG_APP_TARGETED_VITEST_PATHS), options),
     "gg-app targeted tests failed.",
   );
   const timeoutTest = join(repoRoot, "packages/ggcoder/src/tools/bash-timeout.test.ts");

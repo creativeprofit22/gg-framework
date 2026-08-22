@@ -1,3 +1,4 @@
+import path from "node:path";
 import fs from "node:fs/promises";
 import { z } from "zod";
 import { getAppPaths } from "../config.js";
@@ -19,6 +20,7 @@ const SettingsSchema = z.object({
       "xiaomi",
       "deepseek",
       "openrouter",
+      "huggingface",
       "sakana",
       "xai",
     ])
@@ -40,6 +42,10 @@ const SettingsSchema = z.object({
     .default("auto"),
   showTokenUsage: z.boolean().default(true),
   idealReviewEnabled: z.boolean().default(true),
+  /** Pre-stop gate: when code was edited but no test/typecheck/lint/build
+   *  command completed since the last edit, the turn is continued once with a
+   *  demand to verify (then one escalation demanding an honest statement). */
+  verificationGateEnabled: z.boolean().default(true),
   /** Append LSP diagnostics to edit/write tool results. */
   lspDiagnostics: z.boolean().default(true),
   /** Allow write/edit outside the workspace (cwd, tmpdir, ~/.gg). Off by
@@ -87,9 +93,36 @@ const SettingsSchema = z.object({
    *  so a legacy server still connects. Off by default: the probe costs a round
    *  trip, and a legacy stdio server that ignores it pays the probe timeout. */
   mcpModernProtocol: z.boolean().default(false),
+  /** Connect MCP servers declared in the OPENED REPO's `.gg/mcp.json`. That
+   *  file is repo-controlled: a malicious repo can declare a stdio `command`
+   *  that executes the moment the project opens. Off by default — enable only
+   *  for repos you trust (global ~/.gg/mcp.json is always connected). */
+  trustProjectMcpServers: z.boolean().default(false),
+  /** Repo paths the user has individually trusted for project-scope MCP (the
+   *  per-repo complement to the global `trustProjectMcpServers`). Stored as
+   *  resolved absolute paths so symlink/relative mismatches can't flip the
+   *  decision. */
+  trustedProjects: z.array(z.string()).default([]),
   /** Max concurrent subagents per resolved child model. Unset = only the
    *  global limit applies. Can only REDUCE concurrency, never raise it. */
   subagentMaxPerModel: z.number().int().min(1).max(4).optional(),
+  /** Per-input byte budgets for prompt-injected content (skills, MCP tool
+   *  descriptions/schemas, project instructions, total prompt ceiling).
+   *  Unset keys fall back to the built-in defaults (core/context-limits.ts). */
+  contextLimits: z
+    .object({
+      skillDescriptionBytes: z.number().int().min(64).optional(),
+      skillCatalogBytes: z.number().int().min(1024).optional(),
+      mcpToolDescriptionBytes: z.number().int().min(64).optional(),
+      mcpToolSchemaBytes: z.number().int().min(1024).optional(),
+      projectContextBytes: z.number().int().min(1024).optional(),
+      systemPromptCeilingBytes: z
+        .number()
+        .int()
+        .min(16 * 1024)
+        .optional(),
+    })
+    .optional(),
   enabledTools: z.array(z.string()).optional(),
   /** Delete session transcripts older than this many days at startup. 0 disables pruning. */
   sessionRetentionDays: z.number().int().min(0).default(30),
@@ -110,6 +143,7 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: "auto",
   showTokenUsage: true,
   idealReviewEnabled: true,
+  verificationGateEnabled: true,
   lspDiagnostics: true,
   allowOutsideWorkspaceWrites: false,
   networkMode: "off",
@@ -119,6 +153,8 @@ export const DEFAULT_SETTINGS: Settings = {
   deferredBuiltinTools: true,
   grepUseRipgrep: true,
   mcpModernProtocol: false,
+  trustProjectMcpServers: false,
+  trustedProjects: [],
   sessionRetentionDays: 30,
   speedProfile: "optimized",
 };
@@ -163,5 +199,24 @@ export class SettingsManager {
 
   getAll(): Settings {
     return { ...this.settings };
+  }
+
+  /** Whether the project at `cwd` is trusted for project-scope MCP. True when
+   *  EITHER the global `trustProjectMcpServers` toggle is on OR the resolved
+   *  cwd appears in `trustedProjects`. */
+  isProjectTrusted(cwd: string): boolean {
+    if (this.settings.trustProjectMcpServers) return true;
+    const resolved = path.resolve(cwd);
+    return this.settings.trustedProjects.includes(resolved);
+  }
+
+  /** Persist `cwd` as a trusted project (resolved absolute path, deduped) and
+   *  save settings immediately. */
+  async trustProject(cwd: string): Promise<void> {
+    const resolved = path.resolve(cwd);
+    if (!this.settings.trustedProjects.includes(resolved)) {
+      this.settings.trustedProjects = [...this.settings.trustedProjects, resolved];
+      await this.save();
+    }
   }
 }

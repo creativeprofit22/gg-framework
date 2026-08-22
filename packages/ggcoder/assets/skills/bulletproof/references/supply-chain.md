@@ -38,16 +38,16 @@ If others install your code, you are their supply chain.
 
 The highest-value target, because CI holds every credential at once — 59% of machines compromised in one worm forensic study were CI runners, not laptops [V].
 
-| Control | Check |
-|---|---|
-| **Pin actions by SHA** | `uses: org/action@<40-char-sha>`. A version tag is mutable: one 2025 incident retroactively repointed tags across tens of thousands of repositories, and a 2026 one force-pushed nearly every tag of a security vendor's own action [V] |
-| **Least-privilege token** | An explicit `permissions:` block, default `contents: read`, elevated only in the job that needs it |
-| **Dangerous triggers** | Workflows that run on pull requests from forks **and** check out the PR head **and** hold secrets. Roughly 38% of organizations still have one [S] |
-| **Cache poisoning** | A fork-triggered workflow with write access to the base repository's cache can plant content a later trusted job consumes — the initial access in a 2026 credential-free worm [V] |
-| **Script injection** | Never interpolate `${{ github.event.* }}` (titles, branch names, comment bodies) directly into a `run:` block. Pass through `env:` and quote |
-| **Secret hygiene** | No secrets echoed, no `set -x` around them, masked in logs, scoped per environment, rotated on any suspicion |
-| **Runners** | Prefer ephemeral. A reused self-hosted runner leaks state between jobs, including from forks |
-| **Branch protection** | Required review on the release branch, signed commits where feasible, no force-push |
+| Control                   | Check                                                                                                                                                                                                                                   |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Pin actions by SHA**    | `uses: org/action@<40-char-sha>`. A version tag is mutable: one 2025 incident retroactively repointed tags across tens of thousands of repositories, and a 2026 one force-pushed nearly every tag of a security vendor's own action [V] |
+| **Least-privilege token** | An explicit `permissions:` block, default `contents: read`, elevated only in the job that needs it                                                                                                                                      |
+| **Dangerous triggers**    | Workflows that run on pull requests from forks **and** check out the PR head **and** hold secrets. Roughly 38% of organizations still have one [S]                                                                                      |
+| **Cache poisoning**       | A fork-triggered workflow with write access to the base repository's cache can plant content a later trusted job consumes — the initial access in a 2026 credential-free worm [V]                                                       |
+| **Script injection**      | Never interpolate `${{ github.event.* }}` (titles, branch names, comment bodies) directly into a `run:` block. Pass through `env:` and quote                                                                                            |
+| **Secret hygiene**        | No secrets echoed, no `set -x` around them, masked in logs, scoped per environment, rotated on any suspicion                                                                                                                            |
+| **Runners**               | Prefer ephemeral. A reused self-hosted runner leaks state between jobs, including from forks                                                                                                                                            |
+| **Branch protection**     | Required review on the release branch, signed commits where feasible, no force-push                                                                                                                                                     |
 
 ## Consuming other people's code beyond packages
 

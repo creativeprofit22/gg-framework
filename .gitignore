@@ -60,11 +60,23 @@ packages/ggcoder/ideal-sim/
 # prompt-bench scratch sandboxes
 experiments/prompt-bench/.bench-sandbox-*
 
-# Local benchmarks, agent config and one-off research tooling.
+# Local agent config, benchmarks and one-off tooling. These are personal working
+# directories, not shipped source, EXCEPT the CI size/startup gates below: no
+# package build or npm script reads them, so a fresh clone is unaffected by
+# their absence.
+/.gg/
 /.claude/
-/bench/
+# bench/ stays personal except the committed CI gates and their baseline.
+/bench/*
+!/bench/size-gate.mjs
+!/bench/startup-gate.mjs
+!/bench/baseline/
+/bench/baseline/*
+!/bench/baseline/sizes.json
 /benchmarks/
 /experiments/bench-mark/
+/experiments/lean-code-bench/
+/scripts/
 CLAUDE.md
 packages/*/.bench-*.mjs
 

@@ -181,11 +181,7 @@ describe("mcp store", () => {
   });
 
   it("serializes add and remove without resurrecting the removed server", async () => {
-    await addServer(
-      { name: "victim", url: "https://victim.example/mcp" },
-      "global",
-      tmpProject,
-    );
+    await addServer({ name: "victim", url: "https://victim.example/mcp" }, "global", tmpProject);
     const commit = blockNextAtomicConfigCommit();
     const addSurvivor = addServer(
       { name: "survivor", url: "https://survivor.example/mcp" },
@@ -198,10 +194,7 @@ describe("mcp store", () => {
     await commit.contenderStarted;
     commit.release();
 
-    await expect(Promise.all([addSurvivor, removeVictim])).resolves.toEqual([
-      { ok: true },
-      true,
-    ]);
+    await expect(Promise.all([addSurvivor, removeVictim])).resolves.toEqual([{ ok: true }, true]);
     const names = (await loadServers(tmpProject)).map((server) => server.config.name);
     expect(names).toEqual(["survivor"]);
   });

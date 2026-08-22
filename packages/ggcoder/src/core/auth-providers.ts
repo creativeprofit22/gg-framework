@@ -82,31 +82,27 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "gemini",
     label: "Gemini",
-    description: "Gemini 3.1 Flash Lite, Gemini 3.5 Flash, Gemini 3.1 Pro (Preview)",
+    description: "Gemini 3.7 Flash, 3.1 Flash Lite, 3.5 Flash, 3.1 Pro (Preview)",
     methods: ["oauth"],
   },
   {
     value: "xai",
     label: "xAI (Grok)",
-    description: "Grok 4.5 · OAuth or API key",
+    description: "Grok 4.6, Grok 4.5 · OAuth or API key",
     methods: ["oauth", "apikey"],
     apiKeyLabel: "xAI",
     methodDetails: {
       oauth: {
         method: "oauth",
         label: "Sign in with Grok",
-        billing: "Uses your SuperGrok or X Premium subscription — no per-token API billing.",
-        when: "Preferred. Pick this if you already pay for Grok.",
-        requires:
-          "An active SuperGrok or X Premium subscription. xAI gates this endpoint by tier, " +
-          "so a valid login can still be refused — keep an API key as backup.",
+        billing: "Included with SuperGrok or X Premium.",
+        when: "",
       },
       apikey: {
         method: "apikey",
         label: "xAI API key",
-        billing: "Metered pay-per-token billing on your console.x.ai credits.",
-        when: "Use without a Grok subscription, or as the fallback when OAuth usage runs out.",
-        requires: "An API key from console.x.ai.",
+        billing: "Pay-per-token on console.x.ai credits.",
+        when: "",
       },
     },
   },
@@ -120,23 +116,21 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
       oauth: {
         method: "oauth",
         label: "Sign in with Kimi",
-        billing: "Uses your Kimi For Coding plan — no per-token API billing.",
-        when: "Preferred. Pick this if you have a Kimi coding plan.",
-        requires: "An active Kimi For Coding subscription.",
+        billing: "Included with a Kimi For Coding plan.",
+        when: "",
       },
       apikey: {
         method: "apikey",
         label: "Moonshot API key",
-        billing: "Metered pay-per-token billing on your Moonshot platform credits.",
-        when: "Use without a Kimi plan, or as the fallback when plan usage runs out.",
-        requires: "An API key from platform.moonshot.ai.",
+        billing: "Pay-per-token on Moonshot credits.",
+        when: "",
       },
     },
   },
   {
     value: "glm",
     label: "Z.AI (GLM)",
-    description: "GLM-5.2, GLM-5.1, GLM-4.7, GLM-4.7 Flash",
+    description: "GLM-5.3",
     methods: ["apikey"],
     apiKeyLabel: "Z.AI",
   },
@@ -188,6 +182,13 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
     methods: ["apikey"],
     apiKeyLabel: "OpenRouter",
   },
+  {
+    value: "huggingface",
+    label: "Hugging Face",
+    description: "Qwen3 Coder 480B, GPT-OSS 120B",
+    methods: ["apikey"],
+    apiKeyLabel: "Hugging Face",
+  },
 ];
 
 export function getAuthProvider(value: string): AuthProviderMeta | undefined {
@@ -213,13 +214,13 @@ export function describeAuthMethods(provider: string): AuthMethodMeta[] {
           method,
           label: `Sign in with ${meta.label}`,
           billing: "Uses your existing plan with this provider.",
-          when: "The only way to connect this provider.",
+          when: "",
         }
       : {
           method,
           label: `${meta.apiKeyLabel ?? meta.label} API key`,
-          billing: "Metered pay-per-token billing on this provider's credits.",
-          when: "The only way to connect this provider.",
+          billing: "Pay-per-token on this provider's API credits.",
+          when: "",
         };
   });
 }
@@ -235,9 +236,5 @@ export function describeAuthMethods(provider: string): AuthMethodMeta[] {
 export function authPriorityNote(provider: string): string | undefined {
   const dual = dualAuthProvider(provider);
   if (!dual) return undefined;
-  return (
-    `With both connected, ${dual.oauthLabel} is used first. The ${dual.apiKeyLabel} takes over ` +
-    `automatically while subscription usage is out (or if the OAuth login expires), then ` +
-    `${dual.oauthLabel} resumes on its own.`
-  );
+  return `Uses ${dual.oauthLabel} first; the ${dual.apiKeyLabel} takes over when it runs out, then switches back.`;
 }

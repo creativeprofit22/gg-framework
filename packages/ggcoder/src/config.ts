@@ -40,6 +40,13 @@ export interface SavedSettings {
   lspDiagnostics: boolean;
   /** Allow write/edit outside the workspace (cwd, tmpdir, ~/.gg). */
   allowOutsideWorkspaceWrites: boolean;
+  /** Connect MCP servers declared in the opened repo's .gg/mcp.json. That file
+   *  is repo-controlled, so a malicious repo could run a command the moment
+   *  the project opens. Default false — enable only for repos you trust. */
+  trustProjectMcpServers: boolean;
+  /** Repo paths individually trusted for project-scope MCP (the per-repo
+   *  complement to the global `trustProjectMcpServers`). */
+  trustedProjects: string[];
   /** Max concurrent subagents per resolved child model (1–4). Unset = global limit only. */
   subagentMaxPerModel?: number;
   /** Days to keep session transcripts before startup pruning. 0 disables. */
@@ -62,6 +69,7 @@ const VALID_PROVIDERS = new Set<Provider>([
   "minimax",
   "deepseek",
   "openrouter",
+  "huggingface",
   "sakana",
   "xai",
 ]);
@@ -82,6 +90,8 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
     lspDiagnostics: true,
     allowOutsideWorkspaceWrites: false,
     sessionRetentionDays: 30,
+    trustProjectMcpServers: false,
+    trustedProjects: [],
   };
   try {
     const raw = JSON.parse(fsSync.readFileSync(filePath, "utf-8"));
@@ -127,10 +137,28 @@ export function loadSavedSettings(settingsFilePath?: string): SavedSettings {
     if (raw.speedProfile === "optimized" || raw.speedProfile === "baseline") {
       result.speedProfile = raw.speedProfile;
     }
+    if (raw.trustProjectMcpServers === true) result.trustProjectMcpServers = true;
+    if (Array.isArray(raw.trustedProjects))
+      result.trustedProjects = raw.trustedProjects.filter(
+        (x: unknown): x is string => typeof x === "string",
+      );
   } catch {
     // No settings file or invalid JSON — use defaults
   }
   return result;
+}
+
+/** Whether project-scope MCP is allowed for the given cwd. True when EITHER the
+ *  global `trustProjectMcpServers` toggle is on OR the resolved cwd is in the
+ *  per-repo `trustedProjects` list. Shared so the CLI, sidecar, and dashboard
+ *  all agree on the same decision. */
+export function projectScopeAllowed(
+  globalTrust: boolean,
+  trustedProjects: string[],
+  cwd: string,
+): boolean {
+  if (globalTrust) return true;
+  return trustedProjects.includes(path.resolve(cwd));
 }
 
 const VALID_THINKING_LEVELS = new Set<ThinkingLevel>([

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { prettifyError } from "zod";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
@@ -1436,6 +1437,56 @@ describe("edit anchor guard", () => {
 
     expect(contentOf(raw)).toContain("outside the workspace");
     expect(contentOf(raw)).toContain("allowOutsideWorkspaceWrites");
+  });
+});
+
+/**
+ * Models intermittently hand-serialize `edits` into a JSON string instead of
+ * emitting a real array (~1% of edit calls across opus-5/sonnet-5/glm-5.x).
+ * Well-formed strings are coerced; malformed ones must be rejected with a
+ * message that names the mistake, because the stock "expected array, received
+ * string" made the model re-send the identical payload until the agent loop's
+ * repeat counter killed the turn.
+ */
+describe("edit stringified `edits` handling", () => {
+  const parse = (edits: unknown) =>
+    createEditTool(os.tmpdir()).parameters.safeParse({ file_path: "a.ts", edits });
+
+  const errorFor = (edits: unknown): string => {
+    const result = parse(edits);
+    expect(result.success).toBe(false);
+    return result.success ? "" : prettifyError(result.error);
+  };
+
+  it("coerces a well-formed stringified array back into edits", () => {
+    const result = parse(JSON.stringify([{ old_text: "a", new_text: "b" }]));
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.edits).toEqual([{ old_text: "a", new_text: "b" }]);
+  });
+
+  // Verbatim payloads recovered from ~/.gg session logs. Each broke a real
+  // turn: unescaped control characters, a dropped `new_text` key, a `":`
+  // corrupted into `>`, and a stream truncated mid-string.
+  it.each([
+    ["raw control character", '[{"old_text": "a\\nb", "new_text": "c\nd"}]'],
+    ["missing new_text key", '[{"old_text": "a", " * Egress limits"}]'],
+    ["corrupted key delimiter", '[{"old_text">function stopServer() {'],
+    ["truncated mid-payload", '[{"old_text": "a", "new_text": "bb'],
+  ])("rejects %s with actionable guidance", (_label, payload) => {
+    const message = errorFor(payload);
+    expect(message).toContain("JSON-encoded string");
+    expect(message).toContain("real JSON array");
+    expect(message).toContain("split the work");
+    // The unactionable stock message is what caused the retry loop.
+    expect(message).not.toContain("expected array, received string");
+  });
+
+  it("leaves non-string type errors on their default message", () => {
+    expect(errorFor(42)).toContain("expected array, received number");
+  });
+
+  it("still reports per-item errors inside a real array", () => {
+    expect(errorFor([{ old_text: 5 }])).toContain("expected string, received number");
   });
 });
 

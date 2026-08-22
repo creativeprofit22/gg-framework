@@ -21,11 +21,7 @@ import { toast } from "./toast";
 
 type McpPaneClient = Pick<
   PaneAgentClient,
-  | "listMcpServers"
-  | "addMcpServer"
-  | "loginMcpServer"
-  | "removeMcpServer"
-  | "subscribe"
+  "listMcpServers" | "addMcpServer" | "loginMcpServer" | "removeMcpServer" | "subscribe"
 >;
 
 interface Props {
@@ -73,22 +69,25 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
   const [retrying, setRetrying] = useState(false);
   const loginTargetRef = useRef<{ name: string; scope: "global" | "project" } | null>(null);
 
-  const refresh = useCallback(async (cwd?: string): Promise<void> => {
-    setLoading(true);
-    setListCwd(cwd);
-    try {
-      const nextServers = await client.listMcpServers(cwd);
-      setServers(nextServers);
-      setManagementError(null);
-    } catch (error) {
-      setManagementError({
-        message: error instanceof Error ? error.message : "Could not load MCP servers.",
-        retry: () => refresh(cwd),
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [client]);
+  const refresh = useCallback(
+    async (cwd?: string): Promise<void> => {
+      setLoading(true);
+      setListCwd(cwd);
+      try {
+        const nextServers = await client.listMcpServers(cwd);
+        setServers(nextServers);
+        setManagementError(null);
+      } catch (error) {
+        setManagementError({
+          message: error instanceof Error ? error.message : "Could not load MCP servers.",
+          retry: () => refresh(cwd),
+        });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client],
+  );
 
   // Stream OAuth login progress for remote MCP servers. `mcp_auth_url` opens the
   // system browser; done/error give the user clear feedback and refresh the list
@@ -180,11 +179,7 @@ export function McpModal({ onClose, client = primaryMcpClient }: Props): React.R
     setLoggingIn(name);
     loginTargetRef.current = { name, scope: rowScope };
     try {
-      await client.loginMcpServer(
-        name,
-        rowScope,
-        rowScope === "project" ? listCwd : undefined,
-      );
+      await client.loginMcpServer(name, rowScope, rowScope === "project" ? listCwd : undefined);
       // Outcome arrives via the mcp_auth_* events above.
     } catch (e) {
       setLoggingIn(null);

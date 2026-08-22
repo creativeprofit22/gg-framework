@@ -100,6 +100,7 @@ beforeEach(async () => {
     "xiaomi-credits",
     "deepseek",
     "openrouter",
+    "huggingface",
   ];
   await writeJson(
     path.join(tmpHome, ".gg", "auth.json"),
@@ -190,6 +191,73 @@ describe("AgentSession worker auto-compaction", () => {
       ]),
       expect.objectContaining({ provider: "anthropic", model: "claude-test" }),
     );
+  }, 15_000);
+});
+
+describe("AgentSession compaction persistence", () => {
+  it("persists the compaction summary as a new checkpoint in the session log", async () => {
+    // "Model-visible means logged" — the compacted history that replaces the
+    // conversation is exactly what the next model request will be derived
+    // from, so it must land in a NEW persisted session file (the old file
+    // stays as the parent for history reconstruction).
+    shouldCompactMock.mockReturnValue(false); // manual compact() below, no pre-run auto-compaction
+    compactMock.mockResolvedValue({
+      messages: [
+        { role: "system", content: "worker system prompt" },
+        {
+          role: "user",
+          content: "[session compacted] Summary of earlier work: the task was started.",
+        },
+      ],
+      result: {
+        compacted: true,
+        originalCount: 3,
+        newCount: 2,
+        tokensBeforeEstimate: 100_000,
+        tokensAfterEstimate: 500,
+      },
+    });
+    agentLoopMock.mockImplementation(async function* (messages: Message[]) {
+      messages.push({ role: "assistant", content: "working on it" });
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    // Non-transient: compact() takes the lease branch that persists a
+    // compaction checkpoint (transient sessions compact in memory only).
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "worker system prompt",
+    });
+    await session.initialize();
+    await session.prompt("Do the task.");
+    const preCompactPath = session.getState().sessionPath;
+
+    await session.compact();
+    expect(compactMock).toHaveBeenCalledTimes(1);
+    const postCompactPath = session.getState().sessionPath;
+    await session.dispose();
+
+    // The compacted branch is a NEW session file...
+    expect(postCompactPath).toBeTruthy();
+    expect(postCompactPath).not.toBe(preCompactPath);
+
+    // ...whose persisted rows are the replacement history, not the old one.
+    const rows = (await fs.readFile(postCompactPath!, "utf-8"))
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as { type?: string; message?: Message });
+    const texts = rows
+      .filter((row) => row.type === "message" && row.message)
+      .map((row) =>
+        typeof row.message!.content === "string"
+          ? row.message!.content
+          : JSON.stringify(row.message!.content),
+      );
+    expect(texts.some((t) => t.includes("[session compacted] Summary of earlier work"))).toBe(true);
+    expect(texts.some((t) => t.includes("Do the task."))).toBe(false);
   }, 15_000);
 });
 

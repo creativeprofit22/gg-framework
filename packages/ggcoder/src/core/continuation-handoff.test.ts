@@ -3,82 +3,179 @@ import { describe, expect, it } from "vitest";
 import {
   CONTINUATION_HANDOFF_LIMITS,
   buildContinuationEvidence,
+  buildFallbackContinuationHandoff,
   parseContinuationHandoff,
   renderContinuationPrompt,
+  type ContinuationEvidenceV1,
   type ContinuationHandoffV1,
 } from "./continuation-handoff.js";
 
-const validHandoff: ContinuationHandoffV1 = {
-  objective: "Carry the implementation into a fresh session.",
-  verifiedWork: ["Focused tests passed."],
-  decisions: ["Prepare before resetting."],
-  constraints: ["Continue here must remain unchanged."],
-  repositoryCoordinates: [
-    { path: "src/AgentPane.tsx", startLine: 10, endLine: 20, relevance: "Fresh-session flow" },
-  ],
-  artifactPaths: [{ path: ".gg/plans/handoff.md", relevance: "Approved plan" }],
-  unresolvedIssues: [],
-  nextAtomicStep: "Add the sidecar preparation service.",
+const relevantFile = {
+  path: "packages/ggcoder/src/core/continuation-handoff.ts",
+  startLine: 10,
+  endLine: 20,
+  relevance: "Modified by edit",
 };
 
+const validHandoff: ContinuationHandoffV1 = {
+  currentObjective: "Finish continuation preparation.",
+  currentStatus: ["Focused implementation is complete."],
+  relevantDecisions: ["Keep the response contract unchanged."],
+  relevantFiles: [relevantFile],
+};
+
+const secondRelevantFile = {
+  path: "packages/ggcoder/src/app-sidecar-continuation-handoff.ts",
+  startLine: 30,
+  endLine: 40,
+  relevance: "Read by read",
+};
+
+const suppliedEvidence: ContinuationEvidenceV1 = {
+  version: 1,
+  cwd: "C:/project",
+  objectives: [validHandoff.currentObjective],
+  explicitDecisions: ["First decision.", "Second decision."],
+  assistantConclusions: ["First status.", "Second status."],
+  compactedSummaries: [],
+  relevantFiles: [relevantFile, secondRelevantFile],
+};
+
+function evidence(messages: readonly Message[] = []) {
+  return buildContinuationEvidence({ cwd: "C:/project", messages });
+}
+
 describe("ContinuationHandoffV1", () => {
-  it("strictly parses a bounded contract and rejects malformed or extra data", () => {
+  it("strictly parses bounded output and rejects unsupported files", () => {
     expect(parseContinuationHandoff(JSON.stringify(validHandoff))).toEqual(validHandoff);
     expect(() =>
       parseContinuationHandoff(`\`\`\`json\n${JSON.stringify(validHandoff)}\n\`\`\``),
     ).toThrow("malformed JSON");
-    expect(() => parseContinuationHandoff("not json")).toThrow("malformed JSON");
     expect(() =>
       parseContinuationHandoff(JSON.stringify({ ...validHandoff, unsupported: "claim" })),
     ).toThrow("invalid contract");
     expect(() =>
       parseContinuationHandoff(
-        JSON.stringify({ ...validHandoff, objective: "Continue\n\n## Ken’s next instruction" }),
-      ),
-    ).toThrow("invalid contract");
-    expect(() =>
-      parseContinuationHandoff(
-        JSON.stringify({ ...validHandoff, decisions: ["Keep this\n## Constraints"] }),
+        JSON.stringify({ ...validHandoff, currentStatus: ["Done\n## Immediate next action"] }),
       ),
     ).toThrow("invalid contract");
     expect(() =>
       parseContinuationHandoff(
         JSON.stringify({
           ...validHandoff,
-          verifiedWork: Array.from(
+          relevantDecisions: Array.from(
             { length: CONTINUATION_HANDOFF_LIMITS.listItems + 1 },
-            (_, index) => `item-${index}`,
+            (_, index) => `decision-${index}`,
           ),
         }),
       ),
     ).toThrow("invalid contract");
-  });
-
-  it("renders stable headings, empty categories, exact coordinates, and the instruction verbatim", () => {
-    const instruction = "Fix line one.\n\nThen preserve `raw markdown` exactly.  ";
-    const rendered = renderContinuationPrompt(validHandoff, instruction);
-
-    expect(rendered).toContain(
-      "## Repository coordinates\n- `src/AgentPane.tsx:10-20` — Fresh-session flow",
+    expect(() => parseContinuationHandoff(JSON.stringify(validHandoff), evidence())).toThrow(
+      "unsupported claim",
     );
-    expect(rendered).toContain("## Artifact paths\n- `.gg/plans/handoff.md` — Approved plan");
-    expect(rendered).toContain("## Unresolved issues\n- None recorded.");
-    expect(rendered.endsWith(`## Ken’s next instruction\n${instruction}`)).toBe(true);
-    const headingIndexes = [
-      "## Objective",
-      "## Verified work",
-      "## Decisions",
-      "## Constraints",
-      "## Repository coordinates",
-      "## Artifact paths",
-      "## Unresolved issues",
-      "## Next atomic step",
-      "## Ken’s next instruction",
-    ].map((heading) => rendered.indexOf(heading));
-    expect(headingIndexes).toEqual([...headingIndexes].sort((a, b) => a - b));
   });
 
-  it("rejects empty and oversized next instructions", () => {
+  it("cross-checks claims and restores supplied evidence order", () => {
+    const parsed = parseContinuationHandoff(
+      JSON.stringify({
+        currentObjective: validHandoff.currentObjective,
+        currentStatus: ["Second status.", "First status."],
+        relevantDecisions: ["Second decision.", "First decision."],
+        relevantFiles: [secondRelevantFile, relevantFile],
+      }),
+      suppliedEvidence,
+    );
+
+    expect(parsed.currentStatus).toEqual(["First status.", "Second status."]);
+    expect(parsed.relevantDecisions).toEqual(["First decision.", "Second decision."]);
+    expect(parsed.relevantFiles).toEqual([relevantFile, secondRelevantFile]);
+  });
+
+  it("rejects an older supported objective so fallback keeps the newest", () => {
+    const evidenceWithOlderObjective = {
+      ...suppliedEvidence,
+      objectives: ["Earlier objective.", validHandoff.currentObjective],
+    };
+
+    expect(() =>
+      parseContinuationHandoff(
+        JSON.stringify({
+          currentObjective: "Earlier objective.",
+          currentStatus: [],
+          relevantDecisions: [],
+          relevantFiles: [],
+        }),
+        evidenceWithOlderObjective,
+      ),
+    ).toThrow("unsupported claim");
+    expect(buildFallbackContinuationHandoff(evidenceWithOlderObjective).currentObjective).toBe(
+      validHandoff.currentObjective,
+    );
+  });
+
+  it.each([
+    ["objective", { currentObjective: "Fabricated objective." }],
+    ["status", { currentStatus: ["Fabricated status."] }],
+    ["decision", { relevantDecisions: ["Fabricated decision."] }],
+    ["file relevance", { relevantFiles: [{ ...relevantFile, relevance: "Fabricated." }] }],
+    ["out-of-bounds file range", { relevantFiles: [{ ...relevantFile, endLine: 21 }] }],
+  ])("rejects fabricated %s claims", (_label, replacement) => {
+    expect(() =>
+      parseContinuationHandoff(
+        JSON.stringify({
+          currentObjective: validHandoff.currentObjective,
+          currentStatus: [],
+          relevantDecisions: [],
+          relevantFiles: [],
+          ...replacement,
+        }),
+        suppliedEvidence,
+      ),
+    ).toThrow("unsupported");
+  });
+
+  it.each([
+    ["reversed", { startLine: 20, endLine: 10 }],
+    ["unsafe", { startLine: Number.MAX_SAFE_INTEGER + 1 }],
+  ])("rejects %s synthesized ranges", (_label, range) => {
+    expect(() =>
+      parseContinuationHandoff(
+        JSON.stringify({ ...validHandoff, relevantFiles: [{ ...relevantFile, ...range }] }),
+      ),
+    ).toThrow("invalid contract");
+  });
+
+  it("rejects oversized synthesis output before parsing", () => {
+    expect(() =>
+      parseContinuationHandoff(
+        `${JSON.stringify(validHandoff)}${" ".repeat(CONTINUATION_HANDOFF_LIMITS.synthesisResponseChars)}`,
+      ),
+    ).toThrow("size limit");
+  });
+
+  it("renders exactly five ordered sections and preserves the next action byte-for-byte", () => {
+    const instruction = "Fix line one.\n\nThen preserve `raw markdown` exactly.  ";
+    const rendered = renderContinuationPrompt(
+      { ...validHandoff, currentStatus: [], relevantDecisions: [] },
+      instruction,
+    );
+
+    expect(rendered.match(/^## .+$/gm)).toEqual([
+      "## Current objective",
+      "## Current status",
+      "## Relevant decisions",
+      "## Relevant files",
+      "## Immediate next action",
+    ]);
+    expect(rendered).toContain("## Current status\nNone recorded.");
+    expect(rendered).toContain(
+      "## Relevant files\n- `packages/ggcoder/src/core/continuation-handoff.ts:10-20` — Modified by edit",
+    );
+    const actionMarker = "## Immediate next action\n";
+    expect(rendered.slice(rendered.indexOf(actionMarker) + actionMarker.length)).toBe(instruction);
+  });
+
+  it("rejects empty and oversized next actions", () => {
     expect(() => renderContinuationPrompt(validHandoff, "   ")).toThrow("cannot be empty");
     expect(() =>
       renderContinuationPrompt(
@@ -90,101 +187,122 @@ describe("ContinuationHandoffV1", () => {
 });
 
 describe("buildContinuationEvidence", () => {
-  it("keeps objectives, summaries, exact source ranges, and artifact paths", () => {
+  it("uses only the active context and builds an extractive fallback", () => {
     const messages: Message[] = [
-      { role: "system", content: "SECRET SYSTEM PROMPT" },
-      { role: "user", content: "Build the handoff. It must fail closed." },
+      { role: "user", content: "Old request" },
       {
         role: "user",
-        content: "[Previous conversation summary] Contract module is complete.",
+        content:
+          "[Previous conversation summary]\nCurrent work is partly complete.\nDecision: keep version 1.",
         provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
+      },
+      { role: "assistant", content: "The core implementation now passes its focused checks." },
+      { role: "user", content: "Finish fallback delivery. It must preserve the tagged prompt." },
+    ];
+    const activeEvidence = evidence(messages);
+    const fallback = buildFallbackContinuationHandoff(activeEvidence);
+
+    expect(fallback.currentObjective).toBe(
+      "Finish fallback delivery. It must preserve the tagged prompt.",
+    );
+    expect(fallback.currentStatus).toEqual([
+      "Current work is partly complete. Decision: keep version 1.",
+      "The core implementation now passes its focused checks.",
+    ]);
+    expect(fallback.relevantDecisions).toEqual([
+      "Decision: keep version 1.",
+      "Finish fallback delivery. It must preserve the tagged prompt.",
+    ]);
+    expect(JSON.stringify(fallback)).not.toContain(COMPACTION_MARKER);
+  });
+
+  it("prioritizes modified files, then recent reads, with exact paths and ranges", () => {
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "old-read",
+            name: "read",
+            args: { file_path: "src/old.ts", offset: 2, limit: 4 },
+          },
+          {
+            type: "tool_call",
+            id: "edit",
+            name: "edit",
+            args: { file_path: "src/exact path.ts", edits: [] },
+          },
+        ],
       },
       {
         role: "assistant",
         content: [
-          { type: "text", text: "Verified focused tests pass." },
           {
             type: "tool_call",
-            id: "read-1",
+            id: "duplicate-read",
             name: "read",
-            args: { file_path: "src/AgentPane.tsx", offset: 2143, limit: 12 },
+            args: { file_path: "src/exact path.ts", offset: 50, limit: 2 },
           },
           {
             type: "tool_call",
-            id: "shot-1",
-            name: "screenshot",
-            args: { out_path: ".gg/screenshots/fresh.png" },
+            id: "recent-read",
+            name: "read",
+            args: { file_path: "src/recent.ts", offset: 2143, limit: 12 },
           },
         ],
       },
     ];
 
-    const evidence = buildContinuationEvidence({
-      cwd: "C:/project",
-      sourceSessionPath: "C:/sessions/source.jsonl",
-      messages,
-    });
-
-    expect(evidence.objectives).toEqual(["Build the handoff. It must fail closed."]);
-    expect(evidence.constraints).toEqual(["Build the handoff. It must fail closed."]);
-    expect(evidence.compactedSummaries).toEqual(["Contract module is complete."]);
-    expect(evidence.assistantConclusions).toEqual(["Verified focused tests pass."]);
-    expect(evidence.repositoryCoordinates).toEqual([
+    expect(evidence(messages).relevantFiles).toEqual([
+      { path: "src/exact path.ts", relevance: "Modified by edit" },
       {
-        path: "src/AgentPane.tsx",
+        path: "src/recent.ts",
         startLine: 2143,
         endLine: 2154,
-        relevance: "Referenced by read",
+        relevance: "Read by read",
       },
+      { path: "src/old.ts", startLine: 2, endLine: 5, relevance: "Read by read" },
     ]);
-    expect(evidence.artifactPaths).toEqual([
-      { path: "C:/sessions/source.jsonl", relevance: "Source coding session" },
-      { path: ".gg/screenshots/fresh.png", relevance: "Produced or referenced by screenshot" },
-    ]);
-    expect(JSON.stringify(evidence)).not.toContain("SECRET SYSTEM PROMPT");
   });
 
-  it("keeps the newest coordinates and artifacts while preserving the source session", () => {
-    const messages: Message[] = Array.from(
-      { length: 20 },
-      (_, index): Message => ({
+  it("drops invalid and excessive tool-call ranges deterministically", () => {
+    const messages: Message[] = [
+      {
         role: "assistant",
         content: [
           {
             type: "tool_call",
-            id: `read-${index}`,
+            id: "reversed",
             name: "read",
-            args: {
-              file_path: index === 19 ? "src/reports/file-19.ts" : `src/file-${index}.ts`,
-            },
+            args: { file_path: "src/reversed.ts", offset: 20, end_line: 10 },
           },
           {
             type: "tool_call",
-            id: `shot-${index}`,
-            name: "screenshot",
-            args: { out_path: `.gg/screenshots/shot-${index}.png` },
+            id: "overflow",
+            name: "read",
+            args: { file_path: "src/overflow.ts", offset: Number.MAX_SAFE_INTEGER, limit: 2 },
+          },
+          {
+            type: "tool_call",
+            id: "unsafe",
+            name: "read",
+            args: { file_path: "src/unsafe.ts", offset: Number.MAX_SAFE_INTEGER + 1 },
           },
         ],
-      }),
-    );
+      },
+    ];
 
-    const evidence = buildContinuationEvidence({
-      cwd: "/repo",
-      sourceSessionPath: "/sessions/source.jsonl",
-      messages,
-    });
-
-    expect(evidence.repositoryCoordinates).toHaveLength(CONTINUATION_HANDOFF_LIMITS.coordinates);
-    expect(evidence.repositoryCoordinates[0]?.path).toBe("src/file-4.ts");
-    expect(evidence.repositoryCoordinates.at(-1)?.path).toBe("src/reports/file-19.ts");
-    expect(evidence.artifactPaths).toHaveLength(CONTINUATION_HANDOFF_LIMITS.coordinates);
-    expect(evidence.artifactPaths[0]?.path).toBe("/sessions/source.jsonl");
-    expect(evidence.artifactPaths[1]?.path).toBe(".gg/screenshots/shot-5.png");
-    expect(evidence.artifactPaths.at(-1)?.path).toBe(".gg/screenshots/shot-19.png");
+    expect(evidence(messages).relevantFiles).toEqual([
+      { path: "src/unsafe.ts", relevance: "Read by read" },
+      { path: "src/overflow.ts", relevance: "Read by read" },
+      { path: "src/reversed.ts", relevance: "Read by read" },
+    ]);
   });
 
-  it("excludes transcript sludge, hidden automation, raw tool output, and media payloads", () => {
+  it("excludes system text, hidden automation, tool results, media, and transcript markers", () => {
     const messages: Message[] = [
+      { role: "system", content: "SECRET SYSTEM PROMPT" },
       {
         role: "user",
         content: [{ type: "image", mediaType: "image/png", data: "BASE64_PAYLOAD" }],
@@ -196,22 +314,30 @@ describe("buildContinuationEvidence", () => {
       },
       {
         role: "tool",
-        content: [{ type: "tool_result", toolCallId: "x", content: "UNRESTRICTED TOOL OUTPUT" }],
+        content: [{ type: "tool_result", toolCallId: "x", content: "RAW TOOL OUTPUT" }],
+      },
+      {
+        role: "user",
+        content: "[Previous conversation summary]\nCurrent status only.",
+        provenance: { source: "runtime", kind: "compaction_summary", visibility: "summary" },
       },
       { role: "user", content: "Real objective" },
-      { role: "user", content: "Real objective" },
     ];
+    const serialized = JSON.stringify(evidence(messages));
 
-    const serialized = JSON.stringify(
-      buildContinuationEvidence({ cwd: "/repo", sourceSessionPath: "/sessions/a.jsonl", messages }),
-    );
-    expect(serialized).not.toContain("BASE64_PAYLOAD");
-    expect(serialized).not.toContain("HIDDEN AUTOMATION TEXT");
-    expect(serialized).not.toContain("UNRESTRICTED TOOL OUTPUT");
+    for (const excluded of [
+      "SECRET SYSTEM PROMPT",
+      "BASE64_PAYLOAD",
+      "HIDDEN AUTOMATION TEXT",
+      "RAW TOOL OUTPUT",
+      COMPACTION_MARKER,
+    ]) {
+      expect(serialized).not.toContain(excluded);
+    }
     expect(JSON.parse(serialized).objectives).toEqual(["Real objective"]);
   });
 
-  it("caps every evidence category and the total serialized package", () => {
+  it("caps every evidence field, file list, fallback field, and rendered prompt", () => {
     const messages: Message[] = Array.from(
       { length: CONTINUATION_HANDOFF_LIMITS.evidenceItems * 3 },
       (_, index): Message => ({
@@ -221,37 +347,59 @@ describe("buildContinuationEvidence", () => {
     );
     messages.push(
       ...Array.from(
-        { length: CONTINUATION_HANDOFF_LIMITS.coordinates + 4 },
+        { length: CONTINUATION_HANDOFF_LIMITS.relevantFiles + 6 },
         (_, index): Message => ({
           role: "assistant",
           content: [
             {
               type: "tool_call",
-              id: `shot-${index}`,
-              name: "screenshot",
-              args: { out_path: `.gg/screenshots/${index}-${"x".repeat(1_000)}.png` },
+              id: `read-${index}`,
+              name: "read",
+              args: { file_path: `src/file-${index}.ts`, offset: 1, limit: 1 },
             },
           ],
         }),
       ),
     );
-    const evidence = buildContinuationEvidence({
-      cwd: "/repo",
-      sourceSessionPath: "/sessions/a.jsonl",
-      messages,
-    });
-
-    expect(evidence.objectives.length).toBeLessThanOrEqual(
-      CONTINUATION_HANDOFF_LIMITS.evidenceItems,
+    const boundedEvidence = evidence(messages);
+    const fallback = buildFallbackContinuationHandoff(boundedEvidence);
+    const rendered = renderContinuationPrompt(
+      fallback,
+      "n".repeat(CONTINUATION_HANDOFF_LIMITS.nextInstructionChars),
     );
-    expect(
-      evidence.objectives.every(
-        (item) => item.length <= CONTINUATION_HANDOFF_LIMITS.evidenceItemChars,
-      ),
-    ).toBe(true);
-    expect(JSON.stringify(evidence).length).toBeLessThanOrEqual(
+
+    expect(JSON.stringify(boundedEvidence).length).toBeLessThanOrEqual(
       CONTINUATION_HANDOFF_LIMITS.evidenceChars,
     );
-    expect(evidence.artifactPaths[0]?.path).toBe("/sessions/a.jsonl");
+    expect(boundedEvidence.relevantFiles).toHaveLength(
+      CONTINUATION_HANDOFF_LIMITS.relevantFiles,
+    );
+    expect(fallback.currentObjective.length).toBeLessThanOrEqual(
+      CONTINUATION_HANDOFF_LIMITS.objectiveChars,
+    );
+    expect(
+      [...fallback.currentStatus, ...fallback.relevantDecisions].every(
+        (item) => item.length <= CONTINUATION_HANDOFF_LIMITS.listItemChars,
+      ),
+    ).toBe(true);
+    expect(rendered.length).toBeLessThan(CONTINUATION_HANDOFF_LIMITS.renderedPromptChars);
+  });
+
+  it("returns the same honest empty fallback every time", () => {
+    const emptyEvidence = evidence();
+    const first = buildFallbackContinuationHandoff(emptyEvidence);
+
+    expect(buildFallbackContinuationHandoff(emptyEvidence)).toEqual(first);
+    expect(first).toEqual({
+      currentObjective: "None recorded.",
+      currentStatus: [],
+      relevantDecisions: [],
+      relevantFiles: [],
+    });
+    expect(renderContinuationPrompt(first, "Continue")).toContain(
+      "## Relevant files\nNone recorded.",
+    );
   });
 });
+
+const COMPACTION_MARKER = "[Previous conversation summary]";

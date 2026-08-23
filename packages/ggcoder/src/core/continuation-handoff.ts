@@ -5,56 +5,45 @@ export const CONTINUATION_HANDOFF_VERSION = 1 as const;
 
 export const CONTINUATION_HANDOFF_LIMITS = {
   nextInstructionChars: 8_000,
-  objectiveChars: 1_600,
-  listItems: 8,
-  listItemChars: 1_000,
-  coordinates: 16,
+  objectiveChars: 1_200,
+  listItems: 6,
+  listItemChars: 500,
+  relevantFiles: 8,
   pathChars: 500,
-  relevanceChars: 500,
+  relevanceChars: 250,
   evidenceItems: 12,
   evidenceItemChars: 1_500,
   evidenceChars: 18_000,
+  synthesisResponseChars: 24_000,
   renderedPromptChars: 24_000,
 } as const;
 
-export interface ContinuationRepositoryCoordinate {
+export interface ContinuationRelevantFile {
   path: string;
   startLine?: number;
   endLine?: number;
   relevance: string;
 }
 
-export interface ContinuationArtifactPath {
-  path: string;
-  relevance: string;
-}
-
 export interface ContinuationHandoffV1 {
-  objective: string;
-  verifiedWork: string[];
-  decisions: string[];
-  constraints: string[];
-  repositoryCoordinates: ContinuationRepositoryCoordinate[];
-  artifactPaths: ContinuationArtifactPath[];
-  unresolvedIssues: string[];
-  nextAtomicStep: string;
+  currentObjective: string;
+  currentStatus: string[];
+  relevantDecisions: string[];
+  relevantFiles: ContinuationRelevantFile[];
 }
 
 export interface ContinuationEvidenceV1 {
   version: typeof CONTINUATION_HANDOFF_VERSION;
   cwd: string;
-  sourceSessionPath: string;
   objectives: string[];
-  constraints: string[];
+  explicitDecisions: string[];
   assistantConclusions: string[];
   compactedSummaries: string[];
-  repositoryCoordinates: ContinuationRepositoryCoordinate[];
-  artifactPaths: ContinuationArtifactPath[];
+  relevantFiles: ContinuationRelevantFile[];
 }
 
 export interface ContinuationEvidenceInput {
   cwd: string;
-  sourceSessionPath: string;
   messages: readonly Message[];
 }
 
@@ -68,11 +57,16 @@ const boundedString = (max: number) =>
 const boundedList = z
   .array(boundedString(CONTINUATION_HANDOFF_LIMITS.listItemChars))
   .max(CONTINUATION_HANDOFF_LIMITS.listItems);
-const repositoryCoordinateSchema = z
+const boundedLineNumber = z
+  .number()
+  .int()
+  .positive()
+  .refine(Number.isSafeInteger, "must be a safe integer");
+const relevantFileSchema = z
   .object({
     path: boundedString(CONTINUATION_HANDOFF_LIMITS.pathChars),
-    startLine: z.number().int().positive().optional(),
-    endLine: z.number().int().positive().optional(),
+    startLine: boundedLineNumber.optional(),
+    endLine: boundedLineNumber.optional(),
     relevance: boundedString(CONTINUATION_HANDOFF_LIMITS.relevanceChars),
   })
   .strict()
@@ -88,34 +82,26 @@ const repositoryCoordinateSchema = z
       context.addIssue({ code: "custom", message: "endLine must be at or after startLine" });
     }
   });
-const artifactPathSchema = z
-  .object({
-    path: boundedString(CONTINUATION_HANDOFF_LIMITS.pathChars),
-    relevance: boundedString(CONTINUATION_HANDOFF_LIMITS.relevanceChars),
-  })
-  .strict();
 
 export const continuationHandoffV1Schema = z
   .object({
-    objective: boundedString(CONTINUATION_HANDOFF_LIMITS.objectiveChars),
-    verifiedWork: boundedList,
-    decisions: boundedList,
-    constraints: boundedList,
-    repositoryCoordinates: z
-      .array(repositoryCoordinateSchema)
-      .max(CONTINUATION_HANDOFF_LIMITS.coordinates),
-    artifactPaths: z.array(artifactPathSchema).max(CONTINUATION_HANDOFF_LIMITS.coordinates),
-    unresolvedIssues: boundedList,
-    nextAtomicStep: boundedString(CONTINUATION_HANDOFF_LIMITS.listItemChars),
+    currentObjective: boundedString(CONTINUATION_HANDOFF_LIMITS.objectiveChars),
+    currentStatus: boundedList,
+    relevantDecisions: boundedList,
+    relevantFiles: z
+      .array(relevantFileSchema)
+      .max(CONTINUATION_HANDOFF_LIMITS.relevantFiles),
   })
   .strict();
 
 const COMPACTION_SUMMARY_MARKER = "[Previous conversation summary]";
-const ARTIFACT_PATH_PATTERN =
-  /(?:^|[\\/])(?:\.gg[\\/](?:plans|screenshots|generated)|screenshots?|reports?|artifacts?|sessions?)(?:[\\/]|$)/i;
 const SOURCE_EXTENSION_PATTERN =
-  /\.(?:[cm]?[jt]sx?|css|scss|sass|less|html?|rs|py|go|java|kt|swift|rb|php|vue|svelte|astro|sql|ya?ml|toml|json|mdx?)$/i;
+  /\.(?:[cm]?[jt]sx?|css|scss|sass|less|html?|rs|py|go|java|kt|swift|rb|php|vue|svelte|astro|sql|ya?ml|toml|json|mdx?|txt|log|png|jpe?g|gif|webp|svg|pdf)$/i;
 const PATH_ARGUMENT_KEYS = ["file_path", "path", "plan_path", "out_path", "image"] as const;
+const MODIFICATION_TOOLS = new Set(["edit", "write", "generate_image"]);
+const READ_TOOLS = new Set(["read"]);
+const BINDING_DECISION_PATTERN =
+  /\b(?:decision|decided|constraint|required|must|never|do not|don't|only|keep|preserve|without)\b/i;
 
 function cap(text: string, max: number): string {
   const normalized = text.replace(/\s+/g, " ").trim();
@@ -125,13 +111,13 @@ function cap(text: string, max: number): string {
 function addUnique(
   items: string[],
   value: string,
-  limit = CONTINUATION_HANDOFF_LIMITS.evidenceItems,
-  preserveFirst = false,
+  limit: number = CONTINUATION_HANDOFF_LIMITS.evidenceItems,
 ): void {
   const bounded = cap(value, CONTINUATION_HANDOFF_LIMITS.evidenceItemChars);
-  if (!bounded || items.some((item) => item.toLocaleLowerCase() === bounded.toLocaleLowerCase()))
+  if (!bounded || items.some((item) => item.toLocaleLowerCase() === bounded.toLocaleLowerCase())) {
     return;
-  if (items.length >= limit) items.splice(preserveFirst ? 1 : 0, 1);
+  }
+  if (items.length >= limit) items.shift();
   items.push(bounded);
 }
 
@@ -155,71 +141,67 @@ function isEligibleUserEvidence(message: Extract<Message, { role: "user" }>): bo
   if (message.provenance?.visibility === "hidden") return false;
   if (message.provenance?.kind === "compaction_summary") return true;
   if (message.provenance?.source === "runtime") return false;
-  if (message.provenance?.kind === "automation" || message.provenance?.kind === "notification") {
-    return false;
-  }
-  return true;
+  return (
+    message.provenance?.kind !== "automation" && message.provenance?.kind !== "notification"
+  );
 }
 
-function coordinateFromArgs(
-  pathValue: string,
+function positiveSafeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function safeRange(args: Record<string, unknown>): Pick<
+  ContinuationRelevantFile,
+  "startLine" | "endLine"
+> {
+  const startValue = args.startLine ?? args.start_line ?? args.offset;
+  const endValue = args.endLine ?? args.end_line;
+  const limitValue = args.limit;
+  if (startValue === undefined && endValue === undefined && limitValue === undefined) return {};
+
+  const startLine = positiveSafeInteger(startValue);
+  if (startLine === undefined) return {};
+  if (endValue !== undefined) {
+    const endLine = positiveSafeInteger(endValue);
+    return endLine !== undefined && endLine >= startLine ? { startLine, endLine } : {};
+  }
+  if (limitValue !== undefined) {
+    const limit = positiveSafeInteger(limitValue);
+    if (limit === undefined || limit > Number.MAX_SAFE_INTEGER - startLine + 1) return {};
+    const endLine = startLine + limit - 1;
+    return { startLine, endLine };
+  }
+  return { startLine };
+}
+
+function relevantFileFromArgs(
+  path: string,
   args: Record<string, unknown>,
   toolName: string,
-): ContinuationRepositoryCoordinate {
-  const start = positiveInteger(args.startLine ?? args.start_line ?? args.offset);
-  const explicitEnd = positiveInteger(args.endLine ?? args.end_line);
-  const limit = positiveInteger(args.limit);
-  const end =
-    explicitEnd ?? (start !== undefined && limit !== undefined ? start + limit - 1 : undefined);
+  sequence: number,
+): { file: ContinuationRelevantFile; priority: number; sequence: number } {
+  const priority = MODIFICATION_TOOLS.has(toolName) ? 2 : READ_TOOLS.has(toolName) ? 1 : 0;
+  const action = priority === 2 ? "Modified" : priority === 1 ? "Read" : "Referenced";
   return {
-    path: cap(pathValue, CONTINUATION_HANDOFF_LIMITS.pathChars),
-    ...(start === undefined ? {} : { startLine: start }),
-    ...(end === undefined ? {} : { endLine: end }),
-    relevance: cap(`Referenced by ${toolName}`, CONTINUATION_HANDOFF_LIMITS.relevanceChars),
+    file: {
+      path,
+      ...safeRange(args),
+      relevance: `${action} by ${toolName}`.slice(
+        0,
+        CONTINUATION_HANDOFF_LIMITS.relevanceChars,
+      ),
+    },
+    priority,
+    sequence,
   };
 }
 
-function positiveInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
-}
-
-function addCoordinate(
-  coordinates: ContinuationRepositoryCoordinate[],
-  coordinate: ContinuationRepositoryCoordinate,
-): void {
-  const key = `${coordinate.path.toLocaleLowerCase()}:${coordinate.startLine ?? ""}:${coordinate.endLine ?? ""}`;
-  if (
-    coordinates.some(
-      (item) =>
-        `${item.path.toLocaleLowerCase()}:${item.startLine ?? ""}:${item.endLine ?? ""}` === key,
-    )
-  ) {
-    return;
-  }
-  if (coordinates.length >= CONTINUATION_HANDOFF_LIMITS.coordinates) coordinates.shift();
-  coordinates.push(coordinate);
-}
-
-function addArtifact(
-  artifacts: ContinuationArtifactPath[],
-  path: string,
-  relevance: string,
-  preserveFirst = false,
-): void {
-  const boundedPath = cap(path, CONTINUATION_HANDOFF_LIMITS.pathChars);
-  if (
-    !boundedPath ||
-    artifacts.some((item) => item.path.toLocaleLowerCase() === boundedPath.toLocaleLowerCase())
-  ) {
-    return;
-  }
-  if (artifacts.length >= CONTINUATION_HANDOFF_LIMITS.coordinates) {
-    artifacts.splice(preserveFirst ? 1 : 0, 1);
-  }
-  artifacts.push({
-    path: boundedPath,
-    relevance: cap(relevance, CONTINUATION_HANDOFF_LIMITS.relevanceChars),
-  });
+function isExactFilePath(key: (typeof PATH_ARGUMENT_KEYS)[number], value: string): boolean {
+  if (!value.trim() || value.length > CONTINUATION_HANDOFF_LIMITS.pathChars) return false;
+  if (/[\r\n]/.test(value)) return false;
+  return key !== "path" || SOURCE_EXTENSION_PATTERN.test(value);
 }
 
 function toolCalls(message: Extract<Message, { role: "assistant" }>): ContentPart[] {
@@ -230,27 +212,18 @@ function toolCalls(message: Extract<Message, { role: "assistant" }>): ContentPar
 
 function enforceEvidenceTotalLimit(evidence: ContinuationEvidenceV1): ContinuationEvidenceV1 {
   while (JSON.stringify(evidence).length > CONTINUATION_HANDOFF_LIMITS.evidenceChars) {
-    const reducible = [evidence.assistantConclusions, evidence.compactedSummaries].find(
-      (items) => items.length > 1,
-    );
-    if (reducible) {
-      reducible.shift();
+    const oldest = [
+      evidence.objectives,
+      evidence.assistantConclusions,
+      evidence.compactedSummaries,
+      evidence.explicitDecisions,
+    ].find((items) => items.length > 1);
+    if (oldest) {
+      oldest.shift();
       continue;
     }
-    if (evidence.constraints.length > 1) {
-      evidence.constraints.splice(1, 1);
-      continue;
-    }
-    if (evidence.objectives.length > 1) {
-      evidence.objectives.splice(1, 1);
-      continue;
-    }
-    if (evidence.repositoryCoordinates.length > 1) {
-      evidence.repositoryCoordinates.shift();
-      continue;
-    }
-    if (evidence.artifactPaths.length > 1) {
-      evidence.artifactPaths.splice(1, 1);
+    if (evidence.relevantFiles.length > 1) {
+      evidence.relevantFiles.pop();
       continue;
     }
     break;
@@ -258,18 +231,19 @@ function enforceEvidenceTotalLimit(evidence: ContinuationEvidenceV1): Continuati
   return evidence;
 }
 
-/** Build a bounded, evidence-only package. Raw tool results, system text, and media never enter it. */
+/** Build bounded evidence only from the source session's active in-memory context window. */
 export function buildContinuationEvidence(
   input: ContinuationEvidenceInput,
 ): ContinuationEvidenceV1 {
   const objectives: string[] = [];
-  const constraints: string[] = [];
+  const explicitDecisions: string[] = [];
   const assistantConclusions: string[] = [];
   const compactedSummaries: string[] = [];
-  const repositoryCoordinates: ContinuationRepositoryCoordinate[] = [];
-  const artifactPaths: ContinuationArtifactPath[] = [];
-
-  addArtifact(artifactPaths, input.sourceSessionPath, "Source coding session");
+  const files = new Map<
+    string,
+    { file: ContinuationRelevantFile; priority: number; sequence: number }
+  >();
+  let sequence = 0;
 
   for (const message of input.messages) {
     if (message.role === "user" && isEligibleUserEvidence(message)) {
@@ -279,59 +253,91 @@ export function buildContinuationEvidence(
         text.startsWith(COMPACTION_SUMMARY_MARKER) ||
         message.provenance?.kind === "compaction_summary"
       ) {
-        addUnique(compactedSummaries, text.replace(COMPACTION_SUMMARY_MARKER, "").trim());
-      } else {
-        addUnique(objectives, text, CONTINUATION_HANDOFF_LIMITS.evidenceItems, true);
-        if (
-          /\b(?:must|never|do not|don't|only|preserve|without|constraint|required)\b/i.test(text)
-        ) {
-          addUnique(constraints, text, CONTINUATION_HANDOFF_LIMITS.evidenceItems, true);
+        const summary = text.replace(COMPACTION_SUMMARY_MARKER, "").trim();
+        addUnique(compactedSummaries, summary, 1);
+        for (const line of summary.split(/\r?\n/)) {
+          if (/^\s*(?:[-*]\s*)?(?:decision|constraint)s?\s*:/i.test(line)) {
+            addUnique(explicitDecisions, line);
+          }
         }
+      } else {
+        addUnique(objectives, text);
+        if (BINDING_DECISION_PATTERN.test(text)) addUnique(explicitDecisions, text);
       }
       continue;
     }
 
     if (message.role !== "assistant" || message.provenance?.visibility === "hidden") continue;
-    const conclusion = textFromAssistantMessage(message);
-    if (conclusion.trim()) addUnique(assistantConclusions, conclusion);
+    const conclusion = textFromAssistantMessage(message).trim();
+    if (conclusion) {
+      addUnique(assistantConclusions, conclusion);
+      for (const line of conclusion.split(/\r?\n/)) {
+        if (/^\s*(?:[-*]\s*)?(?:decision|constraint)s?\s*:/i.test(line)) {
+          addUnique(explicitDecisions, line);
+        }
+      }
+    }
 
     for (const call of toolCalls(message)) {
       if (call.type !== "tool_call" || !call.args || typeof call.args !== "object") continue;
       const args = call.args as Record<string, unknown>;
       for (const key of PATH_ARGUMENT_KEYS) {
         const value = args[key];
-        if (typeof value !== "string" || !value.trim()) continue;
-        const isRepositoryFile =
-          key === "file_path" ||
-          (SOURCE_EXTENSION_PATTERN.test(value) && !ARTIFACT_PATH_PATTERN.test(value));
-        const artifact =
-          ["screenshot", "generate_image"].includes(call.name) ||
-          (!isRepositoryFile && ARTIFACT_PATH_PATTERN.test(value));
-        if (artifact) {
-          addArtifact(artifactPaths, value, `Produced or referenced by ${call.name}`, true);
-        } else if (isRepositoryFile) {
-          addCoordinate(repositoryCoordinates, coordinateFromArgs(value, args, call.name));
+        if (typeof value !== "string" || !isExactFilePath(key, value)) continue;
+        const candidate = relevantFileFromArgs(value, args, call.name, sequence++);
+        const dedupeKey = value.toLocaleLowerCase();
+        const existing = files.get(dedupeKey);
+        if (
+          !existing ||
+          candidate.priority > existing.priority ||
+          (candidate.priority === existing.priority && candidate.sequence > existing.sequence)
+        ) {
+          files.set(dedupeKey, candidate);
         }
       }
     }
   }
 
-  // Keep the original and latest objectives when the conversation exceeds the item cap.
-  const boundedObjectives =
-    objectives.length <= CONTINUATION_HANDOFF_LIMITS.evidenceItems
-      ? objectives
-      : [objectives[0], ...objectives.slice(-(CONTINUATION_HANDOFF_LIMITS.evidenceItems - 1))];
+  const relevantFiles = [...files.values()]
+    .sort((left, right) => right.priority - left.priority || right.sequence - left.sequence)
+    .slice(0, CONTINUATION_HANDOFF_LIMITS.relevantFiles)
+    .map(({ file }) => file);
 
   return enforceEvidenceTotalLimit({
     version: CONTINUATION_HANDOFF_VERSION,
     cwd: cap(input.cwd, CONTINUATION_HANDOFF_LIMITS.pathChars),
-    sourceSessionPath: cap(input.sourceSessionPath, CONTINUATION_HANDOFF_LIMITS.pathChars),
-    objectives: boundedObjectives,
-    constraints,
+    objectives,
+    explicitDecisions,
     assistantConclusions,
     compactedSummaries,
-    repositoryCoordinates,
-    artifactPaths,
+    relevantFiles,
+  });
+}
+
+function fallbackList(items: readonly string[]): string[] {
+  const bounded: string[] = [];
+  for (const item of items) {
+    const value = cap(item, CONTINUATION_HANDOFF_LIMITS.listItemChars);
+    if (value && !bounded.some((existing) => existing === value)) bounded.push(value);
+  }
+  return bounded.slice(-CONTINUATION_HANDOFF_LIMITS.listItems);
+}
+
+/** Build an extractive handoff when optional model synthesis is unavailable or invalid. */
+export function buildFallbackContinuationHandoff(
+  evidence: ContinuationEvidenceV1,
+): ContinuationHandoffV1 {
+  return continuationHandoffV1Schema.parse({
+    currentObjective: cap(
+      evidence.objectives.at(-1) ?? "None recorded.",
+      CONTINUATION_HANDOFF_LIMITS.objectiveChars,
+    ),
+    currentStatus: fallbackList([
+      ...evidence.compactedSummaries.slice(-1),
+      ...evidence.assistantConclusions.slice(-CONTINUATION_HANDOFF_LIMITS.listItems),
+    ]),
+    relevantDecisions: fallbackList(evidence.explicitDecisions),
+    relevantFiles: evidence.relevantFiles.slice(0, CONTINUATION_HANDOFF_LIMITS.relevantFiles),
   });
 }
 
@@ -339,8 +345,31 @@ function extractJsonObject(response: string): unknown {
   return JSON.parse(response.trim());
 }
 
-/** Parse synthesis output strictly: malformed JSON, unknown keys, and over-limit values fail closed. */
-export function parseContinuationHandoff(response: string): ContinuationHandoffV1 {
+function evidenceOrderedSelection(proposed: readonly string[], evidence: readonly string[]): string[] {
+  const supported = new Set(evidence);
+  const selected = new Set(proposed);
+  if (selected.size !== proposed.length || proposed.some((claim) => !supported.has(claim))) {
+    throw new Error("Continuation handoff synthesis returned an unsupported claim.");
+  }
+  return evidence.filter((claim, index) => selected.has(claim) && evidence.indexOf(claim) === index);
+}
+
+function relevantFileKey(file: ContinuationRelevantFile): string {
+  return JSON.stringify([file.path, file.startLine, file.endLine, file.relevance]);
+}
+
+function relevantFileCoordinates(file: ContinuationRelevantFile): string {
+  return JSON.stringify([file.path, file.startLine, file.endLine]);
+}
+
+/** Parse bounded synthesis output and retain only claims supported by supplied evidence. */
+export function parseContinuationHandoff(
+  response: string,
+  evidence?: ContinuationEvidenceV1,
+): ContinuationHandoffV1 {
+  if (response.length > CONTINUATION_HANDOFF_LIMITS.synthesisResponseChars) {
+    throw new Error("Continuation handoff synthesis exceeded its size limit.");
+  }
   let parsed: unknown;
   try {
     parsed = extractJsonObject(response);
@@ -351,18 +380,48 @@ export function parseContinuationHandoff(response: string): ContinuationHandoffV
   if (!result.success) {
     throw new Error("Continuation handoff synthesis returned an invalid contract.");
   }
-  return result.data;
+  if (!evidence) return result.data;
+
+  if (result.data.currentObjective !== evidence.objectives.at(-1)) {
+    throw new Error("Continuation handoff synthesis returned an unsupported claim.");
+  }
+  const currentStatus = evidenceOrderedSelection(result.data.currentStatus, [
+    ...evidence.compactedSummaries,
+    ...evidence.assistantConclusions,
+  ]);
+  const relevantDecisions = evidenceOrderedSelection(
+    result.data.relevantDecisions,
+    evidence.explicitDecisions,
+  );
+  const sourceFiles = new Map(evidence.relevantFiles.map((file) => [relevantFileKey(file), file]));
+  const coordinates = new Set<string>();
+  const selectedFiles = new Set<string>();
+  for (const file of result.data.relevantFiles) {
+    const coordinate = relevantFileCoordinates(file);
+    const key = relevantFileKey(file);
+    if (coordinates.has(coordinate)) {
+      throw new Error("Continuation handoff synthesis returned duplicate files.");
+    }
+    coordinates.add(coordinate);
+    if (!sourceFiles.has(key)) {
+      throw new Error("Continuation handoff synthesis returned an unsupported file claim.");
+    }
+    selectedFiles.add(key);
+  }
+
+  return {
+    currentObjective: result.data.currentObjective,
+    currentStatus,
+    relevantDecisions,
+    relevantFiles: evidence.relevantFiles.filter((file) => selectedFiles.has(relevantFileKey(file))),
+  };
 }
 
 const HEADINGS: ReadonlyArray<readonly [string, keyof ContinuationHandoffV1]> = [
-  ["Objective", "objective"],
-  ["Verified work", "verifiedWork"],
-  ["Decisions", "decisions"],
-  ["Constraints", "constraints"],
-  ["Repository coordinates", "repositoryCoordinates"],
-  ["Artifact paths", "artifactPaths"],
-  ["Unresolved issues", "unresolvedIssues"],
-  ["Next atomic step", "nextAtomicStep"],
+  ["Current objective", "currentObjective"],
+  ["Current status", "currentStatus"],
+  ["Relevant decisions", "relevantDecisions"],
+  ["Relevant files", "relevantFiles"],
 ];
 
 function renderSection(
@@ -370,20 +429,15 @@ function renderSection(
   value: ContinuationHandoffV1[keyof ContinuationHandoffV1],
 ): string {
   if (typeof value === "string") return value;
-  if (value.length === 0) return "- None recorded.";
-  if (key === "repositoryCoordinates") {
-    return (value as ContinuationRepositoryCoordinate[])
+  if (value.length === 0) return "None recorded.";
+  if (key === "relevantFiles") {
+    return (value as ContinuationRelevantFile[])
       .map((item) => {
         const range = item.startLine
           ? `:${item.startLine}${item.endLine && item.endLine !== item.startLine ? `-${item.endLine}` : ""}`
           : "";
         return `- \`${item.path}${range}\` — ${item.relevance}`;
       })
-      .join("\n");
-  }
-  if (key === "artifactPaths") {
-    return (value as ContinuationArtifactPath[])
-      .map((item) => `- \`${item.path}\` — ${item.relevance}`)
       .join("\n");
   }
   return (value as string[]).map((item) => `- ${item}`).join("\n");
@@ -402,7 +456,7 @@ export function renderContinuationPrompt(
   const sections = HEADINGS.map(
     ([heading, key]) => `## ${heading}\n${renderSection(key, validated[key])}`,
   );
-  sections.push(`## Ken’s next instruction\n${nextInstruction}`);
+  sections.push(`## Immediate next action\n${nextInstruction}`);
   const rendered = sections.join("\n\n");
   if (rendered.length > CONTINUATION_HANDOFF_LIMITS.renderedPromptChars) {
     throw new Error("Rendered continuation handoff exceeds its size limit.");

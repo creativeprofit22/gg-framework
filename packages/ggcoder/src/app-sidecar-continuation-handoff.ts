@@ -2,6 +2,7 @@ import type { Message, Provider } from "@kenkaiiii/gg-ai";
 import {
   CONTINUATION_HANDOFF_VERSION,
   buildContinuationEvidence,
+  buildFallbackContinuationHandoff,
   parseContinuationHandoff,
   renderContinuationPrompt,
   type ContinuationHandoffV1,
@@ -9,8 +10,11 @@ import {
 
 export const CONTINUATION_HANDOFF_SYSTEM_PROMPT = `You prepare a compact continuation handoff for another coding-agent session.
 Return ONLY one JSON object with exactly these keys:
-objective (string), verifiedWork (string[]), decisions (string[]), constraints (string[]), repositoryCoordinates ({path,startLine?,endLine?,relevance}[]), artifactPaths ({path,relevance}[]), unresolvedIssues (string[]), nextAtomicStep (string).
-Use only claims directly supported by the supplied evidence. Prefer an empty array over guessing. Never claim work is verified unless the evidence explicitly says so. Preserve paths and line ranges exactly; never invent coordinates. Keep every string concise and on one line. Do not include markdown fences, commentary, system text, or the next Ken instruction.`;
+currentObjective (string), currentStatus (string[]), relevantDecisions (string[]), relevantFiles ({path,startLine?,endLine?,relevance}[]).
+Use only claims directly supported by the supplied evidence. Copy selected claims exactly without paraphrasing and preserve their evidence order. Prefer an empty array over guessing. Preserve file paths, relevance, and supplied line ranges exactly; never invent files or coordinates. Keep every string concise and on one line. Do not include markdown fences, commentary, system text, or Ken's next instruction.`;
+
+export const CONTINUATION_HANDOFF_SYNTHESIS_TIMEOUT_MS = 4_000;
+const CONTINUATION_HANDOFF_CLEANUP_TIMEOUT_MS = 250;
 
 export interface ContinuationSourceSession {
   getMessages(): Message[];
@@ -38,6 +42,7 @@ export interface ContinuationSynthesisSessionOptions {
   model: string;
   cwd: string;
   systemPrompt: string;
+  signal: AbortSignal;
   transient: true;
   allowedTools: [];
   projectCustomization: false;
@@ -76,6 +81,52 @@ function lastAssistantText(messages: readonly Message[]): string {
   return "";
 }
 
+function withDeadline<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  onTimeout?: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error("Continuation handoff synthesis timed out."));
+    }, timeoutMs);
+    timer.unref?.();
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function settlesWithin(operation: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), timeoutMs);
+    timer.unref?.();
+    const settled = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    operation.then(settled, settled);
+  });
+}
+
+function disposeAfterSettlement(
+  operation: Promise<unknown>,
+  session: ContinuationSynthesisSession,
+): void {
+  const dispose = () => {
+    void withDeadline(session.dispose(), CONTINUATION_HANDOFF_CLEANUP_TIMEOUT_MS).catch(() => {});
+  };
+  operation.then(dispose, dispose);
+}
+
 export class AppSidecarContinuationHandoffService {
   constructor(private readonly dependencies: ContinuationHandoffPreparationDependencies) {}
 
@@ -86,52 +137,94 @@ export class AppSidecarContinuationHandoffService {
     const state = sourceSession.getState();
     const evidence = buildContinuationEvidence({
       cwd: state.cwd,
-      sourceSessionPath: state.sessionPath,
       messages: sourceSession.getMessages(),
     });
-    const synthesisSession = this.dependencies.createSynthesisSession({
-      provider: state.provider,
-      model: state.model,
-      cwd: state.cwd,
-      systemPrompt: CONTINUATION_HANDOFF_SYSTEM_PROMPT,
-      transient: true,
-      allowedTools: [],
-      projectCustomization: false,
-      globalSubagents: false,
-      coderSlashCommands: false,
-      selfCorrectionHooks: false,
-      loadExtensions: false,
-      orchestrationPrompt: false,
-      mcpEnabled: false,
-      maxTurns: 1,
-      maxTurnExtensions: 0,
+    const fallback = buildFallbackContinuationHandoff(evidence);
+    const fallbackResult = (): PreparedContinuationHandoff => ({
+      version: CONTINUATION_HANDOFF_VERSION,
+      prompt: renderContinuationPrompt(fallback, nextInstruction),
+      handoff: fallback,
     });
+    const controller = new AbortController();
+    let synthesisSession: ContinuationSynthesisSession | undefined;
+    let synthesisOperation: Promise<ContinuationHandoffV1> | undefined;
+    let disposalAttempted = false;
 
-    let prepared: PreparedContinuationHandoff;
     try {
-      await synthesisSession.initialize();
-      await synthesisSession.prompt(
-        `Synthesize ContinuationHandoffV1 from this bounded evidence:\n${JSON.stringify(evidence)}`,
-        { source: "runtime", kind: "automation", visibility: "hidden" },
-        { disableTools: true },
+      const session = this.dependencies.createSynthesisSession({
+        provider: state.provider,
+        model: state.model,
+        cwd: state.cwd,
+        systemPrompt: CONTINUATION_HANDOFF_SYSTEM_PROMPT,
+        signal: controller.signal,
+        transient: true,
+        allowedTools: [],
+        projectCustomization: false,
+        globalSubagents: false,
+        coderSlashCommands: false,
+        selfCorrectionHooks: false,
+        loadExtensions: false,
+        orchestrationPrompt: false,
+        mcpEnabled: false,
+        maxTurns: 1,
+        maxTurnExtensions: 0,
+      });
+      synthesisSession = session;
+
+      synthesisOperation = (async () => {
+        await session.initialize();
+        if (controller.signal.aborted) {
+          throw new Error("Continuation handoff synthesis was aborted.");
+        }
+        await session.prompt(
+          `Synthesize ContinuationHandoffV1 from this bounded evidence:\n${JSON.stringify(evidence)}`,
+          { source: "runtime", kind: "automation", visibility: "hidden" },
+          { disableTools: true },
+        );
+        const response = lastAssistantText(session.getMessages());
+        if (!response) {
+          throw new Error("Continuation handoff synthesis returned no response.");
+        }
+        return parseContinuationHandoff(response, evidence);
+      })();
+      const handoff = await withDeadline(
+        synthesisOperation,
+        CONTINUATION_HANDOFF_SYNTHESIS_TIMEOUT_MS,
+        () => controller.abort(),
       );
-      const response = lastAssistantText(synthesisSession.getMessages());
-      if (!response.trim()) throw new Error("Continuation handoff synthesis returned no response.");
-      const handoff = parseContinuationHandoff(response);
-      prepared = {
+      const prepared: PreparedContinuationHandoff = {
         version: CONTINUATION_HANDOFF_VERSION,
         prompt: renderContinuationPrompt(handoff, nextInstruction),
         handoff,
       };
-    } catch (error) {
-      try {
-        await synthesisSession.dispose();
-      } catch {
-        // Preserve the synthesis failure; disposal is best-effort on this path.
+
+      disposalAttempted = true;
+      await withDeadline(
+        session.dispose(),
+        CONTINUATION_HANDOFF_CLEANUP_TIMEOUT_MS,
+        () => controller.abort(),
+      );
+      return prepared;
+    } catch {
+      controller.abort();
+      if (synthesisSession && !disposalAttempted) {
+        if (
+          synthesisOperation &&
+          !(await settlesWithin(synthesisOperation, CONTINUATION_HANDOFF_CLEANUP_TIMEOUT_MS))
+        ) {
+          disposeAfterSettlement(synthesisOperation, synthesisSession);
+          return fallbackResult();
+        }
+        try {
+          await withDeadline(
+            synthesisSession.dispose(),
+            CONTINUATION_HANDOFF_CLEANUP_TIMEOUT_MS,
+          );
+        } catch {
+          // Synthesis cleanup is optional; deterministic fallback remains deliverable.
+        }
       }
-      throw error;
+      return fallbackResult();
     }
-    await synthesisSession.dispose();
-    return prepared;
   }
 }

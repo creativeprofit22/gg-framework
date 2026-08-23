@@ -3,6 +3,7 @@ param(
   [int]$DelaySeconds = 20,
   [ValidateRange(1, 120)][int]$GracefulShutdownSeconds = 10,
   [ValidateRange(1, 120)][int]$ForcedShutdownSeconds = 15,
+  [ValidateRange(1, 300)][int]$LockClearTimeoutSeconds = 30,
   [string]$MetadataPath,
   [string]$LogPath,
   [string]$AllowedInstallerRoot,
@@ -22,15 +23,57 @@ if ([string]::IsNullOrWhiteSpace($AllowedInstallerRoot)) {
 }
 
 $script:InstallLogPath = $LogPath
+$script:LockClearTimeoutMilliseconds = $LockClearTimeoutSeconds * 1000
+$script:RestartManagerResourceLimit = 10000
 
 function Write-Step([string]$Message) {
+  $null = Assert-NoReparsePointTraversal -Path $script:InstallLogPath -Description 'Install log path'
   $line = '[{0}] {1}' -f (Get-Date).ToString('o'), $Message
   Add-Content -LiteralPath $script:InstallLogPath -Value $line -Encoding UTF8
 }
 
-function Test-PathWithinRoot([string]$Path, [string]$Root) {
+function Assert-NoReparsePointTraversal([string]$Path, [string]$Description = 'Path') {
   $fullPath = [IO.Path]::GetFullPath($Path)
-  $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd([char[]]@('\', '/'))
+  $root = [IO.Path]::GetPathRoot($fullPath)
+  $current = $root
+  $relative = $fullPath.Substring($root.Length)
+  foreach ($segment in $relative.Split([char[]]@('\', '/'), [StringSplitOptions]::RemoveEmptyEntries)) {
+    $current = Join-Path $current $segment
+    try {
+      $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+    } catch {
+      if ($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound) { break }
+      throw "Unable to inspect $Description component '$current': $($_.Exception.Message)"
+    }
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      throw "$Description traverses a reparse point: $current"
+    }
+  }
+  return $fullPath
+}
+
+function Assert-DirectoryTreeHasNoReparsePoints([string]$Path, [string]$Description = 'Directory') {
+  $fullPath = Assert-NoReparsePointTraversal -Path $Path -Description $Description
+  if (-not (Test-Path -LiteralPath $fullPath)) { return $fullPath }
+  if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) {
+    throw "$Description is not a directory: $fullPath"
+  }
+  $pending = [Collections.Generic.Queue[string]]::new()
+  $pending.Enqueue($fullPath)
+  while ($pending.Count -gt 0) {
+    foreach ($child in Get-ChildItem -LiteralPath $pending.Dequeue() -Force -ErrorAction Stop) {
+      if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "$Description contains a reparse point: $($child.FullName)"
+      }
+      if ($child.PSIsContainer) { $pending.Enqueue($child.FullName) }
+    }
+  }
+  return $fullPath
+}
+
+function Test-PathWithinRoot([string]$Path, [string]$Root) {
+  $fullPath = Assert-NoReparsePointTraversal -Path $Path -Description 'Contained path'
+  $fullRoot = (Assert-NoReparsePointTraversal -Path $Root -Description 'Containment root').TrimEnd([char[]]@('\', '/'))
   $prefix = $fullRoot + [IO.Path]::DirectorySeparatorChar
   return $fullPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
 }
@@ -46,6 +89,246 @@ function Get-Sha256([string]$Path) {
     }
   } finally {
     $stream.Dispose()
+  }
+}
+
+function Get-NativeErrorCode([Exception]$Exception) {
+  $current = $Exception
+  while ($current) {
+    $code = $current.HResult -band 0xFFFF
+    if ($code -in @(32, 33)) { return $code }
+    $current = $current.InnerException
+  }
+  return ($Exception.HResult -band 0xFFFF)
+}
+
+function Test-SharingViolation([Exception]$Exception) {
+  (Get-NativeErrorCode -Exception $Exception) -in @(32, 33)
+}
+
+function Invoke-RestartManagerQuery([string[]]$Resources) {
+  return [GgCoder.RestartManagerDiagnostics]::Query($Resources)
+}
+
+function Get-RestartManagerLockState([string]$Path, [long]$QueryDeadlineTimestamp = [long]::MaxValue,
+  [ValidateRange(1, 10000)][int]$MaxResourceCount = $script:RestartManagerResourceLimit) {
+  $fullPath = [IO.Path]::GetFullPath($Path)
+  $resources = [Collections.Generic.List[string]]::new()
+  if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+    $resources.Add($fullPath)
+  } elseif (Test-Path -LiteralPath $fullPath -PathType Container) {
+    $null = Assert-DirectoryTreeHasNoReparsePoints -Path $fullPath -Description 'Restart Manager resource directory'
+    foreach ($file in Get-ChildItem -LiteralPath $fullPath -File -Recurse -Force -ErrorAction Stop) {
+      $resources.Add($file.FullName)
+      if ($resources.Count -gt $MaxResourceCount) {
+        return [pscustomobject]@{ ResourceCount = $resources.Count; Status = 'fatal'; Stage = 'register';
+          Reason = 'resource-count-limit'; Limit = $MaxResourceCount; Owners = @() }
+      }
+    }
+  }
+  if ($resources.Count -eq 0) {
+    return [pscustomobject]@{ ResourceCount = 0; Status = 'none';
+      Reason = 'no-existing-file-resources'; Owners = @() }
+  }
+
+  if (-not ('GgCoder.RestartManagerDiagnostics' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace GgCoder {
+  public sealed class RestartManagerOwner {
+    public int ProcessId; public string AppName; public bool Restartable;
+  }
+  public sealed class RestartManagerQueryResult {
+    public string Status, Stage, Reason;
+    public int Error, Attempt, Attempts; public uint Needed;
+    public RestartManagerOwner[] Owners = new RestartManagerOwner[0];
+  }
+  public static class RestartManagerDiagnostics {
+    private const int ErrorMoreData = 234;
+    private const uint MaxOwnerCount = 4096;
+    private const int MaxListAttempts = 4;
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UniqueProcess {
+      public int ProcessId;
+      public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessInfo {
+      public UniqueProcess Process;
+      [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string AppName;
+      [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string ServiceShortName;
+      public uint ApplicationType, AppStatus, TerminalSessionId;
+      [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
+    }
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    private static extern int RmStartSession(out uint handle, int flags, StringBuilder sessionKey);
+    [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
+    private static extern int RmRegisterResources(uint handle, uint fileCount, string[] files, uint appCount, IntPtr apps, uint serviceCount, string[] services);
+    [DllImport("rstrtmgr.dll")]
+    private static extern int RmGetList(uint handle, out uint needed, ref uint count, [In, Out] ProcessInfo[] affected, ref uint rebootReasons);
+    [DllImport("rstrtmgr.dll")] private static extern int RmEndSession(uint handle);
+
+    public static RestartManagerQueryResult Query(string[] paths) {
+      uint handle;
+      int result = RmStartSession(out handle, 0, new StringBuilder(64));
+      if (result != 0) return new RestartManagerQueryResult { Status = "unavailable", Stage = "start", Error = result };
+      try {
+        result = RmRegisterResources(handle, (uint)paths.Length, paths, 0, IntPtr.Zero, 0, null);
+        if (result != 0) return new RestartManagerQueryResult { Status = "unavailable", Stage = "register", Error = result };
+        uint needed = 0, count = 0, rebootReasons = 0;
+        result = RmGetList(handle, out needed, ref count, null, ref rebootReasons);
+        if (result == 0) return new RestartManagerQueryResult { Status = "none" };
+        if (result != ErrorMoreData) return new RestartManagerQueryResult { Status = "unavailable", Stage = "list", Error = result };
+        for (int attempt = 1; attempt <= MaxListAttempts; attempt++) {
+          if (needed == 0 || needed > MaxOwnerCount)
+            return new RestartManagerQueryResult { Status = "unavailable", Stage = "list", Reason = "owner-count-limit", Error = ErrorMoreData, Needed = needed, Attempt = attempt };
+          var processInfo = new ProcessInfo[needed];
+          count = needed;
+          result = RmGetList(handle, out needed, ref count, processInfo, ref rebootReasons);
+          if (result == 0) {
+            var owners = new RestartManagerOwner[count];
+            for (int index = 0; index < count; index++)
+              owners[index] = new RestartManagerOwner { ProcessId = processInfo[index].Process.ProcessId, AppName = processInfo[index].AppName ?? "", Restartable = processInfo[index].Restartable };
+            return new RestartManagerQueryResult { Status = "owners", Owners = owners };
+          }
+          if (result != ErrorMoreData) return new RestartManagerQueryResult { Status = "unavailable", Stage = "list", Error = result };
+        }
+        return new RestartManagerQueryResult { Status = "unavailable", Stage = "list", Reason = "error-more-data-retry-exhausted", Error = ErrorMoreData, Needed = needed, Attempts = MaxListAttempts };
+      } finally { RmEndSession(handle); }
+    }
+  }
+}
+'@
+  }
+  if ($QueryDeadlineTimestamp -ne [long]::MaxValue -and
+      [Diagnostics.Stopwatch]::GetTimestamp() -ge $QueryDeadlineTimestamp) {
+    throw [TimeoutException]::new('Restart Manager polling deadline exhausted before query')
+  }
+  $query = Invoke-RestartManagerQuery -Resources ([string[]]$resources)
+  return [pscustomobject]@{ ResourceCount = $resources.Count; Status = [string]$query.Status;
+    Stage = [string]$query.Stage; Reason = [string]$query.Reason; Error = [int]$query.Error;
+    Needed = [uint32]$query.Needed; Attempt = [int]$query.Attempt; Attempts = [int]$query.Attempts;
+    Owners = @($query.Owners) }
+}
+
+function Format-RestartManagerLockState([object]$State) {
+  $parts = [Collections.Generic.List[string]]::new()
+  $parts.Add("resourceCount=$($State.ResourceCount)"); $parts.Add("status=$($State.Status)")
+  foreach ($field in @('Stage', 'Reason', 'Error', 'Needed')) {
+    if ($State.$field) { $parts.Add("$($field.ToLower())=$($State.$field)") }
+  }
+  if ($State.Reason -eq 'owner-count-limit') { $parts.Add('limit=4096') }
+  elseif ($null -ne $State.Limit) { $parts.Add("limit=$($State.Limit)") }
+  foreach ($field in @('Attempt', 'Attempts')) { if ($State.$field) { $parts.Add("$($field.ToLower())=$($State.$field)") } }
+  if ($State.DiagnosticExceptionType) { $parts.Add("diagnosticExceptionType=$($State.DiagnosticExceptionType)") }
+  if ($State.DiagnosticMessage) {
+    $message = ([string]$State.DiagnosticMessage).Replace('"', "'").Replace("`r", ' ').Replace("`n", ' ')
+    $parts.Add("diagnosticMessage=`"$message`"")
+  }
+  $owners = @($State.Owners)
+  if ($State.Status -eq 'owners') { $parts.Add("count=$($owners.Count)") }
+  foreach ($owner in $owners) {
+    $appName = ([string]$owner.AppName).Replace('"', "'").Replace("`r", ' ').Replace("`n", ' ')
+    $parts.Add("ownerPid=$($owner.ProcessId)"); $parts.Add("ownerApp=`"$appName`"")
+    $parts.Add("ownerRestartable=$($owner.Restartable)")
+  }
+  return $parts -join ' '
+}
+
+function Throw-LockClearTimeout([string]$InstallDirectory, [int]$TimeoutMilliseconds, [int]$Attempts,
+  [string]$LastEvidence, [string]$LastOwnerEvidence) {
+  $ownerEvidence = if ($LastOwnerEvidence) { "; lastOwnerEvidence=$LastOwnerEvidence" } else { '' }
+  $message = "Installed payload locks did not clear before the ${TimeoutMilliseconds}ms Restart Manager polling deadline; attempts=$Attempts; path=`"$InstallDirectory`"; lastEvidence=$LastEvidence$ownerEvidence"
+  Write-Step "LOCK CLEAR TIMEOUT $message"
+  throw $message
+}
+
+function Wait-InstalledPayloadLocksClear([string]$InstallDirectory,
+  [ValidateRange(1, 300000)][int]$TimeoutMilliseconds,
+  [ValidateRange(10, 5000)][int]$PollIntervalMilliseconds = 250) {
+  $frequency = [Diagnostics.Stopwatch]::Frequency
+  $startedTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+  $deadlineTimestamp = $startedTimestamp + [long][Math]::Ceiling($TimeoutMilliseconds * $frequency / 1000.0)
+  $attempt = 0; $lastEvidence = 'status=unavailable reason=not-queried'; $lastOwnerEvidence = $null
+  while ($true) {
+    $beforeQueryTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+    if ($beforeQueryTimestamp -ge $deadlineTimestamp) {
+      $elapsedMilliseconds = [long](($beforeQueryTimestamp - $startedTimestamp) * 1000.0 / $frequency)
+      $lastEvidence = 'status=unavailable reason=polling-deadline-exhausted-before-query'
+      Write-Step "LOCK CLEAR ATTEMPT attempt=$($attempt + 1) elapsedMs=$elapsedMilliseconds path=`"$InstallDirectory`" $lastEvidence"
+      Throw-LockClearTimeout $InstallDirectory $TimeoutMilliseconds $attempt $lastEvidence $lastOwnerEvidence
+    }
+    $attempt += 1
+    try {
+      $state = Get-RestartManagerLockState -Path $InstallDirectory -QueryDeadlineTimestamp $deadlineTimestamp
+    } catch {
+      $state = [pscustomobject]@{ ResourceCount = 0; Status = 'unavailable';
+        DiagnosticExceptionType = $_.Exception.GetType().FullName; DiagnosticMessage = $_.Exception.Message; Owners = @() }
+    }
+    $lastEvidence = Format-RestartManagerLockState -State $state
+    if ($state.Status -eq 'owners') { $lastOwnerEvidence = $lastEvidence }
+    $afterQueryTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+    $elapsedMilliseconds = [long](($afterQueryTimestamp - $startedTimestamp) * 1000.0 / $frequency)
+    Write-Step "LOCK CLEAR ATTEMPT attempt=$attempt elapsedMs=$elapsedMilliseconds path=`"$InstallDirectory`" $lastEvidence"
+    if ($state.Status -eq 'fatal') {
+      $message = "Restart Manager lock query cannot safely continue; path=`"$InstallDirectory`"; evidence=$lastEvidence"
+      Write-Step "LOCK CLEAR FAILED $message"
+      throw $message
+    }
+    if ($afterQueryTimestamp -ge $deadlineTimestamp) {
+      Throw-LockClearTimeout $InstallDirectory $TimeoutMilliseconds $attempt $lastEvidence $lastOwnerEvidence
+    }
+    if ($state.Status -eq 'none') {
+      Write-Step "LOCK CLEAR SUCCESS attempts=$attempt elapsedMs=$elapsedMilliseconds path=`"$InstallDirectory`""
+      return
+    }
+    $remainingMilliseconds = [long][Math]::Ceiling(($deadlineTimestamp - $afterQueryTimestamp) * 1000.0 / $frequency)
+    Start-Sleep -Milliseconds ([Math]::Min($PollIntervalMilliseconds, $remainingMilliseconds))
+  }
+}
+
+function Write-OperationFailureDiagnostic([string]$Operation, [string]$Path, [Exception]$Exception) {
+  $hresult = '0x{0:X8}' -f ([uint32]($Exception.HResult -band 0xFFFFFFFFL))
+  Write-Step "OPERATION FAILED name=$Operation path=`"$Path`" exceptionType=$($Exception.GetType().FullName) hresult=$hresult message=`"$($Exception.Message)`""
+  if (Test-SharingViolation -Exception $Exception) {
+    try {
+      $lockState = Get-RestartManagerLockState -Path $Path
+      $lockEvidence = Format-RestartManagerLockState -State $lockState
+      Write-Step "LOCK EVIDENCE name=$Operation path=`"$Path`" nativeError=$(Get-NativeErrorCode -Exception $Exception) $lockEvidence"
+    } catch {
+      Write-Step "LOCK EVIDENCE name=$Operation path=`"$Path`" status=unavailable diagnosticExceptionType=$($_.Exception.GetType().FullName) diagnosticMessage=`"$($_.Exception.Message)`""
+    }
+  }
+}
+
+function Get-PreInstallerFileMetadata([string]$Path) {
+  $operation = 'pre-installer-hash'
+  Write-Step "OPERATION START name=$operation path=`"$Path`""
+  try {
+    $metadata = Get-FileMetadata -Path $Path
+    Write-Step "OPERATION SUCCESS name=$operation path=`"$Path`" size=$($metadata.Size) sha256=$($metadata.Sha256)"
+    return $metadata
+  } catch {
+    Write-OperationFailureDiagnostic -Operation $operation -Path $Path -Exception $_.Exception
+    throw
+  }
+}
+
+function Move-InstallDirectoryToBackup([string]$InstallDirectory, [string]$BackupPath) {
+  $operation = 'pre-installer-directory-rename'
+  Write-Step "OPERATION START name=$operation path=`"$InstallDirectory`" destinationPath=`"$BackupPath`""
+  try {
+    $null = Assert-DirectoryTreeHasNoReparsePoints -Path $InstallDirectory -Description 'Install directory'
+    $null = Assert-NoReparsePointTraversal -Path (Split-Path -Parent $BackupPath) -Description 'Backup parent directory'
+    $null = Assert-NoReparsePointTraversal -Path $BackupPath -Description 'Backup path'
+    if (Test-Path -LiteralPath $BackupPath) { throw "Backup path already exists: $BackupPath" }
+    Move-Item -LiteralPath $InstallDirectory -Destination $BackupPath
+    Write-Step "OPERATION SUCCESS name=$operation path=`"$InstallDirectory`" destinationPath=`"$BackupPath`""
+  } catch {
+    Write-OperationFailureDiagnostic -Operation $operation -Path $InstallDirectory -Exception $_.Exception
+    throw
   }
 }
 
@@ -408,6 +691,7 @@ function Restore-LocalForkRegistration(
 }
 
 function Invoke-NsisInstaller([string]$InstallerPath) {
+  $null = Assert-NoReparsePointTraversal -Path $InstallerPath -Description 'Installer executable path'
   $installProcess = Start-Process -FilePath $InstallerPath -ArgumentList '/S' -PassThru -Wait
   return [int]$installProcess.ExitCode
 }
@@ -423,6 +707,7 @@ function Get-ProcessSnapshotById([int]$ProcessId) {
 }
 
 function Start-VerifiedApp([string]$ExecutablePath, [ref]$LaunchedSnapshot) {
+  $null = Assert-NoReparsePointTraversal -Path $ExecutablePath -Description 'Installed executable path'
   Write-Step "Launching verified Local Fork app: $ExecutablePath"
   $launched = Start-Process -FilePath $ExecutablePath -PassThru
   $identityDeadline = (Get-Date).AddSeconds(1)
@@ -467,6 +752,7 @@ function Stop-LaunchedVerifiedRoot([object]$Snapshot, [string]$ExpectedExecutabl
 
 function New-InstallBackupPath([string]$InstallDirectory) {
   $parent = Split-Path -Parent $InstallDirectory
+  $null = Assert-NoReparsePointTraversal -Path $parent -Description 'Backup parent directory'
   $leaf = Split-Path -Leaf $InstallDirectory
   $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffZ')
   Join-Path $parent ("{0}.backup-{1}-{2}" -f $leaf, $stamp, [Guid]::NewGuid().ToString('N'))
@@ -484,8 +770,12 @@ function Restore-InstallBackup(
   try {
     Stop-LaunchedVerifiedRoot -Snapshot $LaunchedSnapshot -ExpectedExecutable $InstalledExecutable
     if (Test-Path -LiteralPath $InstallDirectory) {
+      $null = Assert-DirectoryTreeHasNoReparsePoints -Path $InstallDirectory -Description 'Failed install directory'
       Remove-Item -LiteralPath $InstallDirectory -Recurse -Force
     }
+    $null = Assert-DirectoryTreeHasNoReparsePoints -Path $BackupPath -Description 'Rollback backup directory'
+    $null = Assert-NoReparsePointTraversal -Path (Split-Path -Parent $InstallDirectory) -Description 'Install parent directory'
+    $null = Assert-NoReparsePointTraversal -Path $InstallDirectory -Description 'Rollback destination path'
     Move-Item -LiteralPath $BackupPath -Destination $InstallDirectory
     Assert-FileMatchesMetadata -Path $InstalledExecutable -ExpectedSize $PreviousMetadata.Size `
       -ExpectedSha256 $PreviousMetadata.Sha256 -Description 'Restored Local Fork executable'
@@ -498,6 +788,8 @@ function Restore-InstallBackup(
     $rollbackError = $_.Exception.Message
     if (-not (Test-Path -LiteralPath $BackupPath) -and (Test-Path -LiteralPath $InstallDirectory)) {
       try {
+        $null = Assert-DirectoryTreeHasNoReparsePoints -Path $InstallDirectory -Description 'Restored install directory'
+        $null = Assert-NoReparsePointTraversal -Path $BackupPath -Description 'Backup preservation path'
         Move-Item -LiteralPath $InstallDirectory -Destination $BackupPath
       } catch {
         $rollbackError += "; failed to preserve restored directory at backup path: $($_.Exception.Message)"
@@ -509,9 +801,13 @@ function Restore-InstallBackup(
 
 function Remove-InstallBackupSafely([string]$BackupPath) {
   $recoveryArchive = "$BackupPath.recovery.zip"
+  $null = Assert-DirectoryTreeHasNoReparsePoints -Path $BackupPath -Description 'Backup cleanup directory'
+  $null = Assert-NoReparsePointTraversal -Path (Split-Path -Parent $BackupPath) -Description 'Backup parent directory'
+  $null = Assert-NoReparsePointTraversal -Path $recoveryArchive -Description 'Recovery archive path'
   try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     if (Test-Path -LiteralPath $recoveryArchive) {
+      $null = Assert-NoReparsePointTraversal -Path $recoveryArchive -Description 'Existing recovery archive'
       Remove-Item -LiteralPath $recoveryArchive -Force
     }
     [IO.Compression.ZipFile]::CreateFromDirectory(
@@ -521,17 +817,23 @@ function Remove-InstallBackupSafely([string]$BackupPath) {
       $false
     )
   } catch {
-    Remove-Item -LiteralPath $recoveryArchive -Force -ErrorAction SilentlyContinue
-    throw "Backup cleanup was not started; intact backup remains at ${BackupPath}: $($_.Exception.Message)"
+    $archiveFailure = $_.Exception.Message
+    if (Test-Path -LiteralPath $recoveryArchive) {
+      $null = Assert-NoReparsePointTraversal -Path $recoveryArchive -Description 'Partial recovery archive'
+      Remove-Item -LiteralPath $recoveryArchive -Force -ErrorAction SilentlyContinue
+    }
+    throw "Backup cleanup was not started; intact backup remains at ${BackupPath}: $archiveFailure"
   }
 
   try {
+    $null = Assert-DirectoryTreeHasNoReparsePoints -Path $BackupPath -Description 'Backup cleanup directory'
     Remove-Item -LiteralPath $BackupPath -Recurse -Force
   } catch {
     throw "Backup directory cleanup failed; complete recovery archive retained at ${recoveryArchive}: $($_.Exception.Message)"
   }
 
   try {
+    $null = Assert-NoReparsePointTraversal -Path $recoveryArchive -Description 'Recovery archive path'
     Remove-Item -LiteralPath $recoveryArchive -Force
   } catch {
     throw "Backup directory was removed; complete recovery archive retained at ${recoveryArchive}: $($_.Exception.Message)"
@@ -552,15 +854,21 @@ function Invoke-VerifiedInstallTransaction(
   $launchedSnapshot = $null
   $installerStarted = $false
   try {
+    $null = Assert-NoReparsePointTraversal -Path (Split-Path -Parent $InstallDirectory) -Description 'Install parent directory'
+    $null = Assert-NoReparsePointTraversal -Path $InstallDirectory -Description 'Install directory path'
     $registrationSnapshot = Get-LocalForkRegistrationSnapshot
     if ($hadExistingInstall) {
-      $previousMetadata = Get-FileMetadata -Path $InstalledExecutable
+      Wait-InstalledPayloadLocksClear -InstallDirectory $InstallDirectory `
+        -TimeoutMilliseconds $script:LockClearTimeoutMilliseconds
+      $previousMetadata = Get-PreInstallerFileMetadata -Path $InstalledExecutable
       $backupPath = New-InstallBackupPath -InstallDirectory $InstallDirectory
-      Move-Item -LiteralPath $InstallDirectory -Destination $backupPath
+      Move-InstallDirectoryToBackup -InstallDirectory $InstallDirectory -BackupPath $backupPath
       $backupCreated = $true
       Write-Step "Moved previous Local Fork install atomically to backup: $backupPath"
     }
 
+    $null = Assert-NoReparsePointTraversal -Path (Split-Path -Parent $InstallDirectory) -Description 'Install parent directory'
+    $null = Assert-NoReparsePointTraversal -Path $InstallDirectory -Description 'Installer destination path'
     Write-Step 'Starting verified NSIS installer in silent mode'
     $installerStarted = $true
     $installExitCode = Invoke-NsisInstaller -InstallerPath $InstallerManifest.Path
@@ -604,6 +912,7 @@ function Invoke-VerifiedInstallTransaction(
     }
 
     if (-not $hadExistingInstall -and (Test-Path -LiteralPath $InstallDirectory)) {
+      $null = Assert-DirectoryTreeHasNoReparsePoints -Path $InstallDirectory -Description 'Failed new install directory'
       Remove-Item -LiteralPath $InstallDirectory -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($installerStarted -and $registrationSnapshot) {
@@ -630,6 +939,7 @@ function Invoke-LocalPatchedInstall {
   if ([IO.Path]::GetFullPath($installDir).Equals([IO.Path]::GetFullPath($stableInstallDir), [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Local Fork installer resolved to the production GG Coder directory; refusing installation'
   }
+  $null = Assert-NoReparsePointTraversal -Path $script:InstallLogPath -Description 'Install log path'
   Set-Content -LiteralPath $script:InstallLogPath -Value ('[{0}] Detached installer helper started as PID {1}; delay={2}s' -f (Get-Date).ToString('o'), $PID, $DelaySeconds) -Encoding UTF8
   Start-Sleep -Seconds $DelaySeconds
 

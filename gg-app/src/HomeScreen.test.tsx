@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { UpdateInfo } from "./update";
 import { useAppUpdate } from "./update";
 import { HomeScreen } from "./HomeScreen";
+import { CHANGELOG } from "./changelog";
+import { LOCAL_CHANGELOG } from "./local-changelog";
+import { WHATS_NEW_STORAGE_KEY } from "./whats-new";
 
 const agentMocks = vi.hoisted(() => ({
   waitForReady: vi.fn().mockResolvedValue(undefined),
@@ -65,7 +68,9 @@ async function renderHome(): Promise<void> {
 afterEach(cleanup);
 
 beforeEach(() => {
+  localStorage.clear();
   vi.clearAllMocks();
+  agentMocks.openWhatsNewWindow.mockResolvedValue(undefined);
   agentMocks.waitForReady.mockResolvedValue(undefined);
   agentMocks.getProgress.mockResolvedValue(null);
   agentMocks.getSettings.mockResolvedValue({ configured: true, projectsRoot: "C:/projects" });
@@ -90,6 +95,7 @@ describe("HomeScreen local-patched update outcomes", () => {
     });
     expect(outcome.disabled).toBe(true);
     expect(screen.queryByText("v1.2.3")).toBeNull();
+    expect(screen.getByRole("button", { name: "What's new" })).toBeTruthy();
   });
 
   it("shows the error message and confirms before retrying the protected update", async () => {
@@ -131,5 +137,49 @@ describe("HomeScreen local-patched update outcomes", () => {
 
     expect(install).toHaveBeenCalledOnce();
     expect(screen.queryByText("Merge and build patched update?")).toBeNull();
+    expect(screen.getByRole("button", { name: "What's new" })).toBeTruthy();
+  });
+});
+
+describe("HomeScreen What's New trigger", () => {
+  it("stays available when idle and calls the existing native opener", async () => {
+    vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
+    await renderHome();
+
+    fireEvent.click(screen.getByRole("button", { name: "What's new" }));
+
+    expect(agentMocks.openWhatsNewWindow).toHaveBeenCalledOnce();
+  });
+
+  it("reports both unread sources accessibly", async () => {
+    localStorage.setItem(
+      WHATS_NEW_STORAGE_KEY,
+      JSON.stringify({ local: LOCAL_CHANGELOG[1].id, upstream: CHANGELOG[1].version }),
+    );
+    vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
+
+    await renderHome();
+
+    expect(
+      screen.getByRole("button", {
+        name: "What's new, unread from Local Fork and Upstream",
+      }),
+    ).toBeTruthy();
+  });
+
+  it("refreshes unread sources when the main window regains focus", async () => {
+    vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "idle" }));
+    await renderHome();
+    expect(screen.getByRole("button", { name: "What's new" })).toBeTruthy();
+
+    localStorage.setItem(
+      WHATS_NEW_STORAGE_KEY,
+      JSON.stringify({ local: LOCAL_CHANGELOG[0].id, upstream: CHANGELOG[1].version }),
+    );
+    fireEvent(window, new Event("focus"));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "What's new, unread from Upstream" })).toBeTruthy(),
+    );
   });
 });

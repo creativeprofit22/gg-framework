@@ -63,6 +63,8 @@ Follow the manifest's `phase` and `dirtyWorkApplied` fields before touching the 
 
 ## Build a local-patched installer
 
+Before producing a patched installer, prepend one stable-ID entry to `src/local-changelog.ts` for each genuinely user-facing local change. Never rewrite an ID after shipping.
+
 ```bash
 pnpm --filter gg-app build:local-patched
 ```

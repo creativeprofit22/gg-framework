@@ -31,6 +31,7 @@ import {
   shouldConfirmLocalUpdate,
 } from "./local-update-confirmation";
 import { toast } from "./toast";
+import { WHATS_NEW_STORAGE_KEY, getWhatsNewStatus, type WhatsNewFeedId } from "./whats-new";
 
 interface Props {
   onProjects: () => void;
@@ -72,6 +73,7 @@ export function HomeScreen({
   const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [showScorecard, setShowScorecard] = useState(false);
+  const [unreadWhatsNew, setUnreadWhatsNew] = useState<WhatsNewFeedId[]>([]);
   const appUpdate = useAppUpdate();
 
   useEffect(() => {
@@ -119,6 +121,22 @@ export function HomeScreen({
   useEffect(() => {
     if (refreshSignal > 0) void refresh().catch(() => {});
   }, [refreshSignal]);
+
+  useEffect(() => {
+    const refreshUnread = (): void => {
+      setUnreadWhatsNew(getWhatsNewStatus(localStorage, appUpdate.localPatched).unreadFeedIds);
+    };
+    const onStorage = (event: StorageEvent): void => {
+      if (event.key === null || event.key === WHATS_NEW_STORAGE_KEY) refreshUnread();
+    };
+    refreshUnread();
+    window.addEventListener("focus", refreshUnread);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("focus", refreshUnread);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [appUpdate.localPatched]);
 
   const ready = folderSet && providerCount > 0;
 
@@ -177,69 +195,90 @@ export function HomeScreen({
     (appUpdate.phase === "installing" ||
       appUpdate.phase === "completed" ||
       appUpdate.phase === "error");
+  const unreadLabels = unreadWhatsNew.map((id) => (id === "local" ? "Local Fork" : "Upstream"));
+  const whatsNewLabel =
+    unreadLabels.length > 0
+      ? `What's new, unread from ${unreadLabels.join(" and ")}`
+      : "What's new";
 
   return (
     <div className="home" data-tauri-drag-region>
       <HomeBackdrop />
       <MemeLayer />
-      {showUpdate ? (
-        <button
-          className={`home-update${appUpdate.phase === "installing" ? " home-update-progress" : ""}`}
-          disabled={appUpdate.phase === "installing" || appUpdate.phase === "completed"}
-          title={appUpdate.installTitle}
-          onClick={() => {
-            if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
-              setShowLocalUpdateConfirm(true);
-            } else {
-              void appUpdate.install();
-            }
-          }}
-        >
-          {appUpdate.phase === "installing" && !appUpdate.localPatched && (
-            <span className="home-update-fill" style={{ width: `${appUpdate.progress ?? 0}%` }} />
-          )}
-          <Download size={14} strokeWidth={2.25} aria-hidden="true" />
-          {localUpdateStatus ? (
-            <span>
-              {appUpdate.statusMessage ?? appUpdate.installLabel}
-              {appUpdate.phase === "error" && " — Retry"}
-            </span>
-          ) : (
-            /* Both labels occupy the same grid cell; the inactive one is
-               visibility:hidden, so the pill is ALWAYS sized to the wider of
-               the two and never resizes when the install starts or the
-               percentage climbs. */
-            <span className="home-update-swap">
-              <span className={appUpdate.phase === "installing" ? "home-update-hidden" : undefined}>
-                {appUpdate.installLabel}
-              </span>
-              <span className={appUpdate.phase === "installing" ? undefined : "home-update-hidden"}>
-                Installing…
-                <span className="home-update-pct">{`${appUpdate.progress ?? 0}%`}</span>
-              </span>
-            </span>
-          )}
-        </button>
-      ) : (
-        version && (
-          <div className="home-version-row">
-            <span className="home-version">{`v${version}`}</span>
-            <RankBadge
-              snapshot={progress}
-              onClick={() => setShowScorecard(true)}
-              className="home-rank-badge"
-            />
+      <div className="home-header-row">
+        <div className="home-header-status">
+          {showUpdate ? (
             <button
-              className="home-whatsnew"
-              type="button"
-              title="See the latest updates"
-              onClick={() => void openWhatsNewWindow().catch(() => {})}
+              className={`home-update${appUpdate.phase === "installing" ? " home-update-progress" : ""}`}
+              disabled={appUpdate.phase === "installing" || appUpdate.phase === "completed"}
+              title={appUpdate.installTitle}
+              onClick={() => {
+                if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+                  setShowLocalUpdateConfirm(true);
+                } else {
+                  void appUpdate.install();
+                }
+              }}
             >
-              What&apos;s new
+              {appUpdate.phase === "installing" && !appUpdate.localPatched && (
+                <span
+                  className="home-update-fill"
+                  style={{ width: `${appUpdate.progress ?? 0}%` }}
+                />
+              )}
+              <Download size={14} strokeWidth={2.25} aria-hidden="true" />
+              {localUpdateStatus ? (
+                <span>
+                  {appUpdate.statusMessage ?? appUpdate.installLabel}
+                  {appUpdate.phase === "error" && " — Retry"}
+                </span>
+              ) : (
+                <span className="home-update-swap">
+                  <span
+                    className={appUpdate.phase === "installing" ? "home-update-hidden" : undefined}
+                  >
+                    {appUpdate.installLabel}
+                  </span>
+                  <span
+                    className={appUpdate.phase === "installing" ? undefined : "home-update-hidden"}
+                  >
+                    Installing…
+                    <span className="home-update-pct">{`${appUpdate.progress ?? 0}%`}</span>
+                  </span>
+                </span>
+              )}
             </button>
-          </div>
-        )
-      )}
+          ) : (
+            version && (
+              <div className="home-version-row">
+                <span className="home-version">{`v${version}`}</span>
+                <RankBadge
+                  snapshot={progress}
+                  onClick={() => setShowScorecard(true)}
+                  className="home-rank-badge"
+                />
+              </div>
+            )
+          )}
+        </div>
+        <button
+          className="home-whatsnew"
+          type="button"
+          aria-label={whatsNewLabel}
+          title={whatsNewLabel}
+          onClick={() => void openWhatsNewWindow().catch(() => {})}
+        >
+          <span>What&apos;s new</span>
+          {unreadWhatsNew.map((id) => (
+            <span
+              key={id}
+              className={`home-whatsnew-dot feed-${id}`}
+              title={`${id === "local" ? "Local Fork" : "Upstream"} unread`}
+              aria-hidden="true"
+            />
+          ))}
+        </button>
+      </div>
       {showLocalUpdateConfirm && (
         <ConfirmModal
           title={LOCAL_UPDATE_CONFIRMATION_TITLE}

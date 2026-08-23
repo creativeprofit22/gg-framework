@@ -1,59 +1,29 @@
 import { useEffect } from "react";
-import { getVersion } from "@tauri-apps/api/app";
 import { error as logError } from "@tauri-apps/plugin-log";
-import { CHANGELOG } from "./changelog";
 import { windowLabel, openWhatsNewWindow } from "./agent";
+import { appBuildInfo } from "./build-info";
+import { getWhatsNewStatus } from "./whats-new";
 
 /**
- * "What's new" TRIGGER (renders nothing). Mounted in every window via main.tsx,
- * but it gates hard on the `main` window so the modal opens EXACTLY ONCE no
- * matter how many project windows are tiled open. When it fires, it opens a
- * dedicated, screen-centered Tauri window (see Rust `open_whatsnew_window` +
- * `WhatsNewWindow.tsx`) — the notes appear in the center of the user's SCREEN,
- * not inside whichever app window happens to be focused.
- *
- * Decision: we stash the last-seen app version in localStorage and compare it to
- * the running version (`getVersion`):
- *   - no record yet (fresh install) → remember silently, DON'T open.
- *   - same version → nothing new, stay quiet.
- *   - version changed (the updater downloaded + relaunched) → open once.
- * The seen-version is written the moment we decide, so a relaunch only ever
- * shows the notes a single time.
- */
-const STORAGE_KEY = "gg-app:whatsNewVersion";
-
-/**
- * DEV ONLY — force the window open on launch so the layout/scroll can be
- * eyeballed without a real version bump. Leave `false`; ignored in production.
+ * Invisible post-update trigger. Only the main window checks bundled feed heads;
+ * fresh installs are seeded silently and failed native opens remain retryable.
  */
 const DEV_FORCE_WHATSNEW = false;
 
 export function WhatsNewModal(): null {
   useEffect(() => {
-    // Only the main window decides — secondary/tiled windows never trigger it.
     if (windowLabel !== "main") return;
-    if (CHANGELOG.length === 0) return;
 
     if (import.meta.env.DEV && DEV_FORCE_WHATSNEW) {
       void openWhatsNewWindow().catch(() => {});
       return;
     }
 
-    let cancelled = false;
-    void getVersion()
-      .then((version) => {
-        if (cancelled) return;
-        const seen = localStorage.getItem(STORAGE_KEY);
-        // Persist the current version first so a re-check never re-opens it.
-        localStorage.setItem(STORAGE_KEY, version);
-        // Fresh install (no prior record) or unchanged version → nothing to show.
-        if (seen === null || seen === version) return;
-        void openWhatsNewWindow().catch(() => {});
-      })
-      .catch((e) => logError(`What's-new version check failed: ${String(e)}`));
-    return () => {
-      cancelled = true;
-    };
+    const status = getWhatsNewStatus(localStorage, appBuildInfo.localPatched);
+    if (status.unreadFeedIds.length === 0) return;
+    void openWhatsNewWindow().catch((error) =>
+      logError(`What's-new window failed to open: ${String(error)}`),
+    );
   }, []);
 
   return null;

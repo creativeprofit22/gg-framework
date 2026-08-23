@@ -166,6 +166,49 @@ function Assert-UnambiguousLocalForkProcess([object[]]$Processes, [string]$Expec
   $null
 }
 
+function ConvertTo-SingleQuotedPowerShellLiteral([string]$Value) {
+  "'" + $Value.Replace("'", "''") + "'"
+}
+
+function New-LocalForkInstallerEncodedCommand(
+  [string]$ScriptPath,
+  [string]$TaskName,
+  [string]$ManifestPath,
+  [string]$InstallerLogPath,
+  [string]$AllowedRoot
+) {
+  $command = @(
+    '&', (ConvertTo-SingleQuotedPowerShellLiteral $ScriptPath),
+    '-TaskName', (ConvertTo-SingleQuotedPowerShellLiteral $TaskName),
+    '-DelaySeconds', '1',
+    '-MetadataPath', (ConvertTo-SingleQuotedPowerShellLiteral $ManifestPath),
+    '-LogPath', (ConvertTo-SingleQuotedPowerShellLiteral $InstallerLogPath),
+    '-AllowedInstallerRoot', (ConvertTo-SingleQuotedPowerShellLiteral $AllowedRoot)
+  ) -join ' '
+  [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+}
+
+function Register-LocalForkInstallerTask(
+  [string]$TaskName,
+  [string]$PowerShellPath,
+  [string]$EncodedCommand
+) {
+  $action = New-ScheduledTaskAction -Execute $PowerShellPath `
+    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $EncodedCommand"
+  $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+    -LogonType Interactive -RunLevel Limited
+  $null = Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $principal `
+    -Description 'Guarded GG Coder Local Fork installer handoff' -Force
+}
+
+function Start-LocalForkInstallerTask([string]$TaskName) {
+  Start-ScheduledTask -TaskName $TaskName
+}
+
+function Remove-FailedLocalForkInstallerTask([string]$TaskName) {
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+}
+
 function Invoke-GuardedLocalForkInstaller(
   [string]$ScriptPath,
   [string]$ManifestPath,
@@ -180,18 +223,30 @@ function Invoke-GuardedLocalForkInstaller(
   if (-not (Test-Path -LiteralPath $actualScript -PathType Leaf)) {
     throw "Guarded installer script is missing: $actualScript"
   }
+  $actualManifest = Get-FullPath -Path $ManifestPath -Description 'Installer manifest path'
+  $actualLog = Get-FullPath -Path $InstallerLogPath -Description 'Installer log path'
+  $actualAllowedRoot = Get-FullPath -Path $AllowedRoot -Description 'Allowed installer root'
   $taskName = 'ggcoder-local-launch-{0}-{1}' -f $PID, [Guid]::NewGuid().ToString('N')
-  $arguments = @(
-    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $actualScript,
-    '-TaskName', $taskName,
-    '-DelaySeconds', '1',
-    '-MetadataPath', $ManifestPath,
-    '-LogPath', $InstallerLogPath,
-    '-AllowedInstallerRoot', $AllowedRoot
-  )
-  & powershell.exe @arguments
-  $exitCode = $LASTEXITCODE
-  if ($exitCode -ne 0) { throw "Guarded Local Fork installer failed with exit code $exitCode" }
+  $encodedCommand = New-LocalForkInstallerEncodedCommand -ScriptPath $actualScript -TaskName $taskName `
+    -ManifestPath $actualManifest -InstallerLogPath $actualLog -AllowedRoot $actualAllowedRoot
+  $powerShellPath = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
+  if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
+    throw "System PowerShell executable is missing: $powerShellPath"
+  }
+  Register-LocalForkInstallerTask -TaskName $taskName -PowerShellPath $powerShellPath `
+    -EncodedCommand $encodedCommand
+  try {
+    Start-LocalForkInstallerTask -TaskName $taskName
+  } catch {
+    $startFailure = $_.Exception.Message
+    try {
+      Remove-FailedLocalForkInstallerTask -TaskName $taskName
+    } catch {
+      throw "Failed to start guarded installer task '$taskName': $startFailure. Failed to remove the unstarted task: $($_.Exception.Message)"
+    }
+    throw "Failed to start guarded installer task '$taskName': $startFailure"
+  }
+  [pscustomobject]@{ TaskName = $taskName; Status = 'started' }
 }
 
 function Start-CanonicalLocalFork([string]$ExecutablePath) {
@@ -245,28 +300,26 @@ function Invoke-CanonicalLocalForkLaunch(
   $initialProcesses = @(Get-LocalForkRootProcesses)
   $initialRoot = Assert-UnambiguousLocalForkProcess -Processes $initialProcesses -ExpectedExecutable $expectedFullPath
   $installedCurrent = Test-InstalledPayloadCurrent -Path $expectedFullPath -Manifest $manifest
-  $installed = $false
 
   if (-not $installedCurrent) {
     Write-LaunchLog "INSTALL required; installed payload missing or stale; expectedSha256=$($manifest.PayloadSha256)" $LauncherLogPath
-    Invoke-GuardedLocalForkInstaller -ScriptPath $GuardedInstallerPath -ManifestPath $manifest.ManifestPath `
+    $handoff = Invoke-GuardedLocalForkInstaller -ScriptPath $GuardedInstallerPath -ManifestPath $manifest.ManifestPath `
       -AllowedRoot $AllowedInstallerRoot -InstallerLogPath (Join-Path (Split-Path -Parent $LauncherLogPath) 'install-local-patched.log')
-    $installed = $true
-    $revalidated = Read-CanonicalLocalForkManifest -Path $ManifestPath -AllowedRoot $AllowedManifestRoot
-    if ($revalidated.PayloadSha256 -ne $manifest.PayloadSha256 -or
-        $revalidated.InstallerSha256 -ne $manifest.InstallerSha256) {
-      throw 'Local Fork manifest changed while the guarded installer was running'
-    }
-    $manifest = $revalidated
-    if (-not (Test-InstalledPayloadCurrent -Path $expectedFullPath -Manifest $manifest)) {
-      throw 'Guarded installer completed without installing the manifest payload'
+    Write-LaunchLog "SUCCESS disposition=install-scheduled taskName=$($handoff.TaskName)" $LauncherLogPath
+    return [pscustomobject]@{
+      disposition = 'install-scheduled'
+      manifestPath = $manifest.ManifestPath
+      installerPath = $manifest.InstallerPath
+      installerSha256 = $manifest.InstallerSha256
+      executablePath = $expectedFullPath
+      taskName = $handoff.TaskName
     }
   }
 
   $processes = @(Get-LocalForkRootProcesses)
   $root = Assert-UnambiguousLocalForkProcess -Processes $processes -ExpectedExecutable $expectedFullPath
   $expectedPid = 0
-  $disposition = if ($installed) { 'installed-and-verified' } elseif ($root) { 'existing-and-verified' } else { 'launched-and-verified' }
+  $disposition = if ($root) { 'existing-and-verified' } else { 'launched-and-verified' }
   if (-not $root) {
     $started = Start-CanonicalLocalFork -ExecutablePath $expectedFullPath
     $expectedPid = [int]$started.Id

@@ -105,8 +105,7 @@ function Invoke-GuardedLocalForkInstaller {
   $script:InstallerCalls++
   $script:InstallerAllowedRoot = $AllowedRoot
   if (${installerFailure ? "$true" : "$false"}) { throw 'fixture installer failure' }
-  Copy-Item -LiteralPath ${psLiteral(files.payloadPath)} -Destination ${psLiteral(files.executablePath)} -Force
-  $script:MockLive = $true
+  [pscustomobject]@{ TaskName = 'fixture-installer-task'; Status = 'started' }
 }
 function Start-CanonicalLocalFork([string]$ExecutablePath) {
   $script:StarterCalls++
@@ -137,6 +136,86 @@ try {
   return JSON.parse(stdout.trim().split(/\r?\n/).at(-1));
 }
 
+function runTaskHandoff(files, { startFailure = false } = {}) {
+  const installerLogPath = join(files.root, "install logs", "guarded install.log");
+  const driver = `
+$ErrorActionPreference = 'Stop'
+$env:LOCALAPPDATA = ${psLiteral(files.localAppData)}
+. ${psLiteral(launcher)} -LibraryOnly
+$script:RegisterCalls = 0
+$script:StartCalls = 0
+$script:RemoveCalls = 0
+$script:TriggerCalls = 0
+$script:TriggerSupplied = $false
+$script:CapturedTaskName = $null
+$script:CapturedPowerShellPath = $null
+$script:CapturedEncodedCommand = $null
+function New-ScheduledTaskAction {
+  param([string]$Execute, [string]$Argument)
+  [pscustomobject]@{ Execute = $Execute; Argument = $Argument }
+}
+function New-ScheduledTaskPrincipal {
+  param([string]$UserId, [object]$LogonType, [object]$RunLevel)
+  [pscustomobject]@{ UserId = $UserId; LogonType = $LogonType; RunLevel = $RunLevel }
+}
+function New-ScheduledTaskTrigger {
+  param([switch]$Once, [datetime]$At)
+  $script:TriggerCalls++
+  [pscustomobject]@{ Once = $Once; At = $At }
+}
+function Register-ScheduledTask {
+  param([string]$TaskName, [object]$Action, [object]$Principal, [string]$Description, [switch]$Force, [object]$Trigger)
+  $script:RegisterCalls++
+  $script:TriggerSupplied = $PSBoundParameters.ContainsKey('Trigger')
+  $script:CapturedTaskName = $TaskName
+  $script:CapturedPowerShellPath = $Action.Execute
+  $script:CapturedEncodedCommand = ($Action.Argument -split ' ')[-1]
+}
+function Start-ScheduledTask {
+  param([string]$TaskName)
+  $script:StartCalls++
+  if (${startFailure ? "$true" : "$false"}) { throw 'fixture task start failure' }
+}
+function Unregister-ScheduledTask {
+  param([string]$TaskName, [switch]$Confirm)
+  $script:RemoveCalls++
+}
+try {
+  $invokeParams = @{
+    ScriptPath = ${psLiteral(join(import.meta.dirname, "install-local-patched.ps1"))}
+    ManifestPath = ${psLiteral(files.manifestPath)}
+    AllowedRoot = ${psLiteral(files.artifactRoot)}
+    InstallerLogPath = ${psLiteral(installerLogPath)}
+  }
+  $result = Invoke-GuardedLocalForkInstaller @invokeParams
+  $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($script:CapturedEncodedCommand))
+  [pscustomobject]@{
+    ok = $true; result = $result; registerCalls = $script:RegisterCalls; startCalls = $script:StartCalls;
+    removeCalls = $script:RemoveCalls; triggerCalls = $script:TriggerCalls; triggerSupplied = $script:TriggerSupplied;
+    taskName = $script:CapturedTaskName; powerShellPath = $script:CapturedPowerShellPath; decodedCommand = $decoded;
+    expectedManifestPath = [IO.Path]::GetFullPath($invokeParams.ManifestPath);
+    expectedLogPath = [IO.Path]::GetFullPath($invokeParams.InstallerLogPath);
+    expectedAllowedRoot = [IO.Path]::GetFullPath($invokeParams.AllowedRoot)
+  } | ConvertTo-Json -Depth 6 -Compress
+} catch {
+  [pscustomobject]@{
+    ok = $false; error = $_.Exception.Message; registerCalls = $script:RegisterCalls;
+    startCalls = $script:StartCalls; removeCalls = $script:RemoveCalls;
+    triggerCalls = $script:TriggerCalls; triggerSupplied = $script:TriggerSupplied
+  } | ConvertTo-Json -Depth 6 -Compress
+}
+`;
+  const stdout = execFileSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", driver],
+    { encoding: "utf8", windowsHide: true },
+  );
+  return {
+    ...JSON.parse(stdout.trim().split(/\r?\n/).at(-1)),
+    installerLogPath,
+  };
+}
+
 afterEach(() => {
   for (const root of fixtureRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -159,9 +238,10 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
   });
 
   it.each(["stale", "missing"])(
-    "repairs a %s installed payload through the guarded installer",
+    "schedules a %s payload repair and exits before app shutdown",
     (installed) => {
       const files = fixture({ installed });
+      const before = installed === "stale" ? readFileSync(files.executablePath) : null;
       const result = runScenario(files, { live: installed === "stale" });
       expect(result.ok, result.error).toBe(true);
       expect(result).toMatchObject({
@@ -170,14 +250,54 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
         installerAllowedRoot: files.artifactRoot,
         starterCalls: 0,
         result: {
-          disposition: "installed-and-verified",
-          executableSha256: files.payloadHash,
-          pid: 4101,
+          disposition: "install-scheduled",
+          taskName: "fixture-installer-task",
         },
       });
-      expect(sha256(readFileSync(files.executablePath))).toBe(files.payloadHash);
+      if (before) expect(readFileSync(files.executablePath)).toEqual(before);
+      expect(readFileSync(files.logPath, "utf8").trim().split(/\r?\n/).at(-1)).toContain(
+        "SUCCESS disposition=install-scheduled taskName=fixture-installer-task",
+      );
     },
   );
+
+  it("registers a triggerless task, starts it manually, and preserves spaced arguments", () => {
+    const files = fixture({ installed: "missing" });
+    const result = runTaskHandoff(files);
+    expect(result.ok, result.error).toBe(true);
+    expect(result).toMatchObject({
+      registerCalls: 1,
+      triggerCalls: 0,
+      triggerSupplied: false,
+      startCalls: 1,
+      removeCalls: 0,
+      result: { Status: "started" },
+    });
+    expect(result.powerShellPath.toLowerCase()).toMatch(/powershell\.exe$/);
+    expect(result.decodedCommand).toContain(`-TaskName ${psLiteral(result.taskName)}`);
+    expect(result.decodedCommand).toContain(
+      `-MetadataPath ${psLiteral(result.expectedManifestPath)}`,
+    );
+    expect(result.decodedCommand).toContain(`-LogPath ${psLiteral(result.expectedLogPath)}`);
+    expect(result.decodedCommand).toContain(
+      `-AllowedInstallerRoot ${psLiteral(result.expectedAllowedRoot)}`,
+    );
+    expect(readFileSync(join(import.meta.dirname, "install-local-patched.ps1"), "utf8")).toContain(
+      "& schtasks.exe /Delete /TN $TaskName /F",
+    );
+  });
+
+  it("removes only an unstarted task when scheduled-task startup fails", () => {
+    const files = fixture({ installed: "missing" });
+    const result = runTaskHandoff(files, { startFailure: true });
+    expect(result).toMatchObject({
+      ok: false,
+      registerCalls: 1,
+      startCalls: 1,
+      removeCalls: 1,
+    });
+    expect(result.error).toContain("fixture task start failure");
+  });
 
   it("fails closed on a malformed manifest before process or installer actions", () => {
     const files = fixture({ malformed: true });

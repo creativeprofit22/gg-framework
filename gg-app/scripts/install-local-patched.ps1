@@ -24,7 +24,6 @@ if ([string]::IsNullOrWhiteSpace($AllowedInstallerRoot)) {
 
 $script:InstallLogPath = $LogPath
 $script:LockClearTimeoutMilliseconds = $LockClearTimeoutSeconds * 1000
-$script:RestartManagerResourceLimit = 10000
 
 function Write-Step([string]$Message) {
   $null = Assert-NoReparsePointTraversal -Path $script:InstallLogPath -Description 'Install log path'
@@ -110,26 +109,17 @@ function Invoke-RestartManagerQuery([string[]]$Resources) {
   return [GgCoder.RestartManagerDiagnostics]::Query($Resources)
 }
 
-function Get-RestartManagerLockState([string]$Path, [long]$QueryDeadlineTimestamp = [long]::MaxValue,
-  [ValidateRange(1, 10000)][int]$MaxResourceCount = $script:RestartManagerResourceLimit) {
-  $fullPath = [IO.Path]::GetFullPath($Path)
-  $resources = [Collections.Generic.List[string]]::new()
-  if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
-    $resources.Add($fullPath)
-  } elseif (Test-Path -LiteralPath $fullPath -PathType Container) {
-    $null = Assert-DirectoryTreeHasNoReparsePoints -Path $fullPath -Description 'Restart Manager resource directory'
-    foreach ($file in Get-ChildItem -LiteralPath $fullPath -File -Recurse -Force -ErrorAction Stop) {
-      $resources.Add($file.FullName)
-      if ($resources.Count -gt $MaxResourceCount) {
-        return [pscustomobject]@{ ResourceCount = $resources.Count; Status = 'fatal'; Stage = 'register';
-          Reason = 'resource-count-limit'; Limit = $MaxResourceCount; Owners = @() }
-      }
-    }
+function Get-RestartManagerLockState([string]$ResourcePath, [long]$QueryDeadlineTimestamp = [long]::MaxValue) {
+  $fullPath = [IO.Path]::GetFullPath($ResourcePath)
+  if (Test-Path -LiteralPath $fullPath -PathType Container) {
+    return [pscustomobject]@{ ResourceCount = 0; Status = 'fatal'; Stage = 'validate';
+      Reason = 'container-resource-not-allowed'; Owners = @() }
   }
-  if ($resources.Count -eq 0) {
+  if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
     return [pscustomobject]@{ ResourceCount = 0; Status = 'none';
-      Reason = 'no-existing-file-resources'; Owners = @() }
+      Reason = 'no-existing-file-resource'; Owners = @() }
   }
+  $resource = Assert-NoReparsePointTraversal -Path $fullPath -Description 'Restart Manager payload resource'
 
   if (-not ('GgCoder.RestartManagerDiagnostics' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -206,8 +196,8 @@ namespace GgCoder {
       [Diagnostics.Stopwatch]::GetTimestamp() -ge $QueryDeadlineTimestamp) {
     throw [TimeoutException]::new('Restart Manager polling deadline exhausted before query')
   }
-  $query = Invoke-RestartManagerQuery -Resources ([string[]]$resources)
-  return [pscustomobject]@{ ResourceCount = $resources.Count; Status = [string]$query.Status;
+  $query = Invoke-RestartManagerQuery -Resources ([string[]]@($resource))
+  return [pscustomobject]@{ ResourceCount = 1; Status = [string]$query.Status;
     Stage = [string]$query.Stage; Reason = [string]$query.Reason; Error = [int]$query.Error;
     Needed = [uint32]$query.Needed; Attempt = [int]$query.Attempt; Attempts = [int]$query.Attempts;
     Owners = @($query.Owners) }
@@ -237,15 +227,15 @@ function Format-RestartManagerLockState([object]$State) {
   return $parts -join ' '
 }
 
-function Throw-LockClearTimeout([string]$InstallDirectory, [int]$TimeoutMilliseconds, [int]$Attempts,
+function Throw-LockClearTimeout([string]$InstalledExecutable, [int]$TimeoutMilliseconds, [int]$Attempts,
   [string]$LastEvidence, [string]$LastOwnerEvidence) {
   $ownerEvidence = if ($LastOwnerEvidence) { "; lastOwnerEvidence=$LastOwnerEvidence" } else { '' }
-  $message = "Installed payload locks did not clear before the ${TimeoutMilliseconds}ms Restart Manager polling deadline; attempts=$Attempts; path=`"$InstallDirectory`"; lastEvidence=$LastEvidence$ownerEvidence"
+  $message = "Installed payload locks did not clear before the ${TimeoutMilliseconds}ms Restart Manager polling deadline; attempts=$Attempts; installedExecutable=`"$InstalledExecutable`"; lastEvidence=$LastEvidence$ownerEvidence"
   Write-Step "LOCK CLEAR TIMEOUT $message"
   throw $message
 }
 
-function Wait-InstalledPayloadLocksClear([string]$InstallDirectory,
+function Wait-InstalledPayloadLocksClear([string]$InstalledExecutable,
   [ValidateRange(1, 300000)][int]$TimeoutMilliseconds,
   [ValidateRange(10, 5000)][int]$PollIntervalMilliseconds = 250) {
   $frequency = [Diagnostics.Stopwatch]::Frequency
@@ -257,12 +247,12 @@ function Wait-InstalledPayloadLocksClear([string]$InstallDirectory,
     if ($beforeQueryTimestamp -ge $deadlineTimestamp) {
       $elapsedMilliseconds = [long](($beforeQueryTimestamp - $startedTimestamp) * 1000.0 / $frequency)
       $lastEvidence = 'status=unavailable reason=polling-deadline-exhausted-before-query'
-      Write-Step "LOCK CLEAR ATTEMPT attempt=$($attempt + 1) elapsedMs=$elapsedMilliseconds path=`"$InstallDirectory`" $lastEvidence"
-      Throw-LockClearTimeout $InstallDirectory $TimeoutMilliseconds $attempt $lastEvidence $lastOwnerEvidence
+      Write-Step "LOCK CLEAR ATTEMPT attempt=$($attempt + 1) elapsedMs=$elapsedMilliseconds installedExecutable=`"$InstalledExecutable`" $lastEvidence"
+      Throw-LockClearTimeout $InstalledExecutable $TimeoutMilliseconds $attempt $lastEvidence $lastOwnerEvidence
     }
     $attempt += 1
     try {
-      $state = Get-RestartManagerLockState -Path $InstallDirectory -QueryDeadlineTimestamp $deadlineTimestamp
+      $state = Get-RestartManagerLockState -ResourcePath $InstalledExecutable -QueryDeadlineTimestamp $deadlineTimestamp
     } catch {
       $state = [pscustomobject]@{ ResourceCount = 0; Status = 'unavailable';
         DiagnosticExceptionType = $_.Exception.GetType().FullName; DiagnosticMessage = $_.Exception.Message; Owners = @() }
@@ -271,17 +261,17 @@ function Wait-InstalledPayloadLocksClear([string]$InstallDirectory,
     if ($state.Status -eq 'owners') { $lastOwnerEvidence = $lastEvidence }
     $afterQueryTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
     $elapsedMilliseconds = [long](($afterQueryTimestamp - $startedTimestamp) * 1000.0 / $frequency)
-    Write-Step "LOCK CLEAR ATTEMPT attempt=$attempt elapsedMs=$elapsedMilliseconds path=`"$InstallDirectory`" $lastEvidence"
+    Write-Step "LOCK CLEAR ATTEMPT attempt=$attempt elapsedMs=$elapsedMilliseconds installedExecutable=`"$InstalledExecutable`" $lastEvidence"
     if ($state.Status -eq 'fatal') {
-      $message = "Restart Manager lock query cannot safely continue; path=`"$InstallDirectory`"; evidence=$lastEvidence"
+      $message = "Restart Manager lock query cannot safely continue; installedExecutable=`"$InstalledExecutable`"; evidence=$lastEvidence"
       Write-Step "LOCK CLEAR FAILED $message"
       throw $message
     }
     if ($afterQueryTimestamp -ge $deadlineTimestamp) {
-      Throw-LockClearTimeout $InstallDirectory $TimeoutMilliseconds $attempt $lastEvidence $lastOwnerEvidence
+      Throw-LockClearTimeout $InstalledExecutable $TimeoutMilliseconds $attempt $lastEvidence $lastOwnerEvidence
     }
     if ($state.Status -eq 'none') {
-      Write-Step "LOCK CLEAR SUCCESS attempts=$attempt elapsedMs=$elapsedMilliseconds path=`"$InstallDirectory`""
+      Write-Step "LOCK CLEAR SUCCESS attempts=$attempt elapsedMs=$elapsedMilliseconds installedExecutable=`"$InstalledExecutable`""
       return
     }
     $remainingMilliseconds = [long][Math]::Ceiling(($deadlineTimestamp - $afterQueryTimestamp) * 1000.0 / $frequency)
@@ -294,7 +284,7 @@ function Write-OperationFailureDiagnostic([string]$Operation, [string]$Path, [Ex
   Write-Step "OPERATION FAILED name=$Operation path=`"$Path`" exceptionType=$($Exception.GetType().FullName) hresult=$hresult message=`"$($Exception.Message)`""
   if (Test-SharingViolation -Exception $Exception) {
     try {
-      $lockState = Get-RestartManagerLockState -Path $Path
+      $lockState = Get-RestartManagerLockState -ResourcePath $Path
       $lockEvidence = Format-RestartManagerLockState -State $lockState
       Write-Step "LOCK EVIDENCE name=$Operation path=`"$Path`" nativeError=$(Get-NativeErrorCode -Exception $Exception) $lockEvidence"
     } catch {
@@ -858,7 +848,7 @@ function Invoke-VerifiedInstallTransaction(
     $null = Assert-NoReparsePointTraversal -Path $InstallDirectory -Description 'Install directory path'
     $registrationSnapshot = Get-LocalForkRegistrationSnapshot
     if ($hadExistingInstall) {
-      Wait-InstalledPayloadLocksClear -InstallDirectory $InstallDirectory `
+      Wait-InstalledPayloadLocksClear -InstalledExecutable $InstalledExecutable `
         -TimeoutMilliseconds $script:LockClearTimeoutMilliseconds
       $previousMetadata = Get-PreInstallerFileMetadata -Path $InstalledExecutable
       $backupPath = New-InstallBackupPath -InstallDirectory $InstallDirectory

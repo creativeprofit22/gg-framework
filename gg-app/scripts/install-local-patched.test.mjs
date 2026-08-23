@@ -113,6 +113,7 @@ function withExclusiveFileLock(path, readyPath, holdMilliseconds, body) {
     `try { [IO.File]::WriteAllText(${psLiteral(readyPath)}, 'ready'); Start-Sleep -Milliseconds ${holdMilliseconds} } finally { $lock.Dispose() }`;
   const encodedLockBody = Buffer.from(lockBody, "utf16le").toString("base64");
   return (
+    `$null = Get-RestartManagerLockState -ResourcePath ${psLiteral(path)}; ` +
     `$owner = Start-Process powershell.exe -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', ${psLiteral(encodedLockBody)}) -PassThru -WindowStyle Hidden; ` +
     `try { $readyDeadline = [DateTime]::UtcNow.AddSeconds(3); while (-not (Test-Path -LiteralPath ${psLiteral(readyPath)})) { if ([DateTime]::UtcNow -ge $readyDeadline) { throw 'Lock holder did not become ready' }; Start-Sleep -Milliseconds 10 }; ` +
     `${body} } finally { if (-not $owner.HasExited) { $owner.Kill(); $owner.WaitForExit() } }`
@@ -177,61 +178,61 @@ windowsDescribe("detached local installer helper", () => {
     );
   });
 
-  it("passes the installed-payload lock gate immediately when no owner exists", () => {
+  it("registers only the exact installed executable and ignores nested decoy files", () => {
     const fixture = transactionFixture();
+    const nestedDirectory = join(fixture.installDirectory, "resources", "runtime");
+    const nestedDecoy = join(nestedDirectory, "decoy.node");
+    mkdirSync(nestedDirectory, { recursive: true });
+    writeFileSync(nestedDecoy, "decoy payload");
     const result = runPowerShell(
-      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; ` +
-        `Wait-InstalledPayloadLocksClear -InstallDirectory ${psLiteral(fixture.installDirectory)} -TimeoutMilliseconds 500 -PollIntervalMilliseconds 25; ` +
-        `[pscustomobject]@{ DirectoryExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; FileExists = Test-Path -LiteralPath ${psLiteral(fixture.installedExecutable)} } | ConvertTo-Json -Compress`,
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:capturedResources = @(); ` +
+        `function Invoke-RestartManagerQuery([string[]]$Resources) { $script:capturedResources = @($Resources); return [pscustomobject]@{ Status = 'none'; Stage = ''; Reason = ''; Error = 0; Needed = 0; Attempt = 0; Attempts = 0; Owners = @() } }; ` +
+        `Wait-InstalledPayloadLocksClear -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -TimeoutMilliseconds 500 -PollIntervalMilliseconds 25; ` +
+        `[pscustomobject]@{ Resources = @($script:capturedResources); DecoyExists = Test-Path -LiteralPath ${psLiteral(nestedDecoy)} } | ConvertTo-Json -Compress`,
     );
 
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout.trim())).toEqual({ DirectoryExists: true, FileExists: true });
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      Resources: [realpathSync.native(fixture.installedExecutable)],
+      DecoyExists: true,
+    });
     const log = readFileSync(fixture.logPath, "utf8");
-    expect(log).toMatch(/LOCK CLEAR ATTEMPT attempt=1 .* status=none/);
+    expect(log).toMatch(/LOCK CLEAR ATTEMPT attempt=1 .* resourceCount=1 status=none/);
     expect(log).toContain("LOCK CLEAR SUCCESS attempts=1");
   });
 
-  it("treats missing and empty installed payloads as immediately clear", () => {
+  it("treats a missing installed executable as immediately clear", () => {
     const fixture = installerFixture();
-    const missingInstallDirectory = join(fixture.root, "missing-install");
-    const emptyInstallDirectory = join(fixture.root, "empty-install");
-    const logPath = join(fixture.root, "empty-install.log");
-    mkdirSync(emptyInstallDirectory);
+    const missingExecutable = join(fixture.root, "missing-install", "gg-coder-local-fork.exe");
+    const logPath = join(fixture.root, "missing-install.log");
     const result = runPowerShell(
       `$script:InstallLogPath = ${psLiteral(logPath)}; ` +
-        `Wait-InstalledPayloadLocksClear -InstallDirectory ${psLiteral(missingInstallDirectory)} -TimeoutMilliseconds 500 -PollIntervalMilliseconds 25; ` +
-        `Wait-InstalledPayloadLocksClear -InstallDirectory ${psLiteral(emptyInstallDirectory)} -TimeoutMilliseconds 500 -PollIntervalMilliseconds 25`,
+        `Wait-InstalledPayloadLocksClear -InstalledExecutable ${psLiteral(missingExecutable)} -TimeoutMilliseconds 500 -PollIntervalMilliseconds 25`,
     );
 
     expect(result.status, result.stderr).toBe(0);
     const log = readFileSync(logPath, "utf8");
-    expect(
-      log.match(/resourceCount=0 status=none reason=no-existing-file-resources/g),
-    ).toHaveLength(2);
-    expect(log.match(/LOCK CLEAR SUCCESS attempts=1/g)).toHaveLength(2);
+    expect(log).toContain("resourceCount=0 status=none reason=no-existing-file-resource");
+    expect(log).toContain("LOCK CLEAR SUCCESS attempts=1");
   });
-  it("detects a lock on a nested installed payload file until release", () => {
+
+  it("detects the real Restart Manager owner of the installed executable until release", () => {
     const fixture = transactionFixture();
-    const nestedDirectory = join(fixture.installDirectory, "resources", "runtime");
-    const nestedFile = join(nestedDirectory, "payload.node");
-    const readyPath = join(fixture.root, "nested-lock-ready");
-    mkdirSync(nestedDirectory, { recursive: true });
-    writeFileSync(nestedFile, "nested payload");
+    const readyPath = join(fixture.root, "executable-lock-ready");
     const result = runPowerShell(
       `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; ` +
         withExclusiveFileLock(
-          nestedFile,
+          fixture.installedExecutable,
           readyPath,
           600,
-          `Wait-InstalledPayloadLocksClear -InstallDirectory ${psLiteral(fixture.installDirectory)} -TimeoutMilliseconds 3000 -PollIntervalMilliseconds 50; ` +
-            `[pscustomobject]@{ OwnerPid = $owner.Id; NestedFileExists = Test-Path -LiteralPath ${psLiteral(nestedFile)} } | ConvertTo-Json -Compress`,
+          `Wait-InstalledPayloadLocksClear -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -TimeoutMilliseconds 3000 -PollIntervalMilliseconds 50; ` +
+            `[pscustomobject]@{ OwnerPid = $owner.Id; ExecutableExists = Test-Path -LiteralPath ${psLiteral(fixture.installedExecutable)} } | ConvertTo-Json -Compress`,
         ),
     );
 
     expect(result.status, result.stderr).toBe(0);
     const evidence = JSON.parse(result.stdout.trim());
-    expect(evidence.NestedFileExists).toBe(true);
+    expect(evidence.ExecutableExists).toBe(true);
     const log = readFileSync(fixture.logPath, "utf8");
     expect(log).toContain(`status=owners count=1 ownerPid=${evidence.OwnerPid}`);
     expect(log).toMatch(/LOCK CLEAR SUCCESS attempts=[2-9][0-9]*/);
@@ -245,7 +246,7 @@ windowsDescribe("detached local installer helper", () => {
           fixture.installedExecutable,
           readyPath,
           10000,
-          `$failure = $null; try { Wait-InstalledPayloadLocksClear -InstallDirectory ${psLiteral(fixture.installDirectory)} -TimeoutMilliseconds 200 -PollIntervalMilliseconds 25 } catch { $failure = $_ }; ` +
+          `$failure = $null; try { Wait-InstalledPayloadLocksClear -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -TimeoutMilliseconds 200 -PollIntervalMilliseconds 25 } catch { $failure = $_ }; ` +
             `if (-not $failure) { throw 'Expected lock-clear timeout' }; ` +
             `[pscustomobject]@{ OwnerPid = $owner.Id; Failure = $failure.Exception.Message; DirectoryExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; FileExists = Test-Path -LiteralPath ${psLiteral(fixture.installedExecutable)} } | ConvertTo-Json -Compress`,
         ),
@@ -267,9 +268,9 @@ windowsDescribe("detached local installer helper", () => {
     const fixture = transactionFixture();
     const result = runPowerShell(
       `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; ` +
-        `$null = Get-RestartManagerLockState -Path ${psLiteral(fixture.installDirectory)}; ` +
+        `$null = Get-RestartManagerLockState -ResourcePath ${psLiteral(fixture.installedExecutable)}; ` +
         `function Invoke-RestartManagerQuery([string[]]$Resources) { Start-Sleep -Milliseconds 100; return [pscustomobject]@{ Status = 'none'; Stage = ''; Reason = ''; Error = 0; Needed = 0; Attempt = 0; Attempts = 0; Owners = @() } }; ` +
-        `$failure = $null; try { Wait-InstalledPayloadLocksClear -InstallDirectory ${psLiteral(fixture.installDirectory)} -TimeoutMilliseconds 25 -PollIntervalMilliseconds 10 } catch { $failure = $_ }; ` +
+        `$failure = $null; try { Wait-InstalledPayloadLocksClear -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -TimeoutMilliseconds 25 -PollIntervalMilliseconds 10 } catch { $failure = $_ }; ` +
         `if (-not $failure) { throw 'Expected post-query polling deadline failure' }; ` +
         `[pscustomobject]@{ Failure = $failure.Exception.Message; DirectoryExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; FileExists = Test-Path -LiteralPath ${psLiteral(fixture.installedExecutable)} } | ConvertTo-Json -Compress`,
     );
@@ -293,11 +294,11 @@ windowsDescribe("detached local installer helper", () => {
   it("formats exact owner-count and retry exhaustion limits from typed query results", () => {
     const fixture = transactionFixture();
     const result = runPowerShell(
-      `$null = Get-RestartManagerLockState -Path ${psLiteral(fixture.installDirectory)}; ` +
+      `$null = Get-RestartManagerLockState -ResourcePath ${psLiteral(fixture.installedExecutable)}; ` +
         `function Invoke-RestartManagerQuery([string[]]$Resources) { [pscustomobject]@{ Status = 'unavailable'; Stage = 'list'; Reason = 'owner-count-limit'; Error = 234; Needed = 4097; Attempt = 1; Attempts = 0; Owners = @() } }; ` +
-        `$ownerLimit = Format-RestartManagerLockState -State (Get-RestartManagerLockState -Path ${psLiteral(fixture.installDirectory)}); ` +
+        `$ownerLimit = Format-RestartManagerLockState -State (Get-RestartManagerLockState -ResourcePath ${psLiteral(fixture.installedExecutable)}); ` +
         `function Invoke-RestartManagerQuery([string[]]$Resources) { [pscustomobject]@{ Status = 'unavailable'; Stage = 'list'; Reason = 'error-more-data-retry-exhausted'; Error = 234; Needed = 12; Attempt = 0; Attempts = 4; Owners = @() } }; ` +
-        `$retryLimit = Format-RestartManagerLockState -State (Get-RestartManagerLockState -Path ${psLiteral(fixture.installDirectory)}); ` +
+        `$retryLimit = Format-RestartManagerLockState -State (Get-RestartManagerLockState -ResourcePath ${psLiteral(fixture.installedExecutable)}); ` +
         `[pscustomobject]@{ OwnerLimit = $ownerLimit; RetryLimit = $retryLimit } | ConvertTo-Json -Compress`,
     );
 
@@ -310,32 +311,25 @@ windowsDescribe("detached local installer helper", () => {
     });
   });
 
-  it("fails non-destructively when payload resources exceed the Restart Manager limit", () => {
+  it("rejects a directory resource without invoking the native query", () => {
     const fixture = transactionFixture();
     const nestedFile = join(fixture.installDirectory, "second-resource.bin");
     writeFileSync(nestedFile, "second resource");
     const result = runPowerShell(
-      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:RestartManagerResourceLimit = 1; ` +
-        `$failure = $null; try { Wait-InstalledPayloadLocksClear -InstallDirectory ${psLiteral(fixture.installDirectory)} -TimeoutMilliseconds 500 -PollIntervalMilliseconds 25 } catch { $failure = $_ }; ` +
-        `if (-not $failure) { throw 'Expected Restart Manager resource-limit failure' }; ` +
-        `[pscustomobject]@{ Failure = $failure.Exception.Message; DirectoryExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; ExecutableExists = Test-Path -LiteralPath ${psLiteral(fixture.installedExecutable)}; NestedFileExists = Test-Path -LiteralPath ${psLiteral(nestedFile)} } | ConvertTo-Json -Compress`,
+      `$script:queryCalls = 0; function Invoke-RestartManagerQuery([string[]]$Resources) { $script:queryCalls += 1; throw 'native query must not run' }; ` +
+        `$state = Get-RestartManagerLockState -ResourcePath ${psLiteral(fixture.installDirectory)}; ` +
+        `[pscustomobject]@{ Evidence = Format-RestartManagerLockState -State $state; QueryCalls = $script:queryCalls; DirectoryExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; ExecutableExists = Test-Path -LiteralPath ${psLiteral(fixture.installedExecutable)}; NestedFileExists = Test-Path -LiteralPath ${psLiteral(nestedFile)} } | ConvertTo-Json -Compress`,
     );
 
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout.trim())).toMatchObject({
-      Failure: expect.stringContaining(
-        "resourceCount=2 status=fatal stage=register reason=resource-count-limit limit=1",
-      ),
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      Evidence:
+        "resourceCount=0 status=fatal stage=validate reason=container-resource-not-allowed",
+      QueryCalls: 0,
       DirectoryExists: true,
       ExecutableExists: true,
       NestedFileExists: true,
     });
-    const log = readFileSync(fixture.logPath, "utf8");
-    expect(log).toContain("LOCK CLEAR FAILED");
-    expect(log).toContain(
-      "resourceCount=2 status=fatal stage=register reason=resource-count-limit limit=1",
-    );
-    expect(log).not.toContain("LOCK CLEAR TIMEOUT");
   });
 
   it("logs exception and Restart Manager evidence when the hash target is locked", () => {
@@ -603,13 +597,9 @@ windowsDescribe("detached local installer helper", () => {
     });
   });
 
-  it("stops a timed-out transaction before hash, backup rename, or installer invocation", () => {
+  it("stops an executable-lock timeout before hash, backup rename, or installer invocation", () => {
     const fixture = transactionFixture();
-    const nestedDirectory = join(fixture.installDirectory, "resources");
-    const nestedFile = join(nestedDirectory, "locked-runtime.bin");
     const readyPath = join(fixture.root, "transaction-timeout-lock-ready");
-    mkdirSync(nestedDirectory);
-    writeFileSync(nestedFile, "locked transaction payload");
     const body =
       transactionPrelude(fixture) +
       `$script:LockClearTimeoutMilliseconds = 500; $script:hashCalls = 0; $script:renameCalls = 0; $script:installerCalls = 0; ` +
@@ -617,11 +607,12 @@ windowsDescribe("detached local installer helper", () => {
       `function Move-InstallDirectoryToBackup([string]$InstallDirectory, [string]$BackupPath) { $script:renameCalls += 1; throw 'rename must not run' }; ` +
       `function Invoke-NsisInstaller([string]$InstallerPath) { $script:installerCalls += 1; throw 'installer must not run' }; ` +
       withExclusiveFileLock(
-        nestedFile,
+        fixture.installedExecutable,
         readyPath,
         10000,
         `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $false } catch { $failure = $_.Exception.Message }; ` +
-          `[pscustomobject]@{ Failure = $failure; OwnerPid = $owner.Id; HashCalls = $script:hashCalls; RenameCalls = $script:renameCalls; InstallerCalls = $script:installerCalls; InstallExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; ExecutableContent = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes(${psLiteral(fixture.installedExecutable)})); Backups = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -Directory -Filter 'GG Coder Local Fork.backup-*').Count } | ConvertTo-Json -Compress`,
+          `$owner.Kill(); $owner.WaitForExit(); ` +
+          `[pscustomobject]@{ Failure = $failure; OwnerPid = $owner.Id; HashCalls = $script:hashCalls; RenameCalls = $script:renameCalls; InstallerCalls = $script:installerCalls; InstallExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; ExecutableContent = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes(${psLiteral(fixture.installedExecutable)})); ExecutableSha256 = Get-Sha256 -Path ${psLiteral(fixture.installedExecutable)}; Backups = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -Directory -Filter 'GG Coder Local Fork.backup-*').Count; RecoveryArchives = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -File -Filter 'GG Coder Local Fork.backup-*.recovery.zip').Count } | ConvertTo-Json -Compress`,
       );
 
     const result = runPowerShell(body);
@@ -634,8 +625,52 @@ windowsDescribe("detached local installer helper", () => {
       InstallerCalls: 0,
       InstallExists: true,
       ExecutableContent: fixture.oldBytes.toString("utf8"),
+      ExecutableSha256: sha256(fixture.oldBytes).toUpperCase(),
       Backups: 0,
+      RecoveryArchives: 0,
     });
+    expect(evidence.Failure).toContain(
+      "Installed payload locks did not clear before the 500ms Restart Manager polling deadline",
+    );
+    expect(evidence.Failure).toContain(`ownerPid=${evidence.OwnerPid}`);
+  });
+
+  it("relaunches the unchanged executable once after a pre-backup lock timeout", () => {
+    const fixture = transactionFixture();
+    const readyPath = join(fixture.root, "transaction-relaunch-timeout-lock-ready");
+    const body =
+      transactionPrelude(fixture) +
+      `$script:LockClearTimeoutMilliseconds = 500; $script:hashCalls = 0; $script:renameCalls = 0; $script:installerCalls = 0; $script:startCalls = 0; $script:startPaths = @(); ` +
+      `function Get-PreInstallerFileMetadata([string]$Path) { $script:hashCalls += 1; throw 'hash must not run' }; ` +
+      `function Move-InstallDirectoryToBackup([string]$InstallDirectory, [string]$BackupPath) { $script:renameCalls += 1; throw 'rename must not run' }; ` +
+      `function Invoke-NsisInstaller([string]$InstallerPath) { $script:installerCalls += 1; throw 'installer must not run' }; ` +
+      `function Start-VerifiedApp([string]$ExecutablePath, [ref]$LaunchedSnapshot) { $script:startCalls += 1; $script:startPaths += $ExecutablePath; return [pscustomobject]@{ ProcessId = 703; ExecutablePath = $ExecutablePath } }; ` +
+      withExclusiveFileLock(
+        fixture.installedExecutable,
+        readyPath,
+        10000,
+        `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $true } catch { $failure = $_.Exception.Message }; ` +
+          `$owner.Kill(); $owner.WaitForExit(); ` +
+          `[pscustomobject]@{ Failure = $failure; OwnerPid = $owner.Id; HashCalls = $script:hashCalls; RenameCalls = $script:renameCalls; InstallerCalls = $script:installerCalls; StartCalls = $script:startCalls; StartPaths = @($script:startPaths); ExecutableSha256 = Get-Sha256 -Path ${psLiteral(fixture.installedExecutable)}; Backups = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -Directory -Filter 'GG Coder Local Fork.backup-*').Count; RecoveryArchives = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -File -Filter 'GG Coder Local Fork.backup-*.recovery.zip').Count } | ConvertTo-Json -Compress`,
+      );
+
+    const result = runPowerShell(body);
+
+    expect(result.status, result.stderr).toBe(0);
+    const evidence = JSON.parse(result.stdout.trim());
+    expect(evidence).toMatchObject({
+      HashCalls: 0,
+      RenameCalls: 0,
+      InstallerCalls: 0,
+      StartCalls: 1,
+      ExecutableSha256: sha256(fixture.oldBytes).toUpperCase(),
+      Backups: 0,
+      RecoveryArchives: 0,
+    });
+    expect(evidence.StartPaths).toHaveLength(1);
+    expect(realpathSync.native(evidence.StartPaths[0])).toBe(
+      realpathSync.native(fixture.installedExecutable),
+    );
     expect(evidence.Failure).toContain(
       "Installed payload locks did not clear before the 500ms Restart Manager polling deadline",
     );

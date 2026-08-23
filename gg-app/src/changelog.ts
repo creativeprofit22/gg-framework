@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.53.4",
+    date: "2026-08-23",
+    items: [
+      "GG Coder gets to the point now. Its answers had quietly grown into walls of text you stopped reading, because the length limit let bullet lists slide straight past it. I closed that loophole with one hard `120 word` budget nothing escapes, capped every bullet at a single line, and told it to skip the file names and jargon unless you actually need to open something. Same answers, a third of the reading.",
+      "`Ken` now catches bad plans before a single line gets written. He used to wave through anything that looked reasonable, so a wonky design only showed itself once the code existed and cost you real time to unpick. Now he asks what you would ask: does every step deserve to be there, is anything split in the wrong place, does that order actually matter, and what happens on the paths nobody thought about. He still refuses to nitpick taste, so he only speaks up when something is genuinely off.",
+    ],
+  },
+  {
     version: "0.53.3",
     date: "2026-08-23",
     items: [

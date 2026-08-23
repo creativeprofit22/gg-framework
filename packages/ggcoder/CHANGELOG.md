@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.49.4
+
+### Patch Changes
+
+- Tighten reply length with one total word budget nothing is exempt from, and give Ken's plan review a design bar that catches unnecessary steps, misplaced boundaries, and uncovered paths before code is written.
+  - @kenkaiiii/gg-ai@5.49.4
+  - @kenkaiiii/gg-agent@5.49.4
+  - @kenkaiiii/gg-core@5.49.4
+
 ## 5.49.3
 
 ### Patch Changes

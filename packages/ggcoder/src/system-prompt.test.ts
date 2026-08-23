@@ -213,9 +213,22 @@ describe("buildSystemPrompt", () => {
     expect(prompt.match(/^\s*`?> /gm) ?? []).toHaveLength(0);
     expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(1);
 
-    // A hard sentence cap plus a numbered list plus a trailing ask is only
-    // followable if the cap says what it counts.
-    expect(talk).toContain("prose only; a step list or the ask doesn't count");
+    // The budget is the whole reply or it is nothing. Every earlier version
+    // carved out the parts that actually carried the bloat (step lists, the
+    // ask, batched question lists), so a 900-word reply satisfied every rule.
+    // These assertions keep the cap total and the escape hatches deleted.
+    expect(talk).toContain("Prose, lists, headers, the ask — everything counts, nothing is exempt");
+    expect(talk).toContain("still inside the budget");
+    expect(talk).not.toContain("prose only; a step list or the ask doesn't count");
+    expect(talk).not.toContain("exempt from the reply and list caps");
+    expect(talk).not.toContain("Question lists are payload");
+    // "exempt" survives in exactly one place: the line that denies exemptions.
+    expect(talk.match(/exempt/g) ?? []).toHaveLength(1);
+
+    // Cutting How to Talk was the point: it competes with the task for the
+    // model's attention, so the meta-instructions stay smaller than the reply
+    // budget they enforce is generous.
+    expect(talk.split(/\s+/).filter(Boolean).length).toBeLessThan(360);
 
     // Mid-turn speech and the cut rule must agree: a bare "finding" cannot both
     // trigger a message and be cut for not changing the next move.
@@ -281,16 +294,20 @@ describe("buildSystemPrompt", () => {
     for (const required of [
       "works directly in the user's codebase",
       "completing tasks end-to-end",
-      "Final replies: 1–2 sentences, hard cap 5",
+      "**Budget: ~120 words, whole reply.**",
+      "everything counts, nothing is exempt",
+      "**One line per item, ≤15 words, max 5 items.**",
       "Take every safe, reversible step the goal implies",
       "never ask permission, merely suggest it, or leave it for the user",
       "ONE action that unblocks you",
       "what already works so finished work is never buried",
       "conclusion, not investigation",
-      // Jargon stays exact, but never bare: the reader must learn the stake of
-      // a term/file/command in the same breath, without a glossary paragraph.
-      "**Keep the real word, add the stakes.**",
-      "say what it does or risks in the same sentence",
+      // Jargon is opt-in, not default: an identifier only earns a mention when
+      // the user has to act on it, and then it carries its stake in the same
+      // breath. Everything else is described by behavior, not by name.
+      "**Plain words by default.**",
+      "only when the user must act on it",
+      "say what it does, not what it's called",
       "Read before `edit`/`write`",
       "re-read after formatters",
       "Compute in bash; write with `edit`/`write`",
@@ -331,9 +348,6 @@ describe("buildSystemPrompt", () => {
       // batched, recommendation-annotated list instead of an interrogation drip.
       "only decisions (taste, product calls, real tradeoffs) reach the user",
       "one numbered list, every open question",
-      // The exemption must name both caps: a batched question list that
-      // violates the 5-item list cap would put the two rules in conflict.
-      "exempt from the reply and list caps",
     ]) {
       expect(prompt).toContain(required);
     }

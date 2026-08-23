@@ -54,6 +54,44 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     expect(prompt).not.toContain("submitting a plan for approval");
   });
 
+  it("gives plan review a design bar: steps, boundaries, order, uncovered paths", () => {
+    // Post-turn review deliberately cannot ask "is this shape right?" — it
+    // judges a finished diff against the ask, and relitigating structure every
+    // turn is how the autopilot loop stops terminating. Plan review is the one
+    // branch where the question is both answerable and cheap, because no code
+    // exists yet. Each of the four tests below is load-bearing; a plan can be
+    // internally sound and still fail any one of them.
+    expect(prompt).toContain("judge the shape");
+    expect(prompt).toContain("does every step earn its existence");
+    expect(prompt).toContain("boundary between steps sit where the work actually splits");
+    expect(prompt).toContain("is the order forced by real dependencies");
+    expect(prompt).toContain("what happens on the paths the plan never names");
+
+    // A structural flaw has to be actionable and separable from taste, or the
+    // bar collapses back into the nitpicking the contract already forbids.
+    expect(prompt).toContain("is a structural flaw");
+    expect(prompt).toContain("PROMPT it, naming the step");
+    expect(prompt).toContain("taste nitpicks are still not blockers");
+    expect(prompt).toContain("is taste unless you can name what it breaks");
+  });
+
+  it("keeps the design bar out of post-turn verdicts", async () => {
+    // Scope guard: the bar lives in the plan-review bullet only. If it ever
+    // leaks into the turn-review rules, Ken starts re-opening architecture on
+    // finished work and ALL_CLEAR stops being reachable.
+    const planBullet = prompt.slice(
+      prompt.indexOf("- Plans are YOURS to review"),
+      prompt.indexOf("- Transcript lines labeled"),
+    );
+    expect(planBullet).toContain("judge the shape");
+    expect(prompt.match(/judge the shape/g) ?? []).toHaveLength(1);
+    expect(prompt.match(/earn its existence/g) ?? []).toHaveLength(1);
+
+    // The turn-review default survives untouched.
+    const chat = await buildKenSystemPrompt(TEST_CWD);
+    expect(chat).not.toContain("ALL_CLEAR");
+  });
+
   it("tells Ken injected transcript lines are his own, not user asks", () => {
     expect(prompt).toContain("Ken autopilot (injected)");
     expect(prompt).toContain("Judge only against the original user request");

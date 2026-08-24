@@ -186,6 +186,7 @@ windowsDescribe("detached local installer helper", () => {
     writeFileSync(nestedDecoy, "decoy payload");
     const result = runPowerShell(
       `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:capturedResources = @(); ` +
+        `$null = Get-RestartManagerLockState -ResourcePath ${psLiteral(fixture.installedExecutable)}; ` +
         `function Invoke-RestartManagerQuery([string[]]$Resources) { $script:capturedResources = @($Resources); return [pscustomobject]@{ Status = 'none'; Stage = ''; Reason = ''; Error = 0; Needed = 0; Attempt = 0; Attempts = 0; Owners = @() } }; ` +
         `Wait-InstalledPayloadLocksClear -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -TimeoutMilliseconds 500 -PollIntervalMilliseconds 25; ` +
         `[pscustomobject]@{ Resources = @($script:capturedResources); DecoyExists = Test-Path -LiteralPath ${psLiteral(nestedDecoy)} } | ConvertTo-Json -Compress`,

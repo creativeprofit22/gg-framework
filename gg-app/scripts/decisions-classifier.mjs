@@ -29,16 +29,24 @@ export function fallbackDecisionSummary(decisions) {
   const combined = count("combined");
   const unresolved = count("unresolved");
   if (local) {
-    sentences.push(`It held onto your local work in ${area(local)} because the finished update uses your ${local === 1 ? "version" : "versions"} there.`);
+    sentences.push(
+      `It held onto your local work in ${area(local)} because the finished update uses your ${local === 1 ? "version" : "versions"} there.`,
+    );
   }
   if (upstream) {
-    sentences.push(`It brought in upstream's work in ${area(upstream)} because the finished update uses ${upstream === 1 ? "that version" : "those versions"} there.`);
+    sentences.push(
+      `It brought in upstream's work in ${area(upstream)} because the finished update uses ${upstream === 1 ? "that version" : "those versions"} there.`,
+    );
   }
   if (combined) {
-    sentences.push(`It blended your work with upstream in ${area(combined)}, keeping changes from both sides.`);
+    sentences.push(
+      `It blended your work with upstream in ${area(combined)}, keeping changes from both sides.`,
+    );
   }
   if (unresolved) {
-    sentences.push(`It left ${area(unresolved)} marked for review because the result did not point cleanly to either side.`);
+    sentences.push(
+      `It left ${area(unresolved)} marked for review because the result did not point cleanly to either side.`,
+    );
   }
   return sentences.length === 0
     ? "Your protected update completed successfully."
@@ -163,7 +171,13 @@ function verificationFacts(repoRoot, mergeOid) {
 function truncateUtf8(text, maxBytes) {
   const bytes = Buffer.from(text, "utf8");
   if (bytes.length <= maxBytes) return { text, truncated: false };
-  return { text: bytes.subarray(0, maxBytes).toString("utf8").replace(/\ufffd$/u, ""), truncated: true };
+  return {
+    text: bytes
+      .subarray(0, maxBytes)
+      .toString("utf8")
+      .replace(/\ufffd$/u, ""),
+    truncated: true,
+  };
 }
 
 function boundedDiff(repoRoot, from, to, path) {
@@ -185,20 +199,23 @@ export function generateDecisionSummaryContext(repoRoot, record) {
   }
   const { merge, base, localParent, upstreamParent } = record.evidence ?? {};
   for (const oid of [merge, base, localParent, upstreamParent]) {
-    if (!/^[0-9a-f]{40}$/iu.test(oid ?? "")) throw new Error("Decision summary context requires full Git object IDs.");
+    if (!/^[0-9a-f]{40}$/iu.test(oid ?? ""))
+      throw new Error("Decision summary context requires full Git object IDs.");
   }
 
-  const sourceDecisions = record.decisions.slice(0, DECISION_SUMMARY_MAX_DECISIONS).map((decision) => ({
-    decision,
-    orderedFiles: [...decision.files].sort((left, right) =>
-      left.role === right.role
-        ? left.path.localeCompare(right.path)
-        : left.role === "implementation"
-          ? -1
-          : 1,
-    ),
-    selectedFiles: [],
-  }));
+  const sourceDecisions = record.decisions
+    .slice(0, DECISION_SUMMARY_MAX_DECISIONS)
+    .map((decision) => ({
+      decision,
+      orderedFiles: [...decision.files].sort((left, right) =>
+        left.role === right.role
+          ? left.path.localeCompare(right.path)
+          : left.role === "implementation"
+            ? -1
+            : 1,
+      ),
+      selectedFiles: [],
+    }));
   let fileCount = 0;
   for (const source of sourceDecisions) {
     const first = source.orderedFiles.shift();
@@ -218,7 +235,9 @@ export function generateDecisionSummaryContext(repoRoot, record) {
   }
   let truncated =
     record.decisions.length > sourceDecisions.length ||
-    sourceDecisions.some(({ decision, selectedFiles }) => selectedFiles.length < decision.files.length);
+    sourceDecisions.some(
+      ({ decision, selectedFiles }) => selectedFiles.length < decision.files.length,
+    );
   const decisions = sourceDecisions.map(({ decision, selectedFiles }) => ({
     area: decision.area,
     outcome: decision.outcome,
@@ -240,15 +259,18 @@ export function generateDecisionSummaryContext(repoRoot, record) {
     truncated,
     decisions,
   };
-  const diffs = decisions.flatMap((decision) =>
-    decision.files.flatMap((file) => Object.values(file.diffs)),
-  ).reverse();
+  const diffs = decisions
+    .flatMap((decision) => decision.files.flatMap((file) => Object.values(file.diffs)))
+    .reverse();
   const serializedBytes = () => Buffer.byteLength(`${JSON.stringify(context, null, 2)}\n`, "utf8");
   while (serializedBytes() > DECISION_SUMMARY_CONTEXT_MAX_BYTES) {
     const diff = diffs.find((candidate) => candidate.text.length > 0);
     if (!diff) throw new Error("Decision summary metadata exceeds its byte limit.");
     const excess = serializedBytes() - DECISION_SUMMARY_CONTEXT_MAX_BYTES;
-    diff.text = truncateUtf8(diff.text, Math.max(0, Buffer.byteLength(diff.text, "utf8") - excess - 64)).text;
+    diff.text = truncateUtf8(
+      diff.text,
+      Math.max(0, Buffer.byteLength(diff.text, "utf8") - excess - 64),
+    ).text;
     diff.truncated = true;
     context.truncated = true;
   }

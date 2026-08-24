@@ -63,13 +63,15 @@ describe("decisions IPC bridge", () => {
       generatedAt: "bad-date",
     },
   ])("rejects a malformed summary object", async (summary) => {
-    invoke.mockResolvedValue([{
-      id: "decision-abc",
-      date: "2026-08-24",
-      summary,
-      verification: { workflowVerified: true },
-      decisions: [],
-    }]);
+    invoke.mockResolvedValue([
+      {
+        id: "decision-abc",
+        date: "2026-08-24",
+        summary,
+        verification: { workflowVerified: true },
+        decisions: [],
+      },
+    ]);
     await expect(getVerifiedDecisions("C:/source")).rejects.toThrow("invalid decisions response");
   });
 

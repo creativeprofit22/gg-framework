@@ -80,7 +80,9 @@ export interface DecisionSummarySessionOptions {
 
 function exactKeys(value: object, keys: string[]): boolean {
   const actual = Object.keys(value).sort();
-  return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index]);
+  return (
+    actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index])
+  );
 }
 
 function isOid(value: unknown): value is string {
@@ -101,7 +103,8 @@ function isDiff(value: unknown): value is DecisionSummaryDiff {
 }
 
 export function parseDecisionSummaryContext(value: unknown): DecisionSummaryContext {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid summary context");
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("invalid summary context");
   const context = value as Record<string, unknown>;
   if (!exactKeys(context, ["version", "recordedAt", "evidence", "truncated", "decisions"])) {
     throw new Error("invalid summary context");
@@ -128,7 +131,8 @@ export function parseDecisionSummaryContext(value: unknown): DecisionSummaryCont
   }
   let files = 0;
   for (const candidate of decisions) {
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error("invalid summary context");
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate))
+      throw new Error("invalid summary context");
     const decision = candidate as Record<string, unknown>;
     if (
       !exactKeys(decision, ["area", "outcome", "files"]) ||
@@ -138,10 +142,17 @@ export function parseDecisionSummaryContext(value: unknown): DecisionSummaryCont
       !OUTCOMES.has(String(decision.outcome)) ||
       !Array.isArray(decision.files) ||
       decision.files.length < 1
-    ) throw new Error("invalid summary context");
+    )
+      throw new Error("invalid summary context");
     for (const candidateFile of decision.files) {
       files += 1;
-      if (files > 40 || !candidateFile || typeof candidateFile !== "object" || Array.isArray(candidateFile)) throw new Error("invalid summary context");
+      if (
+        files > 40 ||
+        !candidateFile ||
+        typeof candidateFile !== "object" ||
+        Array.isArray(candidateFile)
+      )
+        throw new Error("invalid summary context");
       const file = candidateFile as Record<string, unknown>;
       const diffs = file.diffs as Record<string, unknown> | undefined;
       if (
@@ -156,7 +167,8 @@ export function parseDecisionSummaryContext(value: unknown): DecisionSummaryCont
         !isDiff(diffs.baseToLocal) ||
         !isDiff(diffs.baseToUpstream) ||
         !isDiff(diffs.baseToMerged)
-      ) throw new Error("invalid summary context");
+      )
+        throw new Error("invalid summary context");
     }
   }
   return context as unknown as DecisionSummaryContext;
@@ -174,8 +186,17 @@ export function parseDecisionSummaryResponse(raw: string): DecisionSummaryResult
     throw new Error("invalid summary response");
   }
   let value: unknown;
-  try { value = JSON.parse(raw); } catch { throw new Error("invalid summary response"); }
-  if (!value || typeof value !== "object" || Array.isArray(value) || !exactKeys(value, ["version", "summary"])) {
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("invalid summary response");
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !exactKeys(value, ["version", "summary"])
+  ) {
     throw new Error("invalid summary response");
   }
   const result = value as Record<string, unknown>;
@@ -187,7 +208,8 @@ export function parseDecisionSummaryResponse(raw: string): DecisionSummaryResult
     result.summary.trim() !== result.summary ||
     hasControlCharacter(result.summary) ||
     result.summary.includes("```")
-  ) throw new Error("invalid summary response");
+  )
+    throw new Error("invalid summary response");
   return { version: 1, summary: result.summary };
 }
 
@@ -196,31 +218,68 @@ function lastAssistantText(messages: readonly Message[]): string {
     const message = messages[index];
     if (message.role !== "assistant") continue;
     if (typeof message.content === "string") return message.content;
-    return message.content.filter((part) => part.type === "text").map((part) => part.type === "text" ? part.text : "").join("\n");
+    return message.content
+      .filter((part) => part.type === "text")
+      .map((part) => (part.type === "text" ? part.text : ""))
+      .join("\n");
   }
   return "";
 }
 
-function withDeadline<T>(operation: Promise<T>, timeoutMs: number, onTimeout?: () => void): Promise<T> {
+function withDeadline<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  onTimeout?: () => void,
+): Promise<T> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { onTimeout?.(); reject(new Error("decision summary timed out")); }, timeoutMs);
+    const timer = setTimeout(() => {
+      onTimeout?.();
+      reject(new Error("decision summary timed out"));
+    }, timeoutMs);
     timer.unref?.();
-    operation.then((value) => { clearTimeout(timer); resolve(value); }, (error: unknown) => { clearTimeout(timer); reject(error); });
+    operation.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
   });
 }
 
 export class AppSidecarDecisionSummaryService {
-  constructor(private readonly createSession: (options: DecisionSummarySessionOptions) => DecisionSummarySession) {}
+  constructor(
+    private readonly createSession: (
+      options: DecisionSummarySessionOptions,
+    ) => DecisionSummarySession,
+  ) {}
 
-  async summarize(sourceSession: DecisionSummarySourceSession, context: DecisionSummaryContext): Promise<DecisionSummaryResult> {
+  async summarize(
+    sourceSession: DecisionSummarySourceSession,
+    context: DecisionSummaryContext,
+  ): Promise<DecisionSummaryResult> {
     const state = sourceSession.getState();
     const controller = new AbortController();
     const session = this.createSession({
-      provider: state.provider, model: state.model, cwd: state.cwd,
-      systemPrompt: DECISION_SUMMARY_SYSTEM_PROMPT, signal: controller.signal,
-      transient: true, allowedTools: [], projectCustomization: false, globalSubagents: false,
-      coderSlashCommands: false, selfCorrectionHooks: false, loadExtensions: false,
-      orchestrationPrompt: false, mcpEnabled: false, maxTurns: 1, maxTurnExtensions: 0,
+      provider: state.provider,
+      model: state.model,
+      cwd: state.cwd,
+      systemPrompt: DECISION_SUMMARY_SYSTEM_PROMPT,
+      signal: controller.signal,
+      transient: true,
+      allowedTools: [],
+      projectCustomization: false,
+      globalSubagents: false,
+      coderSlashCommands: false,
+      selfCorrectionHooks: false,
+      loadExtensions: false,
+      orchestrationPrompt: false,
+      mcpEnabled: false,
+      maxTurns: 1,
+      maxTurnExtensions: 0,
     });
     try {
       const operation = (async () => {

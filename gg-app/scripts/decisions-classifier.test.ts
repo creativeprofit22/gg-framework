@@ -32,7 +32,10 @@ beforeAll(() => {
   git("commit", "-qm", "base");
   const base = git("rev-parse", "HEAD");
   git("checkout", "-qb", "local");
-  writeFileSync(join(fixtureRoot, dangerousPath), `export const value = 'local';\n${"l".repeat(20_000)}\n`);
+  writeFileSync(
+    join(fixtureRoot, dangerousPath),
+    `export const value = 'local';\n${"l".repeat(20_000)}\n`,
+  );
   writeFileSync(join(fixtureRoot, "feature.test.ts"), "test('local');\n");
   git("commit", "-qam", "local");
   const localParent = git("rev-parse", "HEAD");
@@ -126,9 +129,9 @@ describe("decision summary context", () => {
     expect(context.decisions.map(({ area }) => area)).toEqual(["dangerous-name", "feature"]);
     expect(context.decisions[0]?.files[0]?.path).toBe(dangerousPath);
     expect(context.decisions[0]?.files[0]?.diffs.baseToLocal.truncated).toBe(true);
-    expect(Buffer.byteLength(context.decisions[0]!.files[0]!.diffs.baseToLocal.text)).toBeLessThanOrEqual(
-      DECISION_SUMMARY_DIFF_MAX_BYTES,
-    );
+    expect(
+      Buffer.byteLength(context.decisions[0]!.files[0]!.diffs.baseToLocal.text),
+    ).toBeLessThanOrEqual(DECISION_SUMMARY_DIFF_MAX_BYTES);
     expect(Buffer.byteLength(`${JSON.stringify(context, null, 2)}\n`)).toBeLessThanOrEqual(
       DECISION_SUMMARY_CONTEXT_MAX_BYTES,
     );
@@ -136,14 +139,20 @@ describe("decision summary context", () => {
 
   it("uses implementation files before tests at the file cap", () => {
     const value = record();
-    value.decisions = [{
-      area: "many",
-      outcome: "combined",
-      files: [
-        ...Array.from({ length: 40 }, (_, index) => ({ path: dangerousPath, role: "implementation" as const, index })),
-        { path: "feature.test.ts", role: "test" as const },
-      ],
-    }];
+    value.decisions = [
+      {
+        area: "many",
+        outcome: "combined",
+        files: [
+          ...Array.from({ length: 40 }, (_, index) => ({
+            path: dangerousPath,
+            role: "implementation" as const,
+            index,
+          })),
+          { path: "feature.test.ts", role: "test" as const },
+        ],
+      },
+    ];
     const context = generateDecisionSummaryContext(fixtureRoot, value);
     expect(context.decisions[0]?.files).toHaveLength(40);
     expect(context.decisions[0]?.files.every(({ role }) => role === "implementation")).toBe(true);

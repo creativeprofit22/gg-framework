@@ -7,16 +7,18 @@ describe("prompt commands", () => {
     expect(PROMPT_COMMANDS.find((command) => command.aliases.includes("g"))).toBeUndefined();
   });
 
-  it("makes generated /commit commands a single-approval grouped workflow", () => {
+  it("makes generated /commit commands a lean single-approval grouped workflow", () => {
     const setupCommit = PROMPT_COMMANDS.find((command) => command.name === "setup-commit");
 
-    expect(setupCommit?.prompt).toContain("Clicking `/commit` authorizes this entire workflow");
-    expect(setupCommit?.prompt).toContain("never enter plan mode");
-    expect(setupCommit?.prompt).toContain("Group by coherent intent");
-    expect(setupCommit?.prompt).toContain("Keep ambiguity together");
-    expect(setupCommit?.prompt).toContain("checked patches");
-    expect(setupCommit?.prompt).toContain("Push exactly once after all commits");
-    expect(setupCommit?.prompt).not.toContain("Want me to fix this first");
+    expect(setupCommit?.prompt).toContain("Review the full diff");
+    expect(setupCommit?.prompt).toContain("Group obvious changes by purpose");
+    expect(setupCommit?.prompt).toContain("Keep uncertain or coupled changes together");
+    expect(setupCommit?.prompt).toContain("QUALITY COMMANDS] once");
+    expect(setupCommit?.prompt).toContain("inspect its staged diff before committing");
+    expect(setupCommit?.prompt).toContain("push exactly once after all commits");
+    expect(setupCommit?.prompt).not.toContain("current index tree");
+    expect(setupCommit?.prompt).not.toContain("Fix high-confidence issues");
+    expect(setupCommit?.prompt).not.toContain("rerun affected checks");
   });
 
   it("strands no audit protocol or dated threat data in a command prompt", () => {

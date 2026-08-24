@@ -233,16 +233,13 @@ description: Group changes by intent, verify, commit in order, and push once
 
 Clicking \`/commit\` authorizes this entire workflow. Execute directly: never enter plan mode, create a plan, pause for confirmation, or ask how to group changes.
 
-1. Inspect status, staged/unstaged diffs, untracked files, and recent commits. Stop only for destructive risk, conflicts, checks that remain failing, or required history rewriting.
-2. Treat all current changes as candidates. Preserve staged-only and worktree content; record the current index tree before changing it.
-3. Group by coherent intent, splitting exact hunks only when independent. Keep ambiguity together and order foundations before dependents.
-4. Run [PROJECT-SPECIFIC QUALITY COMMANDS]. Fix attributable failures safely and rerun; stop if required checks still fail.
-5. Review the full diff for bugs, regressions, debug leftovers, and unintended changes. Fix high-confidence issues automatically, then rerun affected checks.
-6. Stage each group using exact paths or checked patches, never \`git add -A\`; verify its staged diff before committing.
-7. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages. Never amend, rebase, reset history, force-push, or discard changes.
-8. Push exactly once after all commits. If normal push is rejected, stop; never rewrite history.
+1. Inspect status, staged/unstaged diffs, and untracked files. Review the full diff for bugs, regressions, debug leftovers, and unintended changes.
+2. Group obvious changes by purpose, splitting exact hunks only when a file spans independent purposes. Keep uncertain or coupled changes together and order foundations before dependents.
+3. Run [PROJECT-SPECIFIC QUALITY COMMANDS] once. If a required check fails, stop and report it; do not clean up unrelated failures or rerun passing checks without file changes.
+4. For each group, stage exact paths or hunks, never \`git add -A\`; inspect its staged diff before committing.
+5. Create ordered commits with concise Add/Update/Fix/Remove/Refactor messages, then push exactly once after all commits.
 
-Finish with the created commits and push result.
+Finish with the created commits, passed checks, and push result.
 \`\`\`
 
 Replace [PROJECT-SPECIFIC QUALITY COMMANDS] with the actual commands.

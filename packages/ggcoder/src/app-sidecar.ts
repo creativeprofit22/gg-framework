@@ -267,6 +267,13 @@ import {
 import { AppSidecarPhaseLifecycleCoordinator } from "./app-sidecar-phase-lifecycle.js";
 import { reconcileActivePhaseVerificationStage } from "./app-sidecar-phase-verification.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import {
+  AppSidecarRoadmapReviewRunCoordinator,
+  AppSidecarRoadmapReviewScheduler,
+  appSidecarRoadmapReviewSchedulingFailure,
+  appSidecarRoadmapReviewTrigger,
+  type AppSidecarRoadmapReviewTrigger,
+} from "./app-sidecar-roadmap-review-scheduler.js";
 import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import {
   APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
@@ -275,6 +282,7 @@ import {
 } from "./app-sidecar-roadmap-tool-host.js";
 import {
   boundPhaseForAutopilotReview,
+  classifyAppSidecarFinalReviewAttempt,
   phaseCompletionVerdict,
 } from "./app-sidecar-autopilot-phase-review.js";
 import { latestVerificationExceptionForReview } from "./app-sidecar-phase-completion.js";
@@ -2075,7 +2083,9 @@ async function createSession(
   let planGate!: AppSidecarPlanGate;
   const persistPlanGateMarker = (checkpoint: PersistedPlanReviewCheckpoint) =>
     session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
-  let autopilotFinalReviewSink: ((attempt: AppSidecarFinalReviewAttempt) => void) | null = null;
+  const roadmapReviewScheduler = new AppSidecarRoadmapReviewScheduler();
+  const roadmapReviewRuns = new AppSidecarRoadmapReviewRunCoordinator<AppSidecarFinalReviewAttempt>();
+  let settledRoadmapReviewVerdict: { verdict: AutopilotVerdict | null } | null = null;
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
     cwd,
     repository: notesRepository,
@@ -2083,8 +2093,20 @@ async function createSession(
     projectAutopilot,
     canSubmitFinalReview: (actor) =>
       actor !== "ken-autopilot" || (!autopilotCancelled && projectAutopilot.isEnabled(cwd)),
+    getAutopilotFinalReviewClaim: () => roadmapReviewRuns.activeClaim(),
     onFinalReview: (attempt) => {
-      autopilotFinalReviewSink?.(attempt);
+      if (attempt.actor === "ken-autopilot") roadmapReviewRuns.record(attempt);
+    },
+    onReviewReady: (trigger, metadata) => {
+      const outcome = roadmapReviewScheduler.enqueue(trigger);
+      log("INFO", "app-sidecar", "roadmap final-review scheduled", {
+        traceId: trigger.triggerId,
+        phaseId: trigger.phaseId,
+        observedRevision: metadata.revision,
+        transition: metadata.transition,
+        queueOutcome: outcome.status,
+      });
+      return outcome;
     },
     broadcastNotesSnapshot,
     onError: (error, metadata) =>
@@ -3187,6 +3209,10 @@ async function createSession(
           runOutcome: cancelled ? "cancelled" : runSucceeded ? "succeeded" : "failed",
           timestamp: new Date().toISOString(),
         });
+        const scheduledReview = await drainScheduledRoadmapReview(label);
+        if (scheduledReview.attempted) {
+          settledRoadmapReviewVerdict = { verdict: scheduledReview.verdict };
+        }
       }
       // Once every canonical step is complete, remove the approved plan from
       // future system prompts and clear the widget before run_end paints idle.
@@ -3323,6 +3349,9 @@ async function createSession(
             runLifecycle.generation,
           );
         });
+        if (autopilot && settledRoadmapReviewVerdict) {
+          await runAutopilotCycle(IMPLEMENT_PLAN_PROMPT);
+        }
       } finally {
         runClaim.release();
       }
@@ -3366,22 +3395,30 @@ async function createSession(
   // One review = prompt the existing kenAuto session with the normal digest,
   // including any bound Roadmap phase. In Review, only a persisted final_review
   // whose completion gate reports Done can become ALL_CLEAR.
-  async function runAutopilotReview(originalRequest: string): Promise<AutopilotVerdict | null> {
+  async function runAutopilotReview(
+    originalRequest: string,
+    trigger?: AppSidecarRoadmapReviewTrigger,
+  ): Promise<AutopilotVerdict | null> {
     autopilotReviewing = true;
     broadcast("autopilot_review_start", {});
-    const finalReviewAttempts: AppSidecarFinalReviewAttempt[] = [];
-    const previousFinalReviewSink = autopilotFinalReviewSink;
-    autopilotFinalReviewSink = (attempt) => {
-      if (attempt.actor === "ken-autopilot") finalReviewAttempts.push(attempt);
-    };
     try {
-      let boundPhase = null;
-      let verificationException = null;
+      let boundPhase: ReturnType<typeof boundPhaseForAutopilotReview> = null;
+      let verificationException: ReturnType<typeof latestVerificationExceptionForReview> = null;
       const activePhase = session.getActivePhaseContext();
       if (activePhase) {
         const loaded = await notesRepository.load(cwd);
         if (loaded.status === "ok") {
-          boundPhase = boundPhaseForAutopilotReview(loaded.snapshot, activePhase.phase.id);
+          boundPhase = boundPhaseForAutopilotReview(loaded.snapshot, activePhase.phase.id, trigger);
+          if (trigger && !boundPhase) {
+            throw new Error(
+              `Roadmap final-review trigger ${trigger.triggerId} is no longer eligible.`,
+            );
+          }
+          if (!trigger && boundPhase?.status === "review") {
+            throw new Error(
+              `Roadmap phase ${activePhase.phase.id} requires a scheduled final-review claim.`,
+            );
+          }
           const persistedPhase = loaded.snapshot.document.phases.find(
             (phase) => phase.id === activePhase.phase.id,
           );
@@ -3391,31 +3428,194 @@ async function createSession(
       if (boundPhase?.status === "review" && !projectAutopilot.isEnabled(cwd)) return null;
 
       const ken = await ensureKenAutoSession();
-      const digest = buildKenAutopilotContext({
-        cwd,
-        gitBranch,
-        messages: session.getMessages(),
-        originalRequest,
-        injectedPrompts: [...injectedAutopilotPrompts],
-        workflowCommands: await loadWorkflowCommandSpecs(),
-        boundPhase,
-        verificationException,
-      });
-      await ken.prompt(digest);
+      const workflowCommands = await loadWorkflowCommandSpecs();
+      const reviewDigest = () =>
+        buildKenAutopilotContext({
+          cwd,
+          gitBranch,
+          messages: session.getMessages(),
+          originalRequest,
+          injectedPrompts: [...injectedAutopilotPrompts],
+          workflowCommands,
+          boundPhase,
+          verificationException,
+        });
+      const finalReviewAttempts = await roadmapReviewRuns.run(
+        trigger ?? null,
+        async (attempt) => {
+          if (attempt === 1 && trigger) {
+            const refreshed = await notesRepository.load(cwd);
+            if (refreshed.status !== "ok") {
+              throw new Error(
+                `Roadmap final-review retry ${trigger.triggerId} cannot reload Notes.`,
+              );
+            }
+            boundPhase = boundPhaseForAutopilotReview(
+              refreshed.snapshot,
+              trigger.phaseId,
+              trigger,
+            );
+            if (!boundPhase) {
+              throw new Error(
+                `Roadmap final-review retry ${trigger.triggerId} is no longer eligible.`,
+              );
+            }
+            const persistedPhase = refreshed.snapshot.document.phases.find(
+              (phase) => phase.id === trigger.phaseId,
+            );
+            verificationException = latestVerificationExceptionForReview(persistedPhase);
+          }
+          await ken.prompt(reviewDigest());
+        },
+        (attempts) =>
+          !autopilotCancelled &&
+          trigger !== undefined &&
+          boundPhase !== null &&
+          classifyAppSidecarFinalReviewAttempt(boundPhase.id, attempts).status ===
+            "stale-revision",
+      );
       if (autopilotCancelled) return null;
       const textVerdict = parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
-      return phaseCompletionVerdict(boundPhase, finalReviewAttempts, textVerdict);
+      const verdict = phaseCompletionVerdict(boundPhase, finalReviewAttempts, textVerdict);
+      if (trigger) {
+        const classification = classifyAppSidecarFinalReviewAttempt(
+          trigger.phaseId,
+          finalReviewAttempts,
+        );
+        const attempt = classification.status === "missing" ? null : classification.attempt;
+        log("INFO", "app-sidecar", "roadmap final-review completed", {
+          traceId: trigger.triggerId,
+          phaseId: trigger.phaseId,
+          finalReviewResult: attempt?.result.result ?? "missing",
+          completionGateOutcome:
+            attempt?.result.result === "completion-review-committed" ||
+            attempt?.result.result === "completion-review-duplicate"
+              ? attempt.result.gateOutcome
+              : "unavailable",
+        });
+      }
+      return verdict;
     } catch (err) {
-      if (!autopilotCancelled) broadcastError("autopilot_error", "autopilot review failed", err);
+      if (!autopilotCancelled && !trigger) {
+        broadcastError("autopilot_error", "autopilot review failed", err);
+      }
       return null;
     } finally {
-      autopilotFinalReviewSink = previousFinalReviewSink;
       autopilotReviewing = false;
       // Apply any model switch that landed mid-review.
       const pending = pendingKenAutoModel;
       pendingKenAutoModel = null;
       if (pending) await syncKenAutoModel(pending.provider, pending.model);
     }
+  }
+
+  async function replayEligibleRoadmapReview(): Promise<boolean> {
+    if (!autopilot || autopilotCancelled || !projectAutopilot.isEnabled(cwd)) return false;
+    const activePhase = session.getActivePhaseContext();
+    if (!activePhase) return false;
+    const loaded = await notesRepository.load(cwd);
+    if (loaded.status !== "ok") return false;
+    const persistedPhase = loaded.snapshot.document.phases.find(
+      (phase) => phase.id === activePhase.phase.id,
+    );
+    if (
+      !persistedPhase ||
+      persistedPhase.session?.sessionId !== activePhase.session.sessionId ||
+      persistedPhase.session.sessionPath !== activePhase.session.sessionPath
+    ) {
+      return false;
+    }
+    return roadmapReviewScheduler.replay([persistedPhase]).length > 0;
+  }
+
+  async function reportRoadmapReviewSchedulingFailure(
+    trigger: AppSidecarRoadmapReviewTrigger,
+    error: unknown,
+  ): Promise<void> {
+    const loaded = await notesRepository.load(cwd);
+    const observedRevision = loaded.status === "ok" ? loaded.snapshot.revision : null;
+    const failure = appSidecarRoadmapReviewSchedulingFailure(trigger, observedRevision);
+    captureSidecarError(error, "app-sidecar.roadmap-final-review-scheduling", {
+      code: failure.code,
+      traceId: trigger.triggerId,
+      phaseId: trigger.phaseId,
+      observedRevision: observedRevision === null ? "unavailable" : String(observedRevision),
+    });
+    log("ERROR", "app-sidecar", "roadmap final-review scheduling failed", {
+      code: failure.code,
+      traceId: trigger.triggerId,
+      phaseId: trigger.phaseId,
+      observedRevision,
+      queueOutcome: "failed",
+    });
+    broadcast("autopilot_error", {
+      code: failure.code,
+      phaseId: trigger.phaseId,
+      triggerId: trigger.triggerId,
+      revision: observedRevision,
+      headline: failure.headline,
+      message: failure.message,
+      guidance: failure.guidance,
+    });
+    await session
+      .persistAppMarker("error", {
+        scope: "autopilot_error",
+        headline: failure.headline,
+        message: failure.message,
+        guidance: failure.guidance,
+      })
+      .catch(() => {});
+    await phaseLifecycle.enqueue({
+      type: "autopilot-stopped",
+      reason: `${failure.code}: retry final review for trigger ${trigger.triggerId}`,
+    });
+  }
+
+  async function drainScheduledRoadmapReview(
+    originalRequest: string,
+  ): Promise<{ attempted: boolean; verdict: AutopilotVerdict | null }> {
+    await replayEligibleRoadmapReview();
+    const result: { verdict: AutopilotVerdict | null } = { verdict: null };
+    const outcomes = await roadmapReviewScheduler.drain(async (trigger) => {
+      const activePhase = session.getActivePhaseContext();
+      if (!activePhase || activePhase.phase.id !== trigger.phaseId) {
+        throw new Error(
+          `Roadmap final-review trigger ${trigger.triggerId} has no matching session.`,
+        );
+      }
+      const loaded = await notesRepository.load(cwd);
+      if (loaded.status !== "ok") {
+        throw new Error(
+          `Roadmap final-review trigger ${trigger.triggerId} cannot load Project Notes.`,
+        );
+      }
+      log("INFO", "app-sidecar", "roadmap final-review reviewer starting", {
+        traceId: trigger.triggerId,
+        phaseId: trigger.phaseId,
+        observedRevision: loaded.snapshot.revision,
+        transition: "review",
+        queueOutcome: "started",
+      });
+      const persistedPhase = loaded.snapshot.document.phases.find(
+        (phase) => phase.id === trigger.phaseId,
+      );
+      const currentTrigger = persistedPhase ? appSidecarRoadmapReviewTrigger(persistedPhase) : null;
+      if (currentTrigger?.triggerId !== trigger.triggerId) return;
+      result.verdict = await runAutopilotReview(originalRequest, trigger);
+      if (!result.verdict) {
+        throw new Error(
+          `Roadmap final-review trigger ${trigger.triggerId} did not produce a verdict.`,
+        );
+      }
+    });
+    const failed = outcomes.find((outcome) => outcome.status === "failed");
+    if (failed?.status === "failed") {
+      await reportRoadmapReviewSchedulingFailure(failed.trigger, failed.error);
+    }
+    return {
+      attempted: outcomes.some((outcome) => outcome.status === "started"),
+      verdict: result.verdict,
+    };
   }
 
   // One PLAN review: like runAutopilotReview but the digest carries the
@@ -3599,7 +3799,13 @@ async function createSession(
         resetReviewer: async () => {
           await kenAutoSession?.newSession().catch(() => {});
         },
-        review: () => runAutopilotReview(originalRequest),
+        review: async () => {
+          const settled = settledRoadmapReviewVerdict;
+          settledRoadmapReviewVerdict = null;
+          if (settled) return settled.verdict;
+          const scheduled = await drainScheduledRoadmapReview(originalRequest);
+          return scheduled.attempted ? scheduled.verdict : runAutopilotReview(originalRequest);
+        },
         // prompt → record the injected body (so later digests label it as
         // Ken's, not the user's), show a compact Ken-tinted marker (not the
         // prompt body), then feed GG Coder bracketed by runAgent so the run
@@ -3657,6 +3863,25 @@ async function createSession(
       });
     }
   }
+
+  queueMicrotask(() => {
+    void replayEligibleRoadmapReview()
+      .then(async (eligible) => {
+        if (!eligible || sessionBusyState().running || sessionBusyState().autopilotActive) return;
+        if (!runClaim.claim()) return;
+        try {
+          await runAutopilotCycle("Resume the unresolved Roadmap final review.");
+        } finally {
+          runClaim.release();
+        }
+      })
+      .catch((error) => {
+        captureSidecarError(error, "app-sidecar.roadmap-review-replay");
+        log("ERROR", "app-sidecar", "roadmap final-review replay failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+  });
 
   // ── Stranded-queue drain ───────────────────────────────
   // A prompt POSTed while an autopilot cycle is between injected runs (build
@@ -5075,8 +5300,10 @@ async function createSession(
               extractTurnToolCalls(session.getMessages(), messagesBefore),
             ),
           });
-          if (decision.start) {
-            log("INFO", "app-sidecar", "autopilot cycle starting", { kind: decision.kind });
+          if (decision.start || settledRoadmapReviewVerdict) {
+            log("INFO", "app-sidecar", "autopilot cycle starting", {
+              kind: decision.start ? decision.kind : "roadmap-final-review",
+            });
             await runAutopilotCycle(text);
           } else if (autopilot) {
             log("INFO", "app-sidecar", "autopilot skipped", { reason: decision.reason });

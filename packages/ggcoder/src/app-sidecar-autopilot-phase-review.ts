@@ -30,6 +30,7 @@ export function boundPhaseForAutopilotReview(
     goal: phase.goal,
     completionCriteria: [...phase.doneWhen],
     status: phase.status,
+    finalReviewClaim: { triggerId: trigger.triggerId, reviewId: trigger.reviewId },
     latestVerification:
       verification?.type === "status-update" && verification.verification !== null
         ? {
@@ -43,6 +44,37 @@ export function boundPhaseForAutopilotReview(
   };
 }
 
+export type AppSidecarFinalReviewAttemptClassification =
+  | { status: "missing" }
+  | { status: "stale-revision"; attempt: AppSidecarFinalReviewAttempt }
+  | { status: "committed"; attempt: AppSidecarFinalReviewAttempt }
+  | { status: "failed"; attempt: AppSidecarFinalReviewAttempt };
+
+export function classifyAppSidecarFinalReviewAttempt(
+  phaseId: string,
+  attempts: readonly AppSidecarFinalReviewAttempt[],
+): AppSidecarFinalReviewAttemptClassification {
+  const attempt = [...attempts]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.actor === "ken-autopilot" &&
+        candidate.input.phase_id === phaseId &&
+        candidate.input.final_review !== null,
+    );
+  if (!attempt) return { status: "missing" };
+  if (attempt.result.result === "stale-revision") {
+    return { status: "stale-revision", attempt };
+  }
+  if (
+    attempt.result.result === "completion-review-committed" ||
+    attempt.result.result === "completion-review-duplicate"
+  ) {
+    return { status: "committed", attempt };
+  }
+  return { status: "failed", attempt };
+}
+
 /**
  * For a phase in Review, persisted final_review + completion-gate output is the
  * authority. Text-only ALL_CLEAR/IGNORE/HUMAN can never advance the phase.
@@ -54,28 +86,28 @@ export function phaseCompletionVerdict(
 ): AutopilotVerdict | null {
   if (phase?.status !== "review") return textVerdict;
 
-  const relevant = attempts.filter(
-    (attempt) =>
-      attempt.actor === "ken-autopilot" &&
-      attempt.input.phase_id === phase.id &&
-      attempt.input.final_review !== null,
-  );
-  if (relevant.length === 0) {
+  const classification = classifyAppSidecarFinalReviewAttempt(phase.id, attempts);
+  if (classification.status === "missing") {
     throw new Error(
       `Autopilot completion review failed for phase ${phase.id}: no relevant roadmap_status final_review call was recorded.`,
     );
   }
+  if (classification.status !== "committed") {
+    throw new Error(
+      `Autopilot completion review failed for phase ${phase.id}: final_review did not commit or duplicate (result: ${classification.attempt.result.result}).`,
+    );
+  }
 
-  const completed = relevant.at(-1)!;
+  const completed = classification.attempt;
   const completionResult = completed.result;
   if (
-    completed.input.final_review === null ||
-    (completionResult.result !== "completion-review-committed" &&
-      completionResult.result !== "completion-review-duplicate")
+    completionResult.result !== "completion-review-committed" &&
+    completionResult.result !== "completion-review-duplicate"
   ) {
-    throw new Error(
-      `Autopilot completion review failed for phase ${phase.id}: final_review did not commit or duplicate (result: ${completionResult.result}).`,
-    );
+    throw new Error(`Autopilot completion review failed for phase ${phase.id}: invalid result.`);
+  }
+  if (completed.input.final_review === null) {
+    throw new Error(`Autopilot completion review failed for phase ${phase.id}: invalid attempt.`);
   }
 
   if (completed.input.final_review.decision === "rejected") {

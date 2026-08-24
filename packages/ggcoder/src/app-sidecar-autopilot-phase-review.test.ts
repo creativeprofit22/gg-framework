@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   boundPhaseForAutopilotReview,
+  classifyAppSidecarFinalReviewAttempt,
   phaseCompletionVerdict,
 } from "./app-sidecar-autopilot-phase-review.js";
 import type { AppSidecarFinalReviewAttempt } from "./app-sidecar-roadmap-tool-host.js";
@@ -71,6 +72,14 @@ describe("Autopilot phase completion review", () => {
     expect(() => phaseCompletionVerdict(reviewPhase, [], { kind: "all_clear" })).toThrowError(
       "Autopilot completion review failed for phase phase-review: no relevant roadmap_status final_review call was recorded.",
     );
+  });
+
+  it("classifies the latest stale attempt for one fresh-snapshot retry", () => {
+    const stale = attempt({ result: "stale-revision" });
+    expect(classifyAppSidecarFinalReviewAttempt(reviewPhase.id, [attempt(), stale])).toEqual({
+      status: "stale-revision",
+      attempt: stale,
+    });
   });
 
   it.each(["stale-revision", "completion-checkpoint-blocked"] as const)(
@@ -178,6 +187,7 @@ describe("Autopilot phase completion review", () => {
       goal: "Persist the final review",
       completionCriteria: ["Gate says Done"],
       status: "review",
+      finalReviewClaim: { triggerId: trigger.triggerId, reviewId: trigger.reviewId },
       latestVerification: {
         id: "verification-1",
         result: "passed",

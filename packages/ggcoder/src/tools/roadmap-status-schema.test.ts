@@ -76,4 +76,42 @@ describe("roadmap_status provider schema", () => {
       }).success,
     ).toBe(false);
   });
+
+  it("rejects final_review outside a review transition", () => {
+    const tool = createRoadmapStatusTool("ken-autopilot", async () => ({
+      result: "completion-review-committed",
+      phaseId: "phase-1",
+      revision: 2,
+      statusOutcome: "evidence-only",
+      proposals: [],
+      gateOutcome: "done",
+      unmetGateCodes: [],
+    }));
+
+    const result = tool.parameters.safeParse({
+      update_id: "review-1",
+      phase_id: "phase-1",
+      expected_revision: 1,
+      progress: "Reviewed the phase.",
+      transition: "in-progress",
+      evidence: ["Inspected implementation evidence"],
+      final_review: {
+        review_id: "final-review-1",
+        decision: "accepted",
+        evidence: ["Inspected implementation evidence"],
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: ["final_review"],
+            message: "final_review requires transition=review",
+          }),
+        ]),
+      );
+    }
+  });
 });

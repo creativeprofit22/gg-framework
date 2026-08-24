@@ -343,6 +343,13 @@ export const RoadmapStatusParams = z
         message: "passed verification requires at least one evidence item",
       });
     }
+    if (report.final_review !== null && report.transition !== "review") {
+      context.addIssue({
+        code: "custom",
+        path: ["final_review"],
+        message: "final_review requires transition=review",
+      });
+    }
   });
 
 export type RoadmapStatusInput = z.infer<typeof RoadmapStatusParams>;

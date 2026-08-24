@@ -62,6 +62,20 @@ function Assert-PositiveSize([object]$Value, [string]$Description) {
   $size
 }
 
+function Get-Sha256([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+      return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $sha256.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Assert-FileMetadata(
   [string]$Path,
   [long]$ExpectedSize,
@@ -73,7 +87,7 @@ function Assert-FileMetadata(
   if ([long]$item.Length -ne $ExpectedSize) {
     throw "$Description size mismatch: expected $ExpectedSize, found $($item.Length)"
   }
-  $actualHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+  $actualHash = Get-Sha256 -Path $Path
   if ($actualHash -ne $ExpectedSha256) {
     throw "$Description SHA-256 mismatch: expected $ExpectedSha256, found $actualHash"
   }
@@ -138,7 +152,7 @@ function Test-InstalledPayloadCurrent([string]$Path, [object]$Manifest) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
   $item = Get-Item -LiteralPath $Path -Force
   if ([long]$item.Length -ne [long]$Manifest.PayloadSize) { return $false }
-  (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -eq $Manifest.PayloadSha256
+  (Get-Sha256 -Path $Path) -eq $Manifest.PayloadSha256
 }
 
 function Get-LocalForkRootProcesses {

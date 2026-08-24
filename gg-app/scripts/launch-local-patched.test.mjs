@@ -221,6 +221,23 @@ afterEach(() => {
 });
 
 describe.runIf(process.platform === "win32")("canonical Local Fork launcher", () => {
+  it("hashes files without relying on Get-FileHash", () => {
+    const files = fixture();
+    const stdout = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        `. ${psLiteral(launcher)} -LibraryOnly; function Get-FileHash { throw 'Get-FileHash must not be called' }; Get-Sha256 -Path ${psLiteral(files.payloadPath)}`,
+      ],
+      { encoding: "utf8", windowsHide: true },
+    );
+    expect(stdout.trim()).toBe(files.payloadHash);
+  });
+
   it("accepts a current installed payload without reinstalling or relaunching", () => {
     const files = fixture();
     const result = runScenario(files);

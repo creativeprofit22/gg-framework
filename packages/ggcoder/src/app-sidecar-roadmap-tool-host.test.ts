@@ -224,10 +224,22 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     },
   );
 
-  it("automatically persists exactly one claimed acceptance with a Done gate", async () => {
+  const automaticReviewCases = [
+    { decision: "accepted" as const, gateOutcome: "done" as const, phaseStatus: "done" as const },
+    {
+      decision: "rejected" as const,
+      gateOutcome: "review" as const,
+      phaseStatus: "in-progress" as const,
+    },
+  ] as const;
+  async function assertAutomaticReview({
+    decision,
+    gateOutcome,
+    phaseStatus,
+  }: (typeof automaticReviewCases)[number]): Promise<void> {
     const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-roadmap-auto-review-"));
     tempDirectories.push(agentDir);
-    const cwd = "/work/automatic-final-review";
+    const cwd = `/work/automatic-${decision}-final-review`;
     const document = JSON.parse(
       await fs.readFile(new URL("../../../fixtures/project-notes-v3.json", import.meta.url), "utf8"),
     ) as NotesDocumentV3;
@@ -311,12 +323,13 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
                 phase_id: trigger.phaseId,
                 expected_revision: migrated.snapshot.revision,
                 transition: "review",
-                progress: "Autopilot independently accepted the completed phase.",
+                progress: `Autopilot independently ${decision} the completed phase.`,
                 evidence: ["Reviewed implementation and verification evidence"],
                 final_review: {
                   review_id: trigger.reviewId,
-                  decision: "accepted",
-                  evidence: ["Independent final review passed"],
+                  decision,
+                  evidence: [`Independent final review ${decision}`],
+                  reason: decision === "rejected" ? "Remediation is required." : undefined,
                 },
               }),
               {} as never,
@@ -339,11 +352,12 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     ) {
       throw new Error(`automatic review did not complete: ${JSON.stringify(toolResult)}`);
     }
-    expect(toolResult).toMatchObject({ gateOutcome: "done" });
+    expect(toolResult).toMatchObject({ gateOutcome });
     expect(recordFinalReview).toHaveBeenCalledOnce();
     const persisted = await repository.load(cwd);
     expect(persisted.status).toBe("ok");
     if (persisted.status !== "ok") throw new Error("automatic review result did not persist");
+    expect(persisted.snapshot.document.phases[0]!.status).toBe(phaseStatus);
     const completionReviews = persisted.snapshot.document.phases[0]!.roadmapEvents.filter(
       (event) => event.type === "completion-review",
     );
@@ -351,11 +365,16 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       expect.objectContaining({
         id: claimedReviewId,
         reviewer: "ken-autopilot",
-        decision: "accepted",
-        gateOutcome: "done",
+        decision,
+        gateOutcome,
       }),
     ]);
-  });
+  }
+
+  it.each(automaticReviewCases)(
+    "$decision final review persists once with gate $gateOutcome",
+    assertAutomaticReview,
+  );
 
   it("reports accepted completion gate failures as visible non-commits", async () => {
     const broadcastNotesSnapshot = vi.fn();

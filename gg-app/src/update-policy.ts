@@ -8,7 +8,8 @@ export interface InstallUpdateForBuildOptions {
   localPatched: boolean;
   sourceRoot: string;
   update: InstallableUpdate | null;
-  startLocalPatchedUpdate: (sourceRoot: string) => Promise<void>;
+  summarizeDecisions?: boolean;
+  startLocalPatchedUpdate: (sourceRoot: string, summarizeDecisions?: boolean) => Promise<void>;
   relaunch: () => Promise<void>;
 }
 
@@ -16,11 +17,12 @@ export async function installUpdateForBuild({
   localPatched,
   sourceRoot,
   update,
+  summarizeDecisions = false,
   startLocalPatchedUpdate,
   relaunch,
 }: InstallUpdateForBuildOptions): Promise<UpdateInstallPath> {
   if (localPatched) {
-    await startLocalPatchedUpdate(sourceRoot);
+    await startLocalPatchedUpdate(sourceRoot, summarizeDecisions);
     return "local-patched";
   }
   if (!update) return "none";

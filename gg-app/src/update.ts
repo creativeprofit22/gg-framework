@@ -27,7 +27,7 @@ export interface UpdateInfo {
   statusMessage: string | null;
   progressLines: string[];
   installerPath: string | null;
-  install: () => Promise<void>;
+  install: (options?: { summarizeDecisions?: boolean }) => Promise<void>;
 }
 
 const POLL_INTERVAL_MS = 60 * 60 * 1000;
@@ -190,65 +190,71 @@ export function useAppUpdate(): UpdateInfo {
     };
   }, []);
 
-  const install = useCallback(async (): Promise<void> => {
-    if (devFakeEnabled) {
-      setPhase("installing");
-      setProgress(0);
-      await new Promise((resolve) => setTimeout(resolve, 2500));
-      setProgress(null);
-      setPhase("available");
-      return;
-    }
-    if (appBuildInfo.localPatched) {
-      setPhase("installing");
-      setProgressLines([]);
-      setInstallerPath(null);
-      setStatusMessage(
-        "Starting protected local merge — the official binary will not be installed.",
-      );
-      try {
-        await localListenerReady.current?.promise;
-      } catch (error) {
-        setPhase("error");
-        setStatusMessage(`Could not listen for update progress: ${String(error)}`);
+  const install = useCallback(
+    async ({
+      summarizeDecisions = false,
+    }: { summarizeDecisions?: boolean } = {}): Promise<void> => {
+      if (devFakeEnabled) {
+        setPhase("installing");
+        setProgress(0);
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        setProgress(null);
+        setPhase("available");
         return;
       }
+      if (appBuildInfo.localPatched) {
+        setPhase("installing");
+        setProgressLines([]);
+        setInstallerPath(null);
+        setStatusMessage(
+          "Starting protected local merge — the official binary will not be installed.",
+        );
+        try {
+          await localListenerReady.current?.promise;
+        } catch (error) {
+          setPhase("error");
+          setStatusMessage(`Could not listen for update progress: ${String(error)}`);
+          return;
+        }
+        try {
+          await installUpdateForBuild({
+            localPatched: true,
+            sourceRoot: appBuildInfo.sourceRoot,
+            update: null,
+            summarizeDecisions,
+            startLocalPatchedUpdate,
+            relaunch,
+          });
+        } catch (error) {
+          setPhase("error");
+          setStatusMessage(`Local-patched update failed: ${String(error)}`);
+          logError(`Local-patched update failed: ${String(error)}`);
+        }
+        return;
+      }
+      if (!update) return;
+      setPhase("installing");
+      setProgress(0);
       try {
-        await installUpdateForBuild({
-          localPatched: true,
-          sourceRoot: appBuildInfo.sourceRoot,
-          update: null,
-          startLocalPatchedUpdate,
-          relaunch,
+        let total = 0;
+        let downloaded = 0;
+        await update.downloadAndInstall((event) => {
+          if (event.event === "Started") total = event.data.contentLength ?? 0;
+          else if (event.event === "Progress") {
+            downloaded += event.data.chunkLength;
+            if (total > 0) setProgress(Math.min(99, Math.round((downloaded / total) * 100)));
+          } else setProgress(100);
         });
+        await relaunch();
       } catch (error) {
         setPhase("error");
-        setStatusMessage(`Local-patched update failed: ${String(error)}`);
-        logError(`Local-patched update failed: ${String(error)}`);
+        setProgress(null);
+        setStatusMessage(`Update install failed: ${String(error)}`);
+        logError(`Update install failed: ${String(error)}`);
       }
-      return;
-    }
-    if (!update) return;
-    setPhase("installing");
-    setProgress(0);
-    try {
-      let total = 0;
-      let downloaded = 0;
-      await update.downloadAndInstall((event) => {
-        if (event.event === "Started") total = event.data.contentLength ?? 0;
-        else if (event.event === "Progress") {
-          downloaded += event.data.chunkLength;
-          if (total > 0) setProgress(Math.min(99, Math.round((downloaded / total) * 100)));
-        } else setProgress(100);
-      });
-      await relaunch();
-    } catch (error) {
-      setPhase("error");
-      setProgress(null);
-      setStatusMessage(`Update install failed: ${String(error)}`);
-      logError(`Update install failed: ${String(error)}`);
-    }
-  }, [update]);
+    },
+    [update],
+  );
 
   const version = update?.version ?? fakeVersion;
   const installLabel = useMemo(() => {

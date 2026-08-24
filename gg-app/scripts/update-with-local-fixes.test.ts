@@ -1,6 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -117,7 +118,7 @@ interface Fixture {
   initialDirtyStatus: string;
 }
 
-function createUpdateFixture(conflict = false): Fixture {
+function createUpdateFixture(conflict = false, meaningfulOverlap = false): Fixture {
   const root = tempDir("gg-local-update-");
   const upstream = join(root, "upstream.git");
   const origin = join(root, "origin.git");
@@ -128,7 +129,12 @@ function createUpdateFixture(conflict = false): Fixture {
   git(repo, "init", "--initial-branch", "main");
   configureRepository(repo);
   writeIdentityFixture(repo);
-  write(join(repo, "shared.txt"), "base\n");
+  write(
+    join(repo, "shared.txt"),
+    meaningfulOverlap
+      ? "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\n"
+      : "base\n",
+  );
   git(repo, "add", ".");
   git(repo, "commit", "-m", "base");
   git(repo, "remote", "add", "upstream", upstream);
@@ -137,7 +143,13 @@ function createUpdateFixture(conflict = false): Fixture {
   git(repo, "push", "origin", "main");
 
   git(repo, "switch", "-c", "custom/local-customizations");
-  write(join(repo, conflict ? "shared.txt" : "local-one.txt"), conflict ? "local\n" : "one\n");
+  const localPath = conflict || meaningfulOverlap ? "shared.txt" : "local-one.txt";
+  const localContents = conflict
+    ? "local\n"
+    : meaningfulOverlap
+      ? "local one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\n"
+      : "one\n";
+  write(join(repo, localPath), localContents);
   git(repo, "add", ".");
   git(repo, "commit", "-m", "local one");
   git(repo, "push", "-u", "origin", "custom/local-customizations");
@@ -146,10 +158,13 @@ function createUpdateFixture(conflict = false): Fixture {
   git(repo, "commit", "-m", "local two unpushed");
 
   git(repo, "switch", "main");
-  write(
-    join(repo, conflict ? "shared.txt" : "upstream.txt"),
-    conflict ? "upstream\n" : "advance\n",
-  );
+  const upstreamPath = conflict || meaningfulOverlap ? "shared.txt" : "upstream.txt";
+  const upstreamContents = conflict
+    ? "upstream\n"
+    : meaningfulOverlap
+      ? "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\nupstream eleven\n"
+      : "advance\n";
+  write(join(repo, upstreamPath), upstreamContents);
   git(repo, "add", ".");
   git(repo, "commit", "-m", "upstream advance");
   git(repo, "push", "upstream", "main");
@@ -213,6 +228,7 @@ describe("local-fixes updater", () => {
   it("pins protected gg-app verification to the targeted regression files", () => {
     expect(GG_APP_TARGETED_VITEST_PATHS).toEqual([
       "scripts/update-with-local-fixes.test.ts",
+      "scripts/decisions-classifier.test.ts",
       "scripts/build-local-hotfix.test.ts",
       "scripts/vite-config.test.ts",
       "src/brand-static.test.ts",
@@ -282,7 +298,7 @@ describe("local-fixes updater", () => {
     expect(result.stderr).not.toContain("Manifest:");
   }, 30_000);
 
-  it("merges upstream without rewriting local commits and restores tracked and untracked dirt", () => {
+  it("restores dirty work and omits decisions when merged paths do not overlap", () => {
     const fixture = createUpdateFixture();
     const localHead = git(fixture.repo, "rev-parse", "HEAD");
     const sourceHead = git(fixture.repo, "rev-parse", "upstream/main");
@@ -329,9 +345,8 @@ describe("local-fixes updater", () => {
       .filter((name) => name.startsWith("gg-local-before-update-"));
     expect(backupBranches).toHaveLength(1);
     const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
-    const manifest = JSON.parse(
-      readFileSync(join(backupRoot, readdirSync(backupRoot)[0], "manifest.json"), "utf8"),
-    );
+    const syncDir = join(backupRoot, readdirSync(backupRoot)[0]);
+    const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
     expect(manifest.verified).toBe(true);
     expect(manifest.phase).toBe("verified");
     expect(manifest.dirtyWorkApplied).toBe(true);
@@ -339,6 +354,59 @@ describe("local-fixes updater", () => {
       "local one",
       "local two unpushed",
     ]);
+    expect(manifest).not.toHaveProperty("mergeCreated");
+    expect(manifest).not.toHaveProperty("decisionsPath");
+    expect(existsSync(join(syncDir, "decisions.json"))).toBe(false);
+  }, 30_000);
+
+  it("stores meaningful decisions beside the verified sync manifest", () => {
+    const fixture = createUpdateFixture(false, true);
+    const result = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
+
+    expect(result.status, result.stderr).toBe(0);
+    const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
+    const syncDir = join(backupRoot, readdirSync(backupRoot)[0]);
+    const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
+    const decisions = JSON.parse(readFileSync(join(syncDir, "decisions.json"), "utf8"));
+    expect(manifest).toMatchObject({ verified: true, phase: "verified" });
+    expect(manifest).not.toHaveProperty("mergeCreated");
+    expect(manifest).not.toHaveProperty("decisionsPath");
+    expect(decisions.decisions).toEqual([
+      expect.objectContaining({ area: "shared", outcome: "combined" }),
+    ]);
+    expect(decisions.verification.workflowVerified).toBe(true);
+    expect(decisions).toMatchObject({
+      schemaVersion: 3,
+      summary: {
+        text: "Your protected update is ready. It blended your work with upstream in one area, keeping changes from both sides.",
+        source: "fallback",
+        generatedAt: manifest.timestamp,
+      },
+    });
+    expect(existsSync(join(syncDir, "decision-summary-context.json"))).toBe(false);
+    expect(JSON.stringify(decisions)).not.toContain("rationale");
+  }, 30_000);
+
+  it("writes correlated summary context only after an opted-in verified overlap", () => {
+    const fixture = createUpdateFixture(false, true);
+    const result = runUpdater(fixture.repo, [
+      "--no-install",
+      "--no-build",
+      "--no-check",
+      "--decision-summary-context",
+    ]);
+
+    expect(result.status, result.stderr).toBe(0);
+    const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
+    const syncDir = join(backupRoot, readdirSync(backupRoot)[0]);
+    const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
+    const decisions = JSON.parse(readFileSync(join(syncDir, "decisions.json"), "utf8"));
+    const context = JSON.parse(
+      readFileSync(join(syncDir, "decision-summary-context.json"), "utf8"),
+    );
+    expect(context.recordedAt).toBe(manifest.timestamp);
+    expect(context.evidence).toEqual(decisions.evidence);
+    expect(context.decisions).toHaveLength(decisions.decisions.length);
   }, 30_000);
 
   it("stops on conflicts with the backup branch and dirty-work stash intact", () => {
@@ -357,8 +425,8 @@ describe("local-fixes updater", () => {
     ).toBe(true);
   }, 30_000);
 
-  it("stops after a failed check without building or pushing", () => {
-    const fixture = createUpdateFixture();
+  it("stops after a failed check without writing meaningful decisions", () => {
+    const fixture = createUpdateFixture(false, true);
     const bin = join(fixture.root, "bin");
     mkdirSync(bin);
     if (process.platform === "win32") {
@@ -379,10 +447,13 @@ describe("local-fixes updater", () => {
     expect(result.stdout).not.toMatch(/^> git push/m);
     expect(git(fixture.repo, "stash", "list")).toContain("gg local update");
     const backupRoot = join(fixture.repo, ".gg", "local-fixes", "backups");
-    const manifest = JSON.parse(
-      readFileSync(join(backupRoot, readdirSync(backupRoot)[0], "manifest.json"), "utf8"),
-    );
+    const syncDir = join(backupRoot, readdirSync(backupRoot)[0]);
+    const manifest = JSON.parse(readFileSync(join(syncDir, "manifest.json"), "utf8"));
     expect(manifest.phase).toBe("source-verified");
+    expect(manifest.verified).toBe(false);
+    expect(manifest).not.toHaveProperty("mergeCreated");
+    expect(manifest).not.toHaveProperty("decisionsPath");
+    expect(existsSync(join(syncDir, "decisions.json"))).toBe(false);
     expect(manifest.dirtyWorkApplied).toBe(true);
   }, 30_000);
 

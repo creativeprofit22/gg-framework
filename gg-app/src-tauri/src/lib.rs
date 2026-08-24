@@ -1,4 +1,5 @@
 mod azure_connection;
+mod decisions;
 mod local_patched_update;
 
 use azure_connection::commands::{
@@ -5322,6 +5323,16 @@ fn urlencoding(s: &str) -> String {
 
 const LOCAL_PATCHED_UPDATE_EVENT: &str = "local-patched-update";
 
+#[tauri::command]
+async fn app_verified_decisions(
+    repo_root: String,
+) -> Result<Vec<decisions::DecisionRecord>, String> {
+    let repo = resolve_local_update_repo_root(repo_root)?;
+    tauri::async_runtime::spawn_blocking(move || decisions::load_verified_decisions(&repo))
+        .await
+        .map_err(|error| format!("Decisions worker failed: {error}"))
+}
+
 /// Check local source state without blocking Tauri's async command runtime. The
 /// protected update workflow remains the sole owner of merges and builds.
 #[tauri::command]
@@ -5357,8 +5368,10 @@ async fn app_local_patched_update_status(
 #[tauri::command]
 fn app_local_patched_update_start(
     app: tauri::AppHandle,
+    webview: WebviewWindow,
     update_state: State<'_, LocalPatchedUpdate>,
     repo_root: String,
+    summarize_decisions: bool,
 ) -> Result<serde_json::Value, String> {
     let repo = resolve_local_update_repo_root(repo_root)?;
     {
@@ -5368,7 +5381,11 @@ fn app_local_patched_update_start(
         }
         *running = true;
     }
-    std::thread::spawn(move || run_local_patched_update(app, repo));
+    let sidecar = port_for(&webview)
+        .zip(pane_session_for(&webview, PRIMARY_PANE_ID));
+    std::thread::spawn(move || {
+        run_local_patched_update(app, repo, summarize_decisions, sidecar)
+    });
     Ok(serde_json::json!({ "started": true }))
 }
 
@@ -5402,7 +5419,12 @@ fn emit_local_patched_update(app: &tauri::AppHandle, payload: serde_json::Value)
     let _ = app.emit(LOCAL_PATCHED_UPDATE_EVENT, payload);
 }
 
-fn run_local_patched_update(app: tauri::AppHandle, repo: PathBuf) {
+fn run_local_patched_update(
+    app: tauri::AppHandle,
+    repo: PathBuf,
+    summarize_decisions: bool,
+    sidecar: Option<(u16, String)>,
+) {
     emit_local_patched_update(
         &app,
         serde_json::json!({
@@ -5410,7 +5432,7 @@ fn run_local_patched_update(app: tauri::AppHandle, repo: PathBuf) {
             "message": "Starting protected source update: backup, fetch, rebase, restore, check, and build.",
         }),
     );
-    let mut command = local_patched_update_command();
+    let mut command = local_patched_update_command(summarize_decisions);
     command
         .current_dir(&repo)
         .stdout(Stdio::piped())
@@ -5445,6 +5467,9 @@ fn run_local_patched_update(app: tauri::AppHandle, repo: PathBuf) {
 
     match status {
         Ok(status) if status.success() => {
+            if summarize_decisions {
+                write_decision_summary(&app, &repo, sidecar);
+            }
             let installer = newest_rebuilt_installer(&repo);
             let opened = open_rebuilt_update_result(&app, installer.as_deref(), &repo);
             emit_local_patched_update(
@@ -5480,7 +5505,79 @@ fn run_local_patched_update(app: tauri::AppHandle, repo: PathBuf) {
     }
 }
 
-fn local_patched_update_command() -> Command {
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecisionSummaryResponse {
+    version: u8,
+    summary: String,
+}
+
+fn write_decision_summary(
+    app: &tauri::AppHandle,
+    repo: &Path,
+    sidecar: Option<(u16, String)>,
+) {
+    let pending = match decisions::load_pending_decision_summary(repo) {
+        Ok(Some(pending)) => pending,
+        Ok(None) => return,
+        Err(_) => {
+            eprintln!("Decision summary context was rejected; protected update remains verified.");
+            emit_local_patched_update(
+                app,
+                serde_json::json!({
+                    "type": "line",
+                    "stream": "stdout",
+                    "line": "Summary unavailable; protected update remains verified.",
+                }),
+            );
+            return;
+        }
+    };
+    emit_local_patched_update(
+        app,
+        serde_json::json!({
+            "type": "line",
+            "stream": "stdout",
+            "line": "Writing a short What's New summary…",
+        }),
+    );
+
+    let context_json = pending.context_json.clone();
+    let summary = sidecar.and_then(|(port, session)| {
+        let client = app.state::<reqwest::Client>().inner().clone();
+        tauri::async_runtime::block_on(async move {
+            let response = client
+                .post(format!("{}/decision-summary", sidecar_base(port)))
+                .header("x-gg-session", session)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(context_json)
+                .send()
+                .await
+                .ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            let envelope = response.json::<DecisionSummaryResponse>().await.ok()?;
+            (envelope.version == 1).then_some(envelope.summary)
+        })
+    });
+    let available = summary.is_some();
+    if decisions::complete_pending_decision_summary(pending, summary.as_deref()).is_err() {
+        eprintln!("Decision summary could not be stored or cleaned up; protected update remains verified.");
+    }
+    if !available {
+        emit_local_patched_update(
+            app,
+            serde_json::json!({
+                "type": "line",
+                "stream": "stdout",
+                "line": "Summary unavailable; protected update remains verified.",
+            }),
+        );
+    }
+}
+
+fn local_patched_update_command(summarize_decisions: bool) -> Command {
     #[cfg(target_os = "windows")]
     {
         let mut command = Command::new("cmd");
@@ -5493,12 +5590,18 @@ fn local_patched_update_command() -> Command {
             "--",
             "--check",
         ]);
+        if summarize_decisions {
+            command.arg("--decision-summary-context");
+        }
         command
     }
     #[cfg(not(target_os = "windows"))]
     {
         let mut command = Command::new("pnpm");
         command.args(["--filter", "gg-app", "update:local-fixes", "--", "--check"]);
+        if summarize_decisions {
+            command.arg("--decision-summary-context");
+        }
         command
     }
 }
@@ -8867,6 +8970,7 @@ pub fn run() {
             app_settings_get,
             app_settings_save,
             app_create_project,
+            app_verified_decisions,
             app_local_patched_update_status,
             app_local_patched_update_start,
             app_auth_status,

@@ -35,6 +35,12 @@ import {
   AppSidecarContinuationHandoffService,
   type ContinuationSynthesisSessionOptions,
 } from "./app-sidecar-continuation-handoff.js";
+import {
+  AppSidecarDecisionSummaryService,
+  DECISION_SUMMARY_CONTEXT_MAX_BYTES,
+  type DecisionSummarySessionOptions,
+} from "./app-sidecar-decision-summary.js";
+import { handleDecisionSummaryRequest } from "./app-sidecar-decision-summary-route.js";
 import { CONTINUATION_HANDOFF_LIMITS } from "./core/continuation-handoff.js";
 import { SharedMcpClientPool } from "./core/mcp/shared-client-pool.js";
 import { RunLifecycle, type RunState } from "./core/run-lifecycle.js";
@@ -4145,6 +4151,9 @@ async function createSession(
     createSynthesisSession: (options: ContinuationSynthesisSessionOptions) =>
       new AgentSession(options),
   });
+  const decisionSummaryService = new AppSidecarDecisionSummaryService(
+    (options: DecisionSummarySessionOptions) => new AgentSession(options),
+  );
 
   function readBody(req: http.IncomingMessage, res: http.ServerResponse): Promise<string | null> {
     return readCappedBody(req, res);
@@ -5053,6 +5062,20 @@ async function createSession(
           }));
         json(res, 200, { commands: [...workspaceActions, ...builtins, ...custom] });
       })();
+      return;
+    }
+
+    if (method === "POST" && url === "/decision-summary") {
+      void readCappedBody(req, res, DECISION_SUMMARY_CONTEXT_MAX_BYTES)
+        .then(async (raw) => {
+          if (raw === null) return;
+          const response = await handleDecisionSummaryRequest(raw, session, decisionSummaryService);
+          json(res, response.status, response.body);
+        })
+        .catch((error) => {
+          captureSidecarError(error, "app-sidecar.decision-summary.route");
+          json(res, 500, { error: "decision summary unavailable" });
+        });
       return;
     }
 

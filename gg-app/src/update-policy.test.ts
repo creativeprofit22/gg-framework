@@ -23,9 +23,23 @@ describe("installUpdateForBuild", () => {
 
     expect(startLocalPatchedUpdate).toHaveBeenCalledExactlyOnceWith(
       "C:/ggcoder-projects/gg-framework-fork",
+      false,
     );
     expect(update.downloadAndInstall).not.toHaveBeenCalled();
     expect(relaunch).not.toHaveBeenCalled();
+  });
+
+  it("passes summary consent only to the protected local updater", async () => {
+    const startLocalPatchedUpdate = vi.fn().mockResolvedValue(undefined);
+    await installUpdateForBuild({
+      localPatched: true,
+      sourceRoot: "C:/source",
+      update: null,
+      summarizeDecisions: true,
+      startLocalPatchedUpdate,
+      relaunch: vi.fn(),
+    });
+    expect(startLocalPatchedUpdate).toHaveBeenCalledWith("C:/source", true);
   });
 
   it("installs and relaunches official builds", async () => {

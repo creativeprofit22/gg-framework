@@ -12,13 +12,19 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  fallbackDecisionSummary,
+  generateDecisionRecord,
+  generateDecisionSummaryContext,
+} from "./decisions-classifier.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appDir = join(here, "..");
 const defaultRepoRoot = join(appDir, "..");
 const repoRoot = realpathSync(resolve(process.env.GG_LOCAL_UPDATE_REPO_ROOT || defaultRepoRoot));
 const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+const recordedAt = new Date().toISOString();
+const timestamp = recordedAt.replace(/[:.]/g, "-");
 const SAFE_LOCAL_BRANCH = "custom/local-customizations";
 const LEGACY_LOCAL_BRANCH = "custom/local-customizations-v2";
 const READ_ONLY_SAFETY_BRANCH = "custom/local-customizations-safety";
@@ -53,6 +59,7 @@ Options:
   --no-build             Skip installer build (incompatible with --push)
   --check                Run required checks (default)
   --no-check             Skip checks (incompatible with --push)
+  --decision-summary-context  Write bounded verified diff evidence for an opted-in summary
   --dry-run              Print the workflow without changing Git or files
   -h, --help             Show this help
 `;
@@ -67,6 +74,7 @@ function parseArgs(args) {
     install: true,
     build: true,
     check: true,
+    decisionSummaryContext: false,
     dryRun: false,
   };
   for (let i = 0; i < args.length; i += 1) {
@@ -82,6 +90,7 @@ function parseArgs(args) {
     else if (arg === "--no-build") options.build = false;
     else if (arg === "--check") options.check = true;
     else if (arg === "--no-check") options.check = false;
+    else if (arg === "--decision-summary-context") options.decisionSummaryContext = true;
     else if (arg === "--dry-run") options.dryRun = true;
     else if (arg === "-h" || arg === "--help") {
       console.log(usage());
@@ -359,6 +368,7 @@ export function normalPushArgs(branch) {
 
 export const GG_APP_TARGETED_VITEST_PATHS = Object.freeze([
   "scripts/update-with-local-fixes.test.ts",
+  "scripts/decisions-classifier.test.ts",
   "scripts/build-local-hotfix.test.ts",
   "scripts/vite-config.test.ts",
   "src/brand-static.test.ts",
@@ -477,7 +487,7 @@ async function main() {
   const backupDir = join(repoRoot, ".gg", "local-fixes", "backups", timestamp);
   const manifestPath = join(backupDir, "manifest.json");
   const manifest = {
-    timestamp,
+    timestamp: recordedAt,
     repoRoot,
     localBranch,
     source: target,
@@ -497,6 +507,7 @@ async function main() {
     verified: false,
     manifestPath,
   };
+  let mergeCreated = false;
 
   if (options.dryRun) {
     console.log(`[dry-run] create backup directory ${backupDir}`);
@@ -587,6 +598,7 @@ async function main() {
           run("git", ["commit", "-m", `Merge ${target} into ${localBranch}`]),
           "Merged source could not be committed.",
         );
+        mergeCreated = true;
       }
       manifest.mergedHead = capture("git", ["rev-parse", "HEAD"]).stdout.trim();
       manifest.phase = "merged";
@@ -686,6 +698,24 @@ async function main() {
     manifest.verified = true;
     manifest.phase = "verified";
     writeJson(manifestPath, manifest);
+    if (mergeCreated) {
+      const decisions = generateDecisionRecord(repoRoot, manifest.mergedHead);
+      if (decisions.decisions.length > 0) {
+        decisions.schemaVersion = 3;
+        decisions.summary = {
+          text: fallbackDecisionSummary(decisions.decisions),
+          source: "fallback",
+          generatedAt: decisions.verification.recordedAt,
+        };
+        writeJson(join(backupDir, "decisions.json"), decisions);
+        if (options.decisionSummaryContext) {
+          writeJson(
+            join(backupDir, "decision-summary-context.json"),
+            generateDecisionSummaryContext(repoRoot, decisions),
+          );
+        }
+      }
+    }
   }
 
   if (options.push) {

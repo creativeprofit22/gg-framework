@@ -4,6 +4,8 @@ import { sliceHead } from "@kenkaiiii/gg-ai";
 import { extractToMarkdown } from "./html-extract.js";
 import { extractPdfText, PdfExtractorUnavailable } from "./pdf-extract.js";
 import { checkUrlPolicy, type GetNetworkPolicy } from "../core/network-guard.js";
+import { stripInvisibleUnicode } from "../utils/text.js";
+import { log } from "../core/logger.js";
 
 /**
  * Block requests to private/internal network addresses to prevent SSRF.
@@ -857,10 +859,32 @@ async function fetchWithPreferredDocs(
 }
 
 /**
+ * Remove invisible Unicode tag characters from a page before the model reads
+ * it. Any page can encode a full ASCII instruction in U+E0000–U+E007F, which
+ * renders as nothing in the terminal and in any browser — so the user reviewing
+ * the fetch sees innocuous text while the model receives the injected command.
+ * Applied at every format, including cached outlines and extracted PDFs.
+ */
+function sanitizeFetched(url: string, content: string): string {
+  const { text, stripped } = stripInvisibleUnicode(content);
+  if (stripped > 0) {
+    log("WARN", "web-fetch", "Stripped invisible Unicode tag characters from fetched page", {
+      url,
+      stripped,
+    });
+  }
+  return text;
+}
+
+/**
  * Outline-mode wrapper around {@link fetchWithPreferredDocs} that serves
  * repeat views of a page from the per-session cache. The URL is re-validated
  * *before* the cache is consulted, so a cached render can never resurrect a
  * host the current SSRF/allowlist policy forbids.
+ *
+ * Every path out of the fetch pipeline — PDF, llms.txt, outline, cache hit —
+ * returns through here, so {@link sanitizeFetched} applies once and covers all
+ * of them.
  */
 async function fetchPage(
   url: string,
@@ -868,7 +892,9 @@ async function fetchPage(
   signal: AbortSignal,
   cache: Map<string, CachedPage>,
 ): Promise<string> {
-  if (opts.format !== "outline") return await fetchWithPreferredDocs(url, opts, signal);
+  if (opts.format !== "outline") {
+    return sanitizeFetched(url, await fetchWithPreferredDocs(url, opts, signal));
+  }
 
   if (isBlockedUrl(url)) return BLOCKED_URL_MESSAGE;
   const policyError = checkUrlPolicy(url, opts.getNetworkPolicy);
@@ -878,7 +904,7 @@ async function fetchPage(
   const hit = cacheGet(cache, requestKey);
   if (hit) {
     opts.numbers?.reserve(hit.links);
-    return hit.text;
+    return sanitizeFetched(url, hit.text);
   }
 
   let rendered: CachedPage | undefined;
@@ -895,7 +921,7 @@ async function fetchPage(
     signal,
   );
   if (rendered) cacheSet(cache, requestKey, rendered);
-  return result;
+  return sanitizeFetched(url, result);
 }
 
 export function createWebFetchTool(

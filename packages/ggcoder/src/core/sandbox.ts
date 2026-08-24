@@ -32,6 +32,12 @@ export interface SandboxPolicy {
   additionalRoots?: string[];
   /** The user consented to writes outside the workspace; do not contradict them. */
   allowOutsideWorkspaceWrites?: boolean;
+  /**
+   * Unix socket paths sandboxed commands may open, e.g.
+   * `/var/run/docker.sock`. Empty by default — each entry is a hole straight
+   * through the sandbox (see {@link buildSandboxSettings}).
+   */
+  allowUnixSockets?: string[];
 }
 
 export interface SandboxLaunch extends ShellResolution {
@@ -80,6 +86,25 @@ interface SandboxSettings {
 const SANDBOX_CONFIG_DIR = path.join(os.homedir(), ".gg", "sandbox-configs");
 const PROBE_TIMEOUT_MS = 20_000;
 let warnedUnsupported = false;
+let warnedDegraded = false;
+
+/**
+ * Linux ships unix-socket blocking as a separate `apply-seccomp` helper, and
+ * when it is missing SRT continues with the filter silently dropped
+ * (linux-sandbox-utils.js:403 and :1118). The sandbox still starts, still
+ * reports success, and still filters the network — but a sandboxed process can
+ * open AF_UNIX sockets again, which is the Docker/SSH-agent socket back.
+ * `workspace` mode promises to fail closed, so it has to notice.
+ */
+const DEGRADED_ISOLATION =
+  /seccomp[^\n]*not available|unix socket (?:blocking disabled|access not restricted)/i;
+
+export interface SandboxSupport {
+  supported: boolean;
+  reason: string;
+  /** Isolation started but is missing a control we promised; null when intact. */
+  degraded?: string | null;
+}
 
 function sensitiveReadPaths(home: string): string[] {
   return [
@@ -245,10 +270,36 @@ export function buildSandboxSettings(
       allowedDomains,
       deniedDomains: [],
       strictAllowlist: true,
-      allowUnixSockets: [],
-      // Dev servers, preview servers and the screenshot tool all bind a local
-      // port. Loopback never leaves the machine, so blocking it costs core
-      // workflows without buying containment.
+      // Opt-in, and empty by default. Every entry is a full bypass of the
+      // isolation around it: `/var/run/docker.sock` is unauthenticated
+      // root-equivalent control of the host (mount / into a container and the
+      // workspace boundary is gone), and the SSH agent socket signs anything
+      // asked of it. The domain allowlist cannot see either — no TCP is
+      // involved. Users who need `docker` in sandboxed bash grant it here
+      // explicitly, rather than the sandbox quietly deciding for them.
+      //
+      // macOS only: on Linux/WSL2 SRT's seccomp filter blocks AF_UNIX by
+      // syscall and cannot inspect paths, so a per-path list is unenforceable
+      // there (it would need allowAllUnixSockets, which we do not expose).
+      allowUnixSockets: platform === "darwin" ? [...new Set(policy.allowUnixSockets ?? [])] : [],
+      // Always on, with no setting to turn it off.
+      //
+      // SRT couples three rules into this flag: network-bind, network-inbound
+      // and `(allow network-outbound (remote ip "localhost:*"))`
+      // (macos-sandbox-utils.js:473-477), with no per-port form. Dev servers,
+      // preview servers and the screenshot tool all bind loopback, so turning
+      // it off breaks everyday work outright.
+      //
+      // The egress half is a real hole only for someone running an
+      // unauthenticated service on a local TCP port — `docker` exposed on
+      // tcp://localhost:2375, a bare Ollama, a live `kubectl proxy`. That is
+      // rare and self-inflicted, and the common case is already covered: Docker
+      // listens on /var/run/docker.sock by default, which allowUnixSockets
+      // above keeps shut. A setting for the remainder would be one more knob
+      // nobody turns, breaking dev servers for whoever found it by accident.
+      //
+      // Linux is unaffected regardless: bwrap gives the sandbox its own network
+      // namespace, so its loopback is not the host's.
       allowLocalBinding: true,
     },
     ...(platform === "darwin" ? { enableWeakerNetworkIsolation: true } : {}),
@@ -287,16 +338,15 @@ function resolveSandboxCli(): string {
  * initializes, so probe once per process with a trivial command instead of
  * reimplementing its per-platform dependency matrix.
  */
-let supportProbe: Promise<{ supported: boolean; reason: string }> | null = null;
+let supportProbe: Promise<SandboxSupport> | null = null;
 
-export function resetSandboxSupportProbeForTests(): void {
-  supportProbe = null;
+export function resetSandboxSupportProbeForTests(seed?: SandboxSupport): void {
+  supportProbe = seed ? Promise.resolve(seed) : null;
   warnedUnsupported = false;
+  warnedDegraded = false;
 }
 
-function probeSandboxSupport(
-  settingsPath: string,
-): Promise<{ supported: boolean; reason: string }> {
+function probeSandboxSupport(settingsPath: string): Promise<SandboxSupport> {
   supportProbe ??= new Promise((resolve) => {
     let child;
     try {
@@ -305,6 +355,11 @@ function probeSandboxSupport(
         [resolveSandboxCli(), "--settings", settingsPath, "-c", "exit 0"],
         {
           stdio: ["ignore", "ignore", "pipe"],
+          // SRT reports the dropped seccomp filter through its debug logger, so
+          // the one probe run has to ask for it. Only on Linux, which is the
+          // only platform that degrades this way, and the output is parsed and
+          // discarded here rather than shown.
+          ...(process.platform === "linux" ? { env: { ...process.env, SRT_DEBUG: "1" } } : {}),
         },
       );
     } catch (error) {
@@ -312,12 +367,17 @@ function probeSandboxSupport(
       return;
     }
     let stderr = "";
+    let degraded: string | null = null;
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr = `${stderr}${chunk.toString("utf8")}`.slice(-500);
+      const text = chunk.toString("utf8");
+      // Match per chunk: `stderr` keeps only the tail for the failure message,
+      // and under SRT_DEBUG the warning is easily scrolled past it.
+      degraded ??= text.match(DEGRADED_ISOLATION)?.[0] ?? null;
+      stderr = `${stderr}${text}`.slice(-500);
     });
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      resolve({ supported: false, reason: "sandbox probe timed out" });
+      resolve({ supported: false, reason: "sandbox probe timed out", degraded });
     }, PROBE_TIMEOUT_MS);
     timer.unref?.();
     child.once("error", (error) => {
@@ -329,6 +389,7 @@ function probeSandboxSupport(
       resolve({
         supported: code === 0,
         reason: code === 0 ? "ok" : stderr.trim() || `sandbox probe exited with code ${code}`,
+        degraded,
       });
     });
   });
@@ -363,6 +424,10 @@ async function writeStableSettings(settings: SandboxSettings): Promise<string> {
  *   registry host configured explicitly.
  * - **Ubuntu 24.04+**: AppArmor blocks the sandbox entirely, so `auto`
  *   degrades to no isolation (sandbox-runtime#428, #429).
+ * - **Loopback egress is unfiltered**: sandboxed commands can reach any local
+ *   TCP port, because upstream ties that to port binding and dev servers need
+ *   to bind. A service listening on localhost without authentication is
+ *   reachable from sandboxed bash.
  *
  * These are why the default is `off`; revisit when fixed upstream.
  */
@@ -396,6 +461,23 @@ export async function prepareSandboxLaunch(
       });
     }
     return { ...shell, sandboxed: false };
+  }
+
+  if (support.degraded) {
+    if (policy.mode === "workspace") {
+      throw new Error(
+        `OS sandbox isolation is incomplete: ${support.degraded}. Unix sockets ` +
+          `(Docker, the SSH agent) stay reachable from sandboxed commands. Install ` +
+          `@anthropic-ai/sandbox-runtime globally so the apply-seccomp helper is on ` +
+          `disk, or set sandboxMode to "auto" to accept reduced isolation.`,
+      );
+    }
+    if (!warnedDegraded) {
+      warnedDegraded = true;
+      log("WARN", "sandbox", "OS sandbox running with reduced isolation", {
+        reason: support.degraded,
+      });
+    }
   }
 
   return {

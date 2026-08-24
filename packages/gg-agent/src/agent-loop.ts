@@ -25,6 +25,12 @@ import type {
   StructuredToolResult,
 } from "./types.js";
 import { isLocalBackendUrl } from "./local-backend.js";
+import {
+  clampOutputTokens,
+  outputRouteKey,
+  parseOutputTokenCeiling,
+  rememberOutputCeiling,
+} from "./output-ceiling.js";
 
 const DEFAULT_MAX_TURNS = 300;
 /** Per-tool cancellation ceiling; a tool may raise it via `timeoutMs`. */
@@ -530,6 +536,20 @@ export async function* agentLoop(
     "text above is what was already delivered to the user. Continue exactly " +
     "from where it stopped — do not repeat or restart it.]";
   let maxTokensContinuations = 0;
+  // Non-streaming fallback usage, aggregated per session (see "stream_call").
+  let providerCalls = 0;
+  let nonStreamingCalls = 0;
+  let warnedNonStreaming = false;
+  // A rejected output budget is worth exactly one retry: the ceiling the
+  // provider named is applied to the replay, so a second failure means the
+  // limit was not the problem and retrying again just burns the same tokens.
+  const MAX_OUTPUT_CEILING_RETRIES = 1;
+  let outputCeilingRetries = 0;
+  const ceilingKey = outputRouteKey({
+    provider: options.provider,
+    model: options.model,
+    baseUrl: options.baseUrl,
+  });
   const OVERLOAD_BASE_DELAY_MS = 2_000;
   const OVERLOAD_MAX_DELAY_MS = 30_000;
   const STREAM_FIRST_EVENT_TIMEOUT_MS = 45_000; // 45s to get first event (Opus thinks long)
@@ -763,6 +783,31 @@ export async function* agentLoop(
 
       try {
         diag("stream_call", { nonStreaming: useNonStreamingFallback });
+        providerCalls++;
+        if (useNonStreamingFallback) nonStreamingCalls++;
+        // The fallback is silent by design, so a session can keep dropping into
+        // it without anyone noticing. Each entry costs two stalled attempts
+        // first (STALL_RETRIES_BEFORE_NON_STREAMING), and a non-streamed turn
+        // that fails late is replayed in full instead of resuming from partial
+        // output — those tokens get paid for twice, and nothing renders until
+        // the whole reply lands. Three entries is no longer bad luck.
+        //
+        // Counts entries, not share: the flag is cleared after every actionable
+        // response (see below), so a healthy majority of calls is streaming
+        // even in a session that is falling back constantly.
+        if (!warnedNonStreaming && nonStreamingCalls >= 3) {
+          warnedNonStreaming = true;
+          diag("non_streaming_session", {
+            nonStreamingCalls,
+            providerCalls,
+            provider: options.provider,
+            model: options.model,
+            impact:
+              "streaming is disabled for this session after repeated stalls: failed turns are " +
+              "re-billed in full instead of resuming from partial output, and replies appear only " +
+              "when complete",
+          });
+        }
         streamCallStart = Date.now();
         providerAttemptStartedAt = streamCallStart;
         // Re-resolve auth per turn. A refresh performed by any process sharing
@@ -793,7 +838,9 @@ export async function* agentLoop(
           serverTools: options.serverTools,
           toolChoice: options.toolChoice,
           webSearch: options.webSearch,
-          maxTokens: options.maxTokens,
+          // Clamped to whatever ceiling this route has already rejected us for
+          // (identity when nothing has been learned).
+          maxTokens: clampOutputTokens(ceilingKey, options.maxTokens),
           temperature: options.temperature,
           thinking: options.thinking,
           apiKey: liveApiKey,
@@ -990,6 +1037,33 @@ export async function* agentLoop(
           });
           throw err;
         }
+        // The provider named an output-token ceiling. Remember it for this
+        // provider+route+model so every later turn is clamped up front, and
+        // replay this turn once against the limit it just told us.
+        const statedCeiling = parseOutputTokenCeiling(err);
+        if (statedCeiling !== null) {
+          rememberOutputCeiling(ceilingKey, statedCeiling);
+          diag("output_ceiling_learned", {
+            ceiling: statedCeiling,
+            requested: options.maxTokens,
+            provider: options.provider,
+            model: options.model,
+          });
+          if (outputCeilingRetries < MAX_OUTPUT_CEILING_RETRIES) {
+            outputCeilingRetries++;
+            yield {
+              type: "retry" as const,
+              reason: "provider_error" as const,
+              attempt: outputCeilingRetries,
+              maxAttempts: MAX_OUTPUT_CEILING_RETRIES,
+              delayMs: 0,
+              silent: true,
+            };
+            turn--; // The rejected request never reached the model.
+            continue;
+          }
+        }
+
         // Context overflow: try a forced compaction before giving up.
         // The pre-turn transformContext check uses estimated tokens, which can
         // underestimate code-heavy content. When the API confirms overflow we

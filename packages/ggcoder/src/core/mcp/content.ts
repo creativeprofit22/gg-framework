@@ -1,6 +1,7 @@
 import type { ToolExecuteResult } from "@kenkaiiii/gg-agent";
 import { log } from "../logger.js";
 import { shrinkToFit } from "../../utils/image.js";
+import { stripInvisibleUnicode } from "../../utils/text.js";
 
 /** Media types a provider will accept as an image part. */
 const SUPPORTED_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -126,6 +127,11 @@ function asText(item: unknown, toolName: string): string | null {
  * image — becomes a text note instead of vanishing. A block silently dropped is
  * one the model never learns existed, so it answers as though the server
  * returned nothing; a note lets it say what it actually got.
+ *
+ * All text is stripped of invisible Unicode tag characters first. This is the
+ * single point every MCP server's output passes through on its way into the
+ * model's context, and a third-party server is exactly the party that would
+ * hide instructions where neither the user nor the transcript can show them.
  */
 export async function toToolResult(
   content: unknown[],
@@ -133,6 +139,7 @@ export async function toToolResult(
 ): Promise<ToolExecuteResult> {
   const texts: string[] = [];
   const rawImages: McpImagePart[] = [];
+  let hiddenChars = 0;
 
   for (const item of content) {
     const image = asImagePart(item) ?? asEmbeddedImage(item);
@@ -141,7 +148,19 @@ export async function toToolResult(
       continue;
     }
     const text = asText(item, toolName);
-    if (text !== null) texts.push(text);
+    if (text === null) continue;
+    const clean = stripInvisibleUnicode(text);
+    hiddenChars += clean.stripped;
+    texts.push(clean.text);
+  }
+
+  if (hiddenChars > 0) {
+    // Never silent: a stripped payload is an attempted injection, and the user
+    // deserves to know which server sent it.
+    log("WARN", "mcp", "Stripped invisible Unicode tag characters from MCP tool output", {
+      tool: toolName,
+      stripped: hiddenChars,
+    });
   }
 
   if (rawImages.length === 0) {

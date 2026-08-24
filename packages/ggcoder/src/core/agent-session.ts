@@ -707,6 +707,7 @@ export class AgentSession {
         // tool agree on which roots are writable.
         additionalRoots: this.additionalRoots,
         allowOutsideWorkspaceWrites: this.settingsManager.get("allowOutsideWorkspaceWrites"),
+        allowUnixSockets: this.settingsManager.get("sandboxAllowUnixSockets"),
       }),
       getUseExternalGrep: () => this.settingsManager.get("grepUseRipgrep"),
       authStorage: this.authStorage,
@@ -1437,12 +1438,28 @@ export class AgentSession {
   ): Array<TextContent | ImageContent | VideoContent> {
     const parts: Array<TextContent | ImageContent | VideoContent> = [];
     const fileNotes: string[] = [];
-    const modelSupportsVideo = getModel(this.model)?.supportsVideo ?? false;
+    const modelInfo = getModel(this.model);
+    const modelSupportsVideo = modelInfo?.supportsVideo ?? false;
+    // GLM only: GLM models have no native image input, but the GLM session is
+    // the only one with the zai_vision MCP server connected (core/mcp/defaults.ts).
+    // Point at the real tool instead of an inline image the provider layer would
+    // blank into a placeholder. Every other provider keeps inline images.
+    const glmImageHint = this.provider === "glm" && modelInfo?.supportsImages === false;
     for (const a of attachments) {
       if (a.kind === "image") {
-        parts.push({ type: "image", mediaType: a.mediaType, data: a.data });
-        if (a.path) {
-          parts.push({ type: "text", text: `[Image saved at ${a.path}]` });
+        if (glmImageHint && a.path) {
+          parts.push({
+            type: "text",
+            text:
+              `[User attached an image saved at: ${a.path} — analyze it with the ` +
+              `mcp__zai_vision__analyze_image tool (if that tool is not available yet, ` +
+              `call tool_search with "analyze image" to unlock it first, then call it with image_source=${a.path})]`,
+          });
+        } else {
+          parts.push({ type: "image", mediaType: a.mediaType, data: a.data });
+          if (a.path) {
+            parts.push({ type: "text", text: `[Image saved at ${a.path}]` });
+          }
         }
       } else if (a.kind === "video") {
         // Mirror the CLI's buildUserContentWithAttachments: never send inline

@@ -22,6 +22,38 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.53.8",
+    date: "2026-08-24",
+    items: [
+      "Drop an image in the chat with a `GLM` model and it finally gets seen. I rewired attachments so they reach the real `zai vision` engine instead of a dead-end name, and gave slow, careful analysis room to breathe by lifting the cutoff from `60s` to `180s`. Big screenshots now come back with real answers instead of a timeout.",
+    ],
+  },
+  {
+    version: "0.53.7",
+    date: "2026-08-24",
+    items: [
+      "Downloading models from `Hugging Face` finally just works. Loads of models used to refuse to install, and the ones that did could quietly hand you the wrong file: a vision add-on or a tiny helper model instead of the real thing. I fixed how GG Coder finds and picks the file, then checked it against the `66` most popular model repos. Every single one installs now, and it lands in your model dropdown the moment it finishes.",
+      "The download progress is smooth as glass. That percentage and speed readout used to flicker and jump backwards while you watched it. Now it only ever moves forward, in one clean line: `161 MB / 18 GB`, speed, time left. When something does go wrong you get a straight answer, like being told you hit a rate limit and should wait a minute, instead of a wall of terminal gibberish.",
+    ],
+  },
+  {
+    version: "0.53.6",
+    date: "2026-08-23",
+    items: [
+      "GG Coder just went on a diet. I found `3.4 MB` of test code riding along inside every install for no reason at all, and cut it clean out. Same power, lighter download, faster updates from here on.",
+    ],
+  },
+  {
+    version: "0.53.5",
+    date: "2026-08-23",
+    items: [
+      "A booby-trapped web page can no longer hijack your agent. Attackers hide instructions inside characters that are completely invisible to you, then wait for GG Coder to read them and obey. I now scrub every one of those out of web pages and `MCP` tool results before GG Coder ever sees them, and it tells you when it caught someone trying.",
+      "The safety sandbox finally keeps the promise it makes. It used to leave the `Docker` socket reachable by sandboxed commands, which is a straight shot at your whole machine, and on Linux it would quietly run with protections missing while still calling itself safe. Both are shut now, and your dev servers keep working exactly as they always did.",
+      "No more hunting bugs you never caused. When GG Coder edits a file it now says plainly whether it `introduced` those errors or whether they were `already present`, so you stop chasing ghosts through code that was never the problem.",
+      "Long sessions stop dying on you. When a provider rejects a request for being too big, GG Coder now learns the real limit and quietly fits inside it for the next `24 hours` instead of failing the exact same way on every turn after.",
+    ],
+  },
+  {
     version: "0.53.4",
     date: "2026-08-23",
     items: [

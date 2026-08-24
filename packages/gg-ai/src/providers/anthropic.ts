@@ -617,8 +617,15 @@ async function* runStream(options: StreamOptions): AsyncGenerator<StreamEvent, S
           break;
         }
 
-        // message_stop — loop exits naturally
-
+        // message_stop — loop exits naturally.
+        //
+        // Deliberately NOT breaking early here. Breaking makes the SDK iterator
+        // run `if (!done) controller.abort()` in its `finally`
+        // (core/streaming.js:97), which tears the connection down instead of
+        // returning it to the keep-alive pool — every turn would then pay a
+        // fresh TLS handshake. Draining to the end is what every other Anthropic
+        // client does, and the stall it guards against is handled by the agent
+        // loop's idle timeout.
         default:
           // Unhandled event types (e.g. "ping" heartbeats) — yield keepalive
           // so the idle timer in the agent loop resets on any API activity.

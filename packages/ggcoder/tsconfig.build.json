@@ -1,0 +1,13 @@
+// Build-only config: same as tsconfig.json but without the test suite.
+//
+// `dist` is what npm publishes (package.json `files: ["dist"]`), and tests live
+// beside their source as `*.test.ts`, so a plain `tsc` shipped ~3.4MB of
+// compiled test code — a third of the tarball — to every user. Nothing imports
+// it at runtime.
+//
+// Typechecking still covers tests: `pnpm check` runs `tsc --noEmit` against
+// tsconfig.json, which has no excludes. Only emit is narrowed.
+{
+  "extends": "./tsconfig.json",
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx", "src/**/__fixtures__/**"]
+}

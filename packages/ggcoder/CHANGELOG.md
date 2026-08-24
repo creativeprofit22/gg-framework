@@ -1,5 +1,41 @@
 # @kenkaiiii/ggcoder
 
+## 5.49.8
+
+### Patch Changes
+
+- Fix GLM image attachments: route them to the real `mcp__zai_vision__analyze_image` MCP tool (with its `tool_search` unlock path) instead of a phantom tool name, gate the hint to the GLM provider only so other providers keep inline images, and raise the `zai_vision` tool-call timeout from 60s to 180s so long GLM-4.6V analyses stop getting killed mid-flight.
+  - @kenkaiiii/gg-ai@5.49.8
+  - @kenkaiiii/gg-agent@5.49.8
+  - @kenkaiiii/gg-core@5.49.8
+
+## 5.49.7
+
+### Patch Changes
+
+- Fix Hugging Face model downloads picking unpullable files and flickering progress: search now filters to real GGUF repos, repo trees are read recursively so quants in subfolders are found, split shards / vision projectors / imatrix blobs / speculative-decoding drafts are never chosen as the model, pull phase no longer jumps backwards, and failures explain rate limits instead of dumping raw terminal output.
+  - @kenkaiiii/gg-ai@5.49.7
+  - @kenkaiiii/gg-agent@5.49.7
+  - @kenkaiiii/gg-core@5.49.7
+
+## 5.49.6
+
+### Patch Changes
+
+- Shrink the published CLI bundle by 3.4MB by excluding the test suite from the build output
+  - @kenkaiiii/gg-ai@5.49.6
+  - @kenkaiiii/gg-agent@5.49.6
+  - @kenkaiiii/gg-core@5.49.6
+
+## 5.49.5
+
+### Patch Changes
+
+- Harden the sandbox against unix-socket and degraded-isolation escapes, strip invisible Unicode from MCP and web-fetch output, and attribute new diagnostics to the edit that caused them
+  - @kenkaiiii/gg-ai@5.49.5
+  - @kenkaiiii/gg-agent@5.49.5
+  - @kenkaiiii/gg-core@5.49.5
+
 ## 5.49.4
 
 ### Patch Changes

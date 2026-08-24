@@ -5,6 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { LspManager } from "./manager.js";
+import { setEditTelemetryPathForTests } from "./edit-telemetry.js";
 import type { LspServerSpec } from "./servers.js";
 
 const FIXTURE = path.resolve(
@@ -286,5 +287,92 @@ describe("LspManager", () => {
     const result = await manager.diagnosticsAfterWrite(path.join(tmpDir, "a.fake"), "ERROR\n");
 
     expect(result).toBe("");
+  });
+
+  // Without attribution, "this edit broke the file" and "this file was already
+  // failing" produce byte-identical output, so neither the model nor we can
+  // tell them apart.
+  describe("regression attribution", () => {
+    let telemetry: string;
+
+    beforeEach(() => {
+      telemetry = path.join(tmpDir, "edit-quality.jsonl");
+      setEditTelemetryPathForTests(telemetry);
+    });
+
+    afterEach(() => setEditTelemetryPathForTests(undefined));
+
+    async function logged(): Promise<Record<string, unknown>[]> {
+      const raw = await fs.readFile(telemetry, "utf8").catch(() => "");
+      return raw
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+    }
+
+    it("names the edit as the cause when a clean file breaks, and records it", async () => {
+      const manager = makeManager(fakeSpec());
+      const filePath = path.join(tmpDir, "regressed.fake");
+
+      expect(await manager.diagnosticsAfterWrite(filePath, "all good\n")).toBe("");
+      const after = await manager.diagnosticsAfterWrite(filePath, "ERROR\n", "dotdotdot");
+
+      expect(after).toContain("introduced 1 error that was not present before");
+      expect(await logged()).toEqual([
+        expect.objectContaining({ ext: ".fake", source: "dotdotdot", before: 0, after: 1 }),
+      ]);
+    });
+
+    it("does not blame the edit for errors that were already there", async () => {
+      const manager = makeManager(fakeSpec());
+      const filePath = path.join(tmpDir, "already-broken.fake");
+
+      await manager.diagnosticsAfterWrite(filePath, "ERROR\n");
+      const after = await manager.diagnosticsAfterWrite(
+        filePath,
+        "ERROR\nunrelated change\n",
+        "span",
+      );
+
+      expect(after).toContain("already present before this change");
+      expect(after).not.toContain("introduced");
+      // Only valid→invalid transitions are worth recording.
+      expect(await logged()).toEqual([]);
+    });
+
+    it("counts only the newly added errors when a broken file gets worse", async () => {
+      const manager = makeManager(fakeSpec());
+      const filePath = path.join(tmpDir, "worse.fake");
+
+      await manager.diagnosticsAfterWrite(filePath, "ERROR\n");
+      const after = await manager.diagnosticsAfterWrite(filePath, "ERROR\nERROR\nERROR\n", "text");
+
+      expect(after).toContain("introduced 2 errors that were not present before");
+      expect(await logged()).toEqual([
+        expect.objectContaining({ source: "text", before: 1, after: 3, introduced: 2 }),
+      ]);
+    });
+
+    it("says nothing at all when there is no baseline to compare against", async () => {
+      const manager = makeManager(fakeSpec());
+      const filePath = path.join(tmpDir, "first-touch.fake");
+
+      // First edit of the session: the file's prior state was never measured,
+      // and guessing would manufacture a regression that may not exist.
+      const result = await manager.diagnosticsAfterWrite(filePath, "ERROR\n", "write");
+
+      expect(result).toContain("fake error on line 1");
+      expect(result).not.toContain("introduced");
+      expect(result).not.toContain("already present");
+      expect(await logged()).toEqual([]);
+    });
+
+    it("stays silent for a language with no server, baseline or not", async () => {
+      const manager = makeManager(fakeSpec());
+      const result = await manager.diagnosticsAfterWrite(path.join(tmpDir, "notes.md"), "ERROR\n");
+
+      expect(result).toBe("");
+      expect(await logged()).toEqual([]);
+    });
   });
 });

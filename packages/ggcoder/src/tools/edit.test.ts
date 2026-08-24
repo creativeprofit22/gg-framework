@@ -1062,6 +1062,91 @@ describe("createEditTool", () => {
       expect(contentOf(result)).toBe("Successfully replaced text in clean.ts.");
     });
 
+    it("tells the provider which matching strategy placed the edit", async () => {
+      // Attribution is the point of the telemetry: a regression traced to `...`
+      // elision means something very different from one traced to an exact
+      // match, and only this tool knows which ladder rung fired.
+      const cases: { name: string; file: string; old: string; next: string; expect: string }[] = [
+        { name: "exact.ts", file: "alpha\n", old: "alpha", next: "beta", expect: "text" },
+        {
+          name: "indent.ts",
+          file: "    const x = 1;\n    const y = 2;\n",
+          old: "const x = 1;\nconst y = 2;",
+          next: "const x = 10;\nconst y = 20;",
+          expect: "indent_flex",
+        },
+        {
+          name: "elide.ts",
+          file: "function f() {\n  keep();\n  return 1;\n}\n",
+          old: "function f() {\n  ...\n  return 1;\n}",
+          next: "function g() {\n  ...\n  return 1;\n}",
+          expect: "dotdotdot",
+        },
+      ];
+
+      for (const c of cases) {
+        await fs.writeFile(path.join(tmpDir, c.name), c.file);
+        let seen: string | undefined;
+        const tool = createEditTool(
+          tmpDir,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          async (_p, _c, source) => {
+            seen = source;
+            return "";
+          },
+        );
+
+        await tool.execute(
+          { file_path: c.name, edits: [{ old_text: c.old, new_text: c.next }] },
+          { signal: new AbortController().signal, toolCallId: `test-source-${c.expect}` },
+        );
+
+        expect(seen).toBe(c.expect);
+      }
+    });
+
+    it("blames the riskiest strategy when one batch mixes them", async () => {
+      // A batch that needed an elision is a batch whose breakage should be
+      // attributed to the elision, not to the exact match beside it.
+      await fs.writeFile(
+        path.join(tmpDir, "mixed.ts"),
+        "const a = 1;\nfunction f() {\n  keep();\n  return 1;\n}\n",
+      );
+      let seen: string | undefined;
+      const tool = createEditTool(
+        tmpDir,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async (_p, _c, source) => {
+          seen = source;
+          return "";
+        },
+      );
+
+      await tool.execute(
+        {
+          file_path: "mixed.ts",
+          edits: [
+            { old_text: "const a = 1;", new_text: "const a = 2;" },
+            {
+              old_text: "function f() {\n  ...\n  return 1;\n}",
+              new_text: "function g() {\n  ...\n  return 1;\n}",
+            },
+          ],
+        },
+        { signal: new AbortController().signal, toolCallId: "test-source-mixed" },
+      );
+
+      expect(seen).toBe("dotdotdot");
+    });
+
     it("leaves the result unchanged when the provider throws", async () => {
       const filePath = path.join(tmpDir, "throws.ts");
       await fs.writeFile(filePath, "alpha\n");

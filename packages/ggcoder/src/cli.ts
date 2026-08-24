@@ -472,7 +472,10 @@ async function runInkTUI(opts: {
 
   // Wire stream stall diagnostics into the debug log
   setStreamDiagnostic((phase, data) => {
-    log("INFO", "stream", phase, data as Record<string, unknown>);
+    // A session stuck on the non-streaming fallback costs real money and real
+    // latency; it does not belong in the INFO noise floor.
+    const level = phase === "non_streaming_session" ? "WARN" : "INFO";
+    log(level, "stream", phase, data as Record<string, unknown>);
   });
   setProviderDiagnostic((phase, data) => {
     log("INFO", "provider", phase, data as Record<string, unknown>);

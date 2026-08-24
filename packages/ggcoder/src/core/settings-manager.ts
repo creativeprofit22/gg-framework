@@ -78,6 +78,15 @@ const SettingsSchema = z.object({
    * large share of users immediately after an update, with no obvious cause.
    */
   sandboxMode: z.enum(["auto", "workspace", "off"]).default("off"),
+  /**
+   * Unix sockets sandboxed commands may open (macOS; on Linux/WSL2 the seccomp
+   * filter blocks AF_UNIX by syscall and cannot match paths). Empty by default:
+   * `/var/run/docker.sock` is unauthenticated root-equivalent control of the
+   * host, and the SSH agent socket signs whatever it is asked to. Set this only
+   * to run `docker` (or similar) from sandboxed bash, and only knowing that the
+   * socket is a full bypass of the isolation around it.
+   */
+  sandboxAllowUnixSockets: z.array(z.string()).default([]),
   /** Defer MCP tool schemas out of the prompt until discovered via tool_search.
    *  Cuts ~8k tokens/cache-miss turn with two MCP servers connected. */
   deferredMcpTools: z.boolean().default(true),
@@ -149,6 +158,7 @@ export const DEFAULT_SETTINGS: Settings = {
   networkMode: "off",
   networkAllow: [],
   sandboxMode: "off",
+  sandboxAllowUnixSockets: [],
   deferredMcpTools: true,
   deferredBuiltinTools: true,
   grepUseRipgrep: true,

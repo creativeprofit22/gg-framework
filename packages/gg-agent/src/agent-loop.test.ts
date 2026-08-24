@@ -3,6 +3,7 @@ import { z } from "zod";
 import { GGAIError, ProviderError } from "@kenkaiiii/gg-ai";
 import {
   agentLoop,
+  setStreamDiagnostic,
   capToolResults,
   capTurnToolResults,
   classifyOverload,
@@ -1119,6 +1120,67 @@ describe("agentLoop", () => {
     expect(
       turnEnd?.type === "turn_end" ? turnEnd.timing.providerDurationMs : 0,
     ).toBeGreaterThanOrEqual(90_000);
+  }, 30_000);
+
+  it("says so once when a session is running mostly on the non-streaming fallback", async () => {
+    // The fallback is silent, so a session can spend its whole life on it: no
+    // partial output, failed turns re-billed in full, and nothing anywhere
+    // saying why everything suddenly got slower and more expensive.
+    const phases: { phase: string; data?: Record<string, unknown> }[] = [];
+    setStreamDiagnostic((phase, data) => phases.push({ phase, data }));
+
+    // Each fallback entry costs two stalls first, and the flag is cleared again
+    // after every good response — so three entries means three full cycles.
+    let call = 0;
+    let fallbackTurns = 0;
+    mockStream.mockImplementation((opts: StreamOptions) => {
+      call++;
+      if (opts.streaming === false) {
+        fallbackTurns++;
+        return (fallbackTurns < 3
+          ? mockToolCallResult("probe", { inputTokens: 1, outputTokens: 1 }, `t${call}`)
+          : mockOkResult("done")) as unknown as ReturnType<typeof stream>;
+      }
+      // Stall until the per-attempt abort fires — that is what flips the flag.
+      const abortPromise = new Promise<never>((_, reject) => {
+        opts.signal?.addEventListener(
+          "abort",
+          () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          { once: true },
+        );
+      });
+      abortPromise.catch(() => {});
+      return {
+        [Symbol.asyncIterator]: async function* () {
+          yield* [];
+          await abortPromise;
+        },
+        response: abortPromise,
+      } as unknown as ReturnType<typeof stream>;
+    });
+
+    vi.useFakeTimers();
+    const loopPromise = collectLoop([{ role: "user", content: "hi" }], {
+      provider: "anthropic",
+      model: "test",
+      tools: [
+        {
+          name: "probe",
+          description: "keeps the session going",
+          parameters: emptyParams,
+          execute: () => "ok",
+        },
+      ],
+    });
+    for (let i = 0; i < 12; i++) await vi.advanceTimersByTimeAsync(50_000);
+    await loopPromise;
+    vi.useRealTimers();
+    setStreamDiagnostic(null);
+
+    const warnings = phases.filter((p) => p.phase === "non_streaming_session");
+    expect(warnings).toHaveLength(1); // once per session, not once per call
+    expect(warnings[0].data).toMatchObject({ nonStreamingCalls: 3, providerCalls: 9 });
+    expect(String(warnings[0].data?.impact)).toContain("re-billed in full");
   }, 30_000);
 
   it("classifies exhausted stalls as a device or network-path failure", async () => {

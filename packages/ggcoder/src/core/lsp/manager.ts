@@ -2,6 +2,7 @@ import path from "node:path";
 import { log } from "../logger.js";
 import type { LspClient, LspDiagnostic, LspPosition, LspRequestOutcome } from "./client.js";
 import { formatDiagnostics } from "./format.js";
+import { recordEditRegression, type EditSource } from "./edit-telemetry.js";
 import { lspClientPool, type LspClientPool } from "./pool.js";
 import {
   LSP_SERVER_CATALOG,
@@ -67,6 +68,11 @@ export type LspNavigationOutcome<T> =
       message?: string;
     };
 
+/** Errors only: warnings and hints never counted as breakage, matching format.ts. */
+function errorCount(diagnostics: LspDiagnostic[]): number {
+  return diagnostics.filter((d) => (d.severity ?? 1) === 1).length;
+}
+
 const DEFAULT_WARM_BUDGET_MS = 3000;
 
 const DEFAULT_FIRST_BUDGET_MS = 8000;
@@ -125,10 +131,64 @@ export class LspManager {
   /**
    * Compatibility surface used by edit/write tools. Diagnostics remain visible;
    * every clean/degraded outcome remains the exact historical empty string.
+   *
+   * When a baseline is available, the diagnostics are labelled as caused by
+   * this edit or as pre-existing. Without that label the two are
+   * indistinguishable in the output, so the model cannot tell "you just broke
+   * this" from "this file was already failing" — and neither can we.
    */
-  async diagnosticsAfterWrite(filePath: string, content: string): Promise<string> {
+  async diagnosticsAfterWrite(
+    filePath: string,
+    content: string,
+    source?: EditSource,
+  ): Promise<string> {
+    // Read before collecting: the collect below overwrites this entry, and the
+    // value standing here now is the state as of the previous edit.
+    const before = this.errorBaseline(filePath);
     const outcome = await this.diagnosticsAfterWriteDetailed(filePath, content);
-    return outcome.kind === "diagnostics" ? outcome.formatted : "";
+    if (outcome.kind !== "diagnostics") return "";
+    return (
+      outcome.formatted +
+      this.attribute(outcome.filePath, before, errorCount(outcome.diagnostics), source)
+    );
+  }
+
+  /**
+   * How many errors this file had at the end of the last collect, or null when
+   * nothing is known about it yet.
+   *
+   * Deliberately cache-only: re-running a full collect against the pre-edit
+   * content would double every edit's LSP cost to answer a question that is
+   * usually already answered. Degraded outcomes (timeout, server_failed) stay
+   * null rather than being read as "clean", which would invent regressions.
+   *
+   * simplification: the cached count describes the file as of OUR last write,
+   * so an edit made outside the session in between is attributed to this edit.
+   * Upgrade path: stamp the outcome with the file's mtime and drop the baseline
+   * when it no longer matches.
+   */
+  private errorBaseline(filePath: string): number | null {
+    const outcome = this.getLatestOutcome(filePath);
+    if (!outcome) return null;
+    if (outcome.kind === "clean") return 0;
+    if (outcome.kind === "diagnostics") return errorCount(outcome.diagnostics);
+    return null;
+  }
+
+  /** Label the diagnostics against the baseline; empty when nothing is known. */
+  private attribute(
+    filePath: string,
+    before: number | null,
+    after: number,
+    source?: EditSource,
+  ): string {
+    if (before === null || after === 0) return "";
+    const introduced = after - before;
+    if (introduced <= 0) {
+      return `\n(already present before this change, not caused by it)`;
+    }
+    recordEditRegression({ filePath, before, after, source });
+    return `\n(this change introduced ${introduced} error${introduced === 1 ? "" : "s"} that ${introduced === 1 ? "was" : "were"} not present before it)`;
   }
 
   /** Collect diagnostics with explicit confidence/failure evidence. */

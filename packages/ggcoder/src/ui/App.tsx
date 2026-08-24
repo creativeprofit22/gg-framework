@@ -2167,6 +2167,7 @@ export function App(props: AppProps) {
         inputImages,
         modelSupportsImages,
         modelSupportsVideo,
+        modelInfo?.provider,
       );
 
       // ── Queue message if agent is already running ──

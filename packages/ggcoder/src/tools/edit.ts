@@ -16,12 +16,17 @@ import { localOperations, type ToolOperations } from "./operations.js";
 import { assertFresh, recordWrite, type ReadTracker } from "./read-tracker.js";
 import { resolveAnchoredEdit } from "../core/hashline.js";
 import { isPlanModeActive, planModeRestriction } from "../core/runtime-mode.js";
+import type { EditSource } from "../core/lsp/edit-telemetry.js";
 import { resolveWriteGuard, type WriteGuardSettings } from "../core/workspace-guard.js";
 
 type MutationCallback = (filePath: string) => void | Promise<void>;
 
 /** Post-write diagnostics provider (LSP). Non-empty results are appended to successful tool output. */
-type DiagnosticsProvider = (filePath: string, content: string) => Promise<string>;
+type DiagnosticsProvider = (
+  filePath: string,
+  content: string,
+  source?: EditSource,
+) => Promise<string>;
 
 function isMutationCallback(value: unknown): value is MutationCallback {
   return typeof value === "function";
@@ -197,6 +202,20 @@ type FailureKind =
 interface EditOutcome {
   ok: boolean;
   failure?: FailureKind;
+  /** Which matching strategy placed this edit; absent for no-ops. */
+  source?: EditSource;
+}
+
+/**
+ * Riskiest strategy used in a batch, worst first. When one edit landed by exact
+ * text and another only by `...` elision, the elision is what a resulting
+ * breakage should be attributed to.
+ */
+const SOURCE_RISK: EditSource[] = ["dotdotdot", "blank_edges", "indent_flex", "text", "span"];
+
+function riskiestSource(outcomes: EditOutcome[]): EditSource | undefined {
+  const used = new Set(outcomes.map((o) => o.source).filter(Boolean));
+  return SOURCE_RISK.find((s) => used.has(s));
 }
 
 export function createEditTool(
@@ -314,7 +333,7 @@ export function createEditTool(
       for (let i = spanApplied.length - 1; i >= 0; i--) {
         const s = spanApplied[i];
         workingLines.splice(s.start, s.end - s.start + 1, ...s.lines);
-        outcomes[s.index] = { ok: true };
+        outcomes[s.index] = { ok: true, source: "span" };
       }
       let working = workingLines.join("\n");
 
@@ -356,6 +375,7 @@ export function createEditTool(
         //   2. indent-flex (model omitted/shortened leading whitespace)
         //   3. drop spurious leading/trailing blank lines, retry 1+2
         //   4. dotdotdots (`...` elision with preserved middle)
+        let source: EditSource = "text";
         let result = tryMatch(working, normalizedOld, normalizedNew, replaceAll);
 
         const tryFallbacks = (oldText: string): string | null => {
@@ -371,6 +391,7 @@ export function createEditTool(
           const indentFlexed = applyMissingLeadingWhitespace(working, normalizedOld, normalizedNew);
           if (indentFlexed !== null) {
             result = { ok: true, newWorking: indentFlexed };
+            source = "indent_flex";
           }
         }
 
@@ -378,18 +399,24 @@ export function createEditTool(
           const stripped = stripBlankEdges(normalizedOld);
           if (stripped !== null) {
             const candidate = tryFallbacks(stripped);
-            if (candidate !== null) result = { ok: true, newWorking: candidate };
+            if (candidate !== null) {
+              result = { ok: true, newWorking: candidate };
+              source = "blank_edges";
+            }
           }
         }
 
         if (!result.ok && result.reason === "not_found") {
           const elided = applyDotdotdots(working, normalizedOld, normalizedNew);
-          if (elided !== null) result = { ok: true, newWorking: elided };
+          if (elided !== null) {
+            result = { ok: true, newWorking: elided };
+            source = "dotdotdot";
+          }
         }
 
         if (result.ok) {
           working = result.newWorking;
-          outcomes[i] = { ok: true };
+          outcomes[i] = { ok: true, source };
           continue;
         }
 
@@ -519,7 +546,11 @@ export function createEditTool(
         // carries the closest match and a bounded re-read hint.
         if (getDiagnostics) {
           try {
-            diagnosticsNote = await getDiagnostics(resolved, finalContent);
+            diagnosticsNote = await getDiagnostics(
+              resolved,
+              finalContent,
+              riskiestSource(outcomes),
+            );
           } catch {
             // Diagnostics must never break a successful edit.
           }

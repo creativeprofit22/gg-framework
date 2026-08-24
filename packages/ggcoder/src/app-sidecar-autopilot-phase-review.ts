@@ -1,12 +1,14 @@
 import type { AutopilotVerdict } from "./core/autopilot-verdict.js";
 import type { KenAutopilotBoundPhase } from "./core/ken-context.js";
 import type { AppSidecarFinalReviewAttempt } from "./app-sidecar-roadmap-tool-host.js";
+import type { AppSidecarRoadmapReviewTrigger } from "./app-sidecar-roadmap-review-scheduler.js";
 import type { ProjectNotesSnapshot } from "./project-notes-repository.js";
 
 /** Build the persisted phase target included in every normal Autopilot Ken digest. */
 export function boundPhaseForAutopilotReview(
   snapshot: ProjectNotesSnapshot,
   phaseId: string,
+  trigger?: AppSidecarRoadmapReviewTrigger,
 ): KenAutopilotBoundPhase | null {
   const phase = snapshot.document.phases.find((candidate) => candidate.id === phaseId);
   if (!phase) return null;
@@ -14,6 +16,13 @@ export function boundPhaseForAutopilotReview(
   const verification = [...phase.roadmapEvents]
     .reverse()
     .find((event) => event.type === "status-update" && event.verification !== null);
+  if (
+    !trigger ||
+    trigger.phaseId !== phaseId ||
+    verification?.id !== trigger.verificationStatusUpdateId
+  ) {
+    return null;
+  }
 
   return {
     id: phase.id,

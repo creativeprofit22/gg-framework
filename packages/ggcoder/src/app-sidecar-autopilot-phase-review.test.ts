@@ -4,6 +4,7 @@ import {
   phaseCompletionVerdict,
 } from "./app-sidecar-autopilot-phase-review.js";
 import type { AppSidecarFinalReviewAttempt } from "./app-sidecar-roadmap-tool-host.js";
+import { createAppSidecarRoadmapReviewTrigger } from "./app-sidecar-roadmap-review-scheduler.js";
 import type { ProjectNotesSnapshot } from "./project-notes-repository.js";
 
 const reviewPhase = {
@@ -170,7 +171,8 @@ describe("Autopilot phase completion review", () => {
       },
     } as unknown as ProjectNotesSnapshot;
 
-    expect(boundPhaseForAutopilotReview(snapshot, reviewPhase.id)).toEqual({
+    const trigger = createAppSidecarRoadmapReviewTrigger(reviewPhase.id, "verification-1");
+    expect(boundPhaseForAutopilotReview(snapshot, reviewPhase.id, trigger)).toEqual({
       id: reviewPhase.id,
       revision: 7,
       goal: "Persist the final review",
@@ -184,5 +186,13 @@ describe("Autopilot phase completion review", () => {
         evidence: ["pnpm test passed"],
       },
     });
+    expect(boundPhaseForAutopilotReview(snapshot, reviewPhase.id)).toBeNull();
+    expect(
+      boundPhaseForAutopilotReview(
+        snapshot,
+        reviewPhase.id,
+        createAppSidecarRoadmapReviewTrigger(reviewPhase.id, "verification-stale"),
+      ),
+    ).toBeNull();
   });
 });

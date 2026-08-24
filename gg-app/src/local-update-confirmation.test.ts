@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   LOCAL_UPDATE_CONFIRMATION_MESSAGE,
+  LOCAL_UPDATE_SUMMARY_DISCLOSURE,
+  LOCAL_UPDATE_SUMMARY_LABEL,
   shouldConfirmLocalUpdate,
 } from "./local-update-confirmation";
 
@@ -10,6 +12,13 @@ describe("local update confirmation", () => {
     expect(shouldConfirmLocalUpdate(true, "error")).toBe(true);
     expect(shouldConfirmLocalUpdate(true, "installing")).toBe(false);
     expect(shouldConfirmLocalUpdate(false, "available")).toBe(false);
+  });
+
+  it("discloses optional source excerpts and the connected provider", () => {
+    expect(LOCAL_UPDATE_SUMMARY_LABEL).toContain("what changed — and why");
+    expect(LOCAL_UPDATE_SUMMARY_LABEL).toContain("connected AI provider");
+    expect(LOCAL_UPDATE_SUMMARY_DISCLOSURE).toContain("bounded excerpts");
+    expect(LOCAL_UPDATE_SUMMARY_DISCLOSURE).toContain("still works without it");
   });
 
   it("names the canonical merge-preserving flow and safety behavior", () => {

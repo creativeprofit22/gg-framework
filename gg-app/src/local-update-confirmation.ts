@@ -7,6 +7,12 @@ export const LOCAL_UPDATE_CONFIRMATION_MESSAGE =
 
 export const LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL = "Merge and build installer";
 
+export const LOCAL_UPDATE_SUMMARY_LABEL =
+  "Explain what changed — and why — with my connected AI provider.";
+
+export const LOCAL_UPDATE_SUMMARY_DISCLOSURE =
+  "This sends bounded excerpts from the resolved code changes. The update still works without it.";
+
 export function shouldConfirmLocalUpdate(localPatched: boolean, phase: UpdatePhase): boolean {
   return localPatched && (phase === "available" || phase === "error");
 }

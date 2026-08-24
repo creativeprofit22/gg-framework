@@ -21,6 +21,15 @@ const nativeMocks = vi.hoisted(() => ({
   onSessionReset: null as null | ((operationId?: string) => void),
   kenRunning: false,
   toast: vi.fn(),
+  appUpdate: {
+    phase: "idle",
+    progressLines: [] as string[],
+    localPatched: true,
+    installLabel: "Update local fork",
+    installTitle: "Build patched installer",
+    statusMessage: null as string | null,
+    install: vi.fn(async (_options?: { summarizeDecisions?: boolean }) => {}),
+  },
   readDroppedFileAttachment: vi.fn(async (path: string) => ({
     path,
     name: "file.txt",
@@ -138,7 +147,7 @@ vi.mock("./ProjectPicker", () => ({
     </button>
   ),
 }));
-vi.mock("./update", () => ({ useAppUpdate: () => ({ phase: "idle", progressLines: [] }) }));
+vi.mock("./update", () => ({ useAppUpdate: () => nativeMocks.appUpdate }));
 vi.mock("./build-info", () => ({
   formatBuildIdentity: () => "Supah Coder Local Fork · abc1234",
 }));
@@ -349,8 +358,36 @@ afterEach(() => {
   nativeMocks.onSessionReset = null;
   nativeMocks.kenRunning = false;
   nativeMocks.toast.mockReset();
+  nativeMocks.appUpdate.phase = "idle";
+  nativeMocks.appUpdate.install.mockReset();
   vi.useRealTimers();
 });
+describe("AgentPane protected update summary consent", () => {
+  it("starts default-off, propagates consent, and resets after closing", async () => {
+    nativeMocks.appUpdate.phase = "available";
+    const pane = client("pane-update", 1);
+    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={pane} target={target} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /click to review/u }));
+    const checkbox = screen.getByRole<HTMLInputElement>("checkbox", {
+      name: /Explain what changed — and why — with my connected AI provider/u,
+    });
+    expect(checkbox.checked).toBe(false);
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /click to review/u }));
+    const reopened = screen.getByRole<HTMLInputElement>("checkbox", {
+      name: /Explain what changed — and why — with my connected AI provider/u,
+    });
+    expect(reopened.checked).toBe(false);
+    fireEvent.click(reopened);
+    fireEvent.click(screen.getByRole("button", { name: "Merge and build installer" }));
+    expect(nativeMocks.appUpdate.install).toHaveBeenCalledWith({ summarizeDecisions: true });
+  });
+});
+
 describe("AgentPane lifecycle", () => {
   it("rehydrates a durable accessible MCP failure transcript row", async () => {
     const pane = client("pane-1", 1);

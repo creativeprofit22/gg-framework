@@ -24,6 +24,7 @@ import { RankBadge } from "./RankBadge";
 import { ScorecardModal } from "./ScorecardModal";
 import { useAppUpdate } from "./update";
 import { ConfirmModal } from "./ConfirmModal";
+import { LocalUpdateSummaryOption } from "./LocalUpdateSummaryOption";
 import {
   LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL,
   LOCAL_UPDATE_CONFIRMATION_MESSAGE,
@@ -71,6 +72,7 @@ export function HomeScreen({
   const [serveBusy, setServeBusy] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
   const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
+  const [summarizeDecisions, setSummarizeDecisions] = useState(false);
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
   const [showScorecard, setShowScorecard] = useState(false);
   const [unreadWhatsNew, setUnreadWhatsNew] = useState<WhatsNewFeedId[]>([]);
@@ -214,6 +216,7 @@ export function HomeScreen({
               title={appUpdate.installTitle}
               onClick={() => {
                 if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+                  setSummarizeDecisions(false);
                   setShowLocalUpdateConfirm(true);
                 } else {
                   void appUpdate.install();
@@ -284,11 +287,21 @@ export function HomeScreen({
           title={LOCAL_UPDATE_CONFIRMATION_TITLE}
           message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
           confirmLabel={LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL}
+          content={
+            <LocalUpdateSummaryOption
+              checked={summarizeDecisions}
+              onChange={setSummarizeDecisions}
+            />
+          }
           onConfirm={() => {
             setShowLocalUpdateConfirm(false);
-            void appUpdate.install();
+            void appUpdate.install({ summarizeDecisions });
+            setSummarizeDecisions(false);
           }}
-          onClose={() => setShowLocalUpdateConfirm(false)}
+          onClose={() => {
+            setShowLocalUpdateConfirm(false);
+            setSummarizeDecisions(false);
+          }}
         />
       )}
       <AsciiLogo />

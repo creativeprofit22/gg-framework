@@ -1768,7 +1768,8 @@ body {
   font-size: 12px;
   line-height: 1.55;
   margin-top: 8px;
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 /* A hint sitting directly above an input needs breathing room below it,
    otherwise the field is flush against the description text. */
@@ -2033,7 +2034,8 @@ body {
 .feed-local {
   --whatsnew-accent: var(--ken);
 }
-.feed-upstream {
+.feed-upstream,
+.feed-decisions {
   --whatsnew-accent: var(--secondary);
 }
 .whatsnew-tabs {
@@ -9826,4 +9828,33 @@ body {
   .notes-edit-form .notes-task-actions {
     padding-left: 0;
   }
+}
+
+.local-update-summary-option {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin-top: 14px;
+  cursor: pointer;
+}
+
+.local-update-summary-option input {
+  margin-top: 3px;
+  accent-color: var(--primary);
+}
+
+.local-update-summary-option span {
+  display: grid;
+  gap: 4px;
+}
+
+.local-update-summary-option strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.local-update-summary-option small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
 }

@@ -86,6 +86,7 @@ import { MemoryModal } from "./MemoryModal";
 import { ShimmerText } from "./ShimmerText";
 import { WakeScreen } from "./WakeScreen";
 import { ConfirmModal } from "./ConfirmModal";
+import { LocalUpdateSummaryOption } from "./LocalUpdateSummaryOption";
 import { InitGitModal } from "./InitGitModal";
 import { PlanModeLogo } from "./PlanModeLogo";
 import { KenPowerBanner } from "./KenPowerBanner";
@@ -777,6 +778,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // New-session confirmation modal + in-flight guard.
   const [confirmNewSession, setConfirmNewSession] = useState(false);
   const [showLocalUpdateConfirm, setShowLocalUpdateConfirm] = useState(false);
+  const [summarizeDecisions, setSummarizeDecisions] = useState(false);
   // Hide/show the nav button row (the bar + centered title always stay).
   // Persisted across reloads.
   const [navHidden, setNavHidden] = useState(() => {
@@ -3734,6 +3736,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           title={appUpdate.installTitle}
           onClick={() => {
             if (shouldConfirmLocalUpdate(appUpdate.localPatched, appUpdate.phase)) {
+              setSummarizeDecisions(false);
               setShowLocalUpdateConfirm(true);
             } else {
               void appUpdate.install();
@@ -3783,11 +3786,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           title={LOCAL_UPDATE_CONFIRMATION_TITLE}
           message={LOCAL_UPDATE_CONFIRMATION_MESSAGE}
           confirmLabel={LOCAL_UPDATE_CONFIRMATION_CONFIRM_LABEL}
+          content={
+            <LocalUpdateSummaryOption
+              checked={summarizeDecisions}
+              onChange={setSummarizeDecisions}
+            />
+          }
           onConfirm={() => {
             setShowLocalUpdateConfirm(false);
-            void appUpdate.install();
+            void appUpdate.install({ summarizeDecisions });
+            setSummarizeDecisions(false);
           }}
-          onClose={() => setShowLocalUpdateConfirm(false)}
+          onClose={() => {
+            setShowLocalUpdateConfirm(false);
+            setSummarizeDecisions(false);
+          }}
         />
       )}
 

@@ -6,6 +6,7 @@ import { theme } from "./theme";
 import { Confetti } from "./Confetti";
 import { ShimmerText } from "./ShimmerText";
 import { Badge } from "./Badge";
+import type { VerifiedDecisionRecord } from "./agent";
 import {
   availableWhatsNewFeeds,
   getWhatsNewStatus,
@@ -84,7 +85,9 @@ function closeSelf(): void {
 
 interface WhatsNewWindowProps {
   localPatched?: boolean;
+  sourceRoot?: string;
   storage?: Storage;
+  loadDecisions?: (repoRoot: string) => Promise<VerifiedDecisionRecord[]>;
 }
 
 function ReleaseFeed({ entries }: { entries: WhatsNewEntry[] }): React.ReactElement {
@@ -121,29 +124,58 @@ function ReleaseFeed({ entries }: { entries: WhatsNewEntry[] }): React.ReactElem
   );
 }
 
+function decisionEntries(records: VerifiedDecisionRecord[]): WhatsNewEntry[] {
+  return records.map((record) => ({
+    id: record.id,
+    label: "Protected update",
+    date: record.date,
+    items: [record.summary.text],
+  }));
+}
+
+async function loadVerifiedDecisions(sourceRoot: string): Promise<VerifiedDecisionRecord[]> {
+  return (await import("./agent")).getVerifiedDecisions(sourceRoot);
+}
+
+function DecisionsFeed({ records }: { records: VerifiedDecisionRecord[] }): React.ReactElement {
+  if (records.length === 0) {
+    return <p className="whatsnew-empty">No verified decisions yet.</p>;
+  }
+  return <ReleaseFeed entries={decisionEntries(records)} />;
+}
+
 function initialStatus(localPatched: boolean, storage?: Storage): WhatsNewStatus {
   if (storage) return getWhatsNewStatus(storage, localPatched);
   return { feeds: availableWhatsNewFeeds(localPatched), seenHeads: {}, unreadFeedIds: [] };
 }
 
-function tabId(id: WhatsNewFeedId): string {
+type WhatsNewTabId = WhatsNewFeedId | "decisions";
+
+function tabId(id: WhatsNewTabId): string {
   return `whatsnew-tab-${id}`;
 }
 
-function panelId(id: WhatsNewFeedId): string {
+function panelId(id: WhatsNewTabId): string {
   return `whatsnew-panel-${id}`;
 }
 
 export function WhatsNewWindow({
   localPatched = appBuildInfo.localPatched,
+  sourceRoot = appBuildInfo.sourceRoot,
   storage = typeof localStorage === "undefined" ? undefined : localStorage,
+  loadDecisions = loadVerifiedDecisions,
 }: WhatsNewWindowProps = {}): React.ReactElement {
   const [status] = useState(() => initialStatus(localPatched, storage));
-  const [selectedFeedId, setSelectedFeedId] = useState<WhatsNewFeedId>(
+  const [decisions, setDecisions] = useState<VerifiedDecisionRecord[]>([]);
+  const tabs: Array<{ id: WhatsNewTabId; label: string }> = [
+    ...status.feeds.map(({ id, label }) => ({ id, label })),
+    ...(localPatched ? [{ id: "decisions" as const, label: "Decisions" }] : []),
+  ];
+  const [selectedFeedId, setSelectedFeedId] = useState<WhatsNewTabId>(
     status.unreadFeedIds[0] ?? status.feeds[0]?.id ?? "upstream",
   );
   const [unreadFeedIds, setUnreadFeedIds] = useState(status.unreadFeedIds);
-  const hasTabs = status.feeds.length > 1;
+  const hasTabs = tabs.length > 1;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -154,27 +186,42 @@ export function WhatsNewWindow({
   }, []);
 
   useEffect(() => {
-    if (!storage) return;
+    if (!storage || selectedFeedId === "decisions") return;
     markWhatsNewFeedSeen(storage, localPatched, selectedFeedId);
     setUnreadFeedIds((current) => current.filter((id) => id !== selectedFeedId));
   }, [localPatched, selectedFeedId, storage]);
 
+  useEffect(() => {
+    if (!localPatched) return;
+    let active = true;
+    void loadDecisions(sourceRoot)
+      .then((records) => {
+        if (active && records.length > 0) setDecisions(records);
+      })
+      .catch(() => {
+        if (active) setDecisions([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [loadDecisions, localPatched, sourceRoot]);
+
   function selectTabFromKey(event: React.KeyboardEvent, currentIndex: number): void {
     let nextIndex: number | undefined;
     if (event.key === "ArrowLeft") {
-      nextIndex = (currentIndex - 1 + status.feeds.length) % status.feeds.length;
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
     } else if (event.key === "ArrowRight") {
-      nextIndex = (currentIndex + 1) % status.feeds.length;
+      nextIndex = (currentIndex + 1) % tabs.length;
     } else if (event.key === "Home") {
       nextIndex = 0;
     } else if (event.key === "End") {
-      nextIndex = status.feeds.length - 1;
+      nextIndex = tabs.length - 1;
     }
     if (nextIndex === undefined) return;
     event.preventDefault();
-    const nextFeed = status.feeds[nextIndex];
-    setSelectedFeedId(nextFeed.id);
-    document.getElementById(tabId(nextFeed.id))?.focus();
+    const nextTab = tabs[nextIndex];
+    setSelectedFeedId(nextTab.id);
+    document.getElementById(tabId(nextTab.id))?.focus();
   }
 
   return (
@@ -201,23 +248,23 @@ export function WhatsNewWindow({
       </div>
       {hasTabs ? (
         <div className="whatsnew-tabs" role="tablist" aria-label="What's new sources">
-          {status.feeds.map((feed, index) => {
-            const selected = feed.id === selectedFeedId;
-            const unread = unreadFeedIds.includes(feed.id);
+          {tabs.map((tab, index) => {
+            const selected = tab.id === selectedFeedId;
+            const unread = tab.id !== "decisions" && unreadFeedIds.includes(tab.id);
             return (
               <button
-                id={tabId(feed.id)}
-                key={feed.id}
-                className={`whatsnew-tab feed-${feed.id}`}
+                id={tabId(tab.id)}
+                key={tab.id}
+                className={`whatsnew-tab feed-${tab.id}`}
                 type="button"
                 role="tab"
-                aria-controls={panelId(feed.id)}
+                aria-controls={panelId(tab.id)}
                 aria-selected={selected}
                 tabIndex={selected ? 0 : -1}
-                onClick={() => setSelectedFeedId(feed.id)}
+                onClick={() => setSelectedFeedId(tab.id)}
                 onKeyDown={(event) => selectTabFromKey(event, index)}
               >
-                <span>{feed.label}</span>
+                <span>{tab.label}</span>
                 {unread && (
                   <>
                     <span className="whatsnew-unread-dot" aria-hidden="true" />
@@ -244,6 +291,17 @@ export function WhatsNewWindow({
             <ReleaseFeed entries={feed.entries} />
           </div>
         ))}
+        {localPatched && (
+          <div
+            id={panelId("decisions")}
+            className="whatsnew-panel feed-decisions"
+            role="tabpanel"
+            aria-labelledby={tabId("decisions")}
+            hidden={selectedFeedId !== "decisions"}
+          >
+            <DecisionsFeed records={decisions} />
+          </div>
+        )}
       </div>
       <div className="modal-actions">
         <button className="modal-btn primary" type="button" onClick={closeSelf}>

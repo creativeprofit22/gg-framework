@@ -117,7 +117,30 @@ describe("HomeScreen local-patched update outcomes", () => {
     expect(install).not.toHaveBeenCalled();
     expect(screen.getByText("Merge and build patched update?")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Merge and build installer" }));
-    expect(install).toHaveBeenCalledOnce();
+    expect(install).toHaveBeenCalledWith({ summarizeDecisions: false });
+  });
+
+  it("offers labelled default-off consent, propagates it, and resets on close", async () => {
+    const install = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(useAppUpdate).mockReturnValue(updateInfo({ phase: "available", install }));
+    await renderHome();
+
+    fireEvent.click(screen.getByText("Update (local fixes)").closest("button")!);
+    const checkbox = screen.getByRole<HTMLInputElement>("checkbox", {
+      name: /Explain what changed — and why — with my connected AI provider/u,
+    });
+    expect(checkbox.checked).toBe(false);
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(screen.getByText("Update (local fixes)").closest("button")!);
+    const reopened = screen.getByRole<HTMLInputElement>("checkbox", {
+      name: /Explain what changed — and why — with my connected AI provider/u,
+    });
+    expect(reopened.checked).toBe(false);
+    fireEvent.click(reopened);
+    fireEvent.click(screen.getByRole("button", { name: "Merge and build installer" }));
+    expect(install).toHaveBeenCalledWith({ summarizeDecisions: true });
   });
 
   it("installs an official update directly without local confirmation", async () => {

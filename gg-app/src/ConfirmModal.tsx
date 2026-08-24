@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { theme } from "./theme";
 import { Modal } from "./Modal";
 
@@ -7,6 +8,7 @@ interface Props {
   confirmLabel?: string;
   cancelLabel?: string;
   busy?: boolean;
+  content?: ReactNode;
   onConfirm: () => void;
   onClose: () => void;
 }
@@ -22,6 +24,7 @@ export function ConfirmModal({
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
   busy = false,
+  content,
   onConfirm,
   onClose,
 }: Props): React.ReactElement {
@@ -30,6 +33,7 @@ export function ConfirmModal({
       <div className="modal-hint" style={{ color: theme.textSecondary }}>
         {message}
       </div>
+      {content}
       <div className="modal-actions">
         <button className="modal-btn" onClick={onClose}>
           {cancelLabel}

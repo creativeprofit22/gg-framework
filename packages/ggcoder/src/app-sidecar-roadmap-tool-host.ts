@@ -16,7 +16,7 @@ import {
 } from "./tools/roadmap-status.js";
 import {
   evaluateRoadmapVerificationEvidence,
-  partitionVerificationMessagesForRevision,
+  partitionVerificationMessagesForWorkspaceMutation,
 } from "./core/verification-evidence.js";
 
 export type AppSidecarRoadmapSessionRole = "coding" | "ken" | "ken-autopilot";
@@ -122,7 +122,7 @@ export class AppSidecarRoadmapToolHost {
         const partition =
           input.expected_revision === undefined
             ? { currentMessages: messages, staleMessages: [] }
-            : partitionVerificationMessagesForRevision(messages, input.expected_revision);
+            : partitionVerificationMessagesForWorkspaceMutation(messages);
         const verificationEvidence = evaluateRoadmapVerificationEvidence({
           doneWhen: activePhase?.doneWhen ?? [],
           evidence: input.evidence,
@@ -136,7 +136,7 @@ export class AppSidecarRoadmapToolHost {
             ...(input.expected_revision === undefined ? {} : { revision: input.expected_revision }),
             unmetEvidenceCodes: verificationEvidence.unmetEvidenceCodes,
             message:
-              "Review was not applied. Passed verification requires one distinct, current-revision classifier-approved command for each Done When criterion.",
+              "Review was not applied. Passed verification requires one distinct, current-workspace classifier-approved command for each Done When criterion.",
           };
         }
       }

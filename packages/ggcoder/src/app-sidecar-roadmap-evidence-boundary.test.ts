@@ -120,9 +120,11 @@ describe("roadmap review verification evidence boundary", () => {
       result: "verification-incomplete",
       phaseId: PHASE_ID,
       revision: 15,
-      unmetEvidenceCodes: ["rejected-evidence", "missing-approved-evidence"],
+      unmetEvidenceCodes: ["stale-evidence", "missing-approved-evidence"],
     });
     expect(String(result.message)).toContain("Review was not applied");
+    expect(String(result.message)).toContain("current-workspace");
+    expect(String(result.message)).not.toContain("current-revision");
     expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
 
     for (const expectedRevision of [15, 16]) {

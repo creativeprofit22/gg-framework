@@ -6,6 +6,7 @@ import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadma
 import {
   AppSidecarRoadmapReviewRunCoordinator,
   AppSidecarRoadmapReviewScheduler,
+  createAppSidecarRoadmapReviewTrigger,
 } from "./app-sidecar-roadmap-review-scheduler.js";
 import {
   APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
@@ -16,6 +17,7 @@ import { AgentSession } from "./core/agent-session.js";
 import {
   ProjectNotesRepository,
   type NotesDocumentV3,
+  type NotesPhase,
 } from "./project-notes-repository.js";
 import { RoadmapStatusParams } from "./tools/roadmap-status.js";
 
@@ -130,6 +132,12 @@ async function exerciseReviewerSession(role: Exclude<AppSidecarRoadmapSessionRol
     },
     reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
     projectAutopilot: { isEnabled: () => role === "ken-autopilot" },
+    getAutopilotFinalReviewClaim: () => ({
+      phaseId: "reviewer-wiring-phase",
+      verificationStatusUpdateId: "reviewer-wiring-update",
+      triggerId: "reviewer-wiring-trigger",
+      reviewId: "reviewer-wiring-review",
+    }),
     broadcastNotesSnapshot: vi.fn(),
   });
   const fetchMock = vi.fn<typeof fetch>(async (_url, init) => {
@@ -193,9 +201,12 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
 
     expect(loop).toContain("ensureKenAutoSession()");
     expect(loop).not.toContain("ensureKenSession()");
+    expect(loop).toContain("const verdict = phaseCompletionVerdict(");
     expect(loop).toMatch(
-      /try \{[\s\S]*?return phaseCompletionVerdict\([\s\S]*?\} catch \(err\) \{[\s\S]*?broadcastError\("autopilot_error", "autopilot review failed", err\)/,
+      /catch \(err\) \{[\s\S]*?broadcastError\("autopilot_error", "autopilot review failed", err\)/,
     );
+    expect(loop).toContain("reportRoadmapReviewSchedulingFailure");
+    expect(loop).toContain('broadcast("autopilot_error"');
   });
 
   it("persists the settled implementation checkpoint before run_end and Autopilot review", async () => {
@@ -223,6 +234,148 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       await exerciseReviewerSession(role);
     },
   );
+
+  it("reports expected and current Notes revisions for a stale retry", async () => {
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: {
+        recordRoadmapStatusUpdate: vi.fn(async () => ({
+          status: "stale-revision" as const,
+          revision: 25,
+        })),
+        recordRoadmapFinalReview: vi.fn(async () => ({ status: "missing" as const })),
+      },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => true },
+      broadcastNotesSnapshot: vi.fn(),
+    });
+    const tool = host.createSessionTools("ken")[0]!;
+    const output = await tool.execute(
+      RoadmapStatusParams.parse({
+        update_id: "stale-update",
+        phase_id: "phase-stale",
+        expected_revision: 23,
+        transition: "in-progress",
+        progress: "Retrying status.",
+      }),
+      {} as never,
+    );
+    if (typeof output !== "string") throw new Error("roadmap_status returned non-text output");
+
+    expect(JSON.parse(output)).toEqual({
+      result: "stale-revision",
+      phaseId: "phase-stale",
+      revision: 25,
+      message:
+        "Project Notes revision is stale: expected 23, current 25. Reload the current snapshot and retry once with expected_revision=25.",
+    });
+  });
+
+  it("reports expected and current Notes revisions for a stale Autopilot final review", async () => {
+    const claim = createAppSidecarRoadmapReviewTrigger("phase-review-stale", "verification-stale");
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: {
+        recordRoadmapStatusUpdate: vi.fn(async () => ({ status: "missing" as const })),
+        recordRoadmapFinalReview: vi.fn(async () => ({
+          status: "stale-revision" as const,
+          revision: 25,
+        })),
+      },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => true },
+      getAutopilotFinalReviewClaim: () => claim,
+      broadcastNotesSnapshot: vi.fn(),
+    });
+    const tool = host.createSessionTools("ken-autopilot")[0]!;
+    const output = await tool.execute(
+      RoadmapStatusParams.parse({
+        update_id: "stale-review-update",
+        phase_id: claim.phaseId,
+        expected_revision: 23,
+        transition: "review",
+        progress: "Reviewing the stale phase.",
+        evidence: ["Inspected implementation evidence"],
+        final_review: {
+          review_id: claim.reviewId,
+          decision: "accepted",
+          evidence: ["Inspected implementation evidence"],
+        },
+      }),
+      {} as never,
+    );
+    if (typeof output !== "string") throw new Error("roadmap_status returned non-text output");
+
+    expect(JSON.parse(output)).toEqual({
+      result: "stale-revision",
+      phaseId: claim.phaseId,
+      revision: 25,
+      message:
+        "Project Notes revision is stale: expected 23, current 25. Reload the current snapshot and retry once with expected_revision=25.",
+    });
+  });
+
+  it("rejects an Autopilot review_id outside the active deterministic claim", async () => {
+    const claim = createAppSidecarRoadmapReviewTrigger("phase-claim", "verification-claim");
+    let activeClaim: typeof claim | null = claim;
+    const recordRoadmapFinalReview = vi.fn(async () => ({ status: "missing" as const }));
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: {
+        recordRoadmapStatusUpdate: vi.fn(async () => ({ status: "missing" as const })),
+        recordRoadmapFinalReview,
+      },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => true },
+      getAutopilotFinalReviewClaim: () => activeClaim,
+      broadcastNotesSnapshot: vi.fn(),
+    });
+    const tool = host.createSessionTools("ken-autopilot")[0]!;
+    const output = await tool.execute(
+      RoadmapStatusParams.parse({
+        update_id: "review-attempt",
+        phase_id: claim.phaseId,
+        expected_revision: 1,
+        transition: "review",
+        progress: "Reviewed the phase.",
+        evidence: ["Inspected implementation evidence"],
+        final_review: {
+          review_id: "model-selected-id",
+          decision: "accepted",
+          evidence: ["Inspected implementation evidence"],
+        },
+      }),
+      {} as never,
+    );
+    if (typeof output !== "string") throw new Error("roadmap_status returned non-text output");
+
+    expect(JSON.parse(output)).toMatchObject({
+      result: "final-review-claim-mismatch",
+      phaseId: claim.phaseId,
+    });
+    activeClaim = null;
+    const missingClaimOutput = await tool.execute(
+      RoadmapStatusParams.parse({
+        update_id: "review-without-claim",
+        phase_id: claim.phaseId,
+        expected_revision: 1,
+        transition: "review",
+        progress: "Reviewed the phase again.",
+        evidence: ["Inspected implementation evidence"],
+        final_review: {
+          review_id: claim.reviewId,
+          decision: "accepted",
+          evidence: ["Inspected implementation evidence"],
+        },
+      }),
+      {} as never,
+    );
+    if (typeof missingClaimOutput !== "string") {
+      throw new Error("roadmap_status returned non-text output");
+    }
+    expect(JSON.parse(missingClaimOutput).result).toBe("final-review-claim-mismatch");
+    expect(recordRoadmapFinalReview).not.toHaveBeenCalled();
+  });
 
   it("fails closed when the Autopilot claim provider is absent", async () => {
     const recordRoadmapFinalReview = vi.fn(async () => ({ status: "missing" as const }));
@@ -259,6 +412,138 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     expect(JSON.parse(output).result).toBe("final-review-claim-mismatch");
     expect(recordRoadmapFinalReview).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { mode: "queued" as const, message: "Automatic final review is queued" },
+    { mode: "duplicate" as const, message: "Automatic final review was already queued" },
+    { mode: "autopilot-disabled" as const, message: "Autopilot is disabled" },
+    { mode: "unavailable" as const, message: "scheduling is unavailable" },
+    { mode: "failed" as const, message: "scheduling failed" },
+  ])(
+    "reports the durable Review transition separately when scheduling is $mode",
+    async ({ mode, message }) => {
+      const sessionLink = { sessionId: "session-queue", sessionPath: "/sessions/queue.jsonl" };
+      const phase: NotesPhase = {
+        id: "phase-queue",
+        title: "Queue final review",
+        goal: "Schedule the reviewer",
+        doneWhen: ["Review is queued"],
+        order: 0,
+        status: "review",
+        sourcePrompt: "Queue final review",
+        referenceIds: [],
+        session: sessionLink,
+        reminder: null,
+        attentionReason: null,
+        createdAt: "2026-08-23T10:00:00.000Z",
+        updatedAt: "2026-08-23T10:01:00.000Z",
+        completedAt: null,
+        archivedAt: null,
+        overrides: { status: null, referenceIds: null },
+        pendingAutomaticLifecycleTransition: null,
+        lifecycleEvents: [],
+        roadmapEvents: [
+          {
+            type: "status-update",
+            id: "verification-queue",
+            actor: "gg-coder",
+            transition: "review",
+            progress: "Verified",
+            blocker: null,
+            requiredExternalAction: null,
+            evidence: ["pnpm test"],
+            verification: "passed",
+            verificationReason: null,
+            verificationSession: sessionLink,
+            statusOutcome: "applied",
+            proposedReferences: [],
+            timestamp: "2026-08-23T10:01:00.000Z",
+          },
+        ],
+      };
+      const schedulingError = new Error("scheduler unavailable");
+      const onError = vi.fn();
+      const onReviewReady = vi.fn((trigger) => {
+        if (mode === "failed") throw schedulingError;
+        return {
+          status: mode === "duplicate" ? ("duplicate" as const) : ("queued" as const),
+          trigger,
+        };
+      });
+      const host = new AppSidecarRoadmapToolHost({
+        cwd: "/project",
+        repository: {
+          recordRoadmapStatusUpdate: vi.fn(async () => ({
+            status: "duplicate" as const,
+            revision: 23,
+            phaseId: phase.id,
+            phase,
+            statusOutcome: "same-status" as const,
+            proposals: [],
+          })),
+          recordRoadmapFinalReview: vi.fn(async () => ({ status: "missing" as const })),
+        },
+        reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+        projectAutopilot: { isEnabled: () => mode !== "autopilot-disabled" },
+        broadcastNotesSnapshot: vi.fn(),
+        ...(mode === "unavailable" ? {} : { onReviewReady }),
+        onError,
+      });
+      const tool = host.createSessionTools("coding", () => ({
+        getActivePhaseContext: () => ({
+          version: 1,
+          projectKey: "/project",
+          phase: {
+            id: phase.id,
+            title: phase.title,
+            goal: phase.goal,
+            doneWhen: phase.doneWhen,
+            sourcePrompt: phase.sourcePrompt,
+            status: phase.status,
+            archivedAt: null,
+          },
+          session: sessionLink,
+          references: [],
+          executionStage: "reviewing",
+        }),
+        getMessages: () => [],
+        getState: () => sessionLink,
+      }))[0]!;
+      const output = await tool.execute(
+        RoadmapStatusParams.parse({
+          update_id: "verification-queue",
+          phase_id: phase.id,
+          expected_revision: 23,
+          transition: "review",
+          progress: "Verification remains ready.",
+          evidence: ["pnpm test"],
+        }),
+        {} as never,
+      );
+      if (typeof output !== "string") throw new Error("roadmap_status returned non-text output");
+
+      expect(JSON.parse(output)).toMatchObject({
+        result: "duplicate",
+        revision: 23,
+        phaseTransitionOutcome: "same-status",
+        finalReviewScheduleOutcome: mode,
+        message: expect.stringContaining(message),
+      });
+      if (mode === "failed") {
+        expect(onError).toHaveBeenCalledWith(schedulingError, {
+          phaseId: phase.id,
+          updateId: "verification-queue",
+        });
+      } else {
+        expect(onError).not.toHaveBeenCalled();
+      }
+      if (mode === "autopilot-disabled" || mode === "unavailable") {
+        expect(onReviewReady).not.toHaveBeenCalled();
+      } else {
+        expect(onReviewReady).toHaveBeenCalledOnce();
+      }
+    },
+  );
 
   const automaticReviewCases = [
     { decision: "accepted" as const, gateOutcome: "done" as const, phaseStatus: "done" as const },
@@ -388,7 +673,15 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     ) {
       throw new Error(`automatic review did not complete: ${JSON.stringify(toolResult)}`);
     }
-    expect(toolResult).toMatchObject({ gateOutcome });
+    expect(toolResult).toMatchObject({
+      gateOutcome,
+      ...(decision === "rejected"
+        ? {
+            message:
+              "Final review submitted and applied; the phase returned to implementation for remediation.",
+          }
+        : {}),
+    });
     expect(recordFinalReview).toHaveBeenCalledOnce();
     const persisted = await repository.load(cwd);
     expect(persisted.status).toBe("ok");

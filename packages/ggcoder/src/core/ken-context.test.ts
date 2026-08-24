@@ -158,6 +158,10 @@ describe("buildKenDigest", () => {
         goal: "Complete the current phase",
         completionCriteria: ["tests pass", "review is accepted"],
         status: "review",
+        finalReviewClaim: {
+          triggerId: "trigger-review-9",
+          reviewId: "review-phase-review-verification-9",
+        },
         latestVerification: {
           id: "verification-9",
           result: "passed",
@@ -172,8 +176,10 @@ describe("buildKenDigest", () => {
     expect(digest).toContain('"goal": "Complete the current phase"');
     expect(digest).toContain('"completionCriteria"');
     expect(digest).toContain('"status": "review"');
+    expect(digest).toContain('"reviewId": "review-phase-review-verification-9"');
     expect(digest).toContain("targeted test passed");
     expect(digest).toContain("MUST call roadmap_status");
+    expect(digest).toContain("finalReviewClaim.reviewId as review_id");
     expect(digest).toContain("final_review.accepts_verification_exception=true");
     expect(digest).toContain("Do not return a text-only ALL_CLEAR");
     expect(digest).toContain("completion gate");

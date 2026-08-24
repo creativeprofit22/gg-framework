@@ -3480,6 +3480,7 @@ describe("ProjectNotesRepository completion transactions", () => {
       if (before.status !== "ok") throw new Error("Expected incomplete-plan fixture");
       const reviewOverrides = {
         reviewId: `review-incomplete-${path}`,
+        reviewer: "ken-autopilot" as const,
         timestamp: "2026-07-25T12:38:00.000Z",
       };
       const statusOverrides = { updateId: `status-incomplete-${path}` };
@@ -3565,7 +3566,16 @@ describe("ProjectNotesRepository completion transactions", () => {
 
       const completed = await restartedRepository.load(cwd);
       if (completed.status !== "ok") throw new Error("Expected completed fixture");
-      expect(completed.snapshot.document.phases[0]!.roadmapEvents).toEqual(
+      const completedEvents = completed.snapshot.document.phases[0]!.roadmapEvents;
+      expect(completedEvents.filter((event) => event.type === "completion-review")).toEqual([
+        expect.objectContaining({
+          id: `review-incomplete-${path}`,
+          reviewer: "ken-autopilot",
+          decision: "accepted",
+          gateOutcome: "done",
+        }),
+      ]);
+      expect(completedEvents).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ id: `review-incomplete-${path}` }),
           ...(path === "bundled"
@@ -3638,8 +3648,12 @@ describe("ProjectNotesRepository completion transactions", () => {
       ).resolves.toMatchObject({
         status: "committed",
         snapshot: { revision: 4 },
-        phase: { status: "review" },
-        evaluation: { gateOutcome: "review", unmetGateCodes: ["incomplete-plan"] },
+        phase: { status: "in-progress" },
+        evaluation: {
+          gateOutcome: "review",
+          targetStatus: "in-progress",
+          unmetGateCodes: ["incomplete-plan"],
+        },
       });
       await expect(
         recordReviewThrough(
@@ -3709,7 +3723,11 @@ describe("ProjectNotesRepository completion transactions", () => {
           requireBoundPhase: true,
           autopilotEnabled: false,
         }),
-      ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 6 } });
+      ).resolves.toMatchObject({
+        status: "committed",
+        snapshot: { revision: 6 },
+        phase: { status: "review" },
+      });
       await expect(
         recordReviewThrough(
           path,

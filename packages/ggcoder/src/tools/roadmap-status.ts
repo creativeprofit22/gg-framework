@@ -356,6 +356,13 @@ export type RoadmapStatusInput = z.infer<typeof RoadmapStatusParams>;
 export type RoadmapReferenceProposalInput = z.infer<typeof RoadmapReferenceProposalParams>;
 
 export type RoadmapStatusActor = NotesRoadmapActor;
+export type RoadmapFinalReviewScheduleOutcome =
+  | "queued"
+  | "duplicate"
+  | "autopilot-disabled"
+  | "not-eligible"
+  | "unavailable"
+  | "failed";
 
 export interface RoadmapStatusToolContext {
   actor: RoadmapStatusActor;
@@ -368,6 +375,8 @@ export type RoadmapStatusToolResult =
       phaseId: string;
       revision: number;
       statusOutcome: NotesRoadmapStatusOutcome;
+      phaseTransitionOutcome: NotesRoadmapStatusOutcome;
+      finalReviewScheduleOutcome?: RoadmapFinalReviewScheduleOutcome;
       proposals: ProjectNotesRoadmapProposalOutcome[];
       message?: string;
     }
@@ -392,6 +401,7 @@ export type RoadmapStatusToolResult =
   | {
       result:
         | "reviewer-not-authorized"
+        | "final-review-claim-mismatch"
         | "reconciliation-in-progress"
         | "phase-not-bound"
         | "notes-missing"

@@ -25,7 +25,7 @@ export interface PhaseCompletionEvaluation {
   verificationStatusUpdateId: string | null;
   targetStatus: Extract<
     NotesPhaseStatus,
-    "done" | "review" | "needs-attention" | "waiting-for-approval"
+    "done" | "in-progress" | "review" | "needs-attention" | "waiting-for-approval"
   > | null;
   reason: string;
 }
@@ -131,7 +131,7 @@ export function evaluatePhaseCompletion({
       reason: "The phase is already Done; no additional completion transition was written.",
     };
   }
-  if (unmet.has("unresolved-approval")) {
+  if (hasUnresolvedLifecycleStatus(phase, "waiting-for-approval")) {
     return {
       ...evidence,
       gateOutcome: "waiting-for-approval",
@@ -156,7 +156,7 @@ export function evaluatePhaseCompletion({
       ...evidence,
       gateOutcome: "review",
       unmetGateCodes,
-      targetStatus: "review",
+      targetStatus: "in-progress",
       reason: review.reason || "Final review requested revisions.",
     };
   }

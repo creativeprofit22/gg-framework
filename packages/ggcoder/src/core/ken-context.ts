@@ -199,6 +199,7 @@ export interface KenAutopilotBoundPhase {
   goal: string;
   completionCriteria: readonly string[];
   status: string;
+  finalReviewClaim?: { triggerId: string; reviewId: string };
   latestVerification: {
     id: string;
     result: string;
@@ -257,6 +258,7 @@ function renderBoundPhase(phase: KenAutopilotBoundPhase): string {
         goal: phase.goal,
         completionCriteria: phase.completionCriteria,
         status: phase.status,
+        finalReviewClaim: phase.finalReviewClaim,
         latestVerification: phase.latestVerification,
       },
       null,
@@ -269,7 +271,8 @@ const AUTOPILOT_PHASE_COMPLETION_REVIEW_INSTRUCTION =
   "The bound Roadmap phase is in review. Inspect the implementation and verification " +
   "evidence against its goal and every completion criterion. You MUST call roadmap_status " +
   "with final_review for this exact phase and revision; use the bound id as phase_id, " +
-  "the bound revision as expected_revision, and stable update_id/review_id values on retry. " +
+  "the bound revision as expected_revision, and finalReviewClaim.reviewId as review_id. " +
+  "Keep the same update_id and review_id values on retry. " +
   "Do not return a text-only ALL_CLEAR. Submit accepted only when the work and evidence pass inspection, otherwise " +
   "submit rejected with a concrete correction reason. After the tool result, reply " +
   "ALL_CLEAR for an accepted review or PROMPT plus the same correction for a rejected " +

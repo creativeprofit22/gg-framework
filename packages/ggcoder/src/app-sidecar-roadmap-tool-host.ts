@@ -1,16 +1,22 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
 import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
-import type { AppSidecarRoadmapReviewTrigger } from "./app-sidecar-roadmap-review-scheduler.js";
+import {
+  appSidecarRoadmapReviewTrigger,
+  type AppSidecarRoadmapReviewQueueOutcome,
+  type AppSidecarRoadmapReviewTrigger,
+} from "./app-sidecar-roadmap-review-scheduler.js";
 import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import type { ActivePhaseContextV1 } from "./phase-context.js";
 import type {
+  NotesPhase,
   NotesReference,
   ProjectNotesRepository,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
 import {
   createRoadmapStatusTool,
+  type RoadmapFinalReviewScheduleOutcome,
   type RoadmapStatusActor,
   type RoadmapStatusInput,
   type RoadmapStatusToolResult,
@@ -55,6 +61,10 @@ export interface AppSidecarRoadmapToolHostDependencies {
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
   now?: () => string;
   onFinalReview?(attempt: AppSidecarFinalReviewAttempt): void;
+  onReviewReady?(
+    trigger: AppSidecarRoadmapReviewTrigger,
+    metadata: { revision: number; transition: "review" },
+  ): AppSidecarRoadmapReviewQueueOutcome;
   onNonCommit?(metadata: { result: string; phaseId: string; updateId: string }): void;
   onError?(error: unknown, metadata: { phaseId: string; updateId: string }): void;
 }
@@ -186,16 +196,24 @@ export class AppSidecarRoadmapToolHost {
         if (outcome.status === "committed") {
           this.dependencies.broadcastNotesSnapshot(outcome.snapshot);
         }
+        const finalReviewScheduleOutcome =
+          actor === "gg-coder" && input.transition === "review"
+            ? this.scheduleFinalReview(
+                outcome.phase,
+                outcome.status === "committed" ? outcome.snapshot.revision : outcome.revision,
+              )
+            : undefined;
         return {
           result: outcome.status,
           phaseId: input.phase_id,
           revision: outcome.status === "committed" ? outcome.snapshot.revision : outcome.revision,
           statusOutcome: outcome.statusOutcome,
+          phaseTransitionOutcome: outcome.statusOutcome,
           proposals: outcome.proposals,
-          ...(input.transition === "review"
+          ...(finalReviewScheduleOutcome
             ? {
-                message:
-                  "Review submitted and applied. The phase remains in Review until final-review and completion gates pass.",
+                finalReviewScheduleOutcome,
+                message: reviewTransitionMessage(finalReviewScheduleOutcome),
               }
             : {}),
         };
@@ -219,7 +237,9 @@ export class AppSidecarRoadmapToolHost {
           ? { path: outcome.path, message: outcome.message }
           : outcome.status === "verification-incomplete"
             ? { message: outcome.message }
-            : {}),
+            : outcome.status === "stale-revision"
+              ? { message: staleRevisionMessage(input.expected_revision, outcome.revision) }
+              : {}),
       };
     } catch (error) {
       this.dependencies.onError?.(error, {
@@ -229,6 +249,29 @@ export class AppSidecarRoadmapToolHost {
       throw error;
     } finally {
       reconciliation.release();
+    }
+  }
+
+  private scheduleFinalReview(
+    phase: NotesPhase,
+    revision: number,
+  ): RoadmapFinalReviewScheduleOutcome {
+    const trigger = appSidecarRoadmapReviewTrigger(phase);
+    if (!trigger) return "not-eligible";
+    if (!this.dependencies.projectAutopilot.isEnabled(this.dependencies.cwd)) {
+      return "autopilot-disabled";
+    }
+    try {
+      return (
+        this.dependencies.onReviewReady?.(trigger, { revision, transition: "review" }).status ??
+        "unavailable"
+      );
+    } catch (error) {
+      this.dependencies.onError?.(error, {
+        phaseId: phase.id,
+        updateId: trigger.verificationStatusUpdateId,
+      });
+      return "failed";
     }
   }
 
@@ -288,7 +331,9 @@ export class AppSidecarRoadmapToolHost {
         message:
           completion.evaluation.gateOutcome === "done"
             ? "Final review submitted and applied; the phase is complete."
-            : "Final review submitted and applied; the phase remains in Review because completion gates are unmet.",
+            : finalReview.decision === "rejected"
+              ? "Final review submitted and applied; the phase returned to implementation for remediation."
+              : "Final review submitted and applied; the phase remains in Review because completion gates are unmet.",
       };
     }
     if (completion.status === "duplicate") {
@@ -303,7 +348,9 @@ export class AppSidecarRoadmapToolHost {
         message:
           completion.evaluation.gateOutcome === "done"
             ? "Final review submitted and applied; the phase is complete."
-            : "Final review submitted and applied; the phase remains in Review because completion gates are unmet.",
+            : finalReview.decision === "rejected"
+              ? "Final review submitted and applied; the phase returned to implementation for remediation."
+              : "Final review submitted and applied; the phase remains in Review because completion gates are unmet.",
       };
     }
     if (completion.status === "completion-gate-blocked") {
@@ -342,9 +389,34 @@ export class AppSidecarRoadmapToolHost {
         ? { message: completion.message }
         : completion.status === "invalid-reference"
           ? { path: completion.path, message: completion.message }
-          : {}),
+          : completion.status === "stale-revision"
+            ? { message: staleRevisionMessage(input.expected_revision, completion.revision) }
+            : {}),
     };
   }
+}
+
+function staleRevisionMessage(expected: number | undefined, current: number): string {
+  return `Project Notes revision is stale: expected ${expected ?? "unspecified"}, current ${current}. Reload the current snapshot and retry once with expected_revision=${current}.`;
+}
+
+function reviewTransitionMessage(outcome: RoadmapFinalReviewScheduleOutcome): string {
+  if (outcome === "queued") {
+    return "Review transition applied. Automatic final review is queued after implementation settles.";
+  }
+  if (outcome === "duplicate") {
+    return "Review transition applied. Automatic final review was already queued.";
+  }
+  if (outcome === "autopilot-disabled") {
+    return "Review transition applied. The phase awaits an authorized final review because Autopilot is disabled.";
+  }
+  if (outcome === "unavailable") {
+    return "Review transition applied, but automatic final-review scheduling is unavailable.";
+  }
+  if (outcome === "failed") {
+    return "Review transition applied, but automatic final-review scheduling failed; retry the same status update.";
+  }
+  return "Review transition applied. No unresolved verification trigger requires scheduling.";
 }
 
 function activePhaseContext(session: AppSidecarRoadmapToolSession):

@@ -37,6 +37,7 @@ import {
 } from "./app-sidecar-roadmap-tool-host.js";
 import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import { createAppSidecarRoadmapReviewTrigger } from "./app-sidecar-roadmap-review-scheduler.js";
 import { AppSidecarRoadmapDraftDecisionService } from "./app-sidecar-roadmap-draft-route.js";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import {
@@ -932,11 +933,16 @@ describe("production launchBoundPhase orchestration", () => {
 
     let roadmapTimestamp = verificationAt;
     const snapshots: ProjectNotesSnapshot[] = [];
+    const finalReviewClaim = createAppSidecarRoadmapReviewTrigger(
+      "phase-21",
+      "phase-26-verification",
+    );
     const host = new AppSidecarRoadmapToolHost({
       cwd,
       repository,
       reconciliations: fixture.reconciliations,
       projectAutopilot: new AppSidecarProjectAutopilotState(),
+      getAutopilotFinalReviewClaim: () => finalReviewClaim,
       broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
       now: () => roadmapTimestamp,
     });
@@ -963,7 +969,7 @@ describe("production launchBoundPhase orchestration", () => {
           progress: "Phase 26 completion evidence reviewed",
           evidence: ["Implementation and verification evidence accepted"],
           final_review: {
-            review_id: "phase-26-final-review",
+            review_id: finalReviewClaim.reviewId,
             decision: "accepted",
             evidence: ["Autopilot Ken accepted every completion gate"],
           },
@@ -1023,7 +1029,7 @@ describe("production launchBoundPhase orchestration", () => {
       }),
       expect.objectContaining({
         type: "completion-review",
-        id: "phase-26-final-review",
+        id: finalReviewClaim.reviewId,
         reviewer: "ken-autopilot",
         decision: "accepted",
         implementationCheckpointId: "phase-26-implementation",
@@ -1059,7 +1065,7 @@ describe("production launchBoundPhase orchestration", () => {
       "status-update:phase-26-verification",
       "lifecycle:done",
       "status-update:phase-26-final-status",
-      "completion-review:phase-26-final-review",
+      `completion-review:${finalReviewClaim.reviewId}`,
     ]);
 
     const restarted = new ProductionPhaseFixture(restartedRepository, cwd);
@@ -1133,6 +1139,8 @@ describe("production launchBoundPhase orchestration", () => {
       });
       let liveRepository = repository;
       let now = NOW;
+      let activeFinalReviewClaim: ReturnType<typeof createAppSidecarRoadmapReviewTrigger> | null =
+        null;
       const createRoadmapHost = (hostRepository: ProjectNotesRepository) => {
         const autopilot = new AppSidecarProjectAutopilotState();
         autopilot.set(cwd, advancementMode === "autopilot");
@@ -1141,6 +1149,7 @@ describe("production launchBoundPhase orchestration", () => {
           repository: hostRepository,
           reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
           projectAutopilot: autopilot,
+          getAutopilotFinalReviewClaim: () => activeFinalReviewClaim,
           broadcastNotesSnapshot: () => undefined,
           now: () => now,
         });
@@ -1263,6 +1272,10 @@ describe("production launchBoundPhase orchestration", () => {
         ).resolves.toMatchObject({ result: "committed" });
 
         if (options.blockerAndRejection) {
+          activeFinalReviewClaim =
+            advancementMode === "autopilot"
+              ? createAppSidecarRoadmapReviewTrigger(phaseId, `${phaseId}-verification-1`)
+              : null;
           advanceTime();
           await expect(
             executeRoadmap(
@@ -1274,7 +1287,8 @@ describe("production launchBoundPhase orchestration", () => {
                 progress: `${phaseId} needs one correction`,
                 evidence: [`${phaseId} reviewer found a release blocker`],
                 final_review: {
-                  review_id: `${phaseId}-rejected-review`,
+                  review_id:
+                    activeFinalReviewClaim?.reviewId ?? `${phaseId}-rejected-review`,
                   decision: "rejected",
                   reason: "Correct the release blocker",
                 },
@@ -1345,7 +1359,15 @@ describe("production launchBoundPhase orchestration", () => {
           ).resolves.toMatchObject({ result: "committed" });
         }
 
-        const reviewId = `${phaseId}-accepted-review`;
+        activeFinalReviewClaim =
+          advancementMode === "autopilot"
+            ? createAppSidecarRoadmapReviewTrigger(
+                phaseId,
+                `${phaseId}-verification-${options.blockerAndRejection ? 2 : 1}`,
+              )
+            : null;
+        const reviewId =
+          activeFinalReviewClaim?.reviewId ?? `${phaseId}-accepted-review`;
         advanceTime();
         await expect(
           executeRoadmap(
@@ -2531,11 +2553,16 @@ describe("production launchBoundPhase orchestration", () => {
     const snapshots: ProjectNotesSnapshot[] = [];
     const projectAutopilot = new AppSidecarProjectAutopilotState();
     projectAutopilot.set(cwd, true);
+    const finalReviewClaim = createAppSidecarRoadmapReviewTrigger(
+      "phase-21",
+      "missing-verification",
+    );
     const host = new AppSidecarRoadmapToolHost({
       cwd,
       repository,
       reconciliations: fixture.reconciliations,
       projectAutopilot,
+      getAutopilotFinalReviewClaim: () => finalReviewClaim,
       broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
       now: () => "2026-07-26T00:03:00.000Z",
     });
@@ -2567,7 +2594,7 @@ describe("production launchBoundPhase orchestration", () => {
         },
       ],
       final_review: {
-        review_id: "autopilot-final-review",
+        review_id: finalReviewClaim.reviewId,
         decision: "accepted",
         evidence: ["Autopilot accepted the completion evidence"],
       },

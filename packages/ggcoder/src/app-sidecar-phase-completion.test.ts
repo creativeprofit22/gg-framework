@@ -563,14 +563,19 @@ describe("evaluatePhaseCompletion", () => {
     },
   );
 
-  it("records rejected feedback in review and protects overrides and terminal Done", () => {
+  it("returns rejected feedback to implementation and protects overrides and terminal Done", () => {
     expect(
       evaluate(phase(), {
         ...accepted,
         decision: "rejected",
         reason: "Add the missing race test",
       }),
-    ).toMatchObject({ gateOutcome: "review", reason: "Add the missing race test" });
+    ).toMatchObject({
+      gateOutcome: "review",
+      targetStatus: "in-progress",
+      reason: "Add the missing race test",
+    });
+
 
     const overridden = phase();
     overridden.overrides.status = { value: "review", source: "user", updatedAt: LATER };
@@ -593,6 +598,7 @@ describe("evaluatePhaseCompletion", () => {
     });
     expect(evaluate(done)).toMatchObject({ gateOutcome: "done-terminal", targetStatus: null });
   });
+
 
   it("rejects an inactive phase and a stale current binding", () => {
     const inactive = phase();

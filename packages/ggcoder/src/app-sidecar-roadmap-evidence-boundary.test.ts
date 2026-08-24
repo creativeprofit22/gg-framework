@@ -193,8 +193,14 @@ describe("roadmap review verification evidence boundary", () => {
       statusInput(commands.map((command, index) => `criterion ${index + 1}: ${command}`)),
     );
 
-    expect(result).toMatchObject({ result: "committed", revision: 16, statusOutcome: "applied" });
-    expect(String(result.message)).toContain("phase remains in Review");
+    expect(result).toMatchObject({
+      result: "committed",
+      revision: 16,
+      statusOutcome: "applied",
+      phaseTransitionOutcome: "applied",
+      finalReviewScheduleOutcome: "not-eligible",
+    });
+    expect(String(result.message)).toContain("No unresolved verification trigger");
     expect(recordRoadmapStatusUpdate).toHaveBeenCalledOnce();
   });
 });

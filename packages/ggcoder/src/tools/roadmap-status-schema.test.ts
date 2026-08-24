@@ -9,6 +9,7 @@ describe("roadmap_status provider schema", () => {
       phaseId: "phase-1",
       revision: 1,
       statusOutcome: "evidence-only",
+      phaseTransitionOutcome: "evidence-only",
       proposals: [],
     }));
 

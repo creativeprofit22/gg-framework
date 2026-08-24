@@ -4,7 +4,7 @@ import {
   classifyVerificationCommand,
   collectVerificationEvidence,
   evaluateRoadmapVerificationEvidence,
-  partitionVerificationMessagesForRevision,
+  partitionVerificationMessagesForWorkspaceMutation,
 } from "./verification-evidence.js";
 
 describe("classifyVerificationCommand", () => {
@@ -81,6 +81,18 @@ function bashExchange(
   ];
 }
 
+function toolExchange(
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+  content = "completed",
+): Message[] {
+  return [
+    { role: "assistant", content: [{ type: "tool_call", id, name, args }] },
+    { role: "tool", content: [{ type: "tool_result", toolCallId: id, content }] },
+  ];
+}
+
 function roadmapExchange(id: string, revision: number): Message[] {
   return [
     {
@@ -154,7 +166,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
     const partition =
       expectedRevision === undefined
         ? { currentMessages: messages, staleMessages: [] }
-        : partitionVerificationMessagesForRevision(messages, expectedRevision);
+        : partitionVerificationMessagesForWorkspaceMutation(messages);
     return evaluateRoadmapVerificationEvidence({
       doneWhen,
       evidence,
@@ -214,13 +226,73 @@ describe("evaluateRoadmapVerificationEvidence", () => {
     });
   });
 
-  it("rejects approved evidence from before the current revision", () => {
+  it("retains approved evidence across Roadmap metadata and read-only tools", () => {
     const command = "vitest run current-phase.test.ts";
     const messages = [
-      ...bashExchange("old", command, "Exit code: 0"),
+      ...bashExchange("verified", command, "Exit code: 0"),
       ...roadmapExchange("status", 15),
+      ...toolExchange("read", "read", { file_path: "src/example.ts" }),
     ];
-    expect(evaluate(messages, [command])).toMatchObject({
+
+    expect(evaluate(messages, [command])).toEqual({ ready: true, unmetEvidenceCodes: [] });
+  });
+
+  it.each([
+    ["edit", toolExchange("edit", "edit", { file_path: "src/example.ts", edits: [] })],
+    ["delegated edit", toolExchange("delegate", "subagent", { task: "Edit source" })],
+    [
+      "unclassified shell operation",
+      bashExchange("shell", "node scripts/rewrite-source.mjs", "Exit code: 0"),
+    ],
+  ])("invalidates approved evidence after a %s", (_label, mutation) => {
+    const command = "vitest run current-phase.test.ts";
+    expect(
+      evaluate([...bashExchange("old", command, "Exit code: 0"), ...mutation], [command]),
+    ).toEqual({
+      ready: false,
+      unmetEvidenceCodes: ["stale-evidence", "missing-approved-evidence"],
+    });
+  });
+
+  it("keeps the latest mutation boundary when tool results complete out of order", () => {
+    const command = "vitest run current-phase.test.ts";
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "older-edit",
+            name: "edit",
+            args: { file_path: "src/older.ts", edits: [] },
+          },
+        ],
+      },
+      ...bashExchange("verified-between-edits", command, "Exit code: 0"),
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "latest-edit",
+            name: "edit",
+            args: { file_path: "src/latest.ts", edits: [] },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool_result", toolCallId: "latest-edit", content: "completed" },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "older-edit", content: "completed" }],
+      },
+    ];
+
+    expect(evaluate(messages, [command])).toEqual({
       ready: false,
       unmetEvidenceCodes: ["stale-evidence", "missing-approved-evidence"],
     });

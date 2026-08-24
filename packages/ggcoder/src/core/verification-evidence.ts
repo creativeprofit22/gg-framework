@@ -384,35 +384,55 @@ function collectShellEvidence(messages: readonly Message[]): ShellEvidence[] {
   return evidence;
 }
 
-export function partitionVerificationMessagesForRevision(
-  messages: readonly Message[],
-  expectedRevision: number,
-): { currentMessages: Message[]; staleMessages: Message[] } {
-  const roadmapCalls = new Set<string>();
+const READ_ONLY_OR_METADATA_TOOLS = new Set([
+  "code_nav",
+  "code_search",
+  "find",
+  "grep",
+  "ls",
+  "read",
+  "roadmap_inspect",
+  "roadmap_phase_draft",
+  "roadmap_status",
+  "skill",
+  "task_output",
+  "tasks",
+  "tool_search",
+  "web_fetch",
+  "web_search",
+]);
+
+function isWorkspaceMutation(call: { name: string; args: Record<string, unknown> }): boolean {
+  if (call.name === "bash") {
+    const command = typeof call.args.command === "string" ? call.args.command.trim() : "";
+    return !classifyVerificationCommand(command).accepted;
+  }
+  return !READ_ONLY_OR_METADATA_TOOLS.has(call.name);
+}
+
+/** Partition evidence after the latest conservative workspace-mutation boundary. */
+export function partitionVerificationMessagesForWorkspaceMutation(messages: readonly Message[]): {
+  currentMessages: Message[];
+  staleMessages: Message[];
+} {
+  const calls = new Map<
+    string,
+    { name: string; args: Record<string, unknown>; messageIndex: number }
+  >();
   let boundary = 0;
 
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index]!;
     if (message.role === "assistant" && Array.isArray(message.content)) {
       for (const part of message.content as ContentPart[]) {
-        if (part.type === "tool_call" && part.name === "roadmap_status") roadmapCalls.add(part.id);
+        if (part.type !== "tool_call") continue;
+        calls.set(part.id, { name: part.name, args: part.args, messageIndex: index });
       }
     }
     if (message.role !== "tool") continue;
     for (const result of message.content as ToolResult[]) {
-      if (!roadmapCalls.has(result.toolCallId)) continue;
-      try {
-        const parsed = JSON.parse(resultText(result)) as { result?: unknown; revision?: unknown };
-        if (
-          typeof parsed.revision === "number" &&
-          parsed.revision <= expectedRevision &&
-          (parsed.result === "committed" || parsed.result === "completion-review-committed")
-        ) {
-          boundary = index + 1;
-        }
-      } catch {
-        // A malformed/partial tool result is not a trustworthy revision boundary.
-      }
+      const call = calls.get(result.toolCallId);
+      if (call && isWorkspaceMutation(call)) boundary = Math.max(boundary, call.messageIndex);
     }
   }
 
@@ -439,7 +459,7 @@ function referencesCommand(evidence: string, command: string): boolean {
 
 /**
  * Bind a passed Roadmap review handoff to harness-owned shell evidence.
- * Each Done When item must cite one distinct, current-revision command verbatim.
+ * Each Done When item must cite one distinct, current-workspace command verbatim.
  */
 export function evaluateRoadmapVerificationEvidence(input: {
   doneWhen: readonly string[];

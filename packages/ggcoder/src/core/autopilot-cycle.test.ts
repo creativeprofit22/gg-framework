@@ -133,18 +133,29 @@ describe("driveAutopilotCycle — work branch (unchanged behavior)", () => {
     expect(deps.review).toHaveBeenCalledTimes(2);
   });
 
-  it("caps at maxRounds PROMPT verdicts → autopilot_capped", async () => {
+  it("caps only after reviewing the last permitted remediation", async () => {
     const deps = makeDeps([
       { kind: "prompt", body: "fix 1" },
       { kind: "prompt", body: "fix 2" },
       { kind: "prompt", body: "fix 3" },
-      // Would be round 4 — must never be reached.
       { kind: "prompt", body: "fix 4" },
     ]);
     await driveAutopilotCycle(deps);
     expect(deps.ran).toEqual(["fix 1", "fix 2", "fix 3"]);
     expect(deps.emitted).toEqual([{ type: "autopilot_capped", data: { rounds: 3 } }]);
-    expect(deps.review).toHaveBeenCalledTimes(3);
+    expect(deps.review).toHaveBeenCalledTimes(4);
+  });
+
+  it("allows terminal final review after the last permitted remediation", async () => {
+    const deps = makeDeps([{ kind: "prompt", body: "final fix" }, { kind: "all_clear" }], {
+      maxRounds: 1,
+    });
+
+    await driveAutopilotCycle(deps);
+
+    expect(deps.ran).toEqual(["final fix"]);
+    expect(deps.review).toHaveBeenCalledTimes(2);
+    expect(deps.emitted).toEqual([{ type: "autopilot_done", data: {} }]);
   });
 
   it("review failure (null) → silent stop, nothing injected", async () => {
@@ -379,27 +390,29 @@ describe("driveAutopilotCycle — durable plan gate", () => {
     expect(cancelledDeps.counters).toEqual({ ready: 0, revisions: 0 });
   });
 
-  it("repeated revision resubmissions still stop at the round cap", async () => {
+  it("repeated revision resubmissions stop only after a post-remediation review", async () => {
     const pending = pendingFlag();
+    const requestPlanRevision = vi.fn(async () => {
+      pending.set(false);
+      return true;
+    });
     const deps = makeDeps(
       [],
       {
         maxRounds: 2,
         planPending: pending.get,
-        requestPlanRevision: async () => {
-          pending.set(false);
-          return true;
-        },
+        requestPlanRevision,
         runPrompt: async () => pending.set(true),
       },
       [
         { kind: "prompt", body: "reject 1" },
         { kind: "prompt", body: "reject 2" },
-        { kind: "all_clear" },
+        { kind: "prompt", body: "reject 3" },
       ],
     );
     await driveAutopilotCycle(deps);
-    expect(deps.reviewPlan).toHaveBeenCalledTimes(2);
+    expect(deps.reviewPlan).toHaveBeenCalledTimes(3);
+    expect(requestPlanRevision).toHaveBeenCalledTimes(2);
     expect(deps.emitted).toEqual([{ type: "autopilot_capped", data: { rounds: 2 } }]);
   });
 

@@ -129,7 +129,8 @@ export interface AutopilotCycleDeps {
 export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<void> {
   if (deps.isCancelled()) return;
   await deps.resetReviewer();
-  for (let round = 1; round <= deps.maxRounds; round++) {
+  let remediationRounds = 0;
+  for (;;) {
     if (deps.isCancelled()) return;
     if (deps.planPending()) {
       const verdict = await deps.reviewPlan();
@@ -139,10 +140,15 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
         return;
       }
       if (verdict.kind === "prompt") {
+        if (remediationRounds >= deps.maxRounds) {
+          deps.emit({ type: "autopilot_capped", data: { rounds: deps.maxRounds } });
+          return;
+        }
         const revisionRequested = await deps.requestPlanRevision(verdict.body);
         if (!revisionRequested) return;
+        remediationRounds += 1;
         const body = buildPlanRevisionPrompt(verdict.body);
-        deps.onInjected(body, round);
+        deps.onInjected(body, remediationRounds);
         await deps.runPrompt(body);
         continue;
       }
@@ -174,9 +180,13 @@ export async function driveAutopilotCycle(deps: AutopilotCycleDeps): Promise<voi
       deps.emit({ type: "autopilot_human", data: { reason: verdict.reason } });
       return;
     }
-    deps.onInjected(verdict.body, round);
+    if (remediationRounds >= deps.maxRounds) {
+      deps.emit({ type: "autopilot_capped", data: { rounds: deps.maxRounds } });
+      return;
+    }
+    remediationRounds += 1;
+    deps.onInjected(verdict.body, remediationRounds);
     await deps.runPrompt(verdict.body);
     if (deps.isCancelled()) return;
   }
-  deps.emit({ type: "autopilot_capped", data: { rounds: deps.maxRounds } });
 }

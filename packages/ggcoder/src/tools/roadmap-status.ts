@@ -105,7 +105,7 @@ const roadmapStatusInputSchema: JsonSchema = {
         "Required only for a blocked transition. State the exact decision or action required from a person or external actor before work can continue.",
     },
   },
-  required: ["update_id", "phase_id", "progress", "transition"],
+  required: ["update_id", "phase_id", "expected_revision", "progress", "transition"],
   additionalProperties: false,
 };
 const normalizedText = (value: string): string => value.replace(/\r\n?/g, "\n").trim();
@@ -271,7 +271,7 @@ const FinalReview = z
 const commonFields = {
   update_id: StableId,
   phase_id: PhaseId,
-  expected_revision: z.number().int().nonnegative().optional(),
+  expected_revision: z.number().int().nonnegative(),
   progress: Progress,
   evidence: Evidence,
   verification: Verification,
@@ -332,17 +332,6 @@ export const RoadmapStatusParams = z
         code: "custom",
         path: ["evidence"],
         message: "review reports require at least one evidence item",
-      });
-    }
-    if (
-      report.transition === "review" &&
-      report.verification?.result === "passed" &&
-      report.expected_revision === undefined
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["expected_revision"],
-        message: "passed review verification requires the current Project Notes revision",
       });
     }
     if (

@@ -462,8 +462,12 @@ export function evaluateRoadmapVerificationEvidence(input: {
 
   for (const item of input.evidence) {
     const matches = current.filter((candidate) => referencesCommand(item, candidate.command));
-    const passed = [...matches].reverse().find((candidate) => candidate.status === "passed");
-    if (passed) {
+    if (new Set(matches.map((candidate) => normalizedEvidenceText(candidate.command))).size > 1) {
+      unmet.add("unmatched-evidence");
+      continue;
+    }
+    const passed = matches.at(-1);
+    if (passed?.status === "passed") {
       const commandKey = normalizedEvidenceText(passed.command);
       if (usedCommands.has(commandKey)) unmet.add("duplicate-evidence");
       else {

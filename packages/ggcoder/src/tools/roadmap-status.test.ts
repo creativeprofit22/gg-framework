@@ -9,6 +9,7 @@ import {
 const base = {
   update_id: " update-1 ",
   phase_id: " phase-1 ",
+  expected_revision: 1,
   progress: "  Implemented the repository seam.  ",
 };
 

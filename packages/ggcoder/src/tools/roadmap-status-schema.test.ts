@@ -31,7 +31,7 @@ describe("roadmap_status provider schema", () => {
           ),
         },
       },
-      required: ["update_id", "phase_id", "progress", "transition"],
+      required: ["update_id", "phase_id", "expected_revision", "progress", "transition"],
     });
     expect(
       (exportedSchema().properties as Record<string, { description?: string }>).blocker
@@ -42,6 +42,7 @@ describe("roadmap_status provider schema", () => {
       tool.parameters.parse({
         update_id: " update-1 ",
         phase_id: " phase-1 ",
+        expected_revision: 1,
         progress: "\r\n Done \r\n",
         transition: "in-progress",
       }),
@@ -54,5 +55,25 @@ describe("roadmap_status provider schema", () => {
       final_review: null,
       proposed_references: [],
     });
+  });
+
+  it("requires expected_revision before accepting any state-mutating update", () => {
+    const tool = createRoadmapStatusTool("gg-coder", async () => ({
+      result: "committed",
+      phaseId: "phase-1",
+      revision: 1,
+      statusOutcome: "evidence-only",
+      phaseTransitionOutcome: "evidence-only",
+      proposals: [],
+    }));
+
+    expect(
+      tool.parameters.safeParse({
+        update_id: "update-1",
+        phase_id: "phase-1",
+        progress: "Done",
+        transition: "in-progress",
+      }).success,
+    ).toBe(false);
   });
 });

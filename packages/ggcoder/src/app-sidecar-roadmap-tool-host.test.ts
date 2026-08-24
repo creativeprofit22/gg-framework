@@ -51,6 +51,7 @@ function roadmapStatusCallResponse(): Response {
   const argumentsJson = JSON.stringify({
     update_id: "reviewer-wiring-update",
     phase_id: "reviewer-wiring-phase",
+    expected_revision: 1,
     transition: "review",
     progress: "Reviewer wiring reached the durable completion gate.",
     evidence: ["roadmap_status executed through AgentSession"],
@@ -246,6 +247,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     const input = RoadmapStatusParams.parse({
       update_id: "status-incomplete",
       phase_id: "phase-incomplete",
+      expected_revision: 31,
       transition: "review",
       progress: "Autopilot reviewed the phase.",
       evidence: ["Independent verification passed"],

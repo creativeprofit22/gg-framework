@@ -171,6 +171,39 @@ describe("evaluateRoadmapVerificationEvidence", () => {
     });
   });
 
+  it("does not let an unrelated approved command mask the cited command's failure", () => {
+    const required = "vitest run required.test.ts";
+    const unrelated = "tsc --noEmit";
+    expect(
+      evaluate(
+        [
+          ...bashExchange("required", required, "Exit code: 1\n1 test failed"),
+          ...bashExchange("unrelated", unrelated, "Exit code: 0"),
+        ],
+        [`${required}; unrelated approval: ${unrelated}`],
+      ),
+    ).toEqual({
+      ready: false,
+      unmetEvidenceCodes: ["unmatched-evidence", "missing-approved-evidence"],
+    });
+  });
+
+  it("uses the latest execution when a previously passing command later fails", () => {
+    const command = "vitest run current-phase.test.ts";
+    expect(
+      evaluate(
+        [
+          ...bashExchange("passing", command, "Exit code: 0"),
+          ...bashExchange("failing", command, "Exit code: 1\n1 test failed"),
+        ],
+        [command],
+      ),
+    ).toEqual({
+      ready: false,
+      unmetEvidenceCodes: ["failed-evidence", "missing-approved-evidence"],
+    });
+  });
+
   it("rejects an unclassified row-700-style generic smoke command", () => {
     const command = "node scripts/roadmap-smoke.mjs";
     expect(

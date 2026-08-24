@@ -494,6 +494,7 @@ function roadmapInput(
   return RoadmapStatusParams.parse({
     update_id: updateId,
     phase_id: "phase-21",
+    expected_revision: 1,
     transition: "in-progress",
     progress: `Progress for ${updateId}`,
     required_external_action:
@@ -957,6 +958,7 @@ describe("production launchBoundPhase orchestration", () => {
       executeRoadmap(
         host.createSessionTools("ken-autopilot")[0]!,
         roadmapInput("phase-26-final-status", {
+          expected_revision: await currentRevision(repository, cwd),
           transition: "review",
           progress: "Phase 26 completion evidence reviewed",
           evidence: ["Implementation and verification evidence accepted"],
@@ -1206,6 +1208,7 @@ describe("production launchBoundPhase orchestration", () => {
               host.createSessionTools("coding", () => fixture.currentSession)[0]!,
               roadmapInput(`${phaseId}-blocked`, {
                 phase_id: phaseId,
+                expected_revision: await currentRevision(liveRepository, cwd),
                 transition: "blocked",
                 progress: `${phaseId} hit a recoverable blocker`,
                 blocker: "Release gate dependency unavailable",
@@ -1218,6 +1221,7 @@ describe("production launchBoundPhase orchestration", () => {
               host.createSessionTools("coding", () => fixture.currentSession)[0]!,
               roadmapInput(`${phaseId}-recovered`, {
                 phase_id: phaseId,
+                expected_revision: await currentRevision(liveRepository, cwd),
                 transition: "in-progress",
                 progress: `${phaseId} blocker recovered`,
               }),
@@ -1265,6 +1269,7 @@ describe("production launchBoundPhase orchestration", () => {
               host.createSessionTools(reviewer)[0]!,
               roadmapInput(`${phaseId}-rejected-status`, {
                 phase_id: phaseId,
+                expected_revision: await currentRevision(liveRepository, cwd),
                 transition: "review",
                 progress: `${phaseId} needs one correction`,
                 evidence: [`${phaseId} reviewer found a release blocker`],
@@ -1347,6 +1352,7 @@ describe("production launchBoundPhase orchestration", () => {
             host.createSessionTools(reviewer)[0]!,
             roadmapInput(`${phaseId}-accepted-status`, {
               phase_id: phaseId,
+              expected_revision: await currentRevision(liveRepository, cwd),
               transition: "review",
               progress: `${phaseId} completion accepted`,
               evidence: [`${phaseId} completion gates passed`],
@@ -2296,18 +2302,28 @@ describe("production launchBoundPhase orchestration", () => {
       expect.objectContaining({ type: "object" }),
     ]);
     await expect(
-      executeRoadmap(registrations[0]!.tools[0]!, roadmapInput("coding-update")),
+      executeRoadmap(
+        registrations[0]!.tools[0]!,
+        roadmapInput("coding-update", {
+          expected_revision: await currentRevision(repository, cwd),
+        }),
+      ),
     ).resolves.toMatchObject({ result: "committed" });
     await expect(
       executeRoadmap(
         registrations[1]!.tools[0]!,
-        roadmapInput("ken-update", { transition: "blocked", blocker: "Waiting for CI" }),
+        roadmapInput("ken-update", {
+          expected_revision: await currentRevision(repository, cwd),
+          transition: "blocked",
+          blocker: "Waiting for CI",
+        }),
       ),
     ).resolves.toMatchObject({ result: "committed" });
     await expect(
       executeRoadmap(
         registrations[2]!.tools[0]!,
         roadmapInput("autopilot-update", {
+          expected_revision: await currentRevision(repository, cwd),
           transition: "review",
           evidence: ["Focused tests passed"],
         }),
@@ -2389,6 +2405,7 @@ describe("production launchBoundPhase orchestration", () => {
       executeRoadmap(
         host.createSessionTools("coding", () => fixture.currentSession)[0]!,
         roadmapInput("coder-cannot-review", {
+          expected_revision: await currentRevision(repository, cwd),
           transition: "review",
           evidence: ["Verification reported"],
           final_review: finalReview,
@@ -2408,6 +2425,7 @@ describe("production launchBoundPhase orchestration", () => {
       executeRoadmap(
         checkpointBlockedHost.createSessionTools("ken")[0]!,
         roadmapInput("blocked-final-status", {
+          expected_revision: await currentRevision(repository, cwd),
           transition: "review",
           evidence: ["This evidence must not persist"],
           final_review: { ...finalReview, review_id: "blocked-final-review" },
@@ -2428,6 +2446,7 @@ describe("production launchBoundPhase orchestration", () => {
       executeRoadmap(
         host.createSessionTools("ken")[0]!,
         roadmapInput("ken-final-status", {
+          expected_revision: await currentRevision(repository, cwd),
           transition: "review",
           evidence: ["Ken reviewed the phase"],
           final_review: finalReview,
@@ -2469,6 +2488,7 @@ describe("production launchBoundPhase orchestration", () => {
     });
     const tool = host.createSessionTools("ken")[0]!;
     const input = roadmapInput("manual-final-status", {
+      expected_revision: await currentRevision(repository, cwd),
       transition: "review",
       evidence: ["Ken reviewed the manual reference proposal"],
       proposed_references: [
@@ -2521,6 +2541,7 @@ describe("production launchBoundPhase orchestration", () => {
     });
     const tool = host.createSessionTools("ken-autopilot")[0]!;
     const input = roadmapInput("autopilot-final-status", {
+      expected_revision: await currentRevision(repository, cwd),
       transition: "review",
       evidence: ["Autopilot reviewed both reference proposals"],
       proposed_references: [
@@ -2609,7 +2630,14 @@ describe("production launchBoundPhase orchestration", () => {
         sessionPath: "/sessions/replacement-owner.jsonl",
       };
     });
-    await expect(executeRoadmap(codingTool, roadmapInput("stale-session"))).resolves.toEqual({
+    await expect(
+      executeRoadmap(
+        codingTool,
+        roadmapInput("stale-session", {
+          expected_revision: await currentRevision(repository, cwd),
+        }),
+      ),
+    ).resolves.toEqual({
       result: "stale-session",
       phaseId: "phase-21",
     });
@@ -2622,6 +2650,7 @@ describe("production launchBoundPhase orchestration", () => {
     await fixture.start();
     await fixture.promptSettled;
     const blockedInput = roadmapInput("semantic-blocker", {
+      expected_revision: await currentRevision(repository, cwd),
       transition: "blocked",
       blocker: "The deployment account is unavailable.",
       required_external_action: "Provide a valid deployment account.",
@@ -2689,13 +2718,19 @@ describe("production launchBoundPhase orchestration", () => {
     wrongSession.activeContext = fixture.currentSession.getActivePhaseContext();
     const wrongSessionTool = restartedHost.createSessionTools("coding", () => wrongSession)[0]!;
     await expect(
-      executeRoadmap(wrongSessionTool, roadmapInput("wrong-restarted-session")),
+      executeRoadmap(
+        wrongSessionTool,
+        roadmapInput("wrong-restarted-session", {
+          expected_revision: await currentRevision(restartedRepository, cwd),
+        }),
+      ),
     ).resolves.toEqual({ result: "stale-session", phaseId: "phase-21" });
 
     await expect(
       executeRoadmap(
         restartedTool,
         roadmapInput("semantic-blocker-resumed", {
+          expected_revision: await currentRevision(restartedRepository, cwd),
           transition: "in-progress",
           progress: "The release owner supplied an account and deployment resumed",
         }),
@@ -2853,7 +2888,12 @@ describe("production launchBoundPhase orchestration", () => {
     gate.resolve();
     await expect(first).resolves.toMatchObject({ result: "committed" });
     await expect(
-      executeRoadmap(host.createSessionTools("ken-autopilot")[0]!, roadmapInput("update-retry")),
+      executeRoadmap(
+        host.createSessionTools("ken-autopilot")[0]!,
+        roadmapInput("update-retry", {
+          expected_revision: await currentRevision(repository, cwd),
+        }),
+      ),
     ).resolves.toMatchObject({ result: "committed" });
   });
 
@@ -2881,7 +2921,11 @@ describe("production launchBoundPhase orchestration", () => {
     await expect(
       executeRoadmap(
         tool,
-        roadmapInput("manual-override", { transition: "blocked", blocker: "User owns status" }),
+        roadmapInput("manual-override", {
+          expected_revision: await currentRevision(repository, cwd),
+          transition: "blocked",
+          blocker: "User owns status",
+        }),
       ),
     ).resolves.toMatchObject({ result: "committed", statusOutcome: "manual-override" });
     const reference = {
@@ -2892,7 +2936,13 @@ describe("production launchBoundPhase orchestration", () => {
       relevance: "Phase implementation",
     };
     await expect(
-      executeRoadmap(tool, roadmapInput("manual-policy", { proposed_references: [reference] })),
+      executeRoadmap(
+        tool,
+        roadmapInput("manual-policy", {
+          expected_revision: await currentRevision(repository, cwd),
+          proposed_references: [reference],
+        }),
+      ),
     ).resolves.toMatchObject({
       result: "committed",
       proposals: [{ outcome: "pending", policyOutcome: "manual-review" }],
@@ -2903,6 +2953,7 @@ describe("production launchBoundPhase orchestration", () => {
       executeRoadmap(
         tool,
         roadmapInput("autopilot-policy", {
+          expected_revision: await currentRevision(repository, cwd),
           proposed_references: [
             {
               ...reference,
@@ -2921,6 +2972,7 @@ describe("production launchBoundPhase orchestration", () => {
       executeRoadmap(
         tool,
         roadmapInput("malformed-reference", {
+          expected_revision: await currentRevision(repository, cwd),
           proposed_references: [{ ...reference, canonical_url: "not a URL" }],
         }),
       ),

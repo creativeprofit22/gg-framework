@@ -282,9 +282,7 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       },
       {
         role: "tool",
-        content: [
-          { type: "tool_result", toolCallId: "latest-edit", content: "completed" },
-        ],
+        content: [{ type: "tool_result", toolCallId: "latest-edit", content: "completed" }],
       },
       {
         role: "tool",

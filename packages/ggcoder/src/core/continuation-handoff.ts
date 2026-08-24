@@ -88,9 +88,7 @@ export const continuationHandoffV1Schema = z
     currentObjective: boundedString(CONTINUATION_HANDOFF_LIMITS.objectiveChars),
     currentStatus: boundedList,
     relevantDecisions: boundedList,
-    relevantFiles: z
-      .array(relevantFileSchema)
-      .max(CONTINUATION_HANDOFF_LIMITS.relevantFiles),
+    relevantFiles: z.array(relevantFileSchema).max(CONTINUATION_HANDOFF_LIMITS.relevantFiles),
   })
   .strict();
 
@@ -141,21 +139,16 @@ function isEligibleUserEvidence(message: Extract<Message, { role: "user" }>): bo
   if (message.provenance?.visibility === "hidden") return false;
   if (message.provenance?.kind === "compaction_summary") return true;
   if (message.provenance?.source === "runtime") return false;
-  return (
-    message.provenance?.kind !== "automation" && message.provenance?.kind !== "notification"
-  );
+  return message.provenance?.kind !== "automation" && message.provenance?.kind !== "notification";
 }
 
 function positiveSafeInteger(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
-    ? value
-    : undefined;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
-function safeRange(args: Record<string, unknown>): Pick<
-  ContinuationRelevantFile,
-  "startLine" | "endLine"
-> {
+function safeRange(
+  args: Record<string, unknown>,
+): Pick<ContinuationRelevantFile, "startLine" | "endLine"> {
   const startValue = args.startLine ?? args.start_line ?? args.offset;
   const endValue = args.endLine ?? args.end_line;
   const limitValue = args.limit;
@@ -188,10 +181,7 @@ function relevantFileFromArgs(
     file: {
       path,
       ...safeRange(args),
-      relevance: `${action} by ${toolName}`.slice(
-        0,
-        CONTINUATION_HANDOFF_LIMITS.relevanceChars,
-      ),
+      relevance: `${action} by ${toolName}`.slice(0, CONTINUATION_HANDOFF_LIMITS.relevanceChars),
     },
     priority,
     sequence,
@@ -345,13 +335,18 @@ function extractJsonObject(response: string): unknown {
   return JSON.parse(response.trim());
 }
 
-function evidenceOrderedSelection(proposed: readonly string[], evidence: readonly string[]): string[] {
+function evidenceOrderedSelection(
+  proposed: readonly string[],
+  evidence: readonly string[],
+): string[] {
   const supported = new Set(evidence);
   const selected = new Set(proposed);
   if (selected.size !== proposed.length || proposed.some((claim) => !supported.has(claim))) {
     throw new Error("Continuation handoff synthesis returned an unsupported claim.");
   }
-  return evidence.filter((claim, index) => selected.has(claim) && evidence.indexOf(claim) === index);
+  return evidence.filter(
+    (claim, index) => selected.has(claim) && evidence.indexOf(claim) === index,
+  );
 }
 
 function relevantFileKey(file: ContinuationRelevantFile): string {
@@ -413,7 +408,9 @@ export function parseContinuationHandoff(
     currentObjective: result.data.currentObjective,
     currentStatus,
     relevantDecisions,
-    relevantFiles: evidence.relevantFiles.filter((file) => selectedFiles.has(relevantFileKey(file))),
+    relevantFiles: evidence.relevantFiles.filter((file) =>
+      selectedFiles.has(relevantFileKey(file)),
+    ),
   };
 }
 

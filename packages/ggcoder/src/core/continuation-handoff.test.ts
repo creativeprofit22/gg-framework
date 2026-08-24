@@ -371,9 +371,7 @@ describe("buildContinuationEvidence", () => {
     expect(JSON.stringify(boundedEvidence).length).toBeLessThanOrEqual(
       CONTINUATION_HANDOFF_LIMITS.evidenceChars,
     );
-    expect(boundedEvidence.relevantFiles).toHaveLength(
-      CONTINUATION_HANDOFF_LIMITS.relevantFiles,
-    );
+    expect(boundedEvidence.relevantFiles).toHaveLength(CONTINUATION_HANDOFF_LIMITS.relevantFiles);
     expect(fallback.currentObjective.length).toBeLessThanOrEqual(
       CONTINUATION_HANDOFF_LIMITS.objectiveChars,
     );

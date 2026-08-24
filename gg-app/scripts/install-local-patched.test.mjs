@@ -324,8 +324,7 @@ windowsDescribe("detached local installer helper", () => {
 
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout.trim())).toEqual({
-      Evidence:
-        "resourceCount=0 status=fatal stage=validate reason=container-resource-not-allowed",
+      Evidence: "resourceCount=0 status=fatal stage=validate reason=container-resource-not-allowed",
       QueryCalls: 0,
       DirectoryExists: true,
       ExecutableExists: true,

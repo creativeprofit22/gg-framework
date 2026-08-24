@@ -2084,7 +2084,8 @@ async function createSession(
   const persistPlanGateMarker = (checkpoint: PersistedPlanReviewCheckpoint) =>
     session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
   const roadmapReviewScheduler = new AppSidecarRoadmapReviewScheduler();
-  const roadmapReviewRuns = new AppSidecarRoadmapReviewRunCoordinator<AppSidecarFinalReviewAttempt>();
+  const roadmapReviewRuns =
+    new AppSidecarRoadmapReviewRunCoordinator<AppSidecarFinalReviewAttempt>();
   let settledRoadmapReviewVerdict: { verdict: AutopilotVerdict | null } | null = null;
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
     cwd,
@@ -3450,11 +3451,7 @@ async function createSession(
                 `Roadmap final-review retry ${trigger.triggerId} cannot reload Notes.`,
               );
             }
-            boundPhase = boundPhaseForAutopilotReview(
-              refreshed.snapshot,
-              trigger.phaseId,
-              trigger,
-            );
+            boundPhase = boundPhaseForAutopilotReview(refreshed.snapshot, trigger.phaseId, trigger);
             if (!boundPhase) {
               throw new Error(
                 `Roadmap final-review retry ${trigger.triggerId} is no longer eligible.`,
@@ -3471,8 +3468,7 @@ async function createSession(
           !autopilotCancelled &&
           trigger !== undefined &&
           boundPhase !== null &&
-          classifyAppSidecarFinalReviewAttempt(boundPhase.id, attempts).status ===
-            "stale-revision",
+          classifyAppSidecarFinalReviewAttempt(boundPhase.id, attempts).status === "stale-revision",
       );
       if (autopilotCancelled) return null;
       const textVerdict = parseAutopilotVerdict(lastAssistantText(ken.getMessages()));

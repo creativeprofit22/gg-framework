@@ -199,10 +199,8 @@ export class AppSidecarContinuationHandoffService {
       };
 
       disposalAttempted = true;
-      await withDeadline(
-        session.dispose(),
-        CONTINUATION_HANDOFF_CLEANUP_TIMEOUT_MS,
-        () => controller.abort(),
+      await withDeadline(session.dispose(), CONTINUATION_HANDOFF_CLEANUP_TIMEOUT_MS, () =>
+        controller.abort(),
       );
       return prepared;
     } catch {
@@ -216,10 +214,7 @@ export class AppSidecarContinuationHandoffService {
           return fallbackResult();
         }
         try {
-          await withDeadline(
-            synthesisSession.dispose(),
-            CONTINUATION_HANDOFF_CLEANUP_TIMEOUT_MS,
-          );
+          await withDeadline(synthesisSession.dispose(), CONTINUATION_HANDOFF_CLEANUP_TIMEOUT_MS);
         } catch {
           // Synthesis cleanup is optional; deterministic fallback remains deliverable.
         }

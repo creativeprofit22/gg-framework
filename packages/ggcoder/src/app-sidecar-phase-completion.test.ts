@@ -576,7 +576,6 @@ describe("evaluatePhaseCompletion", () => {
       reason: "Add the missing race test",
     });
 
-
     const overridden = phase();
     overridden.overrides.status = { value: "review", source: "user", updatedAt: LATER };
     expect(evaluate(overridden)).toMatchObject({
@@ -598,7 +597,6 @@ describe("evaluatePhaseCompletion", () => {
     });
     expect(evaluate(done)).toMatchObject({ gateOutcome: "done-terminal", targetStatus: null });
   });
-
 
   it("rejects an inactive phase and a stale current binding", () => {
     const inactive = phase();

@@ -562,7 +562,10 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     tempDirectories.push(agentDir);
     const cwd = `/work/automatic-${decision}-final-review`;
     const document = JSON.parse(
-      await fs.readFile(new URL("../../../fixtures/project-notes-v3.json", import.meta.url), "utf8"),
+      await fs.readFile(
+        new URL("../../../fixtures/project-notes-v3.json", import.meta.url),
+        "utf8",
+      ),
     ) as NotesDocumentV3;
     const phase = document.phases[0]!;
     const session = phase.session!;

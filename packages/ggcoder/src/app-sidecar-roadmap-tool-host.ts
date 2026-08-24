@@ -282,9 +282,7 @@ export class AppSidecarRoadmapToolHost {
   ): Promise<RoadmapStatusToolResult> {
     const finalReview = input.final_review!;
     const autopilotClaim =
-      actor === "ken-autopilot"
-        ? this.dependencies.getAutopilotFinalReviewClaim?.()
-        : undefined;
+      actor === "ken-autopilot" ? this.dependencies.getAutopilotFinalReviewClaim?.() : undefined;
     if (
       actor === "ken-autopilot" &&
       (!autopilotClaim ||

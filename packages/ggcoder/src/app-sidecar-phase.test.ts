@@ -1287,8 +1287,7 @@ describe("production launchBoundPhase orchestration", () => {
                 progress: `${phaseId} needs one correction`,
                 evidence: [`${phaseId} reviewer found a release blocker`],
                 final_review: {
-                  review_id:
-                    activeFinalReviewClaim?.reviewId ?? `${phaseId}-rejected-review`,
+                  review_id: activeFinalReviewClaim?.reviewId ?? `${phaseId}-rejected-review`,
                   decision: "rejected",
                   reason: "Correct the release blocker",
                 },
@@ -1366,8 +1365,7 @@ describe("production launchBoundPhase orchestration", () => {
                 `${phaseId}-verification-${options.blockerAndRejection ? 2 : 1}`,
               )
             : null;
-        const reviewId =
-          activeFinalReviewClaim?.reviewId ?? `${phaseId}-accepted-review`;
+        const reviewId = activeFinalReviewClaim?.reviewId ?? `${phaseId}-accepted-review`;
         advanceTime();
         await expect(
           executeRoadmap(

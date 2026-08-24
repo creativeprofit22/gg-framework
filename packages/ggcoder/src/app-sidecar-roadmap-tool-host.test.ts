@@ -4,11 +4,19 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import {
+  AppSidecarRoadmapReviewRunCoordinator,
+  AppSidecarRoadmapReviewScheduler,
+} from "./app-sidecar-roadmap-review-scheduler.js";
+import {
   APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
   AppSidecarRoadmapToolHost,
   type AppSidecarRoadmapSessionRole,
 } from "./app-sidecar-roadmap-tool-host.js";
 import { AgentSession } from "./core/agent-session.js";
+import {
+  ProjectNotesRepository,
+  type NotesDocumentV3,
+} from "./project-notes-repository.js";
 import { RoadmapStatusParams } from "./tools/roadmap-status.js";
 
 const originalAzureApiKey = process.env.AZURE_OPENAI_API_KEY;
@@ -215,6 +223,139 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       await exerciseReviewerSession(role);
     },
   );
+
+  it("automatically persists exactly one claimed acceptance with a Done gate", async () => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "gg-roadmap-auto-review-"));
+    tempDirectories.push(agentDir);
+    const cwd = "/work/automatic-final-review";
+    const document = JSON.parse(
+      await fs.readFile(new URL("../../../fixtures/project-notes-v3.json", import.meta.url), "utf8"),
+    ) as NotesDocumentV3;
+    const phase = document.phases[0]!;
+    const session = phase.session!;
+    phase.status = "review";
+    phase.attentionReason = null;
+    phase.overrides.status = null;
+    phase.pendingAutomaticLifecycleTransition = null;
+    phase.lifecycleEvents = phase.lifecycleEvents.slice(0, 2);
+    phase.lifecycleEvents.push({
+      id: "event-automatic-review",
+      fromStatus: "in-progress",
+      toStatus: "review",
+      source: "agent",
+      timestamp: "2026-08-23T09:59:00.000Z",
+      reason: "Implementation and verification settled.",
+      kind: "other",
+    });
+    phase.roadmapEvents = [
+      {
+        type: "implementation-checkpoint",
+        id: "checkpoint-automatic-review",
+        session,
+        planStepTotal: 1,
+        completedPlanSteps: [1],
+        runOutcome: "succeeded",
+        timestamp: "2026-08-23T10:00:00.000Z",
+      },
+      {
+        type: "status-update",
+        id: "verification-automatic-review",
+        actor: "gg-coder",
+        transition: "review",
+        progress: "All automatic-review criteria passed.",
+        blocker: null,
+        requiredExternalAction: null,
+        evidence: ["pnpm test"],
+        verification: "passed",
+        verificationReason: null,
+        verificationSession: session,
+        statusOutcome: "applied",
+        proposedReferences: [],
+        timestamp: "2026-08-23T10:01:00.000Z",
+      },
+    ];
+    document.updatedAt = "2026-08-23T10:01:00.000Z";
+
+    const repository = new ProjectNotesRepository(agentDir);
+    const migrated = await repository.migrate(cwd, document);
+    if (migrated.status !== "ok") {
+      throw new Error(`automatic review fixture did not migrate: ${JSON.stringify(migrated)}`);
+    }
+
+    const scheduler = new AppSidecarRoadmapReviewScheduler();
+    const reviewRuns = new AppSidecarRoadmapReviewRunCoordinator<unknown>();
+    expect(scheduler.replay([phase])).toMatchObject([{ status: "queued" }]);
+    const recordFinalReview = vi.spyOn(repository, "recordRoadmapFinalReview");
+    let toolResult: unknown;
+    let claimedReviewId: string | undefined;
+    const host = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => true },
+      broadcastNotesSnapshot: vi.fn(),
+      getAutopilotFinalReviewClaim: () => reviewRuns.activeClaim(),
+      now: () => "2026-08-23T10:02:00.000Z",
+    });
+    const autopilotTool = host.createSessionTools("ken-autopilot")[0]!;
+
+    await expect(
+      scheduler.drain(async (trigger) => {
+        claimedReviewId = trigger.reviewId;
+        await reviewRuns.run(
+          trigger,
+          async () => {
+            const output = await autopilotTool.execute(
+              RoadmapStatusParams.parse({
+                update_id: "status-automatic-review",
+                phase_id: trigger.phaseId,
+                expected_revision: migrated.snapshot.revision,
+                transition: "review",
+                progress: "Autopilot independently accepted the completed phase.",
+                evidence: ["Reviewed implementation and verification evidence"],
+                final_review: {
+                  review_id: trigger.reviewId,
+                  decision: "accepted",
+                  evidence: ["Independent final review passed"],
+                },
+              }),
+              {} as never,
+            );
+            if (typeof output !== "string") {
+              throw new Error("roadmap_status returned non-text output");
+            }
+            toolResult = JSON.parse(output) as unknown;
+          },
+          () => false,
+        );
+      }),
+    ).resolves.toMatchObject([{ status: "started" }, { status: "completed" }]);
+
+    if (
+      !toolResult ||
+      typeof toolResult !== "object" ||
+      !("result" in toolResult) ||
+      toolResult.result !== "completion-review-committed"
+    ) {
+      throw new Error(`automatic review did not complete: ${JSON.stringify(toolResult)}`);
+    }
+    expect(toolResult).toMatchObject({ gateOutcome: "done" });
+    expect(recordFinalReview).toHaveBeenCalledOnce();
+    const persisted = await repository.load(cwd);
+    expect(persisted.status).toBe("ok");
+    if (persisted.status !== "ok") throw new Error("automatic review result did not persist");
+    const completionReviews = persisted.snapshot.document.phases[0]!.roadmapEvents.filter(
+      (event) => event.type === "completion-review",
+    );
+    expect(completionReviews).toEqual([
+      expect.objectContaining({
+        id: claimedReviewId,
+        reviewer: "ken-autopilot",
+        decision: "accepted",
+        gateOutcome: "done",
+      }),
+    ]);
+  });
 
   it("reports accepted completion gate failures as visible non-commits", async () => {
     const broadcastNotesSnapshot = vi.fn();

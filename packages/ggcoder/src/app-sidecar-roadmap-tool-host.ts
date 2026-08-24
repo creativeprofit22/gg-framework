@@ -1,6 +1,7 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
 import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
+import type { AppSidecarRoadmapReviewTrigger } from "./app-sidecar-roadmap-review-scheduler.js";
 import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import type { ActivePhaseContextV1 } from "./phase-context.js";
 import type {
@@ -48,6 +49,7 @@ export interface AppSidecarRoadmapToolHostDependencies {
     "recordRoadmapStatusUpdate" | "recordRoadmapFinalReview"
   >;
   canSubmitFinalReview?(actor: Exclude<RoadmapStatusActor, "gg-coder">): boolean;
+  getAutopilotFinalReviewClaim?(): AppSidecarRoadmapReviewTrigger | null;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   projectAutopilot: Pick<AppSidecarProjectAutopilotState, "isEnabled">;
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
@@ -236,6 +238,27 @@ export class AppSidecarRoadmapToolHost {
     statusUpdate: Parameters<ProjectNotesRepository["recordRoadmapFinalReview"]>[1]["statusUpdate"],
   ): Promise<RoadmapStatusToolResult> {
     const finalReview = input.final_review!;
+    const autopilotClaim =
+      actor === "ken-autopilot"
+        ? this.dependencies.getAutopilotFinalReviewClaim?.()
+        : undefined;
+    if (
+      actor === "ken-autopilot" &&
+      (!autopilotClaim ||
+        autopilotClaim.phaseId !== input.phase_id ||
+        autopilotClaim.reviewId !== finalReview.review_id)
+    ) {
+      this.dependencies.onNonCommit?.({
+        result: "final-review-claim-mismatch",
+        phaseId: input.phase_id,
+        updateId: input.update_id,
+      });
+      return {
+        result: "final-review-claim-mismatch",
+        phaseId: input.phase_id,
+        message: "Autopilot final_review must use the active claim's exact phase_id and review_id.",
+      };
+    }
     if (this.dependencies.canSubmitFinalReview?.(actor) === false) {
       return { result: "completion-checkpoint-blocked", phaseId: input.phase_id };
     }

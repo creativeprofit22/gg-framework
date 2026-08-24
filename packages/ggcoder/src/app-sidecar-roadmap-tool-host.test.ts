@@ -224,6 +224,42 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     },
   );
 
+  it("fails closed when the Autopilot claim provider is absent", async () => {
+    const recordRoadmapFinalReview = vi.fn(async () => ({ status: "missing" as const }));
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "C:/workspace",
+      repository: {
+        recordRoadmapStatusUpdate: vi.fn(async () => ({ status: "missing" as const })),
+        recordRoadmapFinalReview,
+      },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => true },
+      broadcastNotesSnapshot: vi.fn(),
+    });
+    const roadmapStatus = host.createSessionTools("ken-autopilot")[0]!;
+
+    const output = await roadmapStatus.execute(
+      RoadmapStatusParams.parse({
+        update_id: "status-missing-claim-provider",
+        phase_id: "phase-missing-claim-provider",
+        expected_revision: 1,
+        progress: "Reviewed the phase.",
+        transition: "review",
+        evidence: ["Inspected implementation evidence"],
+        final_review: {
+          review_id: "review-missing-claim-provider",
+          decision: "accepted",
+          evidence: ["Inspected implementation evidence"],
+        },
+      }),
+      {} as never,
+    );
+
+    if (typeof output !== "string") throw new Error("roadmap_status returned non-text output");
+    expect(JSON.parse(output).result).toBe("final-review-claim-mismatch");
+    expect(recordRoadmapFinalReview).not.toHaveBeenCalled();
+  });
+
   const automaticReviewCases = [
     { decision: "accepted" as const, gateOutcome: "done" as const, phaseStatus: "done" as const },
     {
@@ -400,6 +436,12 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
       broadcastNotesSnapshot,
+      getAutopilotFinalReviewClaim: () => ({
+        phaseId: "phase-incomplete",
+        verificationStatusUpdateId: "verification-passed",
+        triggerId: "trigger-incomplete",
+        reviewId: "review-incomplete",
+      }),
       onNonCommit,
       now: () => "2026-08-15T01:00:00.000Z",
     });

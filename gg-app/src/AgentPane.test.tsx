@@ -725,6 +725,18 @@ describe("AgentPane lifecycle", () => {
     ).toBeTruthy();
   });
 
+  it("surfaces prompt submission failures in the transcript", async () => {
+    const pane = client("pane-prompt-failure", 7);
+    vi.mocked(pane.sendPrompt).mockRejectedValueOnce(new Error("plan approval handoff failed"));
+    render(<AgentPane client={pane} target={chatTarget} workspaceOwnsSessionLifecycle />);
+    const input = await screen.findByRole("textbox");
+
+    fireEvent.change(input, { target: { value: "continue after the plan" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(await screen.findByText("plan approval handoff failed")).toBeTruthy();
+  });
+
   it("approves a chat Roadmap draft without starting implementation or a coding session", async () => {
     const pane = client("pane-chat-approve", 7);
     vi.mocked(pane.getRoadmapPhaseDraft).mockResolvedValue(roadmapDraft);

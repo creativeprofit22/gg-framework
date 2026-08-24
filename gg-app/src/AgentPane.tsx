@@ -2620,6 +2620,15 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // the message is the unedited enhanced text (the bubble shows `trimmed`).
     const sentEnhancements =
       enhancement && enhancement.plain === trimmed ? enhancement.segments : undefined;
+    const reportPromptFailure = (error: unknown) => {
+      pushItem({
+        kind: "error",
+        id: nextId(),
+        headline: "Prompt wasn’t sent",
+        message: error instanceof Error ? error.message : String(error),
+        guidance: "Retry your prompt.",
+      });
+    };
     // While a run is in flight, the message is QUEUED as steering (the sidecar
     // injects it mid-loop). Attachments queue too — they're persisted and ride
     // the same native-block path when the queue drains. Queued rows render
@@ -2647,7 +2656,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         prompt,
         queuedWire,
         sentEnhancements ? { enhancements: sentEnhancements } : undefined,
-      );
+      ).catch(reportPromptFailure);
       return;
     }
     const wire = attachments.map(toWire);
@@ -2678,13 +2687,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setMentionedPaths([]);
     setEnhancement(null);
     endStreamingText();
-    void sendPrompt(
-      prompt,
-      wire,
-      sentEnhancements ? { enhancements: sentEnhancements } : undefined,
-    ).then((submission) => {
-      if (!submission.queued) planResumePromptRef.current = prompt;
-    });
+    void sendPrompt(prompt, wire, sentEnhancements ? { enhancements: sentEnhancements } : undefined)
+      .then((submission) => {
+        if (!submission.queued) planResumePromptRef.current = prompt;
+      })
+      .catch(reportPromptFailure);
   }
 
   // ── Attachment intake (paste / attach button / whole-window drag-drop) ──

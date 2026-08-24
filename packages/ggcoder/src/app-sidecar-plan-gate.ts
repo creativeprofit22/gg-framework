@@ -204,6 +204,29 @@ export class AppSidecarPlanGate {
     return pendingPlanReview(this.currentCheckpoint);
   }
 
+  clearConsumed(consumption: {
+    checkpointId: string;
+    generation: number;
+    state: "approval-committed" | "implementation-prompt-started" | "completed";
+  }): Promise<boolean> {
+    return this.exclusive(async () => {
+      const checkpoint = this.currentCheckpoint;
+      if (
+        (consumption.state !== "implementation-prompt-started" &&
+          consumption.state !== "completed") ||
+        checkpoint?.state !== "human-approved" ||
+        checkpoint.checkpointId !== consumption.checkpointId ||
+        checkpoint.generation !== consumption.generation
+      ) {
+        return false;
+      }
+      // The approval marker belongs to the planning session's history. Clearing only
+      // this live gate matches restoration from the fresh implementation session.
+      this.currentCheckpoint = null;
+      return true;
+    });
+  }
+
   async submit(planPath: string, content: string): Promise<PersistedPlanReviewCheckpoint> {
     if (Buffer.byteLength(content, "utf8") > MAX_PLAN_GATE_CONTENT_BYTES) {
       throw new Error(`Plan snapshot exceeds ${MAX_PLAN_GATE_CONTENT_BYTES} bytes.`);

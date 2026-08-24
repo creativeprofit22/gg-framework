@@ -3339,6 +3339,11 @@ async function createSession(
           approvedPlanPath,
         });
         await session.completeApprovedPlanConsumption();
+        await planGate.clearConsumed({
+          checkpointId: committed.checkpointId,
+          generation: committed.generation,
+          state: "completed",
+        });
         return {
           checkpointId: committed.checkpointId,
           generation: committed.generation,
@@ -3382,7 +3387,7 @@ async function createSession(
         state: consumption.state,
       };
     },
-    launchImplementation: async () => {
+    launchImplementation: async (consumption) => {
       if (!runClaim.claim()) throw new Error("Another provider run already owns the session.");
       try {
         await runAgent(IMPLEMENT_PLAN_PROMPT, async () => {
@@ -3396,7 +3401,20 @@ async function createSession(
           await runAutopilotCycle(IMPLEMENT_PLAN_PROMPT);
         }
       } finally {
-        runClaim.release();
+        try {
+          const current = session.getApprovedPlanConsumption();
+          if (
+            !current ||
+            (current.checkpointId === consumption.checkpointId &&
+              current.generation === consumption.generation)
+          ) {
+            await planGate.clearConsumed(
+              current ?? { ...consumption, state: "completed" as const },
+            );
+          }
+        } finally {
+          runClaim.release();
+        }
       }
     },
     onLaunchFailure: (error) => {

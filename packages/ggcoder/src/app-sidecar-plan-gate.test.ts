@@ -233,6 +233,55 @@ describe("AppSidecarPlanGate", () => {
     expect(persist).not.toHaveBeenCalled();
   });
 
+  it.each(["implementation-prompt-started", "completed"] as const)(
+    "clears a matching approval after its consumption reaches %s",
+    async (state) => {
+      const approved = checkpoint({ state: "human-approved", actor: "user" });
+      const gate = new AppSidecarPlanGate([marker(approved)], vi.fn());
+
+      expect(
+        await gate.clearConsumed({
+          checkpointId: approved.checkpointId,
+          generation: approved.generation,
+          state,
+        }),
+      ).toBe(true);
+      expect(gate.current()).toBeNull();
+      expect(planGateConflictCode(gate.current())).toBeNull();
+    },
+  );
+
+  it("preserves pending, unconsumed, and mismatched approvals", async () => {
+    const pending = checkpoint();
+    const pendingGate = new AppSidecarPlanGate([marker(pending)], vi.fn());
+    expect(
+      await pendingGate.clearConsumed({
+        checkpointId: pending.checkpointId,
+        generation: pending.generation,
+        state: "implementation-prompt-started",
+      }),
+    ).toBe(false);
+    expect(pendingGate.current()).toEqual(pending);
+
+    const approved = checkpoint({ state: "human-approved", actor: "user" });
+    const approvedGate = new AppSidecarPlanGate([marker(approved)], vi.fn());
+    expect(
+      await approvedGate.clearConsumed({
+        checkpointId: approved.checkpointId,
+        generation: approved.generation,
+        state: "approval-committed",
+      }),
+    ).toBe(false);
+    expect(
+      await approvedGate.clearConsumed({
+        checkpointId: "other",
+        generation: approved.generation,
+        state: "completed",
+      }),
+    ).toBe(false);
+    expect(approvedGate.current()).toEqual(approved);
+  });
+
   it("serializes approve-vs-revise so exactly one compare-and-swap wins", async () => {
     const submitted = checkpoint();
     const persisted: PersistedPlanReviewCheckpoint[] = [];

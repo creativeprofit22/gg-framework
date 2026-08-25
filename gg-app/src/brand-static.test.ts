@@ -26,7 +26,9 @@ describe("static Supah Coder branding", () => {
   });
 
   it("routes local-patched installation through the source updater", () => {
-    expect(updatePolicySource).toContain("await startLocalPatchedUpdate(sourceRoot)");
+    expect(updatePolicySource).toContain(
+      "await startLocalPatchedUpdate(sourceRoot, summarizeDecisions)",
+    );
     expect(updatePolicySource).toContain('return "local-patched"');
   });
 });

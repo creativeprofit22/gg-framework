@@ -1,9 +1,21 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { copyPackage, selectedOptionalDependencies } from "./bundle-sidecar.mjs";
+import {
+  buildAndPromoteDirectory,
+  copyPackage,
+  selectedOptionalDependencies,
+} from "./bundle-sidecar.mjs";
 
 const sharpOptionalDependencies = {
   "@img/colour": "1.1.0",
@@ -85,5 +97,112 @@ describe("sidecar optional dependency selection", () => {
       }),
     ).toThrow("sharp has no supported Windows host selection for win32/arm64");
     expect(existsSync(destination)).toBe(false);
+  });
+});
+
+function createPromotionFixture() {
+  const root = mkdtempSync(join(tmpdir(), "gg-sidecar-promotion-"));
+  temporaryDirectories.push(root);
+  const live = join(root, "sidecar");
+  mkdirSync(live);
+  writeFileSync(join(live, "payload.bin"), Buffer.from([0, 1, 2, 255]));
+  return { root, live, oldPayload: readFileSync(join(live, "payload.bin")) };
+}
+
+function expectOldPayloadIntact(live, oldPayload) {
+  expect(readFileSync(join(live, "payload.bin"))).toEqual(oldPayload);
+}
+
+describe("sidecar candidate promotion", () => {
+  it("leaves the live output byte-for-byte intact when the build fails", async () => {
+    const { live, oldPayload } = createPromotionFixture();
+
+    await expect(
+      buildAndPromoteDirectory(
+        live,
+        async (candidate) => {
+          writeFileSync(join(candidate, "partial.bin"), "partial");
+          throw new Error("build failed");
+        },
+        () => {},
+      ),
+    ).rejects.toThrow("build failed");
+
+    expectOldPayloadIntact(live, oldPayload);
+    expect(existsSync(`${live}.candidate`)).toBe(false);
+  });
+
+  it("leaves the live output byte-for-byte intact when validation fails", async () => {
+    const { live, oldPayload } = createPromotionFixture();
+
+    await expect(
+      buildAndPromoteDirectory(
+        live,
+        async (candidate) => writeFileSync(join(candidate, "payload.bin"), "invalid"),
+        () => {
+          throw new Error("validation failed");
+        },
+      ),
+    ).rejects.toThrow("validation failed");
+
+    expectOldPayloadIntact(live, oldPayload);
+  });
+
+  it("replaces the live output only after successful validation", async () => {
+    const { live } = createPromotionFixture();
+
+    await buildAndPromoteDirectory(
+      live,
+      async (candidate) => writeFileSync(join(candidate, "payload.bin"), "new"),
+      (candidate) => expect(readFileSync(join(candidate, "payload.bin"), "utf8")).toBe("new"),
+    );
+
+    expect(readFileSync(join(live, "payload.bin"), "utf8")).toBe("new");
+    expect(existsSync(`${live}.previous`)).toBe(false);
+  });
+
+  it("removes a stale candidate without touching the live output", async () => {
+    const { live, oldPayload } = createPromotionFixture();
+    mkdirSync(`${live}.candidate`);
+    writeFileSync(join(`${live}.candidate`, "stale.bin"), "stale");
+
+    await buildAndPromoteDirectory(
+      live,
+      async (candidate) => {
+        expect(existsSync(join(candidate, "stale.bin"))).toBe(false);
+        expectOldPayloadIntact(live, oldPayload);
+        writeFileSync(join(candidate, "payload.bin"), "fresh");
+      },
+      () => {},
+    );
+
+    expect(readFileSync(join(live, "payload.bin"), "utf8")).toBe("fresh");
+  });
+
+  it("rolls back cleanly when Windows-style candidate rename fails", async () => {
+    const { live, oldPayload } = createPromotionFixture();
+    const candidate = `${live}.candidate`;
+
+    await expect(
+      buildAndPromoteDirectory(
+        live,
+        async (directory) => writeFileSync(join(directory, "payload.bin"), "new"),
+        () => {},
+        {
+          rename(from, to) {
+            if (from === candidate && to === live) {
+              const error = new Error("file is locked");
+              error.code = "EPERM";
+              throw error;
+            }
+            renameSync(from, to);
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ code: "EPERM" });
+
+    expectOldPayloadIntact(live, oldPayload);
+    expect(existsSync(`${live}.previous`)).toBe(false);
+    expect(existsSync(candidate)).toBe(false);
   });
 });

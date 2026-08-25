@@ -19,6 +19,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
 } from "node:fs";
@@ -33,7 +34,6 @@ const outDir = join(here, "..", "src-tauri", "sidecar");
 const outFile = join(outDir, "app-sidecar.mjs");
 const nodeModulesOut = join(outDir, "node_modules");
 const bundledSkillsSource = join(repoRoot, "packages", "ggcoder", "assets", "skills");
-const bundledSkillsOut = join(outDir, "skills");
 
 // Packages that must NOT be inlined: native addons, lazily-loaded optional
 // heavy deps, and child-process entry points that esbuild cannot discover.
@@ -416,8 +416,8 @@ export function copyPackage(
  * Mach-O files makes an arm64 app look Intel-based to macOS inventory scanners
  * and adds roughly 180 MB of unused files before compression.
  */
-function pruneForeignNativePayloads() {
-  const runtimes = join(nodeModulesOut, "onnxruntime-node", "bin", "napi-v3");
+function pruneForeignNativePayloads(stagedOutDir) {
+  const runtimes = join(stagedOutDir, "node_modules", "onnxruntime-node", "bin", "napi-v3");
   if (!existsSync(runtimes)) return;
 
   const selected = join(runtimes, process.platform, process.arch);
@@ -427,7 +427,7 @@ function pruneForeignNativePayloads() {
     );
   }
 
-  const keep = join(outDir, `.gg-onnxruntime-${process.pid}`);
+  const keep = join(stagedOutDir, `.gg-onnxruntime-${process.pid}`);
   cpSync(selected, keep, { recursive: true });
   rmSync(runtimes, { recursive: true, force: true });
   mkdirSync(join(runtimes, process.platform), { recursive: true });
@@ -436,9 +436,9 @@ function pruneForeignNativePayloads() {
   console.log(`pruned onnxruntime-node payloads to ${process.platform}/${process.arch}`);
 }
 
-function pruneSourceMaps() {
+function pruneSourceMaps(stagedOutDir) {
   const removed = [];
-  for (const file of walkFiles(outDir)) {
+  for (const file of walkFiles(stagedOutDir)) {
     if (file.relative.endsWith(".map")) {
       removed.push(file);
       rmSync(file.path);
@@ -464,8 +464,8 @@ function selectOpenSrcBinary() {
   );
 }
 
-function pruneForeignOpenSrcBinaries() {
-  const binDir = join(nodeModulesOut, "opensrc", "bin");
+function pruneForeignOpenSrcBinaries(stagedOutDir) {
+  const binDir = join(stagedOutDir, "node_modules", "opensrc", "bin");
   const selectedName = selectOpenSrcBinary();
   const selected = join(binDir, selectedName);
   if (!existsSync(selected)) {
@@ -477,7 +477,7 @@ function pruneForeignOpenSrcBinaries() {
     .filter((file) => file.relative !== selectedName)
     .map((file) => ({
       ...file,
-      relative: portablePath(relative(outDir, file.path)),
+      relative: portablePath(relative(stagedOutDir, file.path)),
     }));
   const keep = join(binDir, `.gg-opensrc-${process.pid}`);
   cpSync(selected, keep);
@@ -494,7 +494,7 @@ function pruneForeignOpenSrcBinaries() {
   return { removed, selectedName };
 }
 
-function assertPrunedLayout(before, removed, after, selectedOpenSrcBinary) {
+function assertPrunedLayout(stagedOutDir, before, removed, after, selectedOpenSrcBinary) {
   const errors = [];
   const fail = (message) => errors.push(message);
   if (after.bytes !== before.bytes - removed.bytes) {
@@ -565,7 +565,7 @@ function assertPrunedLayout(before, removed, after, selectedOpenSrcBinary) {
     `node_modules/onnxruntime-node/bin/napi-v3/${process.platform}/${process.arch}`,
   ];
   for (const path of requiredFiles) {
-    if (!existsSync(join(outDir, ...path.split("/"))))
+    if (!existsSync(join(stagedOutDir, ...path.split("/"))))
       fail(`required sidecar path missing: ${path}`);
   }
 
@@ -648,7 +648,7 @@ function stripSourceMaps() {
  * the node entries are missing (future version renamed them), keep everything
  * rather than shipping a package that cannot load.
  */
-function pruneBrowserOnnxPayloads() {
+function pruneBrowserOnnxPayloads(stagedNodeModulesOut) {
   const KEEP = [
     "package.json",
     "types.d.ts",
@@ -656,7 +656,7 @@ function pruneBrowserOnnxPayloads() {
     join("dist", "ort.node.min.mjs"),
   ];
   const roots = [];
-  walk(nodeModulesOut, (p, entry) => {
+  walk(stagedNodeModulesOut, (p, entry) => {
     if (
       entry.isDirectory() &&
       entry.name === "onnxruntime-web" &&
@@ -681,6 +681,68 @@ function pruneBrowserOnnxPayloads() {
   }
 }
 
+export async function buildAndPromoteDirectory(
+  liveDirectory,
+  buildCandidate,
+  validateCandidate,
+  {
+    candidateDirectory = `${liveDirectory}.candidate`,
+    backupDirectory = `${liveDirectory}.previous`,
+    rename = renameSync,
+    remove = rmSync,
+    makeDirectory = mkdirSync,
+  } = {},
+) {
+  if (existsSync(backupDirectory)) {
+    if (existsSync(liveDirectory)) remove(backupDirectory, { recursive: true, force: true });
+    else rename(backupDirectory, liveDirectory);
+  }
+  remove(candidateDirectory, { recursive: true, force: true });
+  makeDirectory(candidateDirectory, { recursive: true });
+
+  let result;
+  try {
+    result = await buildCandidate(candidateDirectory);
+    await validateCandidate(candidateDirectory, result);
+  } catch (error) {
+    try {
+      remove(candidateDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "sidecar candidate failed and cleanup failed",
+      );
+    }
+    throw error;
+  }
+
+  let movedLive = false;
+  try {
+    if (existsSync(liveDirectory)) {
+      rename(liveDirectory, backupDirectory);
+      movedLive = true;
+    }
+    rename(candidateDirectory, liveDirectory);
+  } catch (error) {
+    try {
+      if (movedLive) rename(backupDirectory, liveDirectory);
+      remove(candidateDirectory, { recursive: true, force: true });
+    } catch (rollbackError) {
+      throw new AggregateError([error, rollbackError], "sidecar promotion and rollback failed");
+    }
+    throw error;
+  }
+
+  if (movedLive) {
+    try {
+      remove(backupDirectory, { recursive: true, force: true });
+    } catch (error) {
+      console.warn(`sidecar promoted; stale backup cleanup failed: ${error.message}`);
+    }
+  }
+  return result;
+}
+
 async function main() {
   if (!existsSync(ggcoderSidecarEntry)) {
     throw new Error(
@@ -690,54 +752,74 @@ async function main() {
   if (!existsSync(bundledSkillsSource)) {
     throw new Error(`bundled skills missing: ${bundledSkillsSource}`);
   }
-  rmSync(outDir, { recursive: true, force: true });
-  mkdirSync(outDir, { recursive: true });
-  cpSync(bundledSkillsSource, bundledSkillsOut, { recursive: true });
 
-  await build({
-    entryPoints: [sidecarEntry],
-    outfile: outFile,
-    bundle: true,
-    platform: "node",
-    format: "esm",
-    target: "node22",
-    external: EXTERNAL,
-    // ESM bundles that reference `require`/__dirname need a banner shim so the
-    // few CJS-interop call sites in dependencies keep working under Node ESM.
-    banner: {
-      js: [
-        "import { createRequire as __ggCreateRequire } from 'node:module';",
-        "import { fileURLToPath as __ggFileURLToPath } from 'node:url';",
-        "import { dirname as __ggDirname } from 'node:path';",
-        "const require = __ggCreateRequire(import.meta.url);",
-        "const __filename = __ggFileURLToPath(import.meta.url);",
-        "const __dirname = __ggDirname(__filename);",
-      ].join("\n"),
+  const result = await buildAndPromoteDirectory(
+    outDir,
+    async (stagedOutDir) => {
+      const stagedOutFile = join(stagedOutDir, "app-sidecar.mjs");
+      const stagedNodeModulesOut = join(stagedOutDir, "node_modules");
+      cpSync(bundledSkillsSource, join(stagedOutDir, "skills"), { recursive: true });
+
+      await build({
+        entryPoints: [sidecarEntry],
+        outfile: stagedOutFile,
+        bundle: true,
+        platform: "node",
+        format: "esm",
+        target: "node22",
+        external: EXTERNAL,
+        // ESM bundles that reference `require`/__dirname need a banner shim so the
+        // few CJS-interop call sites in dependencies keep working under Node ESM.
+        banner: {
+          js: [
+            "import { createRequire as __ggCreateRequire } from 'node:module';",
+            "import { fileURLToPath as __ggFileURLToPath } from 'node:url';",
+            "import { dirname as __ggDirname } from 'node:path';",
+            "const require = __ggCreateRequire(import.meta.url);",
+            "const __filename = __ggFileURLToPath(import.meta.url);",
+            "const __dirname = __ggDirname(__filename);",
+          ].join("\n"),
+        },
+        logLevel: "info",
+      });
+
+      const copied = new Set();
+      const ggcoderRoot = join(repoRoot, "packages", "ggcoder");
+      for (const name of EXTERNAL) {
+        copyPackage(name, ggcoderRequire, ggcoderRoot, copied, {
+          destination: stagedNodeModulesOut,
+        });
+      }
+      pruneForeignNativePayloads(stagedOutDir);
+      const before = inventory(stagedOutDir);
+      pruneBrowserOnnxPayloads(stagedNodeModulesOut);
+      pruneSourceMaps(stagedOutDir);
+      const opensrc = pruneForeignOpenSrcBinaries(stagedOutDir);
+      const after = inventory(stagedOutDir);
+      const retainedPaths = new Set(after.entries.map((file) => file.relative));
+      const removed = inventoryFromFiles(
+        before.entries.filter((file) => !retainedPaths.has(file.relative)),
+      );
+      return { before, removed, after, copied, selectedOpenSrcBinary: opensrc.selectedName };
     },
-    logLevel: "info",
-  });
+    (stagedOutDir, staged) => {
+      renderInventory(staged.before, staged.removed, staged.after);
+      console.log(
+        `GG_SIDECAR_SIZE_JSON=${inventoryJson(staged.before, staged.removed, staged.after)}`,
+      );
+      assertPrunedLayout(
+        stagedOutDir,
+        staged.before,
+        staged.removed,
+        staged.after,
+        staged.selectedOpenSrcBinary,
+      );
+    },
+  );
 
-  const copied = new Set();
-  const ggcoderRoot = join(repoRoot, "packages", "ggcoder");
-  for (const name of EXTERNAL) {
-    copyPackage(name, ggcoderRequire, ggcoderRoot, copied);
-  }
-  pruneForeignNativePayloads();
-  const before = inventory(outDir);
-  pruneBrowserOnnxPayloads();
-  pruneSourceMaps();
-  const opensrc = pruneForeignOpenSrcBinaries();
-  const after = inventory(outDir);
-  const retainedPaths = new Set(after.entries.map((file) => file.relative));
-  const removed = inventoryFromFiles(
-    before.entries.filter((file) => !retainedPaths.has(file.relative)),
-  );
   console.log(
-    `bundled sidecar → ${outFile}\ncopied ${copied.size} external packages → ${nodeModulesOut}`,
+    `bundled sidecar → ${outFile}\ncopied ${result.copied.size} external packages → ${nodeModulesOut}`,
   );
-  renderInventory(before, removed, after);
-  console.log(`GG_SIDECAR_SIZE_JSON=${inventoryJson(before, removed, after)}`);
-  assertPrunedLayout(before, removed, after, opensrc.selectedName);
 }
 
 const invokedDirectly =

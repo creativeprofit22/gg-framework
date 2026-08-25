@@ -543,6 +543,11 @@ function Wait-ForInstalledAppExit([string]$InstallDirectory, [DateTime]$Deadline
   return @(Get-InstalledAppProcesses -InstallDirectory $InstallDirectory)
 }
 
+function Test-ProcessCreationTimeMatch([long]$ExpectedTicks, [long]$ActualTicks) {
+  $maxPrecisionDriftTicks = [TimeSpan]::TicksPerMillisecond / 1000
+  [Math]::Abs($ActualTicks - $ExpectedTicks) -le $maxPrecisionDriftTicks
+}
+
 function Stop-GgCoderForInstall(
   [string]$InstallDirectory,
   [string]$InstalledExecutable,
@@ -570,7 +575,7 @@ function Stop-GgCoderForInstall(
     if (-not $process) { continue }
     $process.Refresh()
     if (-not $process.Path.Equals($root.ExecutablePath, [StringComparison]::OrdinalIgnoreCase) -or
-        $process.StartTime.ToUniversalTime().Ticks -ne $root.CreationTicks) {
+        -not (Test-ProcessCreationTimeMatch -ExpectedTicks $root.CreationTicks -ActualTicks $process.StartTime.ToUniversalTime().Ticks)) {
       throw "Refusing graceful shutdown because PID $($root.ProcessId) changed identity"
     }
     if ($process.MainWindowHandle -eq [IntPtr]::Zero) { continue }

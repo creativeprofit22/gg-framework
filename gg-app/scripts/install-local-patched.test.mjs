@@ -732,7 +732,44 @@ windowsDescribe("detached local installer helper", () => {
     });
   });
 
-  it("refuses graceful close when a captured PID changes creation identity", () => {
+  it("allows harmless cross-API process timestamp precision drift", () => {
+    const fixture = transactionFixture();
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:closeCalls = 0; ` +
+        `$capturedAt = [DateTime]::UtcNow.AddMinutes(-1); $root = [pscustomobject]@{ ProcessId = 101; ParentProcessId = 1; Name = 'gg-coder-local-fork.exe'; ExecutablePath = ${psLiteral(fixture.installedExecutable)}; CreationTicks = $capturedAt.Ticks }; ` +
+        `$window = [pscustomobject]@{ MainWindowHandle = [IntPtr]1; Path = $root.ExecutablePath; StartTime = [DateTime]::new($capturedAt.Ticks + 3, [DateTimeKind]::Utc) }; $window | Add-Member ScriptMethod Refresh {}; $window | Add-Member ScriptMethod CloseMainWindow { $script:closeCalls += 1; return $true }; ` +
+        `function Get-AppRootSnapshots { @($root) }; function Get-ProcessSnapshotById { $root }; function Get-Process { $window }; function Get-InstalledAppProcesses { @() }; ` +
+        `$failure = ''; $stopped = $false; try { $stopped = Stop-GgCoderForInstall -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -GraceSeconds 1 } catch { $failure = $_.Exception.Message }; ` +
+        `[pscustomobject]@{ Failure = $failure; Stopped = $stopped; CloseCalls = $script:closeCalls } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      Failure: "",
+      Stopped: true,
+      CloseCalls: 1,
+    });
+  });
+
+  it("rejects process timestamp drift beyond one microsecond", () => {
+    const fixture = transactionFixture();
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:closeCalls = 0; ` +
+        `$capturedAt = [DateTime]::UtcNow.AddMinutes(-1); $root = [pscustomobject]@{ ProcessId = 101; ParentProcessId = 1; Name = 'gg-coder-local-fork.exe'; ExecutablePath = ${psLiteral(fixture.installedExecutable)}; CreationTicks = $capturedAt.Ticks }; ` +
+        `$window = [pscustomobject]@{ MainWindowHandle = [IntPtr]1; Path = $root.ExecutablePath; StartTime = [DateTime]::new($capturedAt.Ticks + 11, [DateTimeKind]::Utc) }; $window | Add-Member ScriptMethod Refresh {}; $window | Add-Member ScriptMethod CloseMainWindow { $script:closeCalls += 1; return $true }; ` +
+        `function Get-AppRootSnapshots { @($root) }; function Get-ProcessSnapshotById { $root }; function Get-Process { $window }; function Get-InstalledAppProcesses { @() }; ` +
+        `$failure = ''; try { Stop-GgCoderForInstall -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -GraceSeconds 1 } catch { $failure = $_.Exception.Message }; ` +
+        `[pscustomobject]@{ Failure = $failure; CloseCalls = $script:closeCalls } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("changed identity"),
+      CloseCalls: 0,
+    });
+  });
+
+  it("refuses graceful close for a reused PID with a different creation time", () => {
     const fixture = transactionFixture();
     const result = runPowerShell(
       `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:closeLookups = 0; ` +

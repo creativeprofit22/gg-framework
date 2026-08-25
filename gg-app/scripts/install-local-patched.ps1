@@ -2,11 +2,11 @@ param(
   [Parameter(Mandatory = $true)][string]$TaskName,
   [int]$DelaySeconds = 20,
   [ValidateRange(1, 120)][int]$GracefulShutdownSeconds = 10,
-  [ValidateRange(1, 120)][int]$ForcedShutdownSeconds = 15,
   [ValidateRange(1, 300)][int]$LockClearTimeoutSeconds = 30,
   [string]$MetadataPath,
   [string]$LogPath,
   [string]$AllowedInstallerRoot,
+  [string]$ExpectedVersion,
   [switch]$LibraryOnly
 )
 
@@ -416,9 +416,77 @@ function Read-VerifiedInstallerManifest([string]$Path, [string]$AllowedRoot) {
 
 function Get-InstalledAppProcesses([string]$InstallDirectory) {
   $prefix = [IO.Path]::GetFullPath($InstallDirectory).TrimEnd('\') + '\'
-  @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+  try {
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+  } catch {
+    throw "Unable to enumerate installed Local Fork processes: $($_.Exception.Message)"
+  }
+  @($processes | ForEach-Object {
+    if (-not $_.ExecutablePath) { return }
+    try {
+      $executablePath = [IO.Path]::GetFullPath([string]$_.ExecutablePath)
+    } catch {
+      throw "Unable to canonicalize process path for PID=$($_.ProcessId): $($_.Exception.Message)"
+    }
+    if ($executablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+      [pscustomobject]@{
+        ProcessId = [int]$_.ProcessId
+        ParentProcessId = [int]$_.ParentProcessId
+        Name = [string]$_.Name
+        ExecutablePath = $executablePath
+        CreationTicks = ([DateTime]$_.CreationDate).ToUniversalTime().Ticks
+      }
+    }
   })
+}
+
+function Format-InstalledAppProcesses([object[]]$Processes) {
+  if ($Processes.Count -eq 0) { return 'count=0' }
+  $items = @($Processes | ForEach-Object {
+    'pid={0} parentPid={1} name="{2}" path="{3}"' -f $_.ProcessId, $_.ParentProcessId, `
+      ([string]$_.Name).Replace('"', "'"), ([string]$_.ExecutablePath).Replace('"', "'")
+  })
+  "count=$($Processes.Count) $($items -join '; ')"
+}
+
+function Wait-LocalForkReplacementGate(
+  [string]$InstallDirectory,
+  [string]$InstalledExecutable,
+  [ValidateRange(1, 300000)][int]$TimeoutMilliseconds,
+  [ValidateRange(10, 5000)][int]$PollIntervalMilliseconds = 250
+) {
+  $frequency = [Diagnostics.Stopwatch]::Frequency
+  $startedTimestamp = [Diagnostics.Stopwatch]::GetTimestamp()
+  $deadlineTimestamp = $startedTimestamp + [long][Math]::Ceiling($TimeoutMilliseconds * $frequency / 1000.0)
+  $attempt = 0; $lastProcessEvidence = 'not-probed'; $lastLockEvidence = 'not-probed'
+  while ([Diagnostics.Stopwatch]::GetTimestamp() -lt $deadlineTimestamp) {
+    $attempt += 1
+    $processes = @(Get-InstalledAppProcesses -InstallDirectory $InstallDirectory)
+    $lastProcessEvidence = Format-InstalledAppProcesses -Processes $processes
+    try {
+      $lockState = Get-RestartManagerLockState -ResourcePath $InstalledExecutable -QueryDeadlineTimestamp $deadlineTimestamp
+    } catch {
+      if ($_.Exception.Message -eq 'Restart Manager polling deadline exhausted before query' -and
+          [Diagnostics.Stopwatch]::GetTimestamp() -ge $deadlineTimestamp) {
+        break
+      }
+      throw "Local Fork replacement gate Restart Manager query failed closed: $($_.Exception.Message); processes=$lastProcessEvidence"
+    }
+    $lastLockEvidence = Format-RestartManagerLockState -State $lockState
+    Write-Step "REPLACEMENT GATE attempt=$attempt processes=[$lastProcessEvidence] restartManager=[$lastLockEvidence]"
+    if ($lockState.Status -in @('fatal', 'unavailable')) {
+      throw "Local Fork replacement gate cannot safely continue; processes=$lastProcessEvidence; restartManager=$lastLockEvidence"
+    }
+    if ($processes.Count -eq 0 -and $lockState.Status -eq 'none') {
+      Write-Step "REPLACEMENT GATE SUCCESS attempts=$attempt"
+      return
+    }
+    $remainingMilliseconds = [long][Math]::Ceiling(($deadlineTimestamp - [Diagnostics.Stopwatch]::GetTimestamp()) * 1000.0 / $frequency)
+    if ($remainingMilliseconds -gt 0) {
+      Start-Sleep -Milliseconds ([Math]::Min($PollIntervalMilliseconds, $remainingMilliseconds))
+    }
+  }
+  throw "Local Fork replacement gate timed out after ${TimeoutMilliseconds}ms; attempts=$attempt; processes=$lastProcessEvidence; restartManager=$lastLockEvidence"
 }
 
 function Get-CurrentUserGgAppProcesses {
@@ -459,61 +527,17 @@ function Assert-NoUnrelatedGgAppProcesses(
 }
 
 function Get-AppRootSnapshots([string]$InstalledExecutable) {
-  @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.Name -eq 'gg-coder-local-fork.exe' -and $_.ExecutablePath -and
+  $installDirectory = Split-Path -Parent $InstalledExecutable
+  @(Get-InstalledAppProcesses -InstallDirectory $installDirectory | Where-Object {
+    $_.Name -eq 'gg-coder-local-fork.exe' -and
       $_.ExecutablePath.Equals($InstalledExecutable, [StringComparison]::OrdinalIgnoreCase)
-  } | ForEach-Object {
-    [pscustomobject]@{
-      ProcessId = [int]$_.ProcessId
-      ExecutablePath = [string]$_.ExecutablePath
-      CreationTicks = ([DateTime]$_.CreationDate).ToUniversalTime().Ticks
-    }
   })
-}
-
-function Get-CurrentRootSnapshots([object[]]$CapturedRoots) {
-  @($CapturedRoots | ForEach-Object {
-    $current = Get-CimInstance Win32_Process -Filter "ProcessId = $($_.ProcessId)" -ErrorAction SilentlyContinue
-    if ($current) {
-      [pscustomobject]@{
-        ProcessId = [int]$current.ProcessId
-        ExecutablePath = [string]$current.ExecutablePath
-        CreationTicks = ([DateTime]$current.CreationDate).ToUniversalTime().Ticks
-      }
-    }
-  })
-}
-
-function Assert-SafeForceFallback(
-  [object[]]$CapturedRoots,
-  [object[]]$CurrentRoots,
-  [int[]]$AcceptedCloseRootIds,
-  [int[]]$VisibleWindowRootIds
-) {
-  foreach ($current in $CurrentRoots) {
-    $captured = @($CapturedRoots | Where-Object { $_.ProcessId -eq $current.ProcessId })
-    if ($captured.Count -ne 1) {
-      throw "Refusing forced shutdown for uncaptured GG Coder Local Fork PID $($current.ProcessId)"
-    }
-    if (-not $current.ExecutablePath.Equals($captured[0].ExecutablePath, [StringComparison]::OrdinalIgnoreCase) -or
-        $current.CreationTicks -ne $captured[0].CreationTicks) {
-      throw "Refusing forced shutdown because GG Coder Local Fork PID $($current.ProcessId) changed identity"
-    }
-    if ($AcceptedCloseRootIds -notcontains $current.ProcessId) {
-      throw "Refusing forced shutdown because GG Coder Local Fork PID $($current.ProcessId) did not accept a graceful window close"
-    }
-    if ($VisibleWindowRootIds -contains $current.ProcessId) {
-      throw "Refusing forced shutdown because GG Coder Local Fork PID $($current.ProcessId) still has a visible main window"
-    }
-  }
 }
 
 function Wait-ForInstalledAppExit([string]$InstallDirectory, [DateTime]$Deadline) {
   do {
     $remaining = @(Get-InstalledAppProcesses -InstallDirectory $InstallDirectory)
-    if ($remaining.Count -eq 0) {
-      return @()
-    }
+    if ($remaining.Count -eq 0) { return @() }
     Start-Sleep -Milliseconds 250
   } while ((Get-Date) -lt $Deadline)
   return @(Get-InstalledAppProcesses -InstallDirectory $InstallDirectory)
@@ -522,38 +546,37 @@ function Wait-ForInstalledAppExit([string]$InstallDirectory, [DateTime]$Deadline
 function Stop-GgCoderForInstall(
   [string]$InstallDirectory,
   [string]$InstalledExecutable,
-  [int]$GraceSeconds,
-  [int]$ForceSeconds
+  [int]$GraceSeconds
 ) {
   $capturedRoots = @(Get-AppRootSnapshots -InstalledExecutable $InstalledExecutable)
   if ($capturedRoots.Count -eq 0) {
     $remainingWithoutRoot = @(Get-InstalledAppProcesses -InstallDirectory $InstallDirectory)
     if ($remainingWithoutRoot.Count -gt 0) {
-      throw "Installed GG Coder Local Fork child processes exist without a verifiable app root; refusing to terminate PID(s): $($remainingWithoutRoot.ProcessId -join ', ')"
+      throw "Installed GG Coder Local Fork child processes exist without a verifiable app root; refusing shutdown: $(Format-InstalledAppProcesses $remainingWithoutRoot)"
     }
     Write-Step 'GG Coder Local Fork was already closed'
     return $false
   }
 
   Write-Step "Requesting graceful close for GG Coder Local Fork PID(s): $($capturedRoots.ProcessId -join ', ')"
-  $acceptedCloseRootIds = @()
   foreach ($root in $capturedRoots) {
-    $acceptedAny = $false
-    for ($windowIndex = 0; $windowIndex -lt 32; $windowIndex += 1) {
-      $process = Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue
-      if (-not $process) { break }
-      $process.Refresh()
-      if ($process.MainWindowHandle -eq [IntPtr]::Zero) { break }
-      $handle = $process.MainWindowHandle
-      $accepted = $process.CloseMainWindow()
-      Write-Step "CloseMainWindow PID=$($root.ProcessId) handle=$handle accepted=$accepted"
-      if (-not $accepted) { break }
-      $acceptedAny = $true
-      Start-Sleep -Milliseconds 300
+    $current = Get-ProcessSnapshotById -ProcessId $root.ProcessId
+    if (-not $current) { continue }
+    if (-not $current.ExecutablePath.Equals($root.ExecutablePath, [StringComparison]::OrdinalIgnoreCase) -or
+        $current.CreationTicks -ne $root.CreationTicks) {
+      throw "Refusing graceful shutdown because PID $($root.ProcessId) changed identity"
     }
-    if ($acceptedAny) {
-      $acceptedCloseRootIds += $root.ProcessId
+    $process = Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue
+    if (-not $process) { continue }
+    $process.Refresh()
+    if (-not $process.Path.Equals($root.ExecutablePath, [StringComparison]::OrdinalIgnoreCase) -or
+        $process.StartTime.ToUniversalTime().Ticks -ne $root.CreationTicks) {
+      throw "Refusing graceful shutdown because PID $($root.ProcessId) changed identity"
     }
+    if ($process.MainWindowHandle -eq [IntPtr]::Zero) { continue }
+    $handle = $process.MainWindowHandle
+    $accepted = $process.CloseMainWindow()
+    Write-Step "CloseMainWindow PID=$($root.ProcessId) handle=$handle accepted=$accepted"
   }
 
   $remaining = @(Wait-ForInstalledAppExit -InstallDirectory $InstallDirectory -Deadline (Get-Date).AddSeconds($GraceSeconds))
@@ -561,36 +584,7 @@ function Stop-GgCoderForInstall(
     Write-Step 'GG Coder Local Fork process tree exited cleanly'
     return $true
   }
-
-  $currentRoots = @(Get-CurrentRootSnapshots -CapturedRoots $capturedRoots)
-  if ($currentRoots.Count -eq 0) {
-    throw "GG Coder Local Fork root exited but installed child processes remain; refusing unscoped termination of PID(s): $($remaining.ProcessId -join ', ')"
-  }
-  $visibleWindowRootIds = @()
-  foreach ($root in $currentRoots) {
-    $process = Get-Process -Id $root.ProcessId -ErrorAction SilentlyContinue
-    if ($process) {
-      $process.Refresh()
-      if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
-        $visibleWindowRootIds += $root.ProcessId
-      }
-    }
-  }
-  Assert-SafeForceFallback -CapturedRoots $capturedRoots -CurrentRoots $currentRoots `
-    -AcceptedCloseRootIds $acceptedCloseRootIds -VisibleWindowRootIds $visibleWindowRootIds
-
-  Write-Step "Grace period expired after ${GraceSeconds}s with no app windows; terminating only captured GG Coder Local Fork tree root PID(s): $($currentRoots.ProcessId -join ', ')"
-  foreach ($root in $currentRoots) {
-    $null = & taskkill.exe /PID $root.ProcessId /T /F 2>&1
-    Write-Step "Bounded fallback requested for captured PID=$($root.ProcessId); taskkillExit=$LASTEXITCODE"
-  }
-
-  $remaining = @(Wait-ForInstalledAppExit -InstallDirectory $InstallDirectory -Deadline (Get-Date).AddSeconds($ForceSeconds))
-  if ($remaining.Count -gt 0) {
-    throw "Timed out after bounded shutdown fallback; remaining installed PID(s): $($remaining.ProcessId -join ', ')"
-  }
-  Write-Step 'GG Coder Local Fork process tree exited after bounded captured-tree fallback'
-  return $true
+  throw "Timed out waiting for graceful shutdown after ${GraceSeconds}s; $(Format-InstalledAppProcesses $remaining)"
 }
 
 function Get-FileMetadata([string]$Path) {
@@ -602,6 +596,32 @@ function Get-FileMetadata([string]$Path) {
     Size = [int64]$item.Length
     Sha256 = Get-Sha256 -Path $Path
   }
+}
+
+function Assert-ExpectedVersion([string]$Value) {
+  if ($Value -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+    throw 'Invalid expected version: require numeric major.minor.patch'
+  }
+  $Value
+}
+
+function ConvertTo-NumericCoreVersion([string]$Value, [string]$Description) {
+  $trimmed = $Value.Trim()
+  if ($trimmed -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\.0)?$') {
+    throw "$Description is missing or ambiguous: $Value"
+  }
+  "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+}
+
+function Assert-InstalledProductVersion([string]$Path, [string]$ExpectedVersion) {
+  $validatedExpected = Assert-ExpectedVersion -Value $ExpectedVersion
+  $versionInfo = (Get-Item -LiteralPath $Path -ErrorAction Stop).VersionInfo
+  $productVersion = ConvertTo-NumericCoreVersion -Value ([string]$versionInfo.ProductVersion) -Description 'Installed ProductVersion'
+  $fileVersion = ConvertTo-NumericCoreVersion -Value ([string]$versionInfo.FileVersion) -Description 'Installed FileVersion'
+  if ($productVersion -ne $validatedExpected -or $fileVersion -ne $validatedExpected) {
+    throw "Installed Local Fork version mismatch: expected=$validatedExpected productVersion=$productVersion fileVersion=$fileVersion"
+  }
+  $validatedExpected
 }
 
 function Assert-FileMatchesMetadata(
@@ -644,6 +664,11 @@ function Assert-LocalForkUninstallRegistration([string]$InstallDirectory) {
   }
   if ([string]$registration.MainBinaryName -cne 'gg-coder-local-fork.exe') {
     throw "GG Coder Local Fork uninstall registration has the wrong main binary: $($registration.MainBinaryName)"
+  }
+  [pscustomobject]@{
+    DisplayName = [string]$registration.DisplayName
+    InstallLocation = $actualDirectory
+    MainBinaryName = [string]$registration.MainBinaryName
   }
 }
 
@@ -830,11 +855,26 @@ function Remove-InstallBackupSafely([string]$BackupPath) {
   }
 }
 
+function Remove-FailedNewInstall([string]$InstallDirectory) {
+  try {
+    if (-not (Test-Path -LiteralPath $InstallDirectory)) { return }
+    $null = Assert-DirectoryTreeHasNoReparsePoints -Path $InstallDirectory -Description 'Failed new install directory'
+    Remove-Item -LiteralPath $InstallDirectory -Recurse -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $InstallDirectory) {
+      throw 'directory still exists after removal'
+    }
+    Write-Step "Removed failed new install directory: $InstallDirectory"
+  } catch {
+    throw "Failed new-install cleanup; partial install may remain at '$InstallDirectory'. Manual recovery: remove that directory after stopping Local Fork processes. $($_.Exception.Message)"
+  }
+}
+
 function Invoke-VerifiedInstallTransaction(
   [string]$InstallDirectory,
   [string]$InstalledExecutable,
   [object]$InstallerManifest,
-  [bool]$WasRunning
+  [bool]$WasRunning,
+  [string]$ExpectedVersion
 ) {
   $backupPath = $null
   $backupCreated = $false
@@ -846,10 +886,10 @@ function Invoke-VerifiedInstallTransaction(
   try {
     $null = Assert-NoReparsePointTraversal -Path (Split-Path -Parent $InstallDirectory) -Description 'Install parent directory'
     $null = Assert-NoReparsePointTraversal -Path $InstallDirectory -Description 'Install directory path'
+    Wait-LocalForkReplacementGate -InstallDirectory $InstallDirectory -InstalledExecutable $InstalledExecutable `
+      -TimeoutMilliseconds $script:LockClearTimeoutMilliseconds
     $registrationSnapshot = Get-LocalForkRegistrationSnapshot
     if ($hadExistingInstall) {
-      Wait-InstalledPayloadLocksClear -InstalledExecutable $InstalledExecutable `
-        -TimeoutMilliseconds $script:LockClearTimeoutMilliseconds
       $previousMetadata = Get-PreInstallerFileMetadata -Path $InstalledExecutable
       $backupPath = New-InstallBackupPath -InstallDirectory $InstallDirectory
       Move-InstallDirectoryToBackup -InstallDirectory $InstallDirectory -BackupPath $backupPath
@@ -869,10 +909,14 @@ function Invoke-VerifiedInstallTransaction(
 
     Assert-FileMatchesMetadata -Path $InstalledExecutable -ExpectedSize $InstallerManifest.PayloadSize `
       -ExpectedSha256 $InstallerManifest.PayloadSha256 -Description 'Installed Local Fork executable'
-    Assert-LocalForkUninstallRegistration -InstallDirectory $InstallDirectory
-    Write-Step 'Installed payload and Local Fork uninstall registration verified'
+    $installedVersion = Assert-InstalledProductVersion -Path $InstalledExecutable -ExpectedVersion $ExpectedVersion
+    $registrationMarker = Assert-LocalForkUninstallRegistration -InstallDirectory $InstallDirectory
+    Write-Step 'Installed payload, version, and Local Fork uninstall registration verified'
 
-    $null = Start-VerifiedApp -ExecutablePath $InstalledExecutable -LaunchedSnapshot ([ref]$launchedSnapshot)
+    $healthySnapshot = Start-VerifiedApp -ExecutablePath $InstalledExecutable -LaunchedSnapshot ([ref]$launchedSnapshot)
+    Assert-FileMatchesMetadata -Path $healthySnapshot.ExecutablePath -ExpectedSize $InstallerManifest.PayloadSize `
+      -ExpectedSha256 $InstallerManifest.PayloadSha256 -Description 'Relaunched Local Fork executable'
+    $liveHash = Get-Sha256 -Path $healthySnapshot.ExecutablePath
 
     if ($backupPath) {
       try {
@@ -883,7 +927,7 @@ function Invoke-VerifiedInstallTransaction(
         Write-Step "WARNING: healthy install retained recoverable backup at ${backupPath}: $($_.Exception.Message)"
       }
     }
-    Write-Step "SUCCESS: installed and relaunched verified GG Coder Local Fork PID=$($launchedSnapshot.ProcessId)"
+    Write-Step "SUCCESS installerExitCode=$installExitCode installedPath=`"$InstalledExecutable`" version=$installedVersion payloadSha256=$($InstallerManifest.PayloadSha256) livePid=$($healthySnapshot.ProcessId) livePath=`"$($healthySnapshot.ExecutablePath)`" liveHash=$liveHash marker=DisplayName=GG Coder Local Fork,InstallLocation=`"$($registrationMarker.InstallLocation)`",MainBinaryName=gg-coder-local-fork.exe"
   } catch {
     $originalFailure = $_.Exception.Message
     Write-Step "TRANSACTION FAILED: $originalFailure"
@@ -901,16 +945,26 @@ function Invoke-VerifiedInstallTransaction(
       }
     }
 
-    if (-not $hadExistingInstall -and (Test-Path -LiteralPath $InstallDirectory)) {
-      $null = Assert-DirectoryTreeHasNoReparsePoints -Path $InstallDirectory -Description 'Failed new install directory'
-      Remove-Item -LiteralPath $InstallDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    $freshInstallCleanupFailure = $null
+    if (-not $hadExistingInstall) {
+      try {
+        Stop-LaunchedVerifiedRoot -Snapshot $launchedSnapshot -ExpectedExecutable $InstalledExecutable
+        Remove-FailedNewInstall -InstallDirectory $InstallDirectory
+      } catch {
+        $freshInstallCleanupFailure = $_.Exception.Message
+      }
     }
+    $registrationRollbackFailure = $null
     if ($installerStarted -and $registrationSnapshot) {
       try {
         Restore-LocalForkRegistration -Snapshot $registrationSnapshot
       } catch {
-        throw "Installation failed: $originalFailure. Registration rollback failed: $($_.Exception.Message)"
+        $registrationRollbackFailure = $_.Exception.Message
       }
+    }
+    if ($freshInstallCleanupFailure -or $registrationRollbackFailure) {
+      $rollbackFailures = @($freshInstallCleanupFailure, $registrationRollbackFailure) | Where-Object { $_ }
+      throw "Installation failed: $originalFailure. Rollback cleanup failed: $($rollbackFailures -join '; ')"
     }
     if ($WasRunning -and $hadExistingInstall -and
         (Test-Path -LiteralPath $InstalledExecutable -PathType Leaf)) {
@@ -923,57 +977,93 @@ function Invoke-VerifiedInstallTransaction(
 }
 
 function Invoke-LocalPatchedInstall {
+  $validatedExpectedVersion = Assert-ExpectedVersion -Value $ExpectedVersion
   $installDir = Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork'
   $installedExe = Join-Path $installDir 'gg-coder-local-fork.exe'
   $stableInstallDir = Join-Path $env:LOCALAPPDATA 'GG Coder'
   if ([IO.Path]::GetFullPath($installDir).Equals([IO.Path]::GetFullPath($stableInstallDir), [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Local Fork installer resolved to the production GG Coder directory; refusing installation'
   }
-  $null = Assert-NoReparsePointTraversal -Path $script:InstallLogPath -Description 'Install log path'
-  Set-Content -LiteralPath $script:InstallLogPath -Value ('[{0}] Detached installer helper started as PID {1}; delay={2}s' -f (Get-Date).ToString('o'), $PID, $DelaySeconds) -Encoding UTF8
-  Start-Sleep -Seconds $DelaySeconds
-
-  Write-Step "Reading Local Fork installer manifest from: $MetadataPath"
-  $installerMetadata = Read-VerifiedInstallerManifest -Path $MetadataPath -AllowedRoot $AllowedInstallerRoot
-  Write-Step "Installer and payload metadata verified: installer=$($installerMetadata.Sha256) payload=$($installerMetadata.PayloadSha256)"
-
-  $wasRunning = @(Get-AppRootSnapshots -InstalledExecutable $installedExe).Count -gt 0
-  $transactionStarted = $false
+  $mutexName = "Local\GG-Coder-Local-Fork-Install-$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)"
+  $installMutex = [Threading.Mutex]::new($false, $mutexName)
+  $mutexHeld = $false
   try {
-    $wasRunning = Stop-GgCoderForInstall -InstallDirectory $installDir -InstalledExecutable $installedExe `
-      -GraceSeconds $GracefulShutdownSeconds -ForceSeconds $ForcedShutdownSeconds
-
-    $reverified = Read-VerifiedInstallerManifest -Path $MetadataPath -AllowedRoot $AllowedInstallerRoot
-    if ($reverified.Path -ne $installerMetadata.Path -or
-        $reverified.Sha256 -ne $installerMetadata.Sha256 -or
-        $reverified.PayloadSha256 -ne $installerMetadata.PayloadSha256 -or
-        $reverified.PayloadSize -ne $installerMetadata.PayloadSize) {
-      throw 'Installer manifest changed during shutdown; installation aborted'
+    try {
+      $mutexHeld = $installMutex.WaitOne(0)
+    } catch [Threading.AbandonedMutexException] {
+      $mutexHeld = $true
     }
-    Write-Step 'Installer and expected payload reverified after shutdown'
-    Assert-NoUnrelatedGgAppProcesses -InstalledExecutable $installedExe
-    Write-Step 'No unrelated current-user gg-coder-local-fork.exe processes remain'
+    if (-not $mutexHeld) {
+      throw 'Another Local Fork installation transaction is already running'
+    }
 
-    $transactionStarted = $true
-    Invoke-VerifiedInstallTransaction -InstallDirectory $installDir -InstalledExecutable $installedExe `
-      -InstallerManifest $reverified -WasRunning $wasRunning
-  } catch {
-    $preTransactionFailure = $_.Exception.Message
-    if (-not $transactionStarted -and $wasRunning -and
-        (Test-Path -LiteralPath $installedExe -PathType Leaf) -and
-        @(Get-AppRootSnapshots -InstalledExecutable $installedExe).Count -eq 0) {
-      try {
-        $null = Start-VerifiedApp -ExecutablePath $installedExe
-        Write-Step 'Restarted unchanged GG Coder Local Fork after pre-install failure'
-      } catch {
-        throw "Pre-install failure: $preTransactionFailure. Failed to restart unchanged GG Coder Local Fork: $($_.Exception.Message)"
+    $null = Assert-NoReparsePointTraversal -Path $script:InstallLogPath -Description 'Install log path'
+    Set-Content -LiteralPath $script:InstallLogPath -Value ('[{0}] Detached installer helper started as PID {1}; delay={2}s' -f (Get-Date).ToString('o'), $PID, $DelaySeconds) -Encoding UTF8
+    Start-Sleep -Seconds $DelaySeconds
+
+    Write-Step "Reading Local Fork installer manifest from: $MetadataPath"
+    $installerMetadata = Read-VerifiedInstallerManifest -Path $MetadataPath -AllowedRoot $AllowedInstallerRoot
+    Write-Step "Installer and payload metadata verified: installer=$($installerMetadata.Sha256) payload=$($installerMetadata.PayloadSha256)"
+
+    $wasRunning = @(Get-AppRootSnapshots -InstalledExecutable $installedExe).Count -gt 0
+    $transactionStarted = $false
+    try {
+      $wasRunning = Stop-GgCoderForInstall -InstallDirectory $installDir -InstalledExecutable $installedExe `
+        -GraceSeconds $GracefulShutdownSeconds
+
+      $reverified = Read-VerifiedInstallerManifest -Path $MetadataPath -AllowedRoot $AllowedInstallerRoot
+      if ($reverified.Path -ne $installerMetadata.Path -or
+          $reverified.Sha256 -ne $installerMetadata.Sha256 -or
+          $reverified.PayloadSha256 -ne $installerMetadata.PayloadSha256 -or
+          $reverified.PayloadSize -ne $installerMetadata.PayloadSize) {
+        throw 'Installer manifest changed during shutdown; installation aborted'
       }
+      Write-Step 'Installer and expected payload reverified after shutdown'
+      Assert-NoUnrelatedGgAppProcesses -InstalledExecutable $installedExe
+      Write-Step 'No unrelated current-user gg-coder-local-fork.exe processes remain'
+
+      $transactionStarted = $true
+      Invoke-VerifiedInstallTransaction -InstallDirectory $installDir -InstalledExecutable $installedExe `
+        -InstallerManifest $reverified -WasRunning $wasRunning -ExpectedVersion $validatedExpectedVersion
+    } catch {
+      $preTransactionFailure = $_.Exception.Message
+      if (-not $transactionStarted -and $wasRunning -and
+          (Test-Path -LiteralPath $installedExe -PathType Leaf) -and
+          @(Get-AppRootSnapshots -InstalledExecutable $installedExe).Count -eq 0) {
+        try {
+          $null = Start-VerifiedApp -ExecutablePath $installedExe
+          Write-Step 'Restarted unchanged GG Coder Local Fork after pre-install failure'
+        } catch {
+          throw "Pre-install failure: $preTransactionFailure. Failed to restart unchanged GG Coder Local Fork: $($_.Exception.Message)"
+        }
+      }
+      throw
     }
-    throw
+  } finally {
+    if ($mutexHeld) { $installMutex.ReleaseMutex() }
+    $installMutex.Dispose()
   }
 }
 
-if (-not $LibraryOnly) {
+function Remove-CompletedLocalForkInstallerTask([string]$TaskName) {
+  if ($TaskName -notmatch '^ggcoder-local-launch-\d+-[0-9a-f]{32}$') {
+    throw "Refusing to delete unexpected scheduled task name: $TaskName"
+  }
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $cleanupOutput = & schtasks.exe /Delete /TN $TaskName /F 2>&1
+    $cleanupExitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  if ($cleanupExitCode -ne 0) {
+    throw "Scheduled-task cleanup failed for ${TaskName}: $($cleanupOutput -join ' ')"
+  }
+  Write-Step "Removed scheduled task: $TaskName"
+}
+
+function Invoke-LocalPatchedInstallHelper([string]$TaskName) {
   $helperExitCode = 0
   try {
     Invoke-LocalPatchedInstall
@@ -981,19 +1071,17 @@ if (-not $LibraryOnly) {
     Write-Step "FAILED: $($_.Exception.Message)"
     $helperExitCode = 1
   } finally {
-    $previousErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
     try {
-      $cleanupOutput = & schtasks.exe /Delete /TN $TaskName /F 2>&1
-      $cleanupExitCode = $LASTEXITCODE
-    } finally {
-      $ErrorActionPreference = $previousErrorActionPreference
+      Remove-CompletedLocalForkInstallerTask -TaskName $TaskName
+    } catch {
+      Write-Step "FAILED: $($_.Exception.Message)"
+      $helperExitCode = 1
     }
-    if ($cleanupExitCode -eq 0) {
-      Write-Step "Removed scheduled task: $TaskName"
-    } else {
-      Write-Step "Scheduled-task cleanup warning for ${TaskName}: $($cleanupOutput -join ' ')"
-    }
+    Write-Step "HELPER_EXIT code=$helperExitCode"
   }
-  exit $helperExitCode
+  $helperExitCode
+}
+
+if (-not $LibraryOnly) {
+  exit (Invoke-LocalPatchedInstallHelper -TaskName $TaskName)
 }

@@ -77,7 +77,13 @@ function fixture({ installed = "current", malformed = false } = {}) {
 
 function runScenario(
   files,
-  { live = true, wrongPath = false, ambiguous = false, installerFailure = false } = {},
+  {
+    live = true,
+    wrongPath = false,
+    ambiguous = false,
+    installerFailure = false,
+    replaceDuringStability = false,
+  } = {},
 ) {
   const wrongExecutable = join(files.root, "wrong", "gg-coder-local-fork.exe");
   const driver = `
@@ -89,10 +95,13 @@ $script:MockExecutable = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'GG
 $script:InstallerCalls = 0
 $script:InstallerAllowedRoot = $null
 $script:StarterCalls = 0
+$script:ProcessSamples = 0
 function New-MockRoot([int]$ProcessId, [string]$Path) {
-  [pscustomobject]@{ ProcessId = $ProcessId; ParentProcessId = 900; ExecutablePath = $Path; CreationTicks = 638000000000000000L + $ProcessId }
+  $replacementTicks = if (${replaceDuringStability ? "$true" : "$false"} -and $script:ProcessSamples -ge 4) { 1 } else { 0 }
+  [pscustomobject]@{ ProcessId = $ProcessId; ParentProcessId = 900; ExecutablePath = $Path; CreationTicks = 638000000000000000L + $ProcessId + $replacementTicks }
 }
 function Get-LocalForkRootProcesses {
+  $script:ProcessSamples++
   if (${ambiguous ? "$true" : "$false"}) {
     return @((New-MockRoot 4101 $script:MockExecutable), (New-MockRoot 4102 $script:MockExecutable))
   }
@@ -101,7 +110,7 @@ function Get-LocalForkRootProcesses {
   return @((New-MockRoot 4101 $path))
 }
 function Invoke-GuardedLocalForkInstaller {
-  param([string]$ScriptPath, [string]$ManifestPath, [string]$AllowedRoot, [string]$InstallerLogPath)
+  param([string]$ScriptPath, [string]$ManifestPath, [string]$AllowedRoot, [string]$InstallerLogPath, [string]$ExpectedVersion)
   $script:InstallerCalls++
   $script:InstallerAllowedRoot = $AllowedRoot
   if (${installerFailure ? "$true" : "$false"}) { throw 'fixture installer failure' }
@@ -121,6 +130,7 @@ try {
     AllowedInstallerRoot = ${psLiteral(files.artifactRoot)}
     ExpectedExecutable = ${psLiteral(files.executablePath)}
     LauncherLogPath = ${psLiteral(files.logPath)}
+    ExpectedVersion = '0.53.9'
   }
   $result = Invoke-CanonicalLocalForkLaunch @invokeParams
   [pscustomobject]@{ ok = $true; result = $result; installerCalls = $script:InstallerCalls; installerAllowedRoot = $script:InstallerAllowedRoot; starterCalls = $script:StarterCalls } | ConvertTo-Json -Depth 6 -Compress
@@ -136,7 +146,10 @@ try {
   return JSON.parse(stdout.trim().split(/\r?\n/).at(-1));
 }
 
-function runTaskHandoff(files, { startFailure = false } = {}) {
+function runTaskHandoff(
+  files,
+  { startFailure = false, expectedVersion = "0.53.9", scriptPath } = {},
+) {
   const installerLogPath = join(files.root, "install logs", "guarded install.log");
   const driver = `
 $ErrorActionPreference = 'Stop'
@@ -182,10 +195,11 @@ function Unregister-ScheduledTask {
 }
 try {
   $invokeParams = @{
-    ScriptPath = ${psLiteral(join(import.meta.dirname, "install-local-patched.ps1"))}
+    ScriptPath = ${psLiteral(scriptPath ?? join(import.meta.dirname, "install-local-patched.ps1"))}
     ManifestPath = ${psLiteral(files.manifestPath)}
     AllowedRoot = ${psLiteral(files.artifactRoot)}
     InstallerLogPath = ${psLiteral(installerLogPath)}
+    ExpectedVersion = ${psLiteral(expectedVersion)}
   }
   $result = Invoke-GuardedLocalForkInstaller @invokeParams
   $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($script:CapturedEncodedCommand))
@@ -195,7 +209,8 @@ try {
     taskName = $script:CapturedTaskName; powerShellPath = $script:CapturedPowerShellPath; decodedCommand = $decoded;
     expectedManifestPath = [IO.Path]::GetFullPath($invokeParams.ManifestPath);
     expectedLogPath = [IO.Path]::GetFullPath($invokeParams.InstallerLogPath);
-    expectedAllowedRoot = [IO.Path]::GetFullPath($invokeParams.AllowedRoot)
+    expectedAllowedRoot = [IO.Path]::GetFullPath($invokeParams.AllowedRoot);
+    expectedVersion = $invokeParams.ExpectedVersion
   } | ConvertTo-Json -Depth 6 -Compress
 } catch {
   [pscustomobject]@{
@@ -299,9 +314,25 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
     expect(result.decodedCommand).toContain(
       `-AllowedInstallerRoot ${psLiteral(result.expectedAllowedRoot)}`,
     );
-    expect(readFileSync(join(import.meta.dirname, "install-local-patched.ps1"), "utf8")).toContain(
-      "& schtasks.exe /Delete /TN $TaskName /F",
-    );
+    expect(result.decodedCommand).toContain(`-ExpectedVersion ${psLiteral("0.53.9")}`);
+    expect(result.taskName).toMatch(/^ggcoder-local-launch-\d+-[0-9a-f]{32}$/);
+  });
+
+  it.each(["", "v0.53.9", "0.53", "0.53.9-beta", "0.53.9;exit 0"])(
+    "rejects malformed expected version %j before task registration",
+    (expectedVersion) => {
+      const files = fixture({ installed: "missing" });
+      const result = runTaskHandoff(files, { expectedVersion });
+      expect(result).toMatchObject({ ok: false, registerCalls: 0, startCalls: 0 });
+      expect(result.error).toContain("expected version");
+    },
+  );
+
+  it("rejects a noncanonical installer script before task registration", () => {
+    const files = fixture({ installed: "missing" });
+    const result = runTaskHandoff(files, { scriptPath: join(files.root, "install-local-patched.ps1") });
+    expect(result).toMatchObject({ ok: false, registerCalls: 0, startCalls: 0 });
+    expect(result.error).toContain("non-canonical guarded installer script");
   });
 
   it("removes only an unstarted task when scheduled-task startup fails", () => {
@@ -335,6 +366,13 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
     const result = runScenario(files, { ambiguous: true });
     expect(result).toMatchObject({ ok: false, installerCalls: 0, starterCalls: 0 });
     expect(result.error).toContain("Ambiguous Local Fork roots");
+  });
+
+  it("fails closed when the root identity changes during startup stability", () => {
+    const files = fixture();
+    const result = runScenario(files, { replaceDuringStability: true });
+    expect(result).toMatchObject({ ok: false, installerCalls: 0, starterCalls: 0 });
+    expect(result.error).toContain("stable identity");
   });
 
   it("fails closed when the guarded installer fails", () => {

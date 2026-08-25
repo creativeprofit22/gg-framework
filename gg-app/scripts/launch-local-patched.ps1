@@ -2,7 +2,8 @@ param(
   [switch]$LibraryOnly,
   [string]$MetadataPath,
   [string]$InstallerScriptPath,
-  [string]$LogPath
+  [string]$LogPath,
+  [string]$ExpectedVersion
 )
 
 Set-StrictMode -Version Latest
@@ -52,6 +53,13 @@ function Assert-Sha256([object]$Value, [string]$Description) {
   $text = [string]$Value
   if ($text -notmatch '^[0-9a-fA-F]{64}$') { throw "Malformed Local Fork manifest: invalid $Description" }
   $text.ToLowerInvariant()
+}
+
+function Assert-ExpectedVersion([string]$Value) {
+  if ($Value -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+    throw 'Invalid expected version: require numeric major.minor.patch'
+  }
+  $Value
 }
 
 function Assert-PositiveSize([object]$Value, [string]$Description) {
@@ -189,7 +197,8 @@ function New-LocalForkInstallerEncodedCommand(
   [string]$TaskName,
   [string]$ManifestPath,
   [string]$InstallerLogPath,
-  [string]$AllowedRoot
+  [string]$AllowedRoot,
+  [string]$ExpectedVersion
 ) {
   $command = @(
     '&', (ConvertTo-SingleQuotedPowerShellLiteral $ScriptPath),
@@ -197,7 +206,8 @@ function New-LocalForkInstallerEncodedCommand(
     '-DelaySeconds', '1',
     '-MetadataPath', (ConvertTo-SingleQuotedPowerShellLiteral $ManifestPath),
     '-LogPath', (ConvertTo-SingleQuotedPowerShellLiteral $InstallerLogPath),
-    '-AllowedInstallerRoot', (ConvertTo-SingleQuotedPowerShellLiteral $AllowedRoot)
+    '-AllowedInstallerRoot', (ConvertTo-SingleQuotedPowerShellLiteral $AllowedRoot),
+    '-ExpectedVersion', (ConvertTo-SingleQuotedPowerShellLiteral $ExpectedVersion)
   ) -join ' '
   [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
 }
@@ -227,8 +237,10 @@ function Invoke-GuardedLocalForkInstaller(
   [string]$ScriptPath,
   [string]$ManifestPath,
   [string]$AllowedRoot,
-  [string]$InstallerLogPath
+  [string]$InstallerLogPath,
+  [string]$ExpectedVersion
 ) {
+  $validatedVersion = Assert-ExpectedVersion -Value $ExpectedVersion
   $expectedScript = [IO.Path]::GetFullPath($script:DefaultInstallerScriptPath)
   $actualScript = Get-FullPath -Path $ScriptPath -Description 'Guarded installer script path'
   if (-not $actualScript.Equals($expectedScript, [StringComparison]::OrdinalIgnoreCase)) {
@@ -242,7 +254,8 @@ function Invoke-GuardedLocalForkInstaller(
   $actualAllowedRoot = Get-FullPath -Path $AllowedRoot -Description 'Allowed installer root'
   $taskName = 'ggcoder-local-launch-{0}-{1}' -f $PID, [Guid]::NewGuid().ToString('N')
   $encodedCommand = New-LocalForkInstallerEncodedCommand -ScriptPath $actualScript -TaskName $taskName `
-    -ManifestPath $actualManifest -InstallerLogPath $actualLog -AllowedRoot $actualAllowedRoot
+    -ManifestPath $actualManifest -InstallerLogPath $actualLog -AllowedRoot $actualAllowedRoot `
+    -ExpectedVersion $validatedVersion
   $powerShellPath = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
   if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
     throw "System PowerShell executable is missing: $powerShellPath"
@@ -271,7 +284,8 @@ function Confirm-LiveCanonicalRoot(
   [string]$ExpectedExecutable,
   [object]$Manifest,
   [int]$ExpectedPid = 0,
-  [int]$TimeoutSeconds = 15
+  [int]$TimeoutSeconds = 15,
+  [ValidateRange(1, 30000)][int]$StabilityMilliseconds = 3000
 ) {
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   do {
@@ -284,13 +298,22 @@ function Confirm-LiveCanonicalRoot(
     }
   } while ((Get-Date) -lt $deadline)
   if (-not $root) { throw 'Verified Local Fork root did not remain live during startup' }
+  $initialRoot = $root
+  Start-Sleep -Milliseconds $StabilityMilliseconds
+  $stableProcesses = @(Get-LocalForkRootProcesses)
+  $stableRoot = Assert-UnambiguousLocalForkProcess -Processes $stableProcesses -ExpectedExecutable $ExpectedExecutable
+  if (-not $stableRoot -or $stableRoot.ProcessId -ne $initialRoot.ProcessId -or
+      $stableRoot.CreationTicks -ne $initialRoot.CreationTicks -or
+      -not $stableRoot.ExecutablePath.Equals($initialRoot.ExecutablePath, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Local Fork root PID $($initialRoot.ProcessId) did not retain a stable identity during startup"
+  }
   $actualHash = Assert-FileMetadata $ExpectedExecutable $Manifest.PayloadSize $Manifest.PayloadSha256 `
     'Live Local Fork root executable'
   [pscustomobject]@{
-    ProcessId = [int]$root.ProcessId
-    ParentProcessId = [int]$root.ParentProcessId
-    CreationTicks = [long]$root.CreationTicks
-    ExecutablePath = [string]$root.ExecutablePath
+    ProcessId = [int]$stableRoot.ProcessId
+    ParentProcessId = [int]$stableRoot.ParentProcessId
+    CreationTicks = [long]$stableRoot.CreationTicks
+    ExecutablePath = [string]$stableRoot.ExecutablePath
     Sha256 = $actualHash
   }
 }
@@ -301,8 +324,10 @@ function Invoke-CanonicalLocalForkLaunch(
   [string]$AllowedManifestRoot = $script:RepositoryRoot,
   [string]$AllowedInstallerRoot = $script:DefaultInstallerRoot,
   [string]$ExpectedExecutable = (Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\gg-coder-local-fork.exe'),
-  [string]$LauncherLogPath = $script:DefaultLogPath
+  [string]$LauncherLogPath = $script:DefaultLogPath,
+  [string]$ExpectedVersion
 ) {
+  $validatedVersion = Assert-ExpectedVersion -Value $ExpectedVersion
   $canonicalExecutable = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\gg-coder-local-fork.exe'))
   $expectedFullPath = Get-FullPath -Path $ExpectedExecutable -Description 'Installed Local Fork executable path'
   if (-not $expectedFullPath.Equals($canonicalExecutable, [StringComparison]::OrdinalIgnoreCase)) {
@@ -318,7 +343,8 @@ function Invoke-CanonicalLocalForkLaunch(
   if (-not $installedCurrent) {
     Write-LaunchLog "INSTALL required; installed payload missing or stale; expectedSha256=$($manifest.PayloadSha256)" $LauncherLogPath
     $handoff = Invoke-GuardedLocalForkInstaller -ScriptPath $GuardedInstallerPath -ManifestPath $manifest.ManifestPath `
-      -AllowedRoot $AllowedInstallerRoot -InstallerLogPath (Join-Path (Split-Path -Parent $LauncherLogPath) 'install-local-patched.log')
+      -AllowedRoot $AllowedInstallerRoot -InstallerLogPath (Join-Path (Split-Path -Parent $LauncherLogPath) 'install-local-patched.log') `
+      -ExpectedVersion $validatedVersion
     Write-LaunchLog "SUCCESS disposition=install-scheduled taskName=$($handoff.TaskName)" $LauncherLogPath
     return [pscustomobject]@{
       disposition = 'install-scheduled'
@@ -327,6 +353,7 @@ function Invoke-CanonicalLocalForkLaunch(
       installerSha256 = $manifest.InstallerSha256
       executablePath = $expectedFullPath
       taskName = $handoff.TaskName
+      expectedVersion = $validatedVersion
     }
   }
 
@@ -359,7 +386,8 @@ if (-not $LibraryOnly) {
     $effectiveInstallerScript = if ($InstallerScriptPath) { $InstallerScriptPath } else { $script:DefaultInstallerScriptPath }
     $effectiveLogPath = if ($LogPath) { $LogPath } else { $script:DefaultLogPath }
     Invoke-CanonicalLocalForkLaunch -ManifestPath $effectiveMetadataPath `
-      -GuardedInstallerPath $effectiveInstallerScript -LauncherLogPath $effectiveLogPath | ConvertTo-Json -Depth 4 -Compress
+      -GuardedInstallerPath $effectiveInstallerScript -LauncherLogPath $effectiveLogPath `
+      -ExpectedVersion $ExpectedVersion | ConvertTo-Json -Depth 4 -Compress
   } catch {
     $effectiveLogPath = if ($LogPath) { $LogPath } else { $script:DefaultLogPath }
     try { Write-LaunchLog "FAILED $($_.Exception.Message)" $effectiveLogPath } catch { }

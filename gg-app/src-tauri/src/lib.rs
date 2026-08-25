@@ -16,7 +16,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+#[cfg(any(test, not(target_os = "windows")))]
+use std::time::SystemTime;
 use unicode_normalization::UnicodeNormalization;
 
 #[cfg(unix)]
@@ -5470,19 +5472,49 @@ fn run_local_patched_update(
             if summarize_decisions {
                 write_decision_summary(&app, &repo, sidecar);
             }
-            let installer = newest_rebuilt_installer(&repo);
-            let opened = open_rebuilt_update_result(&app, installer.as_deref(), &repo);
-            emit_local_patched_update(
-                &app,
-                serde_json::json!({
-                    "type": "completed",
-                    "exitCode": status.code().unwrap_or(0),
-                    "installerPath": installer.map(|path| path.to_string_lossy().to_string()),
-                    "opened": opened,
-                    "message": completed_local_update_message(opened),
-                }),
-            );
-            clear_local_patched_update_running(&app);
+            #[cfg(target_os = "windows")]
+            {
+                match schedule_local_patched_installer_handoff(&repo) {
+                    Ok(disposition) => {
+                        emit_local_patched_update(
+                            &app,
+                            serde_json::json!({
+                                "type": "completed",
+                                "exitCode": status.code().unwrap_or(0),
+                                "disposition": disposition,
+                                "message": completed_local_update_message(disposition),
+                            }),
+                        );
+                        clear_local_patched_update_running(&app);
+                        if disposition == "install-scheduled" {
+                            app.exit(0);
+                        }
+                    }
+                    Err(error) => finish_local_patched_update(
+                        &app,
+                        serde_json::json!({
+                            "type": "error",
+                            "message": format!("Failed to schedule the guarded Local Fork installer: {error}"),
+                        }),
+                    ),
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let installer = newest_rebuilt_installer(&repo);
+                let opened = open_rebuilt_update_result(&app, installer.as_deref(), &repo);
+                emit_local_patched_update(
+                    &app,
+                    serde_json::json!({
+                        "type": "completed",
+                        "exitCode": status.code().unwrap_or(0),
+                        "installerPath": installer.map(|path| path.to_string_lossy().to_string()),
+                        "opened": opened,
+                        "message": completed_local_update_message(opened),
+                    }),
+                );
+                clear_local_patched_update_running(&app);
+            }
         }
         Ok(status) => finish_local_patched_update(
             &app,
@@ -5621,6 +5653,80 @@ fn stream_local_update_output<R: Read + Send + 'static>(
     })
 }
 
+#[cfg(target_os = "windows")]
+fn local_patched_installer_handoff_command(repo: &Path) -> Command {
+    let powershell =
+        PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+    let mut command = Command::new(powershell);
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
+    command.arg(
+        repo.join("gg-app")
+            .join("scripts")
+            .join("launch-local-patched.ps1"),
+    );
+    command.arg("-MetadataPath");
+    command.arg(
+        repo.join(".gg")
+            .join("local-fixes")
+            .join("latest-installer.json"),
+    );
+    command.args(["-ExpectedVersion", env!("CARGO_PKG_VERSION")]);
+    command
+}
+
+#[cfg(target_os = "windows")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalPatchedInstallerHandoff {
+    disposition: String,
+    expected_version: String,
+}
+
+#[cfg(target_os = "windows")]
+fn parse_local_patched_installer_handoff(
+    stdout: &[u8],
+    expected_version: &str,
+) -> Result<&'static str, String> {
+    let result: LocalPatchedInstallerHandoff = serde_json::from_slice(stdout)
+        .map_err(|error| format!("launcher returned malformed output: {error}"))?;
+    if result.expected_version != expected_version {
+        return Err("launcher did not confirm the expected version".into());
+    }
+    match result.disposition.as_str() {
+        "install-scheduled" => Ok("install-scheduled"),
+        "existing-and-verified" => Ok("existing-and-verified"),
+        _ => Err("launcher returned an unexpected disposition".into()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn schedule_local_patched_installer_handoff(repo: &Path) -> Result<&'static str, String> {
+    let output = hide_console(&mut local_patched_installer_handoff_command(repo))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("failed to start canonical launcher: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "launcher exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_local_patched_installer_handoff(&output.stdout, env!("CARGO_PKG_VERSION"))
+}
+
+#[cfg(not(target_os = "windows"))]
 fn newest_rebuilt_installer(repo: &Path) -> Option<PathBuf> {
     let bundle = repo.join("gg-app/src-tauri/target/release/bundle");
     let directories = ["nsis", "msi", "dmg", "appimage", "deb", "rpm"];
@@ -5652,6 +5758,7 @@ fn newest_rebuilt_installer(repo: &Path) -> Option<PathBuf> {
     newest.map(|(_, path)| path)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn open_rebuilt_update_result(
     app: &tauri::AppHandle,
     installer: Option<&Path>,
@@ -5680,6 +5787,9 @@ fn open_rebuilt_update_result(
 
 fn completed_local_update_message(opened: &str) -> &'static str {
     match opened {
+        "install-scheduled" => {
+            "Verified replacement scheduled. GG Coder will close and restart after installation."
+        }
         "installer" => "Patched installer built and opened. Finish installation to update the app.",
         "folder" => "Patched installer built. Opened its containing folder.",
         _ => "Patched installer built under gg-app/src-tauri/target/release/bundle.",
@@ -10852,6 +10962,65 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("gg-app-{label}-{}-{unique}", std::process::id()))
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn local_patched_installer_handoff_uses_canonical_launcher_and_version() {
+        let repo = Path::new(r"C:\repo");
+        let command = local_patched_installer_handoff_command(repo);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            Path::new(command.get_program()),
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+        );
+        assert_eq!(
+            args,
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                r"C:\repo\gg-app\scripts\launch-local-patched.ps1",
+                "-MetadataPath",
+                r"C:\repo\.gg\local-fixes\latest-installer.json",
+                "-ExpectedVersion",
+                env!("CARGO_PKG_VERSION"),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn local_patched_installer_handoff_accepts_verified_no_install_result() {
+        for disposition in ["install-scheduled", "existing-and-verified"] {
+            let stdout = format!(
+                r#"{{"disposition":"{disposition}","expectedVersion":"{}"}}"#,
+                env!("CARGO_PKG_VERSION")
+            );
+            assert_eq!(
+                parse_local_patched_installer_handoff(stdout.as_bytes(), env!("CARGO_PKG_VERSION"))
+                    .expect("canonical launcher result"),
+                disposition
+            );
+        }
+        assert!(
+            parse_local_patched_installer_handoff(b"not-json", env!("CARGO_PKG_VERSION")).is_err()
+        );
+        assert!(parse_local_patched_installer_handoff(
+            br#"{"disposition":"unexpected","expectedVersion":"0.53.9"}"#,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .is_err());
     }
 
     #[test]

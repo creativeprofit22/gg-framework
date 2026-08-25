@@ -5,28 +5,112 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const scriptPath = join(import.meta.dirname, "install-local-patched.ps1");
 const temporaryDirectories = [];
+const processTreeFixtureSource = String.raw`
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+using System.Windows.Forms;
+
+public static class LocalForkProcessFixture {
+  [STAThread]
+  public static void Main(string[] args) {
+    string name = Path.GetFileNameWithoutExtension(Process.GetCurrentProcess().MainModule.FileName);
+    if (name.Equals("gg-coder-local-fork", StringComparison.OrdinalIgnoreCase)) {
+      StartChild("ggnode.exe");
+      Application.EnableVisualStyles();
+      Form window = new Form();
+      window.Text = "GG Coder Local Fork fixture";
+      window.WindowState = FormWindowState.Minimized;
+      window.ShowInTaskbar = true;
+      Application.Run(window);
+      return;
+    }
+    if (name.Equals("ggnode", StringComparison.OrdinalIgnoreCase)) StartChild("app-sidecar.exe");
+    int parentId = Int32.Parse(args[0]);
+    try { Process.GetProcessById(parentId).WaitForExit(); } catch (ArgumentException) { }
+  }
+
+  private static void StartChild(string fileName) {
+    ProcessStartInfo info = new ProcessStartInfo(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, fileName), Process.GetCurrentProcess().Id.ToString());
+    info.UseShellExecute = false;
+    info.CreateNoWindow = true;
+    Process.Start(info);
+  }
+}`;
 
 function psLiteral(value) {
   return `'${value.replaceAll("'", "''")}'`;
 }
 
-function runPowerShell(body) {
-  const command = `& { . ${psLiteral(scriptPath)} -TaskName 'test-only' -LibraryOnly; ${body} }`;
+function runPowerShell(body, options = {}) {
+  const command = `& { . ${psLiteral(scriptPath)} -TaskName 'test-only' -ExpectedVersion '0.53.9' -LibraryOnly; ${body} }`;
   return spawnSync(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+    { encoding: "utf8", windowsHide: true, ...options },
+  );
+}
+
+function fixtureLifecycleSnapshot() {
+  const roots = readdirSync(tmpdir(), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("gg-installer-helper-"))
+    .map((entry) => realpathSync(join(tmpdir(), entry.name)))
+    .sort();
+  if (process.platform !== "win32") return { pids: [], roots };
+  const result = spawnSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$temp = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\') + '\\'; @(Get-CimInstance Win32_Process | Where-Object { if (-not $_.ExecutablePath) { return $false }; try { $path = [IO.Path]::GetFullPath([string]$_.ExecutablePath) } catch { return $false }; $path.StartsWith($temp, [StringComparison]::OrdinalIgnoreCase) -and $path -like '*\\gg-installer-helper-*\\GG Coder Local Fork\\*' } | Select-Object -ExpandProperty ProcessId | Sort-Object) | ConvertTo-Json -Compress`,
+    ],
     { encoding: "utf8", windowsHide: true },
   );
+  expect(result.status, result.stderr).toBe(0);
+  const parsed = result.stdout.trim() ? JSON.parse(result.stdout.trim()) : [];
+  return { pids: (Array.isArray(parsed) ? parsed : [parsed]).sort((a, b) => a - b), roots };
+}
+
+function cleanupFixtureRoot(root) {
+  if (process.platform === "win32" && existsSync(root)) {
+    const pidFiles = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".fixture-pid"))
+      .map((entry) => Number.parseInt(readFileSync(join(root, entry.name), "utf8"), 10))
+      .filter(Number.isInteger);
+    const result = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$root = [IO.Path]::GetFullPath(${psLiteral(root)}).TrimEnd('\\') + '\\'; $recorded = @(${pidFiles.join(",")}); $owned = @(Get-CimInstance Win32_Process | Where-Object { if ($recorded -contains [int]$_.ProcessId) { return $true }; if (-not $_.ExecutablePath) { return $false }; try { $path = [IO.Path]::GetFullPath([string]$_.ExecutablePath) } catch { return $false }; $path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) }); foreach ($item in $owned) { Stop-Process -Id $item.ProcessId -Force -ErrorAction SilentlyContinue }; $deadline = [DateTime]::UtcNow.AddSeconds(3); do { $remaining = @(Get-CimInstance Win32_Process | Where-Object { $owned.ProcessId -contains $_.ProcessId }); if ($remaining.Count -eq 0) { break }; Start-Sleep -Milliseconds 50 } while ([DateTime]::UtcNow -lt $deadline); if ($remaining.Count -gt 0) { throw "Fixture cleanup timed out for PIDs $($remaining.ProcessId -join ', ')" }`,
+      ],
+      { encoding: "utf8", windowsHide: true },
+    );
+    expect(result.status, result.stderr).toBe(0);
+  }
+  rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+function withFixtureCleanup(root, action) {
+  try {
+    return action();
+  } finally {
+    cleanupFixtureRoot(root);
+  }
 }
 
 function sha256(bytes) {
@@ -121,18 +205,30 @@ function withExclusiveFileLock(path, readyPath, holdMilliseconds, body) {
 }
 
 function transactionPrelude(fixture) {
-  return `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:registrationRestores = 0; function Get-LocalForkRegistrationSnapshot { [pscustomobject]@{ Exists = $true; Values = @() } }; function Restore-LocalForkRegistration([object]$Snapshot) { $script:registrationRestores += 1 }; $rawManifest = ${psLiteral(JSON.stringify(fixture.manifest))} | ConvertFrom-Json; $manifest = [pscustomobject]@{ Path = $rawManifest.path; PayloadSize = [int64]$rawManifest.payload.size; PayloadSha256 = [string]$rawManifest.payload.sha256 }; `;
+  return `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:registrationRestores = 0; function Get-LocalForkRegistrationSnapshot { [pscustomobject]@{ Exists = $true; Values = @() } }; function Restore-LocalForkRegistration([object]$Snapshot) { $script:registrationRestores += 1 }; function Assert-InstalledProductVersion { '0.53.9' }; $rawManifest = ${psLiteral(JSON.stringify(fixture.manifest))} | ConvertFrom-Json; $manifest = [pscustomobject]@{ Path = $rawManifest.path; PayloadSize = [int64]$rawManifest.payload.size; PayloadSha256 = [string]$rawManifest.payload.sha256 }; `;
 }
 
+let lifecycleBaseline;
+
+beforeAll(() => {
+  lifecycleBaseline = fixtureLifecycleSnapshot();
+});
+
 afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { recursive: true, force: true });
-  }
+  for (const directory of temporaryDirectories.splice(0)) cleanupFixtureRoot(directory);
+});
+
+afterAll(() => {
+  expect(fixtureLifecycleSnapshot()).toEqual(lifecycleBaseline);
 });
 
 const windowsDescribe = process.platform === "win32" ? describe : describe.skip;
 
 windowsDescribe("detached local installer helper", () => {
+  it("starts from a leak-free process and temp-root snapshot", () => {
+    expect(lifecycleBaseline).toEqual({ pids: [], roots: [] });
+  });
+
   it("hashes files without relying on Get-FileHash", () => {
     const fixture = installerFixture();
     const fixturePath = join(fixture.root, "hash-fixture.bin");
@@ -510,6 +606,227 @@ windowsDescribe("detached local installer helper", () => {
     expect(result.stderr).toContain("Unable to enumerate gg-coder-local-fork.exe processes safely");
   });
 
+  it("fails closed on installed-directory CIM errors before backup or NSIS", () => {
+    const fixture = transactionFixture();
+    const result = runPowerShell(
+      transactionPrelude(fixture) +
+        `$script:hashCalls = 0; $script:renameCalls = 0; $script:installerCalls = 0; ` +
+        `function Get-CimInstance { throw 'simulated installed-directory CIM failure' }; ` +
+        `function Get-PreInstallerFileMetadata { $script:hashCalls += 1 }; ` +
+        `function Move-InstallDirectoryToBackup { $script:renameCalls += 1 }; ` +
+        `function Invoke-NsisInstaller { $script:installerCalls += 1 }; ` +
+        `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $false -ExpectedVersion '0.53.9' } catch { $failure = $_.Exception.Message }; ` +
+        `[pscustomobject]@{ Failure = $failure; HashCalls = $script:hashCalls; RenameCalls = $script:renameCalls; InstallerCalls = $script:installerCalls } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("Unable to enumerate installed Local Fork processes"),
+      HashCalls: 0,
+      RenameCalls: 0,
+      InstallerCalls: 0,
+    });
+  });
+
+  it("requires process and Restart Manager zero ownership in the same probe", () => {
+    const fixture = transactionFixture();
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:processProbe = 0; $script:rmProbe = 0; $script:events = @(); ` +
+        `function Get-InstalledAppProcesses { $script:processProbe += 1; if ($script:processProbe -eq 2) { return @([pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; Name = 'app-sidecar.exe'; ExecutablePath = ${psLiteral(join(fixture.installDirectory, "app-sidecar.exe"))} }) }; @() }; ` +
+        `function Get-RestartManagerLockState { $script:rmProbe += 1; if ($script:rmProbe -eq 1) { return [pscustomobject]@{ ResourceCount = 1; Status = 'owners'; Owners = @([pscustomobject]@{ ProcessId = 303; AppName = 'lock-holder'; Restartable = $false }) } }; [pscustomobject]@{ ResourceCount = 1; Status = 'none'; Owners = @() } }; ` +
+        `function Start-Sleep {}; ` +
+        `Wait-LocalForkReplacementGate -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -TimeoutMilliseconds 2000 -PollIntervalMilliseconds 10; ` +
+        `$script:events += 'installer-started'; [pscustomobject]@{ ProcessProbes = $script:processProbe; RestartManagerProbes = $script:rmProbe; Events = $script:events } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      ProcessProbes: 3,
+      RestartManagerProbes: 3,
+      Events: ["installer-started"],
+    });
+  });
+
+  it("observes and gracefully drains a real root-to-sidecar tree before a held payload lock clears", () => {
+    const fixture = transactionFixture();
+    const fixtureSourcePath = join(fixture.root, "process-tree-fixture.cs");
+    const ggNodePath = join(fixture.installDirectory, "ggnode.exe");
+    const sidecarPath = join(fixture.installDirectory, "app-sidecar.exe");
+    const lockReadyPath = join(fixture.root, "integration-lock-ready");
+    const lockPidPath = join(fixture.root, "lock-owner.fixture-pid");
+    writeFileSync(fixtureSourcePath, processTreeFixtureSource);
+
+    const result = withFixtureCleanup(fixture.root, () =>
+      runPowerShell(
+        `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $rootProcess = $null; $lockOwner = $null; $captured = @(); try { ` +
+        `Remove-Item -LiteralPath ${psLiteral(fixture.installedExecutable)} -Force; ` +
+        `Add-Type -Path ${psLiteral(fixtureSourcePath)} -OutputAssembly ${psLiteral(fixture.installedExecutable)} -OutputType WindowsApplication -ReferencedAssemblies @('System.Windows.Forms.dll','System.Drawing.dll'); ` +
+        `Copy-Item -LiteralPath ${psLiteral(fixture.installedExecutable)} -Destination ${psLiteral(ggNodePath)}; Copy-Item -LiteralPath ${psLiteral(fixture.installedExecutable)} -Destination ${psLiteral(sidecarPath)}; ` +
+        `$rootProcess = Start-Process -FilePath ${psLiteral(fixture.installedExecutable)} -PassThru; $fixtureInstalledExecutable = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $($rootProcess.Id)" -ErrorAction Stop).ExecutablePath; $fixtureInstallDirectory = Split-Path -Parent $fixtureInstalledExecutable; ` +
+        `$treeDeadline = [DateTime]::UtcNow.AddSeconds(5); do { $captured = @(Get-InstalledAppProcesses -InstallDirectory $fixtureInstallDirectory); $rootWindow = Get-Process -Id $rootProcess.Id -ErrorAction SilentlyContinue; if ($rootWindow) { $rootWindow.Refresh() }; if ($captured.Count -lt 3 -or -not $rootWindow -or $rootWindow.MainWindowHandle -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 } } while (($captured.Count -lt 3 -or -not $rootWindow -or $rootWindow.MainWindowHandle -eq [IntPtr]::Zero) -and [DateTime]::UtcNow -lt $treeDeadline); ` +
+        `if ($captured.Count -ne 3 -or -not $rootWindow -or $rootWindow.MainWindowHandle -eq [IntPtr]::Zero) { throw "Fixture process tree did not become ready: count=$($captured.Count) handle=$(if ($rootWindow) { $rootWindow.MainWindowHandle } else { 'missing' }) names=$($captured.Name -join ',')" };  ` +
+        `$lockBody = ${psLiteral(`$lock = [IO.File]::Open(${psLiteral(fixture.installedExecutable)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite); try { [IO.File]::WriteAllText(${psLiteral(lockReadyPath)}, 'ready'); Start-Sleep -Milliseconds 1200 } finally { $lock.Dispose() }`)}; ` +
+        `$lockOwner = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($lockBody))) -PassThru -WindowStyle Hidden; [IO.File]::WriteAllText(${psLiteral(lockPidPath)}, [string]$lockOwner.Id); ` +
+        `$readyDeadline = [DateTime]::UtcNow.AddSeconds(3); while (-not (Test-Path -LiteralPath ${psLiteral(lockReadyPath)})) { if ([DateTime]::UtcNow -ge $readyDeadline) { throw 'Fixture lock did not become ready' }; Start-Sleep -Milliseconds 20 }; ` +
+        `$closeAccepted = $rootWindow.CloseMainWindow(); $timer = [Diagnostics.Stopwatch]::StartNew(); Wait-LocalForkReplacementGate -InstallDirectory $fixtureInstallDirectory -InstalledExecutable $fixtureInstalledExecutable -TimeoutMilliseconds 5000 -PollIntervalMilliseconds 50; $timer.Stop(); ` +
+        `$remaining = @(Get-InstalledAppProcesses -InstallDirectory $fixtureInstallDirectory); ` +
+        `[pscustomobject]@{ CloseAccepted = $closeAccepted; Captured = @($captured | Sort-Object ProcessId); Remaining = $remaining.Count; ElapsedMs = $timer.ElapsedMilliseconds } | ConvertTo-Json -Depth 4 -Compress ` +
+        `} finally { if ($lockOwner -and -not $lockOwner.HasExited) { $lockOwner.Kill(); $lockOwner.WaitForExit() }; if ($fixtureInstallDirectory) { for ($cleanupAttempt = 0; $cleanupAttempt -lt 10; $cleanupAttempt += 1) { $fixtureProcesses = @(Get-InstalledAppProcesses -InstallDirectory $fixtureInstallDirectory); if ($fixtureProcesses.Count -eq 0) { break }; foreach ($item in $fixtureProcesses) { $owned = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue; if ($owned) { $owned.Kill(); $owned.WaitForExit() } }; Start-Sleep -Milliseconds 50 } } }`,
+      { timeout: 12_000 },
+    ));
+
+    expect(result.status, result.stderr).toBe(0);
+    const evidence = JSON.parse(result.stdout.trim());
+    expect(evidence.CloseAccepted).toBe(true);
+    expect(evidence.Captured).toHaveLength(3);
+    expect(evidence.Captured.map((process) => process.Name).sort()).toEqual([
+      "app-sidecar.exe",
+      "gg-coder-local-fork.exe",
+      "ggnode.exe",
+    ]);
+    const byName = Object.fromEntries(evidence.Captured.map((process) => [process.Name, process]));
+    expect(byName["ggnode.exe"].ParentProcessId).toBe(byName["gg-coder-local-fork.exe"].ProcessId);
+    expect(byName["app-sidecar.exe"].ParentProcessId).toBe(byName["ggnode.exe"].ProcessId);
+    expect(evidence.Remaining).toBe(0);
+    expect(evidence.ElapsedMs).toBeGreaterThanOrEqual(700);
+  }, 15_000);
+
+  it("graceful timeout never force-kills, backs up, renames, or invokes NSIS", () => {
+    const fixture = transactionFixture();
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:taskkillCalls = 0; $script:transactionCalls = 0; ` +
+        `$root = [pscustomobject]@{ ProcessId = 101; ParentProcessId = 1; Name = 'gg-coder-local-fork.exe'; ExecutablePath = ${psLiteral(fixture.installedExecutable)}; CreationTicks = 12345 }; ` +
+        `$window = [pscustomobject]@{ MainWindowHandle = [IntPtr]1 }; $window | Add-Member ScriptMethod Refresh {}; $window | Add-Member ScriptMethod CloseMainWindow { return $true }; ` +
+        `function Get-AppRootSnapshots { @($root) }; function Get-Process { $window }; function Get-InstalledAppProcesses { @($root) }; ` +
+        `function taskkill.exe { $script:taskkillCalls += 1 }; function Invoke-VerifiedInstallTransaction { $script:transactionCalls += 1 }; ` +
+        `$failure = ''; try { Stop-GgCoderForInstall -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -GraceSeconds 0 } catch { $failure = $_.Exception.Message }; ` +
+        `[pscustomobject]@{ Failure = $failure; TaskkillCalls = $script:taskkillCalls; TransactionCalls = $script:transactionCalls } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("graceful shutdown"),
+      TaskkillCalls: 0,
+      TransactionCalls: 0,
+    });
+  });
+
+  it("rejects mutex contention before shutdown or filesystem mutation", () => {
+    const fixture = installerFixture();
+    const readyPath = join(fixture.root, "mutex-ready");
+    const holderBody = `$name = "Local\\GG-Coder-Local-Fork-Install-$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value)"; $mutex = [Threading.Mutex]::new($false, $name); try { $null = $mutex.WaitOne(); [IO.File]::WriteAllText(${psLiteral(readyPath)}, 'ready'); Start-Sleep -Seconds 10 } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }`;
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath ?? join(fixture.root, "mutex.log"))}; $DelaySeconds = 0; $script:mutations = 0; ` +
+        `function Stop-GgCoderForInstall { $script:mutations += 1 }; function Invoke-VerifiedInstallTransaction { $script:mutations += 1 }; ` +
+        `$holder = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',${psLiteral(Buffer.from(holderBody, "utf16le").toString("base64"))}) -PassThru -WindowStyle Hidden; try { ` +
+        `$deadline = [DateTime]::UtcNow.AddSeconds(3); while (-not (Test-Path -LiteralPath ${psLiteral(readyPath)})) { if ([DateTime]::UtcNow -ge $deadline) { throw 'mutex holder was not ready' }; Start-Sleep -Milliseconds 20 }; ` +
+        `$failure = ''; try { Invoke-LocalPatchedInstall } catch { $failure = $_.Exception.Message }; [pscustomobject]@{ Failure = $failure; Mutations = $script:mutations; LogExists = Test-Path -LiteralPath $script:InstallLogPath } | ConvertTo-Json -Compress ` +
+        `} finally { if (-not $holder.HasExited) { $holder.Kill(); $holder.WaitForExit() } }`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("already running"),
+      Mutations: 0,
+      LogExists: false,
+    });
+  });
+
+  it("refuses graceful close when a captured PID changes creation identity", () => {
+    const fixture = transactionFixture();
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:closeLookups = 0; ` +
+        `$root = [pscustomobject]@{ ProcessId = 101; ParentProcessId = 1; Name = 'gg-coder-local-fork.exe'; ExecutablePath = ${psLiteral(fixture.installedExecutable)}; CreationTicks = 12345 }; ` +
+        `function Get-AppRootSnapshots { @($root) }; function Get-ProcessSnapshotById { [pscustomobject]@{ ProcessId = 101; ExecutablePath = $root.ExecutablePath; CreationTicks = 54321 } }; function Get-Process { $script:closeLookups += 1 }; ` +
+        `$failure = ''; try { Stop-GgCoderForInstall -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -GraceSeconds 1 } catch { $failure = $_.Exception.Message }; ` +
+        `[pscustomobject]@{ Failure = $failure; CloseLookups = $script:closeLookups } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("changed identity"),
+      CloseLookups: 0,
+    });
+  });
+
+  it("makes task cleanup failure override an otherwise successful helper result", () => {
+    const fixture = installerFixture();
+    const logPath = join(fixture.root, "helper.log");
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(logPath)}; function Invoke-LocalPatchedInstall {}; function Remove-CompletedLocalForkInstallerTask { throw 'fixture cleanup failure' }; Invoke-LocalPatchedInstallHelper -TaskName 'ggcoder-local-launch-1-0123456789abcdef0123456789abcdef'`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("1");
+    expect(readFileSync(logPath, "utf8")).toContain("HELPER_EXIT code=1");
+  });
+
+  it("validates task names and propagates native task deletion failure", () => {
+    const fixture = installerFixture();
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(join(fixture.root, "task-cleanup.log"))}; function schtasks.exe { $global:LASTEXITCODE = 5; 'access denied' }; ` +
+        `$nativeFailure = ''; try { Remove-CompletedLocalForkInstallerTask -TaskName 'ggcoder-local-launch-1-0123456789abcdef0123456789abcdef' } catch { $nativeFailure = $_.Exception.Message }; ` +
+        `$invalidFailure = ''; try { Remove-CompletedLocalForkInstallerTask -TaskName 'unrelated-task' } catch { $invalidFailure = $_.Exception.Message }; ` +
+        `[pscustomobject]@{ NativeFailure = $nativeFailure; InvalidFailure = $invalidFailure } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      NativeFailure: expect.stringContaining("access denied"),
+      InvalidFailure: expect.stringContaining("unexpected scheduled task name"),
+    });
+  });
+
+  it("removes and verifies a partial fresh install after installer failure", () => {
+    const fixture = installerFixture();
+    const installDirectory = join(fixture.root, "GG Coder Local Fork");
+    const installedExecutable = join(installDirectory, "gg-coder-local-fork.exe");
+    const logPath = join(fixture.root, "fresh-cleanup.log");
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(logPath)}; function Wait-LocalForkReplacementGate {}; function Get-LocalForkRegistrationSnapshot { [pscustomobject]@{ Exists = $false; Values = @() } }; function Restore-LocalForkRegistration {}; ` +
+        `$manifest = [pscustomobject]@{ Path = ${psLiteral(fixture.installerPath)}; PayloadSize = ${fixture.payloadBytes.length}; PayloadSha256 = ${psLiteral(sha256(fixture.payloadBytes))} }; ` +
+        `function Invoke-NsisInstaller { New-Item -ItemType Directory -Path ${psLiteral(installDirectory)} | Out-Null; ${writeBytesPowerShell(installedExecutable, fixture.payloadBytes)}; 9 }; ` +
+        `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(installDirectory)} -InstalledExecutable ${psLiteral(installedExecutable)} -InstallerManifest $manifest -WasRunning $false -ExpectedVersion '0.53.9' } catch { $failure = $_.Exception.Message }; ` +
+        `[pscustomobject]@{ Failure = $failure; InstallExists = Test-Path -LiteralPath ${psLiteral(installDirectory)} } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("NSIS installer failed"),
+      InstallExists: false,
+    });
+  });
+
+  it("reports the retained path when fresh-install cleanup cannot remove it", () => {
+    const fixture = installerFixture();
+    const installDirectory = join(fixture.root, "GG Coder Local Fork");
+    const installedExecutable = join(installDirectory, "gg-coder-local-fork.exe");
+    const logPath = join(fixture.root, "fresh-retained.log");
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(logPath)}; function Wait-LocalForkReplacementGate {}; function Get-LocalForkRegistrationSnapshot { [pscustomobject]@{ Exists = $false; Values = @() } }; function Restore-LocalForkRegistration {}; ` +
+        `$manifest = [pscustomobject]@{ Path = ${psLiteral(fixture.installerPath)}; PayloadSize = ${fixture.payloadBytes.length}; PayloadSha256 = ${psLiteral(sha256(fixture.payloadBytes))} }; ` +
+        `function Invoke-NsisInstaller { New-Item -ItemType Directory -Path ${psLiteral(installDirectory)} | Out-Null; ${writeBytesPowerShell(installedExecutable, fixture.payloadBytes)}; 9 }; ` +
+        `function Remove-Item { param([string]$LiteralPath, [switch]$Recurse, [switch]$Force, [object]$ErrorAction); if ($LiteralPath -eq ${psLiteral(installDirectory)}) { throw 'fixture removal failure' }; Microsoft.PowerShell.Management\\Remove-Item @PSBoundParameters }; ` +
+        `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(installDirectory)} -InstalledExecutable ${psLiteral(installedExecutable)} -InstallerManifest $manifest -WasRunning $false -ExpectedVersion '0.53.9' } catch { $failure = $_.Exception.Message }; ` +
+        `[pscustomobject]@{ Failure = $failure; InstallExists = Test-Path -LiteralPath ${psLiteral(installDirectory)} } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const evidence = JSON.parse(result.stdout.trim());
+    expect(evidence.InstallExists).toBe(true);
+    expect(evidence.Failure).toContain(installDirectory);
+    expect(evidence.Failure).toContain("Manual recovery");
+  });
+
+  it("contains exact version, complete marker, success evidence, and final helper exit logging", () => {
+    const source = readFileSync(scriptPath, "utf8");
+    expect(source).toContain("ExpectedVersion");
+    expect(source).toContain("ProductVersion");
+    expect(source).toContain("DisplayName=GG Coder Local Fork");
+    expect(source).toContain("MainBinaryName=gg-coder-local-fork.exe");
+    expect(source).toContain("HELPER_EXIT code=$helperExitCode");
+  });
+
   it("rejects an unbounded shutdown timeout before executing helper logic", () => {
     const result = spawnSync(
       "powershell.exe",
@@ -533,86 +850,49 @@ windowsDescribe("detached local installer helper", () => {
     expect(result.stderr).toContain("ValidationError");
   });
 
-  it("allows fallback only for the same captured process after an accepted close and no window", () => {
-    const common =
-      "$captured = [pscustomobject]@{ ProcessId = 101; ExecutablePath = 'C:\\Fixtures\\GG Coder Local Fork\\gg-coder-local-fork.exe'; CreationTicks = 12345 }; " +
-      "$same = [pscustomobject]@{ ProcessId = 101; ExecutablePath = 'c:\\fixtures\\gg coder local fork\\gg-coder-local-fork.exe'; CreationTicks = 12345 }; ";
-
-    const accepted = runPowerShell(
-      `${common} Assert-SafeForceFallback -CapturedRoots @($captured) -CurrentRoots @($same) -AcceptedCloseRootIds @(101) -VisibleWindowRootIds @(); 'accepted'`,
-    );
-    const changedIdentity = runPowerShell(
-      `${common} $same.CreationTicks = 99999; Assert-SafeForceFallback -CapturedRoots @($captured) -CurrentRoots @($same) -AcceptedCloseRootIds @(101) -VisibleWindowRootIds @()`,
-    );
-    const noAcceptedClose = runPowerShell(
-      `${common} Assert-SafeForceFallback -CapturedRoots @($captured) -CurrentRoots @($same) -AcceptedCloseRootIds @() -VisibleWindowRootIds @()`,
-    );
-    const windowReturned = runPowerShell(
-      `${common} Assert-SafeForceFallback -CapturedRoots @($captured) -CurrentRoots @($same) -AcceptedCloseRootIds @(101) -VisibleWindowRootIds @(101)`,
+  it("drains the app and sidecar after graceful close before replacement", () => {
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(join(tmpdir(), `gg-shutdown-${randomUUID()}.log`))}; ` +
+        `$DelaySeconds = 0; $GracefulShutdownSeconds = 2; $script:events = @(); $script:polls = 0; ` +
+        `$installed = Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\gg-coder-local-fork.exe'; ` +
+        `$startedAt = [DateTime]::UtcNow.AddMinutes(-1); $root = [pscustomobject]@{ ProcessId = 101; ParentProcessId = 1; Name = 'gg-coder-local-fork.exe'; ExecutablePath = $installed; CreationTicks = $startedAt.Ticks }; ` +
+        `$window = [pscustomobject]@{ MainWindowHandle = [IntPtr]1; Path = $installed; StartTime = $startedAt.ToLocalTime() }; $window | Add-Member ScriptMethod Refresh {}; ` +
+        `$window | Add-Member ScriptMethod CloseMainWindow { $script:events += 'close-requested'; $this.MainWindowHandle = [IntPtr]::Zero; return $true }; ` +
+        `function Read-VerifiedInstallerManifest { [pscustomobject]@{ Path = 'fixture'; Sha256 = 'installer'; PayloadSha256 = 'payload'; PayloadSize = 1 } }; ` +
+        `function Get-AppRootSnapshots { @($root) }; function Get-ProcessSnapshotById { $root }; function Get-Process { $window }; ` +
+        `function Assert-NoUnrelatedGgAppProcesses {}; function Invoke-VerifiedInstallTransaction { $script:events += 'replacement-started' }; ` +
+        `function Get-InstalledAppProcesses { $script:polls += 1; if ($script:polls -eq 1) { $script:events += 'poll-app-sidecar'; return @($root, [pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; Name = 'app-sidecar.exe'; ExecutablePath = (Join-Path (Split-Path -Parent $installed) 'app-sidecar.exe') }) }; if ($script:polls -eq 2) { $script:events += 'poll-sidecar'; return @([pscustomobject]@{ ProcessId = 202; ParentProcessId = 101; Name = 'app-sidecar.exe'; ExecutablePath = (Join-Path (Split-Path -Parent $installed) 'app-sidecar.exe') }) }; $script:events += 'tree-drained'; @() }; ` +
+        `Invoke-LocalPatchedInstall; [pscustomobject]@{ Events = @($script:events) } | ConvertTo-Json -Compress`,
     );
 
-    expect(accepted.status, accepted.stderr).toBe(0);
-    expect(accepted.stdout.trim()).toBe("accepted");
-    expect(changedIdentity.status).not.toBe(0);
-    expect(changedIdentity.stderr).toContain("changed identity");
-    expect(noAcceptedClose.status).not.toBe(0);
-    expect(noAcceptedClose.stderr).toContain("did not accept a graceful window close");
-    expect(windowReturned.status).not.toBe(0);
-    expect(windowReturned.stderr).toContain("still has a visible main window");
-  });
-
-  it("drains the app and sidecar after graceful close or bounded captured-tree fallback before replacement", () => {
-    const scenario = (forceFallback) =>
-      runPowerShell(
-        `$script:InstallLogPath = ${psLiteral(join(tmpdir(), `gg-shutdown-${randomUUID()}.log`))}; ` +
-          `$DelaySeconds = 0; $GracefulShutdownSeconds = ${forceFallback ? 1 : 2}; $ForcedShutdownSeconds = 1; ` +
-          `$script:events = @(); $script:polls = 0; $script:killed = $false; ` +
-          `$installed = Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\\gg-coder-local-fork.exe'; ` +
-          `$root = [pscustomobject]@{ ProcessId = 101; ExecutablePath = $installed; CreationTicks = 12345 }; ` +
-          `$window = [pscustomobject]@{ MainWindowHandle = [IntPtr]1 }; ` +
-          `$window | Add-Member ScriptMethod Refresh {}; ` +
-          `$window | Add-Member ScriptMethod CloseMainWindow { $script:events += 'close-requested'; $this.MainWindowHandle = [IntPtr]::Zero; return $true }; ` +
-          `function Read-VerifiedInstallerManifest { [pscustomobject]@{ Path = 'fixture'; Sha256 = 'installer'; PayloadSha256 = 'payload'; PayloadSize = 1 } }; ` +
-          `function Get-AppRootSnapshots { @($root) }; ` +
-          `function Get-Process { $window }; ` +
-          `function Get-CurrentRootSnapshots { @($root) }; ` +
-          `function Assert-NoUnrelatedGgAppProcesses {}; ` +
-          `function Invoke-VerifiedInstallTransaction { $script:events += 'replacement-started' }; ` +
-          `function Get-InstalledAppProcesses { ` +
-          `  $script:polls += 1; ` +
-          `  if (${forceFallback ? "$true" : "$false"} -and -not $script:killed) { $script:events += 'poll-app-sidecar'; return @([pscustomobject]@{ ProcessId = 101 }, [pscustomobject]@{ ProcessId = 202 }) }; ` +
-          `  if (-not ${forceFallback ? "$true" : "$false"} -and $script:polls -eq 1) { $script:events += 'poll-app-sidecar'; return @([pscustomobject]@{ ProcessId = 101 }, [pscustomobject]@{ ProcessId = 202 }) }; ` +
-          `  if (-not ${forceFallback ? "$true" : "$false"} -and $script:polls -eq 2) { $script:events += 'poll-sidecar'; return @([pscustomobject]@{ ProcessId = 202 }) }; ` +
-          `  $script:events += 'tree-drained'; return @() ` +
-          `}; ` +
-          `function taskkill.exe { $script:events += 'forced-tree-stop'; $script:killed = $true; $global:LASTEXITCODE = 0 }; ` +
-          `$started = [Diagnostics.Stopwatch]::StartNew(); Invoke-LocalPatchedInstall; $started.Stop(); ` +
-          `[pscustomobject]@{ Events = @($script:events); ElapsedMs = $started.ElapsedMilliseconds } | ConvertTo-Json -Compress`,
-      );
-
-    const graceful = scenario(false);
-    const forced = scenario(true);
-
-    expect(graceful.status, graceful.stderr).toBe(0);
-    expect(JSON.parse(graceful.stdout.trim()).Events).toEqual([
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim()).Events).toEqual([
       "close-requested",
       "poll-app-sidecar",
       "poll-sidecar",
       "tree-drained",
       "replacement-started",
     ]);
-    expect(forced.status, forced.stderr).toBe(0);
-    const forcedEvidence = JSON.parse(forced.stdout.trim());
-    expect(forcedEvidence.Events.at(-3)).toBe("forced-tree-stop");
-    expect(forcedEvidence.Events.slice(-2)).toEqual(["tree-drained", "replacement-started"]);
-    expect(forcedEvidence.ElapsedMs).toBeGreaterThanOrEqual(900);
-    expect(forcedEvidence.ElapsedMs).toBeLessThan(3000);
+  });
+
+  it("normalizes Windows PE versions to the exact expected numeric core", () => {
+    const accepted = runPowerShell(
+      `function Get-Item { [pscustomobject]@{ VersionInfo = [pscustomobject]@{ ProductVersion = '0.53.9'; FileVersion = '0.53.9.0' } } }; Assert-InstalledProductVersion -Path 'fixture.exe' -ExpectedVersion '0.53.9'`,
+    );
+    const rejected = runPowerShell(
+      `function Get-Item { [pscustomobject]@{ VersionInfo = [pscustomobject]@{ ProductVersion = '0.53.10'; FileVersion = '0.53.10.0' } } }; Assert-InstalledProductVersion -Path 'fixture.exe' -ExpectedVersion '0.53.9'`,
+    );
+
+    expect(accepted.status, accepted.stderr).toBe(0);
+    expect(accepted.stdout.trim()).toBe("0.53.9");
+    expect(rejected.status).not.toBe(0);
+    expect(rejected.stderr).toContain("version mismatch");
   });
 
   it("requires Local Fork uninstall registration at the Local Fork directory and binary", () => {
     const fixture = transactionFixture();
     const accepted = runPowerShell(
-      `function Get-LocalForkUninstallRegistration { [pscustomobject]@{ DisplayName = 'GG Coder Local Fork'; InstallLocation = ${psLiteral(`"${fixture.installDirectory}"`)}; MainBinaryName = 'gg-coder-local-fork.exe' } }; Assert-LocalForkUninstallRegistration -InstallDirectory ${psLiteral(fixture.installDirectory)}; 'accepted'`,
+      `function Get-LocalForkUninstallRegistration { [pscustomobject]@{ DisplayName = 'GG Coder Local Fork'; InstallLocation = ${psLiteral(`"${fixture.installDirectory}"`)}; MainBinaryName = 'gg-coder-local-fork.exe' } }; $null = Assert-LocalForkUninstallRegistration -InstallDirectory ${psLiteral(fixture.installDirectory)}; 'accepted'`,
     );
     const wrongBinary = runPowerShell(
       `function Get-LocalForkUninstallRegistration { [pscustomobject]@{ DisplayName = 'GG Coder Local Fork'; InstallLocation = ${psLiteral(fixture.installDirectory)}; MainBinaryName = 'local-fork.exe' } }; Assert-LocalForkUninstallRegistration -InstallDirectory ${psLiteral(fixture.installDirectory)}`,
@@ -678,7 +958,7 @@ windowsDescribe("detached local installer helper", () => {
       RecoveryArchives: 0,
     });
     expect(evidence.Failure).toContain(
-      "Installed payload locks did not clear before the 500ms Restart Manager polling deadline",
+      "Local Fork replacement gate timed out after 500ms",
     );
     expect(evidence.Failure).toContain(`ownerPid=${evidence.OwnerPid}`);
   });
@@ -720,7 +1000,7 @@ windowsDescribe("detached local installer helper", () => {
       realpathSync.native(fixture.installedExecutable),
     );
     expect(evidence.Failure).toContain(
-      "Installed payload locks did not clear before the 500ms Restart Manager polling deadline",
+      "Local Fork replacement gate timed out after 500ms",
     );
     expect(evidence.Failure).toContain(`ownerPid=${evidence.OwnerPid}`);
   });
@@ -730,7 +1010,7 @@ windowsDescribe("detached local installer helper", () => {
       transactionPrelude(fixture) +
       `$script:startCount = 0; ` +
       `function Invoke-NsisInstaller([string]$InstallerPath) { New-Item -ItemType Directory -Path ${psLiteral(fixture.installDirectory)} | Out-Null; ${writeBytesPowerShell(fixture.installedExecutable, fixture.payloadBytes)}; return 0 }; ` +
-      `function Assert-LocalForkUninstallRegistration([string]$InstallDirectory) {}; ` +
+      `function Assert-LocalForkUninstallRegistration([string]$InstallDirectory) { [pscustomobject]@{ DisplayName = 'GG Coder Local Fork'; InstallLocation = $InstallDirectory; MainBinaryName = 'gg-coder-local-fork.exe' } }; ` +
       `function Start-VerifiedApp([string]$ExecutablePath, [ref]$LaunchedSnapshot) { $script:startCount += 1; $snapshot = [pscustomobject]@{ ProcessId = 700; ExecutablePath = $ExecutablePath; CreationTicks = 1 }; if ($LaunchedSnapshot) { $LaunchedSnapshot.Value = $snapshot }; return $snapshot }; ` +
       `Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $true; ` +
       `[pscustomobject]@{ Content = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes(${psLiteral(fixture.installedExecutable)})); Backups = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -Directory -Filter 'GG Coder Local Fork.backup-*').Count; Starts = $script:startCount } | ConvertTo-Json -Compress`;
@@ -743,9 +1023,32 @@ windowsDescribe("detached local installer helper", () => {
       Backups: 0,
       Starts: 1,
     });
-    expect(readFileSync(fixture.logPath, "utf8")).toContain(
-      "SUCCESS: installed and relaunched verified GG Coder Local Fork",
-    );
+    const log = readFileSync(fixture.logPath, "utf8");
+    expect(log).toContain("SUCCESS installerExitCode=0");
+    expect(log).toContain("version=0.53.9");
+    expect(log).toContain(`payloadSha256=${sha256(fixture.payloadBytes)}`);
+    expect(log).toContain("livePid=700");
+    expect(log).toContain("liveHash=");
+    expect(log).toContain("marker=DisplayName=GG Coder Local Fork");
+    expect(log).toContain("MainBinaryName=gg-coder-local-fork.exe");
+  });
+
+  it("rolls back an exact-version verification failure", () => {
+    const fixture = transactionFixture();
+    const body =
+      transactionPrelude(fixture) +
+      `function Assert-InstalledProductVersion { throw 'Installed Local Fork version mismatch: expected=0.53.9 productVersion=0.53.10 fileVersion=0.53.10' }; ` +
+      `function Invoke-NsisInstaller([string]$InstallerPath) { New-Item -ItemType Directory -Path ${psLiteral(fixture.installDirectory)} | Out-Null; ${writeBytesPowerShell(fixture.installedExecutable, fixture.payloadBytes)}; return 0 }; ` +
+      `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $false -ExpectedVersion '0.53.9' } catch { $failure = $_.Exception.Message }; ` +
+      `[pscustomobject]@{ Failure = $failure; Content = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes(${psLiteral(fixture.installedExecutable)})); RegistrationRestores = $script:registrationRestores } | ConvertTo-Json -Compress`;
+
+    const result = runPowerShell(body);
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("previous install was restored"),
+      Content: fixture.oldBytes.toString("utf8"),
+      RegistrationRestores: 1,
+    });
   });
 
   it("rolls back a payload hash mismatch without restarting an app that was closed", () => {
@@ -776,7 +1079,7 @@ windowsDescribe("detached local installer helper", () => {
       transactionPrelude(fixture) +
       `$script:startCount = 0; $script:stopCount = 0; ` +
       `function Invoke-NsisInstaller([string]$InstallerPath) { New-Item -ItemType Directory -Path ${psLiteral(fixture.installDirectory)} | Out-Null; ${writeBytesPowerShell(fixture.installedExecutable, fixture.payloadBytes)}; return 0 }; ` +
-      `function Assert-LocalForkUninstallRegistration([string]$InstallDirectory) {}; ` +
+      `function Assert-LocalForkUninstallRegistration([string]$InstallDirectory) { [pscustomobject]@{ DisplayName = 'GG Coder Local Fork'; InstallLocation = $InstallDirectory; MainBinaryName = 'gg-coder-local-fork.exe' } }; ` +
       `function Stop-LaunchedVerifiedRoot([object]$Snapshot, [string]$ExpectedExecutable) { if ($Snapshot) { $script:stopCount += 1 } }; ` +
       `function Start-VerifiedApp([string]$ExecutablePath, [ref]$LaunchedSnapshot) { $script:startCount += 1; $snapshot = [pscustomobject]@{ ProcessId = 702; ExecutablePath = $ExecutablePath; CreationTicks = 2 }; if ($script:startCount -eq 1) { if ($LaunchedSnapshot) { $LaunchedSnapshot.Value = $snapshot }; throw 'simulated startup failure after launch' }; return $snapshot }; ` +
       `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $true } catch { $failure = $_.Exception.Message }; ` +
@@ -817,6 +1120,90 @@ windowsDescribe("detached local installer helper", () => {
       PartialStillExists: true,
     });
     expect(JSON.parse(result.stdout.trim()).Failure).toContain("Manual recovery");
+  });
+
+  it("preserves the old backup when registration restoration fails midway", () => {
+    const fixture = transactionFixture();
+    const partialBytes = Buffer.from("partial replacement", "utf8");
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $script:registrationValues = @(); $script:startCount = 0; ` +
+        `function Wait-LocalForkReplacementGate {}; function Get-LocalForkRegistrationSnapshot { [pscustomobject]@{ Exists = $true; Values = @([pscustomobject]@{ Name = 'Label'; Value = 'original'; Kind = 'String' }, [pscustomobject]@{ Name = 'Count'; Value = 42; Kind = 'DWord' }) } }; ` +
+        `function Restore-LocalForkRegistration([object]$Snapshot) { $script:registrationValues += $Snapshot.Values[0].Name; throw 'fixture registration failure after first value' }; function Start-VerifiedApp { $script:startCount += 1 }; ` +
+        `$manifest = [pscustomobject]@{ Path = ${psLiteral(fixture.installerPath)}; PayloadSize = ${fixture.payloadBytes.length}; PayloadSha256 = ${psLiteral(sha256(fixture.payloadBytes))} }; ` +
+        `function Invoke-NsisInstaller { New-Item -ItemType Directory -Path ${psLiteral(fixture.installDirectory)} | Out-Null; ${writeBytesPowerShell(fixture.installedExecutable, partialBytes)}; 9 }; ` +
+        `$failure = ''; try { Invoke-VerifiedInstallTransaction -InstallDirectory ${psLiteral(fixture.installDirectory)} -InstalledExecutable ${psLiteral(fixture.installedExecutable)} -InstallerManifest $manifest -WasRunning $true -ExpectedVersion '0.53.9' } catch { $failure = $_.Exception.Message }; ` +
+        `$backups = @(Get-ChildItem -LiteralPath ${psLiteral(fixture.root)} -Directory -Filter 'GG Coder Local Fork.backup-*'); ` +
+        `[pscustomobject]@{ Failure = $failure; InstallExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; BackupCount = $backups.Count; BackupContent = if ($backups.Count -eq 1) { [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes((Join-Path $backups[0].FullName 'gg-coder-local-fork.exe'))) } else { '' }; RegistrationValues = @($script:registrationValues); Starts = $script:startCount } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("fixture registration failure after first value"),
+      InstallExists: false,
+      BackupCount: 1,
+      BackupContent: fixture.oldBytes.toString("utf8"),
+      RegistrationValues: ["Label"],
+      Starts: 0,
+    });
+  });
+
+  it("retains the intact backup when recovery archive creation cannot start", () => {
+    const fixture = transactionFixture();
+    const archivePath = `${fixture.installDirectory}.recovery.zip`;
+    writeFileSync(archivePath, "existing archive");
+    const readyPath = join(fixture.root, "archive-lock-ready");
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; ` +
+        withExclusiveFileLock(
+          archivePath,
+          readyPath,
+          10_000,
+          `$failure = ''; try { Remove-InstallBackupSafely -BackupPath ${psLiteral(fixture.installDirectory)} } catch { $failure = $_.Exception.Message }; [pscustomobject]@{ Failure = $failure; BackupExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; ArchiveExists = Test-Path -LiteralPath ${psLiteral(archivePath)} } | ConvertTo-Json -Compress`,
+        ),
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("intact backup remains"),
+      BackupExists: true,
+      ArchiveExists: true,
+    });
+  });
+
+  it("retains a complete archive when backup directory deletion fails", () => {
+    const fixture = transactionFixture();
+    const archivePath = `${fixture.installDirectory}.recovery.zip`;
+    const readyPath = join(fixture.root, "backup-delete-lock-ready");
+    const lockBody = `$lock = [IO.File]::Open(${psLiteral(fixture.installedExecutable)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read); try { [IO.File]::WriteAllText(${psLiteral(readyPath)}, 'ready'); Start-Sleep -Seconds 10 } finally { $lock.Dispose() }`;
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $owner = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',${psLiteral(Buffer.from(lockBody, "utf16le").toString("base64"))}) -PassThru -WindowStyle Hidden; try { ` +
+        `$deadline = [DateTime]::UtcNow.AddSeconds(3); while (-not (Test-Path -LiteralPath ${psLiteral(readyPath)})) { if ([DateTime]::UtcNow -ge $deadline) { throw 'backup lock holder was not ready' }; Start-Sleep -Milliseconds 20 }; ` +
+        `$failure = ''; try { Remove-InstallBackupSafely -BackupPath ${psLiteral(fixture.installDirectory)} } catch { $failure = $_.Exception.Message }; [pscustomobject]@{ Failure = $failure; BackupExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; ArchiveExists = Test-Path -LiteralPath ${psLiteral(archivePath)} } | ConvertTo-Json -Compress ` +
+        `} finally { if (-not $owner.HasExited) { $owner.Kill(); $owner.WaitForExit() } }`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("complete recovery archive retained"),
+      BackupExists: true,
+      ArchiveExists: true,
+    });
+  });
+
+  it("retains the archive when final recovery archive deletion fails", () => {
+    const fixture = transactionFixture();
+    const archivePath = `${fixture.installDirectory}.recovery.zip`;
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; function Remove-Item { param([string]$LiteralPath, [switch]$Recurse, [switch]$Force, [object]$ErrorAction); if ($LiteralPath -eq ${psLiteral(archivePath)} -and -not (Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)})) { throw 'fixture final archive deletion failure' }; Microsoft.PowerShell.Management\\Remove-Item @PSBoundParameters }; ` +
+        `$failure = ''; try { Remove-InstallBackupSafely -BackupPath ${psLiteral(fixture.installDirectory)} } catch { $failure = $_.Exception.Message }; [pscustomobject]@{ Failure = $failure; BackupExists = Test-Path -LiteralPath ${psLiteral(fixture.installDirectory)}; ArchiveExists = Test-Path -LiteralPath ${psLiteral(archivePath)} } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.stringContaining("complete recovery archive retained"),
+      BackupExists: false,
+      ArchiveExists: true,
+    });
   });
 
   it("verifies the restored executable hash before declaring rollback success", () => {

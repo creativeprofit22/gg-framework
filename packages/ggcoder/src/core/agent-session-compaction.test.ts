@@ -194,6 +194,119 @@ describe("AgentSession worker auto-compaction", () => {
   }, 15_000);
 });
 
+describe("AgentSession verification evidence compaction", () => {
+  it("retains accepted roadmap verification evidence after transcript compaction", async () => {
+    const command = "pnpm check";
+    const result = "Exit code: 0\n\nExecution diagnostics:\nID: verify-1\nExit code: 0";
+    shouldCompactMock.mockReturnValue(false);
+    compactMock.mockResolvedValue(
+      compactionResult([
+        { role: "system", content: "worker system prompt" },
+        { role: "user", content: "[session compacted] Verification completed." },
+      ]),
+    );
+    agentLoopMock.mockImplementation(async function* (messages: Message[]) {
+      messages.push({
+        role: "assistant",
+        content: [{ type: "tool_call", id: "call-1", name: "bash", args: { command } }],
+      });
+      yield { type: "tool_call_start", toolCallId: "call-1", name: "bash", args: { command } };
+      messages.push({
+        role: "tool",
+        content: [{ type: "tool_result", toolCallId: "call-1", content: result }],
+      });
+      yield {
+        type: "tool_call_end",
+        toolCallId: "call-1",
+        result,
+        isError: false,
+        details: {
+          bashDiagnostics: {
+            executionId: "verify-1",
+            command,
+            cwd: tmpProject,
+            reason: "completed",
+            exitCode: 0,
+          },
+        },
+      };
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "worker system prompt",
+      transient: true,
+    });
+
+    await session.initialize();
+    await session.prompt("Verify the task.");
+    await session.compact();
+
+    expect(session.getMessages()).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ role: "tool" })]),
+    );
+    expect(
+      session.evaluateRoadmapVerificationEvidence({
+        doneWhen: ["types pass"],
+        evidence: [command],
+        expectedRevision: 1,
+      }),
+    ).toEqual({ ready: true, unmetEvidenceCodes: [] });
+    await session.dispose();
+  });
+
+  it("clears verification evidence for preserved-conversation new sessions", async () => {
+    const command = "pnpm check";
+    agentLoopMock.mockImplementation(async function* () {
+      yield { type: "tool_call_start", toolCallId: "call-reset", name: "bash", args: { command } };
+      yield {
+        type: "tool_call_end",
+        toolCallId: "call-reset",
+        result: "Exit code: 0",
+        isError: false,
+        details: {
+          bashDiagnostics: {
+            executionId: "verify-reset",
+            command,
+            reason: "completed",
+            exitCode: 0,
+          },
+        },
+      };
+      yield { type: "agent_done" };
+    });
+
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "worker system prompt",
+      transient: true,
+    });
+
+    await session.initialize();
+    await session.prompt("Verify the task.");
+    await session.newSession(true);
+
+    expect(
+      session.evaluateRoadmapVerificationEvidence({
+        doneWhen: ["types pass"],
+        evidence: [command],
+        expectedRevision: 1,
+      }),
+    ).toEqual({
+      ready: false,
+      unmetEvidenceCodes: ["unmatched-evidence", "missing-approved-evidence"],
+    });
+    await session.dispose();
+  });
+});
+
 describe("AgentSession compaction persistence", () => {
   it("persists the compaction summary as a new checkpoint in the session log", async () => {
     // "Model-visible means logged" — the compacted history that replaces the

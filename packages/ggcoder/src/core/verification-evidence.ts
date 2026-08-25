@@ -1,4 +1,5 @@
 import type { ContentPart, Message, ToolResult } from "@kenkaiiii/gg-ai";
+import { NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH } from "@kenkaiiii/gg-core/project-notes";
 import { hasUnsafeShellSyntax, splitShellCommandSegments } from "../tools/read-only-bash.js";
 
 export interface VerificationCommandClassification {
@@ -325,16 +326,16 @@ export function collectVerificationEvidence(messages: readonly Message[]): Verif
   return evidence;
 }
 
-type ShellEvidence = Omit<VerificationEvidence, "status"> & {
+export type RoadmapShellEvidence = Omit<VerificationEvidence, "status"> & {
   status: VerificationEvidence["status"] | "unclassified";
 };
 
-function collectShellEvidence(messages: readonly Message[]): ShellEvidence[] {
+function collectShellEvidence(messages: readonly Message[]): RoadmapShellEvidence[] {
   const calls = new Map<
     string,
     { command: string; classification: VerificationCommandClassification; background: boolean }
   >();
-  const evidence: ShellEvidence[] = [];
+  const evidence: RoadmapShellEvidence[] = [];
 
   for (const message of messages) {
     if (message.role === "assistant" && Array.isArray(message.content)) {
@@ -410,6 +411,104 @@ function isWorkspaceMutation(call: { name: string; args: Record<string, unknown>
   return !READ_ONLY_OR_METADATA_TOOLS.has(call.name);
 }
 
+export interface SessionVerificationEvidenceLedgerSnapshot {
+  currentEvidence: RoadmapShellEvidence[];
+  staleEvidence: RoadmapShellEvidence[];
+}
+
+interface BashExecutionDiagnostics {
+  executionId?: unknown;
+  command?: unknown;
+  reason?: unknown;
+  exitCode?: unknown;
+}
+
+// simplification: Retain 100 executions; persist per-phase evidence if deeper history is required.
+const SESSION_VERIFICATION_LEDGER_MAX_ENTRIES = 100;
+const SESSION_VERIFICATION_EXECUTION_ID_MAX_LENGTH = 128;
+
+/** Session-owned harness evidence; transcript compaction cannot rewrite this ledger. */
+export class SessionVerificationEvidenceLedger {
+  private generation = 0;
+  private readonly entries = new Map<
+    string,
+    { generation: number; evidence: RoadmapShellEvidence }
+  >();
+
+  recordToolResult(input: {
+    name: string;
+    args: Record<string, unknown>;
+    isError: boolean;
+    details?: unknown;
+  }): void {
+    if (isWorkspaceMutation(input)) this.generation += 1;
+    if (input.name !== "bash") return;
+
+    const details = input.details as { bashDiagnostics?: BashExecutionDiagnostics } | undefined;
+    const diagnostics = details?.bashDiagnostics;
+    const executionId =
+      typeof diagnostics?.executionId === "string" ? diagnostics.executionId.trim() : "";
+    const command = typeof diagnostics?.command === "string" ? diagnostics.command.trim() : "";
+    const requestedCommand =
+      typeof input.args.command === "string" ? input.args.command.trim() : "";
+    if (
+      !executionId ||
+      executionId.length > SESSION_VERIFICATION_EXECUTION_ID_MAX_LENGTH ||
+      !command ||
+      command.length > NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH ||
+      command !== requestedCommand
+    ) {
+      return;
+    }
+
+    const classification = classifyVerificationCommand(command);
+    const background = input.args.run_in_background === true || input.args.persist === true;
+    let evidence: RoadmapShellEvidence;
+    if (background) {
+      evidence = {
+        command,
+        status: "rejected",
+        reason: "background or persistent commands are not bounded evidence",
+      };
+    } else if (!classification.candidate) {
+      evidence = { command, status: "unclassified", reason: classification.reason };
+    } else if (!classification.accepted) {
+      evidence = { command, status: "rejected", reason: classification.reason };
+    } else {
+      const passed =
+        !input.isError && diagnostics?.reason === "completed" && diagnostics.exitCode === 0;
+      evidence = {
+        command,
+        status: passed ? "passed" : "failed",
+        reason: passed ? classification.reason : "bounded check did not exit successfully",
+      };
+    }
+    this.entries.delete(executionId);
+    this.entries.set(executionId, { generation: this.generation, evidence });
+    while (this.entries.size > SESSION_VERIFICATION_LEDGER_MAX_ENTRIES) {
+      const oldestExecutionId = this.entries.keys().next().value;
+      if (oldestExecutionId === undefined) break;
+      this.entries.delete(oldestExecutionId);
+    }
+  }
+
+  snapshot(): SessionVerificationEvidenceLedgerSnapshot {
+    const currentEvidence: RoadmapShellEvidence[] = [];
+    const staleEvidence: RoadmapShellEvidence[] = [];
+    for (const entry of this.entries.values()) {
+      (entry.generation === this.generation ? currentEvidence : staleEvidence).push({
+        ...entry.evidence,
+      });
+    }
+    return { currentEvidence, staleEvidence };
+  }
+
+  clear(): void {
+    this.generation = 0;
+    this.entries.clear();
+  }
+}
+
 /** Partition evidence after the latest conservative workspace-mutation boundary. */
 export function partitionVerificationMessagesForWorkspaceMutation(messages: readonly Message[]): {
   currentMessages: Message[];
@@ -467,6 +566,8 @@ export function evaluateRoadmapVerificationEvidence(input: {
   expectedRevision: number | undefined;
   currentMessages: readonly Message[];
   staleMessages?: readonly Message[];
+  currentLedgerEvidence?: readonly RoadmapShellEvidence[];
+  staleLedgerEvidence?: readonly RoadmapShellEvidence[];
 }): RoadmapVerificationEvidenceEvaluation {
   const unmet = new Set<RoadmapVerificationEvidenceUnmetCode>();
   if (input.expectedRevision === undefined) unmet.add("missing-expected-revision");
@@ -475,8 +576,14 @@ export function evaluateRoadmapVerificationEvidence(input: {
   const normalizedItems = input.evidence.map(normalizedEvidenceText);
   if (new Set(normalizedItems).size !== normalizedItems.length) unmet.add("duplicate-evidence");
 
-  const current = collectShellEvidence(input.currentMessages);
-  const stale = collectShellEvidence(input.staleMessages ?? []);
+  const current = [
+    ...collectShellEvidence(input.currentMessages),
+    ...(input.currentLedgerEvidence ?? []),
+  ];
+  const stale = [
+    ...collectShellEvidence(input.staleMessages ?? []),
+    ...(input.staleLedgerEvidence ?? []),
+  ];
   const usedCommands = new Set<string>();
   let approvedMatches = 0;
 

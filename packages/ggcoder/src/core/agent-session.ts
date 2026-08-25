@@ -145,6 +145,12 @@ import { buildRegroundingMessage } from "./regrounding.js";
 import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
 import { VerificationGate, isCodeFilePath, isVerificationCommand } from "./verification-gate.js";
+import {
+  SessionVerificationEvidenceLedger,
+  evaluateRoadmapVerificationEvidence as evaluateRoadmapVerificationEvidenceCore,
+  partitionVerificationMessagesForWorkspaceMutation,
+  type RoadmapVerificationEvidenceEvaluation,
+} from "./verification-evidence.js";
 
 import { findUserSessionPrompt, getUserSessionPrompt } from "./session-preview.js";
 import { normalizeMessageImages } from "./message-images.js";
@@ -448,6 +454,7 @@ export class AgentSession {
   private hookCyclicPattern: CycleDetection | null = null;
   private hookFileEditCounts = new Map<string, number>();
   private hookToolCalls = new Map<string, { name: string; args: Record<string, unknown> }>();
+  private readonly verificationEvidenceLedger = new SessionVerificationEvidenceLedger();
   private idealReviewPhase: "idle" | "reviewing" | "complete" = "idle";
   private activePhaseVerificationInjected = false;
   /** Runtime-only suppression while Ken owns verification in autopilot mode. */
@@ -1577,6 +1584,13 @@ export class AgentSession {
         const call = this.hookToolCalls.get(event.toolCallId);
         const name = call?.name ?? "";
         const args = call?.args;
+        if (call) {
+          this.verificationEvidenceLedger.recordToolResult({
+            ...call,
+            isError: event.isError,
+            details: event.details,
+          });
+        }
         this.hookStats.toolCalls += 1;
         if (event.isError) this.hookStats.toolFailures += 1;
         if (name === "write") this.hookStats.writeCalls += 1;
@@ -2867,6 +2881,7 @@ export class AgentSession {
   }
 
   async newSession(preserveConversation = false): Promise<void> {
+    this.verificationEvidenceLedger.clear();
     // Approved-plan execution is a clean checkpoint of the same conversation;
     // explicit new sessions reset the conversation identity and phase binding.
     if (!preserveConversation) {
@@ -2918,6 +2933,7 @@ export class AgentSession {
 
   async loadSession(sessionPath: string): Promise<void> {
     await this.loadExistingSession(sessionPath);
+    this.verificationEvidenceLedger.clear();
     if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
     this.eventBus.emit("session_start", { sessionId: this.sessionId });
   }
@@ -2925,6 +2941,7 @@ export class AgentSession {
   /** Restore one physical checkpoint without resolving to its conversation tip. */
   async loadSessionCheckpoint(sessionPath: string): Promise<void> {
     await this.loadExistingSession(sessionPath, false);
+    this.verificationEvidenceLedger.clear();
     if (this.sessionId) await this.subAgentManager?.hydrate(this.sessionId);
     this.eventBus.emit("session_start", { sessionId: this.sessionId });
   }
@@ -2960,6 +2977,7 @@ export class AgentSession {
     const systemMsg = this.messages[0];
     this.messages = [systemMsg, ...branchMessages];
     this.lastPersistedIndex = this.messages.length;
+    this.verificationEvidenceLedger.clear();
 
     this.eventBus.emit("branch_created", {
       leafId: this.currentLeafId,
@@ -3580,6 +3598,24 @@ export class AgentSession {
 
   getMessages(): Message[] {
     return this.messages;
+  }
+
+  evaluateRoadmapVerificationEvidence(input: {
+    doneWhen: readonly string[];
+    evidence: readonly string[];
+    expectedRevision: number | undefined;
+  }): RoadmapVerificationEvidenceEvaluation {
+    const partition =
+      input.expectedRevision === undefined
+        ? { currentMessages: this.messages, staleMessages: [] }
+        : partitionVerificationMessagesForWorkspaceMutation(this.messages);
+    const ledger = this.verificationEvidenceLedger.snapshot();
+    return evaluateRoadmapVerificationEvidenceCore({
+      ...input,
+      ...partition,
+      currentLedgerEvidence: ledger.currentEvidence,
+      staleLedgerEvidence: ledger.staleEvidence,
+    });
   }
 
   getActivePhaseContext(): ActivePhaseContextV1 | undefined {

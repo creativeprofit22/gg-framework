@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Message } from "@kenkaiiii/gg-ai";
 import {
+  SessionVerificationEvidenceLedger,
   classifyVerificationCommand,
   collectVerificationEvidence,
   evaluateRoadmapVerificationEvidence,
@@ -329,5 +330,66 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         ["criterion one", "criterion two"],
       ),
     ).toEqual({ ready: true, unmetEvidenceCodes: [] });
+  });
+});
+
+describe("SessionVerificationEvidenceLedger", () => {
+  function record(
+    ledger: SessionVerificationEvidenceLedger,
+    executionId: string,
+    command: string,
+    exitCode = 0,
+  ) {
+    ledger.recordToolResult({
+      name: "bash",
+      args: { command },
+      isError: exitCode !== 0,
+      details: {
+        bashDiagnostics: { executionId, command, reason: "completed", exitCode },
+      },
+    });
+  }
+
+  it("replaces a duplicate execution ID with the latest result", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "duplicate", "pnpm check");
+    record(ledger, "duplicate", "pnpm check", 1);
+
+    expect(ledger.snapshot().currentEvidence).toEqual([
+      expect.objectContaining({ command: "pnpm check", status: "failed" }),
+    ]);
+  });
+
+  it("bounds retained executions while preserving the newest evidence", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    for (let index = 0; index <= 100; index += 1) {
+      record(ledger, `execution-${index}`, `vitest run src/case-${index}.test.ts`);
+    }
+
+    const evidence = ledger.snapshot().currentEvidence;
+    expect(evidence).toHaveLength(100);
+    expect(evidence.at(-1)?.command).toBe("vitest run src/case-100.test.ts");
+  });
+
+  it("does not retain oversized execution diagnostics", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "x".repeat(1_000), `vitest run ${"x".repeat(10_000)}`);
+
+    expect(ledger.snapshot()).toEqual({ currentEvidence: [], staleEvidence: [] });
+  });
+
+  it("moves accepted evidence to stale after a workspace mutation", () => {
+    const ledger = new SessionVerificationEvidenceLedger();
+    record(ledger, "accepted", "pnpm check");
+    ledger.recordToolResult({
+      name: "edit",
+      args: { file_path: "src/example.ts" },
+      isError: false,
+    });
+
+    expect(ledger.snapshot()).toMatchObject({
+      currentEvidence: [],
+      staleEvidence: [expect.objectContaining({ command: "pnpm check", status: "passed" })],
+    });
   });
 });

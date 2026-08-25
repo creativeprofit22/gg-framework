@@ -24,6 +24,7 @@ import {
 import {
   evaluateRoadmapVerificationEvidence,
   partitionVerificationMessagesForWorkspaceMutation,
+  type RoadmapVerificationEvidenceEvaluation,
 } from "./core/verification-evidence.js";
 
 export type AppSidecarRoadmapSessionRole = "coding" | "ken" | "ken-autopilot";
@@ -45,6 +46,11 @@ export interface AppSidecarRoadmapToolSession {
   getActivePhaseContext(): ActivePhaseContextV1 | undefined;
   getMessages(): Message[];
   getState(): { sessionId: string; sessionPath: string | null };
+  evaluateRoadmapVerificationEvidence?(input: {
+    doneWhen: readonly string[];
+    evidence: readonly string[];
+    expectedRevision: number | undefined;
+  }): RoadmapVerificationEvidenceEvaluation;
   updateActivePhaseStage?(executionStage: "implementing" | "reviewing"): Promise<unknown>;
 }
 
@@ -130,17 +136,19 @@ export class AppSidecarRoadmapToolHost {
         input.transition === "review" &&
         input.verification?.result === "passed"
       ) {
+        const evaluationInput = {
+          doneWhen: activePhase?.doneWhen ?? [],
+          evidence: input.evidence,
+          expectedRevision: input.expected_revision,
+        };
         const messages = owningSession?.getMessages() ?? [];
         const partition =
           input.expected_revision === undefined
             ? { currentMessages: messages, staleMessages: [] }
             : partitionVerificationMessagesForWorkspaceMutation(messages);
-        const verificationEvidence = evaluateRoadmapVerificationEvidence({
-          doneWhen: activePhase?.doneWhen ?? [],
-          evidence: input.evidence,
-          expectedRevision: input.expected_revision,
-          ...partition,
-        });
+        const verificationEvidence =
+          owningSession?.evaluateRoadmapVerificationEvidence?.(evaluationInput) ??
+          evaluateRoadmapVerificationEvidence({ ...evaluationInput, ...partition });
         if (!verificationEvidence.ready) {
           return {
             result: "verification-incomplete",

@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.53.9",
+    date: "2026-08-25",
+    items: [
+      "Write a long, multi-line prompt and your chat stays exactly where it should. Past the `3rd` line break the input box used to creep up and cover the newest messages, so you lost sight of the reply you were answering. Now the thread glides up with every line you add, no matter how long the prompt gets.",
+      "Dropping images and videos into chat now works on `Windows` too. Those attachments were quietly vanishing before they ever reached the model. They land properly now, so you get a real answer instead of silence.",
+    ],
+  },
+  {
     version: "0.53.8",
     date: "2026-08-24",
     items: [

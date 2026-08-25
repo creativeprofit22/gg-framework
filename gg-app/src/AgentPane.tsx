@@ -12,6 +12,7 @@ import {
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { theme } from "./theme";
+import { autosizeComposer } from "./composer-autosize";
 import {
   createPaneAgentClient,
   isSwitchModelError,
@@ -1267,30 +1268,45 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     workspaceMode,
   ]);
 
-  // Auto-grow the chat textarea to fit its content (up to a CSS max-height,
-  // after which it scrolls). Runs whenever the input value changes.
-  //
-  // useLayoutEffect (not useEffect) so the height is recomputed BEFORE the
-  // browser paints. This matters most when the enhance animation tears down and
-  // hands its multi-line text back to the textarea: with a post-paint effect the
-  // textarea would flash at its default height for one frame, then resize — a
-  // visible layout shift. Sizing pre-paint makes the handoff seamless.
+  // Auto-grow the composer without letting its temporary collapse un-pin the transcript.
+  const autosizeInput = useCallback(() => {
+    autosizeComposer(inputRef.current, scrollRef.current);
+  }, []);
+
   useLayoutEffect(() => {
-    const el = inputRef.current;
-    if (!el) return;
-    el.style.height = "auto";
-    const max = parseFloat(getComputedStyle(el).maxHeight) || Infinity;
-    // Toggle scrolling only when content truly overflows the cap. Otherwise keep
-    // overflow hidden: under CSS zoom > 1, scrollHeight rounds down to an integer
-    // of unzoomed px, leaving the content a hair taller than the set height —
-    // `auto` would then flash a phantom grey scrollbar inside a single-line input.
-    el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
-    el.style.height = `${Math.min(el.scrollHeight, max)}px`;
-    // Also re-measure when the enhance animation overlay is removed: during the
-    // animation the textarea is position:absolute (stretched to the overlay's
-    // height), so a measurement taken then is wrong. Re-running once enhanceAnim
-    // clears sizes the now-in-flow textarea to its real content height.
-  }, [input, enhanceAnim]);
+    autosizeInput();
+  }, [input, enhanceAnim, autosizeInput]);
+
+  // Re-measure when wrapping changes independently of the draft value.
+  const inputResizeObserverRef = useRef<ResizeObserver | null>(null);
+  const attachInput = useCallback(
+    (el: HTMLTextAreaElement | null) => {
+      inputRef.current = el;
+      inputResizeObserverRef.current?.disconnect();
+      inputResizeObserverRef.current = null;
+      if (!el || typeof ResizeObserver === "undefined") return;
+      let lastWidth = el.clientWidth;
+      const observer = new ResizeObserver(() => {
+        const width = el.clientWidth;
+        if (width === lastWidth) return;
+        lastWidth = width;
+        autosizeInput();
+      });
+      observer.observe(el);
+      inputResizeObserverRef.current = observer;
+    },
+    [autosizeInput],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void document.fonts?.ready.then(() => {
+      if (!cancelled) autosizeInput();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [autosizeInput]);
 
   // Keyboard shortcuts for multi-window navigation.
   //   Cmd/Ctrl+N         → new project window
@@ -3472,7 +3488,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               </div>
             )}
             <textarea
-              ref={inputRef}
+              ref={attachInput}
               className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
               rows={1}
               // Lock the input while the dissolve→decode animation plays: the caret

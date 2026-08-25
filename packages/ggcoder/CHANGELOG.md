@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.49.9
+
+### Patch Changes
+
+- Fix image and video attachments on Windows: write temp files to `os.tmpdir()` instead of a hardcoded `/tmp`, which does not exist on Windows and silently dropped the attachment.
+  - @kenkaiiii/gg-ai@5.49.9
+  - @kenkaiiii/gg-agent@5.49.9
+  - @kenkaiiii/gg-core@5.49.9
+
 ## 5.49.8
 
 ### Patch Changes

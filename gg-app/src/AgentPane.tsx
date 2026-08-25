@@ -3753,7 +3753,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         )}
       </div>
 
-      {appUpdate.phase === "available" && (
+      {appUpdate.phase === "available" && !appUpdate.localPatched && (
         <button
           className="update-banner"
           title={appUpdate.installTitle}

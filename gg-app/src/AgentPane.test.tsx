@@ -359,32 +359,28 @@ afterEach(() => {
   nativeMocks.kenRunning = false;
   nativeMocks.toast.mockReset();
   nativeMocks.appUpdate.phase = "idle";
+  nativeMocks.appUpdate.localPatched = true;
   nativeMocks.appUpdate.install.mockReset();
   vi.useRealTimers();
 });
-describe("AgentPane protected update summary consent", () => {
-  it("starts default-off, propagates consent, and resets after closing", async () => {
+
+describe("AgentPane automatic update footer banner", () => {
+  it("hides local-patched updates while showing official releases", async () => {
     nativeMocks.appUpdate.phase = "available";
-    const pane = client("pane-update", 1);
-    vi.mocked(pane.getState).mockResolvedValue(agentState("azure:gpt-test"));
-    render(<AgentPane client={pane} target={target} />);
+    const localPane = client("pane-local-update", 1);
+    vi.mocked(localPane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={localPane} target={target} />);
+    await screen.findByRole("textbox");
 
-    fireEvent.click(await screen.findByRole("button", { name: /click to review/u }));
-    const checkbox = screen.getByRole<HTMLInputElement>("checkbox", {
-      name: /Explain what changed — and why — with my connected AI provider/u,
-    });
-    expect(checkbox.checked).toBe(false);
-    fireEvent.click(checkbox);
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("button", { name: /click to review/u })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: /click to review/u }));
-    const reopened = screen.getByRole<HTMLInputElement>("checkbox", {
-      name: /Explain what changed — and why — with my connected AI provider/u,
-    });
-    expect(reopened.checked).toBe(false);
-    fireEvent.click(reopened);
-    fireEvent.click(screen.getByRole("button", { name: "Merge and build installer" }));
-    expect(nativeMocks.appUpdate.install).toHaveBeenCalledWith({ summarizeDecisions: true });
+    cleanup();
+    nativeMocks.appUpdate.localPatched = false;
+    const officialPane = client("pane-official-update", 1);
+    vi.mocked(officialPane.getState).mockResolvedValue(agentState("azure:gpt-test"));
+    render(<AgentPane client={officialPane} target={target} />);
+
+    expect(await screen.findByRole("button", { name: /just updated/u })).toBeTruthy();
   });
 });
 

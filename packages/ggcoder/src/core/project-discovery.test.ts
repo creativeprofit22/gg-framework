@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as ConfigModule from "../config.js";
+import { createTestSymlink } from "../test-utils/symlink.js";
 import { encodeCwd } from "./encode-cwd.js";
 import {
   discoverProjects,
@@ -195,9 +196,9 @@ describe("discoverProjects (ggcoder store)", () => {
     await fs.mkdir(root, { recursive: true });
     const real = path.join(tmp, "elsewhere", "linked-project");
     await fs.mkdir(real, { recursive: true });
-    await fs.symlink(real, path.join(root, "linked-project"), "dir");
+    await createTestSymlink(real, path.join(root, "linked-project"), "dir");
     // A dangling link must not become a phantom row.
-    await fs.symlink(path.join(tmp, "gone"), path.join(root, "dangling"), "dir");
+    await createTestSymlink(path.join(tmp, "gone"), path.join(root, "dangling"), "dir");
 
     const projects = await discoverProjects({ projectsRoot: root });
 
@@ -286,7 +287,7 @@ describe("discoverProjects (ggcoder store)", () => {
     const transientRoot = path.join(tmp, "transient-real");
     const tempAlias = path.join(tmp, "transient-alias");
     await fs.mkdir(transientRoot, { recursive: true });
-    await fs.symlink(transientRoot, tempAlias, "dir");
+    await createTestSymlink(transientRoot, tempAlias, "dir");
     vi.spyOn(os, "tmpdir").mockReturnValue(tempAlias);
 
     for (const name of ["one", "two", "three"]) {

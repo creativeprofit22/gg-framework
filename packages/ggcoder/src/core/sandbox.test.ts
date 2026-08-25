@@ -6,6 +6,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAppPaths } from "../config.js";
+import { createTestSymlinkSync } from "../test-utils/symlink.js";
 import { DEFAULT_SETTINGS } from "./settings-manager.js";
 import {
   buildSandboxSettings,
@@ -79,7 +80,7 @@ describe("buildSandboxSettings", () => {
     // an escape that outlives the run that planted it.
     const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "gg-sandbox-home-"));
     const planted = path.join(fakeHome, ".deno");
-    fs.symlinkSync(path.parse(os.tmpdir()).root, planted);
+    createTestSymlinkSync(path.parse(os.tmpdir()).root, planted, "dir");
     const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
     try {
       const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gg-sandbox-workspace-"));
@@ -122,7 +123,7 @@ describe("buildSandboxSettings", () => {
     const ssh = path.join(fakeHome, ".ssh");
     fs.mkdirSync(ssh, { recursive: true });
     fs.mkdirSync(fakeTmp);
-    fs.symlinkSync(ssh, path.join(fakeHome, ".deno"));
+    createTestSymlinkSync(ssh, path.join(fakeHome, ".deno"), "dir");
     const homeSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
     const tmpSpy = vi.spyOn(os, "tmpdir").mockReturnValue(fakeTmp);
     try {

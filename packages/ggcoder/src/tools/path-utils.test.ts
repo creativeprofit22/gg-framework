@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import { createTestSymlink } from "../test-utils/symlink.js";
 import { resolvePath, rejectSymlink, msysToWindowsPath } from "./path-utils.js";
 
 describe("resolvePath", () => {
@@ -124,7 +125,7 @@ describe("rejectSymlink", () => {
     const target = path.join(tmpDir, "target.txt");
     const link = path.join(tmpDir, "link.txt");
     await fs.writeFile(target, "hello");
-    await fs.symlink(target, link);
+    await createTestSymlink(target, link, "file");
     await expect(rejectSymlink(link)).rejects.toThrow("Refusing to follow symlink");
   });
 

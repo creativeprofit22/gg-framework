@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createTestSymlink } from "../../test-utils/symlink.js";
 import { ExtensionLoader } from "./loader.js";
 import { installPlugin, listInstalledPlugins, packPlugin, removePlugin } from "./plugin-bundles.js";
 
@@ -74,7 +75,11 @@ describe("plugin bundles", () => {
   });
 
   it("rejects source symlinks and unsupported executable files", async () => {
-    await fs.symlink(path.join(source, "index.mjs"), path.join(source, "linked.mjs"));
+    await createTestSymlink(
+      path.join(source, "index.mjs"),
+      path.join(source, "linked.mjs"),
+      "file",
+    );
     await expect(packPlugin(source, artifact)).rejects.toThrow("symlinks");
     await fs.rm(path.join(source, "linked.mjs"));
     await fs.writeFile(path.join(source, "payload.exe"), "bad");

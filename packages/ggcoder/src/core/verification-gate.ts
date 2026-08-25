@@ -16,11 +16,28 @@
  * segment of a compound command. Both error directions are safe — a missed
  * recognition leaves the gate silent (today's behavior), a false positive merely
  * skips one continuation.
+ *
+ * Second gate — TAMPER DISCLOSURE. A passing check only proves something if the
+ * check itself was not the thing that changed. Editing a test, a test runner's
+ * config, or adding a suppression pragma makes a red suite go green without
+ * fixing anything, and the resulting transcript is byte-for-byte the shape of a
+ * real fix: mutation, then `pnpm test`, then exit 0. So mutations that alter
+ * what the check ASSERTS are recorded separately from ordinary code mutations,
+ * and survive the verification they enabled — a check cannot clear the
+ * suspicion that it was rigged.
+ *
+ * This gate DISCLOSES, it does not block: writing or repairing a test is normal,
+ * legitimate work (TDD, adding coverage), so refusing to finish would punish the
+ * common case. One demand per run: name what changed in the checks and why, and
+ * confirm the fix stands without it.
  */
 import type { Message } from "@kenkaiiii/gg-ai";
 
 /** Follow-ups per run. After this the gate is silent for the rest of the run. */
 export const MAX_VERIFICATION_INJECTIONS = 1;
+
+/** Tamper-disclosure demands per run. Same reasoning as above: one is enough. */
+export const MAX_TAMPER_INJECTIONS = 1;
 
 /** Words that may precede the real command without changing its shape. */
 const SHELL_WRAPPERS = new Set([
@@ -245,6 +262,122 @@ export function isCodeFilePath(filePath: string): boolean {
   return CODE_EXT_RE.test(filePath);
 }
 
+/**
+ * Files that define what a check ASSERTS rather than what it tests: test files
+ * and test directories, test-runner configs, and the type/lint configs whose
+ * strictness the checks inherit. Editing one of these can turn a failing check
+ * green without touching the behaviour under test.
+ *
+ * Deliberately matched on path shape only. Both error directions are cheap: a
+ * miss leaves today's behavior, a false positive costs one disclosure sentence.
+ */
+export function isCheckOwnFile(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, "/");
+  const base = normalized.slice(normalized.lastIndexOf("/") + 1);
+  // A test/spec file, by suffix (foo.test.ts, foo_test.go, test_foo.py).
+  if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(base)) return true;
+  if (/_test\.(?:go|py|rb|rs)$/.test(base) || /^test_.+\.py$/.test(base)) return true;
+  if (/(?:^|\.)spec\.[cm]?[jt]sx?$/.test(base)) return true;
+  // Anything under a tests directory.
+  if (/(?:^|\/)(?:tests?|__tests__|spec|specs|e2e|testdata|fixtures)\//.test(normalized)) {
+    return true;
+  }
+  // Test-runner and check configuration.
+  if (
+    /^(?:vitest|jest|playwright|cypress|karma|mocha|ava|nightwatch|wdio)\.config\.[cm]?[jt]s$/.test(
+      base,
+    )
+  ) {
+    return true;
+  }
+  if (/^(?:jest|vitest|mocha|ava|nyc|c8)\.(?:config|setup)\./.test(base)) return true;
+  // Type / lint configuration whose strictness the checks inherit.
+  if (/^tsconfig(?:\.[\w-]+)?\.json$/.test(base)) return true;
+  if (/^(?:\.eslintrc(?:\.[\w-]+)?|eslint\.config\.[cm]?[jt]s)$/.test(base)) return true;
+  if (/^(?:biome|\.golangci|\.rubocop|phpstan|psalm)\.(?:jsonc?|ya?ml|neon|xml|toml)$/.test(base)) {
+    return true;
+  }
+  if (/^(?:pyproject\.toml|setup\.cfg|tox\.ini|pytest\.ini|mypy\.ini|\.flake8)$/.test(base)) {
+    return true;
+  }
+  if (/^conftest\.py$/.test(base)) return true;
+  return false;
+}
+
+/**
+ * Markers that silence or skip a check rather than satisfy it. Matched only
+ * against text the model ADDED, so pre-existing suppressions in a file never
+ * trip the gate.
+ *
+ * Deliberately limited to unambiguous intent (an explicit suppression pragma, a
+ * skipped or narrowed test). Judgement calls that are ordinary in real test code
+ * — `as any`, a loosened assertion — are NOT matched: at one extra model turn
+ * per false positive, a noisy signal costs more than the rare miss.
+ */
+const SUPPRESSION_MARKERS: ReadonlyArray<{ re: RegExp; what: string }> = [
+  { re: /@ts-(?:ignore|expect-error|nocheck)\b/, what: "TypeScript error suppression" },
+  { re: /eslint-disable(?:-next-line|-line)?\b/, what: "ESLint rule suppression" },
+  { re: /#\s*type:\s*ignore\b/, what: "mypy type-ignore" },
+  { re: /#\s*noqa\b/, what: "flake8/ruff noqa" },
+  { re: /#\s*(?:pylint|mypy|ruff):\s*disable\b/, what: "Python linter suppression" },
+  { re: /#\[allow\(/, what: "Rust allow attribute" },
+  { re: /\/\/\s*nolint\b/, what: "Go nolint directive" },
+  { re: /@SuppressWarnings\b/, what: "Java warning suppression" },
+  {
+    re: /\b(?:it|test|describe|context)\s*\.\s*(?:skip|todo)\s*\(/,
+    what: "skipped test",
+  },
+  { re: /\b(?:xit|xdescribe|xtest)\s*\(/, what: "skipped test" },
+  {
+    re: /\b(?:it|test|describe|context)\s*\.\s*only\s*\(/,
+    what: "test run narrowed to .only",
+  },
+  { re: /@pytest\.mark\.(?:skip|xfail)\b/, what: "skipped pytest case" },
+  { re: /\bt\.Skip\s*\(/, what: "skipped Go test" },
+  { re: /#\[ignore\]/, what: "ignored Rust test" },
+];
+
+/** The `+` lines of a unified diff, with the marker stripped. */
+export function extractAddedLines(diff: string): string {
+  return diff
+    .split("\n")
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+    .map((line) => line.slice(1))
+    .join("\n");
+}
+
+/** Suppression/skip markers present in newly added text, de-duplicated. */
+export function detectCheckWeakening(addedText: string): string[] {
+  const found = new Set<string>();
+  for (const { re, what } of SUPPRESSION_MARKERS) {
+    if (re.test(addedText)) found.add(what);
+  }
+  return [...found];
+}
+
+/** A mutation that changed what a check asserts, and why it looked that way. */
+export interface SuspectMutation {
+  filePath: string;
+  reason: string;
+}
+
+export function buildTamperDisclosureMessage(suspects: readonly SuspectMutation[]): Message {
+  return {
+    role: "user",
+    provenance: { source: "runtime", kind: "completion_gate", visibility: "hidden" },
+    content:
+      "Verification gate: a check passed in this run, but this run also changed what the " +
+      "checks themselves assert:\n" +
+      suspects.map(({ filePath, reason }) => `- ${filePath} — ${reason}`).join("\n") +
+      "\nA check that was itself edited does not prove the code works. If these edits were " +
+      "legitimate (a new test, a test corrected against agreed behaviour, a suppression the " +
+      "user asked for), say so plainly in your final response and state why the fix stands " +
+      "without them. If instead the check was weakened, skipped, narrowed or silenced to get " +
+      "a green result, revert that now and fix the underlying code. This is the only time you " +
+      "will be asked — do not describe the change as verified without addressing this.",
+  };
+}
+
 export function buildVerificationFollowUpMessage(files: readonly string[]): Message {
   return {
     role: "user",
@@ -271,12 +404,34 @@ export class VerificationGate {
   private lastMutationSeq = 0;
   private lastVerificationSeq = 0;
   private injections = 0;
+  private tamperInjections = 0;
   /** Code files mutated since the last verification — the gate's file list. */
   private mutatedFiles = new Set<string>();
+  /**
+   * Mutations that changed what a check asserts. Keyed by path so repeated edits
+   * to one file disclose once. Deliberately NOT cleared by recordVerification():
+   * the whole point is that the passing check cannot clear the suspicion that it
+   * was the thing edited.
+   */
+  private suspects = new Map<string, string>();
 
-  recordMutation(filePath: string): void {
+  /**
+   * @param addedText Text the model ADDED in this mutation (the `+` lines of a
+   * diff, or a written file's full content). Scanned for suppression and skip
+   * markers; omit it and only the path check applies.
+   */
+  recordMutation(filePath: string, addedText?: string): void {
     this.lastMutationSeq = ++this.seq;
     this.mutatedFiles.add(filePath);
+
+    const reasons: string[] = [];
+    if (isCheckOwnFile(filePath)) reasons.push("edits a test or check configuration");
+    if (addedText) reasons.push(...detectCheckWeakening(addedText).map((what) => `adds ${what}`));
+    if (reasons.length === 0) return;
+    // Keep the fullest reason seen for this file rather than the newest.
+    const existing = this.suspects.get(filePath);
+    const merged = [...new Set([...(existing?.split("; ") ?? []), ...reasons])].join("; ");
+    this.suspects.set(filePath, merged);
   }
 
   recordVerification(): void {
@@ -289,12 +444,32 @@ export class VerificationGate {
   }
 
   /**
+   * True when a check passed after the run altered what the checks assert —
+   * the false-green shape. Requires a verification to have completed: with none,
+   * the standard gate already demands one, and demanding disclosure of an
+   * unproven fix on top of it is noise.
+   */
+  isTamperOwed(): boolean {
+    return this.suspects.size > 0 && this.lastVerificationSeq > 0;
+  }
+
+  /** Suspect mutations recorded this run, sorted for stable output. */
+  tamperSuspects(): SuspectMutation[] {
+    return [...this.suspects]
+      .map(([filePath, reason]) => ({ filePath, reason }))
+      .sort((a, b) => a.filePath.localeCompare(b.filePath));
+  }
+
+  /**
    * Would a stop right now inject? Lets the session arm clients BEFORE the
    * candidate final answer streams, so the draft the injection replaces is held
    * rather than painted and then superseded.
    */
   willInject(): boolean {
-    return this.isOwed() && this.injections < MAX_VERIFICATION_INJECTIONS;
+    return (
+      (this.isOwed() && this.injections < MAX_VERIFICATION_INJECTIONS) ||
+      (this.isTamperOwed() && this.tamperInjections < MAX_TAMPER_INJECTIONS)
+    );
   }
 
   /**
@@ -304,9 +479,17 @@ export class VerificationGate {
    * and one more injection only costs the user another restated final answer.
    */
   followUp(): Message[] | null {
-    if (!this.willInject()) return null;
-    this.injections += 1;
-    return [buildVerificationFollowUpMessage([...this.mutatedFiles].sort())];
+    // "Nothing proved this" outranks "the proof may be rigged": with no check
+    // run at all there is not yet a false green to disclose.
+    if (this.isOwed() && this.injections < MAX_VERIFICATION_INJECTIONS) {
+      this.injections += 1;
+      return [buildVerificationFollowUpMessage([...this.mutatedFiles].sort())];
+    }
+    if (this.isTamperOwed() && this.tamperInjections < MAX_TAMPER_INJECTIONS) {
+      this.tamperInjections += 1;
+      return [buildTamperDisclosureMessage(this.tamperSuspects())];
+    }
+    return null;
   }
 
   reset(): void {
@@ -314,6 +497,8 @@ export class VerificationGate {
     this.lastMutationSeq = 0;
     this.lastVerificationSeq = 0;
     this.injections = 0;
+    this.tamperInjections = 0;
     this.mutatedFiles.clear();
+    this.suspects.clear();
   }
 }

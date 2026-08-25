@@ -337,6 +337,17 @@ describe("VerificationGate tamper disclosure (bench 18 replay)", () => {
     expect(String(gate.followUp()![0]!.content)).toContain("does not prove the code works");
   });
 
+  it("does not claim a check passed when verification predates the latest mutation", () => {
+    const gate = new VerificationGate();
+    gate.recordMutation("src/parser.test.ts", "it.skip('x', () => {})");
+    gate.recordVerification();
+    gate.recordMutation("src/parser.ts", "return fixed;");
+
+    expect(gate.isTamperOwed()).toBe(false);
+    expect(String(gate.followUp()![0]!.content)).toContain("Run the project's verification");
+    expect(gate.followUp()).toBeNull();
+  });
+
   it("demands disclosure once per run, then goes silent", () => {
     const gate = replay([["src/parser.test.ts", "it.skip('x', () => {})"]]);
     expect(gate.followUp()).not.toBeNull();

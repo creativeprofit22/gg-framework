@@ -81,6 +81,7 @@ async function simulateToolCall(
   name: string,
   args: Record<string, unknown>,
   isError = false,
+  details?: unknown,
 ): Promise<void> {
   const toolCallId = `call-${++callSeq}`;
   await internal.trackHookEvent({
@@ -95,6 +96,7 @@ async function simulateToolCall(
     result: "",
     isError,
     durationMs: 1,
+    details,
   } as unknown as AgentEvent);
 }
 
@@ -112,14 +114,27 @@ describe("AgentSession verification gate", () => {
     expect(String(followUp![0]!.content)).toContain("Run the project's verification");
   });
 
-  it("stops blocking once a verification command runs after the edit", async () => {
+  it("stops blocking once a verification command runs successfully after the edit", async () => {
     const internal = await makeSession();
 
     await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
-    await simulateToolCall(internal, "bash", { command: "pnpm vitest run" });
+    await simulateToolCall(internal, "bash", { command: "pnpm vitest run" }, false, {
+      bashDiagnostics: { reason: "completed", exitCode: 0 },
+    });
 
     expect(internal.verificationGate.isOwed()).toBe(false);
     expect(internal.getHookFollowUpMessages()).toBeNull();
+  });
+
+  it("does not count a failed foreground verification command", async () => {
+    const internal = await makeSession();
+
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    await simulateToolCall(internal, "bash", { command: "pnpm vitest run" }, false, {
+      bashDiagnostics: { reason: "nonZeroExit", exitCode: 1 },
+    });
+
+    expect(internal.verificationGate.isOwed()).toBe(true);
   });
 
   it("ignores edits to non-code files and background verification", async () => {
@@ -150,14 +165,12 @@ describe("AgentSession verification gate", () => {
     expect(internal.getHookFollowUpMessages()).toBeNull();
   });
 
-  it("counts reading a finished background verification run as verification", async () => {
+  it("does not count reading a failed background verification run", async () => {
     const internal = await makeSession();
     const manager = new ProcessManager({ bgDir: path.join(tmpHome, "bg-verify") });
     managers.push(manager);
     internal.processManager = manager;
 
-    // A real short verification-shaped process; it exits non-zero (empty dir),
-    // which is fine — the agent SAW the result, that is what counts.
     const started = await manager.start("npm test", tmpProject);
     for (
       let i = 0;
@@ -166,16 +179,42 @@ describe("AgentSession verification gate", () => {
     ) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    expect(manager.list().find((p) => p.id === started.id)?.exitCode).not.toBe(0);
 
     await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
     await simulateToolCall(internal, "bash", {
       command: "npm test",
       run_in_background: true,
     });
-    expect(internal.verificationGate.isOwed()).toBe(true); // background ≠ verified
+    expect(internal.verificationGate.isOwed()).toBe(true);
 
     await simulateToolCall(internal, "task_output", { id: started.id });
-    expect(internal.verificationGate.isOwed()).toBe(false); // read of the finished run
+    expect(internal.verificationGate.isOwed()).toBe(true);
+  });
+
+  it("counts reading a successful background verification run", async () => {
+    const internal = await makeSession();
+    const manager = new ProcessManager({ bgDir: path.join(tmpHome, "bg-verify") });
+    managers.push(manager);
+    internal.processManager = manager;
+    await fs.writeFile(
+      path.join(tmpProject, "package.json"),
+      JSON.stringify({ scripts: { test: "node -e \"process.exit(0)\"" } }),
+    );
+
+    const started = await manager.start("npm test", tmpProject);
+    for (
+      let i = 0;
+      i < 100 && manager.list().find((p) => p.id === started.id)?.exitCode === null;
+      i += 1
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(manager.list().find((p) => p.id === started.id)?.exitCode).toBe(0);
+
+    await simulateToolCall(internal, "edit", { file_path: "src/a.ts" });
+    await simulateToolCall(internal, "task_output", { id: started.id });
+    expect(internal.verificationGate.isOwed()).toBe(false);
   });
 
   it("is disabled by the verificationGateEnabled setting", async () => {

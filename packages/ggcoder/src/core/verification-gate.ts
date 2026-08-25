@@ -444,13 +444,12 @@ export class VerificationGate {
   }
 
   /**
-   * True when a check passed after the run altered what the checks assert —
-   * the false-green shape. Requires a verification to have completed: with none,
-   * the standard gate already demands one, and demanding disclosure of an
-   * unproven fix on top of it is noise.
+   * True when the latest workspace mutation was followed by a passing check
+   * after the run altered what the checks assert — the false-green shape.
+   * Without that ordering, the standard gate must demand fresh verification first.
    */
   isTamperOwed(): boolean {
-    return this.suspects.size > 0 && this.lastVerificationSeq > 0;
+    return this.suspects.size > 0 && this.lastVerificationSeq > this.lastMutationSeq;
   }
 
   /** Suspect mutations recorded this run, sorted for stable output. */

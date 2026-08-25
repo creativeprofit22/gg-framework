@@ -1639,9 +1639,14 @@ export class AgentSession {
               this.verificationGate.recordMutation(filePath, addedText);
             }
           }
+          const bashDiagnostics = (event.details as
+            | { bashDiagnostics?: { reason?: unknown; exitCode?: unknown } }
+            | undefined)?.bashDiagnostics;
           if (
             name === "bash" &&
             !(args as { run_in_background?: unknown }).run_in_background &&
+            bashDiagnostics?.reason === "completed" &&
+            bashDiagnostics.exitCode === 0 &&
             isVerificationCommand(String((args as { command?: unknown }).command ?? ""))
           ) {
             this.verificationGate.recordVerification();
@@ -1654,7 +1659,7 @@ export class AgentSession {
             const proc = this.processManager
               ?.list()
               .find((p) => p.id === (args as { id?: unknown }).id);
-            if (proc && proc.exitCode !== null && isVerificationCommand(proc.command)) {
+            if (proc?.exitCode === 0 && isVerificationCommand(proc.command)) {
               this.verificationGate.recordVerification();
             }
           }

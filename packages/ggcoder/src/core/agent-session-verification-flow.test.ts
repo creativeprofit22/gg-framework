@@ -93,6 +93,8 @@ async function simulateToolCall(
     result: "",
     isError: false,
     durationMs: 1,
+    details:
+      name === "bash" ? { bashDiagnostics: { reason: "completed", exitCode: 0 } } : undefined,
   } as unknown as AgentEvent);
 }
 

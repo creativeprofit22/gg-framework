@@ -198,6 +198,68 @@ export function NotesRoadmap({
     focusAfterRender(phaseId);
   };
 
+  const togglePhase = (phaseId: string): void => {
+    if (phaseId === selectedId) {
+      closeDetail();
+      return;
+    }
+    selectPhase(phaseId);
+  };
+
+  const runCardAction = async (phase: NotesPhase): Promise<void> => {
+    const action = primaryAction(phase);
+    if (action === "Review") {
+      selectPhase(phase.id);
+      return;
+    }
+    if (pendingPhaseId !== null || actionDisabled) return;
+    if (
+      (action === "Start" || action === "Recover") &&
+      (startUnavailableReason !== null || isRoadmapPhaseStartProtected(phases, phase.id))
+    ) {
+      return;
+    }
+
+    setPendingPhaseId(phase.id);
+    try {
+      if (action === "Start") {
+        const result = await onStartPhase(phase.id);
+        if (result.status === "accepted") {
+          setAnnouncement(`Started phase: ${phase.title}`);
+          onActionSuccess();
+          return;
+        }
+        setAnnouncement(
+          result.status === "already-bound"
+            ? `${phase.title} already started in another window.`
+            : result.message,
+        );
+        return;
+      }
+
+      if (!phase.session) {
+        setAnnouncement(`${phase.title} has no resumable session.`);
+        return;
+      }
+      await onResumePhase(phase.id, phase.session);
+      if (phase.reminder) {
+        const result = await onDismissReminder(phase.id, phase.reminder.occurrenceKey);
+        if (result.status !== "committed") {
+          setAnnouncement(`Resumed ${phase.title}, but its reminder could not be dismissed.`);
+          return;
+        }
+      }
+      setAnnouncement(`Resumed phase: ${phase.title}`);
+      onActionSuccess();
+    } catch (error) {
+      setAnnouncement(
+        error instanceof Error ? error.message : `Couldn’t run the action for ${phase.title}.`,
+      );
+    } finally {
+      setPendingPhaseId(null);
+    }
+  };
+
   const startNextPhase = async (): Promise<void> => {
     if (
       !advancement ||
@@ -327,7 +389,7 @@ export function NotesRoadmap({
     : null;
 
   return (
-    <div className={`notes-roadmap${selectedPhase ? " has-detail" : ""}`}>
+    <div className="notes-roadmap">
       <div className="notes-roadmap-toolbar">
         <div>
           <h2 id="notes-roadmap-heading">Roadmap</h2>
@@ -457,7 +519,7 @@ export function NotesRoadmap({
         </section>
       )}
 
-      <div className={`notes-roadmap-workspace${selectedPhase ? " has-detail" : ""}`}>
+      <div className="notes-roadmap-workspace">
         {visiblePhases.length === 0 ? (
           <div className="notes-roadmap-empty">
             <strong>No roadmap phases yet</strong>
@@ -471,62 +533,102 @@ export function NotesRoadmap({
               const actionLabel = phaseActionLabel(phase, action);
               const lifecycle = notesLifecyclePresentation(phase);
               const blocker = activeRoadmapBlocker(phase);
+              const detailProps =
+                selectedPhaseDetailProps?.phase.id === phase.id ? selectedPhaseDetailProps : null;
               return (
                 <li
                   key={phase.id}
                   className={`notes-roadmap-row${selected ? " is-selected" : ""}${blocker ? " is-blocked" : ""}`}
                 >
-                  <button
-                    ref={(element) => {
-                      if (element) phaseTitleRefs.current.set(phase.id, element);
-                      else phaseTitleRefs.current.delete(phase.id);
-                    }}
-                    type="button"
-                    className="notes-roadmap-title"
-                    aria-label={`Inspect phase: ${phase.title}`}
-                    aria-pressed={selected}
-                    disabled={pendingPhaseId !== null}
-                    onClick={() => selectPhase(phase.id)}
-                  >
-                    <span className="notes-roadmap-title-text">{phase.title}</span>
-                    {phase.sourcePrompt.trim().length > 0 && (
-                      <span className="notes-phase-saved-prompt-marker">Saved prompt</span>
+                  <div className="notes-roadmap-card-summary">
+                    <div className="notes-roadmap-card-heading">
+                      <h3 className="notes-roadmap-card-title">
+                        <button
+                          ref={(element) => {
+                            if (element) phaseTitleRefs.current.set(phase.id, element);
+                            else phaseTitleRefs.current.delete(phase.id);
+                          }}
+                          type="button"
+                          className="notes-roadmap-title"
+                          aria-label={`Inspect phase: ${phase.title}`}
+                          aria-expanded={selected}
+                          aria-controls={selected ? `notes-phase-panel-${phase.id}` : undefined}
+                          disabled={pendingPhaseId !== null}
+                          onClick={() => togglePhase(phase.id)}
+                        >
+                          <span className="notes-roadmap-title-text">{phase.title}</span>
+                          {phase.sourcePrompt.trim().length > 0 && (
+                            <span className="notes-phase-saved-prompt-marker">Saved prompt</span>
+                          )}
+                        </button>
+                      </h3>
+                      <span className={`notes-phase-status is-${phase.status}`}>
+                        {lifecycle.state}
+                      </span>
+                    </div>
+
+                    {phase.goal.trim().length > 0 && (
+                      <p className="notes-roadmap-goal">{phase.goal}</p>
                     )}
-                  </button>
-                  <span className="notes-phase-status">
-                    <strong>{lifecycle.state}</strong>
-                    <small>{lifecycle.stage}</small>
-                  </span>
-                  <span className="notes-phase-count">
-                    {phase.referenceIds.length} {phase.referenceIds.length === 1 ? "ref" : "refs"}
-                  </span>
-                  <span className="notes-phase-reminder">
-                    {reminderRowLabel(phase, currentTime)}
-                  </span>
-                  {!selected && (
-                    <button
-                      type="button"
-                      className="notes-roadmap-primary"
-                      aria-label={`${actionLabel} phase: ${phase.title}`}
-                      disabled={pendingPhaseId !== null}
-                      onClick={() => selectPhase(phase.id)}
-                    >
-                      {actionLabel}
-                    </button>
+
+                    {blocker && (
+                      <p className="notes-roadmap-attention">
+                        <strong>Needs attention:</strong> {blocker.blocker}
+                      </p>
+                    )}
+
+                    {phase.doneWhen.length > 0 && (
+                      <section
+                        className="notes-roadmap-criteria"
+                        aria-label={`Done when for ${phase.title}`}
+                      >
+                        <h4>Done when</h4>
+                        <ul>
+                          {phase.doneWhen.map((criterion, index) => (
+                            <li key={`${phase.id}-criterion-${index}`}>{criterion}</li>
+                          ))}
+                        </ul>
+                      </section>
+                    )}
+
+                    <div className="notes-roadmap-card-footer">
+                      <div className="notes-roadmap-meta">
+                        <span>{lifecycle.stage}</span>
+                        <span>
+                          {phase.referenceIds.length}{" "}
+                          {phase.referenceIds.length === 1 ? "ref" : "refs"}
+                        </span>
+                        <span>{reminderRowLabel(phase, currentTime)}</span>
+                      </div>
+                      {!selected && (
+                        <button
+                          type="button"
+                          className="notes-roadmap-primary"
+                          aria-label={`${actionLabel} phase: ${phase.title}`}
+                          disabled={
+                            pendingPhaseId !== null ||
+                            actionDisabled ||
+                            ((action === "Start" || action === "Recover") &&
+                              (startUnavailableReason !== null ||
+                                isRoadmapPhaseStartProtected(phases, phase.id)))
+                          }
+                          onClick={() => void runCardAction(phase)}
+                        >
+                          {actionLabel}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {detailProps && (
+                    <div id={`notes-phase-panel-${phase.id}`}>
+                      <NotesPhaseDetail key={detailProps.phase.id} {...detailProps} />
+                    </div>
                   )}
                 </li>
               );
             })}
           </ol>
-        )}
-
-        {selectedPhaseDetailProps && (
-          <NotesPhaseDetail
-            key /* Preserve detail-local state until phase selection changes. */={
-              selectedPhaseDetailProps.phase.id
-            }
-            {...selectedPhaseDetailProps}
-          />
         )}
       </div>
 

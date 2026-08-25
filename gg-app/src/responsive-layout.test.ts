@@ -74,9 +74,15 @@ describe("narrow-window layout contracts", () => {
     );
   });
 
-  it("biases the Roadmap workspace toward detail with compact, consistently spaced controls", () => {
+  it("stacks Roadmap cards and inline detail with compact, consistently spaced controls", () => {
     expect(appCss).toMatch(
-      /\.notes-roadmap-workspace\.has-detail\s*\{[\s\S]*?grid-template-columns:\s*minmax\(260px,\s*0\.68fr\)\s*minmax\(0,\s*1\.32fr\);/,
+      /\.notes-roadmap-list\s*\{[\s\S]*?display:\s*grid;[\s\S]*?gap:\s*10px;/,
+    );
+    expect(appCss).toMatch(
+      /\.notes-phase-detail\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?margin:\s*0 12px 12px;/,
+    );
+    expect(appCss).not.toMatch(
+      /\.notes-roadmap-workspace(?:\.has-detail)?\s*\{[^}]*grid-template-columns:/,
     );
     expect(appCss).toMatch(
       /\.notes-phase-detail-heading\s*\{[\s\S]*?gap:\s*8px 12px;[\s\S]*?padding:\s*10px 12px 8px;/,

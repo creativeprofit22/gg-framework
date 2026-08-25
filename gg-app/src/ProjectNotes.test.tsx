@@ -281,6 +281,14 @@ async function openRoadmapPhase(title: string): Promise<void> {
   fireEvent.click(screen.getByRole("button", { name: `Inspect phase: ${title}` }));
 }
 
+function phaseDetail(title: string): HTMLElement | null {
+  return (
+    Array.from(globalThis.document.querySelectorAll<HTMLElement>(".notes-phase-detail")).find(
+      (detail) => detail.querySelector("h3")?.textContent === title,
+    ) ?? null
+  );
+}
+
 class FakeProjectNotesClient implements NotesClient {
   cwd: string;
   readonly snapshots = new Map<string, ProjectNotesSnapshot>();
@@ -740,7 +748,7 @@ describe("ProjectNotes", () => {
     expect(
       (await screen.findByRole("tab", { name: "Roadmap" })).getAttribute("aria-selected"),
     ).toBe("true");
-    expect(screen.getByRole("heading", { name: "Phase open-target" })).toBeTruthy();
+    expect(phaseDetail("Phase open-target")).not.toBeNull();
     expect(
       client.snapshots.get(canonicalProjectKey(cwd))?.document.phases[0]!.reminder,
     ).not.toBeNull();
@@ -1008,7 +1016,7 @@ describe("ProjectNotes", () => {
     const reminderNote = screen.getByLabelText("Reminder note (optional)") as HTMLTextAreaElement;
     fireEvent.change(reminderNote, { target: { value: "Keep this local draft" } });
     selectPhaseView("Overview");
-    expect(screen.getByRole("heading", { name: "Phase-local audit" })).toBeTruthy();
+    expect(phaseDetail("Phase-local audit")).not.toBeNull();
     selectPhaseView("More");
     expect((screen.getByLabelText("Reminder note (optional)") as HTMLTextAreaElement).value).toBe(
       "Keep this local draft",
@@ -1018,7 +1026,7 @@ describe("ProjectNotes", () => {
     viewSelector.focus();
     fireEvent.change(viewSelector, { target: { value: "overview" } });
     expect(viewTabs[0]?.getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByRole("heading", { name: "Phase-local audit" })).toBeTruthy();
+    expect(phaseDetail("Phase-local audit")).not.toBeNull();
     expect(document.activeElement).toBe(viewSelector);
     fireEvent.change(viewSelector, { target: { value: "more" } });
     expect((screen.getByLabelText("Reminder note (optional)") as HTMLTextAreaElement).value).toBe(
@@ -1167,6 +1175,123 @@ describe("ProjectNotes", () => {
     expect(screen.getByRole("list", { name: "Roadmap phases" }).children).toHaveLength(1);
     expect(screen.queryByText("Selected phase")).toBeNull();
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "New phase" }));
+  });
+
+  it("renders polished phase cards and expands phase details inline", async () => {
+    const cwd = "/work/roadmap-cards";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("roadmap cards");
+    const alpha = phase("alpha", "in-progress");
+    alpha.title = "Ship the inline Roadmap";
+    alpha.goal = "Make current progress and completion criteria easy to scan.";
+    alpha.doneWhen = ["Desktop remains readable", "Narrow layouts preserve hierarchy"];
+    const beta = phase("beta", "not-started");
+    beta.title = "Verify the release";
+    beta.order = 1;
+    document.phases = [alpha, beta];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+
+    const list = screen.getByRole("list", { name: "Roadmap phases" });
+    expect(list.children).toHaveLength(2);
+    const inspect = screen.getByRole("button", { name: "Inspect phase: Ship the inline Roadmap" });
+    const card = inspect.closest(".notes-roadmap-row");
+    expect(card?.querySelector(".notes-roadmap-card-title")?.tagName).toBe("H3");
+    expect(card?.querySelector(".notes-roadmap-card-title")?.contains(inspect)).toBe(true);
+    expect(card?.querySelector(".notes-roadmap-goal")?.textContent).toBe(alpha.goal);
+    expect(card?.querySelector(".notes-roadmap-criteria h4")?.textContent).toBe("Done when");
+    expect(card?.querySelector(".notes-roadmap-criteria")?.textContent).toContain(
+      "Narrow layouts preserve hierarchy",
+    );
+    expect(card?.querySelector(".notes-phase-status")?.textContent).toBe("Working");
+
+    fireEvent.click(inspect);
+    expect(inspect.getAttribute("aria-expanded")).toBe("true");
+    expect(card?.closest(".notes-roadmap")?.classList.contains("has-detail")).toBe(false);
+    expect(card?.closest(".notes-roadmap-workspace")?.classList.contains("has-detail")).toBe(false);
+    const detailId = inspect.getAttribute("aria-controls");
+    expect(detailId).toBe(`notes-phase-panel-${alpha.id}`);
+    expect(globalThis.document.querySelectorAll(`[id="${detailId}"]`)).toHaveLength(1);
+    expect(
+      globalThis.document
+        .getElementById(detailId!)
+        ?.contains(card?.querySelector(".notes-phase-detail") ?? null),
+    ).toBe(true);
+    expect(
+      globalThis.document.querySelectorAll(`[id="notes-phase-detail-${alpha.id}"]`),
+    ).toHaveLength(1);
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(list.children).toHaveLength(2);
+  });
+
+  it("collapses an expanded Roadmap card and returns focus to its title", async () => {
+    const cwd = "/work/roadmap-card-collapse";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("roadmap card collapse");
+    document.phases = [phase("collapse", "review")];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase("Phase collapse");
+    const title = screen.getByRole("button", { name: "Inspect phase: Phase collapse" });
+    expect(title.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.click(title);
+
+    await waitFor(() => expect(globalThis.document.activeElement).toBe(title));
+    expect(title.getAttribute("aria-expanded")).toBe("false");
+    expect(phaseDetail("Phase collapse")).toBeNull();
+  });
+
+  it("runs Start and Resume card actions directly while Review opens phase detail", async () => {
+    const cwd = "/work/roadmap-card-actions";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("roadmap card actions");
+    const resumable = phase("resume-card", "in-progress");
+    resumable.session = { sessionId: "session-card", sessionPath: "/sessions/card.jsonl" };
+    document.phases = [
+      phase("start-card", "not-started"),
+      { ...resumable, order: 1 },
+      { ...phase("review-card", "review"), order: 2 },
+    ];
+    client.seed(cwd, document);
+    const onStartPhase = vi.fn().mockResolvedValue({
+      status: "accepted",
+      operationId: "operation-card",
+      session: { sessionId: "started-card", sessionPath: "/sessions/started-card.jsonl" },
+      packageTokenCount: 20,
+    });
+    const onResumePhase = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ProjectNotes
+        cwd={cwd}
+        client={client}
+        onStartPhase={onStartPhase}
+        onResumePhase={onResumePhase}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Start phase: Phase start-card" }));
+    await waitFor(() => expect(onStartPhase).toHaveBeenCalledExactlyOnceWith("start-card"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Resume phase: Phase resume-card" }));
+    await waitFor(() =>
+      expect(onResumePhase).toHaveBeenCalledExactlyOnceWith("resume-card", resumable.session),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Review phase: Phase review-card" }));
+    expect(phaseDetail("Phase review-card")).not.toBeNull();
   });
 
   it("contains focus in both directions when inactive Notes panels stay mounted", async () => {
@@ -1388,7 +1513,7 @@ describe("ProjectNotes", () => {
 
     await openRoadmapPhase(selected.title);
     selectPhaseView("References");
-    const phaseDetail = screen.getByRole("heading", { name: selected.title }).closest("section");
+    const selectedDetail = phaseDetail(selected.title);
     fireEvent.click(screen.getByRole("button", { name: "Open source" }));
 
     expect(openSource).toHaveBeenCalledExactlyOnceWith(attachedReference.canonicalUrl);
@@ -1398,19 +1523,19 @@ describe("ProjectNotes", () => {
 
     await act(async () => resolveOpen());
     await waitFor(() =>
-      expect(phaseDetail?.querySelector('[role="status"]')?.textContent).toContain(
+      expect(selectedDetail?.querySelector('[role="status"]')?.textContent).toContain(
         "Opened source: src/file.ts:L1-L2",
       ),
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Open source" }));
     await waitFor(() =>
-      expect(phaseDetail?.querySelector('[role="alert"]')?.textContent).toContain(
+      expect(selectedDetail?.querySelector('[role="alert"]')?.textContent).toContain(
         "Couldn’t open this source in the system browser. Try again.",
       ),
     );
     expect(openSource).toHaveBeenNthCalledWith(2, attachedReference.canonicalUrl);
-    expect(phaseDetail?.querySelector('[role="status"]')?.textContent).toContain(
+    expect(selectedDetail?.querySelector('[role="status"]')?.textContent).toContain(
       "Source opener failed.",
     );
   });
@@ -1471,16 +1596,16 @@ describe("ProjectNotes", () => {
     };
     fireEvent.click(screen.getByRole("button", { name: "Accept" }));
 
-    const phaseDetail = screen.getByRole("heading", { name: selected.title }).closest("section");
+    const selectedDetail = phaseDetail(selected.title);
     await waitFor(() =>
-      expect(phaseDetail?.querySelector('[role="alert"]')?.textContent).toContain(
+      expect(selectedDetail?.querySelector('[role="alert"]')?.textContent).toContain(
         "The Roadmap change could not be saved.",
       ),
     );
     const phaseViews = screen.getByRole("tablist", { name: `${selected.title} views` });
     expect(phaseViews.querySelector('[aria-selected="true"]')?.textContent).toBe("References");
-    expect(phaseDetail?.querySelectorAll('[role="status"]')).toHaveLength(1);
-    expect(phaseDetail?.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(selectedDetail?.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(selectedDetail?.querySelectorAll('[role="alert"]')).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Accept" })).toBeTruthy();
   });
 
@@ -1644,7 +1769,7 @@ describe("ProjectNotes", () => {
       (screen.getByRole("button", { name: "Start next phase" }) as HTMLButtonElement).disabled,
     ).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "Start phase: Fallback successor" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Fallback successor" }));
     expect(
       (screen.getByRole("button", { name: "Start phase" }) as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -2179,7 +2304,7 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
-    fireEvent.click(screen.getByRole("button", { name: "Start phase: Start contract" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Start contract" }));
     expect(onStartPhase).not.toHaveBeenCalled();
     selectPhaseView("References");
     expect(screen.getByRole("heading", { name: "Attached references" })).toBeTruthy();
@@ -2246,7 +2371,7 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
-    fireEvent.click(screen.getByRole("button", { name: "Start phase: Start in code" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Start in code" }));
     const start = screen.getByRole("button", { name: "Start phase" }) as HTMLButtonElement;
     expect(start.disabled).toBe(true);
     expect(start.title).toBe("Switch to coding mode to start this phase.");
@@ -2255,7 +2380,7 @@ describe("ProjectNotes", () => {
     expect(onStartPhase).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
-    fireEvent.click(screen.getByRole("button", { name: "Retry phase: Recover in code" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Recover in code" }));
     const recover = screen.getByRole("button", { name: "Retry phase" }) as HTMLButtonElement;
     expect(recover.disabled).toBe(true);
     expect(recover.title).toBe("Switch to coding mode to start this phase.");
@@ -2263,7 +2388,7 @@ describe("ProjectNotes", () => {
     expect(onResumePhase).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
-    fireEvent.click(screen.getByRole("button", { name: "Resume phase: Resume in code" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Resume in code" }));
     const resume = screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement;
     expect(resume.disabled).toBe(false);
     fireEvent.click(resume);
@@ -2309,20 +2434,20 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
-    fireEvent.click(screen.getByRole("button", { name: "Retry phase: Recover phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Recover phase" }));
     const phaseViews = screen.getByRole("tablist", { name: "Recover phase views" });
     expect(phaseViews.querySelector('[aria-selected="true"]')?.textContent).toBe("Overview");
-    const phaseDetail = screen.getByRole("heading", { name: "Recover phase" }).closest("section");
-    expect(phaseDetail?.querySelectorAll('[role="status"]')).toHaveLength(1);
+    const selectedDetail = phaseDetail("Recover phase");
+    expect(selectedDetail?.querySelectorAll('[role="status"]')).toHaveLength(1);
     const start = screen.getByRole("button", { name: "Retry phase" });
     fireEvent.click(start);
     await waitFor(() =>
-      expect(phaseDetail?.querySelector('[role="alert"]')?.textContent).toContain(
+      expect(selectedDetail?.querySelector('[role="alert"]')?.textContent).toContain(
         "Could not create the phase session. Retry.",
       ),
     );
     expect(phaseViews.querySelector('[aria-selected="true"]')?.textContent).toBe("Overview");
-    expect(phaseDetail?.querySelectorAll('[role="alert"]')).toHaveLength(1);
+    expect(selectedDetail?.querySelectorAll('[role="alert"]')).toHaveLength(1);
     expect(screen.queryByText("Starting phase…")).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(start));
 
@@ -2365,7 +2490,6 @@ describe("ProjectNotes", () => {
       fireEvent.click(
         screen.getByRole("button", { name: `${visibleAction} phase: ${statusLabel} recovery` }),
       );
-      fireEvent.click(screen.getByRole("button", { name: `${visibleAction} phase` }));
 
       await waitFor(() => expect(onResumePhase).toHaveBeenCalledExactlyOnceWith(status, link));
       await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -2525,45 +2649,29 @@ describe("ProjectNotes", () => {
       }) as HTMLButtonElement;
       expect(rowAction.disabled).toBe(false);
       fireEvent.click(rowAction);
-      expect(
-        screen.queryByRole("button", { name: `${expectedAction} phase: ${selected.title}` }),
-      ).toBeNull();
 
       if (expectedAction === "Review") {
         expect(screen.getByText("This phase is available for scope review only.")).toBeTruthy();
         expect(
           screen.queryByRole("button", { name: /^(Start|Recover|Resume|Retry) phase$/ }),
         ).toBeNull();
-      } else {
-        const detailAction = screen.getByRole("button", {
-          name: `${expectedAction} phase`,
-        }) as HTMLButtonElement;
-        expect(detailAction.disabled).toBe(false);
-        expect(detailAction.closest(".notes-phase-detail-heading")).not.toBeNull();
-        expect(detailAction.closest(".notes-phase-detail-actions")).not.toBeNull();
-        expect(detailAction.closest(".notes-phase-execution")).toBeNull();
-        expect(screen.getAllByRole("button", { name: `${expectedAction} phase` })).toHaveLength(1);
-        fireEvent.click(detailAction);
-        const startsSession =
-          expectedAction === "Start" ||
-          (expectedAction === "Retry" && sessionFixture === "unbound");
-        if (startsSession) {
-          await waitFor(() => expect(onStartPhase).toHaveBeenCalledExactlyOnceWith(selected.id));
-        } else {
-          await waitFor(() =>
-            expect(onResumePhase).toHaveBeenCalledExactlyOnceWith(selected.id, selected.session),
-          );
-        }
+        expect(onStartPhase).not.toHaveBeenCalled();
+        expect(onResumePhase).not.toHaveBeenCalled();
+        return;
       }
 
       const startsSession =
         expectedAction === "Start" || (expectedAction === "Retry" && sessionFixture === "unbound");
-      const resumesSession =
-        expectedAction === "Recover" ||
-        expectedAction === "Resume" ||
-        (expectedAction === "Retry" && sessionFixture !== "unbound");
-      expect(onStartPhase).toHaveBeenCalledTimes(startsSession ? 1 : 0);
-      expect(onResumePhase).toHaveBeenCalledTimes(resumesSession ? 1 : 0);
+      if (startsSession) {
+        await waitFor(() => expect(onStartPhase).toHaveBeenCalledExactlyOnceWith(selected.id));
+        expect(onResumePhase).not.toHaveBeenCalled();
+      } else {
+        await waitFor(() =>
+          expect(onResumePhase).toHaveBeenCalledExactlyOnceWith(selected.id, selected.session),
+        );
+        expect(onStartPhase).not.toHaveBeenCalled();
+      }
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     },
   );
 
@@ -2740,7 +2848,7 @@ describe("ProjectNotes", () => {
       expect(button.closest("li")?.textContent).toContain(stage);
     }
 
-    fireEvent.click(screen.getByRole("button", { name: "Retry phase: Attention phase" }));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Attention phase" }));
     selectPhaseView("More");
     expect(screen.getAllByText(/Needs attention: The provider failed/).length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: "Pause automation" })).toBeTruthy();
@@ -2756,7 +2864,7 @@ describe("ProjectNotes", () => {
       updatedAt: "2026-07-15T12:01:00.000Z",
     };
     act(() => client.publish(cwd, refreshed, 2));
-    expect(await screen.findByRole("heading", { name: "Attention phase" })).toBeTruthy();
+    await waitFor(() => expect(phaseDetail("Attention phase")).not.toBeNull());
     expect(screen.queryByText(/Stale reason must stay hidden/)).toBeNull();
     expect(screen.getByRole("button", { name: "Resume phase" })).toBeTruthy();
 
@@ -2811,7 +2919,6 @@ describe("ProjectNotes", () => {
       screen.getAllByRole("button", { name: "Retry phase: Retry implementation" }),
     ).toHaveLength(1);
     fireEvent.click(retry);
-    fireEvent.click(screen.getByRole("button", { name: "Retry phase" }));
 
     await waitFor(() => expect(onStartPhase).toHaveBeenCalledExactlyOnceWith("retry"));
   });
@@ -2828,7 +2935,7 @@ describe("ProjectNotes", () => {
     selectNotesTab("Roadmap");
     expect(screen.queryByText("Selected phase")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Review phase: Only phase" }));
-    expect(screen.getByRole("heading", { name: "Only phase" })).toBeTruthy();
+    expect(phaseDetail("Only phase")).not.toBeNull();
 
     const refreshed = {
       ...populated,
@@ -2836,7 +2943,7 @@ describe("ProjectNotes", () => {
     };
     act(() => client.publish(cwd, refreshed, 2));
 
-    expect(await screen.findByRole("heading", { name: "Only phase refreshed" })).toBeTruthy();
+    await waitFor(() => expect(phaseDetail("Only phase refreshed")).not.toBeNull());
     expect(screen.getByText("Selected phase")).toBeTruthy();
   });
 
@@ -2885,7 +2992,7 @@ describe("ProjectNotes", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Alpha" }));
-    expect(screen.getByText("Verify the Notes shell")).toBeTruthy();
+    expect(screen.getAllByText("Verify the Notes shell").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Shell evidence passes").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Edit" }));
     fireEvent.change(screen.getByLabelText("Edit phase title"), {
@@ -3458,7 +3565,6 @@ describe("ProjectNotes", () => {
     const empty = { ...populated, references: [] };
     act(() => client.publish(cwd, empty, 2));
     selectNotesTab("Roadmap");
-    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Empty context phase" }));
     selectPhaseView("References");
     fireEvent.click(screen.getByRole("button", { name: "Create a reference" }));
     expect(screen.getByRole("tab", { name: "Reference" }).getAttribute("aria-selected")).toBe(

@@ -7687,88 +7687,66 @@ body {
 }
 .notes-roadmap-workspace {
   min-width: 0;
-}
-.notes-roadmap-workspace.has-detail {
-  display: grid;
-  grid-template-columns: minmax(260px, 0.68fr) minmax(0, 1.32fr);
-  align-items: start;
-}
-.notes-roadmap-workspace.has-detail .notes-roadmap-list {
-  min-width: 0;
-  border-inline-end: 1px solid var(--border);
-}
-.notes-roadmap-workspace.has-detail .notes-roadmap-row {
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas:
-    "title action"
-    "status status"
-    "count reminder";
-  gap: 4px 8px;
-  padding-block: 8px;
-}
-.notes-roadmap-workspace.has-detail .notes-phase-count,
-.notes-roadmap-workspace.has-detail .notes-phase-reminder {
-  align-self: start;
-}
-.notes-roadmap-workspace.has-detail .notes-phase-reminder {
-  justify-self: end;
-  text-align: end;
+  padding: 12px;
+  background: var(--surface-2);
 }
 .notes-roadmap-list {
   display: grid;
   min-width: 0;
   margin: 0;
   padding: 0;
+  gap: 10px;
   list-style: none;
 }
 .notes-roadmap-row {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(104px, auto) 52px 146px 70px;
-  grid-template-areas: "title status count reminder action";
-  align-items: center;
   min-width: 0;
-  gap: 10px;
-  padding: 8px 10px 8px 14px;
-  border-bottom: 1px solid var(--border);
-  border-inline-start: 3px solid transparent;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--border-strong);
+  border-radius: var(--radius-card);
+  background: var(--surface-1);
+  transition: border-color var(--t-fast);
 }
 .notes-roadmap-row.is-selected {
   border-inline-start-color: var(--primary);
-  background: var(--surface-2);
+  border-color: var(--border-strong);
 }
 .notes-roadmap-row.is-blocked {
   border-inline-start-color: var(--warning);
-  background: color-mix(in srgb, var(--warning) 7%, transparent);
 }
-.notes-roadmap-row.is-blocked .notes-phase-status {
-  border-inline-start-color: var(--warning);
+.notes-roadmap-card-summary {
+  padding: 14px 16px 12px;
 }
-.notes-roadmap-row.is-blocked .notes-phase-status strong {
-  color: color-mix(in srgb, var(--warning) 84%, var(--text));
+.notes-roadmap-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 12px;
+}
+.notes-roadmap-card-title {
+  min-width: 0;
+  margin: 0;
 }
 .notes-roadmap-title {
-  grid-area: title;
   display: flex;
   min-width: 0;
-  overflow: hidden;
   align-items: center;
   gap: 7px;
   border: 0;
   background: transparent;
   color: var(--text);
-  padding: 4px 0;
+  padding: 2px 0;
   cursor: pointer;
   font-family: var(--sans);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.35;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.4;
   text-align: start;
-  white-space: nowrap;
 }
 .notes-roadmap-title-text {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 .notes-phase-saved-prompt-marker {
   flex: 0 0 auto;
@@ -7784,51 +7762,103 @@ body {
 .notes-roadmap-title:hover {
   color: var(--primary);
 }
-.notes-phase-status,
-.notes-phase-count,
-.notes-phase-reminder {
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .notes-phase-status {
-  grid-area: status;
-  display: flex;
-  justify-self: start;
-  flex-direction: column;
-  border-inline-start: 2px solid var(--border-strong);
-  padding-inline-start: 7px;
+  flex: 0 0 auto;
+  max-width: 44%;
+  padding: 3px 8px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1.35;
+  text-align: center;
 }
-.notes-phase-status strong {
+.notes-phase-status.is-done {
+  border-color: var(--success);
+  color: var(--success);
+}
+.notes-phase-status.is-in-progress,
+.notes-phase-status.is-review {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.notes-phase-status.is-needs-attention {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.notes-roadmap-goal {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.notes-roadmap-attention {
+  margin: 10px 0 0;
+  padding-inline-start: 10px;
+  border-inline-start: 2px solid var(--warning);
   color: var(--text-secondary);
   font-size: 11px;
-  font-weight: 650;
-  line-height: 1.25;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
-.notes-phase-status small {
+.notes-roadmap-attention strong {
+  color: var(--warning);
+}
+.notes-roadmap-criteria {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.notes-roadmap-criteria h4 {
+  margin: 0;
   color: var(--text-muted);
   font-size: 10px;
-  line-height: 1.25;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 1.4;
+  text-transform: uppercase;
 }
-.notes-phase-count {
-  grid-area: count;
-  font-variant-numeric: tabular-nums;
+.notes-roadmap-criteria ul {
+  display: grid;
+  margin: 6px 0 0;
+  padding-inline-start: 18px;
+  gap: 3px;
 }
-.notes-phase-reminder {
-  grid-area: reminder;
+.notes-roadmap-criteria li {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.notes-roadmap-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 10px;
+  gap: 12px;
+}
+.notes-roadmap-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.notes-roadmap-meta span {
+  overflow-wrap: anywhere;
 }
 .notes-roadmap-primary {
-  grid-area: action;
+  flex: 0 0 auto;
   min-width: 64px;
 }
 .notes-phase-detail {
-  position: sticky;
-  top: 10px;
   min-width: 0;
-  margin: 10px;
+  margin: 0 12px 12px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-card);
   background: var(--surface-2);
@@ -9574,51 +9604,39 @@ body {
   }
 }
 @media (max-width: 760px) {
-  .notes-roadmap-workspace.has-detail,
   .notes-reference-workspace.has-detail {
     display: block;
   }
-  .notes-roadmap.has-detail .notes-roadmap-new,
-  .notes-roadmap-workspace.has-detail .notes-roadmap-list,
   .notes-reference-workspace.has-detail .notes-reference-groups {
     display: none;
   }
-  .notes-roadmap-workspace.has-detail .notes-phase-detail,
   .notes-reference-workspace.has-detail .notes-reference-detail {
     position: static;
     margin: 12px;
   }
-  .notes-roadmap-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "title action"
-      "status status"
-      "count reminder";
-    gap: 6px 10px;
-    padding-block: 10px;
+  .notes-roadmap-workspace {
+    padding: 8px;
   }
-  .notes-roadmap-title,
-  .notes-phase-status,
-  .notes-phase-reminder {
-    overflow: visible;
-    text-overflow: clip;
-    white-space: normal;
+  .notes-roadmap-card-summary {
+    padding: 12px;
+  }
+  .notes-roadmap-card-heading {
+    gap: 8px;
   }
   .notes-roadmap-title {
     flex-wrap: wrap;
   }
   .notes-roadmap-title-text {
     flex: 1 1 100%;
-    overflow: visible;
-    text-overflow: clip;
   }
-  .notes-phase-count,
-  .notes-phase-reminder {
-    align-self: start;
+  .notes-roadmap-card-footer {
+    align-items: flex-start;
   }
-  .notes-phase-reminder {
-    justify-self: end;
-    text-align: end;
+  .notes-roadmap-meta {
+    flex: 1 1 auto;
+  }
+  .notes-phase-detail {
+    margin: 0 8px 8px;
   }
   .notes-phase-content,
   .notes-phase-controls,

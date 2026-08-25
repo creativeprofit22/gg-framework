@@ -7321,7 +7321,7 @@ fn pick_sidecar(env_override: Option<String>, is_dev: bool, resource: Option<&Pa
         return workspace_sidecar();
     }
     match resource {
-        Some(p) => p.to_path_buf(),
+        Some(p) => strip_extended_prefix(p.to_path_buf()),
         None => workspace_sidecar(),
     }
 }
@@ -10734,6 +10734,31 @@ mod tests {
         let res = Path::new("/res/sidecar/app-sidecar.mjs");
         let got = pick_sidecar(None, false, Some(res));
         assert_eq!(got, res.to_path_buf());
+    }
+
+    #[test]
+    fn pick_sidecar_bundled_normalizes_windows_resource_paths() {
+        let cases = [
+            (
+                r"\\?\C:\Program Files\GG Coder\sidecar\app-sidecar.mjs",
+                r"C:\Program Files\GG Coder\sidecar\app-sidecar.mjs",
+            ),
+            (
+                r"C:\Program Files\GG Coder\sidecar\app-sidecar.mjs",
+                r"C:\Program Files\GG Coder\sidecar\app-sidecar.mjs",
+            ),
+            (
+                r"\\?\UNC\server\share\sidecar\app-sidecar.mjs",
+                r"\\server\share\sidecar\app-sidecar.mjs",
+            ),
+        ];
+
+        for (resource, expected) in cases {
+            assert_eq!(
+                pick_sidecar(None, false, Some(Path::new(resource))),
+                PathBuf::from(expected)
+            );
+        }
     }
 
     #[test]

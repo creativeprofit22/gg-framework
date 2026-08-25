@@ -561,6 +561,54 @@ windowsDescribe("detached local installer helper", () => {
     expect(windowReturned.stderr).toContain("still has a visible main window");
   });
 
+  it("drains the app and sidecar after graceful close or bounded captured-tree fallback before replacement", () => {
+    const scenario = (forceFallback) =>
+      runPowerShell(
+        `$script:InstallLogPath = ${psLiteral(join(tmpdir(), `gg-shutdown-${randomUUID()}.log`))}; ` +
+          `$DelaySeconds = 0; $GracefulShutdownSeconds = ${forceFallback ? 1 : 2}; $ForcedShutdownSeconds = 1; ` +
+          `$script:events = @(); $script:polls = 0; $script:killed = $false; ` +
+          `$installed = Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\\gg-coder-local-fork.exe'; ` +
+          `$root = [pscustomobject]@{ ProcessId = 101; ExecutablePath = $installed; CreationTicks = 12345 }; ` +
+          `$window = [pscustomobject]@{ MainWindowHandle = [IntPtr]1 }; ` +
+          `$window | Add-Member ScriptMethod Refresh {}; ` +
+          `$window | Add-Member ScriptMethod CloseMainWindow { $script:events += 'close-requested'; $this.MainWindowHandle = [IntPtr]::Zero; return $true }; ` +
+          `function Read-VerifiedInstallerManifest { [pscustomobject]@{ Path = 'fixture'; Sha256 = 'installer'; PayloadSha256 = 'payload'; PayloadSize = 1 } }; ` +
+          `function Get-AppRootSnapshots { @($root) }; ` +
+          `function Get-Process { $window }; ` +
+          `function Get-CurrentRootSnapshots { @($root) }; ` +
+          `function Assert-NoUnrelatedGgAppProcesses {}; ` +
+          `function Invoke-VerifiedInstallTransaction { $script:events += 'replacement-started' }; ` +
+          `function Get-InstalledAppProcesses { ` +
+          `  $script:polls += 1; ` +
+          `  if (${forceFallback ? "$true" : "$false"} -and -not $script:killed) { $script:events += 'poll-app-sidecar'; return @([pscustomobject]@{ ProcessId = 101 }, [pscustomobject]@{ ProcessId = 202 }) }; ` +
+          `  if (-not ${forceFallback ? "$true" : "$false"} -and $script:polls -eq 1) { $script:events += 'poll-app-sidecar'; return @([pscustomobject]@{ ProcessId = 101 }, [pscustomobject]@{ ProcessId = 202 }) }; ` +
+          `  if (-not ${forceFallback ? "$true" : "$false"} -and $script:polls -eq 2) { $script:events += 'poll-sidecar'; return @([pscustomobject]@{ ProcessId = 202 }) }; ` +
+          `  $script:events += 'tree-drained'; return @() ` +
+          `}; ` +
+          `function taskkill.exe { $script:events += 'forced-tree-stop'; $script:killed = $true; $global:LASTEXITCODE = 0 }; ` +
+          `$started = [Diagnostics.Stopwatch]::StartNew(); Invoke-LocalPatchedInstall; $started.Stop(); ` +
+          `[pscustomobject]@{ Events = @($script:events); ElapsedMs = $started.ElapsedMilliseconds } | ConvertTo-Json -Compress`,
+      );
+
+    const graceful = scenario(false);
+    const forced = scenario(true);
+
+    expect(graceful.status, graceful.stderr).toBe(0);
+    expect(JSON.parse(graceful.stdout.trim()).Events).toEqual([
+      "close-requested",
+      "poll-app-sidecar",
+      "poll-sidecar",
+      "tree-drained",
+      "replacement-started",
+    ]);
+    expect(forced.status, forced.stderr).toBe(0);
+    const forcedEvidence = JSON.parse(forced.stdout.trim());
+    expect(forcedEvidence.Events.at(-3)).toBe("forced-tree-stop");
+    expect(forcedEvidence.Events.slice(-2)).toEqual(["tree-drained", "replacement-started"]);
+    expect(forcedEvidence.ElapsedMs).toBeGreaterThanOrEqual(900);
+    expect(forcedEvidence.ElapsedMs).toBeLessThan(3000);
+  });
+
   it("requires Local Fork uninstall registration at the Local Fork directory and binary", () => {
     const fixture = transactionFixture();
     const accepted = runPowerShell(

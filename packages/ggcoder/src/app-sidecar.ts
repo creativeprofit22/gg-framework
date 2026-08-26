@@ -288,6 +288,7 @@ import {
   APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
   AppSidecarRoadmapToolHost,
   type AppSidecarFinalReviewAttempt,
+  type AppSidecarFinalReviewEligibility,
 } from "./app-sidecar-roadmap-tool-host.js";
 import {
   boundPhaseForAutopilotReview,
@@ -2092,6 +2093,64 @@ async function createSession(
   };
   let session!: AgentSession;
   let planGate!: AppSidecarPlanGate;
+  const revalidateRoadmapFinalReviewEligibility = (
+    snapshot: ProjectNotesSnapshot,
+    input: {
+      phaseId: string;
+      expectedRevision: number | undefined;
+      verificationStatusUpdateId?: string;
+    },
+  ): AppSidecarFinalReviewEligibility | null => {
+    if (snapshot.revision !== input.expectedRevision) return null;
+    const active = session.getActivePhaseContext();
+    const phase = snapshot.document.phases.find((candidate) => candidate.id === input.phaseId);
+    if (
+      !active ||
+      active.phase.id !== input.phaseId ||
+      !phase?.session ||
+      phase.session.sessionId !== active.session.sessionId ||
+      phase.session.sessionPath !== active.session.sessionPath
+    ) {
+      return null;
+    }
+    let latestRejectedReviewIndex = -1;
+    for (const [index, event] of phase.roadmapEvents.entries()) {
+      if (event.type === "completion-review" && event.decision === "rejected") {
+        latestRejectedReviewIndex = index;
+      }
+    }
+    const verification = phase.roadmapEvents
+      .slice(latestRejectedReviewIndex + 1)
+      .reverse()
+      .find((event) => event.type === "status-update" && event.verification !== null);
+    if (
+      verification?.type !== "status-update" ||
+      verification.verification === null ||
+      verification.id !== (input.verificationStatusUpdateId ?? verification.id) ||
+      verification.verificationSession?.sessionId !== active.session.sessionId ||
+      verification.verificationSession.sessionPath !== active.session.sessionPath
+    ) {
+      return null;
+    }
+    const base = {
+      phaseId: phase.id,
+      revision: snapshot.revision,
+      sessionId: active.session.sessionId,
+      verificationStatusUpdateId: verification.id,
+    };
+    if (verification.verification === "exception-requested") {
+      return { ...base, verification: "exception-requested" };
+    }
+    if (verification.verification !== "passed") return null;
+    const evidenceEvaluation = session.evaluateRoadmapVerificationEvidence({
+      doneWhen: phase.doneWhen,
+      evidence: verification.evidence,
+      expectedRevision: snapshot.revision,
+    });
+    return evidenceEvaluation.ready
+      ? { ...base, verification: "passed", evidenceEvaluation }
+      : null;
+  };
   const persistPlanGateMarker = (checkpoint: PersistedPlanReviewCheckpoint) =>
     session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
   const roadmapReviewScheduler = new AppSidecarRoadmapReviewScheduler();
@@ -2106,6 +2165,12 @@ async function createSession(
     canSubmitFinalReview: (actor) =>
       actor !== "ken-autopilot" || (!autopilotCancelled && projectAutopilot.isEnabled(cwd)),
     getAutopilotFinalReviewClaim: () => roadmapReviewRuns.activeClaim(),
+    revalidateFinalReviewEligibility: async (input) => {
+      const loaded = await notesRepository.load(cwd);
+      return loaded.status === "ok"
+        ? revalidateRoadmapFinalReviewEligibility(loaded.snapshot, input)
+        : null;
+    },
     onFinalReview: (attempt) => {
       if (attempt.actor === "ken-autopilot") roadmapReviewRuns.record(attempt);
     },
@@ -3469,8 +3534,20 @@ async function createSession(
       if (activePhase) {
         const loaded = await notesRepository.load(cwd);
         if (loaded.status === "ok") {
-          boundPhase = boundPhaseForAutopilotReview(loaded.snapshot, activePhase.phase.id, trigger);
-          if (trigger && !boundPhase) {
+          const eligibility = trigger
+            ? revalidateRoadmapFinalReviewEligibility(loaded.snapshot, {
+                phaseId: trigger.phaseId,
+                expectedRevision: loaded.snapshot.revision,
+                verificationStatusUpdateId: trigger.verificationStatusUpdateId,
+              })
+            : null;
+          boundPhase = boundPhaseForAutopilotReview(
+            loaded.snapshot,
+            activePhase.phase.id,
+            trigger,
+            eligibility?.evidenceEvaluation,
+          );
+          if (trigger && (!eligibility || !boundPhase)) {
             throw new Error(
               `Roadmap final-review trigger ${trigger.triggerId} is no longer eligible.`,
             );
@@ -3511,8 +3588,18 @@ async function createSession(
                 `Roadmap final-review retry ${trigger.triggerId} cannot reload Notes.`,
               );
             }
-            boundPhase = boundPhaseForAutopilotReview(refreshed.snapshot, trigger.phaseId, trigger);
-            if (!boundPhase) {
+            const eligibility = revalidateRoadmapFinalReviewEligibility(refreshed.snapshot, {
+              phaseId: trigger.phaseId,
+              expectedRevision: refreshed.snapshot.revision,
+              verificationStatusUpdateId: trigger.verificationStatusUpdateId,
+            });
+            boundPhase = boundPhaseForAutopilotReview(
+              refreshed.snapshot,
+              trigger.phaseId,
+              trigger,
+              eligibility?.evidenceEvaluation,
+            );
+            if (!eligibility || !boundPhase) {
               throw new Error(
                 `Roadmap final-review retry ${trigger.triggerId} is no longer eligible.`,
               );

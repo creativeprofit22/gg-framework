@@ -26,10 +26,23 @@ export type RoadmapVerificationEvidenceUnmetCode =
   | "criterion-evidence-mismatch"
   | "unmatched-evidence";
 
-export interface RoadmapVerificationEvidenceEvaluation {
-  ready: boolean;
-  unmetEvidenceCodes: RoadmapVerificationEvidenceUnmetCode[];
+export interface RoadmapVerificationCriterionCoverage {
+  criterionIndex: number;
+  criterion: string;
+  evidence: string;
+  command: string;
 }
+
+export type RoadmapVerificationEvidenceEvaluation =
+  | {
+      ready: false;
+      unmetEvidenceCodes: RoadmapVerificationEvidenceUnmetCode[];
+    }
+  | {
+      ready: true;
+      unmetEvidenceCodes: [];
+      criterionCoverage: RoadmapVerificationCriterionCoverage[];
+    };
 
 const LONG_RUNNING_FLAGS = new Set([
   "--watch",
@@ -585,9 +598,10 @@ export function evaluateRoadmapVerificationEvidence(input: {
     ...(input.staleLedgerEvidence ?? []),
   ];
   const usedCommands = new Set<string>();
+  const criterionCoverage: RoadmapVerificationCriterionCoverage[] = [];
   let approvedMatches = 0;
 
-  for (const item of input.evidence) {
+  for (const [criterionOffset, item] of input.evidence.entries()) {
     const matches = current.filter((candidate) => referencesCommand(item, candidate.command));
     if (new Set(matches.map((candidate) => normalizedEvidenceText(candidate.command))).size > 1) {
       unmet.add("unmatched-evidence");
@@ -600,6 +614,12 @@ export function evaluateRoadmapVerificationEvidence(input: {
       else {
         usedCommands.add(commandKey);
         approvedMatches += 1;
+        criterionCoverage.push({
+          criterionIndex: criterionOffset + 1,
+          criterion: input.doneWhen[criterionOffset] ?? "",
+          evidence: item,
+          command: passed.command,
+        });
       }
       continue;
     }
@@ -623,5 +643,6 @@ export function evaluateRoadmapVerificationEvidence(input: {
   }
 
   if (approvedMatches !== input.doneWhen.length) unmet.add("missing-approved-evidence");
-  return { ready: unmet.size === 0, unmetEvidenceCodes: [...unmet] };
+  if (unmet.size > 0) return { ready: false, unmetEvidenceCodes: [...unmet] };
+  return { ready: true, unmetEvidenceCodes: [], criterionCoverage };
 }

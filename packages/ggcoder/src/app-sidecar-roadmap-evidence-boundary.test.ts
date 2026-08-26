@@ -146,22 +146,13 @@ describe("roadmap review verification evidence boundary", () => {
         proposed_references: [],
       });
       expect(review).toMatchObject({
-        result: "completion-review-committed",
-        revision: expectedRevision + 1,
-        gateOutcome: "review",
-        unmetGateCodes: ["incomplete-plan"],
+        result: "verification-incomplete",
+        revision: expectedRevision,
       });
-      expect(String(review.message)).toContain("phase remains in Review");
+      expect(String(review.message)).toContain("current harness-owned verification eligibility");
     }
-    expect(recordRoadmapFinalReview).toHaveBeenCalledTimes(2);
-    expect(broadcastNotesSnapshot).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        revision: 17,
-        document: expect.objectContaining({
-          phases: [expect.objectContaining({ status: "review", completedAt: null })],
-        }),
-      }),
-    );
+    expect(recordRoadmapFinalReview).not.toHaveBeenCalled();
+    expect(broadcastNotesSnapshot).not.toHaveBeenCalled();
   });
 
   it("applies review only with five distinct classifier-approved current commands", async () => {

@@ -5,6 +5,7 @@ import {
   phaseCompletionVerdict,
 } from "./app-sidecar-autopilot-phase-review.js";
 import type { AppSidecarFinalReviewAttempt } from "./app-sidecar-roadmap-tool-host.js";
+import type { RoadmapVerificationEvidenceEvaluation } from "./core/verification-evidence.js";
 import { createAppSidecarRoadmapReviewTrigger } from "./app-sidecar-roadmap-review-scheduler.js";
 import type { ProjectNotesSnapshot } from "./project-notes-repository.js";
 
@@ -14,6 +15,7 @@ const reviewPhase = {
   goal: "Ship phase completion review",
   completionCriteria: ["accepted work", "verification evidence"],
   status: "review",
+  criterionCoverage: null,
   latestVerification: null,
 } as const;
 
@@ -181,13 +183,26 @@ describe("Autopilot phase completion review", () => {
     } as unknown as ProjectNotesSnapshot;
 
     const trigger = createAppSidecarRoadmapReviewTrigger(reviewPhase.id, "verification-1");
-    expect(boundPhaseForAutopilotReview(snapshot, reviewPhase.id, trigger)).toEqual({
+    const evaluation: RoadmapVerificationEvidenceEvaluation = {
+      ready: true,
+      unmetEvidenceCodes: [],
+      criterionCoverage: [
+        {
+          criterionIndex: 1,
+          criterion: "Gate says Done",
+          evidence: "pnpm test passed",
+          command: "pnpm test",
+        },
+      ],
+    };
+    expect(boundPhaseForAutopilotReview(snapshot, reviewPhase.id, trigger, evaluation)).toEqual({
       id: reviewPhase.id,
       revision: 7,
       goal: "Persist the final review",
       completionCriteria: ["Gate says Done"],
       status: "review",
       finalReviewClaim: { triggerId: trigger.triggerId, reviewId: trigger.reviewId },
+      criterionCoverage: evaluation.criterionCoverage,
       latestVerification: {
         id: "verification-1",
         result: "passed",
@@ -197,6 +212,13 @@ describe("Autopilot phase completion review", () => {
       },
     });
     expect(boundPhaseForAutopilotReview(snapshot, reviewPhase.id)).toBeNull();
+    expect(boundPhaseForAutopilotReview(snapshot, reviewPhase.id, trigger)).toBeNull();
+    expect(
+      boundPhaseForAutopilotReview(snapshot, reviewPhase.id, trigger, {
+        ...evaluation,
+        criterionCoverage: [{ ...evaluation.criterionCoverage[0], command: "" }],
+      }),
+    ).toBeNull();
     expect(
       boundPhaseForAutopilotReview(
         snapshot,

@@ -54,6 +54,15 @@ export interface AppSidecarRoadmapToolSession {
   updateActivePhaseStage?(executionStage: "implementing" | "reviewing"): Promise<unknown>;
 }
 
+export interface AppSidecarFinalReviewEligibility {
+  phaseId: string;
+  revision: number;
+  sessionId: string;
+  verificationStatusUpdateId: string;
+  verification: "passed" | "exception-requested";
+  evidenceEvaluation?: RoadmapVerificationEvidenceEvaluation;
+}
+
 export interface AppSidecarRoadmapToolHostDependencies {
   cwd: string;
   repository: Pick<
@@ -62,6 +71,12 @@ export interface AppSidecarRoadmapToolHostDependencies {
   >;
   canSubmitFinalReview?(actor: Exclude<RoadmapStatusActor, "gg-coder">): boolean;
   getAutopilotFinalReviewClaim?(): AppSidecarRoadmapReviewTrigger | null;
+  revalidateFinalReviewEligibility?(input: {
+    actor: Exclude<RoadmapStatusActor, "gg-coder">;
+    phaseId: string;
+    expectedRevision: number | undefined;
+    verificationStatusUpdateId?: string;
+  }): Promise<AppSidecarFinalReviewEligibility | null>;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   projectAutopilot: Pick<AppSidecarProjectAutopilotState, "isEnabled">;
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
@@ -311,6 +326,20 @@ export class AppSidecarRoadmapToolHost {
     if (this.dependencies.canSubmitFinalReview?.(actor) === false) {
       return { result: "completion-checkpoint-blocked", phaseId: input.phase_id };
     }
+    const eligibility = await this.revalidateFinalReviewEligibility(
+      actor,
+      input,
+      autopilotClaim?.verificationStatusUpdateId,
+    );
+    if (!eligibility) {
+      return {
+        result: "verification-incomplete",
+        phaseId: input.phase_id,
+        ...(input.expected_revision === undefined ? {} : { revision: input.expected_revision }),
+        message:
+          "Final review was not applied because current harness-owned verification eligibility could not be confirmed.",
+      };
+    }
     const completion = await this.dependencies.repository.recordRoadmapFinalReview(
       this.dependencies.cwd,
       {
@@ -399,6 +428,36 @@ export class AppSidecarRoadmapToolHost {
             ? { message: staleRevisionMessage(input.expected_revision, completion.revision) }
             : {}),
     };
+  }
+
+  private async revalidateFinalReviewEligibility(
+    actor: Exclude<RoadmapStatusActor, "gg-coder">,
+    input: RoadmapStatusInput,
+    verificationStatusUpdateId: string | undefined,
+  ): Promise<AppSidecarFinalReviewEligibility | null> {
+    try {
+      const eligibility = await this.dependencies.revalidateFinalReviewEligibility?.({
+        actor,
+        phaseId: input.phase_id,
+        expectedRevision: input.expected_revision,
+        ...(verificationStatusUpdateId ? { verificationStatusUpdateId } : {}),
+      });
+      if (
+        !eligibility ||
+        eligibility.phaseId !== input.phase_id ||
+        eligibility.revision !== input.expected_revision ||
+        eligibility.sessionId.length === 0 ||
+        eligibility.verificationStatusUpdateId.length === 0 ||
+        (verificationStatusUpdateId !== undefined &&
+          eligibility.verificationStatusUpdateId !== verificationStatusUpdateId)
+      ) {
+        return null;
+      }
+      if (eligibility.verification === "exception-requested") return eligibility;
+      return eligibility.evidenceEvaluation?.ready === true ? eligibility : null;
+    } catch {
+      return null;
+    }
   }
 }
 

@@ -1,5 +1,6 @@
 import type { AutopilotVerdict } from "./core/autopilot-verdict.js";
 import type { KenAutopilotBoundPhase } from "./core/ken-context.js";
+import type { RoadmapVerificationEvidenceEvaluation } from "./core/verification-evidence.js";
 import type { AppSidecarFinalReviewAttempt } from "./app-sidecar-roadmap-tool-host.js";
 import type { AppSidecarRoadmapReviewTrigger } from "./app-sidecar-roadmap-review-scheduler.js";
 import type { ProjectNotesSnapshot } from "./project-notes-repository.js";
@@ -9,6 +10,7 @@ export function boundPhaseForAutopilotReview(
   snapshot: ProjectNotesSnapshot,
   phaseId: string,
   trigger?: AppSidecarRoadmapReviewTrigger,
+  evidenceEvaluation?: RoadmapVerificationEvidenceEvaluation,
 ): KenAutopilotBoundPhase | null {
   const phase = snapshot.document.phases.find((candidate) => candidate.id === phaseId);
   if (!phase) return null;
@@ -23,6 +25,23 @@ export function boundPhaseForAutopilotReview(
   ) {
     return null;
   }
+  if (verification.type !== "status-update" || verification.verification === null) return null;
+
+  const criterionCoverage =
+    verification.verification === "passed"
+      ? evidenceEvaluation?.ready === true &&
+        evidenceEvaluation.criterionCoverage.length === phase.doneWhen.length &&
+        evidenceEvaluation.criterionCoverage.every(
+          (coverage, index) =>
+            coverage.criterionIndex === index + 1 &&
+            coverage.criterion === phase.doneWhen[index] &&
+            coverage.evidence === verification.evidence[index] &&
+            coverage.command.length > 0,
+        )
+        ? evidenceEvaluation.criterionCoverage.map((coverage) => ({ ...coverage }))
+        : null
+      : null;
+  if (verification.verification === "passed" && criterionCoverage === null) return null;
 
   return {
     id: phase.id,
@@ -31,16 +50,14 @@ export function boundPhaseForAutopilotReview(
     completionCriteria: [...phase.doneWhen],
     status: phase.status,
     finalReviewClaim: { triggerId: trigger.triggerId, reviewId: trigger.reviewId },
-    latestVerification:
-      verification?.type === "status-update" && verification.verification !== null
-        ? {
-            id: verification.id,
-            result: verification.verification,
-            reason: verification.verificationReason,
-            timestamp: verification.timestamp,
-            evidence: [...verification.evidence],
-          }
-        : null,
+    criterionCoverage,
+    latestVerification: {
+      id: verification.id,
+      result: verification.verification,
+      reason: verification.verificationReason,
+      timestamp: verification.timestamp,
+      evidence: [...verification.evidence],
+    },
   };
 }
 

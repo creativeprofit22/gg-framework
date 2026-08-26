@@ -178,10 +178,12 @@ describe("evaluateRoadmapVerificationEvidence", () => {
 
   it("rejects unsafe shell wrappers even when the outer command exits zero", () => {
     const command = "vitest run smoke.test.ts || echo PASS";
-    expect(evaluate(bashExchange("unsafe", command, "Exit code: 0\nPASS"), [command])).toEqual({
+    const evaluation = evaluate(bashExchange("unsafe", command, "Exit code: 0\nPASS"), [command]);
+    expect(evaluation).toEqual({
       ready: false,
       unmetEvidenceCodes: ["rejected-evidence", "missing-approved-evidence"],
     });
+    expect("criterionCoverage" in evaluation).toBe(false);
   });
 
   it("does not let an unrelated approved command mask the cited command's failure", () => {
@@ -235,7 +237,13 @@ describe("evaluateRoadmapVerificationEvidence", () => {
       ...toolExchange("read", "read", { file_path: "src/example.ts" }),
     ];
 
-    expect(evaluate(messages, [command])).toEqual({ ready: true, unmetEvidenceCodes: [] });
+    expect(evaluate(messages, [command])).toEqual({
+      ready: true,
+      unmetEvidenceCodes: [],
+      criterionCoverage: [
+        { criterionIndex: 1, criterion: "criterion one", evidence: command, command },
+      ],
+    });
   });
 
   it.each([
@@ -329,7 +337,24 @@ describe("evaluateRoadmapVerificationEvidence", () => {
         [`criterion one — ${first}`, `criterion two — ${second}`],
         ["criterion one", "criterion two"],
       ),
-    ).toEqual({ ready: true, unmetEvidenceCodes: [] });
+    ).toEqual({
+      ready: true,
+      unmetEvidenceCodes: [],
+      criterionCoverage: [
+        {
+          criterionIndex: 1,
+          criterion: "criterion one",
+          evidence: `criterion one — ${first}`,
+          command: first,
+        },
+        {
+          criterionIndex: 2,
+          criterion: "criterion two",
+          evidence: `criterion two — ${second}`,
+          command: second,
+        },
+      ],
+    });
   });
 });
 

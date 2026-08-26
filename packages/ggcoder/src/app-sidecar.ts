@@ -281,6 +281,8 @@ import {
   AppSidecarRoadmapReviewScheduler,
   appSidecarRoadmapReviewSchedulingFailure,
   appSidecarRoadmapReviewTrigger,
+  resolveAppSidecarRoadmapReviewFailure,
+  shouldRetryAppSidecarRoadmapReview,
   type AppSidecarRoadmapReviewTrigger,
 } from "./app-sidecar-roadmap-review-scheduler.js";
 import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
@@ -3615,7 +3617,9 @@ async function createSession(
           !autopilotCancelled &&
           trigger !== undefined &&
           boundPhase !== null &&
-          classifyAppSidecarFinalReviewAttempt(boundPhase.id, attempts).status === "stale-revision",
+          shouldRetryAppSidecarRoadmapReview(
+            classifyAppSidecarFinalReviewAttempt(boundPhase.id, attempts).status,
+          ),
       );
       if (autopilotCancelled) return null;
       const textVerdict = parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
@@ -3642,7 +3646,7 @@ async function createSession(
       if (!autopilotCancelled && !trigger) {
         broadcastError("autopilot_error", "autopilot review failed", err);
       }
-      return null;
+      return autopilotCancelled ? null : resolveAppSidecarRoadmapReviewFailure(trigger, err);
     } finally {
       autopilotReviewing = false;
       // Apply any model switch that landed mid-review.

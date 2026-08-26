@@ -40,6 +40,20 @@ export function appSidecarRoadmapReviewSchedulingFailure(
   };
 }
 
+export function resolveAppSidecarRoadmapReviewFailure(
+  trigger: AppSidecarRoadmapReviewTrigger | undefined,
+  error: unknown,
+): null {
+  if (trigger) throw error;
+  return null;
+}
+
+export function shouldRetryAppSidecarRoadmapReview(
+  status: "missing" | "stale-revision" | "committed" | "failed",
+): boolean {
+  return status === "missing" || status === "stale-revision";
+}
+
 export function appSidecarRoadmapReviewTrigger(
   phase: NotesPhase,
 ): AppSidecarRoadmapReviewTrigger | null {

@@ -6,6 +6,8 @@ import {
   appSidecarRoadmapReviewSchedulingFailure,
   appSidecarRoadmapReviewTrigger,
   createAppSidecarRoadmapReviewTrigger,
+  resolveAppSidecarRoadmapReviewFailure,
+  shouldRetryAppSidecarRoadmapReview,
 } from "./app-sidecar-roadmap-review-scheduler.js";
 
 const session = { sessionId: "session-1", sessionPath: "/sessions/1.jsonl" };
@@ -115,6 +117,22 @@ describe("AppSidecarRoadmapReviewRunCoordinator", () => {
     expect(coordinator.activeClaim()).toBeNull();
   });
 
+  it("retries once when the first review records no attempt", async () => {
+    const coordinator = new AppSidecarRoadmapReviewRunCoordinator<"committed">();
+    const trigger = appSidecarRoadmapReviewTrigger(phase())!;
+    const reviewRun = vi.fn(async (attempt: 0 | 1) => {
+      if (attempt === 1) coordinator.record("committed");
+    });
+
+    await expect(
+      coordinator.run(trigger, reviewRun, (attempts) =>
+        shouldRetryAppSidecarRoadmapReview(attempts.length === 0 ? "missing" : "committed"),
+      ),
+    ).resolves.toEqual(["committed"]);
+    expect(reviewRun).toHaveBeenCalledTimes(2);
+    expect(coordinator.activeClaim()).toBeNull();
+  });
+
   it("clears the active claim and attempt sink after review failure", async () => {
     const coordinator = new AppSidecarRoadmapReviewRunCoordinator<string>();
     const trigger = appSidecarRoadmapReviewTrigger(phase())!;
@@ -182,6 +200,24 @@ describe("AppSidecarRoadmapReviewScheduler", () => {
       { status: "failed", trigger: appSidecarRoadmapReviewTrigger(candidate), error },
     ]);
     expect(scheduler.replay([candidate])[0]?.status).toBe("queued");
+  });
+
+  it("preserves the exact scheduled review error in the failure outcome", async () => {
+    const scheduler = new AppSidecarRoadmapReviewScheduler();
+    const trigger = appSidecarRoadmapReviewTrigger(phase())!;
+    const error = new Error(
+      "Autopilot completion review failed for phase phase-1: final_review did not commit or duplicate (result: verification-incomplete).",
+    );
+    scheduler.enqueue(trigger);
+
+    await expect(
+      scheduler.drain(async (scheduledTrigger) => {
+        resolveAppSidecarRoadmapReviewFailure(scheduledTrigger, error);
+      }),
+    ).resolves.toEqual([
+      { status: "started", trigger },
+      { status: "failed", trigger, error },
+    ]);
   });
 
   it("replays unresolved durable Review state after coordinator restart", async () => {

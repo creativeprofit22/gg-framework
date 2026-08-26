@@ -142,6 +142,23 @@ describe("What's New feeds", () => {
     expect(limited[1].items).toHaveLength(20);
   });
 
+  it("keeps the latest Local Fork release notes complete", () => {
+    expect(LOCAL_CHANGELOG[0]).toEqual({
+      id: "local-2026-08-25-ui-and-update-reliability",
+      label: "Local Fork",
+      date: "2026-08-25",
+      items: [
+        "Added optional verified update summaries and a Decisions tab in What’s New.",
+        "Prompt submission failures now appear in the conversation instead of failing silently.",
+        "Roadmap cards now expand in place, run primary actions directly, and preserve verification evidence.",
+        "Roadmap completion now requires the expected final review and successful fresh verification.",
+        "Local Fork updates now verify the installer, close gracefully, install automatically, and relaunch your existing profile.",
+        "Sidecar builds now promote atomically and preserve the previous working bundle after validation failures.",
+        "Local Fork builds no longer show the automatic-update footer banner.",
+      ],
+    });
+  });
+
   it("keeps shipped Local Fork IDs unique", () => {
     expect(new Set(LOCAL_CHANGELOG.map(({ id }) => id)).size).toBe(LOCAL_CHANGELOG.length);
   });

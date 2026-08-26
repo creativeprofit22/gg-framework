@@ -17,6 +17,20 @@ export interface LocalChangelogEntry {
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
+    id: "local-2026-08-25-ui-and-update-reliability",
+    label: "Local Fork",
+    date: "2026-08-25",
+    items: [
+      "Added optional verified update summaries and a Decisions tab in What’s New.",
+      "Prompt submission failures now appear in the conversation instead of failing silently.",
+      "Roadmap cards now expand in place, run primary actions directly, and preserve verification evidence.",
+      "Roadmap completion now requires the expected final review and successful fresh verification.",
+      "Local Fork updates now verify the installer, close gracefully, install automatically, and relaunch your existing profile.",
+      "Sidecar builds now promote atomically and preserve the previous working bundle after validation failures.",
+      "Local Fork builds no longer show the automatic-update footer banner.",
+    ],
+  },
+  {
     id: "local-2026-08-23-protected-updates",
     label: "August 23 update",
     date: "2026-08-23",

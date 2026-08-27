@@ -1,4 +1,5 @@
 <!-- gg:init:start -->
+
 # GG Framework
 
 GG Framework is a pnpm monorepo for GG Coder: a multi-provider coding-agent runtime, CLI, and Tauri desktop application with persistent sessions, tools/MCP, and Project Notes workflows.

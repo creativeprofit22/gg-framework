@@ -8824,6 +8824,7 @@ fn start_window_session(
     cwd: PathBuf,
     session_path: Option<String>,
 ) {
+    decisions::initialize_project_decisions(&cwd);
     start_pane_session(
         app,
         label,

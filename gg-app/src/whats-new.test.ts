@@ -144,19 +144,27 @@ describe("What's New feeds", () => {
 
   it("keeps the latest Local Fork release notes complete", () => {
     expect(LOCAL_CHANGELOG[0]).toEqual({
-      id: "local-2026-08-25-ui-and-update-reliability",
-      label: "Local Fork",
-      date: "2026-08-25",
+      id: "local-2026-08-26-packaging-and-review-recovery",
+      label: "August 26 update",
+      date: "2026-08-26",
       items: [
-        "Added optional verified update summaries and a Decisions tab in What’s New.",
-        "Prompt submission failures now appear in the conversation instead of failing silently.",
-        "Roadmap cards now expand in place, run primary actions directly, and preserve verification evidence.",
-        "Roadmap completion now requires the expected final review and successful fresh verification.",
-        "Local Fork updates now verify the installer, close gracefully, install automatically, and relaunch your existing profile.",
-        "Sidecar builds now promote atomically and preserve the previous working bundle after validation failures.",
-        "Local Fork builds no longer show the automatic-update footer banner.",
+        "GG Coder can now set up, calibrate, package, smoke-test, and verify supported Tauri desktop apps deterministically.",
+        "Roadmap final reviews now retry missing results and preserve failed runs for safe recovery instead of leaving completion stuck.",
       ],
     });
+  });
+
+  it.each([
+    [
+      "3fdc4d572e7fa6746e6c77fe3a61413f31f648aa",
+      "GG Coder can now set up, calibrate, package, smoke-test, and verify supported Tauri desktop apps deterministically.",
+    ],
+    [
+      "366a927e2573ace9f0af6ddcbb7fa3d9b36e0a92",
+      "Roadmap final reviews now retry missing results and preserve failed runs for safe recovery instead of leaving completion stuck.",
+    ],
+  ])("keeps the Local Fork note for commit %s", (_commit, note) => {
+    expect(LOCAL_CHANGELOG.flatMap(({ items }) => items)).toContain(note);
   });
 
   it("keeps shipped Local Fork IDs unique", () => {

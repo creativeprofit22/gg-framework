@@ -17,6 +17,15 @@ export interface LocalChangelogEntry {
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
   {
+    id: "local-2026-08-26-packaging-and-review-recovery",
+    label: "August 26 update",
+    date: "2026-08-26",
+    items: [
+      "GG Coder can now set up, calibrate, package, smoke-test, and verify supported Tauri desktop apps deterministically.",
+      "Roadmap final reviews now retry missing results and preserve failed runs for safe recovery instead of leaving completion stuck.",
+    ],
+  },
+  {
     id: "local-2026-08-25-ui-and-update-reliability",
     label: "Local Fork",
     date: "2026-08-25",

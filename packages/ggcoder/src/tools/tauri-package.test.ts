@@ -11,7 +11,14 @@ import type { CalibrationBounds } from "../core/tauri-package/types.js";
 import { createTauriPackageTool } from "./tauri-package.js";
 import { localOperations } from "./operations.js";
 
-const fixture = path.join(import.meta.dirname, "..", "core", "tauri-package", "__fixtures__", "valid");
+const fixture = path.join(
+  import.meta.dirname,
+  "..",
+  "core",
+  "tauri-package",
+  "__fixtures__",
+  "valid",
+);
 const roots: string[] = [];
 
 async function repository(): Promise<string> {
@@ -20,12 +27,18 @@ async function repository(): Promise<string> {
   await cp(fixture, root, { recursive: true });
   const cli = path.join(root, "apps/desktop/node_modules/@tauri-apps/cli");
   await mkdir(cli, { recursive: true });
-  await writeFile(path.join(cli, "package.json"), `${JSON.stringify({ version: "2.11.2", bin: { tauri: "./tauri.js" } }, null, 2)}\n`);
+  await writeFile(
+    path.join(cli, "package.json"),
+    `${JSON.stringify({ version: "2.11.2", bin: { tauri: "./tauri.js" } }, null, 2)}\n`,
+  );
   await writeFile(path.join(cli, "tauri.js"), "module.exports = {};\n");
   const host = detectHostTarget();
   const binaries = path.join(root, "apps/desktop/src-tauri/binaries");
   await mkdir(binaries, { recursive: true });
-  await writeFile(path.join(binaries, `helper-${host.rust_triple}${host.platform === "win32" ? ".exe" : ""}`), "sidecar\n");
+  await writeFile(
+    path.join(binaries, `helper-${host.rust_triple}${host.platform === "win32" ? ".exe" : ""}`),
+    "sidecar\n",
+  );
   return root;
 }
 
@@ -35,7 +48,11 @@ function manager(): ProcessManager {
 
 async function execute(
   tool: ReturnType<typeof createTauriPackageTool>,
-  input: { action: "inspect" | "setup" | "calibrate" | "package" | "verify"; target_id?: string; evidence_sha256?: string },
+  input: {
+    action: "inspect" | "setup" | "calibrate" | "package" | "verify";
+    target_id?: string;
+    evidence_sha256?: string;
+  },
 ): Promise<Record<string, unknown> | string> {
   const output = await tool.execute(input, {
     signal: new AbortController().signal,
@@ -59,8 +76,12 @@ describe("tauri_package tool", () => {
     const before: string[] = [];
     const after: string[] = [];
     const tool = createTauriPackageTool(root, manager(), {
-      onPreFileMutation: (file) => { before.push(file); },
-      onFileMutated: (file) => { after.push(file); },
+      onPreFileMutation: (file) => {
+        before.push(file);
+      },
+      onFileMutated: (file) => {
+        after.push(file);
+      },
     });
     const inspected = (await execute(tool, { action: "inspect" })) as Record<string, unknown>;
     const target = (inspected.targets as Array<{ target_id: string }>)[0]!;
@@ -71,9 +92,15 @@ describe("tauri_package tool", () => {
     })) as Record<string, unknown>;
 
     expect(setup).toMatchObject({ action: "setup", changed: true, target_id: target.target_id });
-    expect(before.map((file) => path.relative(root, file).split(path.sep).join("/"))).toEqual(GENERATED_PATHS);
-    expect(after.map((file) => path.relative(root, file).split(path.sep).join("/"))).toEqual(GENERATED_PATHS);
-    await expect(execute(tool, { action: "verify", target_id: target.target_id })).resolves.toMatchObject({ ok: true });
+    expect(before.map((file) => path.relative(root, file).split(path.sep).join("/"))).toEqual(
+      GENERATED_PATHS,
+    );
+    expect(after.map((file) => path.relative(root, file).split(path.sep).join("/"))).toEqual(
+      GENERATED_PATHS,
+    );
+    await expect(
+      execute(tool, { action: "verify", target_id: target.target_id }),
+    ).resolves.toMatchObject({ ok: true });
 
     const discovery = await discoverTauriPackages(root);
     const calibration: CalibrationBounds = {
@@ -94,7 +121,9 @@ describe("tauri_package tool", () => {
       evidence_sha256: inspected.evidence_sha256 as string,
     });
     expect(repeated).toMatchObject({ action: "setup", changed: false });
-    expect(JSON.parse(await readFile(path.join(root, "scripts/package-tauri.config.json"), "utf8"))).toMatchObject({ calibration });
+    expect(
+      JSON.parse(await readFile(path.join(root, "scripts/package-tauri.config.json"), "utf8")),
+    ).toMatchObject({ calibration });
     expect(before).toHaveLength(GENERATED_PATHS.length);
     expect(after).toHaveLength(GENERATED_PATHS.length);
   });

@@ -319,7 +319,11 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
       getAutopilotFinalReviewClaim: () => claim,
-      revalidateFinalReviewEligibility: eligibleFinalReview(claim.phaseId, 23, claim.verificationStatusUpdateId),
+      revalidateFinalReviewEligibility: eligibleFinalReview(
+        claim.phaseId,
+        23,
+        claim.verificationStatusUpdateId,
+      ),
       broadcastNotesSnapshot: vi.fn(),
     });
     const tool = host.createSessionTools("ken-autopilot")[0]!;

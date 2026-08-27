@@ -1,5 +1,7 @@
 {
   "name": "fixture-root",
   "private": true,
-  "workspaces": ["apps/*"]
+  "workspaces": [
+    "apps/*"
+  ]
 }

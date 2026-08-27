@@ -200,12 +200,14 @@ export interface KenAutopilotBoundPhase {
   completionCriteria: readonly string[];
   status: string;
   finalReviewClaim?: { triggerId: string; reviewId: string };
-  criterionCoverage: readonly {
-    criterionIndex: number;
-    criterion: string;
-    evidence: string;
-    command: string;
-  }[] | null;
+  criterionCoverage:
+    | readonly {
+        criterionIndex: number;
+        criterion: string;
+        evidence: string;
+        command: string;
+      }[]
+    | null;
   latestVerification: {
     id: string;
     result: string;

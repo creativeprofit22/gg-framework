@@ -330,7 +330,9 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
 
   it("rejects a noncanonical installer script before task registration", () => {
     const files = fixture({ installed: "missing" });
-    const result = runTaskHandoff(files, { scriptPath: join(files.root, "install-local-patched.ps1") });
+    const result = runTaskHandoff(files, {
+      scriptPath: join(files.root, "install-local-patched.ps1"),
+    });
     expect(result).toMatchObject({ ok: false, registerCalls: 0, startCalls: 0 });
     expect(result.error).toContain("non-canonical guarded installer script");
   });

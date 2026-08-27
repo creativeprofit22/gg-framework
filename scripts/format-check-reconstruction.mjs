@@ -3,7 +3,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 
 const base = "adacff0230a704d33a8cfaea8265f83cee5f95dd";
 const supported = /\.(?:cjs|css|html|js|json|jsx|md|mjs|mts|ts|tsx|yaml|yml)$/i;
-const generated = new Set(["packages/ggcoder/src/tools/tool-catalog.snapshot.json"]);
+const generated = new Set([
+  "packages/ggcoder/src/__golden__/system-prompt-prefix.md",
+  "packages/ggcoder/src/tools/tool-catalog.snapshot.json",
+]);
 const shouldCheck = (file) => Boolean(file && supported.test(file) && !generated.has(file));
 const tracked = execFileSync(
   "git",

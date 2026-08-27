@@ -12,18 +12,26 @@ import { verifyTauriPackage } from "./verify.js";
 const fixture = path.join(import.meta.dirname, "__fixtures__", "valid");
 const roots: string[] = [];
 
-async function setup(invalidCalibration: "negative" | "fractional" | false = false): Promise<{ root: string; targetId: string }> {
+async function setup(
+  invalidCalibration: "negative" | "fractional" | false = false,
+): Promise<{ root: string; targetId: string }> {
   const root = await mkdtemp(path.join(os.tmpdir(), "gg-tauri-verify-"));
   roots.push(root);
   await cp(fixture, root, { recursive: true });
   const cli = path.join(root, "apps/desktop/node_modules/@tauri-apps/cli");
   await mkdir(cli, { recursive: true });
-  await writeFile(path.join(cli, "package.json"), `${JSON.stringify({ version: "2.11.2", bin: { tauri: "./tauri.js" } }, null, 2)}\n`);
+  await writeFile(
+    path.join(cli, "package.json"),
+    `${JSON.stringify({ version: "2.11.2", bin: { tauri: "./tauri.js" } }, null, 2)}\n`,
+  );
   await writeFile(path.join(cli, "tauri.js"), "module.exports = {};\n");
   const host = detectHostTarget();
   const binaries = path.join(root, "apps/desktop/src-tauri/binaries");
   await mkdir(binaries, { recursive: true });
-  await writeFile(path.join(binaries, `helper-${host.rust_triple}${host.platform === "win32" ? ".exe" : ""}`), "sidecar\n");
+  await writeFile(
+    path.join(binaries, `helper-${host.rust_triple}${host.platform === "win32" ? ".exe" : ""}`),
+    "sidecar\n",
+  );
   const discovery = await discoverTauriPackages(root);
   const target = discovery.targets[0]!;
   const calibration: CalibrationBounds | null = invalidCalibration
@@ -59,7 +67,10 @@ describe("verifyTauriPackage", () => {
 
   it("rejects stale source evidence", async () => {
     const value = await setup();
-    await writeFile(path.join(value.root, "apps/desktop/src-tauri/resources/data.txt"), "changed\n");
+    await writeFile(
+      path.join(value.root, "apps/desktop/src-tauri/resources/data.txt"),
+      "changed\n",
+    );
     const result = await verifyTauriPackage(value.root);
     expect(result.ok).toBe(false);
     expect(result.errors).toContain("Repository evidence digest is stale");
@@ -78,21 +89,29 @@ describe("verifyTauriPackage", () => {
     const value = await setup("negative");
     const result = await verifyTauriPackage(value.root);
     expect(result.ok).toBe(false);
-    expect(result.errors.join("\n")).toContain("calibration.maximum_total_bytes must be finite and non-negative");
+    expect(result.errors.join("\n")).toContain(
+      "calibration.maximum_total_bytes must be finite and non-negative",
+    );
   });
 
   it("rejects fractional calibrated artifact counts", async () => {
     const value = await setup("fractional");
     const result = await verifyTauriPackage(value.root);
     expect(result.ok).toBe(false);
-    expect(result.errors.join("\n")).toContain("calibration.role_counts.app must be a non-negative safe integer");
+    expect(result.errors.join("\n")).toContain(
+      "calibration.role_counts.app must be a non-negative safe integer",
+    );
   });
 
   it("does not change generated files", async () => {
     const value = await setup();
-    const before = await Promise.all(GENERATED_PATHS.map((item) => readFile(path.join(value.root, item))));
+    const before = await Promise.all(
+      GENERATED_PATHS.map((item) => readFile(path.join(value.root, item))),
+    );
     await verifyTauriPackage(value.root);
-    const after = await Promise.all(GENERATED_PATHS.map((item) => readFile(path.join(value.root, item))));
+    const after = await Promise.all(
+      GENERATED_PATHS.map((item) => readFile(path.join(value.root, item))),
+    );
     expect(after).toEqual(before);
   });
 });

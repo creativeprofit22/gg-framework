@@ -66,7 +66,10 @@ describe("generated support ownership", () => {
     await mkdir(repository);
     await commitSupportSet(repository, render());
     const mixedPath = path.join(repository, GENERATED_PATHS[0]);
-    await writeFile(mixedPath, (await readFile(mixedPath, "utf8")).replace("template_version=1", "template_version=2"));
+    await writeFile(
+      mixedPath,
+      (await readFile(mixedPath, "utf8")).replace("template_version=1", "template_version=2"),
+    );
     expect((await inspectSupportSet(repository)).conflicts[0]).toContain("template version 2");
   });
 
@@ -104,8 +107,12 @@ describe("generated support ownership", () => {
     const before: string[] = [];
     const after: string[] = [];
     await commitSupportSet(repository, render(), {
-      onPreMutation: (repositoryPath) => { before.push(repositoryPath); },
-      onCommitted: (repositoryPath) => { after.push(repositoryPath); },
+      onPreMutation: (repositoryPath) => {
+        before.push(repositoryPath);
+      },
+      onCommitted: (repositoryPath) => {
+        after.push(repositoryPath);
+      },
     });
     expect(before).toEqual(GENERATED_PATHS);
     expect(after).toEqual(GENERATED_PATHS);
@@ -116,7 +123,11 @@ describe("generated support ownership", () => {
     const outside = await root();
     await createTestSymlink(outside, path.join(repository, "scripts"), "dir");
 
-    await expect(commitSupportSet(repository, render())).rejects.toThrow(/Symbolic links|Unsafe generated-file parent/);
-    await expect(readFile(path.join(outside, "package-tauri.mjs"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(commitSupportSet(repository, render())).rejects.toThrow(
+      /Symbolic links|Unsafe generated-file parent/,
+    );
+    await expect(readFile(path.join(outside, "package-tauri.mjs"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 });

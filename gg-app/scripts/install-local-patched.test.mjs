@@ -659,21 +659,22 @@ windowsDescribe("detached local installer helper", () => {
     const result = withFixtureCleanup(fixture.root, () =>
       runPowerShell(
         `$script:InstallLogPath = ${psLiteral(fixture.logPath)}; $rootProcess = $null; $lockOwner = $null; $captured = @(); try { ` +
-        `Remove-Item -LiteralPath ${psLiteral(fixture.installedExecutable)} -Force; ` +
-        `Add-Type -Path ${psLiteral(fixtureSourcePath)} -OutputAssembly ${psLiteral(fixture.installedExecutable)} -OutputType WindowsApplication -ReferencedAssemblies @('System.Windows.Forms.dll','System.Drawing.dll'); ` +
-        `Copy-Item -LiteralPath ${psLiteral(fixture.installedExecutable)} -Destination ${psLiteral(ggNodePath)}; Copy-Item -LiteralPath ${psLiteral(fixture.installedExecutable)} -Destination ${psLiteral(sidecarPath)}; ` +
-        `$rootProcess = Start-Process -FilePath ${psLiteral(fixture.installedExecutable)} -PassThru; $fixtureInstalledExecutable = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $($rootProcess.Id)" -ErrorAction Stop).ExecutablePath; $fixtureInstallDirectory = Split-Path -Parent $fixtureInstalledExecutable; ` +
-        `$treeDeadline = [DateTime]::UtcNow.AddSeconds(5); do { $captured = @(Get-InstalledAppProcesses -InstallDirectory $fixtureInstallDirectory); $rootWindow = Get-Process -Id $rootProcess.Id -ErrorAction SilentlyContinue; if ($rootWindow) { $rootWindow.Refresh() }; if ($captured.Count -lt 3 -or -not $rootWindow -or $rootWindow.MainWindowHandle -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 } } while (($captured.Count -lt 3 -or -not $rootWindow -or $rootWindow.MainWindowHandle -eq [IntPtr]::Zero) -and [DateTime]::UtcNow -lt $treeDeadline); ` +
-        `if ($captured.Count -ne 3 -or -not $rootWindow -or $rootWindow.MainWindowHandle -eq [IntPtr]::Zero) { throw "Fixture process tree did not become ready: count=$($captured.Count) handle=$(if ($rootWindow) { $rootWindow.MainWindowHandle } else { 'missing' }) names=$($captured.Name -join ',')" };  ` +
-        `$lockBody = ${psLiteral(`$lock = [IO.File]::Open(${psLiteral(fixture.installedExecutable)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite); try { [IO.File]::WriteAllText(${psLiteral(lockReadyPath)}, 'ready'); Start-Sleep -Milliseconds 1200 } finally { $lock.Dispose() }`)}; ` +
-        `$lockOwner = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($lockBody))) -PassThru -WindowStyle Hidden; [IO.File]::WriteAllText(${psLiteral(lockPidPath)}, [string]$lockOwner.Id); ` +
-        `$readyDeadline = [DateTime]::UtcNow.AddSeconds(3); while (-not (Test-Path -LiteralPath ${psLiteral(lockReadyPath)})) { if ([DateTime]::UtcNow -ge $readyDeadline) { throw 'Fixture lock did not become ready' }; Start-Sleep -Milliseconds 20 }; ` +
-        `$closeAccepted = $rootWindow.CloseMainWindow(); $timer = [Diagnostics.Stopwatch]::StartNew(); Wait-LocalForkReplacementGate -InstallDirectory $fixtureInstallDirectory -InstalledExecutable $fixtureInstalledExecutable -TimeoutMilliseconds 5000 -PollIntervalMilliseconds 50; $timer.Stop(); ` +
-        `$remaining = @(Get-InstalledAppProcesses -InstallDirectory $fixtureInstallDirectory); ` +
-        `[pscustomobject]@{ CloseAccepted = $closeAccepted; Captured = @($captured | Sort-Object ProcessId); Remaining = $remaining.Count; ElapsedMs = $timer.ElapsedMilliseconds } | ConvertTo-Json -Depth 4 -Compress ` +
-        `} finally { if ($lockOwner -and -not $lockOwner.HasExited) { $lockOwner.Kill(); $lockOwner.WaitForExit() }; if ($fixtureInstallDirectory) { for ($cleanupAttempt = 0; $cleanupAttempt -lt 10; $cleanupAttempt += 1) { $fixtureProcesses = @(Get-InstalledAppProcesses -InstallDirectory $fixtureInstallDirectory); if ($fixtureProcesses.Count -eq 0) { break }; foreach ($item in $fixtureProcesses) { $owned = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue; if ($owned) { $owned.Kill(); $owned.WaitForExit() } }; Start-Sleep -Milliseconds 50 } } }`,
-      { timeout: 12_000 },
-    ));
+          `Remove-Item -LiteralPath ${psLiteral(fixture.installedExecutable)} -Force; ` +
+          `Add-Type -Path ${psLiteral(fixtureSourcePath)} -OutputAssembly ${psLiteral(fixture.installedExecutable)} -OutputType WindowsApplication -ReferencedAssemblies @('System.Windows.Forms.dll','System.Drawing.dll'); ` +
+          `Copy-Item -LiteralPath ${psLiteral(fixture.installedExecutable)} -Destination ${psLiteral(ggNodePath)}; Copy-Item -LiteralPath ${psLiteral(fixture.installedExecutable)} -Destination ${psLiteral(sidecarPath)}; ` +
+          `$rootProcess = Start-Process -FilePath ${psLiteral(fixture.installedExecutable)} -PassThru; $fixtureInstalledExecutable = [string](Get-CimInstance Win32_Process -Filter "ProcessId = $($rootProcess.Id)" -ErrorAction Stop).ExecutablePath; $fixtureInstallDirectory = Split-Path -Parent $fixtureInstalledExecutable; ` +
+          `$treeDeadline = [DateTime]::UtcNow.AddSeconds(5); do { $captured = @(Get-InstalledAppProcesses -InstallDirectory $fixtureInstallDirectory); $rootWindow = Get-Process -Id $rootProcess.Id -ErrorAction SilentlyContinue; if ($rootWindow) { $rootWindow.Refresh() }; if ($captured.Count -lt 3 -or -not $rootWindow -or $rootWindow.MainWindowHandle -eq [IntPtr]::Zero) { Start-Sleep -Milliseconds 50 } } while (($captured.Count -lt 3 -or -not $rootWindow -or $rootWindow.MainWindowHandle -eq [IntPtr]::Zero) -and [DateTime]::UtcNow -lt $treeDeadline); ` +
+          `if ($captured.Count -ne 3 -or -not $rootWindow -or $rootWindow.MainWindowHandle -eq [IntPtr]::Zero) { throw "Fixture process tree did not become ready: count=$($captured.Count) handle=$(if ($rootWindow) { $rootWindow.MainWindowHandle } else { 'missing' }) names=$($captured.Name -join ',')" };  ` +
+          `$lockBody = ${psLiteral(`$lock = [IO.File]::Open(${psLiteral(fixture.installedExecutable)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite); try { [IO.File]::WriteAllText(${psLiteral(lockReadyPath)}, 'ready'); Start-Sleep -Milliseconds 1200 } finally { $lock.Dispose() }`)}; ` +
+          `$lockOwner = Start-Process powershell.exe -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($lockBody))) -PassThru -WindowStyle Hidden; [IO.File]::WriteAllText(${psLiteral(lockPidPath)}, [string]$lockOwner.Id); ` +
+          `$readyDeadline = [DateTime]::UtcNow.AddSeconds(3); while (-not (Test-Path -LiteralPath ${psLiteral(lockReadyPath)})) { if ([DateTime]::UtcNow -ge $readyDeadline) { throw 'Fixture lock did not become ready' }; Start-Sleep -Milliseconds 20 }; ` +
+          `$closeAccepted = $rootWindow.CloseMainWindow(); $timer = [Diagnostics.Stopwatch]::StartNew(); Wait-LocalForkReplacementGate -InstallDirectory $fixtureInstallDirectory -InstalledExecutable $fixtureInstalledExecutable -TimeoutMilliseconds 5000 -PollIntervalMilliseconds 50; $timer.Stop(); ` +
+          `$remaining = @(Get-InstalledAppProcesses -InstallDirectory $fixtureInstallDirectory); ` +
+          `[pscustomobject]@{ CloseAccepted = $closeAccepted; Captured = @($captured | Sort-Object ProcessId); Remaining = $remaining.Count; ElapsedMs = $timer.ElapsedMilliseconds } | ConvertTo-Json -Depth 4 -Compress ` +
+          `} finally { if ($lockOwner -and -not $lockOwner.HasExited) { $lockOwner.Kill(); $lockOwner.WaitForExit() }; if ($fixtureInstallDirectory) { for ($cleanupAttempt = 0; $cleanupAttempt -lt 10; $cleanupAttempt += 1) { $fixtureProcesses = @(Get-InstalledAppProcesses -InstallDirectory $fixtureInstallDirectory); if ($fixtureProcesses.Count -eq 0) { break }; foreach ($item in $fixtureProcesses) { $owned = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue; if ($owned) { $owned.Kill(); $owned.WaitForExit() } }; Start-Sleep -Milliseconds 50 } } }`,
+        { timeout: 12_000 },
+      ),
+    );
 
     expect(result.status, result.stderr).toBe(0);
     const evidence = JSON.parse(result.stdout.trim());
@@ -994,9 +995,7 @@ windowsDescribe("detached local installer helper", () => {
       Backups: 0,
       RecoveryArchives: 0,
     });
-    expect(evidence.Failure).toContain(
-      "Local Fork replacement gate timed out after 500ms",
-    );
+    expect(evidence.Failure).toContain("Local Fork replacement gate timed out after 500ms");
     expect(evidence.Failure).toContain(`ownerPid=${evidence.OwnerPid}`);
   });
 
@@ -1036,9 +1035,7 @@ windowsDescribe("detached local installer helper", () => {
     expect(realpathSync.native(evidence.StartPaths[0])).toBe(
       realpathSync.native(fixture.installedExecutable),
     );
-    expect(evidence.Failure).toContain(
-      "Local Fork replacement gate timed out after 500ms",
-    );
+    expect(evidence.Failure).toContain("Local Fork replacement gate timed out after 500ms");
     expect(evidence.Failure).toContain(`ownerPid=${evidence.OwnerPid}`);
   });
   it("installs the verified payload, restarts it, and removes the backup on success", () => {

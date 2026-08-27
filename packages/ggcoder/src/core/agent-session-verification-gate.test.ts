@@ -218,7 +218,7 @@ describe("AgentSession verification gate", () => {
     internal.processManager = manager;
     await fs.writeFile(
       path.join(tmpProject, "package.json"),
-      JSON.stringify({ scripts: { test: "node -e \"process.exit(0)\"" } }),
+      JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }),
     );
 
     const started = await manager.start("npm test", tmpProject);

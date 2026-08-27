@@ -55,7 +55,9 @@ function sortJson(value: unknown): unknown {
 
 export function normalizeRepositoryPath(input: string): string {
   if (!input || input.includes("\0") || input.includes("\\") || path.posix.isAbsolute(input)) {
-    throw new Error(`Path must be a non-empty repository-relative POSIX path: ${JSON.stringify(input)}`);
+    throw new Error(
+      `Path must be a non-empty repository-relative POSIX path: ${JSON.stringify(input)}`,
+    );
   }
   const normalized = path.posix.normalize(input);
   if (
@@ -103,7 +105,8 @@ export async function rejectLinks(
     current = path.join(current, segments[index]!);
     try {
       const stat = await lstat(current);
-      if (stat.isSymbolicLink()) throw new Error(`Symbolic links are not supported: ${repositoryPath}`);
+      if (stat.isSymbolicLink())
+        throw new Error(`Symbolic links are not supported: ${repositoryPath}`);
     } catch (error) {
       if (
         allowMissingLeaf &&
@@ -152,6 +155,7 @@ export function detectHostTarget(
 export function normalizedContentSha256(content: string): string {
   const pattern = /(content_sha256["']?\s*[:=]\s*["']?)([a-f0-9]{64})/g;
   const matches = [...content.matchAll(pattern)];
-  if (matches.length !== 1) throw new Error("Generated file must contain exactly one content digest");
+  if (matches.length !== 1)
+    throw new Error("Generated file must contain exactly one content digest");
   return sha256(content.replace(pattern, `$1${CONTENT_DIGEST_SENTINEL}`));
 }

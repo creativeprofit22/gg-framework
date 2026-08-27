@@ -81,12 +81,21 @@ async function discoverPackageRoots(context: DiscoveryContext): Promise<string[]
   const roots = new Set<string>([""]);
   const rootPackage = await readJsonEvidence(context, "package.json", "root-package", true);
   const packagePatterns = packageWorkspacePatterns(rootPackage);
-  const pnpmWorkspace = await readOptionalEvidence(context, "pnpm-workspace.yaml", "workspace-definition");
+  const pnpmWorkspace = await readOptionalEvidence(
+    context,
+    "pnpm-workspace.yaml",
+    "workspace-definition",
+  );
   if (pnpmWorkspace) packagePatterns.push(...parsePnpmWorkspace(pnpmWorkspace.toString("utf8")));
   for (const lockfile of LOCKFILES) await readOptionalEvidence(context, lockfile, "lockfile");
   for (const pattern of [...new Set(packagePatterns)].sort()) {
     if (pattern.startsWith("!") || pattern.includes("\\") || path.posix.isAbsolute(pattern)) {
-      issue(context, "unsupported-workspace", "pnpm-workspace.yaml", `Unsupported workspace entry: ${pattern}`);
+      issue(
+        context,
+        "unsupported-workspace",
+        "pnpm-workspace.yaml",
+        `Unsupported workspace entry: ${pattern}`,
+      );
       continue;
     }
     if (!GLOB_CHARACTERS.test(pattern)) {
@@ -94,7 +103,12 @@ async function discoverPackageRoots(context: DiscoveryContext): Promise<string[]
       continue;
     }
     if (!pattern.endsWith("/*") || GLOB_CHARACTERS.test(pattern.slice(0, -2))) {
-      issue(context, "unsupported-workspace", "pnpm-workspace.yaml", `Only literal roots and one trailing /* are supported: ${pattern}`);
+      issue(
+        context,
+        "unsupported-workspace",
+        "pnpm-workspace.yaml",
+        `Only literal roots and one trailing /* are supported: ${pattern}`,
+      );
       continue;
     }
     const parent = normalizeRepositoryPath(pattern.slice(0, -2));
@@ -118,7 +132,8 @@ async function discoverPackageRoots(context: DiscoveryContext): Promise<string[]
 
 function packageWorkspacePatterns(rootPackage: JsonObject): string[] {
   const workspaces = rootPackage.workspaces;
-  if (Array.isArray(workspaces)) return workspaces.filter((item): item is string => typeof item === "string");
+  if (Array.isArray(workspaces))
+    return workspaces.filter((item): item is string => typeof item === "string");
   if (isObject(workspaces) && Array.isArray(workspaces.packages)) {
     return workspaces.packages.filter((item): item is string => typeof item === "string");
   }
@@ -162,11 +177,20 @@ async function inspectPackage(
 
   const cliDeclaration = dependencyVersion(packageJson, "@tauri-apps/cli");
   if (!cliDeclaration || majorVersion(cliDeclaration) !== 2) {
-    issue(context, "unsupported-tauri-version", packageManifest, "A local @tauri-apps/cli v2 declaration is required");
+    issue(
+      context,
+      "unsupported-tauri-version",
+      packageManifest,
+      "A local @tauri-apps/cli v2 declaration is required",
+    );
     return null;
   }
   if (!(await existsContained(context.root, tauriConfig))) {
-    const unsupported = [`${tauriRoot}/tauri.conf.json5`, `${tauriRoot}/tauri.conf.toml`, `${tauriRoot}/Tauri.toml`];
+    const unsupported = [
+      `${tauriRoot}/tauri.conf.json5`,
+      `${tauriRoot}/tauri.conf.toml`,
+      `${tauriRoot}/Tauri.toml`,
+    ];
     const found = await firstExisting(context.root, unsupported);
     issue(
       context,
@@ -193,7 +217,13 @@ async function inspectPackage(
     const cli = await resolveCli(context, packageRoot);
     const { resources, paths: resourcePaths } = await resolveResources(context, tauriRoot, config);
     const { sidecars, paths: sidecarPaths } = await resolveSidecars(context, tauriRoot, config);
-    assertNoCaseCollisions([packageManifest, cargoManifest, tauriConfig, ...resourcePaths, ...sidecarPaths]);
+    assertNoCaseCollisions([
+      packageManifest,
+      cargoManifest,
+      tauriConfig,
+      ...resourcePaths,
+      ...sidecarPaths,
+    ]);
     const productName = requiredString(config.productName, "productName", tauriConfig);
     const identifier = requiredString(config.identifier, "identifier", tauriConfig);
     const target_id = `tauri-${sha256(stableJson({ packageManifest, cargoManifest, tauriConfig, host: context.host })).slice(0, 20)}`;
@@ -240,9 +270,15 @@ function assertTauriV2Cargo(source: string): void {
   const sections = parseTomlSections(source);
   const tauri = sections.get("dependencies")?.get("tauri");
   const tauriBuild = sections.get("build-dependencies")?.get("tauri-build");
-  if (!tauri || !tauriBuild) throw new Error("Cargo.toml must declare tauri and tauri-build directly");
-  if (majorVersion(extractTomlVersion(tauri)) !== 2 || majorVersion(extractTomlVersion(tauriBuild)) !== 2) {
-    throw new Error("Tauri v1 Cargo dependencies are unsupported; tauri and tauri-build must be v2");
+  if (!tauri || !tauriBuild)
+    throw new Error("Cargo.toml must declare tauri and tauri-build directly");
+  if (
+    majorVersion(extractTomlVersion(tauri)) !== 2 ||
+    majorVersion(extractTomlVersion(tauriBuild)) !== 2
+  ) {
+    throw new Error(
+      "Tauri v1 Cargo dependencies are unsupported; tauri and tauri-build must be v2",
+    );
   }
 }
 
@@ -258,7 +294,8 @@ function parseTomlSections(source: string): Map<string, Map<string, string>> {
       continue;
     }
     const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(clean);
-    if (assignment && sections.has(section)) sections.get(section)!.set(assignment[1]!, assignment[2]!);
+    if (assignment && sections.has(section))
+      sections.get(section)!.set(assignment[1]!, assignment[2]!);
   }
   return sections;
 }
@@ -288,14 +325,19 @@ function assertTauriV2Config(config: JsonObject): void {
     throw new Error("Tauri v1 configuration is unsupported");
   }
   if (isObject(config.build) && config.build.target !== undefined) {
-    throw new Error("Cross-target configuration is unsupported; package the native host target only");
+    throw new Error(
+      "Cross-target configuration is unsupported; package the native host target only",
+    );
   }
-  if (!isObject(config.bundle) && config.bundle !== undefined) throw new Error("bundle must be an object");
+  if (!isObject(config.bundle) && config.bundle !== undefined)
+    throw new Error("bundle must be an object");
 }
 
 async function resolveCli(context: DiscoveryContext, packageRoot: string) {
   const candidates = [
-    packageRoot ? `${packageRoot}/node_modules/@tauri-apps/cli/package.json` : "node_modules/@tauri-apps/cli/package.json",
+    packageRoot
+      ? `${packageRoot}/node_modules/@tauri-apps/cli/package.json`
+      : "node_modules/@tauri-apps/cli/package.json",
     "node_modules/@tauri-apps/cli/package.json",
   ];
   for (const packagePath of [...new Set(candidates)]) {
@@ -305,10 +347,12 @@ async function resolveCli(context: DiscoveryContext, packageRoot: string) {
     relativeRepositoryPath(context.root, canonicalPackage);
     const cliPackage = await readJsonEvidence(context, packagePath, "tauri-cli-package", false);
     const version = requiredString(cliPackage.version, "version", packagePath);
-    if (majorVersion(version) !== 2) throw new Error(`Installed @tauri-apps/cli must be v2: ${packagePath}`);
+    if (majorVersion(version) !== 2)
+      throw new Error(`Installed @tauri-apps/cli must be v2: ${packagePath}`);
     const bin = cliPackage.bin;
     const binValue = isObject(bin) ? bin.tauri : undefined;
-    if (typeof binValue !== "string") throw new Error(`Installed CLI has no literal bin.tauri: ${packagePath}`);
+    if (typeof binValue !== "string")
+      throw new Error(`Installed CLI has no literal bin.tauri: ${packagePath}`);
     const packageDirectory = path.posix.dirname(packagePath);
     const binPath = normalizeRepositoryPath(path.posix.join(packageDirectory, binValue));
     const canonicalDirectory = path.dirname(canonicalPackage);
@@ -339,7 +383,8 @@ async function resolveResources(
     }
   } else if (isObject(configured)) {
     for (const [source, target] of Object.entries(configured)) {
-      if (typeof target !== "string") throw new Error("Resource map targets must be literal strings");
+      if (typeof target !== "string")
+        throw new Error("Resource map targets must be literal strings");
       entries.push([source, target]);
     }
   } else {
@@ -347,12 +392,15 @@ async function resolveResources(
   }
   const resources: TauriResource[] = [];
   const paths: string[] = [];
-  for (const [configuredSource, configuredTarget] of entries.sort(([a], [b]) => compareText(a, b))) {
+  for (const [configuredSource, configuredTarget] of entries.sort(([a], [b]) =>
+    compareText(a, b),
+  )) {
     const source = resolveConfigLiteral(tauriRoot, configuredSource);
     const target = normalizeLiteral(configuredTarget);
     const absolute = await rejectLinks(context.root, source);
     const info = await stat(absolute);
-    if (!info.isFile() && !info.isDirectory()) throw new Error(`Resource is not a file or directory: ${source}`);
+    if (!info.isFile() && !info.isDirectory())
+      throw new Error(`Resource is not a file or directory: ${source}`);
     const evidencePaths = info.isDirectory()
       ? await collectDirectoryEvidence(context, source, "resource")
       : [await addExistingEvidence(context, source, "resource")];
@@ -391,7 +439,8 @@ function resolveConfigLiteral(tauriRoot: string, value: string): string {
 }
 
 function normalizeLiteral(value: string): string {
-  if (GLOB_CHARACTERS.test(value)) throw new Error(`Globbed resource/sidecar paths are unsupported: ${value}`);
+  if (GLOB_CHARACTERS.test(value))
+    throw new Error(`Globbed resource/sidecar paths are unsupported: ${value}`);
   if (value.includes("\\") || path.posix.isAbsolute(value) || /^[A-Za-z]:/.test(value)) {
     throw new Error(`Absolute or mixed-separator path is unsupported: ${value}`);
   }
@@ -405,14 +454,18 @@ async function collectDirectoryEvidence(
 ): Promise<string[]> {
   const found: string[] = [];
   const visit = async (repositoryPath: string): Promise<void> => {
-    const entries = await readdir(containedPath(context.root, repositoryPath), { withFileTypes: true });
+    const entries = await readdir(containedPath(context.root, repositoryPath), {
+      withFileTypes: true,
+    });
     for (const entry of entries.sort((left, right) => compareText(left.name, right.name))) {
       const child = `${repositoryPath}/${entry.name}`;
-      if (entry.isSymbolicLink()) throw new Error(`Symbolic links are unsupported in referenced paths: ${child}`);
+      if (entry.isSymbolicLink())
+        throw new Error(`Symbolic links are unsupported in referenced paths: ${child}`);
       if (entry.isDirectory()) await visit(child);
       else if (entry.isFile()) found.push(await addExistingEvidence(context, child, role));
       else throw new Error(`Unsupported filesystem entry in resource: ${child}`);
-      if (found.length > MAX_REFERENCED_FILES) throw new Error(`Referenced resource exceeds ${MAX_REFERENCED_FILES} files`);
+      if (found.length > MAX_REFERENCED_FILES)
+        throw new Error(`Referenced resource exceeds ${MAX_REFERENCED_FILES} files`);
     }
   };
   await visit(directory);
@@ -456,13 +509,18 @@ async function readEvidence(
   const absolute = containedPath(context.root, normalized);
   const info = await stat(absolute);
   if (!info.isFile()) throw new Error(`Evidence source is not a file: ${normalized}`);
-  if (info.size > MAX_EVIDENCE_FILE_BYTES) throw new Error(`Evidence source is too large: ${normalized}`);
+  if (info.size > MAX_EVIDENCE_FILE_BYTES)
+    throw new Error(`Evidence source is too large: ${normalized}`);
   const bytes = await readFile(absolute);
   const existing = context.sources.get(normalized);
   if (existing && existing.role !== role && !permitDuplicateRole) {
     throw new Error(`Evidence source has conflicting roles: ${normalized}`);
   }
-  context.sources.set(normalized, { path: normalized, role: existing?.role ?? role, sha256: sha256(bytes) });
+  context.sources.set(normalized, {
+    path: normalized,
+    role: existing?.role ?? role,
+    sha256: sha256(bytes),
+  });
   return bytes;
 }
 
@@ -508,7 +566,8 @@ function majorVersion(version: string): number | null {
 }
 
 function requiredString(value: unknown, field: string, source: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`${source} requires non-empty ${field}`);
+  if (typeof value !== "string" || !value.trim())
+    throw new Error(`${source} requires non-empty ${field}`);
   return value;
 }
 
@@ -516,7 +575,12 @@ function isObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function issue(context: DiscoveryContext, code: DiscoveryIssue["code"], path: string, message: string): void {
+function issue(
+  context: DiscoveryContext,
+  code: DiscoveryIssue["code"],
+  path: string,
+  message: string,
+): void {
   context.issues.push({ code, path, message });
 }
 
@@ -539,4 +603,3 @@ function compareSources(left: EvidenceSource, right: EvidenceSource): number {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
-

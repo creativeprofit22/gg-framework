@@ -36,7 +36,10 @@ async function writeSidecar(root: string, packageRoot: string): Promise<void> {
   await writeFile(path.join(directory, `helper-${host.rust_triple}${extension}`), "fake binary\n");
 }
 
-async function config(root: string, transform: (value: Record<string, unknown>) => void): Promise<void> {
+async function config(
+  root: string,
+  transform: (value: Record<string, unknown>) => void,
+): Promise<void> {
   const configPath = path.join(root, "apps", "desktop", "src-tauri", "tauri.conf.json");
   const parsed = JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>;
   transform(parsed);
@@ -79,17 +82,23 @@ describe("discoverTauriPackages", () => {
 
     const result = await discoverTauriPackages(root);
 
-    expect(result.evidence.sources.filter((source) => source.role === "resource").map((source) => source.path)).toEqual([
-      "apps/desktop/src-tauri/resources/z.txt",
-      "apps/desktop/src-tauri/resources/ä.txt",
-    ]);
+    expect(
+      result.evidence.sources
+        .filter((source) => source.role === "resource")
+        .map((source) => source.path),
+    ).toEqual(["apps/desktop/src-tauri/resources/z.txt", "apps/desktop/src-tauri/resources/ä.txt"]);
   });
 
   it("returns multiple candidates without choosing one", async () => {
     const root = await repository();
-    await cp(path.join(root, "apps", "desktop"), path.join(root, "apps", "second"), { recursive: true });
+    await cp(path.join(root, "apps", "desktop"), path.join(root, "apps", "second"), {
+      recursive: true,
+    });
     const secondPackage = path.join(root, "apps", "second", "package.json");
-    await writeFile(secondPackage, (await readFile(secondPackage, "utf8")).replace("fixture-desktop", "fixture-second"));
+    await writeFile(
+      secondPackage,
+      (await readFile(secondPackage, "utf8")).replace("fixture-desktop", "fixture-second"),
+    );
 
     const result = await discoverTauriPackages(root);
 
@@ -98,14 +107,66 @@ describe("discoverTauriPackages", () => {
   });
 
   it.each([
-    ["missing Cargo proof", async (root: string) => rm(path.join(root, "apps/desktop/src-tauri/Cargo.toml")), "missing-proof"],
-    ["missing config proof", async (root: string) => rm(path.join(root, "apps/desktop/src-tauri/tauri.conf.json")), "missing-proof"],
-    ["Tauri v1", async (root: string) => writeFile(path.join(root, "apps/desktop/src-tauri/Cargo.toml"), "[build-dependencies]\ntauri-build = \"1\"\n[dependencies]\ntauri = \"1\"\n"), "unsupported-tauri-version"],
-    ["JSON5", async (root: string) => { const source = path.join(root, "apps/desktop/src-tauri/tauri.conf.json"); await writeFile(`${source}5`, "{}\n"); await rm(source); }, "unsupported-config-format"],
-    ["TOML", async (root: string) => { await rm(path.join(root, "apps/desktop/src-tauri/tauri.conf.json")); await writeFile(path.join(root, "apps/desktop/src-tauri/tauri.conf.toml"), "productName = 'x'\n"); }, "unsupported-config-format"],
-    ["cross-target", async (root: string) => config(root, (value) => { value.build = { target: "aarch64-apple-darwin" }; }), "unsupported-cross-target"],
-    ["glob resource", async (root: string) => config(root, (value) => { (value.bundle as Record<string, unknown>).resources = ["resources/*"]; }), "unsupported-glob"],
-    ["missing CLI", async (root: string) => rm(path.join(root, "apps/desktop/node_modules"), { recursive: true }), "missing-cli"],
+    [
+      "missing Cargo proof",
+      async (root: string) => rm(path.join(root, "apps/desktop/src-tauri/Cargo.toml")),
+      "missing-proof",
+    ],
+    [
+      "missing config proof",
+      async (root: string) => rm(path.join(root, "apps/desktop/src-tauri/tauri.conf.json")),
+      "missing-proof",
+    ],
+    [
+      "Tauri v1",
+      async (root: string) =>
+        writeFile(
+          path.join(root, "apps/desktop/src-tauri/Cargo.toml"),
+          '[build-dependencies]\ntauri-build = "1"\n[dependencies]\ntauri = "1"\n',
+        ),
+      "unsupported-tauri-version",
+    ],
+    [
+      "JSON5",
+      async (root: string) => {
+        const source = path.join(root, "apps/desktop/src-tauri/tauri.conf.json");
+        await writeFile(`${source}5`, "{}\n");
+        await rm(source);
+      },
+      "unsupported-config-format",
+    ],
+    [
+      "TOML",
+      async (root: string) => {
+        await rm(path.join(root, "apps/desktop/src-tauri/tauri.conf.json"));
+        await writeFile(
+          path.join(root, "apps/desktop/src-tauri/tauri.conf.toml"),
+          "productName = 'x'\n",
+        );
+      },
+      "unsupported-config-format",
+    ],
+    [
+      "cross-target",
+      async (root: string) =>
+        config(root, (value) => {
+          value.build = { target: "aarch64-apple-darwin" };
+        }),
+      "unsupported-cross-target",
+    ],
+    [
+      "glob resource",
+      async (root: string) =>
+        config(root, (value) => {
+          (value.bundle as Record<string, unknown>).resources = ["resources/*"];
+        }),
+      "unsupported-glob",
+    ],
+    [
+      "missing CLI",
+      async (root: string) => rm(path.join(root, "apps/desktop/node_modules"), { recursive: true }),
+      "missing-cli",
+    ],
   ])("rejects %s deterministically", async (_name, mutate, code) => {
     const root = await repository();
     await mutate(root);
@@ -122,7 +183,9 @@ describe("discoverTauriPackages", () => {
     ["mixed separators", "resources\\data.txt", "invalid-path"],
   ])("rejects %s resource paths", async (_name, resource, code) => {
     const root = await repository();
-    await config(root, (value) => { (value.bundle as Record<string, unknown>).resources = [resource]; });
+    await config(root, (value) => {
+      (value.bundle as Record<string, unknown>).resources = [resource];
+    });
 
     const result = await discoverTauriPackages(root);
 
@@ -133,21 +196,34 @@ describe("discoverTauriPackages", () => {
   it("rejects links and case-colliding resource paths", async () => {
     const root = await repository();
     const resources = path.join(root, "apps/desktop/src-tauri/resources");
-    await createTestSymlink(resources, path.join(root, "apps/desktop/src-tauri/linked-resources"), "dir");
-    await config(root, (value) => { (value.bundle as Record<string, unknown>).resources = ["linked-resources/data.txt"]; });
+    await createTestSymlink(
+      resources,
+      path.join(root, "apps/desktop/src-tauri/linked-resources"),
+      "dir",
+    );
+    await config(root, (value) => {
+      (value.bundle as Record<string, unknown>).resources = ["linked-resources/data.txt"];
+    });
     const linked = await discoverTauriPackages(root);
     expect(linked.evidence.issues.map((issue) => issue.code)).toContain("link-rejected");
 
     await rm(path.join(root, "apps/desktop/src-tauri/linked-resources"));
     await writeFile(path.join(resources, "Case.txt"), "case\n");
-    await config(root, (value) => { (value.bundle as Record<string, unknown>).resources = ["resources/Case.txt", "resources/case.txt"]; });
+    await config(root, (value) => {
+      (value.bundle as Record<string, unknown>).resources = [
+        "resources/Case.txt",
+        "resources/case.txt",
+      ];
+    });
     const collision = await discoverTauriPackages(root);
     expect(collision.evidence.issues.map((issue) => issue.code)).toContain("case-collision");
   });
 
   it("does not inspect packages outside declared workspace roots", async () => {
     const root = await repository();
-    await cp(path.join(root, "apps", "desktop"), path.join(root, "undeclared"), { recursive: true });
+    await cp(path.join(root, "apps", "desktop"), path.join(root, "undeclared"), {
+      recursive: true,
+    });
 
     const result = await discoverTauriPackages(root);
 

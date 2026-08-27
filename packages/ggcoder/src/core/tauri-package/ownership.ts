@@ -80,11 +80,15 @@ export async function inspectSupportSet(
       }
     }
   }
-  if (present.length === 0 && conflicts.length === 0) return { state: "absent", conflicts: [], files: [] };
+  if (present.length === 0 && conflicts.length === 0)
+    return { state: "absent", conflicts: [], files: [] };
   if (present.length !== GENERATED_PATHS.length || conflicts.length) {
     const presentPaths = new Set(present.map((file) => file.path));
     for (const repositoryPath of GENERATED_PATHS) {
-      if (!presentPaths.has(repositoryPath) && !conflicts.some((entry) => entry.startsWith(`${repositoryPath}:`))) {
+      if (
+        !presentPaths.has(repositoryPath) &&
+        !conflicts.some((entry) => entry.startsWith(`${repositoryPath}:`))
+      ) {
         conflicts.push(`${repositoryPath}: missing from partial support set`);
       }
     }
@@ -146,11 +150,15 @@ export async function commitSupportSet(
   return withRepositoryLock(root, async () => {
     const inspection = await inspectSupportSet(root, rendered);
     if (inspection.state === "conflict") {
-      throw new Error(`Refusing to overwrite Tauri support files:\n${inspection.conflicts.join("\n")}`);
+      throw new Error(
+        `Refusing to overwrite Tauri support files:\n${inspection.conflicts.join("\n")}`,
+      );
     }
     if (
       inspection.state === "owned" &&
-      rendered.every((file) => inspection.files.find((current) => current.path === file.path)?.bytes.equals(file.bytes))
+      rendered.every((file) =>
+        inspection.files.find((current) => current.path === file.path)?.bytes.equals(file.bytes),
+      )
     ) {
       return { changed: false, paths: [] };
     }
@@ -164,7 +172,8 @@ export async function commitSupportSet(
       for (const [index, file] of rendered.entries()) {
         const current = await readOptional(containedPath(root, file.path));
         const snapshot = snapshots.get(file.path) ?? null;
-        if (!sameBytes(current, snapshot)) throw new Error(`Concurrent mutation detected: ${file.path}`);
+        if (!sameBytes(current, snapshot))
+          throw new Error(`Concurrent mutation detected: ${file.path}`);
         await options.onPreMutation?.(file.path);
         await atomicWrite(root, file.path, file.bytes);
         written.push(file.path);
@@ -172,7 +181,9 @@ export async function commitSupportSet(
       }
     } catch (error) {
       const rollbackErrors = await rollback(root, rendered, snapshots, written);
-      const suffix = rollbackErrors.length ? `\nRollback conflicts:\n${rollbackErrors.join("\n")}` : "";
+      const suffix = rollbackErrors.length
+        ? `\nRollback conflicts:\n${rollbackErrors.join("\n")}`
+        : "";
       throw new Error(`${errorMessage(error)}${suffix}`, { cause: error });
     }
     for (const repositoryPath of written) await options.onCommitted?.(repositoryPath);
@@ -182,10 +193,14 @@ export async function commitSupportSet(
 
 function assertCompleteRender(rendered: readonly GeneratedFile[]): void {
   const paths = rendered.map((file) => file.path);
-  if (paths.length !== GENERATED_PATHS.length || GENERATED_PATHS.some((item) => !paths.includes(item))) {
+  if (
+    paths.length !== GENERATED_PATHS.length ||
+    GENERATED_PATHS.some((item) => !paths.includes(item))
+  ) {
     throw new Error("Renderer must provide the exact six-file Tauri support set");
   }
-  if (new Set(paths).size !== paths.length) throw new Error("Renderer returned duplicate support paths");
+  if (new Set(paths).size !== paths.length)
+    throw new Error("Renderer returned duplicate support paths");
 }
 
 async function rollback(
@@ -227,14 +242,19 @@ async function atomicWrite(root: string, repositoryPath: string, bytes: Buffer):
 }
 
 async function withRepositoryLock<T>(root: string, action: () => Promise<T>): Promise<T> {
-  const lockPath = path.join(os.tmpdir(), `gg-tauri-package-${sha256(root.toLocaleLowerCase("en-US"))}.lock`);
+  const lockPath = path.join(
+    os.tmpdir(),
+    `gg-tauri-package-${sha256(root.toLocaleLowerCase("en-US"))}.lock`,
+  );
   let handle;
   try {
     handle = await open(lockPath, "wx", 0o600);
     await handle.writeFile(`${process.pid}\n`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new Error("Another Tauri packaging action is active for this repository", { cause: error });
+      throw new Error("Another Tauri packaging action is active for this repository", {
+        cause: error,
+      });
     }
     throw error;
   }

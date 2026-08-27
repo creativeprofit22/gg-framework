@@ -17,7 +17,10 @@ export const TauriPackageParams = z
   .object({
     action: z.enum(["inspect", "setup", "calibrate", "package", "verify"]),
     target_id: z.string().min(1).optional(),
-    evidence_sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    evidence_sha256: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -58,8 +61,10 @@ export function createTauriPackageTool(
       if (operations !== localOperations) {
         return "Error: tauri_package supports only local ToolOperations in this version.";
       }
-      const mutating = input.action === "setup" || input.action === "calibrate" || input.action === "package";
-      if (mutating && isPlanModeActive(options.planModeRef)) return planModeRestriction("tauri_package");
+      const mutating =
+        input.action === "setup" || input.action === "calibrate" || input.action === "package";
+      if (mutating && isPlanModeActive(options.planModeRef))
+        return planModeRestriction("tauri_package");
 
       try {
         if (input.action === "inspect") {
@@ -179,7 +184,8 @@ export function createTauriPackageTool(
           launch,
         });
         const output = await renderBashOutput(execution.rawOutput);
-        const succeeded = execution.outcome.reason === "completed" && execution.outcome.exitCode === 0;
+        const succeeded =
+          execution.outcome.reason === "completed" && execution.outcome.exitCode === 0;
         if (succeeded && input.action === "calibrate") await options.onFileMutated?.(configPath);
         const after = succeeded ? await verifyTauriPackage(cwd) : undefined;
         return stableJson({

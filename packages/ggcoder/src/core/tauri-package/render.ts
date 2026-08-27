@@ -29,7 +29,9 @@ export function renderTauriSupport(
   target: TauriCandidate,
   calibration: CalibrationBounds | null = null,
 ): GeneratedFile[] {
-  const discovered = discovery.targets.find((candidate) => candidate.target_id === target.target_id);
+  const discovered = discovery.targets.find(
+    (candidate) => candidate.target_id === target.target_id,
+  );
   if (!discovered || JSON.stringify(discovered) !== JSON.stringify(target)) {
     throw new Error(`Target is not an exact candidate from this discovery: ${target.target_id}`);
   }
@@ -46,7 +48,8 @@ function renderFixed(repositoryPath: string, template: string): GeneratedFile {
   const marker = generatedMarker(templateSha256, CONTENT_DIGEST_SENTINEL);
   const placeholder = repositoryPath.endsWith(".md") ? "<!--__GG_MARKER__-->" : "/*__GG_MARKER__*/";
   const replacement = repositoryPath.endsWith(".md") ? `<!-- ${marker} -->` : `// ${marker}`;
-  if (template.split(placeholder).length !== 2) throw new Error(`Invalid fixed template marker: ${repositoryPath}`);
+  if (template.split(placeholder).length !== 2)
+    throw new Error(`Invalid fixed template marker: ${repositoryPath}`);
   const final = finalizeGeneratedContent(template.replace(placeholder, replacement));
   return {
     path: repositoryPath,

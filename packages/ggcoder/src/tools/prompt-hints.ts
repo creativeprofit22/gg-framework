@@ -20,6 +20,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "tokens than reading whole files. TS/JS, Python, Go, Rust, Java, C#.",
   source_path:
     "Resolve installed package/repo source via opensrc. Inspect the returned path with read/grep/find/ls before assuming a dependency API.",
+  tauri_package:
+    "Deterministically inspect, set up, calibrate, package, or verify supported host-native Tauri v2 JSON apps; load it for /setup-tauri-package and /package-tauri.",
   web_search:
     "Search the web. Use before web_fetch to find pages; supports include/exclude_domains and a time_range recency filter.",
   web_fetch:
@@ -129,6 +131,7 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "task_send",
   "task_stop",
   "tasks",
+  "tauri_package",
   "tool_search",
   "wait_agent",
   "web_fetch",
@@ -148,6 +151,7 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "code_search",
   "ls",
   "source_path",
+  "tauri_package",
   "web_fetch",
   "task_output",
   "task_stop",

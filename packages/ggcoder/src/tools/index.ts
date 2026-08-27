@@ -10,6 +10,7 @@ import { getVideoByteLimit } from "../core/model-registry.js";
 import { createWriteTool } from "./write.js";
 import { createEditTool } from "./edit.js";
 import { createBashTool } from "./bash.js";
+import { createTauriPackageTool } from "./tauri-package.js";
 import { createFindTool } from "./find.js";
 import { createGrepTool } from "./grep.js";
 import { createSearchCodeTool } from "./search-code.js";
@@ -205,6 +206,13 @@ export async function createTools(
       opts?.getNetworkPolicy,
       ops === localOperations ? opts?.getSandboxPolicy : undefined,
     ),
+    createTauriPackageTool(cwd, processManager, {
+      operations: ops,
+      planModeRef,
+      onFileMutated: opts?.onFileMutated,
+      onPreFileMutation: opts?.onPreFileMutation,
+      getSandboxPolicy: ops === localOperations ? opts?.getSandboxPolicy : undefined,
+    }),
     createFindTool(cwd),
     createGrepTool(cwd, ops, { useExternalScanner: opts?.getUseExternalGrep }),
     createSearchCodeTool(cwd, ops),
@@ -292,6 +300,7 @@ export { createReadTool } from "./read.js";
 export { createWriteTool } from "./write.js";
 export { createEditTool } from "./edit.js";
 export { createBashTool } from "./bash.js";
+export { createTauriPackageTool, TauriPackageParams } from "./tauri-package.js";
 export { createFindTool } from "./find.js";
 export { createGrepTool } from "./grep.js";
 export { createSearchCodeTool } from "./search-code.js";

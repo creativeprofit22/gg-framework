@@ -1,4 +1,13 @@
-import fs, { mkdir, mkdtemp, readFile, rm, utimes, readdir, writeFile } from "node:fs/promises";
+import fs, {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  utimes,
+  readdir,
+  writeFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -267,6 +276,42 @@ describe("SessionManager persistence failure handling", () => {
     await manager.appendEntry(badPath, entry("b"));
     await manager.updateLeaf(badPath, "leaf-1");
     expect(calls).toBe(1);
+  });
+
+  it("appendEntry seals a crash-torn last line instead of fusing onto it", async () => {
+    const sessionsDir = await makeTempDir();
+    const created = await new SessionManager(sessionsDir).create(
+      sessionsDir,
+      "anthropic",
+      "test-model",
+    );
+    // A process killed mid-append: the JSON is cut off and has no newline.
+    await appendFile(created.path, '{"type":"message","id":"torn","mess', "utf-8");
+
+    // A fresh manager, as on resume after the crash.
+    const resumed = new SessionManager(sessionsDir);
+    await resumed.appendEntry(created.path, entry("after-crash"));
+
+    const lines = (await readFile(created.path, "utf-8")).split("\n").filter(Boolean);
+    // The torn record stays lost — it was never complete — but the record
+    // written after it survives as its own parseable line.
+    expect(lines).toHaveLength(3);
+    expect(JSON.parse(lines[2] ?? "")).toMatchObject({ type: "message", id: "after-crash" });
+    const loaded = await resumed.load(created.path);
+    expect(loaded?.entries.map((e) => e.id)).toEqual(["after-crash"]);
+  });
+
+  it("appendEntry leaves an intact file byte-identical apart from the new line", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const created = await manager.create(sessionsDir, "anthropic", "test-model");
+    const before = await readFile(created.path, "utf-8");
+
+    await manager.appendEntry(created.path, entry("clean"));
+
+    const after = await readFile(created.path, "utf-8");
+    expect(after.startsWith(before)).toBe(true);
+    expect(after.slice(before.length).split("\n").filter(Boolean)).toHaveLength(1);
   });
 
   it("appendEntry still writes normally when the disk is healthy", async () => {

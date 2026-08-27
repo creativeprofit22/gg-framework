@@ -93,15 +93,21 @@ function typeLineBreaks(breaks: number) {
 
   shell.transcript.scrollTop = CONTENT; // start pinned to the newest message
   observeScrolls();
+  const offBottomAfterAutosize: number[] = [];
 
   for (let n = 0; n < breaks; n++) {
     rows += 1;
-    autosizeComposer(el, shell.transcript); // useLayoutEffect on `input`
+    const wasPinned = pinned;
+    autosizeComposer(el, shell.transcript, pinned); // useLayoutEffect on `input`
     observeScrolls();
+    // A pinned composer must already be at the bottom by the time the
+    // ResizeObserver runs; anything left for the RO to correct is a frame of
+    // visible bounce while typing.
+    if (wasPinned) offBottomAfterAutosize.push(shell.distanceFromBottom());
     if (pinned) shell.transcript.scrollTop = CONTENT; // ResizeObserver re-pin
     observeScrolls();
   }
-  return { pinned, shell, el };
+  return { pinned, shell, el, offBottomAfterAutosize };
 }
 
 describe("autosizeComposer", () => {
@@ -133,6 +139,25 @@ describe("autosizeComposer", () => {
     const { pinned, shell } = typeLineBreaks(12);
     expect(pinned).toBe(true);
     expect(shell.distanceFromBottom()).toBe(0);
+  });
+
+  // Second regression: the pin was restored a frame LATE (the ResizeObserver
+  // did it), so every keystroke that wrapped a line showed the transcript sit a
+  // row off the bottom and then settle — the jitter Ken saw while typing.
+  it("lands at the bottom in the same pass, leaving nothing for the observer", () => {
+    const { offBottomAfterAutosize } = typeLineBreaks(6);
+    expect(offBottomAfterAutosize).toEqual([0, 0, 0, 0, 0, 0]);
+  });
+
+  it("leaves a reader who scrolled up exactly where they were", () => {
+    const shell = makeShell();
+    let rows = 8; // tall enough that the transcript can actually scroll
+    const el = makeComposer(shell, () => rows);
+    autosizeComposer(el, shell.transcript, false);
+    shell.transcript.scrollTop = 100; // scrolled up, un-pinned
+    rows = 9;
+    autosizeComposer(el, shell.transcript, false);
+    expect(shell.transcript.scrollTop).toBe(100);
   });
 
   it("does nothing without a transcript", () => {

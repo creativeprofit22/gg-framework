@@ -142,6 +142,7 @@ import {
   type CycleDetection,
 } from "./loop-breaker.js";
 import { buildRegroundingMessage } from "./regrounding.js";
+import { buildEnvDeltaMessage } from "./env-delta.js";
 import { wrapSteeringText, buildNotificationSteeringText, STEERING_PREFIX } from "./steering.js";
 import { AgentNotificationQueue } from "./agent-notifications.js";
 import {
@@ -479,6 +480,12 @@ export class AgentSession {
   /** 0 = none; 1 = first nudge sent; 2 = final stop-and-report injected. */
   private loopBreakInjected: 0 | 1 | 2 = 0;
   private regroundingInjected = false;
+  /**
+   * The environment as the cached system prompt currently describes it.
+   * Re-recorded on every prompt build, so a rebuild (e.g. `/add-dir`) needs no
+   * delta; anything that changes WITHOUT one is caught by the hook below.
+   */
+  private renderedEnvironment: SystemPromptEnvironment = {};
   /** Wall-clock start of the current run; scopes the background-process gate. */
   private runStartedAt = 0;
   /** Gate injections spent this run, capped by MAX_PROCESS_GATE_INJECTIONS. */
@@ -1727,6 +1734,23 @@ export class AgentSession {
    * Mirrors the TUI's getSteeringMessages ordering.
    */
   private getHookSteeringMessages(): Message[] | null {
+    // Environment drift: settings can move the network allowlist mid-session
+    // with no prompt rebuild, leaving the cached Environment section describing
+    // hosts that are no longer the real policy. Correcting it by appending is
+    // ~30 tokens; re-rendering the prompt would invalidate every cached byte
+    // from that section onward. Unconditional and cheap: identical facts
+    // produce no message at all.
+    // A verbatim custom prompt has no Environment section to correct, so a
+    // note pointing at one would describe something the model cannot see.
+    const environmentDelta = this.customSystemPrompt
+      ? null
+      : buildEnvDeltaMessage(this.renderedEnvironment, this.promptEnvironment());
+    if (environmentDelta) {
+      // The model has now been told; only a further change re-triggers this.
+      this.renderedEnvironment = this.promptEnvironment();
+      log("INFO", "session", "Injecting an environment update the prompt is too stale to show");
+    }
+
     // Push notifications: a child that finished or a background build that
     // exited is new *fact*, not a correction, and it is cheap (bounded to 1 KiB
     // per drain). Drained above the loop-break checks so the agent can act on
@@ -1780,9 +1804,18 @@ export class AgentSession {
         ];
         return { role: "user", content: parts, provenance };
       });
-      return notificationMessage ? [...steeringMessages, notificationMessage] : steeringMessages;
+      return [
+        ...(environmentDelta ? [environmentDelta] : []),
+        ...steeringMessages,
+        ...(notificationMessage ? [notificationMessage] : []),
+      ];
     }
-    if (notificationMessage) return [notificationMessage];
+    if (environmentDelta || notificationMessage) {
+      return [
+        ...(environmentDelta ? [environmentDelta] : []),
+        ...(notificationMessage ? [notificationMessage] : []),
+      ];
+    }
     if (this.opts.selfCorrectionHooks === false) return null;
     if (!this.settingsManager.get("idealReviewEnabled")) return null;
     // Two-stage loop-breaker: stage 1 nudges; a FRESH detection after that
@@ -3497,6 +3530,17 @@ export class AgentSession {
     return this.deferredBuiltinToolNames.filter((name) => !live.has(name));
   }
 
+  /**
+   * The environment about to be rendered into a prompt, remembered as the
+   * truth the model has been told. Pairs with the env-delta hook: whatever the
+   * prompt states, the model is only corrected when reality moves away from it.
+   */
+  private recordRenderedEnvironment(): SystemPromptEnvironment {
+    const environment = this.promptEnvironment();
+    this.renderedEnvironment = environment;
+    return environment;
+  }
+
   /** Environment facts that vary per session rather than per host. */
   private promptEnvironment(): SystemPromptEnvironment {
     const networkAllow =
@@ -3523,7 +3567,7 @@ export class AgentSession {
         toolNames,
         deferredToolNames,
         context: this.opts.agentContext,
-        environment: this.promptEnvironment(),
+        environment: this.recordRenderedEnvironment(),
         contextLimits: this.contextLimits,
       });
     }
@@ -3540,7 +3584,7 @@ export class AgentSession {
       toolNames,
       undefined,
       this.provider,
-      this.promptEnvironment(),
+      this.recordRenderedEnvironment(),
       deferredToolNames,
       this.contextLimits,
     );

@@ -2,6 +2,8 @@
 export { Agent, AgentStream } from "./agent.js";
 export {
   agentLoop,
+  cancelledBeforeStartText,
+  indeterminateOutcomeText,
   isAbortError,
   isContextOverflow,
   isBillingError,

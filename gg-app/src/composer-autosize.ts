@@ -13,6 +13,7 @@
 export function autosizeComposer(
   el: HTMLTextAreaElement | null,
   transcript: HTMLElement | null,
+  pinned = false,
 ): void {
   if (!el) return;
   // That same `height: auto` collapse hands the composer's pixels back to the
@@ -36,7 +37,13 @@ export function autosizeComposer(
   // where scrollHeight rounds down to an integer of unzoomed px and leaves the
   // content a hair taller than the height just set.
   if (content > max) el.style.overflowY = "auto";
-  if (transcript && savedTop !== undefined && transcript.scrollTop !== savedTop) {
-    transcript.scrollTop = savedTop;
-  }
+  if (!transcript || savedTop === undefined) return;
+  // Where the transcript belongs now that the composer has its final height.
+  // While pinned that is the true bottom, NOT the snapshot: a grown composer
+  // eats pixels off the bottom of the viewport, so restoring the old offset
+  // leaves the newest line under the fold and hands the correction to the
+  // ResizeObserver a frame later — a visible bounce on every keystroke that
+  // wraps. Landing at the bottom in the same task makes the growth one motion.
+  const target = pinned ? transcript.scrollHeight : savedTop;
+  if (transcript.scrollTop !== target) transcript.scrollTop = target;
 }

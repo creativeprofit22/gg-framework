@@ -1,5 +1,23 @@
 # @kenkaiiii/ggcoder
 
+## 5.49.11
+
+### Patch Changes
+
+- Cap file reads at 20 MiB and refuse symlinks and fifos at open, report interrupted tool calls as indeterminate rather than cancelled, repair crash-torn session lines, and correct a stale environment without breaking the prompt cache
+  - @kenkaiiii/gg-ai@5.49.11
+  - @kenkaiiii/gg-agent@5.49.11
+  - @kenkaiiii/gg-core@5.49.11
+
+## 5.49.10
+
+### Patch Changes
+
+- Harden the verification gate: an edited check now discloses the tamper instead of passing as proof, and a golden snapshot of the cached system-prompt prefix blocks unreviewed tool or prompt edits.
+  - @kenkaiiii/gg-ai@5.49.10
+  - @kenkaiiii/gg-agent@5.49.10
+  - @kenkaiiii/gg-core@5.49.10
+
 ## 5.49.9
 
 ### Patch Changes

@@ -22,6 +22,33 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.53.12",
+    date: "2026-08-27",
+    items: [
+      "No new buttons this time, just fresher foundations. I updated the core libraries GG Coder runs on, including `tokio` and `serde`, so the app stays current and steady underneath you while I build the next batch.",
+    ],
+  },
+  {
+    version: "0.53.11",
+    date: "2026-08-26",
+    items: [
+      "Open a monster file and the app just shrugs. Reading something enormous could eat all the memory and take down every window at once, wiping out sessions that had nothing to do with it. I cap reads at `20 MB` now and hand back a clean answer instead, so one oversized log never costs you your work.",
+      "Hitting stop is genuinely safe now. If you cancelled mid run, I used to report every unfinished step as though it never happened, so a `git push` that had already gone through could quietly fire a second time. I can finally tell never started apart from outcome unknown, and I say which one it was instead of guessing.",
+      "A crash costs you far less. When the app went down mid save, the half written line used to swallow your next message with it, so you came back to find your own words missing from the `history`. I stitch that torn line back up on the way in, so the only thing lost is the one that was actually interrupted.",
+      "Sneaky files cannot trick me into reading what you never opened. A `symlink` swapped in at the last instant could point me at something private sitting well outside your project. I refuse those at the door now, and I proved it by running the attack on myself first.",
+      "Settings is leaner. I pulled the `Agent plugins` section out while it gets rebuilt properly, so there is one less half finished thing in your way.",
+    ],
+  },
+  {
+    version: "0.53.10",
+    date: "2026-08-26",
+    items: [
+      "Typing a long prompt is dead steady now. The thread used to twitch up and drift back down on every line that wrapped, exactly the kind of tiny wobble that pulls you out of your thoughts. I made the chat settle in one smooth motion, so the newest message just sits there while you write.",
+      "Start a fresh chat and it actually looks fresh. New sessions were opening with the last run's `token` count and timing still sitting under the box, like you had already asked something. That ghost is gone.",
+      "You can trust a green check again. If I ever touch a test, a `tsconfig`, or a lint rule while fixing something, I now have to say so outright instead of letting a rigged check pass as proof. I locked my own instructions behind a snapshot too, so nothing about how I think shifts between releases without you seeing it.",
+    ],
+  },
+  {
     version: "0.53.9",
     date: "2026-08-25",
     items: [

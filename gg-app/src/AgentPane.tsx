@@ -1270,7 +1270,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   // Auto-grow the composer without letting its temporary collapse un-pin the transcript.
   const autosizeInput = useCallback(() => {
-    autosizeComposer(inputRef.current, scrollRef.current);
+    autosizeComposer(inputRef.current, scrollRef.current, stickToBottomRef.current);
   }, []);
 
   useLayoutEffect(() => {
@@ -2868,6 +2868,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     setState(null);
     setTasks([]);
     setContextTokens(0);
+    setTokens(0);
+    setDoneStatus(null);
     setPlanReview(null);
     planTotalRef.current = 0;
     planDoneRef.current = new Set();

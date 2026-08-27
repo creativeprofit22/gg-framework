@@ -63,6 +63,7 @@ export function preparePhase25DevFixture({
   cdpPort,
   descriptorPath = defaultDescriptorPath,
   baseEnvironment = process.env,
+  visual = false,
 } = {}) {
   if (!Number.isInteger(cdpPort) || cdpPort < 1 || cdpPort > 65_535) {
     throw new Error("Phase 25 dev fixture requires an explicit CDP port");
@@ -124,6 +125,7 @@ export function preparePhase25DevFixture({
     TMP: paths.temp,
     WEBVIEW2_USER_DATA_FOLDER: paths.webview2,
     GG_APP_CWD: paths.project,
+    GG_APP_DEV_SMOKE_WINDOW: visual ? "visible" : "minimized",
     GG_PHASE25_DEV_FIXTURE_CDP_PORT: String(cdpPort),
     GG_SIDECAR_PATH: sidecarPath,
     GG_PHASE25_SMOKE_AUDIT_FILE: auditFile,
@@ -166,9 +168,27 @@ export function preparePhase25DevFixture({
   };
 }
 
-function argument(name) {
-  const index = process.argv.indexOf(name);
-  return index < 0 ? null : (process.argv[index + 1] ?? null);
+export function parsePhase25DevFixtureArguments(args) {
+  const parsed = { visual: false };
+  const valueOptions = {
+    "--cdp-port": "cdpPort",
+    "--root": "root",
+    "--descriptor": "descriptor",
+  };
+  for (let index = 0; index < args.length; index += 1) {
+    const name = args[index];
+    if (name === "--visual") {
+      parsed.visual = true;
+      continue;
+    }
+    const key = valueOptions[name];
+    if (!key) throw new Error(`Unknown Phase 25 dev fixture argument: ${name}`);
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`${name} requires a value`);
+    parsed[key] = value;
+    index += 1;
+  }
+  return parsed;
 }
 
 function shellQuote(value) {
@@ -188,16 +208,16 @@ export function fixtureShellEnvironment(fixture, baseEnvironment = process.env) 
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const cdpPort = Number(argument("--cdp-port"));
-  const rootArgument = argument("--root");
-  const descriptorArgument = argument("--descriptor");
-  if (rootArgument && !isAbsolute(rootArgument)) {
+  const args = parsePhase25DevFixtureArguments(process.argv.slice(2));
+  const cdpPort = Number(args.cdpPort);
+  if (args.root && !isAbsolute(args.root)) {
     throw new Error("--root must be absolute");
   }
   const fixture = preparePhase25DevFixture({
-    ...(rootArgument ? { root: rootArgument } : {}),
+    ...(args.root ? { root: args.root } : {}),
     cdpPort,
-    ...(descriptorArgument ? { descriptorPath: descriptorArgument } : {}),
+    ...(args.descriptor ? { descriptorPath: args.descriptor } : {}),
+    visual: args.visual,
   });
   process.stdout.write(fixtureShellEnvironment(fixture));
   process.stderr.write(

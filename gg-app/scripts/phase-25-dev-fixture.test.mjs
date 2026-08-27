@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { fixtureShellEnvironment, preparePhase25DevFixture } from "./phase-25-dev-fixture.mjs";
+import {
+  fixtureShellEnvironment,
+  parsePhase25DevFixtureArguments,
+  preparePhase25DevFixture,
+} from "./phase-25-dev-fixture.mjs";
 import {
   createPhase25FixtureServer,
   validatePhase25FixtureAudit,
@@ -78,6 +82,7 @@ describe("Phase 25 isolated dev fixture", () => {
     expect(fixture.environment.GG_PHASE25_SMOKE_SEED_FILE).toBe(fixture.descriptor.seedFile);
     expect(fixture.environment.GG_PHASE25_DEV_FIXTURE_CDP_PORT).toBe("19925");
     expect(fixture.environment.GG_PHASE25_DEV_FIXTURE_SKIP_ORPHAN_SWEEP).toBe("1");
+    expect(fixture.environment.GG_APP_DEV_SMOKE_WINDOW).toBe("minimized");
     expect(fixture.seed.document.phases).toHaveLength(1);
     expect(fixture.seed.document.phases[0].reminder).toMatchObject({
       occurrenceKey: "occurrence-phase-25",
@@ -95,6 +100,32 @@ describe("Phase 25 isolated dev fixture", () => {
     expect(shell).not.toContain("blocked");
   });
 
+  it("defaults smoke windows to minimized and requires an explicit visual opt-out", () => {
+    const root = temporaryRoot();
+    const visual = preparePhase25DevFixture({
+      root: join(root, "visual"),
+      cdpPort: 19_927,
+      descriptorPath: join(root, "visual-descriptor.json"),
+      baseEnvironment: {},
+      visual: true,
+    });
+
+    expect(visual.environment.GG_APP_DEV_SMOKE_WINDOW).toBe("visible");
+    expect(parsePhase25DevFixtureArguments(["--cdp-port", "19927"])).toEqual({
+      cdpPort: "19927",
+      visual: false,
+    });
+    expect(parsePhase25DevFixtureArguments(["--cdp-port", "19927", "--visual"])).toEqual({
+      cdpPort: "19927",
+      visual: true,
+    });
+    expect(() => parsePhase25DevFixtureArguments(["--visible"])).toThrow(
+      "Unknown Phase 25 dev fixture argument: --visible",
+    );
+    expect(() => parsePhase25DevFixtureArguments(["--cdp-port", "--visual"])).toThrow(
+      "--cdp-port requires a value",
+    );
+  });
   it("blocks background delivery and permits exactly one focused in-app claim", async () => {
     const root = temporaryRoot();
     const fixtureFiles = preparePhase25DevFixture({

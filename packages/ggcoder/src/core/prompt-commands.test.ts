@@ -203,6 +203,7 @@ describe("prompt commands", () => {
     // output the prompt then forbids embedding anyway.
     expect(init?.prompt).toContain("Gotchas & Invariants Agent");
     expect(init?.prompt).toContain("would a competent agent get this wrong without being told?");
+    expect(init?.prompt).toContain("explicit visual-test overrides");
     expect(init?.prompt).not.toContain("Directory Structure Agent");
   });
 

@@ -5865,6 +5865,31 @@ fn phase25_dev_fixture_enabled() -> bool {
     )
 }
 
+fn dev_smoke_window_minimized(enabled: bool, value: Option<&str>) -> Result<bool, String> {
+    if !enabled {
+        return Ok(false);
+    }
+    match value {
+        Some("minimized") => Ok(true),
+        Some("visible") => Ok(false),
+        _ => Err("GG_APP_DEV_SMOKE_WINDOW must be 'minimized' or 'visible'".into()),
+    }
+}
+
+fn phase25_dev_smoke_window_minimized() -> Result<bool, String> {
+    dev_smoke_window_minimized(
+        cfg!(all(debug_assertions, target_os = "windows")) && phase25_dev_fixture_enabled(),
+        std::env::var("GG_APP_DEV_SMOKE_WINDOW").ok().as_deref(),
+    )
+}
+
+fn apply_dev_smoke_window_state(window: &WebviewWindow) -> Result<(), String> {
+    if phase25_dev_smoke_window_minimized()? {
+        window.minimize().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(all(debug_assertions, target_os = "macos"))]
 fn phase26_macos_smoke_enabled() -> bool {
     exact_fixture_opt_in(
@@ -5878,6 +5903,7 @@ fn build_app_window_with_visibility(
     label: &str,
     visible: bool,
 ) -> Result<WebviewWindow, String> {
+    let minimize_on_launch = visible && phase25_dev_smoke_window_minimized()?;
     let mut builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
         .title("Supah Coder")
         .inner_size(1024.0, 720.0)
@@ -5907,7 +5933,11 @@ fn build_app_window_with_visibility(
     if matches!(window_chrome(), WindowChrome::MacOverlay) {
         builder = apply_mac_overlay(builder);
     }
-    builder.build().map_err(|e| e.to_string())
+    let window = builder.build().map_err(|e| e.to_string())?;
+    if minimize_on_launch {
+        apply_dev_smoke_window_state(&window)?;
+    }
+    Ok(window)
 }
 
 fn build_app_window(app: &tauri::AppHandle, label: &str) -> Result<WebviewWindow, String> {
@@ -8927,7 +8957,8 @@ fn restore_or_default_windows(app: &tauri::AppHandle) -> Result<(), String> {
             any_geometry = true;
             let _ = win.set_size(tauri::PhysicalSize::new(w, h));
         }
-        let _ = win.show();
+        win.show().map_err(|e| e.to_string())?;
+        apply_dev_smoke_window_state(&win)?;
     }
     if !any_geometry {
         arrange_windows(app, count);
@@ -9295,6 +9326,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|app, event| match event {
+            RunEvent::Ready => {
+                for window in app.webview_windows().values() {
+                    if let Err(error) = apply_dev_smoke_window_state(window) {
+                        log::error!("failed to apply dev smoke window state: {error}");
+                        app.exit(1);
+                        break;
+                    }
+                }
+            }
             RunEvent::ExitRequested { code, .. } => {
                 log::info!(
                     "{}",
@@ -9488,6 +9528,20 @@ mod tests {
         assert!(exact_fixture_opt_in(true, Some("1")));
     }
 
+    #[test]
+    fn windows_dev_smoke_window_mode_is_exact_and_fail_closed() {
+        assert_eq!(
+            dev_smoke_window_minimized(true, Some("minimized")),
+            Ok(true)
+        );
+        assert_eq!(dev_smoke_window_minimized(true, Some("visible")), Ok(false));
+        assert!(dev_smoke_window_minimized(true, None).is_err());
+        assert!(dev_smoke_window_minimized(true, Some("MINIMIZED")).is_err());
+        assert_eq!(
+            dev_smoke_window_minimized(false, Some("minimized")),
+            Ok(false)
+        );
+    }
     fn prompt_proxy_result(
         status: reqwest::StatusCode,
         body: &str,

@@ -21,8 +21,8 @@ export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
     label: "August 26 update",
     date: "2026-08-26",
     items: [
-      "GG Coder can now set up, calibrate, package, smoke-test, and verify supported Tauri desktop apps deterministically.",
-      "Roadmap final reviews now retry missing results and preserve failed runs for safe recovery instead of leaving completion stuck.",
+      "GG Coder can now prepare and test installers for supported desktop apps built with Tauri. Run `/setup-tauri-package` once, then `/package-tauri` for repeatable builds with fewer manual steps.",
+      "Roadmap final reviews now retry once when a result is missing or out of date. If completion still needs attention, follow the recovery message to retry without losing the failure details.",
     ],
   },
   {

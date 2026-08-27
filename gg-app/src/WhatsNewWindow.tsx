@@ -124,12 +124,19 @@ function ReleaseFeed({ entries }: { entries: WhatsNewEntry[] }): React.ReactElem
   );
 }
 
+const HISTORICAL_DECISION_COPY =
+  "Your update kept your Local Fork’s projects, workspace, Roadmap, session recovery, sign-ins, and connected tools working as before. It also added safer file handling, clearer results when a tool’s outcome is uncertain, better recovery after interruptions, steadier conversations while typing, and simpler settings. This protected your setup while bringing in the latest reliability improvements. You can keep working normally and safely continue your existing projects and sessions.";
+
 function decisionEntries(records: VerifiedDecisionRecord[]): WhatsNewEntry[] {
   return records.map((record) => ({
     id: record.id,
     label: "Protected update",
     date: record.date,
-    items: [record.summary.text],
+    items: [
+      record.id === "decision-89af62bbd76e" && record.summary.source === "fallback"
+        ? HISTORICAL_DECISION_COPY
+        : record.summary.text,
+    ],
   }));
 }
 

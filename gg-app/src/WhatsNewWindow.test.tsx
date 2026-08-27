@@ -225,7 +225,37 @@ describe("WhatsNewWindow", () => {
     expect(within(panel).getByText("2026-08-24")).toBeTruthy();
   });
 
-  it("renders fallback text without a provenance badge", async () => {
+  it("replaces only the historical fallback summary with plain-language copy", async () => {
+    const historicalRecord = {
+      ...verifiedDecisionRecords()[0],
+      id: "decision-89af62bbd76e",
+      summary: {
+        text: "Your protected update is ready. It held onto your local work in one area because the finished update uses your version there. It blended your work with upstream in 7 areas, keeping changes from both sides.",
+        source: "fallback" as const,
+        generatedAt: "2026-08-24T10:00:15.000Z",
+      },
+    };
+    render(
+      <WhatsNewWindow
+        localPatched
+        storage={localStorage}
+        loadDecisions={async () => [historicalRecord]}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Decisions" }));
+    const summary = await screen.findByText(
+      "Your update kept your Local Fork’s projects, workspace, Roadmap, session recovery, sign-ins, and connected tools working as before. It also added safer file handling, clearer results when a tool’s outcome is uncertain, better recovery after interruptions, steadier conversations while typing, and simpler settings. This protected your setup while bringing in the latest reliability improvements. You can keep working normally and safely continue your existing projects and sessions.",
+    );
+    const panel = summary.closest<HTMLElement>("[role='tabpanel']")!;
+    expect(within(panel).getAllByRole("listitem")).toHaveLength(1);
+    expect(panel.textContent).not.toContain(historicalRecord.summary.text);
+    expect(panel.textContent).not.toContain("decision-89af62bbd76e");
+    expect(panel.textContent).not.toContain("gg-app/src/WhatsNewWindow.tsx");
+    expect(panel.textContent).not.toContain("workflowVerified");
+    expect(panel.textContent).not.toContain("a".repeat(40));
+  });
+
+  it("renders ordinary fallback text exactly without a provenance badge", async () => {
     const fallbackRecord = {
       ...verifiedDecisionRecords()[0],
       summary: {

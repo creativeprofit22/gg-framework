@@ -148,8 +148,8 @@ describe("What's New feeds", () => {
       label: "August 26 update",
       date: "2026-08-26",
       items: [
-        "GG Coder can now set up, calibrate, package, smoke-test, and verify supported Tauri desktop apps deterministically.",
-        "Roadmap final reviews now retry missing results and preserve failed runs for safe recovery instead of leaving completion stuck.",
+        "GG Coder can now prepare and test installers for supported desktop apps built with Tauri. Run `/setup-tauri-package` once, then `/package-tauri` for repeatable builds with fewer manual steps.",
+        "Roadmap final reviews now retry once when a result is missing or out of date. If completion still needs attention, follow the recovery message to retry without losing the failure details.",
       ],
     });
   });
@@ -157,11 +157,11 @@ describe("What's New feeds", () => {
   it.each([
     [
       "3fdc4d572e7fa6746e6c77fe3a61413f31f648aa",
-      "GG Coder can now set up, calibrate, package, smoke-test, and verify supported Tauri desktop apps deterministically.",
+      "GG Coder can now prepare and test installers for supported desktop apps built with Tauri. Run `/setup-tauri-package` once, then `/package-tauri` for repeatable builds with fewer manual steps.",
     ],
     [
       "366a927e2573ace9f0af6ddcbb7fa3d9b36e0a92",
-      "Roadmap final reviews now retry missing results and preserve failed runs for safe recovery instead of leaving completion stuck.",
+      "Roadmap final reviews now retry once when a result is missing or out of date. If completion still needs attention, follow the recovery message to retry without losing the failure details.",
     ],
   ])("keeps the Local Fork note for commit %s", (_commit, note) => {
     expect(LOCAL_CHANGELOG.flatMap(({ items }) => items)).toContain(note);

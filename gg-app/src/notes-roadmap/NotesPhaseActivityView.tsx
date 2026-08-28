@@ -230,6 +230,22 @@ function renderActivityItem(item: ActivityItem): ReactNode {
       </>
     );
   }
+  if (event.type === "manual-completion-approval") {
+    return (
+      <>
+        <strong>User</strong> {timestamp}
+        <p>Completion approved from current implementation and verification evidence.</p>
+      </>
+    );
+  }
+  if (event.type === "phase-binding") {
+    return (
+      <>
+        <strong>Coding session</strong> {timestamp}
+        <p>{event.action === "bind-current" ? "Phase session linked." : "Phase authority transferred."}</p>
+      </>
+    );
+  }
   return (
     <>
       <strong>User</strong> {timestamp}

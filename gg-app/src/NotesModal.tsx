@@ -15,8 +15,13 @@ import type {
   NotesReference,
   NotesReferenceOperationResult,
   NotesReminderMutationResult,
+  ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalPreviewOutcome,
   NotesRoadmapMutationResult,
   NotesSessionLink,
+  PhaseBindingOutcome,
+  PhaseBindingRequest,
+  ProjectNotesStorageDiagnostics,
   PhaseRunCancellationResult,
   NotesTask,
   PhaseStartResult,
@@ -44,6 +49,7 @@ interface Props {
   activePhaseCount: number;
   activeReminderCount: number;
   authorityReady: boolean;
+  expectedRevision: number | null;
   initialRoadmapPhaseId?: string | null;
   persistenceStatus: React.ReactNode;
   onChangeCurrentFocus(value: string): void;
@@ -102,6 +108,15 @@ interface Props {
   ): Promise<NotesReminderMutationResult>;
   openSource?: OpenReferenceUrl;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onGetStorageDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
+  onRebindPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onPreviewManualCompletionApproval(
+    phaseId: string,
+    expectedRevision: number,
+  ): Promise<ManualCompletionApprovalPreviewOutcome>;
+  onCommitManualCompletionApproval(
+    nonce: string,
+  ): Promise<ManualCompletionApprovalCommitOutcome>;
   onStartNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
   commands: SlashCommand[];
   onRunCommand(invocation: string): void;
@@ -136,6 +151,7 @@ export function NotesModal({
   activePhaseCount,
   activeReminderCount,
   authorityReady,
+  expectedRevision,
   initialRoadmapPhaseId = null,
   persistenceStatus,
   onChangeCurrentFocus,
@@ -166,6 +182,10 @@ export function NotesModal({
   onDismissReminder,
   openSource,
   onStartPhase,
+  onGetStorageDiagnostics,
+  onRebindPhase,
+  onPreviewManualCompletionApproval,
+  onCommitManualCompletionApproval,
   onStartNextPhase,
   commands,
   onRunCommand,
@@ -330,6 +350,7 @@ export function NotesModal({
                   phases={phases}
                   references={references}
                   authorityReady={authorityReady}
+                  expectedRevision={expectedRevision}
                   initialSelectedPhaseId={initialRoadmapPhaseId}
                   openSource={openSource}
                   onCreatePhase={onCreatePhase}
@@ -348,6 +369,10 @@ export function NotesModal({
                   onSnoozeReminder={onSnoozeReminder}
                   onDismissReminder={onDismissReminder}
                   onStartPhase={onStartPhase}
+                  onGetStorageDiagnostics={onGetStorageDiagnostics}
+                  onRebindPhase={onRebindPhase}
+                  onPreviewManualCompletionApproval={onPreviewManualCompletionApproval}
+                  onCommitManualCompletionApproval={onCommitManualCompletionApproval}
                   onStartNextPhase={onStartNextPhase}
                   commands={commands}
                   onRunCommand={onRunCommand}

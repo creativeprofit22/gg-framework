@@ -16,8 +16,10 @@ import { getUserSessionPrompt } from "./session-preview.js";
 import type { CompletedItem } from "../ui/app-items.js";
 import { canonicalProjectKey } from "../project-notes-repository.js";
 import {
+  ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
   ACTIVE_PHASE_CONTEXT_KIND,
   parseActivePhaseContext,
+  parseActivePhaseContextClear,
   type ActivePhaseContextV1,
 } from "../phase-context.js";
 import {
@@ -1737,7 +1739,19 @@ export class SessionManager {
   ): ActivePhaseContextV1 | undefined {
     let activeContext: ActivePhaseContextV1 | undefined;
     for (const entry of entries) {
-      if (entry.type !== "custom" || entry.kind !== ACTIVE_PHASE_CONTEXT_KIND) continue;
+      if (entry.type !== "custom") continue;
+      if (entry.kind === ACTIVE_PHASE_CONTEXT_CLEAR_KIND) {
+        const clear = parseActivePhaseContextClear(entry.data, expected?.projectKey);
+        if (clear && (expected?.phaseId === undefined || clear.phaseId === expected.phaseId)) {
+          activeContext = undefined;
+        } else if (!clear) {
+          log("WARN", "session", "Ignoring malformed active phase clear metadata", {
+            entryId: entry.id,
+          });
+        }
+        continue;
+      }
+      if (entry.kind !== ACTIVE_PHASE_CONTEXT_KIND) continue;
       const parsed = parseActivePhaseContext(entry.data, expected);
       if (parsed) activeContext = parsed;
       else {

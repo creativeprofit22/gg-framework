@@ -31,8 +31,12 @@ import { normalizeRoadmapPhaseDraft } from "./roadmap-phase-draft-state";
 import {
   isPhaseRunCancellationResult,
   isPhaseStartResult,
+  isManualCompletionApprovalCommitOutcome,
+  isManualCompletionApprovalPreviewOutcome,
+  isPhaseBindingOutcome,
   isProjectNotesMigrationOutcome,
   isProjectNotesReadOutcome,
+  isProjectNotesStorageDiagnostics,
   isProjectNotesRoadmapBlockerResolutionOutcome,
   isProjectNotesSaveOutcome,
   isReminderClaimOutcome,
@@ -2893,6 +2897,35 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async getNotes() {
       const outcome = await call<unknown>("agent_notes_get");
       if (!isProjectNotesReadOutcome(outcome)) throw new Error("invalid Notes read response");
+      return outcome;
+    },
+    async getNotesDiagnostics() {
+      const outcome = await call<unknown>("agent_notes_diagnostics");
+      if (!isProjectNotesStorageDiagnostics(outcome)) {
+        throw new Error("invalid Notes diagnostics response");
+      }
+      return outcome;
+    },
+    async bindRoadmapPhase(request) {
+      const outcome = await call<unknown>("agent_notes_phase_binding", { request });
+      if (!isPhaseBindingOutcome(outcome)) throw new Error("invalid phase binding response");
+      return outcome;
+    },
+    async previewManualCompletionApproval(phaseId, expectedRevision) {
+      const outcome = await call<unknown>("agent_notes_completion_approval_preview", {
+        phaseId,
+        expectedRevision,
+      });
+      if (!isManualCompletionApprovalPreviewOutcome(outcome)) {
+        throw new Error("invalid manual completion approval preview response");
+      }
+      return outcome;
+    },
+    async commitManualCompletionApproval(nonce) {
+      const outcome = await call<unknown>("agent_notes_completion_approval_commit", { nonce });
+      if (!isManualCompletionApprovalCommitOutcome(outcome)) {
+        throw new Error("invalid manual completion approval commit response");
+      }
       return outcome;
     },
     async migrateNotes(document) {

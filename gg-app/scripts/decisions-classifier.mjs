@@ -238,6 +238,12 @@ export function generateDecisionSummaryContext(repoRoot, record) {
     sourceDecisions.some(
       ({ decision, selectedFiles }) => selectedFiles.length < decision.files.length,
     );
+  const diffCache = new Map();
+  const cachedDiff = (from, to, path) => {
+    const key = `${from}:${to}:${path}`;
+    if (!diffCache.has(key)) diffCache.set(key, boundedDiff(repoRoot, from, to, path));
+    return { ...diffCache.get(key) };
+  };
   const decisions = sourceDecisions.map(({ decision, selectedFiles }) => ({
     area: decision.area,
     outcome: decision.outcome,
@@ -245,9 +251,9 @@ export function generateDecisionSummaryContext(repoRoot, record) {
       path: file.path,
       role: file.role,
       diffs: {
-        baseToLocal: boundedDiff(repoRoot, base, localParent, file.path),
-        baseToUpstream: boundedDiff(repoRoot, base, upstreamParent, file.path),
-        baseToMerged: boundedDiff(repoRoot, base, merge, file.path),
+        baseToLocal: cachedDiff(base, localParent, file.path),
+        baseToUpstream: cachedDiff(base, upstreamParent, file.path),
+        baseToMerged: cachedDiff(base, merge, file.path),
       },
     })),
   }));

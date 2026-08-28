@@ -255,7 +255,13 @@ describe("AgentSession verification evidence compaction", () => {
         evidence: [command],
         expectedRevision: 1,
       }),
-    ).toEqual({ ready: true, unmetEvidenceCodes: [] });
+    ).toEqual({
+      ready: true,
+      unmetEvidenceCodes: [],
+      criterionCoverage: [
+        { criterionIndex: 1, criterion: "types pass", evidence: command, command },
+      ],
+    });
     await session.dispose();
   });
 

@@ -18,9 +18,10 @@ type ChatRoadmapSessionOptions = Pick<
 export function createAppSidecarCodingRoadmapSessionOptions(
   statusTools: AgentTool[],
   draftTools: AgentTool[],
+  bindingTools: AgentTool[] = [],
 ): CodingRoadmapSessionOptions {
   return {
-    additionalTools: [...statusTools, ...draftTools],
+    additionalTools: [...statusTools, ...draftTools, ...bindingTools],
     getSystemPromptTail: () => APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT,
   };
 }

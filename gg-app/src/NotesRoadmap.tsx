@@ -28,14 +28,20 @@ import type {
   NotesReferenceOperationResult,
   NotesReminderMutationResult,
   NotesRoadmapMutationResult,
+  ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalPreviewOutcome,
   NotesSessionLink,
+  PhaseBindingOutcome,
+  PhaseBindingRequest,
   PhaseStartResult,
+  ProjectNotesStorageDiagnostics,
 } from "./notes-types";
 
 interface RoadmapProps {
   phases: NotesPhase[];
   references: NotesReference[];
   authorityReady: boolean;
+  expectedRevision: number | null;
   initialSelectedPhaseId?: string | null;
   openSource?: OpenReferenceUrl;
   onCreatePhase(input: NotesPhaseInput): void;
@@ -80,6 +86,15 @@ interface RoadmapProps {
     expectedOccurrenceKey: string,
   ): Promise<NotesReminderMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onGetStorageDiagnostics?(): Promise<ProjectNotesStorageDiagnostics>;
+  onRebindPhase?(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onPreviewManualCompletionApproval?(
+    phaseId: string,
+    expectedRevision: number,
+  ): Promise<ManualCompletionApprovalPreviewOutcome>;
+  onCommitManualCompletionApproval?(
+    nonce: string,
+  ): Promise<ManualCompletionApprovalCommitOutcome>;
   onStartNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
   commands: SlashCommand[];
   onRunCommand(invocation: string): void;
@@ -101,6 +116,7 @@ export function NotesRoadmap({
   phases,
   references,
   authorityReady,
+  expectedRevision,
   initialSelectedPhaseId = null,
   openSource = openReferenceUrl,
   onCreatePhase,
@@ -120,6 +136,12 @@ export function NotesRoadmap({
   onSnoozeReminder,
   onDismissReminder,
   onStartPhase,
+  onGetStorageDiagnostics = async () => {
+    throw new Error("Storage diagnostics are unavailable.");
+  },
+  onRebindPhase = async () => ({ status: "missing" }),
+  onPreviewManualCompletionApproval = async () => ({ status: "missing" }),
+  onCommitManualCompletionApproval = async () => ({ status: "nonce-not-found" }),
   onStartNextPhase,
   commands,
   onRunCommand,
@@ -299,6 +321,7 @@ export function NotesRoadmap({
     ? {
         phase: selectedPhase,
         currentTime,
+        expectedRevision,
         references,
         authorityReady,
         openSource,
@@ -378,6 +401,10 @@ export function NotesRoadmap({
         onSnoozeReminder,
         onDismissReminder,
         onStartPhase,
+        onGetStorageDiagnostics,
+        onRebindPhase,
+        onPreviewManualCompletionApproval,
+        onCommitManualCompletionApproval,
         onResumePhase,
         startUnavailableReason: isRoadmapPhaseStartProtected(phases, selectedPhase.id)
           ? "Use Start next phase to confirm the pending Roadmap advancement."

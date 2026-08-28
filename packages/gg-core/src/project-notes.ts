@@ -207,6 +207,7 @@ export const NOTES_COMPLETION_UNMET_GATE_CODES = [
   "run-not-successful",
   "incomplete-plan",
   "missing-verification",
+  "stale-verification",
   "failed-verification",
   "verification-exception-not-accepted",
   "unresolved-approval",
@@ -284,6 +285,26 @@ export interface NotesRoadmapOverrideReset {
   timestamp: string;
 }
 
+export interface NotesRoadmapManualCompletionApproval {
+  type: "manual-completion-approval";
+  id: string;
+  authority: "native-user";
+  session: NotesSessionLink;
+  implementationCheckpointId: string;
+  verificationStatusUpdateId: string;
+  timestamp: string;
+}
+
+export interface NotesRoadmapPhaseBinding {
+  type: "phase-binding";
+  id: string;
+  action: "bind-current" | "rebind-current";
+  actor: "coding-session";
+  previousSession: NotesSessionLink | null;
+  session: NotesSessionLink;
+  timestamp: string;
+}
+
 export interface NotesRoadmapImplementationRecovery {
   sourceCheckpointId: string;
   sourceRevision: number;
@@ -341,6 +362,8 @@ export type NotesRoadmapEvent =
   | NotesRoadmapBlockerResolution
   | NotesRoadmapReferenceDecision
   | NotesRoadmapOverrideReset
+  | NotesRoadmapManualCompletionApproval
+  | NotesRoadmapPhaseBinding
   | NotesRoadmapImplementationCheckpoint
   | NotesRoadmapCompletionReview
   | NotesRoadmapPhaseAdvancementCheckpoint
@@ -645,6 +668,24 @@ const ROADMAP_REFERENCE_DECISION_KEYS = [
   "timestamp",
 ];
 const ROADMAP_OVERRIDE_RESET_KEYS = ["type", "id", "field", "timestamp"];
+const ROADMAP_MANUAL_COMPLETION_APPROVAL_KEYS = [
+  "type",
+  "id",
+  "authority",
+  "session",
+  "implementationCheckpointId",
+  "verificationStatusUpdateId",
+  "timestamp",
+];
+const ROADMAP_PHASE_BINDING_KEYS = [
+  "type",
+  "id",
+  "action",
+  "actor",
+  "previousSession",
+  "session",
+  "timestamp",
+];
 const ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS = [
   "type",
   "id",
@@ -1968,6 +2009,54 @@ function validateRoadmapEvents(
       }
       if (record.field !== "status" && record.field !== "references") {
         return validationError(`${eventPath}.field`, "expected status or references");
+      }
+      continue;
+    }
+
+    if (record.type === "manual-completion-approval") {
+      if (!isRecordWithKeys(record, ROADMAP_MANUAL_COMPLETION_APPROVAL_KEYS)) {
+        return validationError(eventPath, "invalid manual completion approval");
+      }
+      if (record.authority !== "native-user") {
+        return validationError(`${eventPath}.authority`, "expected native-user");
+      }
+      const sessionError = validateNotesSessionLink(record.session, `${eventPath}.session`);
+      if (sessionError || record.session === null) {
+        return sessionError ?? validationError(`${eventPath}.session`, "a session is required");
+      }
+      if (
+        !isNonEmptyString(record.implementationCheckpointId) ||
+        !isNonEmptyString(record.verificationStatusUpdateId)
+      ) {
+        return validationError(eventPath, "manual completion evidence IDs are required");
+      }
+      continue;
+    }
+
+    if (record.type === "phase-binding") {
+      if (!isRecordWithKeys(record, ROADMAP_PHASE_BINDING_KEYS)) {
+        return validationError(eventPath, "invalid phase binding");
+      }
+      if (record.action !== "bind-current" && record.action !== "rebind-current") {
+        return validationError(`${eventPath}.action`, "unknown phase binding action");
+      }
+      if (record.actor !== "coding-session") {
+        return validationError(`${eventPath}.actor`, "expected coding-session");
+      }
+      const previousSessionError = validateNotesSessionLink(
+        record.previousSession,
+        `${eventPath}.previousSession`,
+      );
+      if (previousSessionError) return previousSessionError;
+      const sessionError = validateNotesSessionLink(record.session, `${eventPath}.session`);
+      if (sessionError || record.session === null) {
+        return sessionError ?? validationError(`${eventPath}.session`, "a bound session is required");
+      }
+      if (
+        (record.action === "bind-current" && record.previousSession !== null) ||
+        (record.action === "rebind-current" && record.previousSession === null)
+      ) {
+        return validationError(`${eventPath}.previousSession`, "does not match the binding action");
       }
       continue;
     }

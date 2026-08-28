@@ -887,6 +887,194 @@ describe("ProjectNotesRepository phase launch transaction", () => {
   });
 });
 
+describe("ProjectNotesRepository phase binding compare-and-swap", () => {
+  const sessionA = { sessionId: "session-a", sessionPath: "/sessions/a.jsonl" };
+  const sessionB = { sessionId: "session-b", sessionPath: "/sessions/b.jsonl" };
+
+  async function bindingRepository(name: string, session: typeof sessionA | null) {
+    const agentDir = await tempAgentDir();
+    const cwd = path.join(agentDir, name);
+    const document = notes();
+    document.phases[0]!.session = session;
+    document.phases[0]!.overrides.status = null;
+    await new ProjectNotesRepository(agentDir).migrate(cwd, document);
+    return { cwd, repository: new ProjectNotesRepository(agentDir) };
+  }
+
+  function request(cwd: string, overrides: Record<string, unknown> = {}) {
+    return {
+      action: "rebind-current" as const,
+      phaseId: "phase-1",
+      expectedProjectKey: canonicalProjectKey(cwd),
+      expectedRevision: 1,
+      expectedPreviousSession: sessionA,
+      operationId: "binding-operation-1",
+      destinationSession: sessionB,
+      timestamp: "2026-07-25T12:35:00.000Z",
+      ...overrides,
+    };
+  }
+
+  it("binds an unbound phase once and returns duplicate on replay", async () => {
+    const { cwd, repository } = await bindingRepository("bind-unbound", null);
+    const bind = request(cwd, {
+      action: "bind-current",
+      expectedPreviousSession: null,
+      destinationSession: sessionA,
+    });
+
+    await expect(repository.bindPhaseToCurrentSession(cwd, bind)).resolves.toMatchObject({
+      status: "committed",
+      revision: 2,
+      previousSession: null,
+      session: sessionA,
+    });
+    await expect(repository.bindPhaseToCurrentSession(cwd, bind)).resolves.toMatchObject({
+      status: "duplicate",
+      revision: 2,
+    });
+    const loaded = await repository.load(cwd);
+    expect(loaded).toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 2,
+        document: {
+          phases: [
+            {
+              session: sessionA,
+              roadmapEvents: [
+                expect.objectContaining({
+                  type: "phase-binding",
+                  id: "binding-operation-1",
+                  action: "bind-current",
+                  previousSession: null,
+                  session: sessionA,
+                }),
+              ],
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  it("serializes duplicate concurrent delivery into one revision", async () => {
+    const { cwd, repository } = await bindingRepository("bind-concurrent", null);
+    const bind = request(cwd, {
+      action: "bind-current",
+      expectedPreviousSession: null,
+      destinationSession: sessionA,
+    });
+
+    const outcomes = await Promise.all([
+      repository.bindPhaseToCurrentSession(cwd, bind),
+      repository.bindPhaseToCurrentSession(cwd, bind),
+    ]);
+    expect(outcomes.map((outcome) => outcome.status).sort()).toEqual(["committed", "duplicate"]);
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2 },
+    });
+  });
+
+  it("fails closed for stale revision, project, previous link, and operation conflicts", async () => {
+    const { cwd, repository } = await bindingRepository("rebind-guards", sessionA);
+
+    await expect(
+      repository.bindPhaseToCurrentSession(cwd, request(cwd, { expectedRevision: 0 })),
+    ).resolves.toEqual({ status: "stale-revision", revision: 1 });
+    await expect(
+      repository.bindPhaseToCurrentSession(cwd, request(cwd, { expectedProjectKey: "/wrong" })),
+    ).resolves.toMatchObject({ status: "project-mismatch", revision: 1 });
+    await expect(
+      repository.bindPhaseToCurrentSession(
+        cwd,
+        request(cwd, {
+          expectedPreviousSession: {
+            sessionId: "session-stale",
+            sessionPath: "/sessions/stale.jsonl",
+          },
+        }),
+      ),
+    ).resolves.toEqual({
+      status: "stale-previous-session",
+      revision: 1,
+      currentSession: sessionA,
+    });
+
+    const committed = await repository.bindPhaseToCurrentSession(cwd, request(cwd));
+    expect(committed.status).toBe("committed");
+    await expect(
+      repository.bindPhaseToCurrentSession(
+        cwd,
+        request(cwd, { destinationSession: { ...sessionB, sessionId: "conflict" } }),
+      ),
+    ).resolves.toEqual({ status: "duplicate-id-conflict", revision: 2 });
+  });
+
+  it("rejects archived, terminal, and non-persistent destination sessions", async () => {
+    const archived = await bindingRepository("bind-archived", sessionA);
+    const archivedLoad = await archived.repository.load(archived.cwd);
+    if (archivedLoad.status !== "ok") throw new Error("Expected archived fixture");
+    const archivedDocument = structuredClone(archivedLoad.snapshot.document);
+    archivedDocument.phases[0]!.archivedAt = "2026-07-25T12:36:00.000Z";
+    await archived.repository.save(archived.cwd, 1, archivedDocument);
+    await expect(
+      archived.repository.bindPhaseToCurrentSession(
+        archived.cwd,
+        request(archived.cwd, { expectedRevision: 2 }),
+      ),
+    ).resolves.toEqual({ status: "phase-archived" });
+
+    const terminal = await bindingRepository("bind-terminal", sessionA);
+    const terminalLoad = await terminal.repository.load(terminal.cwd);
+    if (terminalLoad.status !== "ok") throw new Error("Expected terminal fixture");
+    const terminalDocument = structuredClone(terminalLoad.snapshot.document);
+    const donePhase = terminalDocument.phases[0]!;
+    donePhase.status = "done";
+    donePhase.completedAt = "2026-07-25T12:36:00.000Z";
+    donePhase.updatedAt = donePhase.completedAt;
+    donePhase.overrides.status = {
+      value: "done",
+      source: "user",
+      updatedAt: donePhase.completedAt,
+    };
+    donePhase.lifecycleEvents.push({
+      id: "manual-done-binding-fixture",
+      fromStatus: "in-progress",
+      toStatus: "done",
+      source: "user",
+      timestamp: donePhase.completedAt,
+      reason: "Status changed by user",
+      kind: "other",
+    });
+    terminalDocument.updatedAt = donePhase.completedAt;
+    const doneAgentDir = await tempAgentDir();
+    const doneCwd = path.join(doneAgentDir, "bind-terminal-migrated");
+    const doneRepository = new ProjectNotesRepository(doneAgentDir);
+    await expect(doneRepository.migrate(doneCwd, terminalDocument)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1 },
+    });
+    await expect(
+      doneRepository.bindPhaseToCurrentSession(
+        doneCwd,
+        request(doneCwd, { expectedRevision: 1 }),
+      ),
+    ).resolves.toEqual({ status: "phase-terminal" });
+
+    await expect(
+      doneRepository.bindPhaseToCurrentSession(
+        doneCwd,
+        request(doneCwd, {
+          expectedRevision: 1,
+          destinationSession: { sessionId: "ephemeral", sessionPath: null },
+        }),
+      ),
+    ).resolves.toEqual({ status: "missing-session-path" });
+  });
+});
+
 describe("ProjectNotesRepository authoritative lifecycle transitions", () => {
   async function createLifecycleRepository(projectName: string) {
     const agentDir = await tempAgentDir();
@@ -1080,14 +1268,12 @@ describe("ProjectNotesRepository authoritative lifecycle transitions", () => {
       reason: "Marked done by user",
       kind: "other",
     });
-    const savedDone = await repository.save(cwd, savedReset.snapshot.revision, doneDocument);
-    if (savedDone.status !== "ok") throw new Error("Expected Done save");
     await expect(
-      repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
-        ...transition,
-        status: "in-progress",
-      }),
-    ).resolves.toEqual({ status: "done-terminal" });
+      repository.save(cwd, savedReset.snapshot.revision, doneDocument),
+    ).resolves.toMatchObject({
+      status: "invalid",
+      error: { path: "phases[0].status" },
+    });
   });
 
   it("persists, replaces, and restores the latest suppressed target without accepting a stale session", async () => {
@@ -3146,7 +3332,7 @@ describe("ProjectNotesRepository durability", () => {
     });
   });
 
-  it("allows manual Done, proposal decisions, and override resets through generic save", async () => {
+  it("rejects manual Done while allowing proposal decisions and override resets", async () => {
     const repository = new ProjectNotesRepository(await tempAgentDir());
     const cwd = "/work/frontend-event-suffixes";
     const initial = notes("frontend suffixes");
@@ -3210,10 +3396,15 @@ describe("ProjectNotesRepository durability", () => {
     });
     manualDone.updatedAt = donePhase.completedAt;
     const savedDone = await repository.save(cwd, 1, manualDone);
-    expect(savedDone).toMatchObject({ status: "ok", snapshot: { revision: 2 } });
-    if (savedDone.status !== "ok") throw new Error("Expected manual Done save");
+    expect(savedDone).toMatchObject({
+      status: "invalid",
+      error: {
+        path: "phases[0].status",
+        message: "phase completion requires the dedicated completion authority path",
+      },
+    });
 
-    const decided = structuredClone(savedDone.snapshot.document);
+    const decided = structuredClone(initial);
     const decidedPhase = decided.phases[0]!;
     decidedPhase.roadmapEvents.push({
       type: "reference-decision",
@@ -3225,8 +3416,8 @@ describe("ProjectNotesRepository durability", () => {
     });
     decidedPhase.updatedAt = "2026-07-25T12:36:00.000Z";
     decided.updatedAt = decidedPhase.updatedAt;
-    const savedDecision = await repository.save(cwd, 2, decided);
-    expect(savedDecision).toMatchObject({ status: "ok", snapshot: { revision: 3 } });
+    const savedDecision = await repository.save(cwd, 1, decided);
+    expect(savedDecision).toMatchObject({ status: "ok", snapshot: { revision: 2 } });
     if (savedDecision.status !== "ok") throw new Error("Expected proposal decision save");
 
     const reset = structuredClone(savedDecision.snapshot.document);
@@ -3249,9 +3440,9 @@ describe("ProjectNotesRepository durability", () => {
     resetPhase.updatedAt = "2026-07-25T12:37:00.000Z";
     reset.updatedAt = resetPhase.updatedAt;
 
-    await expect(repository.save(cwd, 3, reset)).resolves.toMatchObject({
+    await expect(repository.save(cwd, 2, reset)).resolves.toMatchObject({
       status: "ok",
-      snapshot: { revision: 4, document: reset },
+      snapshot: { revision: 3, document: reset },
     });
   });
 
@@ -3386,6 +3577,63 @@ describe("ProjectNotesRepository completion transactions", () => {
     });
     expect(verification).toMatchObject({ status: "committed", snapshot: { revision: 3 } });
   }
+
+  it("requires review status for manual completion preview and commit", async () => {
+    const review = await completionSetup("manual-approval-review");
+    await recordCompleteEvidence(review.repository, review.cwd, review.expectedSession);
+    await expect(
+      review.repository.previewManualCompletionApproval(
+        review.cwd,
+        "phase-1",
+        3,
+        review.expectedSession,
+      ),
+    ).resolves.toMatchObject({ status: "ready", revision: 3 });
+    await expect(
+      review.repository.commitManualCompletionApproval(review.cwd, {
+        phaseId: "phase-1",
+        expectedRevision: 3,
+        expectedSession: review.expectedSession,
+        implementationCheckpointId: "checkpoint-complete",
+        verificationStatusUpdateId: "verification-complete",
+        approvalId: "manual-approval-review",
+        timestamp: "2026-07-25T12:38:00.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "committed", revision: 4 });
+
+    const inactive = await completionSetup("manual-approval-in-progress");
+    await recordCompleteEvidence(inactive.repository, inactive.cwd, inactive.expectedSession);
+    await expect(
+      inactive.repository.recordPhaseLifecycleTransition(inactive.cwd, "phase-1", {
+        status: "in-progress",
+        source: "agent",
+        reason: "Implementation resumed",
+        timestamp: "2026-07-25T12:38:00.000Z",
+        kind: "other",
+        expectedSession: inactive.expectedSession,
+      }),
+    ).resolves.toMatchObject({ status: "ok", snapshot: { revision: 4 } });
+    const inactiveGate = { status: "unmet-gate", revision: 4, code: "inactive-phase" };
+    await expect(
+      inactive.repository.previewManualCompletionApproval(
+        inactive.cwd,
+        "phase-1",
+        4,
+        inactive.expectedSession,
+      ),
+    ).resolves.toEqual(inactiveGate);
+    await expect(
+      inactive.repository.commitManualCompletionApproval(inactive.cwd, {
+        phaseId: "phase-1",
+        expectedRevision: 4,
+        expectedSession: inactive.expectedSession,
+        implementationCheckpointId: "checkpoint-complete",
+        verificationStatusUpdateId: "verification-complete",
+        approvalId: "manual-approval-in-progress",
+        timestamp: "2026-07-25T12:39:00.000Z",
+      }),
+    ).resolves.toEqual(inactiveGate);
+  });
 
   type CompletionReviewPath = "direct" | "bundled";
 
@@ -3537,6 +3785,25 @@ describe("ProjectNotesRepository completion transactions", () => {
           timestamp: "2026-07-25T12:39:00.000Z",
         }),
       ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 4 } });
+      await expect(
+        restartedRepository.recordRoadmapStatusUpdate(cwd, {
+          updateId: `verification-recovered-${path}`,
+          phaseId: "phase-1",
+          actor: "gg-coder",
+          transition: "review",
+          progress: "Recovered implementation verified independently",
+          blocker: null,
+          requiredExternalAction: null,
+          evidence: ["Targeted tests passed", "TypeScript check passed"],
+          verification: "passed",
+          verificationReason: null,
+          proposedReferences: [],
+          timestamp: "2026-07-25T12:40:00.000Z",
+          expectedSession,
+          requireBoundPhase: true,
+          autopilotEnabled: false,
+        }),
+      ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 5 } });
 
       await expect(
         recordReviewThrough(
@@ -3549,7 +3816,7 @@ describe("ProjectNotesRepository completion transactions", () => {
         ),
       ).resolves.toMatchObject({
         status: "committed",
-        snapshot: { revision: 5 },
+        snapshot: { revision: 6 },
         phase: { status: "done" },
         evaluation: { gateOutcome: "done", unmetGateCodes: [] },
       });
@@ -3562,7 +3829,7 @@ describe("ProjectNotesRepository completion transactions", () => {
           reviewOverrides,
           statusOverrides,
         ),
-      ).resolves.toMatchObject({ status: "duplicate", revision: 5 });
+      ).resolves.toMatchObject({ status: "duplicate", revision: 6 });
 
       const completed = await restartedRepository.load(cwd);
       if (completed.status !== "ok") throw new Error("Expected completed fixture");
@@ -3887,6 +4154,31 @@ describe("ProjectNotesRepository completion transactions", () => {
         evidence: ["Mismatched retry evidence must not reuse the recovery ID."],
       }),
     ).resolves.toEqual({ status: "duplicate-id-conflict", revision: 19 });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        updateId: "verification-after-recovery-e349b4c7",
+        phaseId,
+        actor: "gg-coder",
+        transition: "review",
+        progress: "Recovered implementation verified independently",
+        blocker: null,
+        requiredExternalAction: null,
+        evidence: [
+          "Browser smoke passed profile creation, discovery, validation, and photo upload.",
+          "Browser smoke and PostgreSQL assertions passed reciprocal matching.",
+          "WebSocket smoke and PostgreSQL assertions passed realtime message persistence.",
+          "Browser smoke and database assertions passed persisted block/report enforcement.",
+          "Docker health and Redis-backed HTTP 429 rate-limit checks passed.",
+        ],
+        verification: "passed",
+        verificationReason: null,
+        proposedReferences: [],
+        timestamp: "2026-08-14T16:01:30.000Z",
+        expectedSession,
+        requireBoundPhase: true,
+        autopilotEnabled: false,
+      }),
+    ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 20 } });
 
     const reviewOverrides = {
       reviewId: "ken-authorized-recovery-review-e349b4c7",
@@ -3898,7 +4190,7 @@ describe("ProjectNotesRepository completion transactions", () => {
       updateId: "ken-authorized-recovery-status-e349b4c7",
       phaseId,
       actor: "ken-autopilot" as const,
-      expectedRevision: 19,
+      expectedRevision: 20,
     };
     const reviewed = await recordReviewThrough(
       "bundled",
@@ -3910,7 +4202,7 @@ describe("ProjectNotesRepository completion transactions", () => {
     );
     expect(reviewed).toMatchObject({
       status: "committed",
-      snapshot: { revision: 20 },
+      snapshot: { revision: 21 },
       phase: { status: "done" },
       evaluation: { gateOutcome: "done", unmetGateCodes: [] },
       advancementCheckpoint: { nextPhaseId },
@@ -3924,11 +4216,11 @@ describe("ProjectNotesRepository completion transactions", () => {
         reviewOverrides,
         statusOverrides,
       ),
-    ).resolves.toMatchObject({ status: "duplicate", revision: 20 });
+    ).resolves.toMatchObject({ status: "duplicate", revision: 21 });
     const completed = await repository.load(cwd);
     if (completed.status !== "ok") throw new Error("Expected completed recovery fixture");
     const completedPhase = completed.snapshot.document.phases[0]!;
-    expect(completed.snapshot.revision).toBe(20);
+    expect(completed.snapshot.revision).toBe(21);
     expect(
       completedPhase.roadmapEvents.filter((event) => event.type === "implementation-checkpoint"),
     ).toHaveLength(2);
@@ -4032,6 +4324,28 @@ describe("ProjectNotesRepository completion transactions", () => {
       runOutcome: "succeeded",
       recovery: { sourceCheckpointId: "stale-source-1-of-9", sourceRevision: 31 },
     });
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        updateId: "verification-after-canonical-recovery",
+        phaseId: "phase-1",
+        actor: "gg-coder",
+        transition: "review",
+        progress: "Canonical recovery verified independently",
+        blocker: null,
+        requiredExternalAction: null,
+        evidence: [
+          "The immutable plan and transcript prove all 18 canonical steps were implemented.",
+          "Criterion-matched repository checks prove malformed recovery evidence remains rejected.",
+        ],
+        verification: "passed",
+        verificationReason: null,
+        proposedReferences: [],
+        timestamp: "2026-08-15T01:02:30.000Z",
+        expectedSession,
+        requireBoundPhase: true,
+        autopilotEnabled: false,
+      }),
+    ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 34 } });
 
     await expect(
       recordReviewThrough(
@@ -4047,12 +4361,12 @@ describe("ProjectNotesRepository completion transactions", () => {
         },
         {
           updateId: "accepted-after-canonical-recovery-status",
-          expectedRevision: 33,
+          expectedRevision: 34,
         },
       ),
     ).resolves.toMatchObject({
       status: "committed",
-      snapshot: { revision: 34 },
+      snapshot: { revision: 35 },
       phase: { status: "done" },
       evaluation: { gateOutcome: "done", unmetGateCodes: [] },
     });

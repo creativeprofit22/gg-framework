@@ -67,7 +67,11 @@ class DevCdpClient {
   }
 }
 
-export async function connectToDevWebview(cdpPort, waitFor) {
+export async function connectToDevWebview(
+  cdpPort,
+  waitFor,
+  acceptTarget = (candidate) => !String(candidate.url).startsWith("devtools://"),
+) {
   const target = await waitFor("dev fixture debugging target", async () => {
     const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
     if (!response.ok) return null;
@@ -76,7 +80,7 @@ export async function connectToDevWebview(cdpPort, waitFor) {
       (candidate) =>
         candidate.type === "page" &&
         typeof candidate.webSocketDebuggerUrl === "string" &&
-        !String(candidate.url).startsWith("devtools://"),
+        acceptTarget(candidate),
     );
   });
   return DevCdpClient.connect(target.webSocketDebuggerUrl);

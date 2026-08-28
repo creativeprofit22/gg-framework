@@ -100,7 +100,9 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
     value,
     onChange,
     document: notesDocument,
+    revision,
     authorityReady,
+    refresh,
     changeCurrentFocus,
     createTask,
     editTask,
@@ -369,6 +371,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             activePhaseCount={activePhaseCount}
             activeReminderCount={activeReminderCount}
             authorityReady={authorityReady}
+            expectedRevision={revision}
             initialRoadmapPhaseId={roadmapTargetPhaseId}
             persistenceStatus={<NotesPersistenceStatus {...notesPersistenceStatus(diagnostics)} />}
             onChangeCurrentFocus={changeCurrentFocus}
@@ -399,6 +402,14 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onDismissReminder={dismissPhaseReminder}
             openSource={openSource}
             onStartPhase={onStartPhase}
+            onGetStorageDiagnostics={() => client.getNotesDiagnostics()}
+            onRebindPhase={(request) => client.bindRoadmapPhase(request)}
+            onPreviewManualCompletionApproval={(phaseId, expectedRevision) =>
+              client.previewManualCompletionApproval(phaseId, expectedRevision)
+            }
+            onCommitManualCompletionApproval={(nonce) =>
+              client.commitManualCompletionApproval(nonce)
+            }
             onStartNextPhase={onStartNextPhase}
             commands={commands}
             onRunCommand={onRunCommand}
@@ -406,7 +417,10 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onResumePhase={onResumePhase}
             phaseStartUnavailableReason={phaseStartUnavailableReason}
             phaseActionDisabled={phaseActionDisabled}
-            onPhaseActionSuccess={() => setShowNotes(false)}
+            onPhaseActionSuccess={() => {
+              refresh();
+              setShowNotes(false);
+            }}
             onChangeHandoff={changeHandoff}
             onHandoffPresented={markHandoffPresented}
             onClose={() => setShowNotes(false)}

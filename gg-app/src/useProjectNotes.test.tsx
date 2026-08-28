@@ -14,6 +14,7 @@ import type {
   ProjectNotesReadOutcome,
   ProjectNotesSaveOutcome,
   ProjectNotesSnapshot,
+  ProjectNotesStorageDiagnostics,
 } from "./notes-types";
 import { useProjectNotes } from "./useProjectNotes";
 
@@ -273,6 +274,42 @@ class FakeNotesClient implements NotesClient {
     this.getCalls += 1;
     if (this.getOverride) return this.getOverride();
     return this.server.read(this.projectKey);
+  }
+
+  async getNotesDiagnostics(): Promise<ProjectNotesStorageDiagnostics> {
+    return {
+      version: 1,
+      applicationIdentity: "com.ggcoder.local-fork",
+      daemonOwner: "node-sidecar",
+      agentDataRoot: "/tmp/agent",
+      canonicalCwd: this.projectKey,
+      projectKey: this.projectKey,
+      projectNotesStore: {
+        primaryPath: "/tmp/agent/project-notes/project.json",
+        backupPath: "/tmp/agent/project-notes/project.backup.json",
+      },
+      logicalSessionId: "logical-test",
+      currentSession: { sessionId: "session-test", sessionPath: null },
+      activePhaseContext: null,
+      persistedPhaseBinding: null,
+      consistency: "unbound",
+    };
+  }
+
+  async bindRoadmapPhase(): Promise<import("./notes-types").PhaseBindingOutcome> {
+    return { status: "missing" };
+  }
+
+  async previewManualCompletionApproval(): Promise<
+    import("./notes-types").ManualCompletionApprovalPreviewOutcome
+  > {
+    return { status: "missing" };
+  }
+
+  async commitManualCompletionApproval(): Promise<
+    import("./notes-types").ManualCompletionApprovalCommitOutcome
+  > {
+    return { status: "nonce-not-found" };
   }
 
   async migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome> {

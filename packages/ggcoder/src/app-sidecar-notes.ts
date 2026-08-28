@@ -6,6 +6,15 @@ import {
   requestPathname,
 } from "./app-sidecar-http-json.js";
 import {
+  isManualCompletionApprovalCommitRequest,
+  isManualCompletionApprovalPreviewRequest,
+  type ManualCompletionApprovalCommitOutcome,
+  type ManualCompletionApprovalPreviewOutcome,
+} from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
+import type { ProjectNotesStorageDiagnostics } from "@kenkaiiii/gg-core/project-notes-diagnostics";
+import type { ManualCompletionApprovalService } from "./app-sidecar-manual-completion-approval.js";
+import type { StorageDiagnosticsSessionContext } from "./app-sidecar-storage-diagnostics.js";
+import {
   type NotesValidationError,
   type ProjectNotesLoadOutcome,
   type ProjectNotesMigrationOutcome,
@@ -20,6 +29,10 @@ export const NOTES_REQUEST_BODY_MAX_BYTES = 4 * 1024 * 1024;
 
 export interface AppSidecarNotesHandlerOptions {
   repository: Pick<ProjectNotesRepository, "load" | "migrate" | "save" | "resolveRoadmapBlocker">;
+  diagnostics: {
+    inspect(context: StorageDiagnosticsSessionContext): Promise<ProjectNotesStorageDiagnostics>;
+  };
+  manualCompletionApproval: ManualCompletionApprovalService;
   onCommittedSnapshot(snapshot: ProjectNotesSnapshot): void;
   onError?: (error: unknown) => void;
 }
@@ -28,7 +41,7 @@ export interface AppSidecarNotesHandler {
   handle(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    context: { cwd: string },
+    context: StorageDiagnosticsSessionContext,
     requestUrl: string,
     method: string,
   ): boolean;
@@ -40,16 +53,59 @@ type ErrorResponse = { status: "error"; message: "notes request failed" };
 export function createAppSidecarNotesHandler(
   options: AppSidecarNotesHandlerOptions,
 ): AppSidecarNotesHandler {
-  const { repository, onCommittedSnapshot, onError } = options;
+  const { repository, diagnostics, manualCompletionApproval, onCommittedSnapshot, onError } = options;
 
   return {
     handle(req, res, context, requestUrl, method) {
       const pathname = requestPathname(requestUrl);
       const isNotesRoute =
         pathname === "/notes" ||
+        pathname === "/notes/diagnostics" ||
+        pathname === "/notes/roadmap/completion-approval/preview" ||
+        pathname === "/notes/roadmap/completion-approval/commit" ||
         pathname === "/notes/migrate" ||
         pathname === "/notes/roadmap/blocker-resolution";
       if (!isNotesRoute) return false;
+
+      if (method === "POST" && pathname === "/notes/roadmap/completion-approval/preview") {
+        void readJsonBody(req, NOTES_REQUEST_BODY_MAX_BYTES)
+          .then((body) => {
+            if (!isManualCompletionApprovalPreviewRequest(body)) {
+              sendJson(res, 400, { status: "invalid-request" });
+              return;
+            }
+            return manualCompletionApproval
+              .preview(body, {
+                getState: () => ({ cwd: context.cwd, ...context.currentSession }),
+              })
+              .then((outcome) => sendJson(res, manualApprovalStatus(outcome), outcome));
+          })
+          .catch((error) => sendUnexpectedError(res, error, onError));
+        return true;
+      }
+
+      if (method === "POST" && pathname === "/notes/roadmap/completion-approval/commit") {
+        void readJsonBody(req, NOTES_REQUEST_BODY_MAX_BYTES)
+          .then((body) => {
+            if (!isManualCompletionApprovalCommitRequest(body)) {
+              sendJson(res, 400, { status: "invalid-request" });
+              return;
+            }
+            return manualCompletionApproval
+              .commit(body)
+              .then((outcome) => sendJson(res, manualApprovalStatus(outcome), outcome));
+          })
+          .catch((error) => sendUnexpectedError(res, error, onError));
+        return true;
+      }
+
+      if (method === "GET" && pathname === "/notes/diagnostics") {
+        void diagnostics
+          .inspect(context)
+          .then((outcome) => sendJson(res, 200, outcome))
+          .catch((error) => sendUnexpectedError(res, error, onError));
+        return true;
+      }
 
       if (method === "GET" && pathname === "/notes") {
         void repository
@@ -237,6 +293,26 @@ function sendBodyReadError(
     sendJson(res, 413, requestBodyTooLarge());
   } else {
     sendUnexpectedError(res, error, onError);
+  }
+}
+
+function manualApprovalStatus(
+  outcome: ManualCompletionApprovalPreviewOutcome | ManualCompletionApprovalCommitOutcome,
+): number {
+  switch (outcome.status) {
+    case "ready":
+    case "committed":
+    case "duplicate":
+      return 200;
+    case "missing":
+    case "nonce-not-found":
+      return 404;
+    case "nonce-expired":
+      return 410;
+    case "corrupt":
+      return 500;
+    default:
+      return 409;
   }
 }
 

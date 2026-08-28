@@ -20,6 +20,8 @@ import {
 } from "../roadmap-reminders";
 import type { NotesPhaseInput } from "../useProjectNotes";
 import type {
+  ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalPreviewOutcome,
   NotesPhase,
   NotesPhaseStatus,
   PhaseRunCancellationResult,
@@ -29,6 +31,8 @@ import type {
   NotesRoadmapReferenceProposal,
   NotesRoadmapStatusUpdate,
   NotesSessionLink,
+  PhaseBindingOutcome,
+  PhaseBindingRequest,
   PhaseStartResult,
 } from "../notes-types";
 import type { NotesLifecyclePresentation } from "../notes-lifecycle-presentation";
@@ -48,6 +52,7 @@ import {
 export interface NotesPhaseDetailProps {
   phase: NotesPhase;
   currentTime: Date;
+  expectedRevision: number | null;
   references: NotesReference[];
   authorityReady: boolean;
   openSource: OpenReferenceUrl;
@@ -91,6 +96,17 @@ export interface NotesPhaseDetailProps {
     expectedOccurrenceKey: string,
   ): Promise<NotesReminderMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
+  onGetStorageDiagnostics(): Promise<
+    import("../notes-types").ProjectNotesStorageDiagnostics
+  >;
+  onRebindPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onPreviewManualCompletionApproval(
+    phaseId: string,
+    expectedRevision: number,
+  ): Promise<ManualCompletionApprovalPreviewOutcome>;
+  onCommitManualCompletionApproval(
+    nonce: string,
+  ): Promise<ManualCompletionApprovalCommitOutcome>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
   actionDisabled: boolean;

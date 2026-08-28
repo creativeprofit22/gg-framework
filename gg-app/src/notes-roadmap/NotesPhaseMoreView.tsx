@@ -1,7 +1,135 @@
-import type { ReactElement } from "react";
+import { useCallback, useEffect, useState, type ReactElement } from "react";
+import type { ProjectNotesStorageDiagnostics } from "../notes-types";
 import { PRODUCT_DISPLAY_NAME } from "../brand";
 import { useNotesPhaseDetail } from "./NotesPhaseDetailState";
 import { formatDateTime, formatTime, visibleRoadmapAttentionReason } from "./roadmap-presentation";
+
+type StorageConsistency = ProjectNotesStorageDiagnostics["consistency"];
+
+const STORAGE_DIAGNOSTIC_COPY: Record<StorageConsistency, readonly [string, string]> = {
+  consistent: ["Current store", "This phase and pane use the same binding."],
+  unbound: ["Phase unbound", "No persisted binding matches this pane's active phase."],
+  "bound-to-other-session": [
+    "Bound elsewhere",
+    "This phase belongs to another session. Resume that session instead.",
+  ],
+  "identity-mismatch": [
+    "Wrong app identity",
+    "The daemon did not receive one valid application identity.",
+  ],
+  "project-mismatch": ["Wrong project", "The active phase and canonical project do not match."],
+  "store-unavailable": ["Store unavailable", "The daemon could not read the canonical Notes store."],
+};
+
+function storageDiagnosticTitle(consistency: StorageConsistency): string {
+  return STORAGE_DIAGNOSTIC_COPY[consistency][0];
+}
+
+function storageDiagnosticMessage(consistency: StorageConsistency): string {
+  return STORAGE_DIAGNOSTIC_COPY[consistency][1];
+}
+
+function storageDiagnosticRows(
+  diagnostics: ProjectNotesStorageDiagnostics,
+): Array<readonly [string, string]> {
+  const binding = diagnostics.persistedPhaseBinding;
+  return [
+    ["Application", diagnostics.applicationIdentity ?? "Missing or invalid"],
+    ["Agent data root", diagnostics.agentDataRoot],
+    ["Project key", diagnostics.projectKey],
+    ["Notes store", diagnostics.projectNotesStore.primaryPath],
+    ["Logical session", diagnostics.logicalSessionId],
+    ["Current session", diagnostics.currentSession.sessionId],
+    ["Phase binding", binding ? binding.session.sessionId : "Unbound"],
+  ];
+}
+
+export function NotesStorageDiagnostics({
+  phaseId,
+  onLoad,
+}: {
+  phaseId: string;
+  onLoad(): Promise<ProjectNotesStorageDiagnostics>;
+}): ReactElement {
+  const [diagnostics, setDiagnostics] = useState<ProjectNotesStorageDiagnostics | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [copyStatus, setCopyStatus] = useState("");
+  const refresh = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    setError("");
+    try {
+      setDiagnostics(await onLoad());
+    } catch (loadError) {
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : "Storage diagnostics could not be loaded.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [onLoad]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const copyDiagnostic = (label: string, value: string): void => {
+    const copy = navigator.clipboard?.writeText(value);
+    if (!copy) {
+      setCopyStatus(`${label} could not be copied.`);
+      return;
+    }
+    void copy
+      .then(() => setCopyStatus(`${label} copied.`))
+      .catch(() => setCopyStatus(`${label} could not be copied.`));
+  };
+
+  return (
+    <section
+      className="notes-storage-diagnostics"
+      aria-labelledby={`notes-storage-diagnostics-${phaseId}`}
+      aria-busy={loading}
+    >
+      <div className="notes-storage-diagnostics-heading">
+        <div>
+          <h4 id={`notes-storage-diagnostics-${phaseId}`}>Storage diagnostics</h4>
+          <p>Reported by this pane's authenticated local daemon.</p>
+        </div>
+        <button type="button" disabled={loading} onClick={() => void refresh()}>
+          {loading ? "Checking…" : "Refresh"}
+        </button>
+      </div>
+      {error ? (
+        <p className="notes-phase-action-error" role="alert">
+          {error}
+        </p>
+      ) : diagnostics ? (
+        <>
+          <p className={`notes-storage-consistency is-${diagnostics.consistency}`}>
+            <strong>{storageDiagnosticTitle(diagnostics.consistency)}</strong>{" "}
+            {storageDiagnosticMessage(diagnostics.consistency)}
+          </p>
+          <dl>
+            {storageDiagnosticRows(diagnostics).map(([label, value]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd title={value}>{value}</dd>
+                <button type="button" onClick={() => copyDiagnostic(label, value)}>
+                  Copy
+                </button>
+              </div>
+            ))}
+          </dl>
+          <p className="sr-only" role="status">
+            {copyStatus}
+          </p>
+        </>
+      ) : null}
+    </section>
+  );
+}
 
 export function NotesPhaseReminderView(): ReactElement {
   const {
@@ -171,6 +299,7 @@ export function NotesPhaseMoreControls(): ReactElement {
     isTopologyMutationBlocked,
     resumeAutomaticStatus,
     runCancellation,
+    onGetStorageDiagnostics,
   } = useNotesPhaseDetail();
 
   return (
@@ -200,6 +329,8 @@ export function NotesPhaseMoreControls(): ReactElement {
           )}
         </div>
       </section>
+
+      <NotesStorageDiagnostics phaseId={phase.id} onLoad={onGetStorageDiagnostics} />
 
       <div className="notes-phase-controls">
         <section

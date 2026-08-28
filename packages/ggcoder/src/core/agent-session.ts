@@ -162,10 +162,12 @@ import {
 import { findUserSessionPrompt, getUserSessionPrompt } from "./session-preview.js";
 import { normalizeMessageImages } from "./message-images.js";
 import {
+  ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
   ACTIVE_PHASE_CONTEXT_KIND,
   buildActivePhaseVerificationFollowUp,
   parseActivePhaseContext,
   renderActivePhasePackage,
+  type ActivePhaseContextClearReason,
   type ActivePhaseContextV1,
   type ActivePhaseExecutionStage,
 } from "../phase-context.js";
@@ -3688,8 +3690,7 @@ export class AgentSession {
 
   async setActivePhaseContext(context: ActivePhaseContextV1 | undefined): Promise<void> {
     if (context === undefined) {
-      this.activePhaseContext = undefined;
-      this.refreshSystemPromptTail();
+      await this.clearActivePhaseContext();
       return;
     }
     const parsed = parseActivePhaseContext(context);
@@ -3703,6 +3704,28 @@ export class AgentSession {
     );
     if (!activeContext) throw new Error("Cannot activate phase context without metadata.");
     this.restorePlanStateFromActivePhase(activeContext);
+    this.refreshSystemPromptTail();
+  }
+
+  async clearActivePhaseContext(reason: ActivePhaseContextClearReason = "cleared"): Promise<void> {
+    const phaseId = this.activePhaseContext?.phase.id ?? null;
+    if (this.sessionPath) {
+      const entry: CustomEntry = {
+        type: "custom",
+        kind: ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
+        id: crypto.randomUUID(),
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        data: {
+          version: 1,
+          projectKey: canonicalProjectKey(this.cwd),
+          phaseId,
+          reason,
+        },
+      };
+      await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
+    }
+    this.activePhaseContext = undefined;
     this.refreshSystemPromptTail();
   }
 

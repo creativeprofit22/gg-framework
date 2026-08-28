@@ -10,6 +10,7 @@ import {
 } from "./project-notes-repository.js";
 
 export const ACTIVE_PHASE_CONTEXT_KIND = "active_phase_context";
+export const ACTIVE_PHASE_CONTEXT_CLEAR_KIND = "active_phase_context_clear";
 export const ACTIVE_PHASE_CONTEXT_VERSION = 1 as const;
 /** Hard ceiling for the system suffix plus initial request. Identities are never dropped. */
 export const ACTIVE_PHASE_PACKAGE_TOKEN_BUDGET = 16_000;
@@ -44,6 +45,19 @@ export interface ActivePhaseContextV1 {
   approvedPlanPath?: string;
 }
 
+export type ActivePhaseContextClearReason =
+  | "cleared"
+  | "binding-compensation"
+  | "binding-reconciliation"
+  | "phase-rebound";
+
+export interface ActivePhaseContextClearV1 {
+  version: 1;
+  projectKey: string;
+  phaseId: string | null;
+  reason: ActivePhaseContextClearReason;
+}
+
 export interface ActivePhasePackage {
   context: ActivePhaseContextV1;
   systemPromptSuffix: string;
@@ -67,6 +81,13 @@ const CONTEXT_KEYS = [
   "executionStage",
   "approvedPlanPath",
 ] as const;
+const CLEAR_KEYS = ["version", "projectKey", "phaseId", "reason"] as const;
+const CLEAR_REASONS = new Set<ActivePhaseContextClearReason>([
+  "cleared",
+  "binding-compensation",
+  "binding-reconciliation",
+  "phase-rebound",
+]);
 const PHASE_KEYS = [
   "id",
   "title",
@@ -111,6 +132,25 @@ function isNullableString(value: unknown): value is string | null {
 
 function isReference(value: unknown): value is ActivePhaseReferenceV1 {
   return validateNotesReferenceProjection(value, "activePhaseContext.references[]") === null;
+}
+
+export function parseActivePhaseContextClear(
+  value: unknown,
+  expectedProjectKey?: string,
+): ActivePhaseContextClearV1 | null {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== CLEAR_KEYS.length ||
+    !hasOnlyKeys(value, CLEAR_KEYS) ||
+    value.version !== 1 ||
+    !isNonEmptyString(value.projectKey) ||
+    (value.phaseId !== null && !isNonEmptyString(value.phaseId)) ||
+    !CLEAR_REASONS.has(value.reason as ActivePhaseContextClearReason) ||
+    (expectedProjectKey !== undefined && value.projectKey !== expectedProjectKey)
+  ) {
+    return null;
+  }
+  return value as unknown as ActivePhaseContextClearV1;
 }
 
 export function parseActivePhaseContext(

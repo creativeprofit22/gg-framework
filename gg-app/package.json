@@ -31,6 +31,7 @@
     "test:launcher-serial": "vitest run scripts/launch-local-patched.test.mjs --no-file-parallelism",
     "test:workspace-narrow": "node scripts/workspace-narrow-regression.mjs",
     "test:workspace-shell-evidence": "vitest run scripts/workspace-shell-evidence.test.mjs --no-file-parallelism",
+    "smoke:roadmap-reliability-dev": "node scripts/roadmap-reliability-dev-smoke.mjs --identity com.ggcoder.local-fork",
     "smoke:packaged": "node scripts/smoke-packaged-windows.mjs",
     "tauri": "tauri"
   },

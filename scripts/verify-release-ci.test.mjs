@@ -59,6 +59,28 @@ test("required check name stays synchronized with the aggregate CI job", () => {
   assert.match(workflow, /needs: \[test, app\]/);
 });
 
+test("roadmap reliability native smoke remains an isolated Windows app gate", () => {
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../gg-app/package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(
+    packageJson.scripts["smoke:roadmap-reliability-dev"],
+    "node scripts/roadmap-reliability-dev-smoke.mjs --identity com.ggcoder.local-fork",
+  );
+
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const smokeStep = workflow.match(
+    /      - name: Roadmap reliability native smoke\r?\n[\s\S]*?(?=      - name:)/,
+  )?.[0];
+  assert.ok(smokeStep);
+  assert.match(smokeStep, /if: runner\.os == 'Windows'/);
+  assert.match(smokeStep, /shell: bash/);
+  assert.match(smokeStep, /pnpm smoke:roadmap-reliability-dev/);
+  assert.match(smokeStep, /\$\{\{ runner\.temp \}\}\/roadmap-reliability-dev-smoke/);
+  assert.match(workflow, /if: failure\(\).*steps\.roadmap_reliability_smoke\.outcome == 'failure'/);
+  assert.match(workflow, /uses: actions\/upload-artifact@v7/);
+});
+
 test("release workflow wires the exact-SHA verifier ahead of protected preflight", () => {
   const workflow = readFileSync(
     new URL("../.github/workflows/release.yml", import.meta.url),

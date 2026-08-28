@@ -2,6 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import type {
+  ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalGateCode,
+} from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
+import type {
+  PhaseBindingAction,
+  PhaseBindingOutcome,
+} from "@kenkaiiii/gg-core/phase-binding-protocol";
 import { withFileLock } from "@kenkaiiii/gg-core";
 import {
   canonicalProjectKey,
@@ -36,8 +44,10 @@ import {
   type NotesRoadmapBlockerResolution,
   type NotesRoadmapCompletionReview,
   type NotesRoadmapImplementationCheckpoint,
+  type NotesRoadmapManualCompletionApproval,
   type NotesRoadmapPhaseAdvancementCheckpoint,
   type NotesRoadmapPhaseAdvancementConfirmation,
+  type NotesRoadmapPhaseBinding,
   type NotesRoadmapReferencePolicyOutcome,
   type NotesRoadmapReferenceProposal,
   type NotesRoadmapReviewer,
@@ -63,6 +73,7 @@ import {
 } from "@kenkaiiii/gg-core/roadmap-workflow";
 import { evaluateActivePhaseReviewReadiness } from "./active-phase-verification.js";
 import {
+  evaluateManualCompletionApproval,
   evaluatePhaseCompletion,
   type PhaseCompletionEvaluation,
 } from "./project-notes-completion-policy.js";
@@ -125,6 +136,46 @@ export type ProjectNotesPhaseLaunchOutcome =
   | { status: "advancement-confirmation-required"; checkpointId: string }
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
+
+export type ProjectNotesManualApprovalPreviewOutcome =
+  | {
+      status: "ready";
+      revision: number;
+      projectKey: string;
+      phaseId: string;
+      session: NotesSessionLink;
+      implementationCheckpointId: string;
+      verificationStatusUpdateId: string;
+    }
+  | { status: "stale-revision"; revision: number }
+  | { status: "unmet-gate"; revision: number; code: ManualCompletionApprovalGateCode }
+  | { status: "missing" }
+  | {
+      status: "corrupt";
+      primary: ProjectNotesCorruptReason | null;
+      backup: ProjectNotesCorruptReason | null;
+    };
+
+export interface ProjectNotesManualApprovalCommitRequest {
+  phaseId: string;
+  expectedRevision: number;
+  expectedSession: NotesSessionLink;
+  implementationCheckpointId: string;
+  verificationStatusUpdateId: string;
+  approvalId: string;
+  timestamp: string;
+}
+
+export interface ProjectNotesPhaseBindingRequest {
+  action: PhaseBindingAction;
+  phaseId: string;
+  expectedProjectKey: string;
+  expectedRevision: number;
+  expectedPreviousSession: NotesSessionLink | null;
+  operationId: string;
+  destinationSession: NotesSessionLink;
+  timestamp: string;
+}
 
 export interface ProjectNotesPhaseAdvancementStartRequest {
   checkpointId: string;
@@ -651,6 +702,36 @@ function validateGenericSaveEventSuffixes(
           "privileged roadmap events require their dedicated authority path",
         );
       }
+    }
+  }
+  return null;
+}
+
+function validateGenericSaveCompletionAuthority(
+  previous: NotesDocumentV3,
+  next: NotesDocumentV3,
+): NotesValidationError | null {
+  const previousById = new Map(previous.phases.map((phase) => [phase.id, phase]));
+  for (const [index, phase] of next.phases.entries()) {
+    const prior = previousById.get(phase.id);
+    const pathPrefix = `phases[${index}]`;
+    if (phase.status === "done" && prior?.status !== "done") {
+      return validationError(
+        `${pathPrefix}.status`,
+        "phase completion requires the dedicated completion authority path",
+      );
+    }
+    if (prior && prior.status === "done" && phase.status !== "done") {
+      return validationError(`${pathPrefix}.status`, "completed phase status is repository-owned");
+    }
+    if (prior && !isDeepStrictEqual(prior.completedAt, phase.completedAt)) {
+      return validationError(`${pathPrefix}.completedAt`, "completion provenance is repository-owned");
+    }
+    if (phase.overrides.status?.value === "done" && prior?.overrides.status?.value !== "done") {
+      return validationError(
+        `${pathPrefix}.overrides.status`,
+        "phase completion overrides require the dedicated completion authority path",
+      );
     }
   }
   return null;
@@ -1581,6 +1662,13 @@ export class ProjectNotesRepository {
         validated.document,
       );
       if (eventAuthorityError) return { status: "invalid", error: eventAuthorityError };
+      const completionAuthorityError = validateGenericSaveCompletionAuthority(
+        current.envelope.document,
+        validated.document,
+      );
+      if (completionAuthorityError) {
+        return { status: "invalid", error: completionAuthorityError };
+      }
       const pendingLifecycleAuthorityError = validateGenericSavePendingLifecycleAuthority(
         current.envelope.document,
         validated.document,
@@ -2613,6 +2701,194 @@ export class ProjectNotesRepository {
     });
   }
 
+  async previewManualCompletionApproval(
+    cwd: string,
+    phaseId: string,
+    expectedRevision: number,
+    expectedSession: NotesSessionLink,
+  ): Promise<ProjectNotesManualApprovalPreviewOutcome> {
+    return this.withLockedCurrent(cwd, async (_paths, current) => {
+      if (current.revision !== expectedRevision) {
+        return { status: "stale-revision", revision: current.revision };
+      }
+      return manualApprovalFacts(current, phaseId, expectedSession);
+    });
+  }
+
+  async commitManualCompletionApproval(
+    cwd: string,
+    request: ProjectNotesManualApprovalCommitRequest,
+  ): Promise<ManualCompletionApprovalCommitOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const phase = current.document.phases.find((candidate) => candidate.id === request.phaseId);
+      const prior = phase?.roadmapEvents.find((event) => event.id === request.approvalId);
+      if (prior) {
+        if (
+          prior.type === "manual-completion-approval" &&
+          prior.implementationCheckpointId === request.implementationCheckpointId &&
+          prior.verificationStatusUpdateId === request.verificationStatusUpdateId &&
+          notesSessionLinksEqual(prior.session, request.expectedSession)
+        ) {
+          return {
+            status: "duplicate",
+            revision: current.revision,
+            phaseId: request.phaseId,
+            approvalId: request.approvalId,
+          };
+        }
+        return { status: "unmet-gate", revision: current.revision, code: "evidence-mismatch" };
+      }
+      if (current.revision !== request.expectedRevision) {
+        return { status: "stale-revision", revision: current.revision };
+      }
+      const facts = manualApprovalFacts(current, request.phaseId, request.expectedSession);
+      if (facts.status !== "ready") return facts;
+      if (
+        facts.implementationCheckpointId !== request.implementationCheckpointId ||
+        facts.verificationStatusUpdateId !== request.verificationStatusUpdateId
+      ) {
+        return { status: "unmet-gate", revision: current.revision, code: "evidence-mismatch" };
+      }
+      const document = structuredClone(current.document);
+      const target = document.phases.find((candidate) => candidate.id === request.phaseId)!;
+      const timestamp = chronologicalRoadmapTimestamp(target, request.timestamp);
+      const approval: NotesRoadmapManualCompletionApproval = {
+        type: "manual-completion-approval",
+        id: request.approvalId,
+        authority: "native-user",
+        session: structuredClone(request.expectedSession),
+        implementationCheckpointId: request.implementationCheckpointId,
+        verificationStatusUpdateId: request.verificationStatusUpdateId,
+        timestamp,
+      };
+      target.roadmapEvents.push(approval);
+      target.lifecycleEvents.push({
+        id: `${request.approvalId}:done`,
+        fromStatus: target.status,
+        toStatus: "done",
+        source: "user",
+        timestamp,
+        reason: "Completion approved through native authority",
+        kind: "other",
+      });
+      target.status = "done";
+      target.completedAt = timestamp;
+      target.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Manual completion approval created invalid Notes",
+      });
+      return {
+        status: "committed",
+        revision: next.revision,
+        phaseId: request.phaseId,
+        approvalId: request.approvalId,
+      };
+    });
+  }
+
+  async bindPhaseToCurrentSession(
+    cwd: string,
+    request: ProjectNotesPhaseBindingRequest,
+  ): Promise<PhaseBindingOutcome> {
+    if (
+      !request.operationId.trim() ||
+      !request.phaseId.trim() ||
+      !request.expectedProjectKey.trim() ||
+      !request.destinationSession.sessionId.trim() ||
+      !Number.isSafeInteger(request.expectedRevision) ||
+      request.expectedRevision < 0 ||
+      !Number.isFinite(Date.parse(request.timestamp))
+    ) {
+      throw new Error("Cannot bind a phase with an invalid compare-and-swap request.");
+    }
+    if (request.destinationSession.sessionPath === null) return { status: "missing-session-path" };
+    if (
+      (request.action === "bind-current" && request.expectedPreviousSession !== null) ||
+      (request.action === "rebind-current" && request.expectedPreviousSession === null)
+    ) {
+      throw new Error("Phase binding action does not match its expected previous session.");
+    }
+
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      for (const candidate of current.document.phases) {
+        const prior = candidate.roadmapEvents.find((event) => event.id === request.operationId);
+        if (!prior) continue;
+        if (
+          prior.type === "phase-binding" &&
+          candidate.id === request.phaseId &&
+          prior.action === request.action &&
+          notesSessionLinksEqual(prior.previousSession, request.expectedPreviousSession) &&
+          notesSessionLinksEqual(prior.session, request.destinationSession)
+        ) {
+          return {
+            status: "duplicate",
+            revision,
+            phaseId: request.phaseId,
+            previousSession: structuredClone(prior.previousSession),
+            session: structuredClone(prior.session),
+          };
+        }
+        return { status: "duplicate-id-conflict", revision };
+      }
+
+      if (current.projectKey !== request.expectedProjectKey) {
+        return { status: "project-mismatch", revision, currentProjectKey: current.projectKey };
+      }
+      if (revision !== request.expectedRevision) return { status: "stale-revision", revision };
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (currentPhase.status === "done") return { status: "phase-terminal" };
+      if (notesSessionLinksEqual(currentPhase.session, request.destinationSession)) {
+        return {
+          status: "already-bound",
+          revision,
+          phaseId: request.phaseId,
+          session: structuredClone(request.destinationSession),
+        };
+      }
+      if (!notesSessionLinksEqual(currentPhase.session, request.expectedPreviousSession)) {
+        return {
+          status: "stale-previous-session",
+          revision,
+          currentSession: structuredClone(currentPhase.session),
+        };
+      }
+
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      const timestamp = chronologicalRoadmapTimestamp(phase, request.timestamp);
+      const binding: NotesRoadmapPhaseBinding = {
+        type: "phase-binding",
+        id: request.operationId,
+        action: request.action,
+        actor: "coding-session",
+        previousSession: structuredClone(request.expectedPreviousSession),
+        session: structuredClone(request.destinationSession),
+        timestamp,
+      };
+      phase.session = structuredClone(request.destinationSession);
+      phase.roadmapEvents.push(binding);
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Phase binding created invalid Notes",
+      });
+      return {
+        status: "committed",
+        revision: next.revision,
+        phaseId: request.phaseId,
+        previousSession: structuredClone(request.expectedPreviousSession),
+        session: structuredClone(request.destinationSession),
+      };
+    });
+  }
+
   async updatePhaseSessionLink(
     cwd: string,
     phaseId: string,
@@ -3020,6 +3296,30 @@ function isTimestamp(value: unknown): value is string {
 
 function serializeEnvelope(envelope: StoredProjectNotesV1): string {
   return `${JSON.stringify(envelope, null, 2)}\n`;
+}
+
+function manualApprovalFacts(
+  current: StoredProjectNotesV1,
+  phaseId: string,
+  expectedSession: NotesSessionLink,
+): Extract<ProjectNotesManualApprovalPreviewOutcome, { status: "ready" | "unmet-gate" }> {
+  const phase = current.document.phases.find((candidate) => candidate.id === phaseId);
+  if (!phase) {
+    return { status: "unmet-gate", revision: current.revision, code: "phase-not-found" };
+  }
+  const evaluation = evaluateManualCompletionApproval(phase, expectedSession);
+  if (evaluation.status !== "eligible") {
+    return { status: "unmet-gate", revision: current.revision, code: evaluation.code };
+  }
+  return {
+    status: "ready",
+    revision: current.revision,
+    projectKey: current.projectKey,
+    phaseId,
+    session: structuredClone(expectedSession),
+    implementationCheckpointId: evaluation.implementationCheckpointId,
+    verificationStatusUpdateId: evaluation.verificationStatusUpdateId,
+  };
 }
 
 function toSnapshot(envelope: StoredProjectNotesV1): ProjectNotesSnapshot {

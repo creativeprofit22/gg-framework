@@ -68,7 +68,9 @@ export interface UseProjectNotesResult {
   value: string;
   onChange(value: string): void;
   document: NotesDocumentV3;
+  revision: number | null;
   authorityReady: boolean;
+  refresh(): void;
   changeCurrentFocus(value: string): void;
   createTask(text: string): void;
   editTask(id: string, text: string): void;
@@ -181,6 +183,7 @@ export function useProjectNotes(
   const inFlightMutationIdRef = useRef<number | null>(null);
   const nextMutationIdRef = useRef(0);
   const processQueueRef = useRef<() => void>(() => undefined);
+  const readAuthoritativeNotesRef = useRef<() => Promise<void>>(async () => undefined);
 
   const showDocument = useCallback((next: NotesDocumentV3) => {
     documentRef.current = next;
@@ -439,6 +442,7 @@ export function useProjectNotes(
       }
     };
 
+    readAuthoritativeNotesRef.current = readAuthoritativeNotes;
     const unsubscribe = client.subscribe((event) => {
       if (epoch !== epochRef.current || modeRef.current === "fallback") return;
       if (isNotesReadyEvent(event)) {
@@ -453,6 +457,7 @@ export function useProjectNotes(
 
     return () => {
       unsubscribe();
+      readAuthoritativeNotesRef.current = async () => undefined;
       if (epochRef.current === epoch) {
         epochRef.current += 1;
         settlePendingMutations(queueRef.current, "unavailable");
@@ -468,6 +473,10 @@ export function useProjectNotes(
     repository,
     showDocument,
   ]);
+
+  const refresh = useCallback(() => {
+    void readAuthoritativeNotesRef.current();
+  }, []);
 
   const processQueue = useCallback(() => {
     const projectCwd = activeCwdRef.current;
@@ -1431,7 +1440,9 @@ export function useProjectNotes(
     value: document.reference,
     onChange,
     document,
+    revision: authoritativeRef.current?.revision ?? null,
     authorityReady,
+    refresh,
     changeCurrentFocus,
     createTask,
     editTask,

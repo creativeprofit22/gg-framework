@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   boundPhaseForAutopilotReview,
   classifyAppSidecarFinalReviewAttempt,
+  finalReviewExecutionResult,
   phaseCompletionVerdict,
 } from "./app-sidecar-autopilot-phase-review.js";
 import type { AppSidecarFinalReviewAttempt } from "./app-sidecar-roadmap-tool-host.js";
@@ -155,6 +156,36 @@ describe("Autopilot phase completion review", () => {
     expect(() =>
       phaseCompletionVerdict(reviewPhase, [attempt({ actor: "ken" })], { kind: "all_clear" }),
     ).toThrowError("no relevant roadmap_status final_review call was recorded");
+  });
+
+  it("preserves typed non-commit and terminal gate outcomes", () => {
+    expect(finalReviewExecutionResult(reviewPhase, [], { kind: "all_clear" })).toMatchObject({
+      status: "no-attempt",
+    });
+    expect(
+      finalReviewExecutionResult(
+        reviewPhase,
+        [attempt({ result: "stale-revision" })],
+        { kind: "all_clear" },
+      ),
+    ).toMatchObject({ status: "typed-non-commit", code: "stale-revision", retryable: true });
+    expect(
+      finalReviewExecutionResult(
+        reviewPhase,
+        [attempt({ decision: "accepted", gateOutcome: "review", unmetGateCodes: ["stale-verification"] })],
+        { kind: "all_clear" },
+      ),
+    ).toMatchObject({ status: "terminal-gate-rejection", code: "stale-verification" });
+  });
+
+  it("returns the persisted duplicate rejection verdict without collapsing it", () => {
+    expect(
+      finalReviewExecutionResult(
+        reviewPhase,
+        [attempt({ result: "completion-review-duplicate", decision: "rejected", reason: "Revise" })],
+        { kind: "all_clear" },
+      ),
+    ).toMatchObject({ status: "duplicate", verdict: { kind: "prompt", body: "Revise" } });
   });
 
   it("loads the bound goal, criteria, status, and latest verification evidence", () => {

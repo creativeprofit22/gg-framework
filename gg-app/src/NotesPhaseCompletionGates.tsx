@@ -45,6 +45,7 @@ const COMPLETION_GATE_RECOVERY = {
     "The implementation checkpoint used by this final review does not complete every canonical plan step.",
   "missing-verification": "Typed verification evidence has not been recorded.",
   "failed-verification": "The verification used by this final review failed.",
+  "stale-verification": "Verification predates the latest implementation checkpoint.",
   "verification-exception-not-accepted":
     "The verification exception still needs reviewer acceptance.",
   "unresolved-approval": "Plan approval is still unresolved.",

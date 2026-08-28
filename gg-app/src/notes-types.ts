@@ -18,6 +18,24 @@ import {
   type ProjectNotesSnapshot,
 } from "@kenkaiiii/gg-core/project-notes";
 export {
+  isManualCompletionApprovalCommitOutcome,
+  isManualCompletionApprovalPreviewOutcome,
+} from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
+export type {
+  ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalPreviewOutcome,
+} from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
+export {
+  isPhaseBindingOutcome,
+  isPhaseBindingRequest,
+} from "@kenkaiiii/gg-core/phase-binding-protocol";
+export type {
+  PhaseBindingOutcome,
+  PhaseBindingRequest,
+} from "@kenkaiiii/gg-core/phase-binding-protocol";
+export { isProjectNotesStorageDiagnostics } from "@kenkaiiii/gg-core/project-notes-diagnostics";
+export type { ProjectNotesStorageDiagnostics } from "@kenkaiiii/gg-core/project-notes-diagnostics";
+export {
   PHASE_START_FAILURE_CODES,
   PHASE_START_STATUSES,
   isPhaseStartFailureCode,
@@ -344,6 +362,21 @@ export type ProjectNotesRoadmapBlockerResolutionOutcome =
 
 export interface NotesClient {
   getNotes(): Promise<ProjectNotesReadOutcome>;
+  getNotesDiagnostics(): Promise<import("@kenkaiiii/gg-core/project-notes-diagnostics").ProjectNotesStorageDiagnostics>;
+  bindRoadmapPhase(
+    request: import("@kenkaiiii/gg-core/phase-binding-protocol").PhaseBindingRequest,
+  ): Promise<import("@kenkaiiii/gg-core/phase-binding-protocol").PhaseBindingOutcome>;
+  previewManualCompletionApproval(
+    phaseId: string,
+    expectedRevision: number,
+  ): Promise<
+    import("@kenkaiiii/gg-core/manual-completion-approval-protocol").ManualCompletionApprovalPreviewOutcome
+  >;
+  commitManualCompletionApproval(
+    nonce: string,
+  ): Promise<
+    import("@kenkaiiii/gg-core/manual-completion-approval-protocol").ManualCompletionApprovalCommitOutcome
+  >;
   migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome>;
   saveNotes(expectedRevision: number, document: NotesDocumentV3): Promise<ProjectNotesSaveOutcome>;
   resolveRoadmapBlocker(

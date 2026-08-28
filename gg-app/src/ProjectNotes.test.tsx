@@ -28,6 +28,7 @@ import type {
   ProjectNotesReadOutcome,
   ProjectNotesSaveOutcome,
   ProjectNotesSnapshot,
+  ProjectNotesStorageDiagnostics,
   ReminderClaimOutcome,
   ReminderReserveOutcome,
 } from "./notes-types";
@@ -317,6 +318,43 @@ class FakeProjectNotesClient implements NotesClient {
     return snapshot
       ? { status: "ok", snapshot, recoveredFromBackup: false }
       : { status: "missing" };
+  }
+
+  async getNotesDiagnostics(): Promise<ProjectNotesStorageDiagnostics> {
+    const projectKey = canonicalProjectKey(this.cwd);
+    return {
+      version: 1,
+      applicationIdentity: "com.ggcoder.local-fork",
+      daemonOwner: "node-sidecar",
+      agentDataRoot: "/tmp/agent",
+      canonicalCwd: projectKey,
+      projectKey,
+      projectNotesStore: {
+        primaryPath: "/tmp/agent/project-notes/project.json",
+        backupPath: "/tmp/agent/project-notes/project.backup.json",
+      },
+      logicalSessionId: "logical-test",
+      currentSession: { sessionId: "session-test", sessionPath: null },
+      activePhaseContext: null,
+      persistedPhaseBinding: null,
+      consistency: "unbound",
+    };
+  }
+
+  async bindRoadmapPhase(): Promise<import("./notes-types").PhaseBindingOutcome> {
+    return { status: "missing" };
+  }
+
+  async previewManualCompletionApproval(): Promise<
+    import("./notes-types").ManualCompletionApprovalPreviewOutcome
+  > {
+    return { status: "missing" };
+  }
+
+  async commitManualCompletionApproval(): Promise<
+    import("./notes-types").ManualCompletionApprovalCommitOutcome
+  > {
+    return { status: "nonce-not-found" };
   }
 
   async migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome> {
@@ -1604,7 +1642,7 @@ describe("ProjectNotes", () => {
     );
     const phaseViews = screen.getByRole("tablist", { name: `${selected.title} views` });
     expect(phaseViews.querySelector('[aria-selected="true"]')?.textContent).toBe("References");
-    expect(selectedDetail?.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(selectedDetail?.querySelectorAll(".notes-phase-action-status")).toHaveLength(1);
     expect(selectedDetail?.querySelectorAll('[role="alert"]')).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Accept" })).toBeTruthy();
   });
@@ -2438,7 +2476,7 @@ describe("ProjectNotes", () => {
     const phaseViews = screen.getByRole("tablist", { name: "Recover phase views" });
     expect(phaseViews.querySelector('[aria-selected="true"]')?.textContent).toBe("Overview");
     const selectedDetail = phaseDetail("Recover phase");
-    expect(selectedDetail?.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(selectedDetail?.querySelectorAll(".notes-phase-action-status")).toHaveLength(1);
     const start = screen.getByRole("button", { name: "Retry phase" });
     fireEvent.click(start);
     await waitFor(() =>

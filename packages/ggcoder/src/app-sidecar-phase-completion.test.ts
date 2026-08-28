@@ -146,6 +146,23 @@ describe("evaluatePhaseCompletion", () => {
     });
   });
 
+  it("rejects verification that predates the latest implementation checkpoint", () => {
+    const result = evaluate(
+      phase([
+        verification("passed", { id: "verification-old", timestamp: NOW }),
+        checkpoint({ id: "checkpoint-new", timestamp: LATER }),
+      ]),
+    );
+
+    expect(result).toMatchObject({
+      gateOutcome: "review",
+      unmetGateCodes: ["stale-verification"],
+      implementationCheckpointId: "checkpoint-new",
+      verificationStatusUpdateId: "verification-old",
+      targetStatus: "review",
+    });
+  });
+
   it("accepts a reviewed plan-only contract checkpoint without incomplete-plan", () => {
     const planApprovalCheckpoint = checkpoint({
       id: "e750ee71-b874-4a7f-998c-9ff0a9a141c0",
@@ -225,7 +242,7 @@ describe("evaluatePhaseCompletion", () => {
       gateOutcome: "review",
       implementationCheckpointId: "new-session-checkpoint",
       verificationStatusUpdateId: "old-session-verification",
-      unmetGateCodes: ["stale-session"],
+      unmetGateCodes: ["stale-session", "stale-verification"],
     });
   });
 
@@ -235,11 +252,11 @@ describe("evaluatePhaseCompletion", () => {
         checkpoint(),
         verification(),
         rejectedReview(),
+        checkpoint({ id: "checkpoint-revision", timestamp: "2026-07-28T12:03:00.000Z" }),
         verification("passed", {
           id: "verification-revision",
-          timestamp: "2026-07-28T12:03:00.000Z",
+          timestamp: "2026-07-28T12:04:00.000Z",
         }),
-        checkpoint({ id: "checkpoint-revision", timestamp: "2026-07-28T12:04:00.000Z" }),
       ]),
     );
     expect(result).toMatchObject({

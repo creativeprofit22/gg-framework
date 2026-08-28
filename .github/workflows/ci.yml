@@ -194,6 +194,28 @@ jobs:
         if: runner.os == 'Windows'
         run: pnpm exec playwright install chromium --only-shell
 
+      - name: Roadmap reliability native smoke
+        id: roadmap_reliability_smoke
+        if: runner.os == 'Windows'
+        working-directory: gg-app
+        shell: bash
+        env:
+          ROADMAP_RELIABILITY_EVIDENCE: ${{ runner.temp }}/roadmap-reliability-dev-smoke
+        run: |
+          mkdir -p "$ROADMAP_RELIABILITY_EVIDENCE"
+          pnpm smoke:roadmap-reliability-dev \
+            --screenshot "$ROADMAP_RELIABILITY_EVIDENCE/roadmap-reliability.png" \
+            --outcome "$ROADMAP_RELIABILITY_EVIDENCE/roadmap-reliability.json"
+
+      - name: Upload failed roadmap reliability evidence
+        if: failure() && runner.os == 'Windows' && steps.roadmap_reliability_smoke.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: roadmap-reliability-dev-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/roadmap-reliability-dev-smoke
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Frontend platform-class test
         run: pnpm --filter gg-app test
 

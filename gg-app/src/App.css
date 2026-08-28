@@ -9239,6 +9239,153 @@ body {
   padding-inline-start: 8px;
   color: var(--text);
 }
+.notes-manual-completion {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.notes-manual-completion h4,
+.notes-manual-completion p,
+.notes-manual-completion dl {
+  margin: 0;
+}
+.notes-manual-completion p,
+.notes-manual-completion dt,
+.notes-manual-completion dd {
+  font-size: 11px;
+}
+.notes-manual-completion-confirm {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: end;
+  gap: 8px;
+}
+.notes-manual-completion-confirm dl,
+.notes-manual-completion-confirm > p {
+  grid-column: 1 / -1;
+}
+.notes-manual-completion-confirm dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.notes-manual-completion-confirm dt {
+  color: var(--text-secondary);
+}
+.notes-manual-completion-confirm dd {
+  max-width: 170px;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notes-manual-completion > .notes-phase-action-feedback {
+  grid-column: 1 / -1;
+}
+.notes-phase-rebind {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.notes-phase-rebind h4,
+.notes-phase-rebind p,
+.notes-phase-rebind dl {
+  margin: 0;
+}
+.notes-phase-rebind p,
+.notes-phase-rebind dt,
+.notes-phase-rebind dd {
+  font-size: 11px;
+}
+.notes-phase-rebind-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+.notes-phase-rebind-confirm dl {
+  display: flex;
+  gap: 12px;
+}
+.notes-phase-rebind-confirm dt {
+  color: var(--text-secondary);
+}
+.notes-phase-rebind-confirm dd {
+  max-width: 150px;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notes-phase-rebind > .notes-phase-action-feedback {
+  grid-column: 1 / -1;
+}
+.notes-storage-diagnostics {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.notes-storage-diagnostics-heading,
+.notes-storage-diagnostics dl > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 10px;
+}
+.notes-storage-diagnostics-heading h4,
+.notes-storage-diagnostics-heading p,
+.notes-storage-diagnostics dl,
+.notes-storage-consistency {
+  margin: 0;
+}
+.notes-storage-diagnostics-heading p,
+.notes-storage-consistency,
+.notes-storage-diagnostics dt,
+.notes-storage-diagnostics dd {
+  font-size: 11px;
+  line-height: 1.45;
+}
+.notes-storage-diagnostics-heading p,
+.notes-storage-diagnostics dt {
+  color: var(--text-secondary);
+}
+.notes-storage-diagnostics dl {
+  display: grid;
+  gap: 6px;
+}
+.notes-storage-diagnostics dt,
+.notes-storage-diagnostics dd {
+  grid-column: 1;
+  min-width: 0;
+}
+.notes-storage-diagnostics dd {
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notes-storage-diagnostics dl button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+.notes-storage-consistency.is-bound-to-other-session,
+.notes-storage-consistency.is-identity-mismatch,
+.notes-storage-consistency.is-project-mismatch,
+.notes-storage-consistency.is-store-unavailable {
+  border-inline-start: 3px solid var(--warning);
+  padding-inline-start: 8px;
+}
 .notes-phase-action-feedback {
   display: grid;
   padding-inline: 14px;

@@ -1497,6 +1497,419 @@ async fn notes_response(response: reqwest::Response) -> Result<serde_json::Value
     normalize_notes_response(status, body)
 }
 
+const NOTES_DIAGNOSTICS_PATH: &str = "/notes/diagnostics";
+const NOTES_PHASE_BINDING_PATH: &str = "/notes/roadmap/phase-binding";
+const NOTES_COMPLETION_APPROVAL_PREVIEW_PATH: &str = "/notes/roadmap/completion-approval/preview";
+const NOTES_COMPLETION_APPROVAL_COMMIT_PATH: &str = "/notes/roadmap/completion-approval/commit";
+
+/// Proxy: load the authenticated pane's canonical Notes storage diagnostics.
+#[tauri::command]
+async fn agent_notes_diagnostics(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let response = client
+        .get(format!("{}{NOTES_DIAGNOSTICS_PATH}", sidecar_base(port)))
+        .header("x-gg-session", &gg_sid)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    notes_response(response).await
+}
+
+/// Proxy: bind or explicitly rebind a Roadmap phase to the authenticated pane.
+#[tauri::command]
+async fn agent_notes_phase_binding(
+    webview: WebviewWindow,
+    pane_id: String,
+    request: serde_json::Value,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    roadmap_typed_request(
+        client
+            .post(format!("{}{NOTES_PHASE_BINDING_PATH}", sidecar_base(port)))
+            .header("x-gg-session", &gg_sid)
+            .json(&request),
+        RoadmapTypedResponseKind::PhaseBinding,
+    )
+    .await
+}
+
+/// Native-authority preview of current manual completion evidence.
+#[tauri::command]
+async fn agent_notes_completion_approval_preview(
+    webview: WebviewWindow,
+    pane_id: String,
+    phase_id: String,
+    expected_revision: u64,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    roadmap_typed_request(
+        client
+            .post(format!(
+                "{}{NOTES_COMPLETION_APPROVAL_PREVIEW_PATH}",
+                sidecar_base(port)
+            ))
+            .header("x-gg-session", &gg_sid)
+            .json(&serde_json::json!({
+                "version": 1,
+                "phaseId": phase_id,
+                "expectedRevision": expected_revision
+            })),
+        RoadmapTypedResponseKind::ManualCompletionPreview,
+    )
+    .await
+}
+
+/// Native-authority commit using only a server-issued checkpoint nonce.
+#[tauri::command]
+async fn agent_notes_completion_approval_commit(
+    webview: WebviewWindow,
+    pane_id: String,
+    nonce: String,
+    client: tauri::State<'_, reqwest::Client>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    roadmap_typed_request(
+        client
+            .post(format!(
+                "{}{NOTES_COMPLETION_APPROVAL_COMMIT_PATH}",
+                sidecar_base(port)
+            ))
+            .header("x-gg-session", &gg_sid)
+            .json(&serde_json::json!({ "version": 1, "nonce": nonce, "confirmed": true })),
+        RoadmapTypedResponseKind::ManualCompletionCommit,
+    )
+    .await
+}
+
+const ROADMAP_TYPED_RESPONSE_MAX_BYTES: usize = 256 * 1024;
+const ROADMAP_TYPED_RESPONSE_ERROR: &str = "invalid Roadmap response from daemon";
+
+#[derive(Clone, Copy)]
+enum RoadmapTypedResponseKind {
+    PhaseBinding,
+    ManualCompletionPreview,
+    ManualCompletionCommit,
+}
+
+async fn roadmap_typed_request(
+    request: reqwest::RequestBuilder,
+    kind: RoadmapTypedResponseKind,
+) -> Result<serde_json::Value, String> {
+    let response = request
+        .send()
+        .await
+        .map_err(|_| ROADMAP_TYPED_RESPONSE_ERROR.to_string())?;
+    roadmap_typed_response(response, kind).await
+}
+
+async fn roadmap_typed_response(
+    response: reqwest::Response,
+    kind: RoadmapTypedResponseKind,
+) -> Result<serde_json::Value, String> {
+    let status = response.status();
+    if !matches!(status.as_u16(), 200 | 404 | 409 | 410) {
+        return Err(ROADMAP_TYPED_RESPONSE_ERROR.to_string());
+    }
+    let is_json = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
+    if !is_json
+        || response
+            .content_length()
+            .is_some_and(|length| length > ROADMAP_TYPED_RESPONSE_MAX_BYTES as u64)
+    {
+        return Err(ROADMAP_TYPED_RESPONSE_ERROR.to_string());
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ROADMAP_TYPED_RESPONSE_ERROR.to_string())?;
+        if body.len().saturating_add(chunk.len()) > ROADMAP_TYPED_RESPONSE_MAX_BYTES {
+            return Err(ROADMAP_TYPED_RESPONSE_ERROR.to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let outcome: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| ROADMAP_TYPED_RESPONSE_ERROR.to_string())?;
+    if !is_roadmap_typed_outcome(kind, status.as_u16(), &outcome) {
+        return Err(ROADMAP_TYPED_RESPONSE_ERROR.to_string());
+    }
+    Ok(outcome)
+}
+
+fn is_roadmap_typed_outcome(
+    kind: RoadmapTypedResponseKind,
+    http_status: u16,
+    value: &serde_json::Value,
+) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let status_matches = match kind {
+        RoadmapTypedResponseKind::PhaseBinding => match status {
+            "committed" | "duplicate" | "already-bound" => http_status == 200,
+            "phase-not-found" | "missing" => http_status == 404,
+            "duplicate-id-conflict"
+            | "stale-revision"
+            | "stale-previous-session"
+            | "project-mismatch"
+            | "phase-archived"
+            | "phase-terminal"
+            | "missing-session-path" => http_status == 409,
+            _ => false,
+        },
+        RoadmapTypedResponseKind::ManualCompletionPreview => match status {
+            "ready" => http_status == 200,
+            "missing" => http_status == 404,
+            "stale-revision" | "unmet-gate" => http_status == 409,
+            _ => false,
+        },
+        RoadmapTypedResponseKind::ManualCompletionCommit => match status {
+            "committed" | "duplicate" => http_status == 200,
+            "missing" | "nonce-not-found" => http_status == 404,
+            "stale-revision" | "unmet-gate" => http_status == 409,
+            "nonce-expired" => http_status == 410,
+            _ => false,
+        },
+    };
+    status_matches
+        && match kind {
+            RoadmapTypedResponseKind::PhaseBinding => is_phase_binding_outcome(value),
+            RoadmapTypedResponseKind::ManualCompletionPreview => {
+                is_manual_completion_preview_outcome(value)
+            }
+            RoadmapTypedResponseKind::ManualCompletionCommit => {
+                is_manual_completion_commit_outcome(value)
+            }
+        }
+}
+
+fn exact_roadmap_object<'a>(
+    value: &'a serde_json::Value,
+    expected: &[&str],
+) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
+    let object = value.as_object()?;
+    has_exact_keys(object, expected).then_some(object)
+}
+
+fn is_roadmap_revision(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|revision| revision <= 9_007_199_254_740_991)
+}
+
+fn is_roadmap_bounded_string(value: Option<&serde_json::Value>, max_length: usize) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| {
+            !candidate.trim().is_empty() && candidate.encode_utf16().count() <= max_length
+        })
+}
+
+fn is_notes_session_link(value: Option<&serde_json::Value>) -> bool {
+    let Some(object) = value
+        .and_then(serde_json::Value::as_object)
+        .filter(|object| has_exact_keys(object, &["sessionId", "sessionPath"]))
+    else {
+        return false;
+    };
+    is_roadmap_bounded_string(object.get("sessionId"), ROADMAP_TYPED_RESPONSE_MAX_BYTES)
+        && object.get("sessionPath").is_some_and(|path| {
+            path.is_null()
+                || is_roadmap_bounded_string(Some(path), ROADMAP_TYPED_RESPONSE_MAX_BYTES)
+        })
+}
+
+fn is_nullable_notes_session_link(value: Option<&serde_json::Value>) -> bool {
+    value.is_some_and(|value| value.is_null() || is_notes_session_link(Some(value)))
+}
+
+fn is_phase_binding_outcome(value: &serde_json::Value) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    match status {
+        "committed" | "duplicate" => {
+            let Some(object) = exact_roadmap_object(
+                value,
+                &[
+                    "status",
+                    "revision",
+                    "phaseId",
+                    "previousSession",
+                    "session",
+                ],
+            ) else {
+                return false;
+            };
+            is_roadmap_revision(object.get("revision"))
+                && is_roadmap_bounded_string(object.get("phaseId"), 256)
+                && is_nullable_notes_session_link(object.get("previousSession"))
+                && is_notes_session_link(object.get("session"))
+        }
+        "already-bound" => {
+            let Some(object) =
+                exact_roadmap_object(value, &["status", "revision", "phaseId", "session"])
+            else {
+                return false;
+            };
+            is_roadmap_revision(object.get("revision"))
+                && is_roadmap_bounded_string(object.get("phaseId"), 256)
+                && is_notes_session_link(object.get("session"))
+        }
+        "duplicate-id-conflict" | "stale-revision" => {
+            exact_roadmap_object(value, &["status", "revision"])
+                .is_some_and(|object| is_roadmap_revision(object.get("revision")))
+        }
+        "stale-previous-session" => {
+            let Some(object) =
+                exact_roadmap_object(value, &["status", "revision", "currentSession"])
+            else {
+                return false;
+            };
+            is_roadmap_revision(object.get("revision"))
+                && is_nullable_notes_session_link(object.get("currentSession"))
+        }
+        "project-mismatch" => {
+            let Some(object) =
+                exact_roadmap_object(value, &["status", "expectedProjectKey", "actualProjectKey"])
+            else {
+                return false;
+            };
+            is_roadmap_bounded_string(object.get("expectedProjectKey"), 4096)
+                && is_roadmap_bounded_string(object.get("actualProjectKey"), 4096)
+        }
+        "phase-not-found"
+        | "phase-archived"
+        | "phase-terminal"
+        | "missing-session-path"
+        | "missing" => exact_roadmap_object(value, &["status"]).is_some(),
+        _ => false,
+    }
+}
+
+fn is_manual_completion_gate_code(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|code| {
+            matches!(
+                code,
+                "missing-implementation"
+                    | "run-not-successful"
+                    | "incomplete-plan"
+                    | "missing-verification"
+                    | "stale-verification"
+                    | "failed-verification"
+                    | "verification-exception"
+                    | "missing-final-review"
+                    | "rejected-final-review"
+                    | "stale-final-review"
+                    | "final-review-evidence-mismatch"
+                    | "final-review-verification-exception"
+                    | "stale-session"
+                    | "unresolved-approval"
+                    | "unresolved-attention"
+            )
+        })
+}
+
+fn is_manual_completion_checkpoint(value: Option<&serde_json::Value>) -> bool {
+    let Some(object) = value
+        .and_then(serde_json::Value::as_object)
+        .filter(|object| {
+            has_exact_keys(
+                object,
+                &[
+                    "nonce",
+                    "projectKey",
+                    "phaseId",
+                    "revision",
+                    "session",
+                    "implementationCheckpointId",
+                    "verificationStatusUpdateId",
+                    "expiresAt",
+                ],
+            )
+        })
+    else {
+        return false;
+    };
+    is_roadmap_bounded_string(object.get("nonce"), 512)
+        && is_roadmap_bounded_string(object.get("projectKey"), 4096)
+        && is_roadmap_bounded_string(object.get("phaseId"), 256)
+        && is_roadmap_revision(object.get("revision"))
+        && is_notes_session_link(object.get("session"))
+        && is_roadmap_bounded_string(object.get("implementationCheckpointId"), 256)
+        && is_roadmap_bounded_string(object.get("verificationStatusUpdateId"), 256)
+        && object
+            .get("expiresAt")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok())
+}
+
+fn is_manual_completion_preview_outcome(value: &serde_json::Value) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    match status {
+        "ready" => exact_roadmap_object(value, &["status", "checkpoint"])
+            .is_some_and(|object| is_manual_completion_checkpoint(object.get("checkpoint"))),
+        "stale-revision" => exact_roadmap_object(value, &["status", "revision"])
+            .is_some_and(|object| is_roadmap_revision(object.get("revision"))),
+        "unmet-gate" => {
+            exact_roadmap_object(value, &["status", "revision", "code"]).is_some_and(|object| {
+                is_roadmap_revision(object.get("revision"))
+                    && is_manual_completion_gate_code(object.get("code"))
+            })
+        }
+        "missing" => exact_roadmap_object(value, &["status"]).is_some(),
+        _ => false,
+    }
+}
+
+fn is_manual_completion_commit_outcome(value: &serde_json::Value) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    match status {
+        "committed" | "duplicate" => {
+            exact_roadmap_object(value, &["status", "revision", "phaseId", "approvalId"])
+                .is_some_and(|object| {
+                    is_roadmap_revision(object.get("revision"))
+                        && is_roadmap_bounded_string(object.get("phaseId"), 256)
+                        && is_roadmap_bounded_string(object.get("approvalId"), 256)
+                })
+        }
+        "stale-revision" => exact_roadmap_object(value, &["status", "revision"])
+            .is_some_and(|object| is_roadmap_revision(object.get("revision"))),
+        "unmet-gate" => {
+            exact_roadmap_object(value, &["status", "revision", "code"]).is_some_and(|object| {
+                is_roadmap_revision(object.get("revision"))
+                    && is_manual_completion_gate_code(object.get("code"))
+            })
+        }
+        "missing" | "nonce-not-found" | "nonce-expired" => {
+            exact_roadmap_object(value, &["status"]).is_some()
+        }
+        _ => false,
+    }
+}
+
 /// Proxy: load the authenticated pane's project Notes snapshot.
 #[tauri::command]
 async fn agent_notes_get(
@@ -9043,6 +9456,10 @@ pub fn run() {
             open_url,
             agent_state,
             agent_notes_get,
+            agent_notes_diagnostics,
+            agent_notes_phase_binding,
+            agent_notes_completion_approval_preview,
+            agent_notes_completion_approval_commit,
             agent_phase_start,
             agent_phase_advancement_start,
             agent_phase_cancel,
@@ -9464,6 +9881,251 @@ fn refresh_live_sessions(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_storage_diagnostics_use_authenticated_identity_scoped_proxy() {
+        let home = Path::new("/tmp/gg-identity-diagnostics");
+        let production = agent_data_root_for_home(home, PRODUCTION_APP_IDENTIFIER);
+        let local_fork = agent_data_root_for_home(home, "com.ggcoder.local-fork");
+
+        assert_eq!(NOTES_DIAGNOSTICS_PATH, "/notes/diagnostics");
+        assert_eq!(
+            sidecar_identity_arg("com.ggcoder.local-fork"),
+            "--gg-app-identity=com.ggcoder.local-fork"
+        );
+        assert_ne!(production, local_fork);
+    }
+
+    #[test]
+    fn roadmap_phase_binding_uses_current_pane_route_without_destination_fields() {
+        let request = serde_json::json!({
+            "version": 1,
+            "action": "bind-current",
+            "phaseId": "phase-1",
+            "expectedProjectKey": "c:/work/project",
+            "expectedRevision": 1,
+            "expectedPreviousSession": null,
+            "operationId": "operation-1",
+            "confirmRebind": false
+        });
+
+        assert_eq!("/notes/roadmap/phase-binding", NOTES_PHASE_BINDING_PATH);
+        assert!(request.get("destinationSession").is_none());
+    }
+
+    #[test]
+    fn roadmap_manual_completion_approval_uses_fixed_native_authority_payloads() {
+        assert_eq!(
+            NOTES_COMPLETION_APPROVAL_PREVIEW_PATH,
+            "/notes/roadmap/completion-approval/preview"
+        );
+        assert_eq!(
+            NOTES_COMPLETION_APPROVAL_COMMIT_PATH,
+            "/notes/roadmap/completion-approval/commit"
+        );
+        let commit = serde_json::json!({ "version": 1, "nonce": "nonce-1", "confirmed": true });
+        assert!(commit.get("reviewer").is_none());
+        assert!(commit.get("acceptsVerificationException").is_none());
+    }
+
+    fn roadmap_proxy_result(
+        status: reqwest::StatusCode,
+        content_type: &str,
+        body: &str,
+        kind: RoadmapTypedResponseKind,
+    ) -> Result<serde_json::Value, String> {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let response_body = body.to_string();
+        let response_content_type = content_type.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).unwrap();
+            let response = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown"),
+                response_content_type,
+                response_body.len(),
+                response_body,
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let result = tauri::async_runtime::block_on(async {
+            let response = reqwest::Client::new()
+                .get(format!("http://{address}/roadmap"))
+                .send()
+                .await
+                .unwrap();
+            roadmap_typed_response(response, kind).await
+        });
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn roadmap_documented_typed_outcomes_cross_the_native_boundary() {
+        let session = serde_json::json!({ "sessionId": "session-1", "sessionPath": null });
+        let checkpoint = serde_json::json!({
+            "nonce": "nonce-1",
+            "projectKey": "c:/work/project",
+            "phaseId": "phase-1",
+            "revision": 7,
+            "session": session,
+            "implementationCheckpointId": "implementation-1",
+            "verificationStatusUpdateId": "verification-1",
+            "expiresAt": "2026-08-28T03:30:00.000Z"
+        });
+        let cases = [
+            (
+                reqwest::StatusCode::OK,
+                serde_json::json!({
+                    "status": "already-bound",
+                    "revision": 7,
+                    "phaseId": "phase-1",
+                    "session": session
+                }),
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                serde_json::json!({ "status": "phase-not-found" }),
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                serde_json::json!({ "status": "stale-revision", "revision": 8 }),
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::OK,
+                serde_json::json!({ "status": "ready", "checkpoint": checkpoint }),
+                RoadmapTypedResponseKind::ManualCompletionPreview,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                serde_json::json!({ "status": "stale-revision", "revision": 8 }),
+                RoadmapTypedResponseKind::ManualCompletionPreview,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                serde_json::json!({
+                    "status": "unmet-gate",
+                    "revision": 8,
+                    "code": "stale-verification"
+                }),
+                RoadmapTypedResponseKind::ManualCompletionPreview,
+            ),
+            (
+                reqwest::StatusCode::OK,
+                serde_json::json!({
+                    "status": "duplicate",
+                    "revision": 8,
+                    "phaseId": "phase-1",
+                    "approvalId": "approval-1"
+                }),
+                RoadmapTypedResponseKind::ManualCompletionCommit,
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                serde_json::json!({ "status": "nonce-not-found" }),
+                RoadmapTypedResponseKind::ManualCompletionCommit,
+            ),
+            (
+                reqwest::StatusCode::GONE,
+                serde_json::json!({ "status": "nonce-expired" }),
+                RoadmapTypedResponseKind::ManualCompletionCommit,
+            ),
+        ];
+
+        for (status, body, kind) in cases {
+            assert_eq!(
+                roadmap_proxy_result(
+                    status,
+                    "application/json; charset=utf-8",
+                    &body.to_string(),
+                    kind
+                ),
+                Ok(body)
+            );
+        }
+    }
+
+    #[test]
+    fn roadmap_auth_malformed_content_type_and_undocumented_responses_reject() {
+        let cases = [
+            (
+                reqwest::StatusCode::UNAUTHORIZED,
+                "application/json",
+                r#"{"status":"stale-revision","revision":8}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                "application/json",
+                r#"{"status":"stale-revision"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                "text/plain",
+                r#"{"status":"stale-revision","revision":8}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                "application/json",
+                r#"{"status":"stale-revision","revision":8,"extra":true}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                "application/json",
+                r#"{"status":"stale-revision","revision":8}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "application/json",
+                r#"{"status":"corrupt","primary":"malformed-json","backup":null}"#,
+                RoadmapTypedResponseKind::PhaseBinding,
+            ),
+        ];
+
+        for (status, content_type, body, kind) in cases {
+            assert!(roadmap_proxy_result(status, content_type, body, kind).is_err());
+        }
+    }
+
+    #[test]
+    fn roadmap_oversized_responses_reject() {
+        let body = "x".repeat(ROADMAP_TYPED_RESPONSE_MAX_BYTES + 1);
+        assert!(roadmap_proxy_result(
+            reqwest::StatusCode::OK,
+            "application/json",
+            &body,
+            RoadmapTypedResponseKind::PhaseBinding,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn roadmap_transport_failures_reject() {
+        let result = tauri::async_runtime::block_on(roadmap_typed_request(
+            reqwest::Client::new()
+                .get("http://127.0.0.1:0/roadmap")
+                .timeout(std::time::Duration::from_secs(1)),
+            RoadmapTypedResponseKind::PhaseBinding,
+        ));
+        assert!(result.is_err());
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

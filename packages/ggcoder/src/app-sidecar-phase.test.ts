@@ -34,6 +34,7 @@ import {
 import {
   APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
   AppSidecarRoadmapToolHost,
+  type AppSidecarFinalReviewEligibility,
 } from "./app-sidecar-roadmap-tool-host.js";
 import { AppSidecarSessionMutationCoordinator } from "./app-sidecar-session-mutation.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
@@ -513,6 +514,26 @@ async function executeRoadmap(
   return JSON.parse(output) as Record<string, unknown>;
 }
 
+function eligibleFinalReview(input: {
+  phaseId: string;
+  expectedRevision: number | undefined;
+  verificationStatusUpdateId?: string;
+}): AppSidecarFinalReviewEligibility {
+  return {
+    phaseId: input.phaseId,
+    revision: input.expectedRevision ?? 0,
+    sessionId: "integration-review-session",
+    verificationStatusUpdateId:
+      input.verificationStatusUpdateId ?? "integration-verification-status",
+    verification: "passed" as const,
+    evidenceEvaluation: {
+      ready: true as const,
+      unmetEvidenceCodes: [],
+      criterionCoverage: [],
+    },
+  };
+}
+
 function roadmapHost(
   repository: Pick<
     ProjectNotesRepository,
@@ -528,6 +549,7 @@ function roadmapHost(
     repository,
     reconciliations,
     projectAutopilot,
+    revalidateFinalReviewEligibility: async (input) => eligibleFinalReview(input),
     broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
     now: () => NOW,
   });
@@ -942,6 +964,7 @@ describe("production launchBoundPhase orchestration", () => {
       repository,
       reconciliations: fixture.reconciliations,
       projectAutopilot: new AppSidecarProjectAutopilotState(),
+      revalidateFinalReviewEligibility: async (input) => eligibleFinalReview(input),
       getAutopilotFinalReviewClaim: () => finalReviewClaim,
       broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
       now: () => roadmapTimestamp,
@@ -1149,6 +1172,7 @@ describe("production launchBoundPhase orchestration", () => {
           repository: hostRepository,
           reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
           projectAutopilot: autopilot,
+          revalidateFinalReviewEligibility: async (input) => eligibleFinalReview(input),
           getAutopilotFinalReviewClaim: () => activeFinalReviewClaim,
           broadcastNotesSnapshot: () => undefined,
           now: () => now,
@@ -1518,17 +1542,17 @@ describe("production launchBoundPhase orchestration", () => {
   it.each(["not-started", "needs-attention", "cancelled"] as const)(
     "recovers a null-path %s binding with one authoritative replacement",
     async (status) => {
-      const { repository, cwd } = await setup();
-      await updatePhase(repository, cwd, (notes) => {
-        const phase = notes.phases[0]!;
-        phase.status = status;
-        phase.session = { sessionId: "bound", sessionPath: null };
-        phase.attentionReason =
-          status === "needs-attention" ? "Previous launch lost its session path." : null;
-        phase.completedAt = status === "cancelled" ? NOW : null;
-        phase.overrides.status = null;
-        phase.lifecycleEvents = [];
-      });
+      const { repository, cwd } = await setup(false);
+      const seeded = document();
+      const phase = seeded.phases[0]!;
+      phase.status = status;
+      phase.session = { sessionId: "bound", sessionPath: null };
+      phase.attentionReason =
+        status === "needs-attention" ? "Previous launch lost its session path." : null;
+      phase.completedAt = status === "cancelled" ? NOW : null;
+      phase.overrides.status = null;
+      phase.lifecycleEvents = [];
+      await repository.migrate(cwd, seeded);
       const fixture = new ProductionPhaseFixture(repository, cwd);
 
       const response = await fixture.start();
@@ -2235,7 +2259,7 @@ describe("production launchBoundPhase orchestration", () => {
   });
 
   it("disposes a stale candidate when another window completes the phase before Start", async () => {
-    const { repository, cwd } = await setup();
+    const { repository, cwd } = await setup(false);
     const fixture = new ProductionPhaseFixture(repository, cwd);
     const staleCandidate = new FakePhaseSession(99, fixture.events);
     await fixture.candidates.add("phase-21", {
@@ -2243,21 +2267,21 @@ describe("production launchBoundPhase orchestration", () => {
       initialPrompt: "stale prompt",
       tokenCount: 1,
     });
-    await updatePhase(repository, cwd, (notes) => {
-      const phase = notes.phases[0]!;
-      phase.status = "done";
-      phase.completedAt = NOW;
-      phase.overrides.status = null;
-      phase.lifecycleEvents.push({
-        id: "event-done",
-        fromStatus: "not-started",
-        toStatus: "done",
-        source: "user",
-        timestamp: NOW,
-        reason: "Completion review accepted",
-        kind: "other",
-      });
+    const completedNotes = document();
+    const completedPhase = completedNotes.phases[0]!;
+    completedPhase.status = "done";
+    completedPhase.completedAt = NOW;
+    completedPhase.overrides.status = null;
+    completedPhase.lifecycleEvents.push({
+      id: "event-done",
+      fromStatus: "not-started",
+      toStatus: "done",
+      source: "user",
+      timestamp: NOW,
+      reason: "Completion review accepted",
+      kind: "other",
     });
+    await repository.migrate(cwd, completedNotes);
     const beforeStart = await repository.load(cwd);
     if (beforeStart.status !== "ok") throw new Error("Expected completed phase");
 
@@ -2412,6 +2436,7 @@ describe("production launchBoundPhase orchestration", () => {
       repository,
       reconciliations: fixture.reconciliations,
       projectAutopilot: new AppSidecarProjectAutopilotState(),
+      revalidateFinalReviewEligibility: async (input) => eligibleFinalReview(input),
       broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
       now: () => "2026-07-26T00:03:00.000Z",
     });
@@ -2438,6 +2463,7 @@ describe("production launchBoundPhase orchestration", () => {
       canSubmitFinalReview: () => false,
       reconciliations: fixture.reconciliations,
       projectAutopilot: new AppSidecarProjectAutopilotState(),
+      revalidateFinalReviewEligibility: async (input) => eligibleFinalReview(input),
       broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
       now: () => "2026-07-26T00:03:00.000Z",
     });
@@ -2503,6 +2529,7 @@ describe("production launchBoundPhase orchestration", () => {
       repository,
       reconciliations: fixture.reconciliations,
       projectAutopilot: new AppSidecarProjectAutopilotState(),
+      revalidateFinalReviewEligibility: async (input) => eligibleFinalReview(input),
       broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
       now: () => "2026-07-26T00:03:00.000Z",
     });
@@ -2560,6 +2587,7 @@ describe("production launchBoundPhase orchestration", () => {
       repository,
       reconciliations: fixture.reconciliations,
       projectAutopilot,
+      revalidateFinalReviewEligibility: async (input) => eligibleFinalReview(input),
       getAutopilotFinalReviewClaim: () => finalReviewClaim,
       broadcastNotesSnapshot: (snapshot) => snapshots.push(snapshot),
       now: () => "2026-07-26T00:03:00.000Z",

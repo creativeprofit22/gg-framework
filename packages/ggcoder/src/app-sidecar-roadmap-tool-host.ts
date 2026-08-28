@@ -1,5 +1,6 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
+import { canonicalProjectKey } from "@kenkaiiii/gg-core/project-notes";
 import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
 import {
   appSidecarRoadmapReviewTrigger,
@@ -279,7 +280,10 @@ export class AppSidecarRoadmapToolHost {
     phase: NotesPhase,
     revision: number,
   ): RoadmapFinalReviewScheduleOutcome {
-    const trigger = appSidecarRoadmapReviewTrigger(phase);
+    const trigger = appSidecarRoadmapReviewTrigger(
+      phase,
+      canonicalProjectKey(this.dependencies.cwd),
+    );
     if (!trigger) return "not-eligible";
     if (!this.dependencies.projectAutopilot.isEnabled(this.dependencies.cwd)) {
       return "autopilot-disabled";

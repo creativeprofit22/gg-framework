@@ -219,6 +219,21 @@ import type { ProgressFile, ProgressSnapshot } from "./core/progress/types.js";
 import { AppSidecarReloadCoordinator } from "./app-sidecar-reload.js";
 import { AppSidecarSessionRouter, sessionEventFrame } from "./app-sidecar-session-router.js";
 import { createAppSidecarNotesHandler, type AppSidecarNotesHandler } from "./app-sidecar-notes.js";
+import { createManualCompletionApprovalService } from "./app-sidecar-manual-completion-approval.js";
+import {
+  createAppSidecarStorageDiagnostics,
+  parseAppIdentityArgument,
+  type AppSidecarStorageDiagnostics,
+} from "./app-sidecar-storage-diagnostics.js";
+import {
+  createAppSidecarPhaseBindingService,
+  type AppSidecarPhaseBindingService,
+} from "./app-sidecar-phase-binding.js";
+import {
+  isPhaseBindingRoute,
+  parsePhaseBindingBody,
+  phaseBindingHttpStatus,
+} from "./app-sidecar-phase-binding-route.js";
 import {
   AppSidecarReminderCoordinator,
   createAppSidecarReminderHandler,
@@ -295,7 +310,9 @@ import {
 import {
   boundPhaseForAutopilotReview,
   classifyAppSidecarFinalReviewAttempt,
+  finalReviewExecutionResult,
   phaseCompletionVerdict,
+  type AppSidecarFinalReviewExecutionResult,
 } from "./app-sidecar-autopilot-phase-review.js";
 import { latestVerificationExceptionForReview } from "./app-sidecar-phase-completion.js";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
@@ -312,6 +329,7 @@ import {
   createAppSidecarChatRoadmapSessionOptions,
   createAppSidecarCodingRoadmapSessionOptions,
 } from "./app-sidecar-roadmap-session-options.js";
+import { createRoadmapBindTool } from "./tools/roadmap-bind.js";
 import {
   AppSidecarRoadmapDraftDecisionService,
   parseRoadmapPhaseDraftRejectBody,
@@ -998,6 +1016,7 @@ async function main(): Promise<void> {
   const authToken = configuredAuthToken || randomUUID();
 
   const paths = await ensureAppDirs();
+  const applicationIdentity = parseAppIdentityArgument(process.argv.slice(2));
   // The shell scopes this filename to its Tauri product identity so production
   // and local-fork daemons never interleave or race log rotation.
   const sidecarLogFile = path.basename(
@@ -1009,7 +1028,7 @@ async function main(): Promise<void> {
   log("INFO", "app-sidecar", "daemon lifecycle start", {
     daemonPid: process.pid,
     shellPid,
-    agentDataRoot: paths.agentDir,
+    applicationIdentity: applicationIdentity ?? "invalid-or-missing",
   });
   // The desktop sidecar previously omitted the stream diagnostic hook used by
   // the CLI, leaving device-specific provider stalls impossible to distinguish from
@@ -1088,6 +1107,11 @@ async function main(): Promise<void> {
 
   const oauthInFlightProviders = new Set<string>();
   const notesRepository = new ProjectNotesRepository(paths.agentDir);
+  const storageDiagnostics = createAppSidecarStorageDiagnostics({
+    applicationIdentity,
+    agentDataRoot: paths.agentDir,
+    repository: notesRepository,
+  });
   const roadmapReconciliations = new AppSidecarRoadmapReconciliationCoordinator();
   const roadmapDrafts = new AppSidecarRoadmapDraftCoordinator({
     onChange: (projectKey, draft) => {
@@ -1107,6 +1131,14 @@ async function main(): Promise<void> {
       }
     }
   };
+  const phaseBinding = createAppSidecarPhaseBindingService({
+    repository: notesRepository,
+    onCommittedSnapshot: broadcastNotesSnapshot,
+  });
+  const manualCompletionApproval = createManualCompletionApprovalService({
+    repository: notesRepository,
+    onCommittedSnapshot: broadcastNotesSnapshot,
+  });
   const roadmapDraftDecisions = new AppSidecarRoadmapDraftDecisionService({
     drafts: roadmapDrafts,
     repository: notesRepository,
@@ -1135,6 +1167,8 @@ async function main(): Promise<void> {
   );
   const notes = createAppSidecarNotesHandler({
     repository: notesRepository,
+    diagnostics: storageDiagnostics,
+    manualCompletionApproval,
     onCommittedSnapshot: broadcastNotesSnapshot,
     onError: (error) => {
       captureSidecarError(error, "app-sidecar.notes.request");
@@ -1426,6 +1460,8 @@ async function main(): Promise<void> {
                 reminders,
                 reminderCoordinator,
                 notesRepository,
+                storageDiagnostics,
+                phaseBinding,
                 roadmapReconciliations,
                 roadmapDrafts,
                 roadmapDraftDecisions,
@@ -1856,6 +1892,8 @@ async function createSession(
     reminders: AppSidecarReminderHandler;
     reminderCoordinator: AppSidecarReminderCoordinator;
     notesRepository: ProjectNotesRepository;
+    storageDiagnostics: AppSidecarStorageDiagnostics;
+    phaseBinding: AppSidecarPhaseBindingService;
     roadmapReconciliations: AppSidecarRoadmapReconciliationCoordinator;
     roadmapDrafts: AppSidecarRoadmapDraftCoordinator;
     roadmapDraftDecisions: AppSidecarRoadmapDraftDecisionService;
@@ -1884,6 +1922,8 @@ async function createSession(
     reminders,
     reminderCoordinator,
     notesRepository,
+    storageDiagnostics,
+    phaseBinding,
     roadmapReconciliations,
     roadmapDrafts,
     roadmapDraftDecisions,
@@ -2228,6 +2268,23 @@ async function createSession(
       ...createAppSidecarCodingRoadmapSessionOptions(
         roadmapToolHost.createSessionTools("coding", () => created),
         roadmapDraftToolHost.createSessionTools(),
+        [
+          createRoadmapBindTool(async (input) => {
+            if (input.action === "inspect") {
+              const state = created.getState();
+              return storageDiagnostics.inspect({
+                cwd,
+                logicalSessionId: opts.id,
+                currentSession: {
+                  sessionId: state.sessionId,
+                  sessionPath: state.sessionPath,
+                },
+                activePhaseContext: created.getActivePhaseContext(),
+              });
+            }
+            return phaseBinding.bind(input, created);
+          }),
+        ],
       ),
     });
     return created;
@@ -2257,7 +2314,13 @@ async function createSession(
   await session.initialize();
   planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
   if (mode === "code") {
+    await phaseBinding.reconcile(session);
     await reconcileActivePhaseVerificationStage({ cwd, repository: notesRepository, session });
+    if (projectAutopilot.isEnabled(cwd)) {
+      void drainScheduledRoadmapReview("Recovered persisted Roadmap review trigger.").catch(
+        (error) => captureSidecarError(error, "app-sidecar.roadmap-final-review-restore"),
+      );
+    }
   }
   const phaseLifecycle = new AppSidecarPhaseLifecycleCoordinator({
     cwd,
@@ -3523,10 +3586,18 @@ async function createSession(
   // One review = prompt the existing kenAuto session with the normal digest,
   // including any bound Roadmap phase. In Review, only a persisted final_review
   // whose completion gate reports Done can become ALL_CLEAR.
+  function runAutopilotReview(
+    originalRequest: string,
+    trigger: AppSidecarRoadmapReviewTrigger,
+  ): Promise<AppSidecarFinalReviewExecutionResult>;
+  function runAutopilotReview(
+    originalRequest: string,
+    trigger?: undefined,
+  ): Promise<AutopilotVerdict | null>;
   async function runAutopilotReview(
     originalRequest: string,
     trigger?: AppSidecarRoadmapReviewTrigger,
-  ): Promise<AutopilotVerdict | null> {
+  ): Promise<AutopilotVerdict | AppSidecarFinalReviewExecutionResult | null> {
     autopilotReviewing = true;
     broadcast("autopilot_review_start", {});
     try {
@@ -3565,7 +3636,11 @@ async function createSession(
           verificationException = latestVerificationExceptionForReview(persistedPhase);
         }
       }
-      if (boundPhase?.status === "review" && !projectAutopilot.isEnabled(cwd)) return null;
+      if (boundPhase?.status === "review" && !projectAutopilot.isEnabled(cwd)) {
+        return trigger
+          ? { status: "retryable-reviewer-error", message: "Project Autopilot is disabled." }
+          : null;
+      }
 
       const ken = await ensureKenAutoSession();
       const workflowCommands = await loadWorkflowCommandSpecs();
@@ -3621,10 +3696,18 @@ async function createSession(
             classifyAppSidecarFinalReviewAttempt(boundPhase.id, attempts).status,
           ),
       );
-      if (autopilotCancelled) return null;
+      if (autopilotCancelled) {
+        return trigger
+          ? { status: "retryable-reviewer-error", message: "Autopilot review was cancelled." }
+          : null;
+      }
       const textVerdict = parseAutopilotVerdict(lastAssistantText(ken.getMessages()));
-      const verdict = phaseCompletionVerdict(boundPhase, finalReviewAttempts, textVerdict);
-      if (trigger) {
+      if (trigger && boundPhase) {
+        const executionResult = finalReviewExecutionResult(
+          boundPhase,
+          finalReviewAttempts,
+          textVerdict,
+        );
         const classification = classifyAppSidecarFinalReviewAttempt(
           trigger.phaseId,
           finalReviewAttempts,
@@ -3633,20 +3716,22 @@ async function createSession(
         log("INFO", "app-sidecar", "roadmap final-review completed", {
           traceId: trigger.triggerId,
           phaseId: trigger.phaseId,
-          finalReviewResult: attempt?.result.result ?? "missing",
+          finalReviewResult: attempt?.result.result ?? executionResult.status,
           completionGateOutcome:
             attempt?.result.result === "completion-review-committed" ||
             attempt?.result.result === "completion-review-duplicate"
               ? attempt.result.gateOutcome
               : "unavailable",
         });
+        return executionResult;
       }
-      return verdict;
+      return phaseCompletionVerdict(boundPhase, finalReviewAttempts, textVerdict);
     } catch (err) {
-      if (!autopilotCancelled && !trigger) {
+      if (trigger) return resolveAppSidecarRoadmapReviewFailure(trigger, err);
+      if (!autopilotCancelled) {
         broadcastError("autopilot_error", "autopilot review failed", err);
       }
-      return autopilotCancelled ? null : resolveAppSidecarRoadmapReviewFailure(trigger, err);
+      return null;
     } finally {
       autopilotReviewing = false;
       // Apply any model switch that landed mid-review.
@@ -3657,7 +3742,7 @@ async function createSession(
   }
 
   async function replayEligibleRoadmapReview(): Promise<boolean> {
-    if (!autopilot || autopilotCancelled || !projectAutopilot.isEnabled(cwd)) return false;
+    if (autopilotCancelled || !projectAutopilot.isEnabled(cwd)) return false;
     const activePhase = session.getActivePhaseContext();
     if (!activePhase) return false;
     const loaded = await notesRepository.load(cwd);
@@ -3672,28 +3757,33 @@ async function createSession(
     ) {
       return false;
     }
-    return roadmapReviewScheduler.replay([persistedPhase]).length > 0;
+    return roadmapReviewScheduler.replay([persistedPhase], loaded.snapshot.projectKey).length > 0;
   }
 
   async function reportRoadmapReviewSchedulingFailure(
     trigger: AppSidecarRoadmapReviewTrigger,
-    error: unknown,
+    result: AppSidecarFinalReviewExecutionResult,
   ): Promise<void> {
     const loaded = await notesRepository.load(cwd);
     const observedRevision = loaded.status === "ok" ? loaded.snapshot.revision : null;
     const failure = appSidecarRoadmapReviewSchedulingFailure(trigger, observedRevision);
-    captureSidecarError(error, "app-sidecar.roadmap-final-review-scheduling", {
+    captureSidecarError(
+      new Error(`Roadmap final-review retries exhausted: ${result.status}`),
+      "app-sidecar.roadmap-final-review-scheduling",
+      {
       code: failure.code,
       traceId: trigger.triggerId,
       phaseId: trigger.phaseId,
       observedRevision: observedRevision === null ? "unavailable" : String(observedRevision),
-    });
+      },
+    );
     log("ERROR", "app-sidecar", "roadmap final-review scheduling failed", {
       code: failure.code,
       traceId: trigger.triggerId,
       phaseId: trigger.phaseId,
       observedRevision,
       queueOutcome: "failed",
+      typedOutcome: result.status,
     });
     broadcast("autopilot_error", {
       code: failure.code,
@@ -3712,10 +3802,6 @@ async function createSession(
         guidance: failure.guidance,
       })
       .catch(() => {});
-    await phaseLifecycle.enqueue({
-      type: "autopilot-stopped",
-      reason: `${failure.code}: retry final review for trigger ${trigger.triggerId}`,
-    });
   }
 
   async function drainScheduledRoadmapReview(
@@ -3723,7 +3809,7 @@ async function createSession(
   ): Promise<{ attempted: boolean; verdict: AutopilotVerdict | null }> {
     await replayEligibleRoadmapReview();
     const result: { verdict: AutopilotVerdict | null } = { verdict: null };
-    const outcomes = await roadmapReviewScheduler.drain(async (trigger) => {
+    const outcomes = await roadmapReviewScheduler.drain(async (trigger, attempt) => {
       const activePhase = session.getActivePhaseContext();
       if (!activePhase || activePhase.phase.id !== trigger.phaseId) {
         throw new Error(
@@ -3739,6 +3825,8 @@ async function createSession(
       log("INFO", "app-sidecar", "roadmap final-review reviewer starting", {
         traceId: trigger.triggerId,
         phaseId: trigger.phaseId,
+        projectKey: trigger.projectKey,
+        attempt,
         observedRevision: loaded.snapshot.revision,
         transition: "review",
         queueOutcome: "started",
@@ -3746,18 +3834,36 @@ async function createSession(
       const persistedPhase = loaded.snapshot.document.phases.find(
         (phase) => phase.id === trigger.phaseId,
       );
-      const currentTrigger = persistedPhase ? appSidecarRoadmapReviewTrigger(persistedPhase) : null;
-      if (currentTrigger?.triggerId !== trigger.triggerId) return;
-      result.verdict = await runAutopilotReview(originalRequest, trigger);
-      if (!result.verdict) {
-        throw new Error(
-          `Roadmap final-review trigger ${trigger.triggerId} did not produce a verdict.`,
-        );
+      const currentTrigger = persistedPhase
+        ? appSidecarRoadmapReviewTrigger(persistedPhase, loaded.snapshot.projectKey)
+        : null;
+      if (currentTrigger?.triggerId !== trigger.triggerId) {
+        return {
+          status: "typed-non-commit",
+          attempt: null,
+          code: "trigger-no-longer-current",
+          retryable: false,
+        };
       }
+      const execution = await runAutopilotReview(originalRequest, trigger);
+      if (execution.status === "committed" || execution.status === "duplicate") {
+        result.verdict = execution.verdict;
+      }
+      return execution;
     });
     const failed = outcomes.find((outcome) => outcome.status === "failed");
     if (failed?.status === "failed") {
-      await reportRoadmapReviewSchedulingFailure(failed.trigger, failed.error);
+      await reportRoadmapReviewSchedulingFailure(failed.trigger, failed.result);
+    }
+    const retry = outcomes.find((outcome) => outcome.status === "retry-scheduled");
+    if (retry?.status === "retry-scheduled") {
+      const delay = Math.max(0, retry.nextAttemptAt - Date.now());
+      const timer = setTimeout(() => {
+        void drainScheduledRoadmapReview(originalRequest).catch((error) => {
+          captureSidecarError(error, "app-sidecar.roadmap-final-review-retry");
+        });
+      }, delay);
+      timer.unref();
     }
     return {
       attempted: outcomes.some((outcome) => outcome.status === "started"),
@@ -4381,7 +4487,53 @@ async function createSession(
     url: string,
     method: string,
   ): void {
-    if (notes.handle(req, res, { cwd }, url, method)) return;
+    if (isPhaseBindingRoute(method, url)) {
+      if (mode !== "code") {
+        json(res, 403, { status: "coding-mode-required" });
+        return;
+      }
+      void readJsonBody(req, 64 * 1024)
+        .then((body) => {
+          const request = parsePhaseBindingBody(body);
+          if (!request) {
+            json(res, 400, { status: "invalid-request" });
+            return;
+          }
+          return phaseBinding.bind(request, session).then((outcome) => {
+            json(res, phaseBindingHttpStatus(outcome), outcome);
+          });
+        })
+        .catch((error) => {
+          if (error instanceof AppSidecarJsonBodyError) {
+            json(res, error.kind === "too-large" ? 413 : 400, { status: "invalid-request" });
+            return;
+          }
+          captureSidecarError(error, "app-sidecar.phase-binding");
+          json(res, 500, { status: "failed" });
+        });
+      return;
+    }
+
+    const sessionState = session.getState();
+    if (
+      notes.handle(
+        req,
+        res,
+        {
+          cwd,
+          logicalSessionId: opts.id,
+          currentSession: {
+            sessionId: sessionState.sessionId,
+            sessionPath: sessionState.sessionPath,
+          },
+          activePhaseContext: session.getActivePhaseContext(),
+        },
+        url,
+        method,
+      )
+    ) {
+      return;
+    }
     if (reminders.handle(req, res, { id: opts.id, cwd }, url, method)) return;
 
     const draftRoute = parseRoadmapPhaseDraftRoute(method, url);

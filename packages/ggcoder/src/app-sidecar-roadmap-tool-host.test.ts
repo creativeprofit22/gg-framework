@@ -157,6 +157,7 @@ async function exerciseReviewerSession(role: Exclude<AppSidecarRoadmapSessionRol
     reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
     projectAutopilot: { isEnabled: () => role === "ken-autopilot" },
     getAutopilotFinalReviewClaim: () => ({
+      projectKey: cwd,
       phaseId: "reviewer-wiring-phase",
       verificationStatusUpdateId: "reviewer-wiring-update",
       triggerId: "reviewer-wiring-trigger",
@@ -230,7 +231,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
 
     expect(loop).toContain("ensureKenAutoSession()");
     expect(loop).not.toContain("ensureKenSession()");
-    expect(loop).toContain("const verdict = phaseCompletionVerdict(");
+    expect(loop).toContain("const executionResult = finalReviewExecutionResult(");
     expect(loop).toContain("revalidateRoadmapFinalReviewEligibility");
     expect(loop!.indexOf("revalidateRoadmapFinalReviewEligibility")).toBeLessThan(
       loop!.indexOf("ensureKenAutoSession()"),
@@ -844,6 +845,12 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
           },
           () => false,
         );
+        return {
+          status: "typed-non-commit" as const,
+          attempt: null,
+          code: "test-review-persisted",
+          retryable: false,
+        };
       }),
     ).resolves.toMatchObject([{ status: "started" }, { status: "completed" }]);
 
@@ -912,6 +919,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       projectAutopilot: { isEnabled: () => true },
       broadcastNotesSnapshot,
       getAutopilotFinalReviewClaim: () => ({
+        projectKey: "/project",
         phaseId: "phase-incomplete",
         verificationStatusUpdateId: "verification-passed",
         triggerId: "trigger-incomplete",

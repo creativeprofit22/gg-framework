@@ -17,16 +17,18 @@ function tool(name: string): AgentTool {
 }
 
 describe("app-sidecar Roadmap session options", () => {
-  it("preserves coding-session status, draft tools, and prompt wiring", () => {
+  it("registers binding only for coding sessions with existing Roadmap tools", () => {
     const options = createAppSidecarCodingRoadmapSessionOptions(
       [tool("roadmap_status")],
       [tool("roadmap_inspect"), tool("roadmap_phase_draft")],
+      [tool("roadmap_bind")],
     );
 
     expect(options.additionalTools?.map((candidate) => candidate.name)).toEqual([
       "roadmap_status",
       "roadmap_inspect",
       "roadmap_phase_draft",
+      "roadmap_bind",
     ]);
     expect(options.getSystemPromptTail?.()).toBe(APP_SIDECAR_ROADMAP_DRAFT_SYSTEM_PROMPT);
   });

@@ -64,8 +64,28 @@ export function boundPhaseForAutopilotReview(
 export type AppSidecarFinalReviewAttemptClassification =
   | { status: "missing" }
   | { status: "stale-revision"; attempt: AppSidecarFinalReviewAttempt }
-  | { status: "committed"; attempt: AppSidecarFinalReviewAttempt }
+  | { status: "committed" | "duplicate"; attempt: AppSidecarFinalReviewAttempt }
   | { status: "failed"; attempt: AppSidecarFinalReviewAttempt };
+
+export type AppSidecarFinalReviewExecutionResult =
+  | {
+      status: "committed" | "duplicate";
+      attempt: AppSidecarFinalReviewAttempt;
+      verdict: AutopilotVerdict;
+    }
+  | {
+      status: "typed-non-commit";
+      attempt: AppSidecarFinalReviewAttempt | null;
+      code: string;
+      retryable: boolean;
+    }
+  | { status: "retryable-reviewer-error"; message: string }
+  | { status: "no-attempt"; message: string }
+  | {
+      status: "terminal-gate-rejection";
+      attempt: AppSidecarFinalReviewAttempt;
+      code: string;
+    };
 
 export function classifyAppSidecarFinalReviewAttempt(
   phaseId: string,
@@ -83,13 +103,81 @@ export function classifyAppSidecarFinalReviewAttempt(
   if (attempt.result.result === "stale-revision") {
     return { status: "stale-revision", attempt };
   }
-  if (
-    attempt.result.result === "completion-review-committed" ||
-    attempt.result.result === "completion-review-duplicate"
-  ) {
+  if (attempt.result.result === "completion-review-committed") {
     return { status: "committed", attempt };
   }
+  if (attempt.result.result === "completion-review-duplicate") {
+    return { status: "duplicate", attempt };
+  }
   return { status: "failed", attempt };
+}
+
+export function finalReviewExecutionResult(
+  phase: KenAutopilotBoundPhase,
+  attempts: readonly AppSidecarFinalReviewAttempt[],
+  textVerdict: AutopilotVerdict,
+): AppSidecarFinalReviewExecutionResult {
+  const classification = classifyAppSidecarFinalReviewAttempt(phase.id, attempts);
+  if (classification.status === "missing") {
+    return {
+      status: "no-attempt",
+      message: "Autopilot Ken did not submit a final_review tool call.",
+    };
+  }
+  if (classification.status === "stale-revision") {
+    return {
+      status: "typed-non-commit",
+      attempt: classification.attempt,
+      code: "stale-revision",
+      retryable: true,
+    };
+  }
+  if (classification.status === "failed") {
+    return {
+      status: "typed-non-commit",
+      attempt: classification.attempt,
+      code: classification.attempt.result.result,
+      retryable: false,
+    };
+  }
+  const attempt = classification.attempt;
+  const finalReview = attempt.input.final_review;
+  if (finalReview === null) {
+    return {
+      status: "typed-non-commit",
+      attempt,
+      code: "invalid-final-review-attempt",
+      retryable: false,
+    };
+  }
+  if (finalReview.decision === "rejected") {
+    return {
+      status: classification.status,
+      attempt,
+      verdict: {
+        kind: "prompt",
+        body:
+          finalReview.reason?.trim() ||
+          "The phase completion review was rejected. Correct the work and re-run verification.",
+      },
+    };
+  }
+  if (
+    (attempt.result.result === "completion-review-committed" ||
+      attempt.result.result === "completion-review-duplicate") &&
+    attempt.result.gateOutcome === "done"
+  ) {
+    return { status: classification.status, attempt, verdict: { kind: "all_clear" } };
+  }
+  return {
+    status: "terminal-gate-rejection",
+    attempt,
+    code:
+      attempt.result.result === "completion-review-committed" ||
+      attempt.result.result === "completion-review-duplicate"
+        ? attempt.result.unmetGateCodes[0] ?? "completion-gate-remains-review"
+        : attempt.result.result,
+  };
 }
 
 /**
@@ -109,7 +197,7 @@ export function phaseCompletionVerdict(
       `Autopilot completion review failed for phase ${phase.id}: no relevant roadmap_status final_review call was recorded.`,
     );
   }
-  if (classification.status !== "committed") {
+  if (classification.status !== "committed" && classification.status !== "duplicate") {
     throw new Error(
       `Autopilot completion review failed for phase ${phase.id}: final_review did not commit or duplicate (result: ${classification.attempt.result.result}).`,
     );

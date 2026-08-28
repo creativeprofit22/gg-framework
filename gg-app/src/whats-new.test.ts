@@ -144,12 +144,12 @@ describe("What's New feeds", () => {
 
   it("keeps the latest Local Fork release notes complete", () => {
     expect(LOCAL_CHANGELOG[0]).toEqual({
-      id: "local-2026-08-26-packaging-and-review-recovery",
-      label: "August 26 update",
-      date: "2026-08-26",
+      id: "local-2026-08-28-roadmap-and-streaming",
+      label: "August 28 update",
+      date: "2026-08-28",
       items: [
-        "GG Coder can now prepare and test installers for supported desktop apps built with Tauri. Run `/setup-tauri-package` once, then `/package-tauri` for repeatable builds with fewer manual steps.",
-        "Roadmap final reviews now retry once when a result is missing or out of date. If completion still needs attention, follow the recovery message to retry without losing the failure details.",
+        "Roadmap work now starts automatically only when exactly one eligible phase is available. Ambiguous choices stay manual, and manual Ken still requires an explicit Start.",
+        "Streaming replies now reveal smoothly and stay pinned while preserving the Local Fork’s multi-pane workspace.",
       ],
     });
   });

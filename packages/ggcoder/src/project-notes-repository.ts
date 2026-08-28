@@ -199,6 +199,34 @@ export type ProjectNotesPhaseAdvancementStartOutcome =
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
+export interface ProjectNotesAutomaticPhaseAdvancementRequest {
+  checkpointId: string;
+  expectedRevision: number;
+  destinationSession: NotesSessionLink;
+  timestamp: string;
+}
+
+export type ProjectNotesAutomaticPhaseAdvancementOutcome =
+  | (Extract<ProjectNotesPhaseLaunchOutcome, { status: "accepted" | "already-bound" }> & {
+      operationId: string;
+    })
+  | {
+      status: "stale";
+      reason:
+        | "checkpoint-not-found"
+        | "checkpoint-confirmed"
+        | "manual-confirmation-required"
+        | "completion-not-authoritative"
+        | "target-mismatch"
+        | "target-ineligible"
+        | "stale-revision"
+        | "session-mismatch"
+        | "session-in-use";
+    }
+  | { status: "invalid-confirmation" }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
 export type ProjectNotesPhaseLinkOutcome =
   | { status: "ok"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
   | { status: "stale-session" }
@@ -1369,14 +1397,10 @@ function selectNextEligibleRoadmapPhaseIndex(
   completionReviewId: string,
   reviewer: NotesRoadmapReviewer,
 ): number | null {
-  const orderedIndexes = orderedRoadmapPhaseIndexes(document);
-  const sourceOrderIndex = orderedIndexes.findIndex(
-    (documentIndex) => document.phases[documentIndex]!.id === completedPhaseId,
-  );
-  if (sourceOrderIndex < 0) return null;
-  const source = document.phases[orderedIndexes[sourceOrderIndex]!]!;
-  const review = latestCompletionReview(source);
+  const source = document.phases.find((phase) => phase.id === completedPhaseId);
+  const review = source && latestCompletionReview(source);
   if (
+    !source ||
     source.archivedAt !== null ||
     source.status !== "done" ||
     source.overrides.status !== null ||
@@ -1387,20 +1411,16 @@ function selectNextEligibleRoadmapPhaseIndex(
   ) {
     return null;
   }
-  for (let orderIndex = sourceOrderIndex + 1; orderIndex < orderedIndexes.length; orderIndex += 1) {
-    const candidateIndex = orderedIndexes[orderIndex]!;
-    const candidate = document.phases[candidateIndex]!;
-    if (
-      candidate.archivedAt !== null ||
-      (candidate.status !== "not-started" && candidate.status !== "planning")
-    ) {
-      continue;
-    }
-    return candidate.session === null && candidate.overrides.status === null
-      ? candidateIndex
-      : null;
-  }
-  return null;
+  const candidateIndexes = document.phases.flatMap((candidate, index) =>
+    candidate.id !== completedPhaseId &&
+    candidate.archivedAt === null &&
+    (candidate.status === "not-started" || candidate.status === "planning") &&
+    candidate.overrides.status === null &&
+    candidate.session === null
+      ? [index]
+      : [],
+  );
+  return candidateIndexes.length === 1 ? candidateIndexes[0]! : null;
 }
 
 function checkpointForReview(
@@ -2487,6 +2507,26 @@ export class ProjectNotesRepository {
     });
   }
 
+  async confirmAutomaticPhaseAdvancement(
+    cwd: string,
+    request: ProjectNotesAutomaticPhaseAdvancementRequest,
+  ): Promise<ProjectNotesAutomaticPhaseAdvancementOutcome> {
+    if (
+      !request.checkpointId.trim() ||
+      !Number.isSafeInteger(request.expectedRevision) ||
+      request.expectedRevision < 0 ||
+      !request.destinationSession.sessionId.trim() ||
+      request.destinationSession.sessionPath === null ||
+      !request.destinationSession.sessionPath.trim() ||
+      !Number.isFinite(Date.parse(request.timestamp))
+    ) {
+      return { status: "invalid-confirmation" };
+    }
+    return this.withLockedCurrent(cwd, (paths, current) =>
+      this.confirmAutomaticPhaseAdvancementLocked(paths, current, request),
+    );
+  }
+
   async confirmPhaseAdvancement(
     cwd: string,
     request: ProjectNotesPhaseAdvancementStartRequest,
@@ -3104,6 +3144,152 @@ export class ProjectNotesRepository {
       });
       return { status: "ok", snapshot: toSnapshot(next), phase: structuredClone(phase) };
     });
+  }
+
+  private async confirmAutomaticPhaseAdvancementLocked(
+    paths: ProjectNotesPaths,
+    current: StoredProjectNotesV1,
+    request: ProjectNotesAutomaticPhaseAdvancementRequest,
+  ): Promise<ProjectNotesAutomaticPhaseAdvancementOutcome> {
+    const operationId = `automatic-phase-advancement:${request.checkpointId}`;
+    const sourcePhaseIndex = current.document.phases.findIndex((phase) =>
+      phase.roadmapEvents.some(
+        (event) => event.type === "phase-advancement-checkpoint" && event.id === request.checkpointId,
+      ),
+    );
+    if (sourcePhaseIndex < 0) return { status: "stale", reason: "checkpoint-not-found" };
+    const sourcePhase = current.document.phases[sourcePhaseIndex]!;
+    const checkpoint = sourcePhase.roadmapEvents.find(
+      (event): event is NotesRoadmapPhaseAdvancementCheckpoint =>
+        event.type === "phase-advancement-checkpoint" && event.id === request.checkpointId,
+    )!;
+    if (checkpoint.reviewer !== "ken-autopilot") {
+      return { status: "stale", reason: "manual-confirmation-required" };
+    }
+    const review = latestCompletionReview(sourcePhase);
+    if (
+      sourcePhase.archivedAt !== null ||
+      sourcePhase.status !== "done" ||
+      sourcePhase.overrides.status !== null ||
+      review?.id !== checkpoint.completionReviewId ||
+      review.reviewer !== checkpoint.reviewer ||
+      review.decision !== "accepted" ||
+      review.gateOutcome !== "done"
+    ) {
+      return { status: "stale", reason: "completion-not-authoritative" };
+    }
+    if (!notesSessionLinksEqual(sourcePhase.session, request.destinationSession)) {
+      return { status: "stale", reason: "session-mismatch" };
+    }
+
+    const sameSessionId = current.document.phases.filter(
+      (phase) => phase.session?.sessionId === request.destinationSession.sessionId,
+    );
+    if (
+      sameSessionId.some(
+        (phase) => phase.session?.sessionPath !== request.destinationSession.sessionPath,
+      )
+    ) {
+      return { status: "stale", reason: "session-mismatch" };
+    }
+    const existingConfirmation = sourcePhase.roadmapEvents.find(
+      (event): event is NotesRoadmapPhaseAdvancementConfirmation =>
+        event.type === "phase-advancement-confirmation" && event.checkpointId === checkpoint.id,
+    );
+    const targetPhase = current.document.phases.find((phase) => phase.id === checkpoint.nextPhaseId);
+    if (existingConfirmation) {
+      const eligible = current.document.phases.filter(
+        (phase) =>
+          phase.id !== sourcePhase.id &&
+          phase.archivedAt === null &&
+          (phase.status === "not-started" || phase.status === "planning") &&
+          phase.overrides.status === null &&
+          (phase.session === null ||
+            (phase.id === checkpoint.nextPhaseId &&
+              notesSessionLinksEqual(phase.session, request.destinationSession))),
+      );
+      const activeLinks = sameSessionId.filter(
+        (phase) =>
+          phase.archivedAt === null && phase.status !== "done" && phase.status !== "cancelled",
+      );
+      if (
+        existingConfirmation.actor !== "system" ||
+        existingConfirmation.operationId !== operationId ||
+        !targetPhase ||
+        !notesSessionLinksEqual(targetPhase.session, request.destinationSession) ||
+        eligible.length !== 1 ||
+        eligible[0]!.id !== targetPhase.id ||
+        activeLinks.length !== 1 ||
+        activeLinks[0]!.id !== targetPhase.id
+      ) {
+        return { status: "stale", reason: "checkpoint-confirmed" };
+      }
+      const { references } = phaseLaunchContext(current.document, targetPhase);
+      return {
+        status: "already-bound",
+        operationId,
+        snapshot: toSnapshot(current),
+        phase: structuredClone(targetPhase),
+        references: structuredClone(references),
+        session: { ...request.destinationSession },
+      };
+    }
+    if (current.revision !== request.expectedRevision) {
+      return { status: "stale", reason: "stale-revision" };
+    }
+    const targetIndex = selectNextEligibleRoadmapPhaseIndex(
+      current.document,
+      checkpoint.completedPhaseId,
+      checkpoint.completionReviewId,
+      checkpoint.reviewer,
+    );
+    if (targetIndex === null) return { status: "stale", reason: "target-ineligible" };
+    const currentTarget = current.document.phases[targetIndex]!;
+    if (currentTarget.id !== checkpoint.nextPhaseId) {
+      return { status: "stale", reason: "target-mismatch" };
+    }
+    if (
+      sameSessionId.some(
+        (phase) =>
+          phase.id !== sourcePhase.id &&
+          phase.archivedAt === null &&
+          phase.status !== "done" &&
+          phase.status !== "cancelled",
+      )
+    ) {
+      return { status: "stale", reason: "session-in-use" };
+    }
+
+    const document = structuredClone(current.document);
+    const source = document.phases[sourcePhaseIndex]!;
+    const boundPhase = document.phases[targetIndex]!;
+    const timestamp = chronologicalRoadmapTimestamp(source, request.timestamp);
+    source.roadmapEvents.push({
+      type: "phase-advancement-confirmation",
+      id: this.createId(),
+      checkpointId: checkpoint.id,
+      nextPhaseId: checkpoint.nextPhaseId,
+      actor: "system",
+      operationId,
+      timestamp,
+    });
+    source.updatedAt = timestamp;
+    boundPhase.session = { ...request.destinationSession };
+    boundPhase.updatedAt = timestamp;
+    document.updatedAt = timestamp;
+    const next = await this.commitDocument(paths, current, document, {
+      validationMode: "validated",
+      context: "Automatic phase advancement created invalid Notes",
+    });
+    const { references } = phaseLaunchContext(document, boundPhase);
+    return {
+      status: "accepted",
+      operationId,
+      snapshot: toSnapshot(next),
+      phase: structuredClone(boundPhase),
+      references: structuredClone(references),
+      session: { ...request.destinationSession },
+    };
   }
 
   private async withLockedCurrent<T>(

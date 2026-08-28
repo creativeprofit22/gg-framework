@@ -1435,12 +1435,13 @@ describe("production launchBoundPhase orchestration", () => {
       const alpha = await completePhase("phase-alpha", { blockerAndRejection: true });
       let nextPhase;
       if (advancementMode === "manual") {
-        nextPhase = selectNextEligibleRoadmapPhase(
+        const eligibility = selectNextEligibleRoadmapPhase(
           alpha.snapshot,
           "phase-alpha",
           alpha.reviewId,
           "manual",
         );
+        nextPhase = eligibility.kind === "unique" ? eligibility.phase : undefined;
       } else {
         const restartedRepository = new ProjectNotesRepository(path.join(root, ".gg"));
         const restarted = await restartedRepository.load(cwd);
@@ -1462,7 +1463,7 @@ describe("production launchBoundPhase orchestration", () => {
       const beta = await completePhase("phase-beta", { blockerAndRejection: false });
       expect(
         selectNextEligibleRoadmapPhase(beta.snapshot, "phase-beta", beta.reviewId, advancementMode),
-      ).toBeNull();
+      ).toEqual({ kind: "none" });
       expect(selectLatestRoadmapPhaseAdvancement(beta.snapshot)).toMatchObject({
         state: "confirmed",
         checkpoint: { completedPhaseId: "phase-alpha", nextPhaseId: "phase-beta" },

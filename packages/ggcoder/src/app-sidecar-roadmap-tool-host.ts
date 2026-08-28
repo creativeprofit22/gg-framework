@@ -83,6 +83,7 @@ export interface AppSidecarRoadmapToolHostDependencies {
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
   now?: () => string;
   onFinalReview?(attempt: AppSidecarFinalReviewAttempt): void;
+  afterFinalReview?(attempt: AppSidecarFinalReviewAttempt): void | Promise<void>;
   onReviewReady?(
     trigger: AppSidecarRoadmapReviewTrigger,
     metadata: { revision: number; transition: "review" },
@@ -202,7 +203,22 @@ export class AppSidecarRoadmapToolHost {
       if (input.final_review !== null) {
         const reviewActor = actor as Exclude<RoadmapStatusActor, "gg-coder">;
         const result = await this.recordFinalReview(reviewActor, input, statusRequest);
-        this.dependencies.onFinalReview?.({ actor: reviewActor, input, result });
+        const attempt = { actor: reviewActor, input, result };
+        this.dependencies.onFinalReview?.(attempt);
+        if (
+          (result.result === "completion-review-committed" ||
+            result.result === "completion-review-duplicate") &&
+          result.gateOutcome === "done"
+        ) {
+          try {
+            await this.dependencies.afterFinalReview?.(attempt);
+          } catch (error) {
+            this.dependencies.onError?.(error, {
+              phaseId: input.phase_id,
+              updateId: input.update_id,
+            });
+          }
+        }
         return result;
       }
       const outcome = await this.dependencies.repository.recordRoadmapStatusUpdate(

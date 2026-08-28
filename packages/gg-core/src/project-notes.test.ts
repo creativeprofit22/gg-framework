@@ -864,31 +864,34 @@ describe("project Notes contract", () => {
     );
   });
 
-  it("accepts durable phase advancement checkpoint and human confirmation events", async () => {
-    const document = await fixture();
-    const phase = document.phases[0]!;
-    const checkpoint: NotesRoadmapPhaseAdvancementCheckpoint = {
-      type: "phase-advancement-checkpoint",
-      id: "advancement-checkpoint-1",
-      completionReviewId: "review-schema-contract",
-      completedPhaseId: phase.id,
-      nextPhaseId: document.phases[1]!.id,
-      reviewer: "ken-autopilot",
-      timestamp: NOW,
-    };
-    const confirmation: NotesRoadmapPhaseAdvancementConfirmation = {
-      type: "phase-advancement-confirmation",
-      id: "advancement-confirmation-1",
-      checkpointId: checkpoint.id,
-      nextPhaseId: checkpoint.nextPhaseId,
-      actor: "user",
-      operationId: "start-operation-1",
-      timestamp: NOW,
-    };
-    phase.roadmapEvents.push(checkpoint, confirmation);
+  it.each(["user", "system"] as const)(
+    "accepts durable phase advancement checkpoint and %s confirmation events",
+    async (actor) => {
+      const document = await fixture();
+      const phase = document.phases[0]!;
+      const checkpoint: NotesRoadmapPhaseAdvancementCheckpoint = {
+        type: "phase-advancement-checkpoint",
+        id: "advancement-checkpoint-1",
+        completionReviewId: "review-schema-contract",
+        completedPhaseId: phase.id,
+        nextPhaseId: document.phases[1]!.id,
+        reviewer: "ken-autopilot",
+        timestamp: NOW,
+      };
+      const confirmation: NotesRoadmapPhaseAdvancementConfirmation = {
+        type: "phase-advancement-confirmation",
+        id: "advancement-confirmation-1",
+        checkpointId: checkpoint.id,
+        nextPhaseId: checkpoint.nextPhaseId,
+        actor,
+        operationId: "start-operation-1",
+        timestamp: NOW,
+      };
+      phase.roadmapEvents.push(checkpoint, confirmation);
 
-    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
-  });
+      expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+    },
+  );
 
   it.each([
     ["checkpoint id", (event: Record<string, unknown>) => (event.id = "")],

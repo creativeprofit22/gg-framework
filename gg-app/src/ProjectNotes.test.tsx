@@ -1756,6 +1756,50 @@ describe("ProjectNotes", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("labels automatic phase binding as a system activity", async () => {
+    const cwd = "/work/automatic-next-phase";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("automatic next phase");
+    const completed = phase("completed", "done");
+    completed.title = "Completed foundation";
+    const review = completionReview({ reviewer: "ken" });
+    completed.roadmapEvents = [
+      review,
+      {
+        type: "phase-advancement-checkpoint",
+        id: "checkpoint-automatic",
+        completionReviewId: review.id,
+        completedPhaseId: completed.id,
+        nextPhaseId: "next",
+        reviewer: "ken",
+        timestamp: NOW,
+      },
+      {
+        type: "phase-advancement-confirmation",
+        id: "confirmation-automatic",
+        checkpointId: "checkpoint-automatic",
+        nextPhaseId: "next",
+        actor: "system",
+        operationId: "automatic-phase-advancement:checkpoint-automatic",
+        timestamp: NOW,
+      },
+    ];
+    const next = phase("next", "planning");
+    next.order = 1;
+    next.session = completed.session;
+    document.phases = [completed, next];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    fireEvent.click(screen.getByRole("button", { name: "Review phase: Completed foundation" }));
+    selectPhaseView("Activity");
+    const activity = screen.getByText("Next phase bound automatically.").closest("li");
+    expect(activity?.textContent).toContain("System");
+    expect(activity?.textContent).not.toContain("Start next phase confirmed.");
+  });
+
   it("blocks ordinary Start for a stale successor and exposes target recovery", async () => {
     const cwd = "/work/stale-next-phase";
     const client = new FakeProjectNotesClient(cwd);

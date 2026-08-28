@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  createAppSidecarRoadmapPhaseAdvancementCoordinator,
   selectLatestRoadmapPhaseAdvancement,
   selectNextEligibleRoadmapPhase,
   type RoadmapPhaseAdvancementMode,
+  type RoadmapPhaseAdvancementSession,
+  type RoadmapPhaseEligibility,
 } from "./app-sidecar-phase-advancement.js";
+import type { ActivePhaseContextV1 } from "./phase-context.js";
 import type {
   NotesPhase,
   NotesRoadmapCompletionReview,
+  ProjectNotesAutomaticPhaseAdvancementOutcome,
+  ProjectNotesRepository,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
 
@@ -96,7 +102,7 @@ function select(
   phases: NotesPhase[],
   reviewId = "review-complete",
   mode: RoadmapPhaseAdvancementMode = "manual",
-): NotesPhase | null {
+): RoadmapPhaseEligibility {
   return selectNextEligibleRoadmapPhase(snapshot(phases), "source", reviewId, mode);
 }
 
@@ -104,29 +110,20 @@ describe("selectNextEligibleRoadmapPhase", () => {
   it.each([
     ["manual", "ken"],
     ["autopilot", "ken-autopilot"],
-  ] as const)("selects the next phase for %s completion", (mode, reviewer) => {
-    const source = completedSource([completionReview({ reviewer })]);
+  ] as const)("classifies one eligible phase for %s completion", (mode, reviewer) => {
     const candidate = phase("candidate", 20, mode === "manual" ? "not-started" : "planning");
 
-    expect(select([source, candidate], "review-complete", mode)).toBe(candidate);
+    expect(
+      select(
+        [completedSource([completionReview({ reviewer })]), candidate],
+        "review-complete",
+        mode,
+      ),
+    ).toEqual({ kind: "unique", phase: candidate });
   });
 
-  it.each([
-    ["manual", "ken-autopilot"],
-    ["autopilot", "ken"],
-  ] as const)("requires the completion reviewer for %s mode", (mode, reviewer) => {
-    const source = completedSource([completionReview({ reviewer })]);
-
-    expect(select([source, phase("candidate", 20)], "review-complete", mode)).toBeNull();
-  });
-
-  it("is idempotent for a duplicate review replay and rejects a superseded review", () => {
+  it("requires an authoritative latest accepted Done review", () => {
     const candidate = phase("candidate", 20);
-    const durableDuplicate = completedSource();
-
-    expect(select([durableDuplicate, candidate])).toBe(candidate);
-    expect(select([durableDuplicate, candidate])).toBe(candidate);
-
     const superseded = completedSource([
       completionReview(),
       completionReview({
@@ -136,105 +133,325 @@ describe("selectNextEligibleRoadmapPhase", () => {
         timestamp: LATER,
       }),
     ]);
-    expect(select([superseded, candidate])).toBeNull();
+
+    expect(select([superseded, candidate])).toEqual({ kind: "none" });
+    expect(select([completedSource([]), candidate])).toEqual({ kind: "none" });
+    expect(
+      select([completedSource([completionReview({ reviewer: "ken-autopilot" })]), candidate]),
+    ).toEqual({ kind: "none" });
   });
 
-  it("rejects stale and missing review IDs", () => {
-    const candidate = phase("candidate", 20);
-    const source = completedSource([
-      completionReview({ id: "review-stale" }),
-      completionReview({ id: "review-current", timestamp: LATER }),
-    ]);
-
-    expect(select([source, candidate], "review-stale")).toBeNull();
-    expect(select([source, candidate], "review-missing")).toBeNull();
-    expect(select([completedSource([]), candidate])).toBeNull();
-  });
-
-  it.each([
-    ["rejected", { decision: "rejected" as const }],
-    ["blocked", { gateOutcome: "needs-attention" as const }],
-    ["partial gate", { gateOutcome: "review" as const }],
-    ["approval gate", { gateOutcome: "waiting-for-approval" as const }],
-  ])("rejects a %s completion review", (_name, reviewOverrides) => {
-    const source = completedSource([completionReview(reviewOverrides)]);
-
-    expect(select([source, phase("candidate", 20)])).toBeNull();
-  });
-
-  it("requires a non-archived source that is Done", () => {
-    const candidate = phase("candidate", 20);
-    const archived = completedSource(undefined, { archivedAt: LATER });
-    const stillInReview = completedSource(undefined, { status: "review", completedAt: null });
-    const userOverridden = completedSource(undefined, {
-      overrides: {
-        status: { value: "done", source: "user", updatedAt: LATER },
-        referenceIds: null,
-      },
-    });
-
-    expect(select([archived, candidate])).toBeNull();
-    expect(select([stillInReview, candidate])).toBeNull();
-    expect(select([userOverridden, candidate])).toBeNull();
-  });
-
-  it("skips archived and already-Done candidates", () => {
-    const archived = phase("archived", 20, "not-started", { archivedAt: LATER });
-    const done = phase("done", 30, "done");
-    const candidate = phase("candidate", 40, "planning");
-
-    expect(select([completedSource(), archived, done, candidate])).toBe(candidate);
-  });
-
-  it("skips cancelled and otherwise ineligible candidate statuses", () => {
-    const candidates = [
-      phase("cancelled", 20, "cancelled"),
-      phase("waiting", 30, "waiting-for-approval"),
-      phase("active", 40, "in-progress"),
-      phase("review", 50, "review"),
-      phase("attention", 60, "needs-attention"),
-    ];
-    const eligible = phase("eligible", 70, "not-started");
-
-    expect(select([completedSource(), ...candidates, eligible])).toBe(eligible);
-  });
-
-  it("stops when the next phase is already bound or user-overridden", () => {
-    const bound = phase("bound", 20, "planning", {
-      session: { sessionId: "bound-session", sessionPath: "/sessions/bound.jsonl" },
-    });
-    const afterBound = phase("after-bound", 30, "not-started");
-    const overridden = phase("overridden", 20, "not-started", {
-      overrides: {
-        status: { value: "not-started", source: "user", updatedAt: LATER },
-        referenceIds: null,
-      },
-    });
-    const afterOverride = phase("after-override", 30, "planning");
-
-    expect(select([completedSource(), bound, afterBound])).toBeNull();
-    expect(select([completedSource(), overridden, afterOverride])).toBeNull();
-  });
-
-  it("searches strictly after the source in stable Roadmap order", () => {
-    const before = phase("before", 10, "not-started");
-    const source = completedSource();
-    const sameOrderAfter = phase("same-order-after", 10, "planning");
-    const later = phase("later", 20, "not-started");
-
-    expect(select([before, source, sameOrderAfter, later])).toBe(sameOrderAfter);
-  });
-
-  it("uses phase order rather than document position", () => {
-    const later = phase("later", 30, "planning");
-    const source = completedSource();
+  it("classifies every eligible branch regardless of order", () => {
     const earlier = phase("earlier", 5, "not-started");
+    const later = phase("later", 30, "planning");
 
-    expect(select([later, source, earlier])).toBe(later);
+    expect(select([later, completedSource(), earlier])).toEqual({
+      kind: "ambiguous",
+      phases: [earlier, later],
+    });
   });
 
-  it("returns null at the end of the Roadmap", () => {
-    expect(select([completedSource()])).toBeNull();
+  it("does not break equal-order ambiguity by document position", () => {
+    const left = phase("left", 20, "not-started");
+    const right = phase("right", 20, "planning");
+
+    expect(select([completedSource(), left, right])).toEqual({
+      kind: "ambiguous",
+      phases: [left, right],
+    });
+  });
+
+  it("excludes blocked, waiting, archived, overridden, terminal, and bound phases", () => {
+    const excluded = [
+      phase("blocked", 20, "needs-attention"),
+      phase("waiting", 30, "waiting-for-approval"),
+      phase("archived", 40, "not-started", { archivedAt: LATER }),
+      phase("done", 50, "done"),
+      phase("cancelled", 60, "cancelled"),
+      phase("bound", 70, "planning", {
+        session: { sessionId: "other", sessionPath: "/sessions/other.jsonl" },
+      }),
+      phase("overridden", 80, "not-started", {
+        overrides: {
+          status: { value: "not-started", source: "user", updatedAt: LATER },
+          referenceIds: null,
+        },
+      }),
+    ];
+    const eligible = phase("eligible", 90, "not-started");
+
+    expect(select([completedSource(), ...excluded, eligible])).toEqual({
+      kind: "unique",
+      phase: eligible,
+    });
+  });
+
+  it("returns none when no phase is automatically eligible", () => {
+    expect(select([completedSource()])).toEqual({ kind: "none" });
+  });
+});
+
+describe("AppSidecarRoadmapPhaseAdvancementCoordinator", () => {
+  const sessionLink = {
+    sessionId: "completed-session",
+    sessionPath: "/sessions/completed.jsonl",
+  };
+
+  function advancementSnapshot(
+    confirmed: boolean,
+    reviewer: "ken" | "ken-autopilot" = "ken-autopilot",
+  ) {
+    const review = completionReview({ reviewer });
+    const checkpoint = {
+      type: "phase-advancement-checkpoint",
+      id: "checkpoint-auto",
+      completionReviewId: review.id,
+      completedPhaseId: "source",
+      nextPhaseId: "next",
+      reviewer,
+      timestamp: LATER,
+    } as const;
+    const source = completedSource([review], {
+      roadmapEvents: [
+        review,
+        checkpoint,
+        ...(confirmed
+          ? [
+              {
+                type: "phase-advancement-confirmation" as const,
+                id: "confirmation-auto",
+                checkpointId: checkpoint.id,
+                nextPhaseId: "next",
+                actor: "system" as const,
+                operationId: `automatic-phase-advancement:${checkpoint.id}`,
+                timestamp: LATER,
+              },
+            ]
+          : []),
+      ],
+    });
+    const target = phase("next", 20, "not-started", {
+      session: confirmed ? sessionLink : null,
+    });
+    return { checkpoint, snapshot: snapshot([source, target]), target };
+  }
+
+  function interleavedSnapshot(confirmed: boolean) {
+    const current = advancementSnapshot(confirmed);
+    const otherSession = {
+      sessionId: "other-session",
+      sessionPath: "/sessions/other.jsonl",
+    };
+    const otherReview = completionReview({
+      id: "review-other",
+      reviewer: "ken-autopilot",
+      timestamp: "2026-08-12T12:02:00.000Z",
+    });
+    const otherCheckpoint = {
+      type: "phase-advancement-checkpoint",
+      id: "checkpoint-other",
+      completionReviewId: otherReview.id,
+      completedPhaseId: "source-other",
+      nextPhaseId: "next-other",
+      reviewer: "ken-autopilot",
+      timestamp: "2026-08-12T12:03:00.000Z",
+    } as const;
+    const otherSource = completedSource([otherReview], {
+      id: "source-other",
+      order: 30,
+      session: otherSession,
+      roadmapEvents: [
+        otherReview,
+        otherCheckpoint,
+        {
+          type: "phase-advancement-confirmation",
+          id: "confirmation-other",
+          checkpointId: otherCheckpoint.id,
+          nextPhaseId: otherCheckpoint.nextPhaseId,
+          actor: "system",
+          operationId: `automatic-phase-advancement:${otherCheckpoint.id}`,
+          timestamp: "2026-08-12T12:04:00.000Z",
+        },
+      ],
+    });
+    const otherTarget = phase("next-other", 40, "planning", { session: otherSession });
+    return {
+      ...current,
+      snapshot: snapshot([
+        current.snapshot.document.phases[0]!,
+        current.target,
+        otherSource,
+        otherTarget,
+      ]),
+    };
+  }
+  it.each([false, true])("restores planning context when Notes commit is %s", async (confirmed) => {
+    const fixture = advancementSnapshot(confirmed);
+    const status = confirmed ? "already-bound" : "accepted";
+    const outcome: ProjectNotesAutomaticPhaseAdvancementOutcome = {
+      status,
+      operationId: `automatic-phase-advancement:${fixture.checkpoint.id}`,
+      snapshot: fixture.snapshot,
+      phase: fixture.target,
+      references: [],
+      session: sessionLink,
+    };
+    const calls: Array<Parameters<ProjectNotesRepository["confirmAutomaticPhaseAdvancement"]>> = [];
+    const repository: Pick<ProjectNotesRepository, "load" | "confirmAutomaticPhaseAdvancement"> = {
+      async load(_cwd) {
+        return { status: "ok", snapshot: fixture.snapshot, recoveredFromBackup: false };
+      },
+      async confirmAutomaticPhaseAdvancement(...args) {
+        calls.push(args);
+        return outcome;
+      },
+    };
+    let context: ActivePhaseContextV1 | undefined;
+    const session: RoadmapPhaseAdvancementSession = {
+      getState: () => ({ cwd: "/project", ...sessionLink }),
+      async setActivePhaseContext(next) {
+        context = next;
+      },
+    };
+    const coordinator = createAppSidecarRoadmapPhaseAdvancementCoordinator({
+      repository,
+      now: () => LATER,
+    });
+
+    await expect(coordinator.recover(session)).resolves.toMatchObject({ status });
+    expect(calls).toEqual([
+      [
+        "/project",
+        expect.objectContaining({
+          checkpointId: fixture.checkpoint.id,
+          destinationSession: sessionLink,
+        }),
+      ],
+    ]);
+    expect(context).toMatchObject({
+      phase: { id: "next" },
+      session: sessionLink,
+      executionStage: "planning",
+    });
+  });
+
+  it("preserves manual Ken's explicit Start gate after review and restart", async () => {
+    const fixture = advancementSnapshot(false, "ken");
+    let confirmationCalls = 0;
+    let contextWrites = 0;
+    const repository: Pick<ProjectNotesRepository, "load" | "confirmAutomaticPhaseAdvancement"> = {
+      async load() {
+        return { status: "ok", snapshot: fixture.snapshot, recoveredFromBackup: false };
+      },
+      async confirmAutomaticPhaseAdvancement() {
+        confirmationCalls += 1;
+        throw new Error("Manual advancement must use the explicit Start gate");
+      },
+    };
+    const session: RoadmapPhaseAdvancementSession = {
+      getState: () => ({ cwd: "/project", ...sessionLink }),
+      async setActivePhaseContext() {
+        contextWrites += 1;
+      },
+    };
+
+    await expect(
+      createAppSidecarRoadmapPhaseAdvancementCoordinator({ repository }).recover(session),
+    ).resolves.toEqual({ status: "none" });
+    await expect(
+      createAppSidecarRoadmapPhaseAdvancementCoordinator({ repository }).recover(session),
+    ).resolves.toEqual({ status: "none" });
+    expect(confirmationCalls).toBe(0);
+    expect(contextWrites).toBe(0);
+  });
+
+  it("recovers its pending checkpoint when another session has the globally newest record", async () => {
+    const fixture = interleavedSnapshot(false);
+    expect(selectLatestRoadmapPhaseAdvancement(fixture.snapshot)).toMatchObject({
+      checkpoint: { id: "checkpoint-other" },
+    });
+    const calls: string[] = [];
+    const repository: Pick<ProjectNotesRepository, "load" | "confirmAutomaticPhaseAdvancement"> = {
+      async load() {
+        return { status: "ok", snapshot: fixture.snapshot, recoveredFromBackup: false };
+      },
+      async confirmAutomaticPhaseAdvancement(_cwd, request) {
+        calls.push(request.checkpointId);
+        return {
+          status: "accepted",
+          operationId: `automatic-phase-advancement:${fixture.checkpoint.id}`,
+          snapshot: fixture.snapshot,
+          phase: fixture.target,
+          references: [],
+          session: sessionLink,
+        };
+      },
+    };
+    const coordinator = createAppSidecarRoadmapPhaseAdvancementCoordinator({ repository });
+    const session: RoadmapPhaseAdvancementSession = {
+      getState: () => ({ cwd: "/project", ...sessionLink }),
+      async setActivePhaseContext() {},
+    };
+
+    await expect(coordinator.recover(session)).resolves.toMatchObject({ status: "accepted" });
+    expect(calls).toEqual([fixture.checkpoint.id]);
+  });
+
+  it("retries its system-confirmed checkpoint after restart despite a newer other-session record", async () => {
+    const fixture = interleavedSnapshot(true);
+    const calls: string[] = [];
+    const repository: Pick<ProjectNotesRepository, "load" | "confirmAutomaticPhaseAdvancement"> = {
+      async load() {
+        return { status: "ok", snapshot: fixture.snapshot, recoveredFromBackup: false };
+      },
+      async confirmAutomaticPhaseAdvancement(_cwd, request) {
+        calls.push(request.checkpointId);
+        return {
+          status: "already-bound",
+          operationId: `automatic-phase-advancement:${fixture.checkpoint.id}`,
+          snapshot: fixture.snapshot,
+          phase: fixture.target,
+          references: [],
+          session: sessionLink,
+        };
+      },
+    };
+    const session: RoadmapPhaseAdvancementSession = {
+      getState: () => ({ cwd: "/project", ...sessionLink }),
+      async setActivePhaseContext() {},
+    };
+
+    await expect(
+      createAppSidecarRoadmapPhaseAdvancementCoordinator({ repository }).recover(session),
+    ).resolves.toMatchObject({ status: "already-bound" });
+    await expect(
+      createAppSidecarRoadmapPhaseAdvancementCoordinator({ repository }).recover(session),
+    ).resolves.toMatchObject({ status: "already-bound" });
+    expect(calls).toEqual([fixture.checkpoint.id, fixture.checkpoint.id]);
+  });
+
+  it("fails closed when the matching checkpoint has ambiguous phase candidates", async () => {
+    const fixture = advancementSnapshot(false);
+    fixture.snapshot.document.phases.push(phase("competing", 30));
+    let confirmationCalls = 0;
+    const repository: Pick<ProjectNotesRepository, "load" | "confirmAutomaticPhaseAdvancement"> = {
+      async load() {
+        return { status: "ok", snapshot: fixture.snapshot, recoveredFromBackup: false };
+      },
+      async confirmAutomaticPhaseAdvancement() {
+        confirmationCalls += 1;
+        throw new Error("Ambiguous recovery must not reach repository confirmation");
+      },
+    };
+    const session: RoadmapPhaseAdvancementSession = {
+      getState: () => ({ cwd: "/project", ...sessionLink }),
+      async setActivePhaseContext() {},
+    };
+
+    await expect(
+      createAppSidecarRoadmapPhaseAdvancementCoordinator({ repository }).recover(session),
+    ).resolves.toEqual({ status: "none" });
+    expect(confirmationCalls).toBe(0);
   });
 });
 

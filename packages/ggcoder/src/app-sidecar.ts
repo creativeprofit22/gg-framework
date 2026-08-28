@@ -266,6 +266,7 @@ import {
   AppSidecarPlanHandoff,
   type ApprovedPlanConsumptionIdentity,
 } from "./app-sidecar-plan-handoff.js";
+import { createAppSidecarRoadmapPhaseAdvancementCoordinator } from "./app-sidecar-phase-advancement.js";
 import {
   parsePhaseAdvancementStartBody,
   parsePhaseAdvancementStartRoute,
@@ -2199,6 +2200,10 @@ async function createSession(
   const roadmapReviewRuns =
     new AppSidecarRoadmapReviewRunCoordinator<AppSidecarFinalReviewAttempt>();
   let settledRoadmapReviewVerdict: { verdict: AutopilotVerdict | null } | null = null;
+  const roadmapPhaseAdvancement = createAppSidecarRoadmapPhaseAdvancementCoordinator({
+    repository: notesRepository,
+    onCommittedSnapshot: broadcastNotesSnapshot,
+  });
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
     cwd,
     repository: notesRepository,
@@ -2215,6 +2220,12 @@ async function createSession(
     },
     onFinalReview: (attempt) => {
       if (attempt.actor === "ken-autopilot") roadmapReviewRuns.record(attempt);
+    },
+    afterFinalReview: async () => {
+      const outcome = await roadmapPhaseAdvancement.recover(session);
+      if (outcome.status === "stale" || outcome.status === "invalid-confirmation") {
+        log("WARN", "app-sidecar", "automatic roadmap phase binding deferred", { outcome });
+      }
     },
     onReviewReady: (trigger, metadata) => {
       const outcome = roadmapReviewScheduler.enqueue(trigger);
@@ -2315,6 +2326,9 @@ async function createSession(
   planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
   if (mode === "code") {
     await phaseBinding.reconcile(session);
+    await roadmapPhaseAdvancement.recover(session).catch((error) =>
+      captureSidecarError(error, "app-sidecar.roadmap-phase-advancement-restore"),
+    );
     await reconcileActivePhaseVerificationStage({ cwd, repository: notesRepository, session });
     if (projectAutopilot.isEnabled(cwd)) {
       void drainScheduledRoadmapReview("Recovered persisted Roadmap review trigger.").catch(

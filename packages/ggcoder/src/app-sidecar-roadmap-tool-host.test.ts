@@ -829,6 +829,10 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     const reviewRuns = new AppSidecarRoadmapReviewRunCoordinator<unknown>();
     expect(scheduler.replay([phase])).toMatchObject([{ status: "queued" }]);
     const recordFinalReview = vi.spyOn(repository, "recordRoadmapFinalReview");
+    const afterFinalReview = vi.fn(async () => {
+      if (decision === "accepted") throw new Error("binding unavailable");
+    });
+    const onError = vi.fn();
     let toolResult: unknown;
     let claimedReviewId: string | undefined;
     const host = new AppSidecarRoadmapToolHost({
@@ -844,6 +848,8 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
         "verification-automatic-review",
       ),
       now: () => "2026-08-23T10:02:00.000Z",
+      afterFinalReview,
+      onError,
     });
     const autopilotTool = host.createSessionTools("ken-autopilot")[0]!;
 
@@ -904,6 +910,16 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
         : {}),
     });
     expect(recordFinalReview).toHaveBeenCalledOnce();
+    if (decision === "accepted") {
+      expect(afterFinalReview).toHaveBeenCalledOnce();
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "binding unavailable" }),
+        expect.objectContaining({ phaseId: phase.id }),
+      );
+    } else {
+      expect(afterFinalReview).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+    }
     const persisted = await repository.load(cwd);
     expect(persisted.status).toBe("ok");
     if (persisted.status !== "ok") throw new Error("automatic review result did not persist");

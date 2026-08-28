@@ -352,7 +352,7 @@ export interface NotesRoadmapPhaseAdvancementConfirmation {
   id: string;
   checkpointId: string;
   nextPhaseId: string;
-  actor: "user";
+  actor: "user" | "system";
   operationId: string;
   timestamp: string;
 }
@@ -2334,8 +2334,8 @@ function validateRoadmapEvents(
       if (record.nextPhaseId !== checkpoint.nextPhaseId) {
         return validationError(`${eventPath}.nextPhaseId`, "expected the checkpoint next phase ID");
       }
-      if (record.actor !== "user") {
-        return validationError(`${eventPath}.actor`, "expected fixed human actor user");
+      if (record.actor !== "user" && record.actor !== "system") {
+        return validationError(`${eventPath}.actor`, "expected actor user or system");
       }
       if (!isNonEmptyString(record.operationId)) {
         return validationError(`${eventPath}.operationId`, "expected a stable operation ID");

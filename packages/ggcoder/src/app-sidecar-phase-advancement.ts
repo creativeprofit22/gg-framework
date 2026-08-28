@@ -1,12 +1,22 @@
-import type {
-  NotesPhase,
-  NotesRoadmapPhaseAdvancementCheckpoint,
-  NotesRoadmapPhaseAdvancementConfirmation,
+import {
+  notesSessionLinksEqual,
+  type NotesPhase,
+  type NotesRoadmapPhaseAdvancementCheckpoint,
+  type NotesRoadmapPhaseAdvancementConfirmation,
 } from "@kenkaiiii/gg-core/project-notes";
-import type { ProjectNotesSnapshot } from "./project-notes-repository.js";
+import { createActivePhaseContext, type ActivePhaseContextV1 } from "./phase-context.js";
+import type {
+  ProjectNotesAutomaticPhaseAdvancementOutcome,
+  ProjectNotesRepository,
+  ProjectNotesSnapshot,
+} from "./project-notes-repository.js";
 
 export type RoadmapPhaseAdvancementMode = "manual" | "autopilot";
 export type RoadmapPhaseAdvancementState = "pending" | "confirmed" | "stale";
+export type RoadmapPhaseEligibility =
+  | { kind: "none" }
+  | { kind: "unique"; phase: NotesPhase }
+  | { kind: "ambiguous"; phases: NotesPhase[] };
 
 export interface RoadmapPhaseAdvancementPresentation {
   state: RoadmapPhaseAdvancementState;
@@ -14,6 +24,26 @@ export interface RoadmapPhaseAdvancementPresentation {
   confirmation: NotesRoadmapPhaseAdvancementConfirmation | null;
   completedPhase: NotesPhase;
   nextPhase: NotesPhase | null;
+}
+
+export interface RoadmapPhaseAdvancementSession {
+  getState(): { cwd: string; sessionId: string; sessionPath: string | null };
+  setActivePhaseContext(context: ActivePhaseContextV1 | undefined): Promise<void>;
+}
+
+export interface AppSidecarRoadmapPhaseAdvancementCoordinator {
+  coordinate(
+    checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
+    expectedRevision: number,
+    session: RoadmapPhaseAdvancementSession,
+  ): Promise<
+    ProjectNotesAutomaticPhaseAdvancementOutcome | { status: "none" | "missing-session-path" }
+  >;
+  recover(
+    session: RoadmapPhaseAdvancementSession,
+  ): Promise<
+    ProjectNotesAutomaticPhaseAdvancementOutcome | { status: "none" | "missing-session-path" }
+  >;
 }
 
 function orderedRoadmapPhases(snapshot: ProjectNotesSnapshot): NotesPhase[] {
@@ -30,20 +60,21 @@ function latestCompletionReview(phase: NotesPhase) {
   return [...phase.roadmapEvents].reverse().find((event) => event.type === "completion-review");
 }
 
-/** Select the exact first eligible phase protected by an authoritative completion review. */
+/** Classify every automatically startable phase after authoritative completion. */
 export function selectNextEligibleRoadmapPhase(
   snapshot: ProjectNotesSnapshot,
   completedPhaseId: string,
   completionReviewId: string,
   mode: RoadmapPhaseAdvancementMode,
-): NotesPhase | null {
-  const orderedPhases = orderedRoadmapPhases(snapshot);
-  const sourceIndex = orderedPhases.findIndex((phase) => phase.id === completedPhaseId);
-  if (sourceIndex < 0) return null;
-
-  const source = orderedPhases[sourceIndex]!;
-  if (source.archivedAt !== null || source.status !== "done" || source.overrides.status !== null) {
-    return null;
+): RoadmapPhaseEligibility {
+  const source = snapshot.document.phases.find((phase) => phase.id === completedPhaseId);
+  if (
+    !source ||
+    source.archivedAt !== null ||
+    source.status !== "done" ||
+    source.overrides.status !== null
+  ) {
+    return { kind: "none" };
   }
   const latestReview = latestCompletionReview(source);
   const expectedReviewer = mode === "manual" ? "ken" : "ken-autopilot";
@@ -54,29 +85,25 @@ export function selectNextEligibleRoadmapPhase(
     latestReview.decision !== "accepted" ||
     latestReview.gateOutcome !== "done"
   ) {
-    return null;
+    return { kind: "none" };
   }
 
-  for (let index = sourceIndex + 1; index < orderedPhases.length; index += 1) {
-    const candidate = orderedPhases[index]!;
-    if (
-      candidate.archivedAt !== null ||
-      (candidate.status !== "not-started" && candidate.status !== "planning")
-    ) {
-      continue;
-    }
-    return candidate.session === null && candidate.overrides.status === null ? candidate : null;
-  }
-  return null;
+  const phases = orderedRoadmapPhases(snapshot).filter(
+    (candidate) =>
+      candidate.id !== completedPhaseId &&
+      candidate.archivedAt === null &&
+      (candidate.status === "not-started" || candidate.status === "planning") &&
+      candidate.overrides.status === null &&
+      candidate.session === null,
+  );
+  if (phases.length === 0) return { kind: "none" };
+  if (phases.length === 1) return { kind: "unique", phase: phases[0]! };
+  return { kind: "ambiguous", phases };
 }
 
-/**
- * Reconstruct the newest durable advancement checkpoint without causing side effects.
- * Restarts call this selector only to present state; they never launch a phase.
- */
-export function selectLatestRoadmapPhaseAdvancement(
+function roadmapPhaseAdvancementPresentations(
   snapshot: ProjectNotesSnapshot,
-): RoadmapPhaseAdvancementPresentation | null {
+): RoadmapPhaseAdvancementPresentation[] {
   const candidates = orderedRoadmapPhases(snapshot).flatMap((phase, roadmapIndex) =>
     phase.roadmapEvents.flatMap((event, eventIndex) =>
       event.type === "phase-advancement-checkpoint"
@@ -84,38 +111,108 @@ export function selectLatestRoadmapPhaseAdvancement(
         : [],
     ),
   );
-  const latest = candidates.sort((left, right) => {
-    const timestampOrder =
-      Date.parse(right.checkpoint.timestamp) - Date.parse(left.checkpoint.timestamp);
-    return (
-      timestampOrder || right.roadmapIndex - left.roadmapIndex || right.eventIndex - left.eventIndex
-    );
-  })[0];
-  if (!latest) return null;
+  return candidates
+    .sort((left, right) => {
+      const timestampOrder =
+        Date.parse(right.checkpoint.timestamp) - Date.parse(left.checkpoint.timestamp);
+      return (
+        timestampOrder ||
+        right.roadmapIndex - left.roadmapIndex ||
+        right.eventIndex - left.eventIndex
+      );
+    })
+    .map(({ phase, checkpoint }) => {
+      const confirmation =
+        phase.roadmapEvents.find(
+          (event): event is NotesRoadmapPhaseAdvancementConfirmation =>
+            event.type === "phase-advancement-confirmation" && event.checkpointId === checkpoint.id,
+        ) ?? null;
+      const mode: RoadmapPhaseAdvancementMode =
+        checkpoint.reviewer === "ken" ? "manual" : "autopilot";
+      const eligibility = selectNextEligibleRoadmapPhase(
+        snapshot,
+        checkpoint.completedPhaseId,
+        checkpoint.completionReviewId,
+        mode,
+      );
+      const nextPhase =
+        snapshot.document.phases.find((candidate) => candidate.id === checkpoint.nextPhaseId) ??
+        null;
+      const targetMatches =
+        eligibility.kind === "unique" && eligibility.phase.id === checkpoint.nextPhaseId;
 
-  const confirmation =
-    latest.phase.roadmapEvents.find(
-      (event): event is NotesRoadmapPhaseAdvancementConfirmation =>
-        event.type === "phase-advancement-confirmation" &&
-        event.checkpointId === latest.checkpoint.id,
-    ) ?? null;
-  const mode: RoadmapPhaseAdvancementMode =
-    latest.checkpoint.reviewer === "ken" ? "manual" : "autopilot";
-  const selected = selectNextEligibleRoadmapPhase(
-    snapshot,
-    latest.checkpoint.completedPhaseId,
-    latest.checkpoint.completionReviewId,
-    mode,
-  );
-  const nextPhase =
-    snapshot.document.phases.find((phase) => phase.id === latest.checkpoint.nextPhaseId) ?? null;
-  const targetMatches = selected?.id === latest.checkpoint.nextPhaseId;
+      return {
+        state: confirmation ? "confirmed" : targetMatches ? "pending" : "stale",
+        checkpoint,
+        confirmation,
+        completedPhase: phase,
+        nextPhase,
+      };
+    });
+}
+
+/** Reconstruct the newest durable advancement checkpoint without causing side effects. */
+export function selectLatestRoadmapPhaseAdvancement(
+  snapshot: ProjectNotesSnapshot,
+): RoadmapPhaseAdvancementPresentation | null {
+  return roadmapPhaseAdvancementPresentations(snapshot)[0] ?? null;
+}
+
+export function createAppSidecarRoadmapPhaseAdvancementCoordinator(options: {
+  repository: Pick<ProjectNotesRepository, "load" | "confirmAutomaticPhaseAdvancement">;
+  onCommittedSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
+  now?: () => string;
+}): AppSidecarRoadmapPhaseAdvancementCoordinator {
+  const now = options.now ?? (() => new Date().toISOString());
+
+  async function coordinate(
+    checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
+    expectedRevision: number,
+    session: RoadmapPhaseAdvancementSession,
+  ) {
+    if (checkpoint.reviewer !== "ken-autopilot") return { status: "none" } as const;
+    const state = session.getState();
+    if (!state.sessionPath) return { status: "missing-session-path" } as const;
+    const outcome = await options.repository.confirmAutomaticPhaseAdvancement(state.cwd, {
+      checkpointId: checkpoint.id,
+      expectedRevision,
+      destinationSession: { sessionId: state.sessionId, sessionPath: state.sessionPath },
+      timestamp: now(),
+    });
+    if (outcome.status === "accepted" || outcome.status === "already-bound") {
+      options.onCommittedSnapshot?.(outcome.snapshot);
+      await session.setActivePhaseContext(
+        createActivePhaseContext({
+          projectKey: outcome.snapshot.projectKey,
+          phase: outcome.phase,
+          references: outcome.references,
+          session: outcome.session,
+          executionStage: "planning",
+        }),
+      );
+    }
+    return outcome;
+  }
 
   return {
-    state: confirmation ? "confirmed" : targetMatches ? "pending" : "stale",
-    checkpoint: latest.checkpoint,
-    confirmation,
-    completedPhase: latest.phase,
-    nextPhase,
+    coordinate,
+    async recover(session) {
+      const state = session.getState();
+      if (!state.sessionPath) return { status: "missing-session-path" };
+      const loaded = await options.repository.load(state.cwd);
+      if (loaded.status !== "ok") return { status: "none" };
+      const currentSession = { sessionId: state.sessionId, sessionPath: state.sessionPath };
+      const advancement = roadmapPhaseAdvancementPresentations(loaded.snapshot).find((candidate) =>
+        notesSessionLinksEqual(candidate.completedPhase.session, currentSession),
+      );
+      if (
+        !advancement ||
+        advancement.state === "stale" ||
+        (advancement.state === "confirmed" && advancement.confirmation?.actor !== "system")
+      ) {
+        return { status: "none" };
+      }
+      return coordinate(advancement.checkpoint, loaded.snapshot.revision, session);
+    },
   };
 }

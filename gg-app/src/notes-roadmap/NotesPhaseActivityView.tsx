@@ -215,10 +215,11 @@ function renderActivityItem(item: ActivityItem): ReactNode {
     );
   }
   if (event.type === "phase-advancement-confirmation") {
+    const automatic = event.actor === "system";
     return (
       <>
-        <strong>User</strong> {timestamp}
-        <p>Start next phase confirmed.</p>
+        <strong>{automatic ? "System" : "User"}</strong> {timestamp}
+        <p>{automatic ? "Next phase bound automatically." : "Start next phase confirmed."}</p>
       </>
     );
   }

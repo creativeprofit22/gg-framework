@@ -58,13 +58,7 @@ const REQUEST_KEYS = [
   "operationId",
   "confirmRebind",
 ] as const;
-const COMMITTED_KEYS = [
-  "status",
-  "revision",
-  "phaseId",
-  "previousSession",
-  "session",
-] as const;
+const COMMITTED_KEYS = ["status", "revision", "phaseId", "previousSession", "session"] as const;
 const ALREADY_BOUND_KEYS = ["status", "revision", "phaseId", "session"] as const;
 const REVISION_KEYS = ["status", "revision"] as const;
 const STALE_SESSION_KEYS = ["status", "revision", "currentSession"] as const;

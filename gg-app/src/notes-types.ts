@@ -17,6 +17,15 @@ import {
   type ProjectNotesSaveOutcome,
   type ProjectNotesSnapshot,
 } from "@kenkaiiii/gg-core/project-notes";
+import type {
+  ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalPreviewOutcome,
+} from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
+import type {
+  PhaseBindingOutcome,
+  PhaseBindingRequest,
+} from "@kenkaiiii/gg-core/phase-binding-protocol";
+import type { ProjectNotesStorageDiagnostics } from "@kenkaiiii/gg-core/project-notes-diagnostics";
 export {
   isManualCompletionApprovalCommitOutcome,
   isManualCompletionApprovalPreviewOutcome,
@@ -362,21 +371,13 @@ export type ProjectNotesRoadmapBlockerResolutionOutcome =
 
 export interface NotesClient {
   getNotes(): Promise<ProjectNotesReadOutcome>;
-  getNotesDiagnostics(): Promise<import("@kenkaiiii/gg-core/project-notes-diagnostics").ProjectNotesStorageDiagnostics>;
-  bindRoadmapPhase(
-    request: import("@kenkaiiii/gg-core/phase-binding-protocol").PhaseBindingRequest,
-  ): Promise<import("@kenkaiiii/gg-core/phase-binding-protocol").PhaseBindingOutcome>;
+  getNotesDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
+  bindRoadmapPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
   previewManualCompletionApproval(
     phaseId: string,
     expectedRevision: number,
-  ): Promise<
-    import("@kenkaiiii/gg-core/manual-completion-approval-protocol").ManualCompletionApprovalPreviewOutcome
-  >;
-  commitManualCompletionApproval(
-    nonce: string,
-  ): Promise<
-    import("@kenkaiiii/gg-core/manual-completion-approval-protocol").ManualCompletionApprovalCommitOutcome
-  >;
+  ): Promise<ManualCompletionApprovalPreviewOutcome>;
+  commitManualCompletionApproval(nonce: string): Promise<ManualCompletionApprovalCommitOutcome>;
   migrateNotes(document: NotesDocumentV3): Promise<ProjectNotesMigrationOutcome>;
   saveNotes(expectedRevision: number, document: NotesDocumentV3): Promise<ProjectNotesSaveOutcome>;
   resolveRoadmapBlocker(

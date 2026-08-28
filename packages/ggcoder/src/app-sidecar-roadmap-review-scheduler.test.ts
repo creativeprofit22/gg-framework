@@ -107,7 +107,9 @@ describe("appSidecarRoadmapReviewTrigger", () => {
 
   it("rejects failed, non-review, and completed phases", () => {
     expect(appSidecarRoadmapReviewTrigger(phase([verification("failed")]), projectKey)).toBeNull();
-    expect(appSidecarRoadmapReviewTrigger({ ...phase(), status: "in-progress" }, projectKey)).toBeNull();
+    expect(
+      appSidecarRoadmapReviewTrigger({ ...phase(), status: "in-progress" }, projectKey),
+    ).toBeNull();
     expect(appSidecarRoadmapReviewTrigger({ ...phase(), status: "done" }, projectKey)).toBeNull();
   });
 
@@ -124,9 +126,9 @@ describe("appSidecarRoadmapReviewTrigger", () => {
   });
 
   it("separates identical phase triggers from different projects", () => {
-    expect(createAppSidecarRoadmapReviewTrigger("phase-1", "verification-1", "/project-a")).not.toEqual(
-      createAppSidecarRoadmapReviewTrigger("phase-1", "verification-1", "/project-b"),
-    );
+    expect(
+      createAppSidecarRoadmapReviewTrigger("phase-1", "verification-1", "/project-a"),
+    ).not.toEqual(createAppSidecarRoadmapReviewTrigger("phase-1", "verification-1", "/project-b"));
   });
 });
 
@@ -153,13 +155,15 @@ describe("AppSidecarRoadmapReviewScheduler", () => {
     let now = 1_000;
     const scheduler = new AppSidecarRoadmapReviewScheduler({ now: () => now, retryDelaysMs: [50] });
     const trigger = appSidecarRoadmapReviewTrigger(phase(), projectKey)!;
-    const seenTriggers: typeof trigger[] = [];
-    const execute = vi.fn(async (candidate: typeof trigger): Promise<AppSidecarFinalReviewExecutionResult> => {
-      seenTriggers.push(candidate);
-      return seenTriggers.length === 1
-        ? { status: "retryable-reviewer-error", message: "provider unavailable" }
-        : committed;
-    });
+    const seenTriggers: (typeof trigger)[] = [];
+    const execute = vi.fn(
+      async (candidate: typeof trigger): Promise<AppSidecarFinalReviewExecutionResult> => {
+        seenTriggers.push(candidate);
+        return seenTriggers.length === 1
+          ? { status: "retryable-reviewer-error", message: "provider unavailable" }
+          : committed;
+      },
+    );
     scheduler.enqueue(trigger);
 
     const first = await scheduler.drain(execute);
@@ -169,7 +173,9 @@ describe("AppSidecarRoadmapReviewScheduler", () => {
     const second = await scheduler.drain(execute);
     expect(second.map((outcome) => outcome.status)).toEqual(["started", "completed"]);
     expect(seenTriggers).toEqual([trigger, trigger]);
-    expect(seenTriggers.map(({ statusUpdateId, reviewId }) => ({ statusUpdateId, reviewId }))).toEqual([
+    expect(
+      seenTriggers.map(({ statusUpdateId, reviewId }) => ({ statusUpdateId, reviewId })),
+    ).toEqual([
       { statusUpdateId: trigger.statusUpdateId, reviewId: trigger.reviewId },
       { statusUpdateId: trigger.statusUpdateId, reviewId: trigger.reviewId },
     ]);
@@ -181,8 +187,8 @@ describe("AppSidecarRoadmapReviewScheduler", () => {
     scheduler.enqueue(trigger);
     expect(scheduler.enqueue(trigger).status).toBe("duplicate");
     let release!: (result: AppSidecarFinalReviewExecutionResult) => void;
-    const running = scheduler.drain(() =>
-      new Promise<AppSidecarFinalReviewExecutionResult>((resolve) => (release = resolve)),
+    const running = scheduler.drain(
+      () => new Promise<AppSidecarFinalReviewExecutionResult>((resolve) => (release = resolve)),
     );
     expect(scheduler.enqueue(trigger).status).toBe("duplicate");
     release(committed);
@@ -233,7 +239,8 @@ describe("AppSidecarRoadmapReviewScheduler", () => {
       code: "roadmap-final-review-scheduling-failed",
       headline: "Roadmap final review will retry",
       message: `roadmap-final-review-scheduling-failed: phase phase-1, trigger ${trigger.triggerId}, observed revision 25.`,
-      guidance: "The persisted Review trigger remains eligible and will be rediscovered after recovery.",
+      guidance:
+        "The persisted Review trigger remains eligible and will be rediscovered after recovery.",
     });
   });
 });

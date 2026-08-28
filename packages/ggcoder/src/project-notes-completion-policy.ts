@@ -97,7 +97,8 @@ export function latestVerificationExceptionEventForReview(
   if (
     verification?.verification !== "exception-requested" ||
     (implementation !== undefined &&
-      phase.roadmapEvents.lastIndexOf(verification) <= phase.roadmapEvents.lastIndexOf(implementation)) ||
+      phase.roadmapEvents.lastIndexOf(verification) <=
+        phase.roadmapEvents.lastIndexOf(implementation)) ||
     !notesSessionLinksEqual(verification.verificationSession, phase.session)
   ) {
     return null;

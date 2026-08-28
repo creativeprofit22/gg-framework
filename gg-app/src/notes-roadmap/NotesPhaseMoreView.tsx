@@ -18,7 +18,10 @@ const STORAGE_DIAGNOSTIC_COPY: Record<StorageConsistency, readonly [string, stri
     "The daemon did not receive one valid application identity.",
   ],
   "project-mismatch": ["Wrong project", "The active phase and canonical project do not match."],
-  "store-unavailable": ["Store unavailable", "The daemon could not read the canonical Notes store."],
+  "store-unavailable": [
+    "Store unavailable",
+    "The daemon could not read the canonical Notes store.",
+  ],
 };
 
 function storageDiagnosticTitle(consistency: StorageConsistency): string {
@@ -62,9 +65,7 @@ export function NotesStorageDiagnostics({
       setDiagnostics(await onLoad());
     } catch (loadError) {
       setError(
-        loadError instanceof Error
-          ? loadError.message
-          : "Storage diagnostics could not be loaded.",
+        loadError instanceof Error ? loadError.message : "Storage diagnostics could not be loaded.",
       );
     } finally {
       setLoading(false);

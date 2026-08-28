@@ -64,9 +64,18 @@ describe("manual completion approval protocol", () => {
   });
 
   it.each([
-    { status: "ready", checkpoint: { ...checkpoint, session: { ...checkpoint.session, sessionPath: null } } },
+    {
+      status: "ready",
+      checkpoint: { ...checkpoint, session: { ...checkpoint.session, sessionPath: null } },
+    },
     { status: "unmet-gate", revision: 4, code: "unknown" },
-    { status: "committed", revision: 5, phaseId: "phase-1", approvalId: "approval-1", reviewer: "ken" },
+    {
+      status: "committed",
+      revision: 5,
+      phaseId: "phase-1",
+      approvalId: "approval-1",
+      reviewer: "ken",
+    },
   ])("fails closed for invalid outcomes %o", (value) => {
     expect(
       isManualCompletionApprovalPreviewOutcome(value) ||

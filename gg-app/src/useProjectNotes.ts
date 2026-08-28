@@ -173,6 +173,7 @@ export function useProjectNotes(
   const [saveDiagnostics, setSaveDiagnostics] = useState<NotesSaveResult | null>(null);
   const [authorityDiagnostics, setAuthorityDiagnostics] = useState<NotesAuthorityDiagnostic[]>([]);
   const [authorityReady, setAuthorityReady] = useState(false);
+  const [authoritativeRevision, setAuthoritativeRevision] = useState<number | null>(null);
 
   const documentRef = useRef(document);
   const activeCwdRef = useRef(cwd);
@@ -219,6 +220,7 @@ export function useProjectNotes(
       authoritativeRef.current = snapshot;
       modeRef.current = "sidecar";
       setAuthorityReady(true);
+      setAuthoritativeRevision(snapshot.revision);
       setLoadDiagnostics(null);
       setSaveDiagnostics(null);
       renderSidecarState();
@@ -238,6 +240,7 @@ export function useProjectNotes(
       modeRef.current = "fallback";
       authoritativeRef.current = null;
       setAuthorityReady(false);
+      setAuthoritativeRevision(null);
       const pending = queueRef.current;
       const appliedOperationResults: Array<{
         mutation: NotesMutation;
@@ -288,6 +291,7 @@ export function useProjectNotes(
     inFlightMutationIdRef.current = null;
     authoritativeRef.current = null;
     setAuthorityReady(false);
+    setAuthoritativeRevision(null);
     setAuthorityDiagnostics([]);
     setLoadDiagnostics(null);
     setSaveDiagnostics(null);
@@ -523,6 +527,7 @@ export function useProjectNotes(
             outcome.snapshot.revision > authoritativeRef.current.revision
           ) {
             authoritativeRef.current = outcome.snapshot;
+            setAuthoritativeRevision(outcome.snapshot.revision);
           }
           setSaveDiagnostics(null);
           setAuthorityDiagnostics((current) =>
@@ -1440,7 +1445,7 @@ export function useProjectNotes(
     value: document.reference,
     onChange,
     document,
-    revision: authoritativeRef.current?.revision ?? null,
+    revision: authoritativeRevision,
     authorityReady,
     refresh,
     changeCurrentFocus,

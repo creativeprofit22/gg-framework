@@ -47,7 +47,9 @@ describe("Roadmap storage diagnostics", () => {
     render(<NotesStorageDiagnostics phaseId="phase-1" onLoad={async () => diagnostics} />);
 
     expect(await screen.findByText("Bound elsewhere")).toBeTruthy();
-    expect(screen.getByText("This phase belongs to another session. Resume that session instead.")).toBeTruthy();
+    expect(
+      screen.getByText("This phase belongs to another session. Resume that session instead."),
+    ).toBeTruthy();
     expect(screen.getByText("session-other")).toBeTruthy();
     expect(screen.getByText("com.ggcoder.local-fork")).toBeTruthy();
   });
@@ -64,9 +66,7 @@ describe("Roadmap storage diagnostics", () => {
     const application = screen.getByText("com.ggcoder.local-fork").closest("div");
     fireEvent.click(application!.querySelector("button")!);
 
-    await waitFor(() =>
-      expect(writeText).toHaveBeenCalledWith("com.ggcoder.local-fork"),
-    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("com.ggcoder.local-fork"));
     expect(screen.getByRole("status").textContent).toBe("Application copied.");
   });
 

@@ -8,10 +8,7 @@ import type {
   PhaseBindingRequest,
   ProjectNotesStorageDiagnostics,
 } from "../notes-types";
-import {
-  ManualCompletionApprovalControl,
-  PhaseRebindControl,
-} from "./NotesPhaseOverviewView";
+import { ManualCompletionApprovalControl, PhaseRebindControl } from "./NotesPhaseOverviewView";
 
 const previousSession = { sessionId: "session-a", sessionPath: "C:\\sessions\\a.jsonl" };
 const phase: NotesPhase = {
@@ -94,7 +91,11 @@ describe("manual completion approval", () => {
     fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
     expect(await screen.findByText("implementation-1")).toBeTruthy();
     expect(screen.getByText("verification-1")).toBeTruthy();
-    expect(screen.getByText("Confirming marks this phase Done. Any Notes change requires a fresh preview.")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Confirming marks this phase Done. Any Notes change requires a fresh preview.",
+      ),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Confirm completion" }));
 
     expect(onCommit).toHaveBeenCalledWith("nonce-1");
@@ -114,7 +115,9 @@ describe("manual completion approval", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
-    expect(await screen.findByText("Notes changed. Refresh and review the current evidence again.")).toBeTruthy();
+    expect(
+      await screen.findByText("Notes changed. Refresh and review the current evidence again."),
+    ).toBeTruthy();
     expect(onStale).toHaveBeenCalledOnce();
 
     cleanup();
@@ -122,13 +125,19 @@ describe("manual completion approval", () => {
       <ManualCompletionApprovalControl
         phase={reviewPhase}
         expectedRevision={8}
-        onPreview={async () => ({ status: "unmet-gate", revision: 8, code: "verification-exception" })}
+        onPreview={async () => ({
+          status: "unmet-gate",
+          revision: 8,
+          code: "verification-exception",
+        })}
         onCommit={async () => ({ status: "nonce-not-found" })}
         onSuccess={vi.fn()}
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
-    expect(await screen.findByText("Manual approval cannot accept a verification exception.")).toBeTruthy();
+    expect(
+      await screen.findByText("Manual approval cannot accept a verification exception."),
+    ).toBeTruthy();
 
     cleanup();
     render(
@@ -166,27 +175,33 @@ describe("manual completion approval", () => {
     renderControl();
     fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm completion" }));
-    expect(await screen.findByText("The approval preview expired. Review the current evidence again.")).toBeTruthy();
+    expect(
+      await screen.findByText("The approval preview expired. Review the current evidence again."),
+    ).toBeTruthy();
     expect(onSuccess).not.toHaveBeenCalled();
 
     cleanup();
     renderControl();
     fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm completion" }));
-    expect(await screen.findByText("Notes changed. Refresh and review the current evidence again.")).toBeTruthy();
+    expect(
+      await screen.findByText("Notes changed. Refresh and review the current evidence again."),
+    ).toBeTruthy();
     expect(onSuccess).toHaveBeenCalledOnce();
   });
 });
 
 describe("phase rebind confirmation", () => {
   it("shows both session identities and derives the destination from diagnostics", async () => {
-    const onRebind = vi.fn(async (_request: PhaseBindingRequest): Promise<PhaseBindingOutcome> => ({
-      status: "committed",
-      revision: 8,
-      phaseId: "phase-1",
-      previousSession,
-      session: diagnostics.currentSession,
-    }));
+    const onRebind = vi.fn(
+      async (_request: PhaseBindingRequest): Promise<PhaseBindingOutcome> => ({
+        status: "committed",
+        revision: 8,
+        phaseId: "phase-1",
+        previousSession,
+        session: diagnostics.currentSession,
+      }),
+    );
     const onSuccess = vi.fn();
     render(
       <PhaseRebindControl
@@ -236,7 +251,9 @@ describe("phase rebind confirmation", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Confirm rebind" }));
 
     expect(
-      await screen.findByText("Notes changed. Refresh diagnostics and confirm the current revision again."),
+      await screen.findByText(
+        "Notes changed. Refresh diagnostics and confirm the current revision again.",
+      ),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Rebind to this session" })).toBeTruthy();
   });

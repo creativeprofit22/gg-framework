@@ -754,7 +754,10 @@ function validateGenericSaveCompletionAuthority(
       return validationError(`${pathPrefix}.status`, "completed phase status is repository-owned");
     }
     if (prior && !isDeepStrictEqual(prior.completedAt, phase.completedAt)) {
-      return validationError(`${pathPrefix}.completedAt`, "completion provenance is repository-owned");
+      return validationError(
+        `${pathPrefix}.completedAt`,
+        "completion provenance is repository-owned",
+      );
     }
     if (phase.overrides.status?.value === "done" && prior?.overrides.status?.value !== "done") {
       return validationError(
@@ -3149,7 +3152,8 @@ export class ProjectNotesRepository {
     const operationId = `automatic-phase-advancement:${request.checkpointId}`;
     const sourcePhaseIndex = current.document.phases.findIndex((phase) =>
       phase.roadmapEvents.some(
-        (event) => event.type === "phase-advancement-checkpoint" && event.id === request.checkpointId,
+        (event) =>
+          event.type === "phase-advancement-checkpoint" && event.id === request.checkpointId,
       ),
     );
     if (sourcePhaseIndex < 0) return { status: "stale", reason: "checkpoint-not-found" };
@@ -3191,7 +3195,9 @@ export class ProjectNotesRepository {
       (event): event is NotesRoadmapPhaseAdvancementConfirmation =>
         event.type === "phase-advancement-confirmation" && event.checkpointId === checkpoint.id,
     );
-    const targetPhase = current.document.phases.find((phase) => phase.id === checkpoint.nextPhaseId);
+    const targetPhase = current.document.phases.find(
+      (phase) => phase.id === checkpoint.nextPhaseId,
+    );
     if (existingConfirmation) {
       const eligible = current.document.phases.filter(
         (phase) =>

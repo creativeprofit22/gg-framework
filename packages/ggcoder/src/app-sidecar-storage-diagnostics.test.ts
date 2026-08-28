@@ -76,7 +76,10 @@ describe("app sidecar storage diagnostics", () => {
       "bound-to-other-session",
     ],
     [input({ applicationIdentity: null }), "identity-mismatch"],
-    [input({ activePhaseContext: { ...activePhase, projectKey: "c:/work/other" } }), "project-mismatch"],
+    [
+      input({ activePhaseContext: { ...activePhase, projectKey: "c:/work/other" } }),
+      "project-mismatch",
+    ],
     [input({ storeAvailable: false }), "store-unavailable"],
   ] as const)("classifies the exact runtime relationship as %s", (fixture, expected) => {
     expect(buildProjectNotesStorageDiagnostics(fixture).consistency).toBe(expected);
@@ -98,7 +101,7 @@ describe("app sidecar storage diagnostics", () => {
 
   it("uses only the injected repository and resolved runtime values", async () => {
     const repository = {
-      paths: vi.fn((cwd: string) => ({
+      paths: vi.fn((_cwd: string) => ({
         directory: path.join("C:\\agent", "project-notes"),
         primary: path.join("C:\\agent", "project-notes", "project.json"),
         backup: path.join("C:\\agent", "project-notes", "project.backup.json"),

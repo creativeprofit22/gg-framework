@@ -36,7 +36,9 @@ describe("pane Notes storage diagnostics", () => {
   it("parses the shared daemon response through native IPC", async () => {
     invoke.mockResolvedValue(diagnostics);
 
-    await expect(createPaneAgentClient("pane-a").getNotesDiagnostics()).resolves.toEqual(diagnostics);
+    await expect(createPaneAgentClient("pane-a").getNotesDiagnostics()).resolves.toEqual(
+      diagnostics,
+    );
     expect(invoke).toHaveBeenCalledWith("agent_notes_diagnostics", { paneId: "pane-a" });
   });
 

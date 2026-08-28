@@ -34,6 +34,7 @@ import type {
   PhaseBindingOutcome,
   PhaseBindingRequest,
   PhaseStartResult,
+  ProjectNotesStorageDiagnostics,
 } from "../notes-types";
 import type { NotesLifecyclePresentation } from "../notes-lifecycle-presentation";
 import type { PhaseView } from "./NotesPhaseViewNavigation";
@@ -96,17 +97,13 @@ export interface NotesPhaseDetailProps {
     expectedOccurrenceKey: string,
   ): Promise<NotesReminderMutationResult>;
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
-  onGetStorageDiagnostics(): Promise<
-    import("../notes-types").ProjectNotesStorageDiagnostics
-  >;
+  onGetStorageDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
   onPreviewManualCompletionApproval(
     phaseId: string,
     expectedRevision: number,
   ): Promise<ManualCompletionApprovalPreviewOutcome>;
-  onCommitManualCompletionApproval(
-    nonce: string,
-  ): Promise<ManualCompletionApprovalCommitOutcome>;
+  onCommitManualCompletionApproval(nonce: string): Promise<ManualCompletionApprovalCommitOutcome>;
   onResumePhase(phaseId: string, link: NotesSessionLink): Promise<void>;
   startUnavailableReason: string | null;
   actionDisabled: boolean;

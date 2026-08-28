@@ -307,7 +307,11 @@ export function ManualCompletionApprovalControl({
         <p>Requires current passed verification after the latest successful implementation.</p>
       </div>
       {preview ? (
-        <div className="notes-manual-completion-confirm" role="group" aria-label="Confirm manual completion">
+        <div
+          className="notes-manual-completion-confirm"
+          role="group"
+          aria-label="Confirm manual completion"
+        >
           <dl>
             <div>
               <dt>Implementation</dt>

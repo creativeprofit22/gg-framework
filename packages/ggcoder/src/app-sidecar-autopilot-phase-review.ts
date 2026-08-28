@@ -105,13 +105,15 @@ export function classifyAppSidecarFinalReviewAttempt(
   const attempt =
     finalReviewClaim === undefined
       ? relevantAttempts.at(-1)
-      : [...relevantAttempts].reverse().find(
-          (candidate) =>
-            candidate.input.update_id === finalReviewClaim.statusUpdateId &&
-            candidate.input.final_review?.review_id === finalReviewClaim.reviewId &&
-            (candidate.result.result === "completion-review-committed" ||
-              candidate.result.result === "completion-review-duplicate"),
-        ) ?? relevantAttempts.at(-1);
+      : ([...relevantAttempts]
+          .reverse()
+          .find(
+            (candidate) =>
+              candidate.input.update_id === finalReviewClaim.statusUpdateId &&
+              candidate.input.final_review?.review_id === finalReviewClaim.reviewId &&
+              (candidate.result.result === "completion-review-committed" ||
+                candidate.result.result === "completion-review-duplicate"),
+          ) ?? relevantAttempts.at(-1));
   if (!attempt) return { status: "missing" };
   if (attempt.result.result === "stale-revision") {
     return { status: "stale-revision", attempt };
@@ -128,7 +130,7 @@ export function classifyAppSidecarFinalReviewAttempt(
 export function finalReviewExecutionResult(
   phase: KenAutopilotBoundPhase,
   attempts: readonly AppSidecarFinalReviewAttempt[],
-  textVerdict: AutopilotVerdict,
+  _textVerdict: AutopilotVerdict,
 ): AppSidecarFinalReviewExecutionResult {
   const classification = classifyAppSidecarFinalReviewAttempt(
     phase.id,
@@ -192,7 +194,7 @@ export function finalReviewExecutionResult(
     code:
       attempt.result.result === "completion-review-committed" ||
       attempt.result.result === "completion-review-duplicate"
-        ? attempt.result.unmetGateCodes[0] ?? "completion-gate-remains-review"
+        ? (attempt.result.unmetGateCodes[0] ?? "completion-gate-remains-review")
         : attempt.result.result,
   };
 }

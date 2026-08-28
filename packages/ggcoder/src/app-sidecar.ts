@@ -2326,9 +2326,11 @@ async function createSession(
   planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
   if (mode === "code") {
     await phaseBinding.reconcile(session);
-    await roadmapPhaseAdvancement.recover(session).catch((error) =>
-      captureSidecarError(error, "app-sidecar.roadmap-phase-advancement-restore"),
-    );
+    await roadmapPhaseAdvancement
+      .recover(session)
+      .catch((error) =>
+        captureSidecarError(error, "app-sidecar.roadmap-phase-advancement-restore"),
+      );
     await reconcileActivePhaseVerificationStage({ cwd, repository: notesRepository, session });
     if (projectAutopilot.isEnabled(cwd)) {
       void drainScheduledRoadmapReview("Recovered persisted Roadmap review trigger.").catch(
@@ -3790,10 +3792,10 @@ async function createSession(
       new Error(`Roadmap final-review retries exhausted: ${result.status}`),
       "app-sidecar.roadmap-final-review-scheduling",
       {
-      code: failure.code,
-      traceId: trigger.triggerId,
-      phaseId: trigger.phaseId,
-      observedRevision: observedRevision === null ? "unavailable" : String(observedRevision),
+        code: failure.code,
+        traceId: trigger.triggerId,
+        phaseId: trigger.phaseId,
+        observedRevision: observedRevision === null ? "unavailable" : String(observedRevision),
       },
     );
     log("ERROR", "app-sidecar", "roadmap final-review scheduling failed", {

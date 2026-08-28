@@ -61,13 +61,7 @@ const rawInputSchema = {
         expected_revision: { type: "number", minimum: 0 },
         operation_id: { type: "string", maxLength: 256 },
       },
-      required: [
-        "action",
-        "phase_id",
-        "expected_project_key",
-        "expected_revision",
-        "operation_id",
-      ],
+      required: ["action", "phase_id", "expected_project_key", "expected_revision", "operation_id"],
       additionalProperties: false,
     },
     {

@@ -506,7 +506,8 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       for (const decision of ["accepted", "rejected"] as const) {
         const output = await tool.execute(
           RoadmapStatusParams.parse({
-            update_id: role === "ken-autopilot" ? claim.statusUpdateId : `gated-${role}-${decision}`,
+            update_id:
+              role === "ken-autopilot" ? claim.statusUpdateId : `gated-${role}-${decision}`,
             phase_id: claim.phaseId,
             expected_revision: 7,
             transition: "review",

@@ -1057,10 +1057,7 @@ describe("ProjectNotesRepository phase binding compare-and-swap", () => {
       snapshot: { revision: 1 },
     });
     await expect(
-      doneRepository.bindPhaseToCurrentSession(
-        doneCwd,
-        request(doneCwd, { expectedRevision: 1 }),
-      ),
+      doneRepository.bindPhaseToCurrentSession(doneCwd, request(doneCwd, { expectedRevision: 1 })),
     ).resolves.toEqual({ status: "phase-terminal" });
 
     await expect(
@@ -4937,7 +4934,9 @@ describe("ProjectNotesRepository completion transactions", () => {
     if (initial.status !== "ok") throw new Error("Expected session-conflict Notes");
     const conflicted = structuredClone(initial.snapshot.document);
     conflicted.phases[2]!.session = expectedSession;
-    await expect(repository.save(cwd, initial.snapshot.revision, conflicted)).resolves.toMatchObject({
+    await expect(
+      repository.save(cwd, initial.snapshot.revision, conflicted),
+    ).resolves.toMatchObject({
       status: "ok",
     });
     await recordCompleteEvidence(repository, cwd, expectedSession, 3);

@@ -6,13 +6,16 @@ describe("roadmap_bind tool", () => {
     const handle = vi.fn(async () => ({ status: "missing" as const }));
     const tool = createRoadmapBindTool(handle);
 
-    await tool.execute({
-      action: "bind-current",
-      phase_id: "phase-1",
-      expected_project_key: "c:/work/project",
-      expected_revision: 4,
-      operation_id: "operation-1",
-    }, {} as never);
+    await tool.execute(
+      {
+        action: "bind-current",
+        phase_id: "phase-1",
+        expected_project_key: "c:/work/project",
+        expected_revision: 4,
+        operation_id: "operation-1",
+      },
+      {} as never,
+    );
 
     expect(handle).toHaveBeenCalledWith({
       version: 1,

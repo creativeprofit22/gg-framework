@@ -189,16 +189,20 @@ describe("Autopilot phase completion review", () => {
       status: "no-attempt",
     });
     expect(
-      finalReviewExecutionResult(
-        reviewPhase,
-        [attempt({ result: "stale-revision" })],
-        { kind: "all_clear" },
-      ),
+      finalReviewExecutionResult(reviewPhase, [attempt({ result: "stale-revision" })], {
+        kind: "all_clear",
+      }),
     ).toMatchObject({ status: "typed-non-commit", code: "stale-revision", retryable: true });
     expect(
       finalReviewExecutionResult(
         reviewPhase,
-        [attempt({ decision: "accepted", gateOutcome: "review", unmetGateCodes: ["stale-verification"] })],
+        [
+          attempt({
+            decision: "accepted",
+            gateOutcome: "review",
+            unmetGateCodes: ["stale-verification"],
+          }),
+        ],
         { kind: "all_clear" },
       ),
     ).toMatchObject({ status: "terminal-gate-rejection", code: "stale-verification" });
@@ -208,7 +212,13 @@ describe("Autopilot phase completion review", () => {
     expect(
       finalReviewExecutionResult(
         reviewPhase,
-        [attempt({ result: "completion-review-duplicate", decision: "rejected", reason: "Revise" })],
+        [
+          attempt({
+            result: "completion-review-duplicate",
+            decision: "rejected",
+            reason: "Revise",
+          }),
+        ],
         { kind: "all_clear" },
       ),
     ).toMatchObject({ status: "duplicate", verdict: { kind: "prompt", body: "Revise" } });

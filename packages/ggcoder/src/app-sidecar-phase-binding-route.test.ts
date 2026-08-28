@@ -29,13 +29,32 @@ describe("phase binding route", () => {
 
   it("parses only the strict shared request body", () => {
     expect(parsePhaseBindingBody(body)).toEqual(body);
-    expect(parsePhaseBindingBody({ ...body, destinationSession: { sessionId: "chosen" } })).toBeNull();
+    expect(
+      parsePhaseBindingBody({ ...body, destinationSession: { sessionId: "chosen" } }),
+    ).toBeNull();
     expect(parsePhaseBindingBody({ ...body, confirmRebind: false })).toBeNull();
   });
 
   it.each([
-    [{ status: "committed", revision: 5, phaseId: "phase-1", previousSession: body.expectedPreviousSession, session: body.expectedPreviousSession }, 200],
-    [{ status: "already-bound", revision: 5, phaseId: "phase-1", session: body.expectedPreviousSession }, 200],
+    [
+      {
+        status: "committed",
+        revision: 5,
+        phaseId: "phase-1",
+        previousSession: body.expectedPreviousSession,
+        session: body.expectedPreviousSession,
+      },
+      200,
+    ],
+    [
+      {
+        status: "already-bound",
+        revision: 5,
+        phaseId: "phase-1",
+        session: body.expectedPreviousSession,
+      },
+      200,
+    ],
     [{ status: "phase-not-found" }, 404],
     [{ status: "missing" }, 404],
     [{ status: "stale-revision", revision: 5 }, 409],

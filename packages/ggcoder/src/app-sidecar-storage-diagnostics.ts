@@ -73,8 +73,10 @@ export function createAppSidecarStorageDiagnostics(
   };
 }
 
-export interface BuildProjectNotesStorageDiagnosticsInput
-  extends Omit<ProjectNotesStorageDiagnostics, "version" | "daemonOwner" | "consistency"> {
+export interface BuildProjectNotesStorageDiagnosticsInput extends Omit<
+  ProjectNotesStorageDiagnostics,
+  "version" | "daemonOwner" | "consistency"
+> {
   storeAvailable: boolean;
 }
 
@@ -104,7 +106,8 @@ function diagnosticConsistency(
   if (!input.storeAvailable) return "store-unavailable";
   if (
     input.projectKey !== input.canonicalCwd ||
-    (input.activePhaseContext !== null && input.activePhaseContext.projectKey !== input.projectKey) ||
+    (input.activePhaseContext !== null &&
+      input.activePhaseContext.projectKey !== input.projectKey) ||
     (input.persistedPhaseBinding !== null &&
       input.persistedPhaseBinding.projectKey !== input.projectKey)
   ) {

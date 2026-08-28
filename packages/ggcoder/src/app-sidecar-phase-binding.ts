@@ -147,7 +147,9 @@ function bindingPreflight(
   if (loaded.snapshot.revision !== request.expectedRevision) {
     return { status: "stale-revision", revision: loaded.snapshot.revision };
   }
-  const phase = loaded.snapshot.document.phases.find((candidate) => candidate.id === request.phaseId);
+  const phase = loaded.snapshot.document.phases.find(
+    (candidate) => candidate.id === request.phaseId,
+  );
   if (!phase) return { status: "phase-not-found" };
   if (phase.archivedAt !== null) return { status: "phase-archived" };
   if (phase.status === "done") return { status: "phase-terminal" };

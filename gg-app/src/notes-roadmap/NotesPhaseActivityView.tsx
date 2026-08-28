@@ -243,7 +243,11 @@ function renderActivityItem(item: ActivityItem): ReactNode {
     return (
       <>
         <strong>Coding session</strong> {timestamp}
-        <p>{event.action === "bind-current" ? "Phase session linked." : "Phase authority transferred."}</p>
+        <p>
+          {event.action === "bind-current"
+            ? "Phase session linked."
+            : "Phase authority transferred."}
+        </p>
       </>
     );
   }

@@ -2073,7 +2073,9 @@ function validateRoadmapEvents(
       if (previousSessionError) return previousSessionError;
       const sessionError = validateNotesSessionLink(record.session, `${eventPath}.session`);
       if (sessionError || record.session === null) {
-        return sessionError ?? validationError(`${eventPath}.session`, "a bound session is required");
+        return (
+          sessionError ?? validationError(`${eventPath}.session`, "a bound session is required")
+        );
       }
       if (
         (record.action === "bind-current" && record.previousSession !== null) ||

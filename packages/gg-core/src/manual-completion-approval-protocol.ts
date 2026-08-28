@@ -1,4 +1,8 @@
-import { isNotesSessionLink, type NotesSessionLink, type ProjectNotesCorruptReason } from "./project-notes.js";
+import {
+  isNotesSessionLink,
+  type NotesSessionLink,
+  type ProjectNotesCorruptReason,
+} from "./project-notes.js";
 
 export const MANUAL_COMPLETION_APPROVAL_GATE_CODES = [
   "phase-not-found",
@@ -114,8 +118,7 @@ export function isManualCompletionApprovalPreviewOutcome(
   if (!isRecord(value)) return false;
   if (value.status === "ready") {
     return (
-      isExactRecord(value, ["status", "checkpoint"] as const) &&
-      isCheckpoint(value.checkpoint)
+      isExactRecord(value, ["status", "checkpoint"] as const) && isCheckpoint(value.checkpoint)
     );
   }
   return isSharedOutcome(value);

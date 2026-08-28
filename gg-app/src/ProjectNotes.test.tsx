@@ -17,6 +17,8 @@ import {
   v3NotesKey,
 } from "./notes-storage";
 import type {
+  ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalPreviewOutcome,
   NotesClient,
   NotesDocumentV3,
   NotesPhase,
@@ -29,6 +31,7 @@ import type {
   ProjectNotesSaveOutcome,
   ProjectNotesSnapshot,
   ProjectNotesStorageDiagnostics,
+  PhaseBindingOutcome,
   ReminderClaimOutcome,
   ReminderReserveOutcome,
 } from "./notes-types";
@@ -341,19 +344,15 @@ class FakeProjectNotesClient implements NotesClient {
     };
   }
 
-  async bindRoadmapPhase(): Promise<import("./notes-types").PhaseBindingOutcome> {
+  async bindRoadmapPhase(): Promise<PhaseBindingOutcome> {
     return { status: "missing" };
   }
 
-  async previewManualCompletionApproval(): Promise<
-    import("./notes-types").ManualCompletionApprovalPreviewOutcome
-  > {
+  async previewManualCompletionApproval(): Promise<ManualCompletionApprovalPreviewOutcome> {
     return { status: "missing" };
   }
 
-  async commitManualCompletionApproval(): Promise<
-    import("./notes-types").ManualCompletionApprovalCommitOutcome
-  > {
+  async commitManualCompletionApproval(): Promise<ManualCompletionApprovalCommitOutcome> {
     return { status: "nonce-not-found" };
   }
 
@@ -1851,7 +1850,6 @@ describe("ProjectNotes", () => {
     expect(
       (screen.getByRole("button", { name: "Start next phase" }) as HTMLButtonElement).disabled,
     ).toBe(true);
-
 
     selectNotesTab("Archive");
     const restore = screen.getByRole("button", { name: "Restore phase: Reviewed target" });

@@ -43,7 +43,9 @@ class FakeSession implements PhaseBindingSession {
     this.active = context;
   }
 
-  async clearActivePhaseContext(reason: "cleared" | "binding-compensation" | "binding-reconciliation" | "phase-rebound") {
+  async clearActivePhaseContext(
+    reason: "cleared" | "binding-compensation" | "binding-reconciliation" | "phase-rebound",
+  ) {
     this.clearReasons.push(reason);
     this.active = undefined;
   }

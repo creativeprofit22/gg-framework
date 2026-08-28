@@ -163,7 +163,10 @@ describe("project Notes contract", () => {
     overridden.overrides.status = { value: "not-started", source: "user", updatedAt: NOW };
 
     expect(
-      classifyRoadmapAutoStartEligibility([target, candidate("source", 0), bound, overridden], "source"),
+      classifyRoadmapAutoStartEligibility(
+        [target, candidate("source", 0), bound, overridden],
+        "source",
+      ),
     ).toMatchObject({ kind: "unique", phase: { id: "target" } });
     expect(
       classifyRoadmapAutoStartEligibility([target, candidate("other", 99)], "source"),

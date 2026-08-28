@@ -53,7 +53,8 @@ type ErrorResponse = { status: "error"; message: "notes request failed" };
 export function createAppSidecarNotesHandler(
   options: AppSidecarNotesHandlerOptions,
 ): AppSidecarNotesHandler {
-  const { repository, diagnostics, manualCompletionApproval, onCommittedSnapshot, onError } = options;
+  const { repository, diagnostics, manualCompletionApproval, onCommittedSnapshot, onError } =
+    options;
 
   return {
     handle(req, res, context, requestUrl, method) {

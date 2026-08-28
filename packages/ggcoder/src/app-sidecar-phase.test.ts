@@ -1310,21 +1310,18 @@ describe("production launchBoundPhase orchestration", () => {
           await expect(
             executeRoadmap(
               host.createSessionTools(reviewer)[0]!,
-              roadmapInput(
-                activeFinalReviewClaim?.statusUpdateId ?? `${phaseId}-rejected-status`,
-                {
-                  phase_id: phaseId,
-                  expected_revision: await currentRevision(liveRepository, cwd),
-                  transition: "review",
-                  progress: `${phaseId} needs one correction`,
-                  evidence: [`${phaseId} reviewer found a release blocker`],
-                  final_review: {
-                    review_id: activeFinalReviewClaim?.reviewId ?? `${phaseId}-rejected-review`,
-                    decision: "rejected",
-                    reason: "Correct the release blocker",
-                  },
+              roadmapInput(activeFinalReviewClaim?.statusUpdateId ?? `${phaseId}-rejected-status`, {
+                phase_id: phaseId,
+                expected_revision: await currentRevision(liveRepository, cwd),
+                transition: "review",
+                progress: `${phaseId} needs one correction`,
+                evidence: [`${phaseId} reviewer found a release blocker`],
+                final_review: {
+                  review_id: activeFinalReviewClaim?.reviewId ?? `${phaseId}-rejected-review`,
+                  decision: "rejected",
+                  reason: "Correct the release blocker",
                 },
-              ),
+              }),
             ),
           ).resolves.toMatchObject({
             result: "completion-review-committed",
@@ -1403,21 +1400,18 @@ describe("production launchBoundPhase orchestration", () => {
         await expect(
           executeRoadmap(
             host.createSessionTools(reviewer)[0]!,
-            roadmapInput(
-              activeFinalReviewClaim?.statusUpdateId ?? `${phaseId}-accepted-status`,
-              {
-                phase_id: phaseId,
-                expected_revision: await currentRevision(liveRepository, cwd),
-                transition: "review",
-                progress: `${phaseId} completion accepted`,
-                evidence: [`${phaseId} completion gates passed`],
-                final_review: {
-                  review_id: reviewId,
-                  decision: "accepted",
-                  evidence: [`${reviewer} accepted ${phaseId}`],
-                },
+            roadmapInput(activeFinalReviewClaim?.statusUpdateId ?? `${phaseId}-accepted-status`, {
+              phase_id: phaseId,
+              expected_revision: await currentRevision(liveRepository, cwd),
+              transition: "review",
+              progress: `${phaseId} completion accepted`,
+              evidence: [`${phaseId} completion gates passed`],
+              final_review: {
+                review_id: reviewId,
+                decision: "accepted",
+                evidence: [`${reviewer} accepted ${phaseId}`],
               },
-            ),
+            }),
           ),
         ).resolves.toMatchObject({
           result: "completion-review-committed",

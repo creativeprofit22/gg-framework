@@ -92,9 +92,7 @@ interface RoadmapProps {
     phaseId: string,
     expectedRevision: number,
   ): Promise<ManualCompletionApprovalPreviewOutcome>;
-  onCommitManualCompletionApproval?(
-    nonce: string,
-  ): Promise<ManualCompletionApprovalCommitOutcome>;
+  onCommitManualCompletionApproval?(nonce: string): Promise<ManualCompletionApprovalCommitOutcome>;
   onStartNextPhase(checkpointId: string, nextPhaseId: string): Promise<PhaseStartResult>;
   commands: SlashCommand[];
   onRunCommand(invocation: string): void;

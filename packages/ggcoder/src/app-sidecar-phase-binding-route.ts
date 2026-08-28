@@ -7,7 +7,10 @@ import { requestPathname } from "./app-sidecar-http-json.js";
 
 export const PHASE_BINDING_ROUTE = "/notes/roadmap/phase-binding";
 
-export function isPhaseBindingRoute(method: string | undefined, requestUrl: string | undefined): boolean {
+export function isPhaseBindingRoute(
+  method: string | undefined,
+  requestUrl: string | undefined,
+): boolean {
   return method === "POST" && !!requestUrl && requestPathname(requestUrl) === PHASE_BINDING_ROUTE;
 }
 

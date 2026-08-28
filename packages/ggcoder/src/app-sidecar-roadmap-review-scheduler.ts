@@ -67,7 +67,8 @@ export function appSidecarRoadmapReviewSchedulingFailure(
     code,
     headline: "Roadmap final review will retry",
     message: `${code}: phase ${trigger.phaseId}, trigger ${trigger.triggerId}, observed revision ${observedRevision ?? "unavailable"}.`,
-    guidance: "The persisted Review trigger remains eligible and will be rediscovered after recovery.",
+    guidance:
+      "The persisted Review trigger remains eligible and will be rediscovered after recovery.",
   };
 }
 
@@ -190,7 +191,11 @@ export class AppSidecarRoadmapReviewScheduler {
       if (shouldRetryResult(result, attempt) && attempt < this.maxAttempts) {
         const delay = this.retryDelaysMs[Math.min(attempt - 1, this.retryDelaysMs.length - 1)] ?? 0;
         const nextAttemptAt = this.now() + delay;
-        this.queued.set(triggerId, { trigger: queued.trigger, attempts: attempt, readyAt: nextAttemptAt });
+        this.queued.set(triggerId, {
+          trigger: queued.trigger,
+          attempts: attempt,
+          readyAt: nextAttemptAt,
+        });
         const scheduled = {
           status: "retry-scheduled",
           trigger: queued.trigger,
@@ -205,7 +210,12 @@ export class AppSidecarRoadmapReviewScheduler {
         outcomes.push(failed);
         onOutcome?.(failed);
       } else {
-        const completed = { status: "completed", trigger: queued.trigger, attempt, result } as const;
+        const completed = {
+          status: "completed",
+          trigger: queued.trigger,
+          attempt,
+          result,
+        } as const;
         outcomes.push(completed);
         onOutcome?.(completed);
       }

@@ -99,8 +99,7 @@ function isNullablePhaseLink(value: unknown): value is ProjectNotesDiagnosticPha
 
 function isDiagnosticSessionLink(value: unknown): value is NotesSessionLink {
   return (
-    isNotesSessionLink(value) &&
-    (value.sessionPath === null || isAbsolutePath(value.sessionPath))
+    isNotesSessionLink(value) && (value.sessionPath === null || isAbsolutePath(value.sessionPath))
   );
 }
 

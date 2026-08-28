@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { NotesReferenceInput } from "./notes-reference";
 import { createEmptyNotesDocument, createNotesRepository, v3NotesKey } from "./notes-storage";
 import type {
+  ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalPreviewOutcome,
   NotesClient,
   NotesDocumentV3,
   NotesReferenceOperationResult,
@@ -15,6 +17,7 @@ import type {
   ProjectNotesSaveOutcome,
   ProjectNotesSnapshot,
   ProjectNotesStorageDiagnostics,
+  PhaseBindingOutcome,
 } from "./notes-types";
 import { useProjectNotes } from "./useProjectNotes";
 
@@ -296,19 +299,15 @@ class FakeNotesClient implements NotesClient {
     };
   }
 
-  async bindRoadmapPhase(): Promise<import("./notes-types").PhaseBindingOutcome> {
+  async bindRoadmapPhase(): Promise<PhaseBindingOutcome> {
     return { status: "missing" };
   }
 
-  async previewManualCompletionApproval(): Promise<
-    import("./notes-types").ManualCompletionApprovalPreviewOutcome
-  > {
+  async previewManualCompletionApproval(): Promise<ManualCompletionApprovalPreviewOutcome> {
     return { status: "missing" };
   }
 
-  async commitManualCompletionApproval(): Promise<
-    import("./notes-types").ManualCompletionApprovalCommitOutcome
-  > {
+  async commitManualCompletionApproval(): Promise<ManualCompletionApprovalCommitOutcome> {
     return { status: "nonce-not-found" };
   }
 

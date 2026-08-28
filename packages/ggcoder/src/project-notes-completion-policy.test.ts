@@ -86,7 +86,9 @@ function phase(events: NotesRoadmapEvent[]): NotesPhase {
 
 describe("manual completion approval policy", () => {
   it("accepts only current passed verification after current implementation", () => {
-    expect(evaluateManualCompletionApproval(phase([checkpoint(), verification()]), session)).toEqual({
+    expect(
+      evaluateManualCompletionApproval(phase([checkpoint(), verification()]), session),
+    ).toEqual({
       status: "eligible",
       implementationCheckpointId: "implementation-1",
       verificationStatusUpdateId: "verification-passed",
@@ -100,7 +102,9 @@ describe("manual completion approval policy", () => {
         session,
       ),
     ).toEqual({ status: "unmet-gate", code: "inactive-phase" });
-    expect(evaluateManualCompletionApproval(phase([checkpoint(), verification()]), session)).toEqual({
+    expect(
+      evaluateManualCompletionApproval(phase([checkpoint(), verification()]), session),
+    ).toEqual({
       status: "eligible",
       implementationCheckpointId: "implementation-1",
       verificationStatusUpdateId: "verification-passed",
@@ -114,7 +118,10 @@ describe("manual completion approval policy", () => {
     [phase([checkpoint(), verification("exception-requested")]), "verification-exception"],
     [phase([verification(), checkpoint()]), "stale-verification"],
     [
-      phase([checkpoint({ session: otherSession }), verification("passed", { verificationSession: otherSession })]),
+      phase([
+        checkpoint({ session: otherSession }),
+        verification("passed", { verificationSession: otherSession }),
+      ]),
       "stale-session",
     ],
   ] as const)("rejects %s evidence with %s", (candidate, code) => {
@@ -151,10 +158,16 @@ describe("manual completion approval policy", () => {
 
   it("rejects archived, done, and status-overridden phases", () => {
     expect(
-      evaluateManualCompletionApproval({ ...phase([checkpoint(), verification()]), archivedAt: "2026-08-27T21:00:00.000Z" }, session),
+      evaluateManualCompletionApproval(
+        { ...phase([checkpoint(), verification()]), archivedAt: "2026-08-27T21:00:00.000Z" },
+        session,
+      ),
     ).toEqual({ status: "unmet-gate", code: "archived-phase" });
     expect(
-      evaluateManualCompletionApproval({ ...phase([checkpoint(), verification()]), status: "done" }, session),
+      evaluateManualCompletionApproval(
+        { ...phase([checkpoint(), verification()]), status: "done" },
+        session,
+      ),
     ).toEqual({ status: "unmet-gate", code: "already-done" });
     expect(
       evaluateManualCompletionApproval(

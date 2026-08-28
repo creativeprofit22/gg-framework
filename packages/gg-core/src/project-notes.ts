@@ -391,6 +391,29 @@ export interface NotesPhase {
   roadmapEvents: NotesRoadmapEvent[];
 }
 
+export type NotesRoadmapAutoStartEligibility =
+  | { kind: "none" }
+  | { kind: "unique"; phase: NotesPhase }
+  | { kind: "ambiguous"; phases: NotesPhase[] };
+
+/** Classifies the full, order-independent set of phases eligible for automatic binding. */
+export function classifyRoadmapAutoStartEligibility(
+  phases: readonly NotesPhase[],
+  completedPhaseId: string,
+): NotesRoadmapAutoStartEligibility {
+  const candidates = phases.filter(
+    (phase) =>
+      phase.id !== completedPhaseId &&
+      phase.archivedAt === null &&
+      (phase.status === "not-started" || phase.status === "planning") &&
+      phase.overrides.status === null &&
+      phase.session === null,
+  );
+  if (candidates.length === 0) return { kind: "none" };
+  if (candidates.length === 1) return { kind: "unique", phase: candidates[0]! };
+  return { kind: "ambiguous", phases: candidates };
+}
+
 export function notesSessionLinksEqual(
   left: NotesSessionLink | null,
   right: NotesSessionLink | null,

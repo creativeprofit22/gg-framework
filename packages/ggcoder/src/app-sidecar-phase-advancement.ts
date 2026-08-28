@@ -1,6 +1,8 @@
 import {
+  classifyRoadmapAutoStartEligibility,
   notesSessionLinksEqual,
   type NotesPhase,
+  type NotesRoadmapAutoStartEligibility,
   type NotesRoadmapPhaseAdvancementCheckpoint,
   type NotesRoadmapPhaseAdvancementConfirmation,
 } from "@kenkaiiii/gg-core/project-notes";
@@ -13,10 +15,7 @@ import type {
 
 export type RoadmapPhaseAdvancementMode = "manual" | "autopilot";
 export type RoadmapPhaseAdvancementState = "pending" | "confirmed" | "stale";
-export type RoadmapPhaseEligibility =
-  | { kind: "none" }
-  | { kind: "unique"; phase: NotesPhase }
-  | { kind: "ambiguous"; phases: NotesPhase[] };
+export type RoadmapPhaseEligibility = NotesRoadmapAutoStartEligibility;
 
 export interface RoadmapPhaseAdvancementPresentation {
   state: RoadmapPhaseAdvancementState;
@@ -88,17 +87,7 @@ export function selectNextEligibleRoadmapPhase(
     return { kind: "none" };
   }
 
-  const phases = orderedRoadmapPhases(snapshot).filter(
-    (candidate) =>
-      candidate.id !== completedPhaseId &&
-      candidate.archivedAt === null &&
-      (candidate.status === "not-started" || candidate.status === "planning") &&
-      candidate.overrides.status === null &&
-      candidate.session === null,
-  );
-  if (phases.length === 0) return { kind: "none" };
-  if (phases.length === 1) return { kind: "unique", phase: phases[0]! };
-  return { kind: "ambiguous", phases };
+  return classifyRoadmapAutoStartEligibility(orderedRoadmapPhases(snapshot), completedPhaseId);
 }
 
 function roadmapPhaseAdvancementPresentations(

@@ -78,6 +78,49 @@ describe("selectRoadmapAdvancement", () => {
     },
   );
 
+  it("finds the unique eligible target before the completed source", () => {
+    const target = phase("next", -1);
+
+    expect(selectRoadmapAdvancement([completedWithCheckpoint(), target])).toMatchObject({
+      currentEligiblePhase: { id: "next" },
+      ready: true,
+      recoveryReason: null,
+    });
+    expect(isRoadmapPhaseStartProtected([completedWithCheckpoint(), target], target.id)).toBe(true);
+  });
+
+  it.each([
+    ["equal", 1, 1],
+    ["different", -1, 2],
+  ])("treats %s-order eligible candidates as ambiguous", (_label, leftOrder, rightOrder) => {
+    const result = selectRoadmapAdvancement([
+      completedWithCheckpoint(),
+      phase("next", leftOrder),
+      phase("other", rightOrder),
+    ]);
+
+    expect(result).toMatchObject({
+      currentEligiblePhase: null,
+      ready: false,
+      recoveryReason: expect.stringContaining("2 unbound automatic phases are eligible"),
+    });
+  });
+
+  it("ignores bound and status-overridden phases when classifying the unique target", () => {
+    const bound = phase("bound", -1);
+    bound.session = { sessionId: "session-1", sessionPath: "/session-1" };
+    const overridden = phase("overridden", 2);
+    overridden.overrides.status = { value: "not-started", source: "user", updatedAt: NOW };
+
+    expect(
+      selectRoadmapAdvancement([bound, completedWithCheckpoint(), overridden, phase("next", 3)]),
+    ).toMatchObject({
+      currentEligiblePhase: { id: "next" },
+      ready: true,
+      recoveryReason: null,
+    });
+  });
+
   it("does not infer Start from a completion review without a checkpoint", () => {
     const source = completedWithCheckpoint();
     source.roadmapEvents = source.roadmapEvents.filter(
@@ -104,6 +147,17 @@ describe("selectRoadmapAdvancement", () => {
     expect(selectRoadmapAdvancement([stale, phase("next", 1)])).toBeNull();
   });
 
+  it("explains when no automatic candidate remains", () => {
+    const target = phase("next", 1);
+    target.session = { sessionId: "session-1", sessionPath: "/session-1" };
+
+    expect(selectRoadmapAdvancement([completedWithCheckpoint(), target])).toMatchObject({
+      currentEligiblePhase: null,
+      ready: false,
+      recoveryReason: expect.stringContaining("no longer an unbound automatic candidate"),
+    });
+  });
+
   it("keeps an archived or reordered target visible as a recoverable checkpoint", () => {
     const source = completedWithCheckpoint();
     const target = phase("next", 1);
@@ -113,7 +167,9 @@ describe("selectRoadmapAdvancement", () => {
       nextPhase: { id: "next" },
       currentEligiblePhase: { id: "fallback" },
       ready: false,
-      recoveryReason: expect.stringContaining("Restore next"),
+      recoveryReason: expect.stringContaining(
+        "The only eligible phase is fallback, but the checkpoint targets next",
+      ),
     });
     expect(isRoadmapPhaseStartProtected([source, target, fallback], fallback.id)).toBe(true);
     expect(
@@ -124,10 +180,11 @@ describe("selectRoadmapAdvancement", () => {
     ).toBe(false);
   });
 
-  it("blocks topology changes that replace a ready checkpoint target", () => {
+  it("blocks eligibility changes, but not order changes, for a ready checkpoint target", () => {
     const source = completedWithCheckpoint();
     const target = phase("next", 1);
     const fallback = phase("fallback", 2);
+    fallback.session = { sessionId: "session-1", sessionPath: "/session-1" };
     const phases = [source, target, fallback];
     expect(
       isRoadmapTopologyMutationBlocked(phases, {
@@ -141,7 +198,7 @@ describe("selectRoadmapAdvancement", () => {
         phaseId: fallback.id,
         direction: "up",
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isRoadmapTopologyMutationBlocked(phases, {
         type: "pause-status",

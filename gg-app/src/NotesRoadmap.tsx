@@ -499,7 +499,7 @@ export function NotesRoadmap({
             <h3 id="notes-next-phase-title">
               {advancement.ready
                 ? `Ready for ${advancement.nextPhase.title}`
-                : `Restore ${advancement.nextPhase.title}`}
+                : `Resolve target for ${advancement.nextPhase.title}`}
             </h3>
             <p>
               {advancement.recoveryReason ??

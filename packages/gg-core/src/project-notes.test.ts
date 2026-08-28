@@ -11,6 +11,7 @@ import {
   canonicalProjectKey,
   canonicalReferenceIdentity,
   classifyLegacyNotesLifecycleEvent,
+  classifyRoadmapAutoStartEligibility,
   isNotesCompletionGateOutcome,
   isNotesCompletionUnmetGateCode,
   isNotesDocumentV2,
@@ -143,6 +144,31 @@ function expectError(value: unknown, path: string, message?: string): void {
 }
 
 describe("project Notes contract", () => {
+  it("classifies automatic Roadmap candidates by exact full-set eligibility", async () => {
+    const document = await fixture();
+    const template = document.phases[0]!;
+    const candidate = (id: string, order: number): NotesPhase => ({
+      ...template,
+      id,
+      order,
+      status: "not-started",
+      archivedAt: null,
+      session: null,
+      overrides: { ...template.overrides, status: null },
+    });
+    const target = candidate("target", -1);
+    const bound = candidate("bound", 2);
+    bound.session = { sessionId: "bound", sessionPath: "/bound" };
+    const overridden = candidate("overridden", 3);
+    overridden.overrides.status = { value: "not-started", source: "user", updatedAt: NOW };
+
+    expect(
+      classifyRoadmapAutoStartEligibility([target, candidate("source", 0), bound, overridden], "source"),
+    ).toMatchObject({ kind: "unique", phase: { id: "target" } });
+    expect(
+      classifyRoadmapAutoStartEligibility([target, candidate("other", 99)], "source"),
+    ).toMatchObject({ kind: "ambiguous", phases: [{ id: "target" }, { id: "other" }] });
+  });
   it.each([
     ["pending", "planning"],
     ["in-progress", "in-progress"],

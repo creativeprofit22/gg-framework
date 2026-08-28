@@ -1,3 +1,4 @@
+import { classifyRoadmapAutoStartEligibility } from "@kenkaiiii/gg-core/project-notes";
 import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "../brand";
 import type {
   NotesCompletionGateOutcome,
@@ -106,28 +107,17 @@ export function selectRoadmapAdvancement(phases: readonly NotesPhase[]): Roadmap
   }
   const nextPhase = phases.find((phase) => phase.id === latest.checkpoint.nextPhaseId);
   if (!nextPhase) return null;
-  const sourceOrderIndex = orderedPhases.findIndex(({ phase }) => phase.id === latest.phase.id);
-  const currentEligiblePhase =
-    orderedPhases
-      .slice(sourceOrderIndex + 1)
-      .map(({ phase }) => phase)
-      .find(
-        (phase) =>
-          phase.archivedAt === null &&
-          (phase.status === "not-started" || phase.status === "planning"),
-      ) ?? null;
-  const ready =
-    currentEligiblePhase?.id === nextPhase.id &&
-    nextPhase.session === null &&
-    nextPhase.overrides.status === null;
+  const eligibility = classifyRoadmapAutoStartEligibility(phases, latest.phase.id);
+  const currentEligiblePhase = eligibility.kind === "unique" ? eligibility.phase : null;
+  const ready = eligibility.kind === "unique" && eligibility.phase.id === nextPhase.id;
   let recoveryReason: string | null = null;
   if (!ready) {
     recoveryReason =
-      nextPhase.archivedAt !== null
-        ? `Restore ${nextPhase.title} so it is the first eligible successor before starting another phase.`
-        : currentEligiblePhase && currentEligiblePhase.id !== nextPhase.id
-          ? `Move ${nextPhase.title} ahead of ${currentEligiblePhase.title} to restore the reviewed Roadmap target.`
-          : `Restore ${nextPhase.title} to an unstarted automatic state before confirming advancement.`;
+      eligibility.kind === "none"
+        ? `${nextPhase.title} is no longer an unbound automatic candidate. Restore it to Not started or Planning with automatic status and no linked session.`
+        : eligibility.kind === "ambiguous"
+          ? `${eligibility.phases.length} unbound automatic phases are eligible. Leave only ${nextPhase.title} eligible before starting the reviewed target.`
+          : `The only eligible phase is ${eligibility.phase.title}, but the checkpoint targets ${nextPhase.title}. Restore the reviewed candidate set before starting.`;
   }
   return {
     checkpoint: latest.checkpoint,
@@ -145,15 +135,10 @@ export function isRoadmapPhaseStartProtected(
 ): boolean {
   const advancement = selectRoadmapAdvancement(phases);
   if (!advancement) return false;
-  const ordered = phases
-    .map((phase, documentIndex) => ({ phase, documentIndex }))
-    .sort(
-      (left, right) =>
-        left.phase.order - right.phase.order || left.documentIndex - right.documentIndex,
-    );
-  const sourceIndex = ordered.findIndex(({ phase }) => phase.id === advancement.completedPhase.id);
-  const candidateIndex = ordered.findIndex(({ phase }) => phase.id === phaseId);
-  return sourceIndex >= 0 && candidateIndex > sourceIndex;
+  const eligibility = classifyRoadmapAutoStartEligibility(phases, advancement.completedPhase.id);
+  return eligibility.kind === "unique"
+    ? eligibility.phase.id === phaseId
+    : eligibility.kind === "ambiguous" && eligibility.phases.some((phase) => phase.id === phaseId);
 }
 
 export function isRoadmapTopologyMutationBlocked(
@@ -166,8 +151,7 @@ export function isRoadmapTopologyMutationBlocked(
   if (!nextPhases) return false;
   const next = selectRoadmapAdvancement(nextPhases);
   if (next?.checkpoint.id !== current.checkpoint.id) return true;
-  if (current.ready) return !next.ready;
-  return !next.ready && next.currentEligiblePhase?.id !== current.currentEligiblePhase?.id;
+  return current.ready && !next.ready;
 }
 
 function applyRoadmapTopologyMutation(

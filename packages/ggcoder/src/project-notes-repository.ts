@@ -15,6 +15,7 @@ import {
   canonicalProjectKey,
   canonicalReferenceIdentity,
   classifyLegacyNotesLifecycleEvent,
+  classifyRoadmapAutoStartEligibility,
   isNotesLifecycleEventSource,
   isNotesPhaseStatus,
   isNotesReminderDeliveryChannel,
@@ -1411,16 +1412,10 @@ function selectNextEligibleRoadmapPhaseIndex(
   ) {
     return null;
   }
-  const candidateIndexes = document.phases.flatMap((candidate, index) =>
-    candidate.id !== completedPhaseId &&
-    candidate.archivedAt === null &&
-    (candidate.status === "not-started" || candidate.status === "planning") &&
-    candidate.overrides.status === null &&
-    candidate.session === null
-      ? [index]
-      : [],
-  );
-  return candidateIndexes.length === 1 ? candidateIndexes[0]! : null;
+  const eligibility = classifyRoadmapAutoStartEligibility(document.phases, completedPhaseId);
+  return eligibility.kind === "unique"
+    ? document.phases.findIndex((phase) => phase.id === eligibility.phase.id)
+    : null;
 }
 
 function checkpointForReview(

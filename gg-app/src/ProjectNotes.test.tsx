@@ -1800,7 +1800,7 @@ describe("ProjectNotes", () => {
     expect(activity?.textContent).not.toContain("Start next phase confirmed.");
   });
 
-  it("blocks ordinary Start for a stale successor and exposes target recovery", async () => {
+  it("recovers a stale target without overridden candidates shadowing it", async () => {
     const cwd = "/work/stale-next-phase";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("stale next phase");
@@ -1826,6 +1826,7 @@ describe("ProjectNotes", () => {
     const fallback = phase("fallback", "not-started");
     fallback.title = "Fallback successor";
     fallback.order = 2;
+    fallback.overrides.status = { value: "not-started", source: "user", updatedAt: NOW };
     document.phases = [completed, reviewedTarget, fallback];
     client.seed(cwd, document);
     const onStartPhase = vi.fn();
@@ -1846,17 +1847,11 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
-    expect(screen.getByRole("region", { name: "Restore Reviewed target" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Resolve target for Reviewed target" })).toBeTruthy();
     expect(
       (screen.getByRole("button", { name: "Start next phase" }) as HTMLButtonElement).disabled,
     ).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "Inspect phase: Fallback successor" }));
-    expect(
-      (screen.getByRole("button", { name: "Start phase" }) as HTMLButtonElement).disabled,
-    ).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "Back to roadmap" }));
-    expect(onStartPhase).not.toHaveBeenCalled();
 
     selectNotesTab("Archive");
     const restore = screen.getByRole("button", { name: "Restore phase: Reviewed target" });

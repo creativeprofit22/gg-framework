@@ -111,13 +111,16 @@ describe("appSidecarRoadmapReviewTrigger", () => {
     expect(appSidecarRoadmapReviewTrigger({ ...phase(), status: "done" }, projectKey)).toBeNull();
   });
 
-  it("keeps a current verification trigger stable across unrelated Notes revisions", () => {
-    const before = appSidecarRoadmapReviewTrigger(phase(), projectKey);
+  it("keeps deterministic, distinct event IDs across unrelated Notes revisions", () => {
+    const before = appSidecarRoadmapReviewTrigger(phase(), projectKey)!;
     const after = appSidecarRoadmapReviewTrigger(
       { ...phase(), updatedAt: "2026-08-23T12:05:00.000Z" },
       projectKey,
     );
     expect(after).toEqual(before);
+    expect(before.statusUpdateId).toMatch(/^autopilot-final-status-/);
+    expect(before.reviewId).toMatch(/^autopilot-final-/);
+    expect(before.statusUpdateId).not.toBe(before.reviewId);
   });
 
   it("separates identical phase triggers from different projects", () => {
@@ -146,24 +149,30 @@ describe("AppSidecarRoadmapReviewRunCoordinator", () => {
 });
 
 describe("AppSidecarRoadmapReviewScheduler", () => {
-  it("retries a reviewer failure with a fake clock and then commits", async () => {
+  it("retries a reviewer failure with the same trigger and event IDs", async () => {
     let now = 1_000;
     const scheduler = new AppSidecarRoadmapReviewScheduler({ now: () => now, retryDelaysMs: [50] });
     const trigger = appSidecarRoadmapReviewTrigger(phase(), projectKey)!;
-    const execute = vi
-      .fn<() => Promise<AppSidecarFinalReviewExecutionResult>>()
-      .mockResolvedValueOnce({ status: "retryable-reviewer-error", message: "provider unavailable" })
-      .mockResolvedValueOnce(committed);
+    const seenTriggers: typeof trigger[] = [];
+    const execute = vi.fn(async (candidate: typeof trigger): Promise<AppSidecarFinalReviewExecutionResult> => {
+      seenTriggers.push(candidate);
+      return seenTriggers.length === 1
+        ? { status: "retryable-reviewer-error", message: "provider unavailable" }
+        : committed;
+    });
     scheduler.enqueue(trigger);
 
     const first = await scheduler.drain(execute);
     expect(first.map((outcome) => outcome.status)).toEqual(["started", "retry-scheduled"]);
-    expect(execute).toHaveBeenCalledTimes(1);
     expect(await scheduler.drain(execute)).toEqual([]);
     now += 50;
     const second = await scheduler.drain(execute);
     expect(second.map((outcome) => outcome.status)).toEqual(["started", "completed"]);
-    expect(execute).toHaveBeenCalledTimes(2);
+    expect(seenTriggers).toEqual([trigger, trigger]);
+    expect(seenTriggers.map(({ statusUpdateId, reviewId }) => ({ statusUpdateId, reviewId }))).toEqual([
+      { statusUpdateId: trigger.statusUpdateId, reviewId: trigger.reviewId },
+      { statusUpdateId: trigger.statusUpdateId, reviewId: trigger.reviewId },
+    ]);
   });
 
   it("deduplicates callbacks while queued and in flight", async () => {
@@ -199,22 +208,25 @@ describe("AppSidecarRoadmapReviewScheduler", () => {
     expect((await scheduler.drain(noAttempt)).at(-1)?.status).toBe("completed");
   });
 
-  it("rediscovers unresolved persisted state after scheduler restart", async () => {
+  it("rediscovers the same trigger and event IDs after scheduler restart", async () => {
     const candidate = phase();
     const first = new AppSidecarRoadmapReviewScheduler();
-    first.replay([candidate], projectKey);
+    const originalTrigger = first.replay([candidate], projectKey)[0]!.trigger;
     await first.drain(async () => ({
       status: "retryable-reviewer-error",
       message: "daemon stopping",
     }));
 
     const restarted = new AppSidecarRoadmapReviewScheduler();
-    expect(restarted.replay([candidate], projectKey)[0]?.status).toBe("queued");
+    const rediscovered = restarted.replay([candidate], projectKey)[0]!;
+    expect(rediscovered.status).toBe("queued");
+    expect(rediscovered.trigger).toEqual(originalTrigger);
+    expect(rediscovered.trigger.statusUpdateId).toBe(originalTrigger.statusUpdateId);
+    expect(rediscovered.trigger.reviewId).toBe(originalTrigger.reviewId);
     const execute = vi.fn(async () => committed);
     await restarted.drain(execute);
-    expect(execute).toHaveBeenCalledOnce();
+    expect(execute).toHaveBeenCalledWith(rediscovered.trigger, 1);
   });
-
   it("reports safe recoverable failure details without requiring fresh verification", () => {
     const trigger = appSidecarRoadmapReviewTrigger(phase(), projectKey)!;
     expect(appSidecarRoadmapReviewSchedulingFailure(trigger, 25)).toEqual({

@@ -16,6 +16,11 @@ const reviewPhase = {
   goal: "Ship phase completion review",
   completionCriteria: ["accepted work", "verification evidence"],
   status: "review",
+  finalReviewClaim: {
+    triggerId: "trigger-1",
+    statusUpdateId: "update-1",
+    reviewId: "review-1",
+  },
   criterionCoverage: null,
   latestVerification: null,
 } as const;
@@ -25,6 +30,8 @@ function attempt(
     actor?: "ken" | "ken-autopilot";
     decision?: "accepted" | "rejected";
     reason?: string | null;
+    updateId?: string;
+    reviewId?: string;
     result?:
       | "completion-review-committed"
       | "completion-review-duplicate"
@@ -39,7 +46,7 @@ function attempt(
   return {
     actor: options.actor ?? "ken-autopilot",
     input: {
-      update_id: "update-1",
+      update_id: options.updateId ?? "update-1",
       phase_id: reviewPhase.id,
       expected_revision: reviewPhase.revision,
       transition: "review",
@@ -47,7 +54,7 @@ function attempt(
       evidence: ["targeted tests passed"],
       verification: null,
       final_review: {
-        review_id: "review-1",
+        review_id: options.reviewId ?? "review-1",
         decision,
         evidence: ["targeted tests passed"],
         reason: options.reason ?? (decision === "rejected" ? "Fix the failing edge case." : null),
@@ -77,9 +84,14 @@ describe("Autopilot phase completion review", () => {
     );
   });
 
-  it("classifies the latest stale attempt for one fresh-snapshot retry", () => {
+  it("classifies the latest stale attempt when no claimed attempt succeeded", () => {
     const stale = attempt({ result: "stale-revision" });
-    expect(classifyAppSidecarFinalReviewAttempt(reviewPhase.id, [attempt(), stale])).toEqual({
+    expect(
+      classifyAppSidecarFinalReviewAttempt(reviewPhase.id, reviewPhase.finalReviewClaim, [
+        attempt({ updateId: "wrong-update" }),
+        stale,
+      ]),
+    ).toEqual({
       status: "stale-revision",
       attempt: stale,
     });
@@ -96,21 +108,35 @@ describe("Autopilot phase completion review", () => {
     },
   );
 
-  it.each([
-    ["completion-review-committed", "stale-revision"],
-    ["completion-review-duplicate", "completion-checkpoint-blocked"],
-  ] as const)(
-    "throws using the latest result when an earlier attempt succeeded: %s then %s",
-    (earlierResult, latestResult) => {
-      expect(() =>
-        phaseCompletionVerdict(
+  it.each(["completion-review-committed", "completion-review-duplicate"] as const)(
+    "preserves a successful claimed attempt after a mismatched-ID failure: %s",
+    (result) => {
+      const completed = attempt({ result });
+      expect(
+        classifyAppSidecarFinalReviewAttempt(reviewPhase.id, reviewPhase.finalReviewClaim, [
+          completed,
+          attempt({ result: "completion-checkpoint-blocked", updateId: "mismatched-update" }),
+        ]),
+      ).toEqual({
+        status: result === "completion-review-committed" ? "committed" : "duplicate",
+        attempt: completed,
+      });
+      expect(
+        finalReviewExecutionResult(
           reviewPhase,
-          [attempt({ result: earlierResult }), attempt({ result: latestResult })],
+          [
+            completed,
+            attempt({
+              result: "completion-checkpoint-blocked",
+              reviewId: "mismatched-review",
+            }),
+          ],
           { kind: "all_clear" },
         ),
-      ).toThrowError(
-        `Autopilot completion review failed for phase phase-review: final_review did not commit or duplicate (result: ${latestResult}).`,
-      );
+      ).toMatchObject({
+        status: result === "completion-review-committed" ? "committed" : "duplicate",
+        verdict: { kind: "all_clear" },
+      });
     },
   );
 
@@ -232,7 +258,11 @@ describe("Autopilot phase completion review", () => {
       goal: "Persist the final review",
       completionCriteria: ["Gate says Done"],
       status: "review",
-      finalReviewClaim: { triggerId: trigger.triggerId, reviewId: trigger.reviewId },
+      finalReviewClaim: {
+        triggerId: trigger.triggerId,
+        statusUpdateId: trigger.statusUpdateId,
+        reviewId: trigger.reviewId,
+      },
       criterionCoverage: evaluation.criterionCoverage,
       latestVerification: {
         id: "verification-1",

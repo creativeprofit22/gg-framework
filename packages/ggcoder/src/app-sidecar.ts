@@ -3693,7 +3693,11 @@ async function createSession(
           trigger !== undefined &&
           boundPhase !== null &&
           shouldRetryAppSidecarRoadmapReview(
-            classifyAppSidecarFinalReviewAttempt(boundPhase.id, attempts).status,
+            classifyAppSidecarFinalReviewAttempt(
+              boundPhase.id,
+              boundPhase.finalReviewClaim,
+              attempts,
+            ).status,
           ),
       );
       if (autopilotCancelled) {
@@ -3710,6 +3714,7 @@ async function createSession(
         );
         const classification = classifyAppSidecarFinalReviewAttempt(
           trigger.phaseId,
+          boundPhase.finalReviewClaim,
           finalReviewAttempts,
         );
         const attempt = classification.status === "missing" ? null : classification.attempt;

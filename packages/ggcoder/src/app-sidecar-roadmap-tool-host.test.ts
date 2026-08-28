@@ -83,7 +83,7 @@ function sseResponse(events: Record<string, unknown>[]): Response {
 
 function roadmapStatusCallResponse(): Response {
   const argumentsJson = JSON.stringify({
-    update_id: "reviewer-wiring-update",
+    update_id: "reviewer-wiring-status",
     phase_id: "reviewer-wiring-phase",
     expected_revision: 1,
     transition: "review",
@@ -161,6 +161,7 @@ async function exerciseReviewerSession(role: Exclude<AppSidecarRoadmapSessionRol
       phaseId: "reviewer-wiring-phase",
       verificationStatusUpdateId: "reviewer-wiring-update",
       triggerId: "reviewer-wiring-trigger",
+      statusUpdateId: "reviewer-wiring-status",
       reviewId: "reviewer-wiring-review",
     }),
     revalidateFinalReviewEligibility: eligibleFinalReview(
@@ -306,16 +307,17 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     });
   });
 
-  it("reports expected and current Notes revisions for a stale Autopilot final review", async () => {
+  it("accepts the active event IDs before reporting a stale Autopilot revision", async () => {
     const claim = createAppSidecarRoadmapReviewTrigger("phase-review-stale", "verification-stale");
+    const recordRoadmapFinalReview = vi.fn(async () => ({
+      status: "stale-revision" as const,
+      revision: 25,
+    }));
     const host = new AppSidecarRoadmapToolHost({
       cwd: "/project",
       repository: {
         recordRoadmapStatusUpdate: vi.fn(async () => ({ status: "missing" as const })),
-        recordRoadmapFinalReview: vi.fn(async () => ({
-          status: "stale-revision" as const,
-          revision: 25,
-        })),
+        recordRoadmapFinalReview,
       },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
@@ -330,7 +332,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     const tool = host.createSessionTools("ken-autopilot")[0]!;
     const output = await tool.execute(
       RoadmapStatusParams.parse({
-        update_id: "stale-review-update",
+        update_id: claim.statusUpdateId,
         phase_id: claim.phaseId,
         expected_revision: 23,
         transition: "review",
@@ -346,6 +348,13 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     );
     if (typeof output !== "string") throw new Error("roadmap_status returned non-text output");
 
+    expect(recordRoadmapFinalReview).toHaveBeenCalledWith(
+      "/project",
+      expect.objectContaining({
+        statusUpdate: expect.objectContaining({ updateId: claim.statusUpdateId }),
+        review: expect.objectContaining({ reviewId: claim.reviewId }),
+      }),
+    );
     expect(JSON.parse(output)).toEqual({
       result: "stale-revision",
       phaseId: claim.phaseId,
@@ -355,7 +364,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     });
   });
 
-  it("rejects an Autopilot review_id outside the active deterministic claim", async () => {
+  it("rejects Autopilot event IDs outside the active deterministic claim", async () => {
     const claim = createAppSidecarRoadmapReviewTrigger("phase-claim", "verification-claim");
     let activeClaim: typeof claim | null = claim;
     const recordRoadmapFinalReview = vi.fn(async () => ({ status: "missing" as const }));
@@ -373,7 +382,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     const tool = host.createSessionTools("ken-autopilot")[0]!;
     const output = await tool.execute(
       RoadmapStatusParams.parse({
-        update_id: "review-attempt",
+        update_id: claim.statusUpdateId,
         phase_id: claim.phaseId,
         expected_revision: 1,
         transition: "review",
@@ -390,6 +399,29 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
     if (typeof output !== "string") throw new Error("roadmap_status returned non-text output");
 
     expect(JSON.parse(output)).toMatchObject({
+      result: "final-review-claim-mismatch",
+      phaseId: claim.phaseId,
+    });
+    const statusMismatchOutput = await tool.execute(
+      RoadmapStatusParams.parse({
+        update_id: "model-selected-status-id",
+        phase_id: claim.phaseId,
+        expected_revision: 1,
+        transition: "review",
+        progress: "Reviewed the phase with a reused status ID.",
+        evidence: ["Inspected implementation evidence"],
+        final_review: {
+          review_id: claim.reviewId,
+          decision: "accepted",
+          evidence: ["Inspected implementation evidence"],
+        },
+      }),
+      {} as never,
+    );
+    if (typeof statusMismatchOutput !== "string") {
+      throw new Error("roadmap_status returned non-text output");
+    }
+    expect(JSON.parse(statusMismatchOutput)).toMatchObject({
       result: "final-review-claim-mismatch",
       phaseId: claim.phaseId,
     });
@@ -474,7 +506,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       for (const decision of ["accepted", "rejected"] as const) {
         const output = await tool.execute(
           RoadmapStatusParams.parse({
-            update_id: `gated-${role}-${decision}`,
+            update_id: role === "ken-autopilot" ? claim.statusUpdateId : `gated-${role}-${decision}`,
             phase_id: claim.phaseId,
             expected_revision: 7,
             transition: "review",
@@ -823,7 +855,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
           async () => {
             const output = await autopilotTool.execute(
               RoadmapStatusParams.parse({
-                update_id: "status-automatic-review",
+                update_id: trigger.statusUpdateId,
                 phase_id: trigger.phaseId,
                 expected_revision: migrated.snapshot.revision,
                 transition: "review",
@@ -923,6 +955,7 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
         phaseId: "phase-incomplete",
         verificationStatusUpdateId: "verification-passed",
         triggerId: "trigger-incomplete",
+        statusUpdateId: "status-incomplete",
         reviewId: "review-incomplete",
       }),
       revalidateFinalReviewEligibility: eligibleFinalReview(

@@ -49,7 +49,11 @@ export function boundPhaseForAutopilotReview(
     goal: phase.goal,
     completionCriteria: [...phase.doneWhen],
     status: phase.status,
-    finalReviewClaim: { triggerId: trigger.triggerId, reviewId: trigger.reviewId },
+    finalReviewClaim: {
+      triggerId: trigger.triggerId,
+      statusUpdateId: trigger.statusUpdateId,
+      reviewId: trigger.reviewId,
+    },
     criterionCoverage,
     latestVerification: {
       id: verification.id,
@@ -89,16 +93,25 @@ export type AppSidecarFinalReviewExecutionResult =
 
 export function classifyAppSidecarFinalReviewAttempt(
   phaseId: string,
+  finalReviewClaim: KenAutopilotBoundPhase["finalReviewClaim"],
   attempts: readonly AppSidecarFinalReviewAttempt[],
 ): AppSidecarFinalReviewAttemptClassification {
-  const attempt = [...attempts]
-    .reverse()
-    .find(
-      (candidate) =>
-        candidate.actor === "ken-autopilot" &&
-        candidate.input.phase_id === phaseId &&
-        candidate.input.final_review !== null,
-    );
+  const relevantAttempts = attempts.filter(
+    (candidate) =>
+      candidate.actor === "ken-autopilot" &&
+      candidate.input.phase_id === phaseId &&
+      candidate.input.final_review !== null,
+  );
+  const attempt =
+    finalReviewClaim === undefined
+      ? relevantAttempts.at(-1)
+      : [...relevantAttempts].reverse().find(
+          (candidate) =>
+            candidate.input.update_id === finalReviewClaim.statusUpdateId &&
+            candidate.input.final_review?.review_id === finalReviewClaim.reviewId &&
+            (candidate.result.result === "completion-review-committed" ||
+              candidate.result.result === "completion-review-duplicate"),
+        ) ?? relevantAttempts.at(-1);
   if (!attempt) return { status: "missing" };
   if (attempt.result.result === "stale-revision") {
     return { status: "stale-revision", attempt };
@@ -117,7 +130,11 @@ export function finalReviewExecutionResult(
   attempts: readonly AppSidecarFinalReviewAttempt[],
   textVerdict: AutopilotVerdict,
 ): AppSidecarFinalReviewExecutionResult {
-  const classification = classifyAppSidecarFinalReviewAttempt(phase.id, attempts);
+  const classification = classifyAppSidecarFinalReviewAttempt(
+    phase.id,
+    phase.finalReviewClaim,
+    attempts,
+  );
   if (classification.status === "missing") {
     return {
       status: "no-attempt",
@@ -191,7 +208,11 @@ export function phaseCompletionVerdict(
 ): AutopilotVerdict | null {
   if (phase?.status !== "review") return textVerdict;
 
-  const classification = classifyAppSidecarFinalReviewAttempt(phase.id, attempts);
+  const classification = classifyAppSidecarFinalReviewAttempt(
+    phase.id,
+    phase.finalReviewClaim,
+    attempts,
+  );
   if (classification.status === "missing") {
     throw new Error(
       `Autopilot completion review failed for phase ${phase.id}: no relevant roadmap_status final_review call was recorded.`,

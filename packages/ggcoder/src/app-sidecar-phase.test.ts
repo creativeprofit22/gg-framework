@@ -983,26 +983,32 @@ describe("production launchBoundPhase orchestration", () => {
     ).resolves.toMatchObject({ result: "committed", statusOutcome: "applied" });
 
     roadmapTimestamp = reviewAt;
-    await expect(
-      executeRoadmap(
-        host.createSessionTools("ken-autopilot")[0]!,
-        roadmapInput("phase-26-final-status", {
-          expected_revision: await currentRevision(repository, cwd),
-          transition: "review",
-          progress: "Phase 26 completion evidence reviewed",
-          evidence: ["Implementation and verification evidence accepted"],
-          final_review: {
-            review_id: finalReviewClaim.reviewId,
-            decision: "accepted",
-            evidence: ["Autopilot Ken accepted every completion gate"],
-          },
-        }),
-      ),
-    ).resolves.toMatchObject({
+    const finalReviewTool = host.createSessionTools("ken-autopilot")[0]!;
+    const finalReviewInput = roadmapInput(finalReviewClaim.statusUpdateId, {
+      expected_revision: await currentRevision(repository, cwd),
+      transition: "review",
+      progress: "Phase 26 completion evidence reviewed",
+      evidence: ["Implementation and verification evidence accepted"],
+      final_review: {
+        review_id: finalReviewClaim.reviewId,
+        decision: "accepted",
+        evidence: ["Autopilot Ken accepted every completion gate"],
+      },
+    });
+    await expect(executeRoadmap(finalReviewTool, finalReviewInput)).resolves.toMatchObject({
       result: "completion-review-committed",
       gateOutcome: "done",
       unmetGateCodes: [],
     });
+    const committedRevision = await currentRevision(repository, cwd);
+    await expect(executeRoadmap(finalReviewTool, finalReviewInput)).resolves.toMatchObject({
+      result: "completion-review-duplicate",
+      revision: committedRevision,
+      gateOutcome: "done",
+      unmetGateCodes: [],
+    });
+    expect(finalReviewClaim.statusUpdateId).not.toBe(finalReviewClaim.reviewId);
+    expect(await currentRevision(repository, cwd)).toBe(committedRevision);
     expect(snapshots).toHaveLength(2);
 
     await fixture.dispose();
@@ -1046,7 +1052,7 @@ describe("production launchBoundPhase orchestration", () => {
       }),
       expect.objectContaining({
         type: "status-update",
-        id: "phase-26-final-status",
+        id: finalReviewClaim.statusUpdateId,
         actor: "ken-autopilot",
         statusOutcome: "evidence-only",
       }),
@@ -1087,7 +1093,7 @@ describe("production launchBoundPhase orchestration", () => {
       "lifecycle:review",
       "status-update:phase-26-verification",
       "lifecycle:done",
-      "status-update:phase-26-final-status",
+      `status-update:${finalReviewClaim.statusUpdateId}`,
       `completion-review:${finalReviewClaim.reviewId}`,
     ]);
 
@@ -1304,18 +1310,21 @@ describe("production launchBoundPhase orchestration", () => {
           await expect(
             executeRoadmap(
               host.createSessionTools(reviewer)[0]!,
-              roadmapInput(`${phaseId}-rejected-status`, {
-                phase_id: phaseId,
-                expected_revision: await currentRevision(liveRepository, cwd),
-                transition: "review",
-                progress: `${phaseId} needs one correction`,
-                evidence: [`${phaseId} reviewer found a release blocker`],
-                final_review: {
-                  review_id: activeFinalReviewClaim?.reviewId ?? `${phaseId}-rejected-review`,
-                  decision: "rejected",
-                  reason: "Correct the release blocker",
+              roadmapInput(
+                activeFinalReviewClaim?.statusUpdateId ?? `${phaseId}-rejected-status`,
+                {
+                  phase_id: phaseId,
+                  expected_revision: await currentRevision(liveRepository, cwd),
+                  transition: "review",
+                  progress: `${phaseId} needs one correction`,
+                  evidence: [`${phaseId} reviewer found a release blocker`],
+                  final_review: {
+                    review_id: activeFinalReviewClaim?.reviewId ?? `${phaseId}-rejected-review`,
+                    decision: "rejected",
+                    reason: "Correct the release blocker",
+                  },
                 },
-              }),
+              ),
             ),
           ).resolves.toMatchObject({
             result: "completion-review-committed",
@@ -1394,18 +1403,21 @@ describe("production launchBoundPhase orchestration", () => {
         await expect(
           executeRoadmap(
             host.createSessionTools(reviewer)[0]!,
-            roadmapInput(`${phaseId}-accepted-status`, {
-              phase_id: phaseId,
-              expected_revision: await currentRevision(liveRepository, cwd),
-              transition: "review",
-              progress: `${phaseId} completion accepted`,
-              evidence: [`${phaseId} completion gates passed`],
-              final_review: {
-                review_id: reviewId,
-                decision: "accepted",
-                evidence: [`${reviewer} accepted ${phaseId}`],
+            roadmapInput(
+              activeFinalReviewClaim?.statusUpdateId ?? `${phaseId}-accepted-status`,
+              {
+                phase_id: phaseId,
+                expected_revision: await currentRevision(liveRepository, cwd),
+                transition: "review",
+                progress: `${phaseId} completion accepted`,
+                evidence: [`${phaseId} completion gates passed`],
+                final_review: {
+                  review_id: reviewId,
+                  decision: "accepted",
+                  evidence: [`${reviewer} accepted ${phaseId}`],
+                },
               },
-            }),
+            ),
           ),
         ).resolves.toMatchObject({
           result: "completion-review-committed",
@@ -2593,7 +2605,7 @@ describe("production launchBoundPhase orchestration", () => {
       now: () => "2026-07-26T00:03:00.000Z",
     });
     const tool = host.createSessionTools("ken-autopilot")[0]!;
-    const input = roadmapInput("autopilot-final-status", {
+    const input = roadmapInput(finalReviewClaim.statusUpdateId, {
       expected_revision: await currentRevision(repository, cwd),
       transition: "review",
       evidence: ["Autopilot reviewed both reference proposals"],

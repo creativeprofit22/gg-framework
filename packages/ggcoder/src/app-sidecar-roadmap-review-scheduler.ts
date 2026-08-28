@@ -11,6 +11,7 @@ export interface AppSidecarRoadmapReviewTrigger {
   phaseId: string;
   verificationStatusUpdateId: string;
   triggerId: string;
+  statusUpdateId: string;
   reviewId: string;
 }
 
@@ -125,6 +126,7 @@ export function createAppSidecarRoadmapReviewTrigger(
     phaseId,
     verificationStatusUpdateId,
     triggerId: `roadmap-final-review-${digest}`,
+    statusUpdateId: `autopilot-final-status-${digest}`,
     reviewId: `autopilot-final-${digest}`,
   };
 }

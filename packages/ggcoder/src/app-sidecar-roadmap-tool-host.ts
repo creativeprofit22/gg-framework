@@ -314,6 +314,7 @@ export class AppSidecarRoadmapToolHost {
       actor === "ken-autopilot" &&
       (!autopilotClaim ||
         autopilotClaim.phaseId !== input.phase_id ||
+        autopilotClaim.statusUpdateId !== input.update_id ||
         autopilotClaim.reviewId !== finalReview.review_id)
     ) {
       this.dependencies.onNonCommit?.({
@@ -324,7 +325,8 @@ export class AppSidecarRoadmapToolHost {
       return {
         result: "final-review-claim-mismatch",
         phaseId: input.phase_id,
-        message: "Autopilot final_review must use the active claim's exact phase_id and review_id.",
+        message:
+          "Autopilot final_review must use the active claim's exact phase_id, update_id, and review_id.",
       };
     }
     if (this.dependencies.canSubmitFinalReview?.(actor) === false) {

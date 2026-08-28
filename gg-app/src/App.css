@@ -3274,6 +3274,29 @@ body {
 .markdown {
   white-space: normal;
 }
+
+/* Streaming word reveal: each newly-arrived word mounts with a short
+   blur-to-sharp fade, which hides the moment a batch of tokens landed. The
+   spans exist ONLY while a row is streaming (see Markdown.tsx `animate`), so
+   finished prose keeps its plain DOM. inline-block is what makes `filter`
+   reliable here; whitespace stays outside the spans so lines break normally. */
+.markdown .md-word {
+  display: inline-block;
+  white-space: pre;
+  animation: md-word-in 220ms ease-out both;
+}
+@keyframes md-word-in {
+  from {
+    opacity: 0;
+    filter: blur(5px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .markdown .md-word {
+    animation: none;
+  }
+}
+
 .markdown > :first-child {
   margin-top: 0;
 }

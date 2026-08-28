@@ -72,7 +72,7 @@ Switch mid-conversation with `/model`. Not locked to anyone.
 | **Anthropic**     | Claude Opus 5, Sonnet 5, Haiku 4.5                                 | OAuth            |
 | **OpenAI**        | GPT-5.5, GPT-5.5 Pro, GPT-5.4, GPT-5.3 Codex                       | OAuth            |
 | **Moonshot**      | Kimi K3, Kimi K2.7 Code                                            | OAuth or API key |
-| **Z.AI (GLM)**    | GLM-5.3                                                            | API key          |
+| **Z.AI (GLM)**    | GLM-5.3, GLM-5.3-Flash (image)                                     | API key          |
 | **MiniMax**       | MiniMax M3 (image + video)                                         | API key          |
 | **Xiaomi (MiMo)** | MiMo-V2.5-Pro, MiMo-V2.5-Pro-UltraSpeed, MiMo-V2.5 (image + video) | API key          |
 | **DeepSeek**      | DeepSeek V4 Pro, V4 Flash                                          | API key          |

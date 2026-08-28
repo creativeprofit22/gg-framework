@@ -1,5 +1,14 @@
 # @kenkaiiii/ggcoder
 
+## 5.50.0
+
+### Patch Changes
+
+- Updated dependencies [10138dd]
+  - @kenkaiiii/gg-core@5.50.0
+  - @kenkaiiii/gg-ai@5.50.0
+  - @kenkaiiii/gg-agent@5.50.0
+
 ## 5.49.11
 
 ### Patch Changes

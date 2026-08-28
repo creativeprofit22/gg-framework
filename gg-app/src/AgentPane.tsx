@@ -56,6 +56,7 @@ import { AutopilotReviewBar } from "./AutopilotReviewBar";
 import { useKenMentor } from "./useKenMentor";
 import { useAutopilot } from "./useAutopilot";
 import { useAgentEvents, HOOK_PRESENTATION, type HookKind } from "./useAgentEvents";
+import { useSmoothText } from "./useSmoothText";
 import { LiveToolPanel, type LiveToolEntry } from "./LiveToolPanel";
 import { SubAgentFeed, type SubAgentLine } from "./SubAgentFeed";
 import { CompactionNotice } from "./CompactionNotice";
@@ -3889,6 +3890,21 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   );
 }
 
+/** Smoothly reveals streamed prose and keeps its growing tail visible. */
+function StreamingMarkdown({
+  text,
+  onGrow,
+}: {
+  text: string;
+  onGrow?: () => void;
+}): React.ReactElement {
+  const { text: revealed, animating } = useSmoothText(text);
+  useLayoutEffect(() => {
+    onGrow?.();
+  }, [revealed, onGrow]);
+  return <Markdown animate={animating}>{revealed}</Markdown>;
+}
+
 // ── Row renderers ──────────────────────────────────────────
 // Memoized per row: the streaming run rebuilds the `items` array on every
 // `text_delta`, but `appendAssistant` returns the SAME object reference for
@@ -3979,7 +3995,7 @@ const TranscriptRow = memo(function TranscriptRow({
                   {DOT}
                 </span>
                 <div className="assistant-text">
-                  <Markdown>{seg.text}</Markdown>
+                  <StreamingMarkdown text={seg.text} onGrow={onImageLoad} />
                 </div>
               </div>
             ),
@@ -3998,7 +4014,7 @@ const TranscriptRow = memo(function TranscriptRow({
             {DOT}
           </span>
           <div className="assistant-text">
-            <Markdown>{item.text}</Markdown>
+            <StreamingMarkdown text={item.text} onGrow={onImageLoad} />
           </div>
         </div>
       );

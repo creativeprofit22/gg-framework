@@ -379,13 +379,12 @@ export const MODELS: ModelInfo[] = [
     maxThinkingLevel: "high",
   },
   // ── Z.AI (GLM) ─────────────────────────────────────────
-  // GLM-5.3 is the only GLM entry: it supersedes 5.2 (same GLM-5 base, all
-  // gains from post-training) and the coding endpoint already answers
-  // `glm-5.2` requests as glm-5.3, so the older ids were menu clutter that
-  // routed to strictly worse coding for the same plan quota.
-  // Released 2026-08-14; live on the coding endpoint (verified), while the
-  // standard paas API is still "coming soon". `max` is both the ceiling and
-  // Z.AI's own default — the rungs below it live in thinking-level.ts.
+  // Two GLM entries, both live on the coding endpoint (verified against its
+  // /models list). The pre-5.3 ids stay retired: they routed to strictly worse
+  // coding for the same plan quota, and the endpoint already answers `glm-5.2`
+  // requests as glm-5.3.
+  // `max` is both the ceiling and Z.AI's own default — the rungs below it live
+  // in thinking-level.ts.
   {
     id: "glm-5.3",
     name: "GLM-5.3",
@@ -396,6 +395,30 @@ export const MODELS: ModelInfo[] = [
     supportsImages: false,
     supportsVideo: false,
     costTier: "medium",
+    maxThinkingLevel: "max",
+  },
+  // GLM-5.3-Flash (released 2026-08-26): 320B-A18B natively multimodal sibling
+  // at ~1/20th of 5.3's API price with 3× the coding-plan quota, so it is the
+  // provider's `low` tier — scout sub-agents and compaction summaries route
+  // here instead of paying 5.3 rates.
+  // Images are native on the coding endpoint (verified: base64 data URL in an
+  // `image_url` block answers correctly), which also means GLM image
+  // attachments go inline for this model rather than through the zai_vision MCP
+  // detour that `supportsImages: false` triggers.
+  // Video/file input is documented but unverified on this transport, so it
+  // stays off until measured. Thinking cannot be disabled server-side (Z.AI
+  // maps a `disabled` toggle to the `low` rung and answers 200), and unlike
+  // 5.3 it accepts any reasoning_effort string without a 400.
+  {
+    id: "glm-5.3-flash",
+    name: "GLM-5.3-Flash",
+    provider: "glm",
+    contextWindow: 1_000_000,
+    maxOutputTokens: 131_072,
+    supportsThinking: true,
+    supportsImages: true,
+    supportsVideo: false,
+    costTier: "low",
     maxThinkingLevel: "max",
   },
   // ── MiniMax ────────────────────────────────────────────
@@ -726,7 +749,8 @@ export function getDefaultThinkingLevel(
  * - Anthropic: always Sonnet 5
  * - OpenAI: cheapest (Codex Mini)
  * - Gemini: use the current model
- * - GLM / Moonshot: use the current model (no cheap alternative registered)
+ * - GLM: GLM-5.3-Flash (the registered low-cost sibling)
+ * - Moonshot: use the current model (no cheap alternative registered)
  */
 export function getSummaryModel(provider: Provider, currentModelId: string): ModelInfo {
   if (provider === "anthropic") {
@@ -752,7 +776,7 @@ export function getSummaryModel(provider: Provider, currentModelId: string): Mod
  *
  * Routes off each model's `costTier` — the single source of truth that already
  * travels with the registry entry — so a model rename/bump needs no change
- * here. Providers with no low-tier sibling (GLM, Moonshot, MiniMax, Xiaomi,
+ * here. Providers with no low-tier sibling (Moonshot, MiniMax, Xiaomi,
  * Sakana, OpenRouter) gracefully keep the parent model, so there's never a
  * crash or a cross-provider jump to a login the user may not have.
  */

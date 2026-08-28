@@ -22,6 +22,14 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.54.0",
+    date: "2026-08-28",
+    items: [
+      "My replies flow onto the screen now instead of stuttering. Text used to land in whatever clumps the network delivered, so it read like a typewriter with hiccups. I set my own steady pace and softly fade in each word as it arrives, so watching me work feels smooth no matter how fast the model bursts.",
+      "`GLM-5.3-Flash` just joined the lineup. It reads your images natively, keeps the full `1M` context and the top thinking ceiling, and costs about a twentieth of GLM-5.3 with triple the plan quota. I quietly route background work like scouting and summaries through it too, so your GLM sessions stretch much further.",
+    ],
+  },
+  {
     version: "0.53.12",
     date: "2026-08-27",
     items: [

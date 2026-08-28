@@ -105,6 +105,21 @@ describe("AgentSession attachment routing (app/sidecar path)", () => {
     }
   }, 20_000);
 
+  it("sends inline pixels to GLM-5.3-Flash, which sees images natively", async () => {
+    const session = await createSession("glm", "glm-5.3-flash");
+    try {
+      await session.promptWithAttachments("What is this?", [image]);
+      const parts = lastUserParts(session);
+      // Flash is natively multimodal, so the zai_vision detour would waste a
+      // round trip and lose fidelity: the pixels ride along with the prompt.
+      expect(parts.some((p) => p.type === "image")).toBe(true);
+      expect(parts.some((p) => p.text?.includes("zai_vision"))).toBe(false);
+      expect(parts.some((p) => p.text === `[Image saved at ${image.path}]`)).toBe(true);
+    } finally {
+      await session.dispose();
+    }
+  }, 20_000);
+
   it("keeps inline image parts for non-GLM providers (untouched behavior)", async () => {
     const session = await createSession("anthropic", "claude-test");
     try {

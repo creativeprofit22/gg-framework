@@ -470,6 +470,28 @@ describe("useProjectNotes sidecar authority", () => {
     expect(storage.getItem(v3NotesKey(cwd))).toContain("stale local");
   });
 
+  it("publishes the latest revision after saves and authoritative refreshes", async () => {
+    const cwd = "/work/project";
+    const storage = new MemoryStorage();
+    const server = new FakeNotesServer();
+    server.snapshots.set(cwd, { projectKey: cwd, revision: 1, document: notes("initial") });
+    const client = server.connect(cwd);
+    const hook = renderHook(() => useProjectNotes(cwd, hookOptions(client, storage)));
+    await waitFor(() => expect(hook.result.current.revision).toBe(1));
+
+    act(() => hook.result.current.onChange("saved"));
+    await waitFor(() => expect(hook.result.current.revision).toBe(2));
+
+    server.snapshots.set(cwd, {
+      projectKey: cwd,
+      revision: 3,
+      document: notes("refreshed"),
+    });
+    act(() => client.emit({ type: "ready", data: {} }));
+
+    await waitFor(() => expect(hook.result.current.revision).toBe(3));
+  });
+
   it("refetches the authoritative snapshot when a reconnect ready event follows a missed change", async () => {
     const cwd = "/work/project";
     const storage = new MemoryStorage();

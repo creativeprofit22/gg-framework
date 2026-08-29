@@ -108,7 +108,7 @@ function MatrixRain(): React.ReactElement {
       ctx.fillRect(0, 0, width, height);
       // Canvas 2D cannot resolve CSS var(), so spell out the mono stack (matches
       // the --mono token) instead of silently falling back to the default font.
-      ctx.font = `${FONT_SIZE}px "Geist Mono Variable", ui-monospace, monospace`;
+      ctx.font = `${FONT_SIZE}px ui-monospace, SFMono-Regular, Menlo, monospace`;
 
       for (let i = 0; i < columns; i++) {
         const ch = GLYPHS[Math.floor(Math.random() * GLYPHS.length)];

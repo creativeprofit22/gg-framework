@@ -1,6 +1,6 @@
 {
   "name": "@kenkaiiii/gg-voice",
-  "version": "4.3.365",
+  "version": "4.3.368",
   "type": "module",
   "description": "Provider-agnostic realtime voice orchestration for GG tools and agents",
   "license": "MIT",

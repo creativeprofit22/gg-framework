@@ -54,7 +54,16 @@ function renderIdentitySection(provider: Provider | undefined): string {
  * One total budget plus a per-item line cap is the only form the model cannot
  * satisfy while still writing an essay.
  */
-function renderTalkSection(): string {
+function renderTalkSection(toolNames: readonly string[] | undefined): string {
+  // Two mutually exclusive ask rules. While `ask_user` is registered the
+  // blockquote form must not appear in the prompt AT ALL: showing the model a
+  // concrete prose template for the ask is an invitation to use it, and the
+  // measured failure was exactly that — a soft "want me to also…?" blockquote
+  // ending the reply while the card the user can click never got built. The
+  // fallback only renders for hosts with no one to answer a question.
+  const askRule = (toolNames ?? DEFAULT_TOOL_NAMES).includes("ask_user")
+    ? `**Every ask is an \`ask_user\` call — never a sentence.** No question? Just end; never invent one. Any question you'd end on — a blocker OR a soft "want me to also…?" — is a tool call, never prose: no asking line, no blockquote, no options restated as text. Offering optional follow-up work counts as a question. Several: one call, each with your pick marked \`recommended\`.`
+    : `**The ask = ONE channel, never two.** No question? Just end; never invent one. Any question — blocker or soft "want me to also…?" — is the last line: \`> **<the ask>?** <your next step>\`. Blockquote nothing else. Several: one numbered list, each with your pick, inside the budget.`;
   return (
     `## How to Talk\n\n` +
     `Write for severe ADHD: fast scanning, low working memory, easy action.\n\n` +
@@ -64,7 +73,7 @@ function renderTalkSection(): string {
     `**Cut what they can't act on.** Reasoning, findings, and history earn a clause only when they change the next move: conclusion, not investigation; never re-explain yourself.\n\n` +
     `**Plain words by default.** Name a file, symbol, or command only when the user must act on it — then give its stake in the same breath (≤8 words). Otherwise say what it does, not what it's called.\n\n` +
     `**Default to action.** Take every safe, reversible step the goal implies — never ask permission, merely suggest it, or leave it for the user. When something in How to Work genuinely stops you, ask for the ONE action that unblocks you.\n\n` +
-    `**Blockquote = the ask.** The reply's last line, exactly one: \`> **<the ask>?** <what you do the moment they answer>\`, phrased so someone who never saw the code can answer. Blockquote nothing else, so \`>\` always means "you're up". Several open questions: one numbered list, every open question with its recommended answer, still inside the budget.\n\n` +
+    `${askRule}\n\n` +
     `Give ONE recommended approach — default to X, switch to Y only when [condition] — not a menu, unless a command's flow defines its own options. ` +
     `Between tool calls, speak only when the plan changes: a decision, tradeoff, surprise finding, or the ask. No preamble, no recap, no hedging, no output dumps. ` +
     `Surface tradeoffs and unverified claims plainly. Rarely and at random (~1 in 6 replies), drop ONE short, absurd, cringey interjection with an emoji — a fart confession (“Woops I just farted!”), a weird craving, a pigeon fact; invent fresh ones, never repeat, never force, never explain.`
@@ -532,7 +541,7 @@ export async function buildSystemPrompt(
   const limits = contextLimits ?? CONTEXT_LIMITS;
   const sections: string[] = [
     renderIdentitySection(provider),
-    renderTalkSection(),
+    renderTalkSection(toolNames),
     renderWorkSection(),
   ];
 

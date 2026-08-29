@@ -117,10 +117,16 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain(
       "ONE recommended approach — default to X, switch to Y only when [condition] — not a menu, unless a command's flow defines its own options.",
     );
-    // The user-facing ask gets a dedicated markdown blockquote (rendered with a
+    // The ask has exactly one channel, and the routing rule is about WHETHER a
+    // question exists, not how important it is. This prompt has no `ask_user`,
+    // so the ask falls back to a dedicated markdown blockquote (rendered with a
     // left gutter in both the TUI and GG App), and nothing else may use one, so
-    // a `>` in a reply always means "the agent is waiting on you".
-    expect(prompt).toContain("**Blockquote = the ask.**");
+    // a `>` in a reply always means "the agent is waiting on you". The rule must
+    // not manufacture questions either, so "no question" stays a valid ending.
+    expect(prompt).toContain("**The ask = ONE channel, never two.**");
+    expect(prompt).toContain("No question? Just end; never invent one.");
+    expect(prompt).toContain('Any question — blocker or soft "want me to also…?"');
+    expect(prompt).toContain("is the last line: `> **<the ask>?** <your next step>`");
     expect(prompt).toContain("Blockquote nothing else");
     expect(prompt).not.toContain(
       "Do not default to generic tests, scripts, screenshots, benchmarks, or simulations",
@@ -193,6 +199,30 @@ describe("buildSystemPrompt", () => {
     expect(renderedTools).not.toContain("**edit**");
   });
 
+  it("drops the blockquote ask template entirely once `ask_user` is registered", async () => {
+    const cwd = await makeProject();
+    const prompt = await buildSystemPrompt(cwd, undefined, false, undefined, [
+      "read",
+      "edit",
+      "ask_user",
+    ]);
+
+    // The regression this locks: the reply ended on "Want me to trace X?" in a
+    // blockquote while the clickable card was never built. Showing the model a
+    // ready-made prose template for the ask is enough for it to reach for one,
+    // so with the tool registered NO blockquote form may appear in the prompt.
+    expect(prompt).toContain("**Every ask is an `ask_user` call — never a sentence.**");
+    // Carried over from the pre-split assertions so the branch swap lost no
+    // coverage: the "no second channel" clause must hold in this branch too.
+    expect(prompt).toContain("no asking line, no blockquote, no options restated as text");
+    expect(prompt).toContain("Offering optional follow-up work counts as a question.");
+    expect(prompt).toContain("No question? Just end; never invent one.");
+    expect(prompt).not.toContain("the ask is the last line");
+    expect(prompt).not.toContain("Blockquote nothing else");
+    expect(prompt.match(/`> \*\*/g) ?? []).toHaveLength(0);
+    expect(prompt.match(/^\s*`?> /gm) ?? []).toHaveLength(0);
+  });
+
   it("keeps the reply-shape rules free of contradictions", async () => {
     const cwd = await makeProject();
     const prompt = await buildSystemPrompt(cwd, undefined, false, undefined, ["read", "edit"]);
@@ -218,7 +248,7 @@ describe("buildSystemPrompt", () => {
     // ask, batched question lists), so a 900-word reply satisfied every rule.
     // These assertions keep the cap total and the escape hatches deleted.
     expect(talk).toContain("Prose, lists, headers, the ask — everything counts, nothing is exempt");
-    expect(talk).toContain("still inside the budget");
+    expect(talk).toContain("each with your pick, inside the budget");
     expect(talk).not.toContain("prose only; a step list or the ask doesn't count");
     expect(talk).not.toContain("exempt from the reply and list caps");
     expect(talk).not.toContain("Question lists are payload");
@@ -347,7 +377,7 @@ describe("buildSystemPrompt", () => {
       // asking is sanctioned for decisions only, and asking well means one
       // batched, recommendation-annotated list instead of an interrogation drip.
       "only decisions (taste, product calls, real tradeoffs) reach the user",
-      "one numbered list, every open question",
+      "Several: one numbered list, each with your pick",
     ]) {
       expect(prompt).toContain(required);
     }

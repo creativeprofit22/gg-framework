@@ -20,6 +20,10 @@ import type { AgentTool } from "@kenkaiiii/gg-agent";
  * rates hold: measure that, not just the token saving, before moving a name.
  */
 export const CORE_TOOL_NAMES: readonly string[] = [
+  // Core wherever it is registered at all (the app sidecar): a question the
+  // model must `tool_search` for first is a question it writes in prose
+  // instead. Hosts with nobody to answer never build it, so they pay nothing.
+  "ask_user",
   "read",
   "write",
   "edit",

@@ -7,7 +7,7 @@ describe("prompt commands", () => {
     expect(PROMPT_COMMANDS.find((command) => command.aliases.includes("g"))).toBeUndefined();
   });
 
-  it("makes generated /commit commands a lean single-approval grouped workflow", () => {
+  it("makes generated /commit commands a lean grouped workflow with one review gate", () => {
     const setupCommit = PROMPT_COMMANDS.find((command) => command.name === "setup-commit");
 
     expect(setupCommit?.prompt).toContain("Review the full diff");
@@ -15,10 +15,12 @@ describe("prompt commands", () => {
     expect(setupCommit?.prompt).toContain("Keep uncertain or coupled changes together");
     expect(setupCommit?.prompt).toContain("QUALITY COMMANDS] once");
     expect(setupCommit?.prompt).toContain("inspect its staged diff before committing");
+    expect(setupCommit?.prompt).toContain("fast review of real bugs");
+    expect(setupCommit?.prompt).toContain("findings at least 80");
+    expect(setupCommit?.prompt).toContain("one `ask_user` choice");
+    expect(setupCommit?.prompt).toContain("rerun affected checks without another review");
     expect(setupCommit?.prompt).toContain("push exactly once after all commits");
     expect(setupCommit?.prompt).not.toContain("current index tree");
-    expect(setupCommit?.prompt).not.toContain("Fix high-confidence issues");
-    expect(setupCommit?.prompt).not.toContain("rerun affected checks");
   });
 
   it("strands no audit protocol or dated threat data in a command prompt", () => {
@@ -115,9 +117,15 @@ describe("prompt commands", () => {
     expect(expand?.prompt).toContain("validate it yourself before reporting");
     expect(expand?.prompt).toContain("The table must have exactly 3 columns");
     expect(expand?.prompt).toContain("Do not start implementing until the user chooses");
-    expect(expand?.prompt).toContain("A) Build all of these features in plan mode");
-    expect(expand?.prompt).toContain("B) Build only the top priority ones in plan mode");
-    expect(expand?.prompt).toContain("C) Other");
+    // The choice is offered through `ask_user` (clickable options in the app)
+    // and ONLY there: restating the options as text gave the user the same
+    // question twice, once clickable and once not. Prose is the fallback for
+    // hosts that cannot render the card at all.
+    expect(expand?.prompt).toContain("`ask_user` tool");
+    expect(expand?.prompt).toContain("Build all of these features in plan mode");
+    expect(expand?.prompt).toContain("Build only the top priority ones in plan mode");
+    expect(expand?.prompt).toContain("The card is the ONLY ask");
+    expect(expand?.prompt).toContain("Only if `ask_user` is unavailable");
     expect(expand?.prompt).toContain("call the enter_plan tool");
     expect(expand?.prompt).toContain("call exit_plan with the plan path");
     expect(expand?.prompt).not.toContain("Create a Goal");

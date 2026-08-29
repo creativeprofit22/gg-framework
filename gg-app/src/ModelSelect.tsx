@@ -127,7 +127,12 @@ export function ModelSelect({
     unavailableReason ?? (activeLocal?.endpoint ? `${title} — ${activeLocal.endpoint}` : title);
   // Dim to match every other disabled control in the footer, so "you can't use
   // this right now" is visible before the click rather than after it.
-  const controlColor = unavailable ? theme.textDim : (color ?? theme.text);
+  //
+  // Rest one step below full ink: hover lifts the label with `filter: brightness`
+  // (App.css), and `theme.text` is so close to white that brightening it clips to
+  // #fff with no visible change. Callers passing their own `color` (Ken's picker)
+  // are mid-range already and keep it.
+  const controlColor = unavailable ? theme.textDim : (color ?? theme.textSecondary);
 
   useEffect(() => {
     setOpen(false);

@@ -37,6 +37,10 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   interrupt_agent: "Interrupt a child agent's current turn, keeping its context for a follow-up.",
   tasks:
     "Manage the project task list. Never proactively — only on explicit request, or at a slash-command's task-handoff step.",
+  ask_user:
+    "Any question ending a reply — blocker or optional next step — goes here as clickable " +
+    "options, never prose. Plain words; mark your pick `recommended`. A click sends only that " +
+    "option, so each must be a complete instruction, not one asking them to specify.",
   enter_plan:
     "Enter read-only plan mode for complex/risky tasks before implementation; draft a plan under .gg/plans/.",
   exit_plan: "Submit a .gg/plans/ markdown plan for user approval and leave plan mode.",
@@ -107,6 +111,7 @@ export function buildToolSteering(activeTools: readonly string[]): string {
  * would otherwise cost the agent a capability with no signal at all.
  */
 export const BUILTIN_TOOL_NAMES: readonly string[] = [
+  "ask_user",
   "bash",
   "code_nav",
   "code_search",

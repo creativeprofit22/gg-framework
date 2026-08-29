@@ -3490,6 +3490,34 @@ async fn agent_mcp_elicit(
         .map_err(|e| e.to_string())
 }
 
+/// Proxy: answer an `ask_user` question band.
+///
+/// `action` is `answer` | `cancel`; `answers` maps each question id to the
+/// picked value (or values, for a multi-select). The turn is blocked on this,
+/// so the webview must call it on every dismissal path too.
+#[tauri::command]
+async fn agent_ask_user(
+    webview: WebviewWindow,
+    pane_id: String,
+    client: State<'_, reqwest::Client>,
+    id: String,
+    action: String,
+    answers: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let port = port_for(&webview).ok_or("daemon not ready")?;
+    let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let res = client
+        .post(format!("{}/ask/{}", sidecar_base(port), urlencoding(&id)))
+        .header("x-gg-session", &gg_sid)
+        .json(&serde_json::json!({ "action": action, "answers": answers }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Proxy: disconnect a provider (clear its stored credentials).
 #[tauri::command]
 async fn agent_auth_logout(
@@ -9496,6 +9524,7 @@ pub fn run() {
             agent_auth_oauth_start,
             agent_auth_oauth_code,
             agent_mcp_elicit,
+            agent_ask_user,
             agent_auth_logout,
             agent_kill_task,
             agent_import_transcript,

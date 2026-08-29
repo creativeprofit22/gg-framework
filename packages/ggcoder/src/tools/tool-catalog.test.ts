@@ -33,6 +33,7 @@ const SNAPSHOT_PATH = path.join(import.meta.dirname, "tool-catalog.snapshot.json
  * it changes the default model-visible surface.
  */
 const OPT_IN_TOOLS = new Set([
+  "ask_user", // only hosts that can render the question band (the app sidecar)
   "tool_search", // registered by AgentSession.ensureToolSearchTool()
   "web_search", // provider-gated: non-anthropic providers only
   "subagent", // needs agents[] + provider + model

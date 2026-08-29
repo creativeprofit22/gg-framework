@@ -3,11 +3,6 @@
 import { errorMom } from "./error-mom";
 import ReactDOM from "react-dom/client";
 import { error as logError, attachConsole } from "@tauri-apps/plugin-log";
-// Self-hosted Geist Sans + Mono (bundled by Vite → works offline in the
-// packaged app). Imported before App so the @font-face rules land ahead of the
-// stylesheet that references them.
-import "@fontsource-variable/geist";
-import "@fontsource-variable/geist-mono";
 import App from "./App";
 import { ZoomController } from "./ZoomController";
 import { WhatsNewModal } from "./WhatsNewModal";

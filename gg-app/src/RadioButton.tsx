@@ -3,6 +3,7 @@ import { Pause, Play, Radio, Volume2 } from "lucide-react";
 import { theme } from "./theme";
 import { getRadioState, setRadio, setRadioVolume, type RadioStation } from "./agent";
 import { Modal } from "./Modal";
+import { Dropdown } from "./Dropdown";
 
 /** Titlebar control and modal player for the app-wide internet radio. */
 export function RadioButton(): React.ReactElement {
@@ -99,19 +100,18 @@ export function RadioButton(): React.ReactElement {
           <label className="modal-label" style={{ color: theme.textMuted }}>
             Station
           </label>
-          <select
-            className="modal-input radio-station-select"
-            style={{ color: theme.text, background: theme.inputBackground }}
+          <Dropdown
+            label="Station"
+            options={stations.map((station) => ({
+              value: station.id,
+              label: station.name,
+              description: station.description,
+            }))}
             value={selected}
             disabled={busy || stations.length === 0}
-            onChange={(event) => changeStation(event.target.value)}
-          >
-            {stations.map((station) => (
-              <option key={station.id} value={station.id}>
-                {station.name}
-              </option>
-            ))}
-          </select>
+            placeholder={stations.length === 0 ? "Loading stations\u2026" : "Choose a station"}
+            onChange={changeStation}
+          />
           <div className="modal-hint radio-station-description" style={{ color: theme.textDim }}>
             {selectedStation?.description ?? "Choose a station to start listening."}
           </div>

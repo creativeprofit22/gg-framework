@@ -1,5 +1,35 @@
 # @kenkaiiii/ggcoder
 
+## 5.51.2
+
+### Patch Changes
+
+- Release a parked `ask_user` question when the user sends their own prompt instead of picking an option, so the turn resumes immediately rather than waiting out the ten-minute timeout.
+  - @kenkaiiii/gg-ai@5.51.2
+  - @kenkaiiii/gg-agent@5.51.2
+  - @kenkaiiii/gg-core@5.51.2
+
+## 5.51.1
+
+### Patch Changes
+
+- Route every end-of-reply question through the `ask_user` tool when it is registered, instead of writing it as a markdown blockquote the user has to type an answer to.
+  - @kenkaiiii/gg-ai@5.51.1
+  - @kenkaiiii/gg-agent@5.51.1
+  - @kenkaiiii/gg-core@5.51.1
+
+## 5.51.0
+
+### Minor Changes
+
+- Add the `ask_user` tool so the agent can ask a structured question mid-run and block on the answer, with the request parked until the user replies or it times out
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.51.0
+- @kenkaiiii/gg-agent@5.51.0
+- @kenkaiiii/gg-core@5.51.0
+
 ## 5.50.0
 
 ### Patch Changes

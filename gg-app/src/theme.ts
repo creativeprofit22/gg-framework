@@ -8,41 +8,43 @@
 // this file's job. An alias with neither a `theme.X` reader nor a CSS var is
 // simply dead.
 export const theme = {
-  // Surfaces — cool charcoal ramp, elevation by ΔL only (no shadows).
-  background: "#0f1115",
-  surface1: "#161922",
-  surface2: "#1d212b",
-  border: "#272b36",
-  borderStrong: "#353a47",
+  // Surfaces — near-black, separated by lightness alone. Borders are alpha
+  // white in the stylesheet; these opaque values are the closest solid
+  // equivalents for the few inline-style consumers that need one.
+  background: "#0a0a0c",
+  surface1: "#141519",
+  surface2: "#1c1e23",
+  border: "#22242a",
+  borderStrong: "#2f3138",
 
-  // Text — neutral-cool, APCA-gated.
-  text: "#f4f6f8",
-  textSecondary: "#c3c9d4",
-  textMuted: "#9aa3b2",
-  textDim: "#5b6472",
+  // Text — one ink at four levels.
+  text: "#f2f3f7",
+  textSecondary: "#c8c9d2",
+  textMuted: "#9a9ba5",
+  textDim: "#63646e",
 
-  // Accents — true sibling set (OKLCH L 69–76); dot/icon/border/verb colors.
-  primary: "#4d9dff",
-  secondary: "#9b8cf7",
-  success: "#36c489",
-  warning: "#e3a23f",
-  error: "#f2716e",
-  info: "#2dd4bf",
+  // Accent — periwinkle, luminous enough to carry near-black text on a fill.
+  primary: "#b0b6ff",
+  secondary: "#b0b6ff",
+  success: "#7fe89a",
+  warning: "#f0cf63",
+  error: "#ff6b60",
+  info: "#62e8d8",
 
   // Aliases mapped onto the accent family for existing consumers.
-  accent: "#9b8cf7",
-  code: "#e3a23f",
-  language: "#2dd4bf",
-  footerText: "#9aa3b2",
-  commandColor: "#9b8cf7",
+  accent: "#b0b6ff",
+  code: "#f2f3f7",
+  language: "#62e8d8",
+  footerText: "#9a9ba5",
+  commandColor: "#b0b6ff",
 
-  inputBackground: "#161922",
+  inputBackground: "#141519",
 
   // User text + chip — mirrors the ggcoder TUI (commandColor #818cf8 on the
   // #374151 message fill). Shared by the user bubble and the chat input so the
   // "this is you" color reads identically in both places.
-  userText: "#818cf8",
-  userBackground: "#313a49",
+  userText: "#f2f3f7",
+  userBackground: "#26272c",
 
   // Ken Kai (mentor agent) — soft cyan. Used as the FULL text color of Ken's
   // replies (and the @Ken active chip in the input), so it must read well as
@@ -50,8 +52,8 @@ export const theme = {
   // magenta it replaced (which vibrated as full paragraphs). Distinct from the
   // GG Coder blue dot and the greener `info` teal — the color IS the only
   // signal that a reply is Ken's, not GG Coder's.
-  ken: "#5ad1e6",
+  ken: "#62e8d8",
 } as const;
 
 // User-message chip background — mirrors USER_MESSAGE_BACKGROUND in the TUI.
-export const USER_MESSAGE_BACKGROUND = "#313a49";
+export const USER_MESSAGE_BACKGROUND = "#26272c";

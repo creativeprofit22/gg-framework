@@ -22,6 +22,37 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.55.3",
+    date: "2026-08-29",
+    items: [
+      "You can now ignore my question and just tell me what you actually want. Typing your own reply instead of tapping an option used to leave me frozen for up to `10 minutes` before I even read it. Now your message reaches me instantly, the question card clears itself out of the way, and the chat holds perfectly still while it goes.",
+    ],
+  },
+  {
+    version: "0.55.2",
+    date: "2026-08-29",
+    items: [
+      "My questions are clickable again. I had started slipping them back into the reply as a line of text, so you were stuck typing out an answer to something that should take one tap. Now every question I end on, even a casual `want me to also do this?`, opens the real question band with the options ready to pick.",
+    ],
+  },
+  {
+    version: "0.55.1",
+    date: "2026-08-29",
+    items: [
+      "Your chat box finally sits still. Type all the way to the edge of the first line and it used to bounce up and down on every keystroke, yanking the text out from under your eyes. I taught it to make up its mind once and hold, so writing long prompts is calm again.",
+      "The bar along the bottom feels smoother to use. Hovering `Thinking` or a model name no longer slaps an underline on it. The text just warms up brightly under your cursor and stays exactly where it is, so nothing twitches while you aim.",
+    ],
+  },
+  {
+    version: "0.55.0",
+    date: "2026-08-29",
+    items: [
+      "I can finally just ask you a question. When I hit a real fork in the road, a question band opens right inside the reply with the options laid out, and I wait on your call instead of guessing and getting it wrong. Click an option, press its number, or hit `Something else` and type your own answer straight into the composer. No more coming back to find I picked the thing you did not want.",
+      "GG Coder got a new look. Deeper, near black surfaces, a soft periwinkle accent, and a gentle glow that shifts with every window so no two ever feel like the same template. The glow also breathes while I work, so you can tell I am busy from across the room without reading a word.",
+      "The composer feels like a real writing space now. `Send` lives in its own round button that becomes stop the instant I start running, and the box grows with your draft instead of jumping around under your cursor. I also dropped the bundled fonts for the ones your system already loves, so there is less to ship and less to load.",
+    ],
+  },
+  {
     version: "0.54.0",
     date: "2026-08-28",
     items: [

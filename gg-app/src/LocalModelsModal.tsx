@@ -258,17 +258,7 @@ export function LocalModelsModal({ onClose }: Props): React.ReactElement {
           )}
         </>
       ) : (
-        /* `.modal-hint` sets word-break: break-all (it's shared with URL and
-           path hints); this is prose, so break on word boundaries instead. */
-        <div
-          className="modal-hint"
-          style={{
-            color: theme.textDim,
-            marginTop: 12,
-            wordBreak: "normal",
-            overflowWrap: "break-word",
-          }}
-        >
+        <div className="modal-hint" style={{ color: theme.textDim, marginTop: 12 }}>
           No tool calling = can’t run the agent. “?” context = server didn’t report one.
         </div>
       )}

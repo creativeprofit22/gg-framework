@@ -1362,4 +1362,56 @@ describe("models_change", () => {
 
     expect(getModels()).toEqual([]);
   });
+
+  describe("ask_user band", () => {
+    const question = {
+      id: "flag",
+      question: "Flip the flag for everyone now?",
+      kind: "confirm",
+      options: [{ label: "Yes" }, { label: "No" }],
+    };
+
+    it("renders a question the agent is parked on", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+      });
+      expect(getItems()).toEqual([
+        expect.objectContaining({ kind: "ask", prompt: { id: "ask-1", questions: [question] } }),
+      ]);
+    });
+
+    it("drops a malformed frame instead of rendering an unanswerable band", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [] }));
+        hook.result.current.handleEvent(ev("ask_user", { questions: [question] }));
+      });
+      expect(getItems()).toEqual([]);
+    });
+
+    // The sidecar releases parked questions only on a real abort, so only a
+    // cancelled run may close a band.
+    it("closes an unanswered band when the run is cancelled", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+        hook.result.current.handleEvent(ev("run_end", { cancelled: true }));
+      });
+      expect(getItems()).toEqual([expect.objectContaining({ kind: "ask", cancelled: true })]);
+    });
+
+    // Autopilot emits a run_end per injected round while the tool call is still
+    // parked; closing there would kill a question the user can still answer and
+    // strand the agent until its ten-minute timeout.
+    it("leaves the band live across a normal run_end", () => {
+      const { hook, getItems } = setup();
+      act(() => {
+        hook.result.current.handleEvent(ev("ask_user", { id: "ask-1", questions: [question] }));
+        hook.result.current.handleEvent(ev("run_end", {}));
+        hook.result.current.handleEvent(ev("run_end", {}));
+      });
+      expect(getItems()).toEqual([expect.not.objectContaining({ cancelled: true })]);
+    });
+  });
 });

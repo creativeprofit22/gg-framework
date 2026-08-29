@@ -1,4 +1,5 @@
 import type { ElicitResult } from "@modelcontextprotocol/client";
+import { createParkedRequests } from "../parked-requests.js";
 import type { MCPElicitHandler, MCPElicitation } from "./client.js";
 
 /**
@@ -42,40 +43,20 @@ export function createElicitationBridge(opts: {
   onTimeout?: (prompt: ElicitationPrompt) => void;
   timeoutMs?: number;
 }): ElicitationBridge {
-  const timeoutMs = opts.timeoutMs ?? MCP_ELICIT_TIMEOUT_MS;
-  const pending = new Map<
-    string,
-    { resolve: (result: ElicitResult) => void; timer: ReturnType<typeof setTimeout> }
-  >();
-  let seq = 0;
-
-  const settle = (id: string, result: ElicitResult): boolean => {
-    const entry = pending.get(id);
-    if (!entry) return false;
-    pending.delete(id);
-    clearTimeout(entry.timer);
-    entry.resolve(result);
-    return true;
-  };
+  const parked = createParkedRequests<MCPElicitation, ElicitResult>({
+    idPrefix: "elicit",
+    broadcast: opts.broadcast,
+    cancelValue: () => ({ action: "cancel" }),
+    timeoutMs: opts.timeoutMs ?? MCP_ELICIT_TIMEOUT_MS,
+    ...(opts.onTimeout ? { onTimeout: opts.onTimeout } : {}),
+  });
 
   return {
-    onElicit: (request) =>
-      new Promise<ElicitResult>((resolve) => {
-        const prompt: ElicitationPrompt = { ...request, id: `elicit-${++seq}` };
-        const timer = setTimeout(() => {
-          opts.onTimeout?.(prompt);
-          settle(prompt.id, { action: "cancel" });
-        }, timeoutMs);
-        timer.unref?.();
-        pending.set(prompt.id, { resolve, timer });
-        opts.broadcast(prompt);
-      }),
-    settle,
-    cancelAll: () => {
-      for (const id of [...pending.keys()]) settle(id, { action: "cancel" });
-    },
+    onElicit: parked.park,
+    settle: parked.settle,
+    cancelAll: parked.cancelAll,
     get pendingCount() {
-      return pending.size;
+      return parked.pendingCount;
     },
   };
 }

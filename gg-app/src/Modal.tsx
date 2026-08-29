@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef } from "react";
+import { createPortal } from "react-dom";
 import { theme } from "./theme";
 
 const FOCUSABLE_SELECTOR = [
@@ -108,7 +109,12 @@ export function Modal({
     };
   }, []);
 
-  return (
+  // Portalled to <body>. A modal opened from a trigger nested inside the app
+  // shell (the radio button lives in the nav bar) would otherwise be trapped in
+  // that ancestor's stacking context, and paint UNDER later siblings — the
+  // transcript showed straight through the panel. Rendering at the document
+  // root makes every modal immune to wherever its trigger happens to live.
+  return createPortal(
     <div
       className="modal-backdrop"
       onMouseDown={(event) => {
@@ -140,6 +146,7 @@ export function Modal({
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

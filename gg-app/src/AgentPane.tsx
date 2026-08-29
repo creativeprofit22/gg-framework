@@ -44,6 +44,7 @@ import {
   type TrayIntent,
   type Attachment,
   type PromptSegment,
+  type AskUserPrompt,
   type PaneAgentClient,
   type PaneSessionTarget,
   NewSessionError,
@@ -107,7 +108,11 @@ import { AutopilotToggle } from "./AutopilotToggle";
 import { HomeScreen } from "./HomeScreen";
 import { SettingsModal } from "./SettingsModal";
 import { initialEntryView, type EntryView } from "./app-entry-view";
-import { submitDisposition } from "./submit-disposition";
+import {
+  showsQueuedBubble,
+  submitDisposition,
+  withoutSupersedingMessage,
+} from "./submit-disposition";
 import { Toaster } from "./Toaster";
 import { Confetti } from "./Confetti";
 import { RankBadge } from "./RankBadge";
@@ -130,8 +135,11 @@ import {
 import { recoverPromptLabel } from "./prompt-labels";
 import { playSound } from "./sounds";
 import { segmentDoneMarkers, hasDoneMarker, countPlanSteps } from "./plan-steps";
-import { Paperclip, AtSign, GitBranch } from "lucide-react";
+import { ArrowUp, Paperclip, AtSign, GitBranch, Square } from "lucide-react";
 import { AttachmentBar } from "./AttachmentBar";
+import { AskBand } from "./AskBand";
+import { dropSupersededAsks, mergeAskAnswers } from "./ask-user";
+import { glowPlacement, glowStateFor, glowVars } from "./window-glow";
 import { EnhancedSegments } from "./PromptEnhancement";
 import { EnhanceDissolve } from "./EnhanceDissolve";
 import { toast } from "./toast";
@@ -321,6 +329,7 @@ export type Item =
       // True while this message is still waiting in the mid-run steering queue.
       // Rendered dimmed; cleared at run_end once the agent has consumed it.
       queued?: boolean;
+      promoted?: boolean;
       // True when this prompt was addressed to Ken (`@Ken …`). Renders the bubble
       // in Ken's color so the transcript shows it went to the mentor, not GG Coder.
       ken?: boolean;
@@ -364,6 +373,14 @@ export type Item =
   | { kind: "generating_image"; id: number; prompt: string }
   // Plan-mode entry banner (ASCII logo + optional reason).
   | { kind: "plan"; id: number; reason: string }
+  | {
+      kind: "ask";
+      id: number;
+      prompt: AskUserPrompt;
+      answers?: Record<string, string | string[]>;
+      sent?: boolean;
+      cancelled?: boolean;
+    }
   // A task kicked off from the Tasks modal (shown at the top of its session).
   | { kind: "task"; id: number; title: string }
   // Sub-agents delegated in a turn — a live, in-chat feed of each one's tools.
@@ -688,6 +705,20 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // once its slide-out animation finishes.
   const [kenPowerBanner, setKenPowerBanner] = useState<"on" | "off" | null>(null);
   const [running, setRunning] = useState(false);
+  const [hasFinishedRun, setHasFinishedRun] = useState(false);
+  const glowSeed = `${windowLabel}:${props.paneId}`;
+  const glowStyle = useMemo(() => glowVars(glowPlacement(glowSeed)), [glowSeed]);
+  const glowState = glowStateFor(running, hasFinishedRun);
+  const wasRunning = useRef(false);
+  useEffect(() => {
+    if (running) {
+      wasRunning.current = true;
+      setHasFinishedRun(false);
+    } else if (wasRunning.current) {
+      wasRunning.current = false;
+      setHasFinishedRun(true);
+    }
+  }, [running]);
   const cancelling = state?.runState === "cancelling";
   const requestCancel = useCallback(() => {
     if (cancelling) return;
@@ -1057,6 +1088,20 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom <= 48;
   }, []);
+
+  // Native drag leave/drop can be lost when the pointer exits the webview.
+  useEffect(() => {
+    if (!isFileDragOver) return;
+    const reset = (): void => setIsFileDragOver(false);
+    const timer = window.setTimeout(reset, 4000);
+    window.addEventListener("blur", reset);
+    window.addEventListener("drop", reset);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("blur", reset);
+      window.removeEventListener("drop", reset);
+    };
+  }, [isFileDragOver]);
 
   const insertDroppedFolderPaths = useCallback((paths: string[]): void => {
     if (paths.length === 0) return;
@@ -2130,6 +2175,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     const disposition = submitDisposition(trimmed, readyRef.current, running);
     if (disposition === "ignore") return;
     const queued = disposition === "queue";
+    const supersedesQuestion = hasOpenAsk();
+    if (supersedesQuestion) {
+      dismissOpenAsks();
+      if (queued) noteSupersedingSend(trimmed);
+    }
     // A user send always re-pins to the bottom — they want to see their message.
     stickToBottomRef.current = true;
     pushItem({
@@ -2138,7 +2188,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       text: trimmed,
       command: label !== undefined || isWorkflowCommand(trimmed),
       ...(label !== undefined ? { label } : {}),
-      ...(queued ? { queued: true } : {}),
+      ...(showsQueuedBubble(disposition, supersedesQuestion) ? { queued: true } : {}),
     });
     if (!opts?.keepInput) {
       setInput("");
@@ -2155,6 +2205,76 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // current one without re-creating the interval on every render.
   const submitTextRef = useRef(submitText);
   submitTextRef.current = submitText;
+
+  const typingAskRef = useRef<{ itemId: number; promptId: string; questionId: string } | null>(
+    null,
+  );
+
+  function hasOpenAsk(): boolean {
+    return items.some((item) => item.kind === "ask" && !item.sent && !item.cancelled);
+  }
+
+  const dismissOpenAsks = useCallback((): void => {
+    setItems(dropSupersededAsks);
+    typingAskRef.current = null;
+  }, [setItems]);
+
+  const supersedingTextRef = useRef<string | null>(null);
+  const [supersedingText, setSupersedingText] = useState<string | null>(null);
+  const supersedeClearRef = useRef<number | null>(null);
+  const noteSupersedingSend = useCallback((text: string): void => {
+    supersedingTextRef.current = text;
+    setSupersedingText(text);
+    if (supersedeClearRef.current !== null) window.clearTimeout(supersedeClearRef.current);
+    supersedeClearRef.current = window.setTimeout(() => {
+      supersedingTextRef.current = null;
+      setSupersedingText(null);
+    }, 5000);
+  }, []);
+  useEffect(() => {
+    const text = supersedingTextRef.current;
+    if (text !== null && !queuedMessages.some((message) => message.text === text)) {
+      supersedingTextRef.current = null;
+      setSupersedingText(null);
+    }
+  }, [queuedMessages]);
+  useEffect(
+    () => () => {
+      if (supersedeClearRef.current !== null) window.clearTimeout(supersedeClearRef.current);
+    },
+    [],
+  );
+  const visibleQueuedMessages = useMemo(
+    () => withoutSupersedingMessage(queuedMessages, supersedingText),
+    [queuedMessages, supersedingText],
+  );
+
+  const handleAskAnswer = useCallback(
+    (itemId: number, promptId: string, delta: Record<string, string | string[]>): void => {
+      setItems((current) =>
+        current.map((item) => {
+          if (item.kind !== "ask" || item.id !== itemId || item.sent || item.cancelled) return item;
+          const merged = mergeAskAnswers(item.answers, delta, item.prompt.questions);
+          if (merged.complete) {
+            void client
+              .answerAskUser(promptId, "answer", merged.answers)
+              .catch((error) => setStatus(`could not answer question: ${String(error)}`));
+          }
+          return { ...item, answers: merged.answers, sent: merged.complete || undefined };
+        }),
+      );
+    },
+    [client],
+  );
+
+  const handleAskType = useCallback(
+    (itemId: number, promptId: string, questionId: string, seed = ""): void => {
+      typingAskRef.current = { itemId, promptId, questionId };
+      if (seed) setInput(seed);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    },
+    [],
+  );
 
   const createAuthoritativeNewSession = useCallback(async (): Promise<string> => {
     if (running) throw new LocalSessionMutationBusyError();
@@ -2229,7 +2349,10 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         }
         kenPromptActionLockRef.current = true;
         try {
+          const supersedesQuestion = hasOpenAsk();
+          if (supersedesQuestion) dismissOpenAsks();
           const submission = await sendPrompt(prompt, [], { kenSent: true });
+          if (supersedesQuestion && submission.queued) noteSupersedingSend(prompt);
           if (!submission.queued) planResumePromptRef.current = prompt;
           stickToBottomRef.current = true;
           setQueuedCount(submission.count);
@@ -2238,7 +2361,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             id: nextId(),
             text: prompt,
             kenSent: true,
-            queued: submission.queued,
+            queued: showsQueuedBubble(disposition, supersedesQuestion),
           });
           if (!submission.queued) endStreamingText();
           return { status: "sent", session: "current" };
@@ -2381,7 +2504,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     [
       autopilotReviewing,
       createAuthoritativeNewSession,
+      dismissOpenAsks,
       endStreamingText,
+      noteSupersedingSend,
       planReview,
       pushItem,
       restorePromptToComposer,
@@ -2589,6 +2714,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // echoed inline in the user's bubble; all media is sent to the agent.
   function submit(): void {
     const trimmed = input.trim();
+    const typedAsk = typingAskRef.current;
+    if (typedAsk && trimmed) {
+      typingAskRef.current = null;
+      setInput("");
+      setSlashIndex(0);
+      handleAskAnswer(typedAsk.itemId, typedAsk.promptId, { [typedAsk.questionId]: trimmed });
+      return;
+    }
     if (!readyRef.current || planReview !== null) return;
     if (!trimmed && attachments.length === 0 && mentionedPaths.length === 0) return;
 
@@ -3144,7 +3277,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   return (
     <div
       className={`app agent-pane${props.focused !== false ? " pane-focused" : ""}${isFileDragOver ? " app-file-dragover" : ""}${windowFocused && props.windowFocused !== false ? " window-focused" : ""}`}
-      style={{ background: theme.background }}
+      data-glow={glowState}
+      style={{ background: theme.background, ...glowStyle }}
       onPointerDown={() => props.onFocus?.(paneId)}
       onDragEnter={handleWindowDragEnter}
       onDragOver={handleWindowDragOver}
@@ -3351,6 +3485,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     key: it.id,
                     item: it,
                     onImageLoad: maybeScrollToBottom,
+                    onAskAnswer: handleAskAnswer,
+                    onAskType: handleAskType,
                   }),
                 )}
               </KenPromptActionProvider>
@@ -3444,7 +3580,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         )}
         <AttachmentBar attachments={attachments} onRemove={removeAttachment} />
         <ReferencedFiles paths={mentionedPaths} onRemove={removeMentionChip} />
-        <QueuedBar messages={queuedMessages} onCancel={handleCancelQueued} />
+        <QueuedBar messages={visibleQueuedMessages} onCancel={handleCancelQueued} />
         <div className="inputrow">
           <input
             ref={fileInputRef}
@@ -3458,16 +3594,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             }}
           />
           <button
-            className="attach-btn"
+            className="icon-circle"
+            aria-label="Attach files"
             title={planReview !== null ? "Resolve the pending plan first" : "Attach files"}
             disabled={planReview !== null}
             onClick={() => fileInputRef.current?.click()}
           >
-            <Paperclip size={16} />
+            <Paperclip size={15} strokeWidth={1.8} />
           </button>
-          <span className="prompt" style={{ color: theme.primary }}>
-            {">"}
-          </span>
           <div className="input-stack">
             {enhanceAnim && (
               <EnhanceDissolve
@@ -3603,6 +3737,24 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               Ken, next?
             </button>
           )}
+          <div className="inputactions-trailing">
+            <button
+              type="button"
+              className={`composer-send-icon${running ? " is-stop" : ""}`}
+              aria-label={running ? "Stop response" : "Send message"}
+              title={running ? (cancelling ? "Stopping…" : "Stop response") : "Send message"}
+              disabled={
+                running
+                  ? cancelling
+                  : !readyRef.current ||
+                    planReview !== null ||
+                    (!input.trim() && attachments.length === 0 && mentionedPaths.length === 0)
+              }
+              onClick={running ? requestCancel : submit}
+            >
+              {running ? <Square size={12} fill="currentColor" /> : <ArrowUp size={16} />}
+            </button>
+          </div>
         </div>
         {!enhanceAnim && (
           // Pill pinned to the center of the input box (.inputwrap) top border,
@@ -3632,10 +3784,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         ) : (
           <>
             {workspaceMode === "chat" ? (
-              <span
-                className="footer-left footer-reveal"
-                style={{ color: theme.textDim, fontFamily: "var(--mono)" }}
-              >
+              <span className="footer-left footer-reveal" style={{ color: theme.textDim }}>
                 {state?.chatAgent === "therapist"
                   ? "Therapist Agent"
                   : state?.chatAgent === "research"
@@ -3643,7 +3792,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     : "Brainstorm"}
               </span>
             ) : (
-              <span className="footer-left footer-reveal" style={{ fontFamily: "var(--mono)" }}>
+              <span className="footer-left footer-reveal">
                 {BUILD_IDENTITY && (
                   <span className="footer-custom-build">{`◆ ${BUILD_IDENTITY}`}</span>
                 )}
@@ -3835,8 +3984,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
           title={workspaceMode === "chat" ? "New Chat" : "New Session"}
           message={
             workspaceMode === "chat"
-              ? "This will create a new chat. The current conversation will be cleared. Are you sure?"
-              : "This will create a new session for this project. The current conversation will be cleared. Are you sure?"
+              ? "Start a fresh chat? Your current conversation is saved in Sessions."
+              : "Start a fresh session? Your current conversation is saved in Sessions."
           }
           confirmLabel={workspaceMode === "chat" ? "New Chat" : "New Session"}
           busy={newSessionBusy}
@@ -3915,9 +4064,17 @@ function StreamingMarkdown({
 const TranscriptRow = memo(function TranscriptRow({
   item,
   onImageLoad,
+  onAskAnswer,
+  onAskType,
 }: {
   item: Item;
   onImageLoad?: () => void;
+  onAskAnswer?: (
+    itemId: number,
+    promptId: string,
+    delta: Record<string, string | string[]>,
+  ) => void;
+  onAskType?: (itemId: number, promptId: string, questionId: string, seed?: string) => void;
 }): React.ReactElement | null {
   switch (item.kind) {
     case "user":
@@ -3947,8 +4104,14 @@ const TranscriptRow = memo(function TranscriptRow({
         );
       }
       return (
-        <div className={`user-msg${item.queued ? " queued" : ""}${item.ken ? " user-ken" : ""}`}>
-          {item.queued && <span className="queued-pill">queued</span>}
+        <div
+          className={`user-msg${item.queued ? " queued" : ""}${item.promoted ? " promoted" : ""}${item.ken ? " user-ken" : ""}`}
+        >
+          {(item.queued || item.promoted) && (
+            <span className="queued-pill" aria-hidden={item.promoted}>
+              queued
+            </span>
+          )}
           {item.images && item.images.length > 0 && (
             <div className="user-img-row">
               {item.images.map((src, i) => (
@@ -4144,6 +4307,19 @@ const TranscriptRow = memo(function TranscriptRow({
       );
     case "plan":
       return <PlanModeLogo reason={item.reason} />;
+    case "ask":
+      return (
+        <AskBand
+          prompt={item.prompt}
+          answers={item.answers}
+          sent={item.sent}
+          cancelled={item.cancelled}
+          onAnswer={(delta) => onAskAnswer?.(item.id, item.prompt.id, delta)}
+          onTypeInstead={(questionId, seed) =>
+            onAskType?.(item.id, item.prompt.id, questionId, seed)
+          }
+        />
+      );
     case "task":
       return (
         <div className="line task-row">

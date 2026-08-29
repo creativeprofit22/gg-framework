@@ -109,15 +109,37 @@ function Invoke-RestartManagerQuery([string[]]$Resources) {
   return [GgCoder.RestartManagerDiagnostics]::Query($Resources)
 }
 
+function New-RestartManagerLockState(
+  [int]$ResourceCount,
+  [string]$Status,
+  [string]$Stage = '',
+  [string]$Reason = '',
+  [int]$Error = 0,
+  [uint32]$Needed = 0,
+  [Nullable[uint32]]$Limit = $null,
+  [int]$Attempt = 0,
+  [int]$Attempts = 0,
+  [string]$DiagnosticExceptionType = '',
+  [string]$DiagnosticMessage = '',
+  [object[]]$Owners = @()
+) {
+  [pscustomobject]@{
+    ResourceCount = $ResourceCount; Status = $Status; Stage = $Stage; Reason = $Reason
+    Error = $Error; Needed = $Needed; Limit = $Limit; Attempt = $Attempt; Attempts = $Attempts
+    DiagnosticExceptionType = $DiagnosticExceptionType; DiagnosticMessage = $DiagnosticMessage
+    Owners = @($Owners)
+  }
+}
+
 function Get-RestartManagerLockState([string]$ResourcePath, [long]$QueryDeadlineTimestamp = [long]::MaxValue) {
   $fullPath = [IO.Path]::GetFullPath($ResourcePath)
   if (Test-Path -LiteralPath $fullPath -PathType Container) {
-    return [pscustomobject]@{ ResourceCount = 0; Status = 'fatal'; Stage = 'validate';
-      Reason = 'container-resource-not-allowed'; Owners = @() }
+    return New-RestartManagerLockState -ResourceCount 0 -Status 'fatal' -Stage 'validate' `
+      -Reason 'container-resource-not-allowed'
   }
   if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
-    return [pscustomobject]@{ ResourceCount = 0; Status = 'none';
-      Reason = 'no-existing-file-resource'; Owners = @() }
+    return New-RestartManagerLockState -ResourceCount 0 -Status 'none' `
+      -Reason 'no-existing-file-resource'
   }
   $resource = Assert-NoReparsePointTraversal -Path $fullPath -Description 'Restart Manager payload resource'
 
@@ -197,10 +219,10 @@ namespace GgCoder {
     throw [TimeoutException]::new('Restart Manager polling deadline exhausted before query')
   }
   $query = Invoke-RestartManagerQuery -Resources ([string[]]@($resource))
-  return [pscustomobject]@{ ResourceCount = 1; Status = [string]$query.Status;
-    Stage = [string]$query.Stage; Reason = [string]$query.Reason; Error = [int]$query.Error;
-    Needed = [uint32]$query.Needed; Attempt = [int]$query.Attempt; Attempts = [int]$query.Attempts;
-    Owners = @($query.Owners) }
+  return New-RestartManagerLockState -ResourceCount 1 -Status ([string]$query.Status) `
+    -Stage ([string]$query.Stage) -Reason ([string]$query.Reason) -Error ([int]$query.Error) `
+    -Needed ([uint32]$query.Needed) -Attempt ([int]$query.Attempt) -Attempts ([int]$query.Attempts) `
+    -Owners @($query.Owners)
 }
 
 function Format-RestartManagerLockState([object]$State) {
@@ -254,8 +276,8 @@ function Wait-InstalledPayloadLocksClear([string]$InstalledExecutable,
     try {
       $state = Get-RestartManagerLockState -ResourcePath $InstalledExecutable -QueryDeadlineTimestamp $deadlineTimestamp
     } catch {
-      $state = [pscustomobject]@{ ResourceCount = 0; Status = 'unavailable';
-        DiagnosticExceptionType = $_.Exception.GetType().FullName; DiagnosticMessage = $_.Exception.Message; Owners = @() }
+      $state = New-RestartManagerLockState -ResourceCount 0 -Status 'unavailable' `
+        -DiagnosticExceptionType $_.Exception.GetType().FullName -DiagnosticMessage $_.Exception.Message
     }
     $lastEvidence = Format-RestartManagerLockState -State $state
     if ($state.Status -eq 'owners') { $lastOwnerEvidence = $lastEvidence }

@@ -388,6 +388,59 @@ windowsDescribe("detached local installer helper", () => {
     expect(log).not.toContain("LOCK CLEAR SUCCESS");
   });
 
+  it("normalizes every omitted optional lock-state field under strict mode", () => {
+    const result = runPowerShell(
+      `Set-StrictMode -Version Latest; ` +
+        `$state = New-RestartManagerLockState -ResourceCount 1 -Status 'none'; ` +
+        `[pscustomobject]@{ Stage = $state.Stage; Reason = $state.Reason; Error = $state.Error; Needed = $state.Needed; Limit = $state.Limit; Attempt = $state.Attempt; Attempts = $state.Attempts; Evidence = Format-RestartManagerLockState -State $state } | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      Stage: "",
+      Reason: "",
+      Error: 0,
+      Needed: 0,
+      Limit: null,
+      Attempt: 0,
+      Attempts: 0,
+      Evidence: "resourceCount=1 status=none",
+    });
+  });
+
+  it("formats a normalized lock state without an optional Limit argument under strict mode", () => {
+    const result = runPowerShell(
+      `Set-StrictMode -Version Latest; ` +
+        `$state = New-RestartManagerLockState -ResourceCount 1 -Status 'none' -DiagnosticExceptionType '' -DiagnosticMessage ''; ` +
+        `Format-RestartManagerLockState -State $state`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("resourceCount=1 status=none");
+  });
+
+  it("formats a normalized lock state without DiagnosticExceptionType under strict mode", () => {
+    const result = runPowerShell(
+      `Set-StrictMode -Version Latest; ` +
+        `$state = New-RestartManagerLockState -ResourceCount 1 -Status 'none' -DiagnosticMessage ''; ` +
+        `Format-RestartManagerLockState -State $state`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("resourceCount=1 status=none");
+  });
+
+  it("formats a normalized lock state without DiagnosticMessage under strict mode", () => {
+    const result = runPowerShell(
+      `Set-StrictMode -Version Latest; ` +
+        `$state = New-RestartManagerLockState -ResourceCount 1 -Status 'none' -DiagnosticExceptionType ''; ` +
+        `Format-RestartManagerLockState -State $state`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("resourceCount=1 status=none");
+  });
+
   it("formats exact owner-count and retry exhaustion limits from typed query results", () => {
     const fixture = transactionFixture();
     const result = runPowerShell(
@@ -892,7 +945,7 @@ windowsDescribe("detached local installer helper", () => {
     const result = runPowerShell(
       `$script:InstallLogPath = ${psLiteral(join(tmpdir(), `gg-shutdown-${randomUUID()}.log`))}; ` +
         `$DelaySeconds = 0; $GracefulShutdownSeconds = 2; $script:events = @(); $script:polls = 0; ` +
-        `$installed = Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\gg-coder-local-fork.exe'; ` +
+        `$installed = Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\\gg-coder-local-fork.exe'; ` +
         `$startedAt = [DateTime]::UtcNow.AddMinutes(-1); $root = [pscustomobject]@{ ProcessId = 101; ParentProcessId = 1; Name = 'gg-coder-local-fork.exe'; ExecutablePath = $installed; CreationTicks = $startedAt.Ticks }; ` +
         `$window = [pscustomobject]@{ MainWindowHandle = [IntPtr]1; Path = $installed; StartTime = $startedAt.ToLocalTime() }; $window | Add-Member ScriptMethod Refresh {}; ` +
         `$window | Add-Member ScriptMethod CloseMainWindow { $script:events += 'close-requested'; $this.MainWindowHandle = [IntPtr]::Zero; return $true }; ` +

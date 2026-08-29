@@ -19,7 +19,7 @@ const configurationFingerprint = { version: 1, sha256: "a".repeat(64) };
 const scannerProfile = {
   version: 1,
   id: "ci-scanner",
-  specialistCommand: "setup-ci",
+  specialistCommand: "research",
 };
 const inventoryEntry = { path: "package.json", sha256: "b".repeat(64) };
 const inventory = {
@@ -27,7 +27,7 @@ const inventory = {
   configurationFingerprint,
   scanners: [
     scannerProfile,
-    { version: 1, id: "skills-scanner", specialistCommand: "setup-skills" },
+    { version: 1, id: "sweep-scanner", specialistCommand: "setup-sweep" },
   ],
   entries: [inventoryEntry, { path: "src/index.ts", sha256: "c".repeat(64) }],
 };
@@ -43,8 +43,8 @@ const evidence = { version: 1, items: [evidenceItem] };
 const opportunity = {
   version: 1,
   scannerId: "ci-scanner",
-  specialistCommand: "setup-ci",
-  key: "missing-workflow",
+  specialistCommand: "research",
+  key: "missing-ci",
   path: ".github/workflows/ci.yml",
 };
 const lifecycle = { version: 1, opportunity, state: "discovered" };
@@ -52,7 +52,7 @@ const transition = { version: 1, opportunity, from: "discovered", to: "queued" }
 const route = {
   version: 1,
   opportunity,
-  specialistCommand: "setup-ci",
+  specialistCommand: "research",
   configurationFingerprint,
 };
 const executionResult = {
@@ -164,17 +164,33 @@ describe("fingerprints and scanner profiles", () => {
     expect(scannerProfileV1Schema.safeParse({ ...scannerProfile, id }).success).toBe(false);
   });
 
-  it.each(["research", "setup-programmatic", "setup-ci --force"])(
-    "rejects unsupported specialist %j",
+  it.each(["research", "setup-sweep", "setup-tauri-package"])(
+    "accepts supported specialist %j",
     (specialistCommand) => {
       expect(
         scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand }).success,
-      ).toBe(false);
+      ).toBe(true);
       expect(
         opportunityIdentityV1Schema.safeParse({ ...opportunity, specialistCommand }).success,
-      ).toBe(false);
+      ).toBe(true);
     },
   );
+
+  it.each([
+    "setup-ci",
+    "setup-commit",
+    "setup-skills",
+    "setup-programmatic",
+    "package-tauri",
+    "research --force",
+  ])("rejects unsupported specialist %j", (specialistCommand) => {
+    expect(
+      scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand }).success,
+    ).toBe(false);
+    expect(
+      opportunityIdentityV1Schema.safeParse({ ...opportunity, specialistCommand }).success,
+    ).toBe(false);
+  });
 
   it("rejects unsupported contract versions", () => {
     expect(
@@ -277,7 +293,7 @@ describe("opportunity lifecycle transitions", () => {
 describe("route and execution boundaries", () => {
   it("rejects a route/opportunity specialist mismatch", () => {
     expect(
-      routeEnvelopeV1Schema.safeParse({ ...route, specialistCommand: "setup-skills" }).success,
+      routeEnvelopeV1Schema.safeParse({ ...route, specialistCommand: "setup-sweep" }).success,
     ).toBe(false);
   });
 

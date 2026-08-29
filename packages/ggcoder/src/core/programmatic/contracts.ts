@@ -25,9 +25,8 @@ const stableIdSchema = z
   .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const boundedString = (max: number) => z.string().min(1).max(max);
 const specialistCommandSchema = z.enum([
-  "setup-ci",
-  "setup-commit",
-  "setup-skills",
+  "research",
+  "setup-sweep",
   "setup-tauri-package",
 ]);
 const lifecycleStateSchema = z.enum(["discovered", "queued", "running", "completed", "dismissed"]);

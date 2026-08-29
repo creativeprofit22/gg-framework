@@ -1325,18 +1325,29 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   // Re-measure when wrapping changes independently of the draft value.
   const inputResizeObserverRef = useRef<ResizeObserver | null>(null);
+  const inputResizeFrameRef = useRef<number | null>(null);
   const attachInput = useCallback(
     (el: HTMLTextAreaElement | null) => {
       inputRef.current = el;
       inputResizeObserverRef.current?.disconnect();
       inputResizeObserverRef.current = null;
+      if (inputResizeFrameRef.current !== null) {
+        cancelAnimationFrame(inputResizeFrameRef.current);
+        inputResizeFrameRef.current = null;
+      }
       if (!el || typeof ResizeObserver === "undefined") return;
       let lastWidth = el.clientWidth;
       const observer = new ResizeObserver(() => {
         const width = el.clientWidth;
         if (width === lastWidth) return;
         lastWidth = width;
-        autosizeInput();
+        if (inputResizeFrameRef.current !== null) {
+          cancelAnimationFrame(inputResizeFrameRef.current);
+        }
+        inputResizeFrameRef.current = requestAnimationFrame(() => {
+          inputResizeFrameRef.current = null;
+          autosizeInput();
+        });
       });
       observer.observe(el);
       inputResizeObserverRef.current = observer;
@@ -2784,6 +2795,11 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     // the same native-block path when the queue drains. Queued rows render
     // dimmed until run_end clears the flag.
     if (running) {
+      const supersedesQuestion = hasOpenAsk();
+      if (supersedesQuestion) {
+        dismissOpenAsks();
+        noteSupersedingSend(prompt);
+      }
       const queuedWire = attachments.map(toWire);
       const queuedImgs = attachments.filter((a) => a.previewUrl).map((a) => a.previewUrl!);
       pushItem({
@@ -2794,7 +2810,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
         images: queuedImgs.length > 0 ? queuedImgs : undefined,
         files: mentionedPaths.length > 0 ? mentionedPaths : undefined,
         enhancements: sentEnhancements,
-        queued: true,
+        queued: showsQueuedBubble("queue", supersedesQuestion),
       });
       setInput("");
       setAttachments([]);

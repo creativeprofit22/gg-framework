@@ -260,7 +260,8 @@ describe("AgentSession Ideal review coverage gate", () => {
     expect(followUp).toContain("Run the phase completion checks now");
     expect(followUp).toContain("1. Focused tests pass");
     expect(followUp).toContain("2. Package build passes");
-    expect(followUp).toContain("Do not submit final_review");
+    expect(followUp).toContain('Use transition: "done" only when verification.result is "passed"');
+    expect(followUp).toContain("owning implementation run must settle successfully");
     expect(internal.getHookFollowUpMessages()).toBeNull();
   });
 });

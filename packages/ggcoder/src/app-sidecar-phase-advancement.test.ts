@@ -11,6 +11,8 @@ import type { ActivePhaseContextV1 } from "./phase-context.js";
 import type {
   NotesPhase,
   NotesRoadmapCompletionReview,
+  NotesRoadmapPhaseAdvancementCheckpoint,
+  NotesRoadmapStatusUpdate,
   ProjectNotesAutomaticPhaseAdvancementOutcome,
   ProjectNotesRepository,
   ProjectNotesSnapshot,
@@ -98,12 +100,84 @@ function snapshot(phases: NotesPhase[]): ProjectNotesSnapshot {
   };
 }
 
+const directSession = {
+  sessionId: "direct-session",
+  sessionPath: "/sessions/direct.jsonl",
+};
+
+function directCompletionFixture(kind: "malformed-evidence" | "later-untyped-status") {
+  const verification: NotesRoadmapStatusUpdate = {
+    type: "status-update",
+    id: "verification-direct",
+    actor: "gg-coder",
+    transition: kind === "malformed-evidence" ? "in-progress" : "done",
+    progress: "Verification passed",
+    blocker: null,
+    requiredExternalAction: null,
+    evidence: ["pnpm test exited successfully"],
+    verification: "passed",
+    verificationReason: null,
+    verificationSession: directSession,
+    statusOutcome: kind === "malformed-evidence" ? "applied" : "completion-pending",
+    proposedReferences: [],
+    timestamp: NOW,
+  };
+  const events: NotesPhase["roadmapEvents"] = [verification];
+  if (kind === "later-untyped-status") {
+    events.push({
+      ...verification,
+      id: "status-after-verification",
+      transition: "in-progress",
+      progress: "Work continued after verification",
+      evidence: [],
+      verification: null,
+      verificationSession: null,
+      statusOutcome: "applied",
+    });
+  }
+  events.push({
+    type: "implementation-checkpoint",
+    id: "implementation-direct",
+    session: directSession,
+    planStepTotal: 1,
+    completedPlanSteps: kind === "malformed-evidence" ? [] : [1],
+    runOutcome: "succeeded",
+    verificationStatusUpdateId: verification.id,
+    timestamp: NOW,
+  });
+  const checkpoint: NotesRoadmapPhaseAdvancementCheckpoint = {
+    type: "phase-advancement-checkpoint",
+    id: "advancement-direct",
+    implementationCheckpointId: "implementation-direct",
+    verificationStatusUpdateId: verification.id,
+    completedPhaseId: "source",
+    nextPhaseId: "candidate",
+    timestamp: NOW,
+  };
+  events.push(checkpoint);
+  return {
+    checkpoint,
+    phases: [
+      completedSource([], { session: directSession, roadmapEvents: events }),
+      phase("candidate", 20),
+    ],
+  };
+}
+
 function select(
   phases: NotesPhase[],
   reviewId = "review-complete",
   mode: RoadmapPhaseAdvancementMode = "manual",
 ): RoadmapPhaseEligibility {
-  return selectNextEligibleRoadmapPhase(snapshot(phases), "source", reviewId, mode);
+  return selectNextEligibleRoadmapPhase(snapshot(phases), {
+    type: "phase-advancement-checkpoint",
+    id: "advancement-select",
+    completionReviewId: reviewId,
+    completedPhaseId: "source",
+    nextPhaseId: "candidate",
+    reviewer: mode === "autopilot" ? "ken-autopilot" : "ken",
+    timestamp: NOW,
+  });
 }
 
 describe("selectNextEligibleRoadmapPhase", () => {
@@ -140,6 +214,17 @@ describe("selectNextEligibleRoadmapPhase", () => {
       select([completedSource([completionReview({ reviewer: "ken-autopilot" })]), candidate]),
     ).toEqual({ kind: "none" });
   });
+
+  it.each(["malformed-evidence", "later-untyped-status"] as const)(
+    "does not present %s direct completion as advancement authority",
+    (kind) => {
+      const fixture = directCompletionFixture(kind);
+
+      expect(selectNextEligibleRoadmapPhase(snapshot(fixture.phases), fixture.checkpoint)).toEqual({
+        kind: "none",
+      });
+    },
+  );
 
   it("classifies every eligible branch regardless of order", () => {
     const earlier = phase("earlier", 5, "not-started");

@@ -251,7 +251,7 @@ describe("active phase context", () => {
         executionStage: "reviewing",
         approvedPlanPath: ".gg/plans/phase-21.md",
       }),
-    ).toMatchObject({ executionStage: "reviewing", approvedPlanPath: ".gg/plans/phase-21.md" });
+    ).toMatchObject({ executionStage: "implementing", approvedPlanPath: ".gg/plans/phase-21.md" });
   });
 
   it.each(["tool", "revision", "path", "query", "anchor"] as const)(

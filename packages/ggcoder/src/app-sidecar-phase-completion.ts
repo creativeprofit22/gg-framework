@@ -3,64 +3,29 @@ import {
   type NotesImplementationRunOutcome,
   type NotesSessionLink,
 } from "@kenkaiiii/gg-core/project-notes";
-import type { AutopilotVerdict } from "./core/autopilot-verdict.js";
-import type { KenVerificationException } from "./core/ken-context.js";
-import { latestVerificationExceptionEventForReview } from "./project-notes-completion-policy.js";
 import type {
   NotesPhase,
-  ProjectNotesCompletionReviewOutcome,
-  ProjectNotesCompletionReviewRequest,
   ProjectNotesImplementationCheckpointOutcome,
   ProjectNotesImplementationCheckpointRequest,
-  ProjectNotesImplementationRecoveryOutcome,
-  ProjectNotesImplementationRecoveryRequest,
+  ProjectNotesPhaseCompletionSettlementOutcome,
+  ProjectNotesPhaseCompletionSettlementRequest,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
-
-/** Adapt the current typed verification exception into Autopilot Ken's review context. */
-export function latestVerificationExceptionForReview(
-  phase: NotesPhase | undefined,
-): KenVerificationException | null {
-  const verification = latestVerificationExceptionEventForReview(phase);
-  if (!verification) return null;
-  return {
-    id: verification.id,
-    requesterActor: verification.actor,
-    reason: verification.verificationReason,
-    timestamp: verification.timestamp,
-    evidence: [...verification.evidence],
-  };
-}
-
-/** An ALL_CLEAR accepts an exception only by naming the exact current request. */
-export function autopilotVerdictAcceptsVerificationException(
-  verdict: Extract<AutopilotVerdict, { kind: "all_clear" }>,
-  currentException: KenVerificationException | null,
-): boolean {
-  return (
-    currentException !== null && verdict.acceptedVerificationExceptionId === currentException.id
-  );
-}
 
 export interface PhaseCompletionRepository {
   recordImplementationCheckpoint(
     cwd: string,
     request: ProjectNotesImplementationCheckpointRequest,
   ): Promise<ProjectNotesImplementationCheckpointOutcome>;
-  recoverImplementationCheckpoint(
+  settlePhaseCompletion(
     cwd: string,
-    request: ProjectNotesImplementationRecoveryRequest,
-  ): Promise<ProjectNotesImplementationRecoveryOutcome>;
-  recordCompletionReview(
-    cwd: string,
-    request: ProjectNotesCompletionReviewRequest,
-  ): Promise<ProjectNotesCompletionReviewOutcome>;
+    request: ProjectNotesPhaseCompletionSettlementRequest,
+  ): Promise<ProjectNotesPhaseCompletionSettlementOutcome>;
 }
 
 export type PhaseCompletionCoordinatorOutcome =
   | ProjectNotesImplementationCheckpointOutcome
-  | ProjectNotesImplementationRecoveryOutcome
-  | ProjectNotesCompletionReviewOutcome
+  | ProjectNotesPhaseCompletionSettlementOutcome
   | { status: "storage-failure"; error: unknown };
 
 export interface PhaseImplementationPlanProgress {
@@ -73,9 +38,7 @@ interface RetainedPhaseImplementationPlanProgress extends PhaseImplementationPla
   session: NotesSessionLink;
 }
 
-/** Retain canonical plan evidence after prompt/UI cleanup so a rejected phase's
- * correction run can write the fresh implementation checkpoint required for
- * the new review round. Evidence never crosses a phase or session binding. */
+/** Retains canonical plan evidence across prompt cleanup for one phase/session. */
 export class AppSidecarPhaseImplementationPlanTracker {
   private retained: RetainedPhaseImplementationPlanProgress | null = null;
 
@@ -107,10 +70,7 @@ export class AppSidecarPhaseImplementationPlanTracker {
   }
 }
 
-/** Rehydrate completed-plan evidence from the durable same-phase/same-session
- * checkpoint log after a sidecar restart. The checkpoint remains subject to
- * the normal post-rejection freshness gate; only its canonical plan shape is
- * reused to write the correction run's new checkpoint. */
+/** Rehydrates plan shape only; interrupted runs must still provide fresh verification. */
 export function restorePhaseImplementationPlanEvidence(input: {
   tracker: AppSidecarPhaseImplementationPlanTracker;
   phase: NotesPhase;
@@ -144,10 +104,7 @@ export interface PhaseCompletionCoordinatorOptions {
   cwd: string;
   repository: PhaseCompletionRepository;
   broadcastSnapshot(snapshot: ProjectNotesSnapshot): void;
-  onError?(
-    error: unknown,
-    kind: "implementation-checkpoint" | "implementation-recovery" | "completion-review",
-  ): void;
+  onError?(error: unknown, kind: "implementation-checkpoint" | "completion-settlement"): void;
 }
 
 export class AppSidecarPhaseCompletionCoordinator {
@@ -163,32 +120,26 @@ export class AppSidecarPhaseCompletionCoordinator {
     );
   }
 
-  recover(
-    request: ProjectNotesImplementationRecoveryRequest,
+  settle(
+    request: ProjectNotesPhaseCompletionSettlementRequest,
   ): Promise<PhaseCompletionCoordinatorOutcome> {
-    return this.enqueue("implementation-recovery", () =>
-      this.options.repository.recoverImplementationCheckpoint(this.options.cwd, request),
-    );
-  }
-
-  review(request: ProjectNotesCompletionReviewRequest): Promise<PhaseCompletionCoordinatorOutcome> {
-    return this.enqueue("completion-review", () =>
-      this.options.repository.recordCompletionReview(this.options.cwd, request),
+    return this.enqueue("completion-settlement", () =>
+      this.options.repository.settlePhaseCompletion(this.options.cwd, request),
     );
   }
 
   private enqueue(
-    kind: "implementation-checkpoint" | "implementation-recovery" | "completion-review",
+    kind: "implementation-checkpoint" | "completion-settlement",
     operation: () => Promise<
-      | ProjectNotesImplementationCheckpointOutcome
-      | ProjectNotesImplementationRecoveryOutcome
-      | ProjectNotesCompletionReviewOutcome
+      ProjectNotesImplementationCheckpointOutcome | ProjectNotesPhaseCompletionSettlementOutcome
     >,
   ): Promise<PhaseCompletionCoordinatorOutcome> {
     const queued = this.tail.then(async () => {
       try {
         const outcome = await operation();
-        if (outcome.status === "committed") this.options.broadcastSnapshot(outcome.snapshot);
+        if (outcome.status === "committed" || outcome.status === "open") {
+          this.options.broadcastSnapshot(outcome.snapshot);
+        }
         return outcome;
       } catch (error) {
         this.options.onError?.(error, kind);
@@ -203,12 +154,12 @@ export class AppSidecarPhaseCompletionCoordinator {
   }
 }
 
-/** Persist the settled implementation run with live plan evidence, or with the
- * same phase/session's retained evidence after completed-plan prompt cleanup. */
+/** Persist a settled run; direct completion uses only this run's retained intent. */
 export function checkpointSettledPhaseImplementation(input: {
   coordinator: AppSidecarPhaseCompletionCoordinator;
   tracker: AppSidecarPhaseImplementationPlanTracker;
   checkpointId: string;
+  completionIntentId?: string;
   phaseId: string;
   expectedSession: NotesSessionLink;
   currentPlanProgress: PhaseImplementationPlanProgress;
@@ -221,7 +172,7 @@ export function checkpointSettledPhaseImplementation(input: {
     current: input.currentPlanProgress,
   });
   if (!progress) return Promise.resolve(null);
-  return input.coordinator.checkpoint({
+  const request = {
     checkpointId: input.checkpointId,
     phaseId: input.phaseId,
     expectedSession: input.expectedSession,
@@ -229,5 +180,8 @@ export function checkpointSettledPhaseImplementation(input: {
     completedPlanSteps: progress.completed,
     runOutcome: input.runOutcome,
     timestamp: input.timestamp,
-  });
+  };
+  return input.completionIntentId
+    ? input.coordinator.settle({ ...request, completionIntentId: input.completionIntentId })
+    : input.coordinator.checkpoint(request);
 }

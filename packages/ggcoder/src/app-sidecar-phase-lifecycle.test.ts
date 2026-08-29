@@ -66,12 +66,6 @@ const contract: Array<{
     },
   },
   {
-    name: "restored review",
-    signal: { type: "session-restored", executionStage: "reviewing" },
-    stage: "reviewing",
-    expected: { status: "review", source: "session", reason: "Review session resumed" },
-  },
-  {
     name: "plan entered",
     signal: { type: "plan-entered" },
     stage: "planning",
@@ -114,30 +108,16 @@ const contract: Array<{
     },
   },
   {
-    name: "revision implementation starts",
-    signal: { type: "implementation-run-started" },
-    stage: "reviewing",
-    expected: {
-      status: "in-progress",
-      source: "session",
-      reason: "Implementation run started",
-    },
-  },
-  {
-    name: "Ideal review starts",
+    name: "Ideal review stays outside Roadmap lifecycle",
     signal: { type: "ideal-review-started" },
     stage: "implementing",
-    expected: {
-      status: "review",
-      source: "agent",
-      reason: "Implementation verification started",
-    },
+    expected: null,
   },
   {
-    name: "Autopilot review starts",
+    name: "Autopilot review stays outside Roadmap lifecycle",
     signal: { type: "autopilot-review-started" },
-    stage: "reviewing",
-    expected: { status: "review", source: "agent", reason: "Autopilot review started" },
+    stage: "implementing",
+    expected: null,
   },
   {
     name: "Autopilot requests a decision",
@@ -168,7 +148,7 @@ const contract: Array<{
   {
     name: "Autopilot cannot continue",
     signal: { type: "autopilot-stopped", reason: "Autopilot reached its review limit" },
-    stage: "reviewing",
+    stage: "implementing",
     expected: {
       status: "needs-attention",
       source: "system",
@@ -221,7 +201,7 @@ describe("phase lifecycle signal mapper", () => {
     [
       "generic attention opened",
       { type: "autopilot-stopped", reason: "Localized stop" },
-      "reviewing",
+      "implementing",
       "attention-generic-opened",
     ],
     [
@@ -229,12 +209,6 @@ describe("phase lifecycle signal mapper", () => {
       { type: "implementation-run-started" },
       "implementing",
       "attention-implementation-resolved",
-    ],
-    [
-      "review restoration resolved attention",
-      { type: "session-restored", executionStage: "reviewing" },
-      "reviewing",
-      "attention-review-resolved",
     ],
   ] as const)("assigns a stable kind when $0", (_name, signal, stage, kind) => {
     expect(mapPhaseLifecycleSignal(signal as PhaseLifecycleSignal, stage)?.kind).toBe(kind);
@@ -250,9 +224,9 @@ describe("phase lifecycle signal mapper", () => {
     expect(mapPhaseLifecycleSignal(signal, "implementing")).toBeNull();
   });
 
-  it("requires implementation stages for run and review start signals", () => {
+  it("requires implementation stage for run start and ignores review start signals", () => {
     expect(mapPhaseLifecycleSignal({ type: "implementation-run-started" }, "planning")).toBeNull();
-    expect(mapPhaseLifecycleSignal({ type: "ideal-review-started" }, "reviewing")).toBeNull();
+    expect(mapPhaseLifecycleSignal({ type: "ideal-review-started" }, "implementing")).toBeNull();
     expect(mapPhaseLifecycleSignal({ type: "autopilot-review-started" }, "planning")).toBeNull();
   });
 
@@ -300,9 +274,12 @@ describe("phase lifecycle coordinator", () => {
     });
 
     const planning = coordinator.enqueue({ type: "plan-entered" });
-    current = { ...active, phaseId: "later-phase", executionStage: "reviewing" };
+    current = { ...active, phaseId: "later-phase", executionStage: "implementing" };
     now = "2026-07-27T00:00:02.000Z";
-    const review = coordinator.enqueue({ type: "autopilot-review-started" });
+    const attention = coordinator.enqueue({
+      type: "runtime-error",
+      reason: "Provider connection failed",
+    });
     await Promise.resolve();
     expect(writes).toHaveLength(1);
     expect(writes[0]).toMatchObject({
@@ -312,10 +289,10 @@ describe("phase lifecycle coordinator", () => {
 
     first.resolve({ status: "ok", snapshot: snapshot(1) });
     await expect(planning).resolves.toMatchObject({ status: "committed" });
-    await expect(review).resolves.toMatchObject({ status: "committed" });
+    await expect(attention).resolves.toMatchObject({ status: "committed" });
     expect(writes[1]).toMatchObject({
       phaseId: "later-phase",
-      transition: { timestamp: "2026-07-27T00:00:02.000Z", status: "review" },
+      transition: { timestamp: "2026-07-27T00:00:02.000Z", status: "needs-attention" },
     });
     expect(broadcasts).toEqual([1, 2]);
   });

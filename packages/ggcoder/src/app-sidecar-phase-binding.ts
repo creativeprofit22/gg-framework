@@ -62,7 +62,7 @@ export function createAppSidecarPhaseBindingService(
         phase,
         references: loaded.snapshot.document.references,
         session: destinationSession,
-        executionStage: phase.status === "review" ? "reviewing" : "implementing",
+        executionStage: "implementing",
       });
       await session.setActivePhaseContext(activeContext);
       const repositoryRequest: ProjectNotesPhaseBindingRequest = {

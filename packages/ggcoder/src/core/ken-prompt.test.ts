@@ -21,12 +21,10 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     }
   });
 
-  it("keeps reviewer-authorized final-review submission with Autopilot Ken", () => {
-    expect(prompt).toContain("Reviewer-authorized control actions are yours");
-    expect(prompt).toContain("roadmap_status with final_review");
-    expect(prompt).toContain("call that registered tool");
-    expect(prompt).toContain("never delegate the submission to GG Coder");
-    expect(prompt).not.toContain("you can't run anything yourself");
+  it("keeps ordinary Autopilot review read-only from Roadmap mutation", () => {
+    expect(prompt).toContain("you can't implement fixes or run their verification yourself");
+    expect(prompt).not.toContain("roadmap_status with final_review");
+    expect(prompt).not.toContain("Reviewer-authorized control actions are yours");
   });
 
   it("routes only real user-level questions/options to HUMAN", () => {

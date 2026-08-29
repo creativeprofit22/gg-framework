@@ -32,6 +32,7 @@ import {
   NOTES_REFERENCE_METADATA_MAX_LENGTH,
   NOTES_REFERENCE_URL_MAX_LENGTH,
   NOTES_REMINDER_NOTE_MAX_LENGTH,
+  isNotesDirectCompletionAuthority,
   validateNotesCompletionReviewFields,
   validateNotesDocumentV3,
   validateNotesImplementationCheckpointFields,
@@ -41,6 +42,8 @@ import {
   type NotesDocumentV3,
   type NotesPhase,
   type NotesPhaseStatus,
+  type NotesRoadmapDirectPhaseAdvancementCheckpoint,
+  type NotesRoadmapImplementationCheckpoint,
   type NotesRoadmapPhaseAdvancementCheckpoint,
   type NotesRoadmapPhaseAdvancementConfirmation,
   type NotesRoadmapStatusUpdate,
@@ -93,6 +96,39 @@ async function fixture(): Promise<NotesDocumentV3> {
   return JSON.parse(
     await fs.readFile(new URL("../../../fixtures/project-notes-v3.json", import.meta.url), "utf8"),
   ) as NotesDocumentV3;
+}
+
+interface DirectCompletionFixture {
+  document: NotesDocumentV3;
+  phase: NotesPhase;
+  verification: NotesRoadmapStatusUpdate;
+  implementation: NotesRoadmapImplementationCheckpoint;
+  checkpoint: NotesRoadmapDirectPhaseAdvancementCheckpoint;
+}
+
+async function directCompletionFixture(): Promise<DirectCompletionFixture> {
+  const document = await fixture();
+  const phase = document.phases[0]!;
+  const verification = phase.roadmapEvents[0]!;
+  if (verification.type !== "status-update") throw new Error("expected verification fixture");
+  verification.transition = "done";
+  verification.statusOutcome = "completion-pending";
+  const implementation = phase.roadmapEvents[1]!;
+  if (implementation.type !== "implementation-checkpoint") {
+    throw new Error("expected implementation fixture");
+  }
+  implementation.verificationStatusUpdateId = verification.id;
+  const checkpoint: NotesRoadmapDirectPhaseAdvancementCheckpoint = {
+    type: "phase-advancement-checkpoint",
+    id: "direct-advancement-checkpoint-1",
+    implementationCheckpointId: implementation.id,
+    verificationStatusUpdateId: verification.id,
+    completedPhaseId: phase.id,
+    nextPhaseId: document.phases[1]!.id,
+    timestamp: NOW,
+  };
+  phase.roadmapEvents = [verification, implementation, checkpoint];
+  return { document, phase, verification, implementation, checkpoint };
 }
 
 function legacyV2(): NotesDocumentV2 {
@@ -890,6 +926,142 @@ describe("project Notes contract", () => {
       document,
       "phases[0].roadmapEvents[2]",
       "Done requires accepted review evidence, a successful complete implementation checkpoint, passed verification or an accepted verification exception, evidence matching the current phase session, and no unmet gates",
+    );
+  });
+
+  it("accepts authoritative direct completion evidence", async () => {
+    const state = await directCompletionFixture();
+
+    expect(isNotesDirectCompletionAuthority(state.phase, state.checkpoint)).toBe(true);
+    expect(validateNotesDocumentV3(state.document)).toEqual({
+      ok: true,
+      document: state.document,
+    });
+  });
+
+  it.each<[string, (state: DirectCompletionFixture) => void]>([
+    [
+      "implementation is not latest",
+      ({ phase, implementation, checkpoint }) => {
+        const later = { ...implementation, id: "checkpoint-later" };
+        phase.roadmapEvents = [phase.roadmapEvents[0]!, implementation, later, checkpoint];
+      },
+    ],
+    [
+      "implementation did not succeed",
+      ({ implementation }) => {
+        implementation.runOutcome = "failed";
+      },
+    ],
+    [
+      "implementation plan is incomplete",
+      ({ implementation }) => {
+        implementation.completedPlanSteps = [];
+      },
+    ],
+    [
+      "verification is not exactly linked",
+      ({ implementation }) => {
+        implementation.verificationStatusUpdateId = "different-verification";
+      },
+    ],
+    [
+      "evidence does not match the phase session",
+      ({ phase }) => {
+        phase.session = { sessionId: "replacement", sessionPath: "/sessions/replacement.jsonl" };
+      },
+    ],
+    [
+      "verification actor is not gg-coder",
+      ({ verification }) => {
+        verification.actor = "ken";
+      },
+    ],
+    [
+      "verification transition is not Done",
+      ({ verification }) => {
+        verification.transition = "in-progress";
+      },
+    ],
+    [
+      "verification outcome is not completion-pending",
+      ({ verification }) => {
+        verification.statusOutcome = "applied";
+      },
+    ],
+    [
+      "verification result did not pass",
+      ({ verification }) => {
+        verification.verification = "failed";
+      },
+    ],
+    [
+      "verification follows implementation",
+      ({ phase, verification, implementation, checkpoint }) => {
+        phase.roadmapEvents = [implementation, verification, checkpoint];
+      },
+    ],
+  ])("rejects direct completion authority when %s", async (_name, mutate) => {
+    const state = await directCompletionFixture();
+    mutate(state);
+
+    expect(isNotesDirectCompletionAuthority(state.phase, state.checkpoint)).toBe(false);
+  });
+
+  it("rejects the exact mutated-fixture direct advancement bypass", async () => {
+    const state = await directCompletionFixture();
+    state.implementation.completedPlanSteps = [];
+    state.verification.transition = "in-progress";
+    state.verification.statusOutcome = "applied";
+
+    expectError(
+      state.document,
+      "phases[0].roadmapEvents[2]",
+      "direct advancement requires current complete implementation and exact passed Done verification for the phase session",
+    );
+  });
+
+  it("rejects direct completion after a later untyped status report", async () => {
+    const state = await directCompletionFixture();
+    const laterStatus: NotesRoadmapStatusUpdate = {
+      ...state.verification,
+      id: "status-after-done",
+      transition: "in-progress",
+      progress: "Work continued after verification",
+      evidence: [],
+      verification: null,
+      verificationReason: null,
+      verificationSession: null,
+      statusOutcome: "applied",
+    };
+    state.phase.roadmapEvents = [
+      state.verification,
+      laterStatus,
+      state.implementation,
+      state.checkpoint,
+    ];
+
+    expect(isNotesDirectCompletionAuthority(state.phase, state.checkpoint)).toBe(false);
+    expectError(
+      state.document,
+      "phases[0].roadmapEvents[3]",
+      "direct advancement requires current complete implementation and exact passed Done verification for the phase session",
+    );
+  });
+
+  it("rejects direct Done intent without passed verification", async () => {
+    const document = await fixture();
+    const verification = document.phases[0]!.roadmapEvents[0]!;
+    if (verification.type !== "status-update") throw new Error("expected verification fixture");
+    verification.transition = "done";
+    verification.statusOutcome = "completion-pending";
+    verification.verification = "failed";
+    verification.verificationReason = "Focused verification failed";
+
+    expectError(
+      document,
+      "phases[0].roadmapEvents[0]",
+      "Done intent requires coding-session ownership and passed verification",
     );
   });
 

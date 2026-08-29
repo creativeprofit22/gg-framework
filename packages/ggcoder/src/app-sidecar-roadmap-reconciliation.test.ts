@@ -9,7 +9,7 @@ describe("AppSidecarRoadmapReconciliationCoordinator", () => {
     expect(lease).toMatchObject({ operationId: "operation-1", kind: "phase-start" });
     expect(coordinator.tryAcquire("c:/work/./project", "status-update")).toBeNull();
     expect(coordinator.tryAcquire("c:/work/project", "implementation-checkpoint")).toBeNull();
-    expect(coordinator.tryAcquire("c:/work/project", "completion-review")).toBeNull();
+    expect(coordinator.tryAcquire("c:/work/project", "phase-create")).toBeNull();
     expect(coordinator.owner("c:/WORK/project")).toMatchObject({
       operationId: "operation-1",
       kind: "phase-start",
@@ -24,7 +24,7 @@ describe("AppSidecarRoadmapReconciliationCoordinator", () => {
     expect(coordinator.tryAcquire("/work/project", "phase-start")).toBeNull();
     expect(coordinator.tryAcquire("/work/project", "status-update")).toBeNull();
     expect(coordinator.tryAcquire("/work/project", "implementation-checkpoint")).toBeNull();
-    expect(coordinator.tryAcquire("/work/project", "completion-review")).toBeNull();
+    expect(coordinator.tryAcquire("/work/project", "phase-create")).toBeNull();
     lease!.release();
     expect(coordinator.tryAcquire("/work/project", "phase-create")).not.toBeNull();
   });
@@ -53,9 +53,9 @@ describe("AppSidecarRoadmapReconciliationCoordinator", () => {
     }
 
     expect(coordinator.owner("/work/project")).toBeUndefined();
-    expect(coordinator.tryAcquire("/work/project", "completion-review")).toMatchObject({
+    expect(coordinator.tryAcquire("/work/project", "implementation-checkpoint")).toMatchObject({
       operationId: "operation-2",
-      kind: "completion-review",
+      kind: "implementation-checkpoint",
     });
   });
 });

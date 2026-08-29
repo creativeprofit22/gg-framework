@@ -1,6 +1,5 @@
 import type { ManualCompletionApprovalGateCode } from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
 import {
-  classifyLegacyNotesLifecycleEvent,
   notesSessionLinksEqual,
   type NotesCompletionGateOutcome,
   type NotesCompletionUnmetGateCode,
@@ -11,13 +10,6 @@ import {
   type NotesRoadmapStatusUpdate,
   type NotesSessionLink,
 } from "@kenkaiiii/gg-core/project-notes";
-
-export interface PhaseCompletionReviewDecision {
-  decision: "accepted" | "rejected";
-  acceptsVerificationException: boolean;
-  reviewer: "ken" | "ken-autopilot";
-  reason: string | null;
-}
 
 export interface PhaseCompletionEvaluation {
   gateOutcome: NotesCompletionGateOutcome;
@@ -39,10 +31,11 @@ export type ManualCompletionApprovalEvaluation =
     }
   | { status: "unmet-gate"; code: ManualCompletionApprovalGateCode };
 
-export interface EvaluatePhaseCompletionInput {
+export interface EvaluateDirectPhaseCompletionInput {
   phase: NotesPhase;
   expectedSession: NotesSessionLink;
-  review: PhaseCompletionReviewDecision;
+  implementationCheckpointId: string;
+  verificationStatusUpdateId: string;
 }
 
 export function evaluateManualCompletionApproval(
@@ -52,75 +45,57 @@ export function evaluateManualCompletionApproval(
   if (phase.status === "done") return { status: "unmet-gate", code: "already-done" };
   if (phase.archivedAt !== null) return { status: "unmet-gate", code: "archived-phase" };
   if (phase.overrides.status !== null) return { status: "unmet-gate", code: "status-override" };
-  if (phase.status !== "review") return { status: "unmet-gate", code: "inactive-phase" };
-  const evaluation = evaluatePhaseCompletion({
-    phase,
-    expectedSession,
-    review: {
-      decision: "accepted",
-      acceptsVerificationException: false,
-      reviewer: "ken",
-      reason: null,
-    },
-  });
-  if (
-    evaluation.targetStatus === "done" &&
-    evaluation.implementationCheckpointId &&
-    evaluation.verificationStatusUpdateId
-  ) {
-    return {
-      status: "eligible",
-      implementationCheckpointId: evaluation.implementationCheckpointId,
-      verificationStatusUpdateId: evaluation.verificationStatusUpdateId,
-    };
+  if (["not-started", "planning", "cancelled"].includes(phase.status)) {
+    return { status: "unmet-gate", code: "inactive-phase" };
+  }
+  const implementation = latestImplementationCheckpoint(phase);
+  if (!implementation) return { status: "unmet-gate", code: "missing-implementation" };
+  if (!notesSessionLinksEqual(phase.session, expectedSession)) {
+    return { status: "unmet-gate", code: "stale-session" };
+  }
+  if (!notesSessionLinksEqual(implementation.session, expectedSession)) {
+    return { status: "unmet-gate", code: "stale-session" };
+  }
+  if (implementation.runOutcome !== "succeeded") {
+    return { status: "unmet-gate", code: "run-not-successful" };
+  }
+  if (!hasEveryPlanStep(implementation)) {
+    return { status: "unmet-gate", code: "incomplete-plan" };
+  }
+  const verification = verificationForImplementation(phase, implementation);
+  if (!verification) return { status: "unmet-gate", code: "missing-verification" };
+  if (!notesSessionLinksEqual(verification.verificationSession, expectedSession)) {
+    return { status: "unmet-gate", code: "stale-session" };
+  }
+  if (verification.verification === "failed") {
+    return { status: "unmet-gate", code: "failed-verification" };
+  }
+  if (verification.verification === null) {
+    return { status: "unmet-gate", code: "missing-verification" };
   }
   return {
-    status: "unmet-gate",
-    code: manualApprovalGateCode(evaluation.unmetGateCodes),
+    status: "eligible",
+    implementationCheckpointId: implementation.id,
+    verificationStatusUpdateId: verification.id,
   };
 }
 
-/** Return the current typed exception event only when it belongs to the current
- * phase session and follows the latest rejected completion review. */
-export function latestVerificationExceptionEventForReview(
-  phase: NotesPhase | undefined,
-): NotesRoadmapStatusUpdate | null {
-  if (!phase?.session) return null;
-  const rejectionIndex = latestRejectedReviewIndex(phase);
-  const implementation = latestRoadmapEventAfter(
-    phase,
-    rejectionIndex,
-    (event): event is NotesRoadmapImplementationCheckpoint =>
-      event.type === "implementation-checkpoint",
-  );
-  const verification = latestVerificationForReviewRound(phase, rejectionIndex);
-  if (
-    verification?.verification !== "exception-requested" ||
-    (implementation !== undefined &&
-      phase.roadmapEvents.lastIndexOf(verification) <=
-        phase.roadmapEvents.lastIndexOf(implementation)) ||
-    !notesSessionLinksEqual(verification.verificationSession, phase.session)
-  ) {
-    return null;
-  }
-  return verification;
-}
-
-export function evaluatePhaseCompletion({
+export function evaluateDirectPhaseCompletion({
   phase,
   expectedSession,
-  review,
-}: EvaluatePhaseCompletionInput): PhaseCompletionEvaluation {
-  const rejectionIndex = latestRejectedReviewIndex(phase);
-  const implementation = latestRoadmapEventAfter(
-    phase,
-    rejectionIndex,
+  implementationCheckpointId,
+  verificationStatusUpdateId,
+}: EvaluateDirectPhaseCompletionInput): PhaseCompletionEvaluation {
+  const implementation = phase.roadmapEvents.find(
     (event): event is NotesRoadmapImplementationCheckpoint =>
-      event.type === "implementation-checkpoint",
+      event.type === "implementation-checkpoint" && event.id === implementationCheckpointId,
   );
-  const verification = latestVerificationForReviewRound(phase, rejectionIndex);
-  const implementationIndex = implementation ? phase.roadmapEvents.lastIndexOf(implementation) : -1;
-  const verificationIndex = verification ? phase.roadmapEvents.lastIndexOf(verification) : -1;
+  const verification = phase.roadmapEvents.find(
+    (event): event is NotesRoadmapStatusUpdate =>
+      event.type === "status-update" && event.id === verificationStatusUpdateId,
+  );
+  const latestImplementation = latestImplementationCheckpoint(phase);
+  const latestVerification = latestTypedVerification(phase);
   const unmet = new Set<NotesCompletionUnmetGateCode>();
 
   if (!notesSessionLinksEqual(phase.session, expectedSession)) unmet.add("stale-session");
@@ -130,7 +105,6 @@ export function evaluatePhaseCompletion({
   ) {
     unmet.add("inactive-phase");
   }
-
   if (!implementation) {
     unmet.add("missing-implementation");
   } else {
@@ -138,27 +112,32 @@ export function evaluatePhaseCompletion({
       unmet.add("stale-session");
     if (implementation.runOutcome !== "succeeded") unmet.add("run-not-successful");
     if (!hasEveryPlanStep(implementation)) unmet.add("incomplete-plan");
+    if (
+      implementation.verificationStatusUpdateId !== verificationStatusUpdateId ||
+      latestImplementation?.id !== implementation.id
+    ) {
+      unmet.add("stale-verification");
+    }
   }
-
   if (!verification) {
     unmet.add("missing-verification");
   } else {
     if (!notesSessionLinksEqual(verification.verificationSession, expectedSession)) {
       unmet.add("stale-session");
     }
-    if (implementation && verificationIndex <= implementationIndex) {
+    if (
+      verification.actor !== "gg-coder" ||
+      verification.transition !== "done" ||
+      verification.statusOutcome !== "completion-pending" ||
+      latestVerification?.id !== verification.id
+    ) {
       unmet.add("stale-verification");
     }
-    if (verification.verification === "failed") {
-      unmet.add("failed-verification");
-    } else if (
-      verification.verification === "exception-requested" &&
-      !review.acceptsVerificationException
-    ) {
+    if (verification.verification === "failed") unmet.add("failed-verification");
+    if (verification.verification !== "passed") {
       unmet.add("verification-exception-not-accepted");
     }
   }
-
   if (hasUnresolvedLifecycleStatus(phase, "waiting-for-approval")) {
     unmet.add("unresolved-approval");
   }
@@ -166,19 +145,15 @@ export function evaluatePhaseCompletion({
     unmet.add("unresolved-attention");
   }
 
-  const evidence = {
-    implementationCheckpointId: implementation?.id ?? null,
-    verificationStatusUpdateId: verification?.id ?? null,
-  };
+  const evidence = { implementationCheckpointId, verificationStatusUpdateId };
   const unmetGateCodes = [...unmet];
-
   if (phase.overrides.status !== null) {
     return {
       ...evidence,
       gateOutcome: "manual-override",
       unmetGateCodes,
       targetStatus: null,
-      reason: "Final review was recorded, but the user status override remains authoritative.",
+      reason: "The user status override remains authoritative.",
     };
   }
   if (phase.status === "done") {
@@ -190,41 +165,16 @@ export function evaluatePhaseCompletion({
       reason: "The phase is already Done; no additional completion transition was written.",
     };
   }
-  if (hasUnresolvedLifecycleStatus(phase, "waiting-for-approval")) {
-    return {
-      ...evidence,
-      gateOutcome: "waiting-for-approval",
-      unmetGateCodes,
-      targetStatus: "waiting-for-approval",
-      reason: "Plan approval is still unresolved.",
-    };
-  }
-  if (unmet.has("failed-verification") || unmet.has("unresolved-attention")) {
-    return {
-      ...evidence,
-      gateOutcome: "needs-attention",
-      unmetGateCodes,
-      targetStatus: "needs-attention",
-      reason: unmet.has("failed-verification")
-        ? verification?.verificationReason || "Verification failed."
-        : "A question or error still needs attention.",
-    };
-  }
-  if (review.decision === "rejected") {
-    return {
-      ...evidence,
-      gateOutcome: "review",
-      unmetGateCodes,
-      targetStatus: "in-progress",
-      reason: review.reason || "Final review requested revisions.",
-    };
-  }
   if (unmetGateCodes.length > 0) {
     return {
       ...evidence,
-      gateOutcome: "review",
+      gateOutcome: hasUnresolvedLifecycleStatus(phase, "waiting-for-approval")
+        ? "waiting-for-approval"
+        : unmet.has("failed-verification") || unmet.has("unresolved-attention")
+          ? "needs-attention"
+          : "review",
       unmetGateCodes,
-      targetStatus: "review",
+      targetStatus: null,
       reason: completionRecoveryReason(unmetGateCodes),
     };
   }
@@ -233,138 +183,86 @@ export function evaluatePhaseCompletion({
     gateOutcome: "done",
     unmetGateCodes: [],
     targetStatus: "done",
-    reason: `Final review accepted by ${review.reviewer === "ken" ? "Supah" : "Autopilot Supah"}.`,
+    reason:
+      "Current-session implementation and verification evidence passed every completion gate.",
   };
 }
 
-function latestRejectedReviewIndex(phase: NotesPhase): number {
-  for (let index = phase.roadmapEvents.length - 1; index >= 0; index -= 1) {
-    const event = phase.roadmapEvents[index]!;
-    if (event.type === "completion-review" && event.decision === "rejected") return index;
-  }
-  return -1;
+function latestImplementationCheckpoint(
+  phase: NotesPhase,
+): NotesRoadmapImplementationCheckpoint | undefined {
+  return [...phase.roadmapEvents]
+    .reverse()
+    .find(
+      (event): event is NotesRoadmapImplementationCheckpoint =>
+        event.type === "implementation-checkpoint",
+    );
 }
 
-function latestVerificationForReviewRound(
+function latestTypedVerification(phase: NotesPhase): NotesRoadmapStatusUpdate | undefined {
+  return [...phase.roadmapEvents]
+    .reverse()
+    .find(
+      (event): event is NotesRoadmapStatusUpdate =>
+        event.type === "status-update" && event.verification !== null,
+    );
+}
+
+function verificationForImplementation(
   phase: NotesPhase,
-  rejectionIndex = latestRejectedReviewIndex(phase),
+  implementation: NotesRoadmapImplementationCheckpoint,
 ): NotesRoadmapStatusUpdate | undefined {
-  return latestRoadmapEventAfter(
-    phase,
-    rejectionIndex,
-    (event): event is NotesRoadmapStatusUpdate =>
-      event.type === "status-update" && event.verification !== null,
-  );
-}
-
-function latestRoadmapEventAfter<T extends NotesPhase["roadmapEvents"][number]>(
-  phase: NotesPhase,
-  startIndex: number,
-  predicate: (event: NotesPhase["roadmapEvents"][number]) => event is T,
-): T | undefined {
-  for (let index = phase.roadmapEvents.length - 1; index > startIndex; index -= 1) {
-    const event = phase.roadmapEvents[index]!;
-    if (predicate(event)) return event;
+  if (implementation.verificationStatusUpdateId) {
+    return phase.roadmapEvents.find(
+      (event): event is NotesRoadmapStatusUpdate =>
+        event.type === "status-update" && event.id === implementation.verificationStatusUpdateId,
+    );
   }
-  return undefined;
+  const implementationIndex = phase.roadmapEvents.indexOf(implementation);
+  return phase.roadmapEvents
+    .slice(implementationIndex + 1)
+    .reverse()
+    .find(
+      (event): event is NotesRoadmapStatusUpdate =>
+        event.type === "status-update" && event.verification !== null,
+    );
 }
 
 function hasEveryPlanStep(checkpoint: NotesRoadmapImplementationCheckpoint): boolean {
-  if (
-    checkpoint.planStepTotal <= 0 ||
-    checkpoint.completedPlanSteps.length !== checkpoint.planStepTotal
-  ) {
-    return false;
-  }
-  return checkpoint.completedPlanSteps.every((step, index) => step === index + 1);
+  return (
+    checkpoint.planStepTotal > 0 &&
+    checkpoint.completedPlanSteps.length === checkpoint.planStepTotal &&
+    checkpoint.completedPlanSteps.every((step, index) => step === index + 1)
+  );
 }
-
-type LifecycleBlockerKind = Extract<
-  NotesLifecycleEventKind,
-  | "approval-opened"
-  | "attention-question-opened"
-  | "attention-runtime-opened"
-  | "attention-tool-opened"
-  | "attention-generic-opened"
->;
-
-const ATTENTION_RESOLUTION_KINDS: Readonly<
-  Record<Exclude<LifecycleBlockerKind, "approval-opened">, readonly NotesLifecycleEventKind[]>
-> = {
-  "attention-question-opened": ["attention-implementation-resolved"],
-  "attention-runtime-opened": ["attention-implementation-resolved", "attention-review-resolved"],
-  "attention-tool-opened": ["attention-implementation-resolved"],
-  "attention-generic-opened": ["attention-implementation-resolved", "attention-review-resolved"],
-};
 
 function hasUnresolvedLifecycleStatus(
   phase: NotesPhase,
-  status: "waiting-for-approval" | "needs-attention",
+  status: Extract<NotesPhaseStatus, "waiting-for-approval" | "needs-attention">,
 ): boolean {
-  let blockingIndex = -1;
-  for (let index = phase.lifecycleEvents.length - 1; index >= 0; index -= 1) {
-    if (phase.lifecycleEvents[index]!.toStatus === status) {
-      blockingIndex = index;
-      break;
-    }
-  }
-  if (blockingIndex < 0) return phase.status === status;
-  const blockingEvent = phase.lifecycleEvents[blockingIndex]!;
-  const blockerKind = lifecycleEventKind(blockingEvent);
-  if (status === "waiting-for-approval" && blockerKind !== "approval-opened") return true;
-  if (status === "needs-attention" && !(blockerKind in ATTENTION_RESOLUTION_KINDS)) return true;
-
-  const resolutionKinds: readonly NotesLifecycleEventKind[] =
-    blockerKind === "approval-opened"
-      ? ["approval-resolved"]
-      : ATTENTION_RESOLUTION_KINDS[blockerKind as Exclude<LifecycleBlockerKind, "approval-opened">];
-  const blockingTimestamp = Date.parse(blockingEvent.timestamp);
-  const resolved = phase.lifecycleEvents
-    .slice(blockingIndex + 1)
-    .some(
-      (event) =>
-        Date.parse(event.timestamp) >= blockingTimestamp &&
-        resolutionKinds.some((kind) => kind === lifecycleEventKind(event)),
-    );
-  return !resolved;
-}
-
-function lifecycleEventKind(event: NotesPhase["lifecycleEvents"][number]): NotesLifecycleEventKind {
-  return event.kind ?? classifyLegacyNotesLifecycleEvent(event);
-}
-
-function manualApprovalGateCode(
-  unmet: readonly NotesCompletionUnmetGateCode[],
-): ManualCompletionApprovalGateCode {
-  if (unmet.includes("stale-session")) return "stale-session";
-  if (unmet.includes("unresolved-approval")) return "unresolved-approval";
-  if (unmet.includes("unresolved-attention")) return "unresolved-attention";
-  if (unmet.includes("inactive-phase")) return "inactive-phase";
-  if (unmet.includes("missing-implementation")) return "missing-implementation";
-  if (unmet.includes("run-not-successful")) return "run-not-successful";
-  if (unmet.includes("incomplete-plan")) return "incomplete-plan";
-  if (unmet.includes("missing-verification")) return "missing-verification";
-  if (unmet.includes("stale-verification")) return "stale-verification";
-  if (unmet.includes("failed-verification")) return "failed-verification";
-  if (unmet.includes("verification-exception-not-accepted")) return "verification-exception";
-  return "evidence-mismatch";
+  const lastStatusEvent = [...phase.lifecycleEvents]
+    .reverse()
+    .find((event) => event.toStatus !== null);
+  return lastStatusEvent?.toStatus === status;
 }
 
 function completionRecoveryReason(unmet: NotesCompletionUnmetGateCode[]): string {
-  if (unmet.includes("missing-implementation"))
-    return "Implementation evidence has not been recorded.";
-  if (unmet.includes("stale-session"))
-    return "Completion evidence belongs to a different phase session.";
-  if (unmet.includes("run-not-successful"))
-    return "The implementation run did not settle successfully.";
-  if (unmet.includes("incomplete-plan")) return "Not every canonical plan step is complete.";
-  if (unmet.includes("missing-verification"))
-    return "Typed verification evidence has not been recorded.";
-  if (unmet.includes("stale-verification"))
-    return "Verification predates the latest implementation checkpoint.";
-  if (unmet.includes("verification-exception-not-accepted")) {
-    return "The verification exception still needs reviewer acceptance.";
-  }
-  if (unmet.includes("inactive-phase")) return "The phase is not active for automatic completion.";
-  return "Completion evidence is incomplete.";
+  if (unmet.includes("missing-implementation")) return "Implementation evidence is missing.";
+  if (unmet.includes("run-not-successful")) return "The owning run did not succeed.";
+  if (unmet.includes("incomplete-plan")) return "Canonical plan steps are incomplete.";
+  if (unmet.includes("missing-verification")) return "Typed verification evidence is missing.";
+  if (unmet.includes("stale-session")) return "Evidence belongs to another phase session.";
+  if (unmet.includes("stale-verification")) return "Verification is not current for this run.";
+  if (unmet.includes("unresolved-approval")) return "Plan approval is still unresolved.";
+  if (unmet.includes("unresolved-attention")) return "A question or error still needs attention.";
+  if (unmet.includes("failed-verification")) return "Verification failed.";
+  return "Completion gates remain unmet.";
+}
+
+export function lifecycleEventKindForStatus(status: NotesPhaseStatus): NotesLifecycleEventKind {
+  return status === "waiting-for-approval"
+    ? "approval-opened"
+    : status === "needs-attention"
+      ? "attention-generic-opened"
+      : "other";
 }

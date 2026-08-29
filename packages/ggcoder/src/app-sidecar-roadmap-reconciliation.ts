@@ -5,8 +5,7 @@ export type RoadmapReconciliationKind =
   | "phase-create"
   | "phase-start"
   | "status-update"
-  | "implementation-checkpoint"
-  | "completion-review";
+  | "implementation-checkpoint";
 
 export interface RoadmapReconciliationOwner {
   projectKey: string;

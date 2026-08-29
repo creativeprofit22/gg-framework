@@ -2013,8 +2013,6 @@ export class AgentSession {
         },
       ];
     };
-    if (this.activePhaseContext?.executionStage === "reviewing") return null;
-
     // Run verification before phase and Ideal-review gates.
     if (
       this.opts.selfCorrectionHooks !== false &&

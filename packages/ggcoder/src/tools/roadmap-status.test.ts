@@ -22,28 +22,12 @@ describe("RoadmapStatusParams", () => {
       progress: "Implemented the repository seam.",
       evidence: [],
       verification: null,
-      final_review: null,
       proposed_references: [],
     });
   });
 
-  it("requires separate nonblank reason and external action only for blocked reports", () => {
+  it("requires separate reason and external action only for blocked reports", () => {
     expect(() => RoadmapStatusParams.parse({ ...base, transition: "blocked" })).toThrow();
-    expect(() =>
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "blocked",
-        blocker: "Access is unavailable",
-      }),
-    ).toThrow();
-    expect(() =>
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "blocked",
-        blocker: "Access is unavailable",
-        required_external_action: "   ",
-      }),
-    ).toThrow();
     expect(
       RoadmapStatusParams.parse({
         ...base,
@@ -56,104 +40,35 @@ describe("RoadmapStatusParams", () => {
       required_external_action: "Grant this session repository access.",
     });
     expect(() =>
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "pending",
-        required_external_action: "not allowed",
-      }),
-    ).toThrow();
-    expect(() =>
       RoadmapStatusParams.parse({ ...base, transition: "in-progress", blocker: "not allowed" }),
     ).toThrow();
   });
 
-  it("requires evidence for review and has no Done transition", () => {
-    expect(() => RoadmapStatusParams.parse({ ...base, transition: "review" })).toThrow();
-    expect(
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "review",
-        evidence: [" pnpm test passed "],
-      }).evidence,
-    ).toEqual(["pnpm test passed"]);
+  it("requires passed verification and evidence for Done", () => {
     expect(() => RoadmapStatusParams.parse({ ...base, transition: "done" })).toThrow();
-  });
-
-  it("validates typed verification evidence and reasons", () => {
-    expect(() =>
+    expect(
       RoadmapStatusParams.parse({
         ...base,
-        transition: "in-progress",
+        transition: "done",
+        evidence: [" pnpm test exited successfully "],
         verification: { result: "passed" },
       }),
-    ).toThrow();
-    expect(
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "in-progress",
-        evidence: [" pnpm test passed "],
-        verification: { result: "passed" },
-      }).verification,
-    ).toEqual({ result: "passed" });
-    expect(() =>
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "in-progress",
-        verification: { result: "failed" },
-      }),
-    ).toThrow();
-    expect(
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "blocked",
-        blocker: "Tests failed",
-        required_external_action: "Decide whether to accept the failed verification",
-        verification: { result: "failed", reason: " Typecheck failed " },
-      }).verification,
-    ).toEqual({ result: "failed", reason: "Typecheck failed" });
-  });
-
-  it("normalizes strict accepted and rejected final-review decisions", () => {
-    expect(
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "review",
-        evidence: ["Implementation reviewed"],
-        final_review: {
-          review_id: " review-1 ",
-          decision: "accepted",
-          evidence: [" All gates checked "],
-        },
-      }).final_review,
-    ).toEqual({
-      review_id: "review-1",
-      decision: "accepted",
-      evidence: ["All gates checked"],
-      reason: null,
-      accepts_verification_exception: false,
+    ).toMatchObject({
+      transition: "done",
+      evidence: ["pnpm test exited successfully"],
+      verification: { result: "passed" },
     });
     expect(() =>
       RoadmapStatusParams.parse({
         ...base,
-        transition: "in-progress",
-        final_review: { review_id: "review-2", decision: "rejected" },
-      }),
-    ).toThrow();
-    expect(() =>
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "in-progress",
-        final_review: {
-          review_id: "review-2",
-          decision: "rejected",
-          reason: "Needs work",
-          accepts_verification_exception: true,
-        },
+        transition: "done",
+        evidence: ["pnpm test failed"],
+        verification: { result: "failed", reason: "Tests failed" },
       }),
     ).toThrow();
   });
 
-  it("normalizes optional reference coordinates to null", () => {
+  it("normalizes optional reference coordinates", () => {
     const parsed = RoadmapStatusParams.parse({
       ...base,
       transition: "in-progress",
@@ -167,66 +82,31 @@ describe("RoadmapStatusParams", () => {
         },
       ],
     });
-    expect(parsed.proposed_references[0]).toEqual({
+    expect(parsed.proposed_references[0]).toMatchObject({
       provider: "github",
-      tool: null,
       canonical_url: "https://github.com/owner/repo",
       owner: "owner",
       repo: "repo",
-      revision: null,
-      path: null,
-      range: null,
-      issue: null,
-      pull_request: null,
-      query: null,
-      anchor: null,
       relevance: "Repository implementation",
     });
-  });
-
-  it("rejects malformed reference coordinates atomically", () => {
-    expect(() =>
-      RoadmapStatusParams.parse({
-        ...base,
-        transition: "in-progress",
-        proposed_references: [
-          {
-            provider: "github",
-            canonical_url: "https://github.com/owner/repo/issues/1",
-            owner: "owner",
-            repo: "repo",
-            range: { start_line: 10, end_line: 2 },
-            issue: 1,
-            pull_request: 2,
-            relevance: "bad",
-          },
-        ],
-      }),
-    ).toThrow();
   });
 });
 
 describe("createRoadmapStatusTool", () => {
-  it("attributes the actor and returns compact JSON", async () => {
+  it("attributes coding ownership and returns compact JSON", async () => {
     const record = vi.fn(
       async ({ input }: RoadmapStatusToolContext): Promise<RoadmapStatusToolResult> => ({
         result: "phase-not-bound",
         phaseId: input.phase_id,
       }),
     );
-    const tool = createRoadmapStatusTool("ken", record);
+    const tool = createRoadmapStatusTool("gg-coder", record);
     const input = RoadmapStatusParams.parse({ ...base, transition: "pending" });
 
     await expect(tool.execute(input, {} as never)).resolves.toBe(
       JSON.stringify({ result: "phase-not-bound", phaseId: "phase-1" }),
     );
-    expect(record).toHaveBeenCalledWith({ actor: "ken", input });
-    expect(tool.name).toBe("roadmap_status");
-    expect(tool.description).toContain("blocker states why work cannot continue");
-    expect(tool.description).toContain(
-      "required_external_action states exactly what a person or external actor must do or decide",
-    );
-    expect(tool.description).toContain("recoverable or transient tool failures are not blockers");
-    expect(tool.description).toContain("fresh in-progress report");
+    expect(record).toHaveBeenCalledWith({ actor: "gg-coder", input });
+    expect(tool.description).toContain("completion waits for owning run settlement");
   });
 });

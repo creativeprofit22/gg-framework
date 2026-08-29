@@ -160,11 +160,17 @@ export type NotesRoadmapActor = (typeof NOTES_ROADMAP_ACTORS)[number];
 export const NOTES_ROADMAP_REVIEWERS = ["ken", "ken-autopilot"] as const;
 export type NotesRoadmapReviewer = (typeof NOTES_ROADMAP_REVIEWERS)[number];
 
-export const NOTES_ROADMAP_TRANSITIONS = ["pending", "in-progress", "blocked", "review"] as const;
+export const NOTES_ROADMAP_TRANSITIONS = [
+  "pending",
+  "in-progress",
+  "blocked",
+  "review",
+  "done",
+] as const;
 export type NotesRoadmapTransition = (typeof NOTES_ROADMAP_TRANSITIONS)[number];
 export type NotesRoadmapPhaseStatus = Extract<
   NotesPhaseStatus,
-  "planning" | "in-progress" | "needs-attention" | "review"
+  "planning" | "in-progress" | "needs-attention" | "review" | "done"
 >;
 
 const NOTES_PHASE_STATUS_BY_ROADMAP_TRANSITION = {
@@ -172,6 +178,7 @@ const NOTES_PHASE_STATUS_BY_ROADMAP_TRANSITION = {
   "in-progress": "in-progress",
   blocked: "needs-attention",
   review: "review",
+  done: "done",
 } as const satisfies Record<NotesRoadmapTransition, NotesRoadmapPhaseStatus>;
 
 export function notesPhaseStatusForRoadmapTransition(
@@ -220,6 +227,7 @@ export const NOTES_ROADMAP_STATUS_OUTCOMES = [
   "applied",
   "same-status",
   "evidence-only",
+  "completion-pending",
   "manual-override",
   "done-terminal",
 ] as const;
@@ -318,10 +326,12 @@ export interface NotesRoadmapImplementationCheckpoint {
   planStepTotal: number;
   completedPlanSteps: number[];
   runOutcome: NotesImplementationRunOutcome;
+  verificationStatusUpdateId?: string;
   recovery?: NotesRoadmapImplementationRecovery;
   timestamp: string;
 }
 
+/** Legacy read-only compatibility for persisted reviewer-era events. */
 export interface NotesRoadmapCompletionReview {
   type: "completion-review";
   id: string;
@@ -337,7 +347,8 @@ export interface NotesRoadmapCompletionReview {
   timestamp: string;
 }
 
-export interface NotesRoadmapPhaseAdvancementCheckpoint {
+/** Legacy read-only compatibility for reviewer-authorized advancement. */
+export interface NotesRoadmapLegacyPhaseAdvancementCheckpoint {
   type: "phase-advancement-checkpoint";
   id: string;
   completionReviewId: string;
@@ -346,6 +357,20 @@ export interface NotesRoadmapPhaseAdvancementCheckpoint {
   reviewer: NotesRoadmapReviewer;
   timestamp: string;
 }
+
+export interface NotesRoadmapDirectPhaseAdvancementCheckpoint {
+  type: "phase-advancement-checkpoint";
+  id: string;
+  implementationCheckpointId: string;
+  verificationStatusUpdateId: string;
+  completedPhaseId: string;
+  nextPhaseId: string;
+  timestamp: string;
+}
+
+export type NotesRoadmapPhaseAdvancementCheckpoint =
+  | NotesRoadmapLegacyPhaseAdvancementCheckpoint
+  | NotesRoadmapDirectPhaseAdvancementCheckpoint;
 
 export interface NotesRoadmapPhaseAdvancementConfirmation {
   type: "phase-advancement-confirmation";
@@ -420,6 +445,48 @@ export function notesSessionLinksEqual(
 ): boolean {
   if (left === null || right === null) return left === right;
   return left.sessionId === right.sessionId && left.sessionPath === right.sessionPath;
+}
+
+/** Verifies the complete, current evidence chain authorizing direct phase completion. */
+export function isNotesDirectCompletionAuthority(
+  phase: Pick<NotesPhase, "session" | "roadmapEvents">,
+  checkpoint: NotesRoadmapDirectPhaseAdvancementCheckpoint,
+): boolean {
+  const checkpointIndex = phase.roadmapEvents.indexOf(checkpoint);
+  if (checkpointIndex < 0) return false;
+  const priorEvents = phase.roadmapEvents.slice(0, checkpointIndex);
+  const implementation = [...priorEvents]
+    .reverse()
+    .find(
+      (event): event is NotesRoadmapImplementationCheckpoint =>
+        event.type === "implementation-checkpoint",
+    );
+  const verification = [...priorEvents]
+    .reverse()
+    .find(
+      (event): event is NotesRoadmapStatusUpdate => event.type === "status-update",
+    );
+  if (!implementation || !verification) return false;
+
+  const implementationIndex = phase.roadmapEvents.indexOf(implementation);
+  const verificationIndex = phase.roadmapEvents.indexOf(verification);
+  return (
+    implementation.id === checkpoint.implementationCheckpointId &&
+    implementation.runOutcome === "succeeded" &&
+    implementation.planStepTotal > 0 &&
+    implementation.completedPlanSteps.length === implementation.planStepTotal &&
+    implementation.completedPlanSteps.every((step, index) => step === index + 1) &&
+    implementation.verificationStatusUpdateId === checkpoint.verificationStatusUpdateId &&
+    verification.id === checkpoint.verificationStatusUpdateId &&
+    verification.actor === "gg-coder" &&
+    verification.transition === "done" &&
+    verification.statusOutcome === "completion-pending" &&
+    verification.verification === "passed" &&
+    notesSessionLinksEqual(implementation.session, phase.session) &&
+    notesSessionLinksEqual(verification.verificationSession, phase.session) &&
+    verificationIndex < implementationIndex &&
+    implementationIndex < checkpointIndex
+  );
 }
 
 /** Returns the status automatic policy will restore when a manual status override is reset. */
@@ -709,7 +776,7 @@ const ROADMAP_PHASE_BINDING_KEYS = [
   "session",
   "timestamp",
 ];
-const ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS = [
+const LEGACY_ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS = [
   "type",
   "id",
   "session",
@@ -717,6 +784,14 @@ const ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS = [
   "completedPlanSteps",
   "runOutcome",
   "timestamp",
+];
+const ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS = [
+  ...LEGACY_ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS,
+  "verificationStatusUpdateId",
+];
+const LEGACY_ROADMAP_RECOVERED_IMPLEMENTATION_CHECKPOINT_KEYS = [
+  ...LEGACY_ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS,
+  "recovery",
 ];
 const ROADMAP_RECOVERED_IMPLEMENTATION_CHECKPOINT_KEYS = [
   ...ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS,
@@ -737,13 +812,22 @@ const ROADMAP_COMPLETION_REVIEW_KEYS = [
   "unmetGateCodes",
   "timestamp",
 ];
-const ROADMAP_PHASE_ADVANCEMENT_CHECKPOINT_KEYS = [
+const LEGACY_ROADMAP_PHASE_ADVANCEMENT_CHECKPOINT_KEYS = [
   "type",
   "id",
   "completionReviewId",
   "completedPhaseId",
   "nextPhaseId",
   "reviewer",
+  "timestamp",
+];
+const ROADMAP_PHASE_ADVANCEMENT_CHECKPOINT_KEYS = [
+  "type",
+  "id",
+  "implementationCheckpointId",
+  "verificationStatusUpdateId",
+  "completedPhaseId",
+  "nextPhaseId",
   "timestamp",
 ];
 const ROADMAP_PHASE_ADVANCEMENT_CONFIRMATION_KEYS = [
@@ -870,7 +954,7 @@ export function isNotesRoadmapTransitionEvidenceSatisfied(
   transition: unknown,
   evidence: readonly unknown[],
 ): boolean {
-  return transition !== "review" || evidence.length > 0;
+  return (transition !== "review" && transition !== "done") || evidence.length > 0;
 }
 
 export function isNotesVerificationEvidenceSatisfied(
@@ -1891,7 +1975,7 @@ function validateRoadmapEvents(
         return validationError(`${eventPath}.evidence`, "expected up to 20 bounded evidence items");
       }
       if (!isNotesRoadmapTransitionEvidenceSatisfied(record.transition, record.evidence)) {
-        return validationError(`${eventPath}.evidence`, "review reports require evidence");
+        return validationError(`${eventPath}.evidence`, "review and Done reports require evidence");
       }
       if (record.verification === null) {
         if (!isNotesVerificationReasonSatisfied(record.verification, record.verificationReason)) {
@@ -1942,6 +2026,21 @@ function validateRoadmapEvents(
       if (record.transition === "blocked") blockedUpdates.add(record.id);
       if (!isNotesRoadmapStatusOutcome(record.statusOutcome)) {
         return validationError(`${eventPath}.statusOutcome`, "unknown status outcome");
+      }
+      if ((record.transition === "done") !== (record.statusOutcome === "completion-pending")) {
+        return validationError(
+          `${eventPath}.statusOutcome`,
+          "Done reports require the completion-pending outcome",
+        );
+      }
+      if (
+        record.transition === "done" &&
+        (record.actor !== "gg-coder" || record.verification !== "passed")
+      ) {
+        return validationError(
+          eventPath,
+          "Done intent requires coding-session ownership and passed verification",
+        );
       }
       if (
         !Array.isArray(record.proposedReferences) ||
@@ -2087,8 +2186,16 @@ function validateRoadmapEvents(
     }
 
     if (record.type === "implementation-checkpoint") {
-      const recovered = isRecordWithKeys(record, ROADMAP_RECOVERED_IMPLEMENTATION_CHECKPOINT_KEYS);
-      if (!recovered && !isRecordWithKeys(record, ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS)) {
+      const recovered =
+        isRecordWithKeys(record, ROADMAP_RECOVERED_IMPLEMENTATION_CHECKPOINT_KEYS) ||
+        isRecordWithKeys(record, LEGACY_ROADMAP_RECOVERED_IMPLEMENTATION_CHECKPOINT_KEYS);
+      const current =
+        isRecordWithKeys(record, ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS) ||
+        isRecordWithKeys(record, ROADMAP_RECOVERED_IMPLEMENTATION_CHECKPOINT_KEYS);
+      const legacy =
+        isRecordWithKeys(record, LEGACY_ROADMAP_IMPLEMENTATION_CHECKPOINT_KEYS) ||
+        isRecordWithKeys(record, LEGACY_ROADMAP_RECOVERED_IMPLEMENTATION_CHECKPOINT_KEYS);
+      if (!current && !legacy) {
         return validationError(eventPath, "invalid implementation checkpoint");
       }
       if (recovered) {
@@ -2146,6 +2253,29 @@ function validateRoadmapEvents(
       }
       if (checkpointIssue?.code === "unknown-run-outcome") {
         return validationError(`${eventPath}.runOutcome`, "unknown implementation run outcome");
+      }
+      if (current) {
+        if (
+          !isNonEmptyString(record.verificationStatusUpdateId) ||
+          !verificationUpdates.has(record.verificationStatusUpdateId)
+        ) {
+          return validationError(
+            `${eventPath}.verificationStatusUpdateId`,
+            "expected a prior typed verification update ID",
+          );
+        }
+        const verificationUpdate = verificationUpdates.get(record.verificationStatusUpdateId);
+        if (
+          !notesSessionLinksEqual(
+            verificationUpdate?.verificationSession ?? null,
+            record.session as NotesSessionLink,
+          )
+        ) {
+          return validationError(
+            `${eventPath}.verificationStatusUpdateId`,
+            "verification and implementation sessions must match",
+          );
+        }
       }
       implementationCheckpoints.set(
         record.id,
@@ -2290,22 +2420,56 @@ function validateRoadmapEvents(
     }
 
     if (record.type === "phase-advancement-checkpoint") {
-      if (!isRecordWithKeys(record, ROADMAP_PHASE_ADVANCEMENT_CHECKPOINT_KEYS)) {
+      const legacyShape = isRecordWithKeys(
+        record,
+        LEGACY_ROADMAP_PHASE_ADVANCEMENT_CHECKPOINT_KEYS,
+      );
+      const directShape = isRecordWithKeys(record, ROADMAP_PHASE_ADVANCEMENT_CHECKPOINT_KEYS);
+      if (!legacyShape && !directShape) {
         return validationError(eventPath, "invalid phase advancement checkpoint");
       }
-      if (!isNonEmptyString(record.completionReviewId)) {
-        return validationError(`${eventPath}.completionReviewId`, "expected a stable review ID");
-      }
-      const completionReview = completionReviews.get(record.completionReviewId);
-      if (
-        completionReview === undefined ||
-        completionReview.decision !== "accepted" ||
-        completionReview.gateOutcome !== "done"
-      ) {
-        return validationError(
-          `${eventPath}.completionReviewId`,
-          "expected a prior accepted Done completion review ID",
-        );
+      const legacy = Object.hasOwn(record, "completionReviewId");
+      if (legacy) {
+        if (!isNonEmptyString(record.completionReviewId)) {
+          return validationError(`${eventPath}.completionReviewId`, "expected a stable review ID");
+        }
+        const completionReview = completionReviews.get(record.completionReviewId);
+        if (
+          completionReview === undefined ||
+          completionReview.decision !== "accepted" ||
+          completionReview.gateOutcome !== "done"
+        ) {
+          return validationError(
+            `${eventPath}.completionReviewId`,
+            "expected a prior accepted Done completion review ID",
+          );
+        }
+        if (
+          !isNotesRoadmapReviewer(record.reviewer) ||
+          record.reviewer !== completionReview.reviewer
+        ) {
+          return validationError(
+            `${eventPath}.reviewer`,
+            "expected the referenced completion review mode",
+          );
+        }
+      } else {
+        const directCheckpoint =
+          record as unknown as NotesRoadmapDirectPhaseAdvancementCheckpoint;
+        if (
+          !isNotesDirectCompletionAuthority(
+            {
+              session: phaseSession,
+              roadmapEvents: value as NotesRoadmapEvent[],
+            },
+            directCheckpoint,
+          )
+        ) {
+          return validationError(
+            eventPath,
+            "direct advancement requires current complete implementation and exact passed Done verification for the phase session",
+          );
+        }
       }
       if (record.completedPhaseId !== phaseId) {
         return validationError(
@@ -2321,15 +2485,6 @@ function validateRoadmapEvents(
         return validationError(
           `${eventPath}.nextPhaseId`,
           "expected another phase ID in this Roadmap",
-        );
-      }
-      if (
-        !isNotesRoadmapReviewer(record.reviewer) ||
-        record.reviewer !== completionReview.reviewer
-      ) {
-        return validationError(
-          `${eventPath}.reviewer`,
-          "expected the referenced completion review mode",
         );
       }
       advancementCheckpoints.set(

@@ -111,12 +111,6 @@ const RESTORED_STAGE_TRANSITIONS: Record<ActivePhaseExecutionStage, PhaseLifecyc
     reason: "Implementation session resumed",
     kind: "attention-implementation-resolved",
   },
-  reviewing: {
-    status: "review",
-    source: "session",
-    reason: "Review session resumed",
-    kind: "attention-review-resolved",
-  },
 };
 
 export function mapPhaseLifecycleSignal(
@@ -150,7 +144,7 @@ export function mapPhaseLifecycleSignal(
             kind: "approval-resolved",
           };
     case "implementation-run-started":
-      return executionStage === "implementing" || executionStage === "reviewing"
+      return executionStage === "implementing"
         ? {
             status: "in-progress",
             source: "session",
@@ -159,18 +153,8 @@ export function mapPhaseLifecycleSignal(
           }
         : null;
     case "ideal-review-started":
-      return executionStage === "implementing"
-        ? {
-            status: "review",
-            source: "agent",
-            reason: "Implementation verification started",
-            kind: "other",
-          }
-        : null;
     case "autopilot-review-started":
-      return executionStage === "implementing" || executionStage === "reviewing"
-        ? { status: "review", source: "agent", reason: "Autopilot review started", kind: "other" }
-        : null;
+      return null;
     case "autopilot-human":
       return {
         status: "needs-attention",

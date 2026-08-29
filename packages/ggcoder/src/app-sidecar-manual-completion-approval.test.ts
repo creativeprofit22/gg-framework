@@ -137,7 +137,7 @@ describe("manual completion approval service", () => {
     expect(committedSnapshots).toHaveLength(1);
   });
 
-  it("rejects preview when current evidence belongs to an in-progress phase", async () => {
+  it("offers native approval when current evidence belongs to an in-progress phase", async () => {
     const { cwd, repository, session } = await setup("in-progress");
     await expect(
       repository.recordPhaseLifecycleTransition(cwd, "phase-1", {
@@ -153,7 +153,15 @@ describe("manual completion approval service", () => {
 
     await expect(
       service.preview({ version: 1, phaseId: "phase-1", expectedRevision: 4 }, session),
-    ).resolves.toEqual({ status: "unmet-gate", revision: 4, code: "inactive-phase" });
+    ).resolves.toMatchObject({
+      status: "ready",
+      checkpoint: {
+        revision: 4,
+        phaseId: "phase-1",
+        implementationCheckpointId: "implementation-1",
+        verificationStatusUpdateId: "verification-1",
+      },
+    });
   });
 
   it("rejects every revision race without publishing and requires a fresh preview", async () => {

@@ -1,5 +1,6 @@
 import {
   classifyRoadmapAutoStartEligibility,
+  isNotesDirectCompletionAuthority,
   notesSessionLinksEqual,
   type NotesPhase,
   type NotesRoadmapAutoStartEligibility,
@@ -59,35 +60,36 @@ function latestCompletionReview(phase: NotesPhase) {
   return [...phase.roadmapEvents].reverse().find((event) => event.type === "completion-review");
 }
 
+function isAdvancementAuthorityCurrent(
+  source: NotesPhase,
+  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
+): boolean {
+  if (source.archivedAt !== null || source.status !== "done" || source.overrides.status !== null) {
+    return false;
+  }
+  if ("completionReviewId" in checkpoint) {
+    const review = latestCompletionReview(source);
+    return (
+      review?.id === checkpoint.completionReviewId &&
+      review.reviewer === checkpoint.reviewer &&
+      review.decision === "accepted" &&
+      review.gateOutcome === "done"
+    );
+  }
+  return isNotesDirectCompletionAuthority(source, checkpoint);
+}
+
 /** Classify every automatically startable phase after authoritative completion. */
 export function selectNextEligibleRoadmapPhase(
   snapshot: ProjectNotesSnapshot,
-  completedPhaseId: string,
-  completionReviewId: string,
-  mode: RoadmapPhaseAdvancementMode,
+  checkpoint: NotesRoadmapPhaseAdvancementCheckpoint,
 ): RoadmapPhaseEligibility {
-  const source = snapshot.document.phases.find((phase) => phase.id === completedPhaseId);
-  if (
-    !source ||
-    source.archivedAt !== null ||
-    source.status !== "done" ||
-    source.overrides.status !== null
-  ) {
-    return { kind: "none" };
-  }
-  const latestReview = latestCompletionReview(source);
-  const expectedReviewer = mode === "manual" ? "ken" : "ken-autopilot";
-  if (
-    latestReview?.type !== "completion-review" ||
-    latestReview.id !== completionReviewId ||
-    latestReview.reviewer !== expectedReviewer ||
-    latestReview.decision !== "accepted" ||
-    latestReview.gateOutcome !== "done"
-  ) {
-    return { kind: "none" };
-  }
-
-  return classifyRoadmapAutoStartEligibility(orderedRoadmapPhases(snapshot), completedPhaseId);
+  const source = snapshot.document.phases.find((phase) => phase.id === checkpoint.completedPhaseId);
+  if (!source || !isAdvancementAuthorityCurrent(source, checkpoint)) return { kind: "none" };
+  return classifyRoadmapAutoStartEligibility(
+    orderedRoadmapPhases(snapshot),
+    checkpoint.completedPhaseId,
+  );
 }
 
 function roadmapPhaseAdvancementPresentations(
@@ -116,14 +118,7 @@ function roadmapPhaseAdvancementPresentations(
           (event): event is NotesRoadmapPhaseAdvancementConfirmation =>
             event.type === "phase-advancement-confirmation" && event.checkpointId === checkpoint.id,
         ) ?? null;
-      const mode: RoadmapPhaseAdvancementMode =
-        checkpoint.reviewer === "ken" ? "manual" : "autopilot";
-      const eligibility = selectNextEligibleRoadmapPhase(
-        snapshot,
-        checkpoint.completedPhaseId,
-        checkpoint.completionReviewId,
-        mode,
-      );
+      const eligibility = selectNextEligibleRoadmapPhase(snapshot, checkpoint);
       const nextPhase =
         snapshot.document.phases.find((candidate) => candidate.id === checkpoint.nextPhaseId) ??
         null;
@@ -150,6 +145,7 @@ export function selectLatestRoadmapPhaseAdvancement(
 export function createAppSidecarRoadmapPhaseAdvancementCoordinator(options: {
   repository: Pick<ProjectNotesRepository, "load" | "confirmAutomaticPhaseAdvancement">;
   onCommittedSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
+  isAutopilotEnabled?: (cwd: string) => boolean;
   now?: () => string;
 }): AppSidecarRoadmapPhaseAdvancementCoordinator {
   const now = options.now ?? (() => new Date().toISOString());
@@ -159,8 +155,14 @@ export function createAppSidecarRoadmapPhaseAdvancementCoordinator(options: {
     expectedRevision: number,
     session: RoadmapPhaseAdvancementSession,
   ) {
-    if (checkpoint.reviewer !== "ken-autopilot") return { status: "none" } as const;
     const state = session.getState();
+    if (
+      "completionReviewId" in checkpoint
+        ? checkpoint.reviewer !== "ken-autopilot"
+        : options.isAutopilotEnabled?.(state.cwd) !== true
+    ) {
+      return { status: "none" } as const;
+    }
     if (!state.sessionPath) return { status: "missing-session-path" } as const;
     const outcome = await options.repository.confirmAutomaticPhaseAdvancement(state.cwd, {
       checkpointId: checkpoint.id,

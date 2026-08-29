@@ -20,7 +20,7 @@ describe("roadmap_status provider schema", () => {
     expect(exportedSchema()).toMatchObject({
       type: "object",
       properties: {
-        transition: { enum: ["pending", "in-progress", "blocked", "review"] },
+        transition: { enum: ["pending", "in-progress", "blocked", "done"] },
         blocker: {
           type: "string",
           description: expect.stringContaining("concrete reason work cannot continue"),
@@ -53,7 +53,6 @@ describe("roadmap_status provider schema", () => {
       progress: "Done",
       evidence: [],
       verification: null,
-      final_review: null,
       proposed_references: [],
     });
   });
@@ -78,41 +77,38 @@ describe("roadmap_status provider schema", () => {
     ).toBe(false);
   });
 
-  it("rejects final_review outside a review transition", () => {
-    const tool = createRoadmapStatusTool("ken-autopilot", async () => ({
-      result: "completion-review-committed",
+  it("accepts Done only with passed verification and evidence", () => {
+    const tool = createRoadmapStatusTool("gg-coder", async () => ({
+      result: "committed",
       phaseId: "phase-1",
       revision: 2,
-      statusOutcome: "evidence-only",
+      statusOutcome: "completion-pending",
+      phaseTransitionOutcome: "completion-pending",
+      completionIntentId: "completion-intent-1",
       proposals: [],
-      gateOutcome: "done",
-      unmetGateCodes: [],
     }));
 
-    const result = tool.parameters.safeParse({
-      update_id: "review-1",
-      phase_id: "phase-1",
-      expected_revision: 1,
-      progress: "Reviewed the phase.",
-      transition: "in-progress",
-      evidence: ["Inspected implementation evidence"],
-      final_review: {
-        review_id: "final-review-1",
-        decision: "accepted",
-        evidence: ["Inspected implementation evidence"],
-      },
-    });
-
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            path: ["final_review"],
-            message: "final_review requires transition=review",
-          }),
-        ]),
-      );
-    }
+    expect(
+      tool.parameters.safeParse({
+        update_id: "completion-intent-1",
+        phase_id: "phase-1",
+        expected_revision: 1,
+        progress: "Completed and verified.",
+        transition: "done",
+        evidence: ["pnpm test exited successfully"],
+        verification: { result: "passed" },
+      }).success,
+    ).toBe(true);
+    expect(
+      tool.parameters.safeParse({
+        update_id: "completion-intent-2",
+        phase_id: "phase-1",
+        expected_revision: 1,
+        progress: "Verification failed.",
+        transition: "done",
+        evidence: ["pnpm test failed"],
+        verification: { result: "failed", reason: "Tests failed" },
+      }).success,
+    ).toBe(false);
   });
 });

@@ -7,10 +7,6 @@ import {
   NOTES_ROADMAP_REASON_MAX_LENGTH,
   isNotesRoadmapTransitionEvidenceSatisfied,
   isNotesVerificationEvidenceSatisfied,
-  validateNotesCompletionReviewFields,
-  type NotesCompletionGateOutcome,
-  type NotesCompletionUnmetGateCode,
-  type NotesRoadmapActor,
   type NotesRoadmapStatusOutcome,
 } from "@kenkaiiii/gg-core/project-notes";
 import type { ProjectNotesRoadmapProposalOutcome } from "../project-notes-repository.js";
@@ -70,28 +66,12 @@ const roadmapStatusInputSchema: JsonSchema = {
       required: ["result"],
       additionalProperties: false,
     },
-    final_review: {
-      type: "object",
-      properties: {
-        review_id: { type: "string", maxLength: 128 },
-        decision: { enum: ["accepted", "rejected"] },
-        evidence: {
-          type: "array",
-          items: { type: "string", maxLength: NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH },
-          maxItems: NOTES_ROADMAP_EVIDENCE_MAX_ITEMS,
-        },
-        reason: { type: "string", maxLength: NOTES_ROADMAP_REASON_MAX_LENGTH },
-        accepts_verification_exception: { type: "boolean" },
-      },
-      required: ["review_id", "decision"],
-      additionalProperties: false,
-    },
     proposed_references: {
       type: "array",
       items: roadmapReferenceProposalInputSchema,
       maxItems: NOTES_ROADMAP_PROPOSALS_MAX_ITEMS,
     },
-    transition: { enum: ["pending", "in-progress", "blocked", "review"] },
+    transition: { enum: ["pending", "in-progress", "blocked", "done"] },
     blocker: {
       type: "string",
       maxLength: 1_024,
@@ -231,42 +211,8 @@ const Verification = z
   ])
   .nullish()
   .transform((value) => value ?? null);
-const FinalReview = z
-  .discriminatedUnion("decision", [
-    z
-      .object({
-        review_id: StableId,
-        decision: z.literal("accepted"),
-        evidence: Evidence,
-        reason: ReviewReason.nullish().transform((value) => value ?? null),
-        accepts_verification_exception: z.boolean().default(false),
-      })
-      .strict(),
-    z
-      .object({
-        review_id: StableId,
-        decision: z.literal("rejected"),
-        evidence: Evidence,
-        reason: ReviewReason.nullish().transform((value) => value ?? null),
-        accepts_verification_exception: z.literal(false).default(false),
-      })
-      .strict(),
-  ])
-  .nullish()
-  .transform((value) => value ?? null)
-  .superRefine((review, context) => {
-    if (review === null) return;
-    const issue = validateNotesCompletionReviewFields(review);
-    if (issue?.code === "accepted-requires-evidence") {
-      context.addIssue({
-        code: "custom",
-        path: ["evidence"],
-        message: "accepted reviews require at least one evidence item",
-      });
-    } else if (issue?.code === "rejected-requires-reason") {
-      context.addIssue({ code: "custom", path: ["reason"], message: "reason is required" });
-    }
-  });
+
+const PassedVerification = z.object({ result: z.literal("passed") }).strict();
 
 const commonFields = {
   update_id: StableId,
@@ -275,7 +221,6 @@ const commonFields = {
   progress: Progress,
   evidence: Evidence,
   verification: Verification,
-  final_review: FinalReview,
   proposed_references: ProposedReferences,
 };
 
@@ -319,10 +264,11 @@ export const RoadmapStatusParams = z
     z
       .object({
         ...commonFields,
-        transition: z.literal("review"),
+        transition: z.literal("done"),
         blocker: z.never().optional(),
         required_external_action: z.never().optional(),
         evidence: Evidence,
+        verification: PassedVerification,
       })
       .strict(),
   ])
@@ -331,7 +277,7 @@ export const RoadmapStatusParams = z
       context.addIssue({
         code: "custom",
         path: ["evidence"],
-        message: "review reports require at least one evidence item",
+        message: "Done reports require at least one evidence item",
       });
     }
     if (
@@ -343,29 +289,13 @@ export const RoadmapStatusParams = z
         message: "passed verification requires at least one evidence item",
       });
     }
-    if (report.final_review !== null && report.transition !== "review") {
-      context.addIssue({
-        code: "custom",
-        path: ["final_review"],
-        message: "final_review requires transition=review",
-      });
-    }
   });
 
 export type RoadmapStatusInput = z.infer<typeof RoadmapStatusParams>;
 export type RoadmapReferenceProposalInput = z.infer<typeof RoadmapReferenceProposalParams>;
 
-export type RoadmapStatusActor = NotesRoadmapActor;
-export type RoadmapFinalReviewScheduleOutcome =
-  | "queued"
-  | "duplicate"
-  | "autopilot-disabled"
-  | "not-eligible"
-  | "unavailable"
-  | "failed";
-
 export interface RoadmapStatusToolContext {
-  actor: RoadmapStatusActor;
+  actor: "gg-coder";
   input: RoadmapStatusInput;
 }
 
@@ -376,32 +306,12 @@ export type RoadmapStatusToolResult =
       revision: number;
       statusOutcome: NotesRoadmapStatusOutcome;
       phaseTransitionOutcome: NotesRoadmapStatusOutcome;
-      finalReviewScheduleOutcome?: RoadmapFinalReviewScheduleOutcome;
+      completionIntentId?: string;
       proposals: ProjectNotesRoadmapProposalOutcome[];
       message?: string;
-    }
-  | {
-      result: "completion-review-committed" | "completion-review-duplicate";
-      phaseId: string;
-      revision: number;
-      statusOutcome: NotesRoadmapStatusOutcome;
-      proposals: ProjectNotesRoadmapProposalOutcome[];
-      gateOutcome: NotesCompletionGateOutcome;
-      unmetGateCodes: NotesCompletionUnmetGateCode[];
-      message?: string;
-    }
-  | {
-      result: "completion-gate-blocked";
-      phaseId: string;
-      revision: number;
-      gateOutcome: NotesCompletionGateOutcome;
-      unmetGateCodes: NotesCompletionUnmetGateCode[];
-      message: string;
     }
   | {
       result:
-        | "reviewer-not-authorized"
-        | "final-review-claim-mismatch"
         | "reconciliation-in-progress"
         | "phase-not-bound"
         | "notes-missing"
@@ -412,9 +322,7 @@ export type RoadmapStatusToolResult =
         | "phase-archived"
         | "stale-session"
         | "invalid-reference"
-        | "verification-incomplete"
-        | "completion-checkpoint-blocked"
-        | "invalid-review";
+        | "verification-incomplete";
       phaseId: string;
       revision?: number;
       owner?: { operationId: string; kind: string } | null;
@@ -424,19 +332,13 @@ export type RoadmapStatusToolResult =
     };
 
 export function createRoadmapStatusTool(
-  actor: RoadmapStatusActor,
+  actor: "gg-coder",
   record: (context: RoadmapStatusToolContext) => Promise<RoadmapStatusToolResult>,
 ): AgentTool<typeof RoadmapStatusParams> {
   return {
     name: "roadmap_status",
     description:
-      "Append one bounded Roadmap progress, blocker, required external action, typed verification, final-review decision, and structured-reference report. " +
-      "Report transition: blocked only when work cannot continue without a concrete external decision or action; blocker states why work cannot continue, required_external_action states exactly what a person or external actor must do or decide, and recoverable or transient tool failures are not blockers. " +
-      "Send a fresh in-progress report after blocked work actually resumes. Report meaningful milestones promptly, one call at a time. Cite actual checks in evidence, " +
-      "reuse IDs only when retrying the same report, and avoid repeating an unchanged report. " +
-      "GG Coder may transition an active phase to review only with verification.result=passed and exactly one evidence item per Done When criterion, in criterion order; every item must cite verbatim one distinct, current-revision command that the verification classifier approved and observed exiting successfully. " +
-      "Failed or incomplete verification stays in-progress (or blocked only for a concrete external dependency). Only Ken or Autopilot Ken may submit final_review; " +
-      "the completion gate, not this tool text, decides Done and preserves user overrides.",
+      "Report bounded Roadmap progress or a real external blocker. Done requires passed verification and one current classifier-approved command per criterion; completion waits for owning run settlement.",
     parameters: RoadmapStatusParams,
     rawInputSchema: roadmapStatusInputSchema,
     executionMode: "sequential",

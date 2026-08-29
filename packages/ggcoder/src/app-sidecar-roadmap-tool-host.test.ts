@@ -853,30 +853,42 @@ describe("app sidecar reviewer roadmap_status production wiring", () => {
       onError,
     });
     const autopilotTool = host.createSessionTools("ken-autopilot")[0]!;
+    const codingTool = host.createSessionTools("coding", () => {
+      throw new Error("ordinary GG Coder must be rejected before session access");
+    })[0]!;
 
     await expect(
       scheduler.drain(async (trigger) => {
         claimedReviewId = trigger.reviewId;
+        const input = RoadmapStatusParams.parse({
+          update_id: trigger.statusUpdateId,
+          phase_id: trigger.phaseId,
+          expected_revision: migrated.snapshot.revision,
+          transition: "review",
+          progress: `Autopilot independently ${decision} the completed phase.`,
+          evidence: ["Reviewed implementation and verification evidence"],
+          final_review: {
+            review_id: trigger.reviewId,
+            decision,
+            evidence: [`Independent final review ${decision}`],
+            reason: decision === "rejected" ? "Remediation is required." : undefined,
+          },
+        });
+        if (decision === "accepted") {
+          const codingOutput = await codingTool.execute(input, {} as never);
+          if (typeof codingOutput !== "string") {
+            throw new Error("roadmap_status returned non-text output");
+          }
+          expect(JSON.parse(codingOutput)).toEqual({
+            result: "reviewer-not-authorized",
+            phaseId: trigger.phaseId,
+          });
+          expect(recordFinalReview).not.toHaveBeenCalled();
+        }
         await reviewRuns.run(
           trigger,
           async () => {
-            const output = await autopilotTool.execute(
-              RoadmapStatusParams.parse({
-                update_id: trigger.statusUpdateId,
-                phase_id: trigger.phaseId,
-                expected_revision: migrated.snapshot.revision,
-                transition: "review",
-                progress: `Autopilot independently ${decision} the completed phase.`,
-                evidence: ["Reviewed implementation and verification evidence"],
-                final_review: {
-                  review_id: trigger.reviewId,
-                  decision,
-                  evidence: [`Independent final review ${decision}`],
-                  reason: decision === "rejected" ? "Remediation is required." : undefined,
-                },
-              }),
-              {} as never,
-            );
+            const output = await autopilotTool.execute(input, {} as never);
             if (typeof output !== "string") {
               throw new Error("roadmap_status returned non-text output");
             }

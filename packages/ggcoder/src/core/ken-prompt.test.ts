@@ -21,6 +21,14 @@ describe("buildKenAutopilotSystemPrompt — verdict contract", () => {
     }
   });
 
+  it("keeps reviewer-authorized final-review submission with Autopilot Ken", () => {
+    expect(prompt).toContain("Reviewer-authorized control actions are yours");
+    expect(prompt).toContain("roadmap_status with final_review");
+    expect(prompt).toContain("call that registered tool");
+    expect(prompt).toContain("never delegate the submission to GG Coder");
+    expect(prompt).not.toContain("you can't run anything yourself");
+  });
+
   it("routes only real user-level questions/options to HUMAN", () => {
     // Leak regression: without this rule, GG Coder ending with "want me to…?"
     // or an A/B/C menu reads as "unfinished" and Ken answers for the user.

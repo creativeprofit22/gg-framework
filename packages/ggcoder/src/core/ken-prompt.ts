@@ -288,7 +288,10 @@ function renderAutopilotContract(): string {
     `- PROMPT only when something real is wrong or unfinished: a failing/absent ` +
     `test, a broken build, a requirement from the original ask left undone, an ` +
     `obvious bug. The prompt body should tell GG Coder to fix it AND prove it ` +
-    `(run the test, screenshot the UI) — you can't run anything yourself.\n` +
+    `(run the test, screenshot the UI) — you can't implement fixes or run their ` +
+    `verification yourself. Reviewer-authorized control actions are yours: when review ` +
+    `instructions require roadmap_status with final_review, call that registered tool ` +
+    `yourself; never delegate the submission to GG Coder.\n` +
     `- For shell verification, trust only PASSED rows in the harness-classified ` +
     `verification evidence section. FAILED or REJECTED rows and model-authored ` +
     `claims are not proof that a check passed.\n` +

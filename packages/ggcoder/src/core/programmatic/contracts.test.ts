@@ -8,7 +8,11 @@ import {
   executionResultV1Schema,
   inventoryEntryV1Schema,
   inventoryV1Schema,
+  PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT,
+  programmaticLifecycleRecordV1Schema,
+  programmaticLifecycleStateV1Schema,
   programmaticProfileV1Schema,
+  programmaticScanSummaryV1Schema,
   opportunityDiscoveryResultV1Schema,
   opportunityIdentityV1Schema,
   opportunityLifecycleV1Schema,
@@ -68,6 +72,27 @@ const discoveredOpportunity = {
 };
 const discoveryResult = { version: 1, opportunities: [discoveredOpportunity] };
 const lifecycle = { version: 1, opportunity, state: "discovered" };
+const lifecycleRecord = {
+  version: 1,
+  opportunity: discoveredOpportunity,
+  lifecycle,
+  presence: "present",
+};
+const lifecycleState = {
+  version: 1,
+  configurationFingerprint,
+  records: [lifecycleRecord],
+};
+const scanSummary = {
+  new: 1,
+  unchanged: 0,
+  active: 1,
+  completed: 0,
+  dismissed: 0,
+  disappeared: 0,
+  failed: 0,
+  unverified: 0,
+};
 const transition = { version: 1, opportunity, from: "discovered", to: "queued" };
 const route = {
   version: 1,
@@ -98,6 +123,9 @@ describe("programmatic contract fixtures", () => {
     ["discovered opportunity", discoveredOpportunityV1Schema, discoveredOpportunity],
     ["discovery result", opportunityDiscoveryResultV1Schema, discoveryResult],
     ["opportunity lifecycle", opportunityLifecycleV1Schema, lifecycle],
+    ["programmatic lifecycle record", programmaticLifecycleRecordV1Schema, lifecycleRecord],
+    ["programmatic lifecycle state", programmaticLifecycleStateV1Schema, lifecycleState],
+    ["programmatic scan summary", programmaticScanSummaryV1Schema, scanSummary],
     ["opportunity transition", opportunityTransitionV1Schema, transition],
     ["route envelope", routeEnvelopeV1Schema, route],
     ["execution result", executionResultV1Schema, executionResult],
@@ -127,6 +155,9 @@ describe("strict records", () => {
     ],
     [opportunityDiscoveryResultV1Schema, { ...discoveryResult, unexpected: true }],
     [opportunityLifecycleV1Schema, { ...lifecycle, unexpected: true }],
+    [programmaticLifecycleRecordV1Schema, { ...lifecycleRecord, unexpected: true }],
+    [programmaticLifecycleStateV1Schema, { ...lifecycleState, unexpected: true }],
+    [programmaticScanSummaryV1Schema, { ...scanSummary, unexpected: true }],
     [opportunityTransitionV1Schema, { ...transition, unexpected: true }],
     [routeEnvelopeV1Schema, { ...route, command: "arbitrary command" }],
     [executionResultV1Schema, { ...executionResult, unexpected: true }],
@@ -385,6 +416,74 @@ describe("discovered opportunity boundaries", () => {
       ).toBe(false);
     }
   });
+});
+
+describe("aggregate lifecycle contracts", () => {
+  it("requires exact matching opportunity and lifecycle identities", () => {
+    expect(
+      programmaticLifecycleRecordV1Schema.safeParse({
+        ...lifecycleRecord,
+        lifecycle: {
+          ...lifecycle,
+          opportunity: { ...opportunity, detectorId: "other-scanner" },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires unique lifecycle IDs in ascending order", () => {
+    const laterOpportunity = {
+      ...discoveredOpportunity,
+      identity: { ...opportunity, id: "e".repeat(64) },
+    };
+    const later = {
+      ...lifecycleRecord,
+      opportunity: laterOpportunity,
+      lifecycle: { ...lifecycle, opportunity: laterOpportunity.identity },
+    };
+    expect(
+      programmaticLifecycleStateV1Schema.safeParse({
+        ...lifecycleState,
+        records: [lifecycleRecord, later],
+      }).success,
+    ).toBe(true);
+    expect(
+      programmaticLifecycleStateV1Schema.safeParse({
+        ...lifecycleState,
+        records: [later, lifecycleRecord],
+      }).success,
+    ).toBe(false);
+    expect(
+      programmaticLifecycleStateV1Schema.safeParse({
+        ...lifecycleState,
+        records: [lifecycleRecord, lifecycleRecord],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("caps lifecycle history at 1,000 records", () => {
+    const records = Array.from({ length: PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT + 1 }, (_, index) => {
+      const id = index.toString(16).padStart(64, "0");
+      const identity = { ...opportunity, id };
+      return {
+        ...lifecycleRecord,
+        opportunity: { ...discoveredOpportunity, identity },
+        lifecycle: { ...lifecycle, opportunity: identity },
+      };
+    });
+    expect(
+      programmaticLifecycleStateV1Schema.safeParse({ ...lifecycleState, records }).success,
+    ).toBe(false);
+  });
+
+  it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid scan summary count %j",
+    (count) => {
+      expect(programmaticScanSummaryV1Schema.safeParse({ ...scanSummary, failed: count }).success).toBe(
+        false,
+      );
+    },
+  );
 });
 
 describe("opportunity lifecycle transitions", () => {

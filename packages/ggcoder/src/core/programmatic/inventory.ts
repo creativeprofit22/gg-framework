@@ -54,6 +54,11 @@ export const PROGRAMMATIC_INVENTORY_EXCLUSIONS = [
   "**/*.pfx",
   "**/id_rsa",
   "**/id_rsa.pub",
+  ".gg/programmatic/state.json",
+  ".gg/programmatic/state.previous.json",
+  ".gg/programmatic/.state.tmp",
+  ".gg/programmatic/.state.previous.tmp",
+  ".gg/programmatic/state.json.lock",
 ] as const;
 
 const CONFIG_FILE_NAMES = new Set([

@@ -23,6 +23,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
   tauri_package:
     "Deterministically inspect, set up, calibrate, package, or verify supported host-native Tauri v2 JSON apps; load it for /setup-tauri-package and /package-tauri.",
   programmatic_profile: "Inspect/persist.",
+  programmatic_scan: "Run one approved-profile scan and persist bounded lifecycle summary state.",
   web_search:
     "Search the web. Use before web_fetch to find pages; supports include/exclude_domains and a time_range recency filter.",
   web_fetch:
@@ -123,6 +124,7 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "list_agents",
   "ls",
   "programmatic_profile",
+  "programmatic_scan",
   "read",
   "screenshot",
   "send_message",
@@ -156,6 +158,7 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "source_path",
   "tauri_package",
   "programmatic_profile",
+  "programmatic_scan",
   "web_fetch",
   "task_output",
   "task_stop",

@@ -2,6 +2,7 @@ import path from "node:path";
 import { z } from "zod";
 
 export const PROGRAMMATIC_CONTRACT_VERSION = 1 as const;
+export const PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT = 1_000;
 
 const LIMITS = {
   pathChars: 500,
@@ -30,11 +31,12 @@ const stableIdSchema = z
 const boundedString = (max: number) => z.string().min(1).max(max);
 const specialistCommandSchema = z.enum(["research", "setup-sweep", "setup-tauri-package"]);
 const lifecycleStateSchema = z.enum(["discovered", "queued", "running", "completed", "dismissed"]);
-const positiveSafeIntegerSchema = z
+const nonnegativeSafeIntegerSchema = z
   .number()
   .int()
-  .positive()
+  .nonnegative()
   .refine(Number.isSafeInteger, "must be a safe integer");
+const positiveSafeIntegerSchema = nonnegativeSafeIntegerSchema.positive();
 const allowedTransitions = {
   discovered: new Set(["queued", "dismissed"]),
   queued: new Set(["discovered", "running", "dismissed"]),
@@ -213,6 +215,46 @@ export const opportunityLifecycleV1Schema = z.strictObject({
   state: lifecycleStateSchema,
 });
 
+export const programmaticLifecycleRecordV1Schema = z
+  .strictObject({
+    version: versionSchema,
+    opportunity: discoveredOpportunityV1Schema,
+    lifecycle: opportunityLifecycleV1Schema,
+    presence: z.enum(["present", "disappeared"]),
+  })
+  .refine(
+    (value) =>
+      value.opportunity.identity.id === value.lifecycle.opportunity.id &&
+      value.opportunity.identity.detectorId === value.lifecycle.opportunity.detectorId &&
+      value.opportunity.identity.key === value.lifecycle.opportunity.key &&
+      value.opportunity.identity.path === value.lifecycle.opportunity.path,
+    { path: ["lifecycle", "opportunity"], message: "lifecycle identity must match opportunity identity" },
+  );
+
+export const programmaticLifecycleStateV1Schema = z
+  .strictObject({
+    version: versionSchema,
+    configurationFingerprint: configurationFingerprintV1Schema,
+    records: z
+      .array(programmaticLifecycleRecordV1Schema)
+      .max(PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT),
+  })
+  .refine((value) => isStrictlyAscending(value.records.map(({ opportunity }) => opportunity.identity.id)), {
+    path: ["records"],
+    message: "opportunity IDs must be unique and sorted ascending",
+  });
+
+export const programmaticScanSummaryV1Schema = z.strictObject({
+  new: nonnegativeSafeIntegerSchema,
+  unchanged: nonnegativeSafeIntegerSchema,
+  active: nonnegativeSafeIntegerSchema,
+  completed: nonnegativeSafeIntegerSchema,
+  dismissed: nonnegativeSafeIntegerSchema,
+  disappeared: nonnegativeSafeIntegerSchema,
+  failed: nonnegativeSafeIntegerSchema,
+  unverified: nonnegativeSafeIntegerSchema,
+});
+
 export const opportunityTransitionV1Schema = z
   .strictObject({
     version: versionSchema,
@@ -256,6 +298,9 @@ export type OpportunityRouteV1 = z.infer<typeof opportunityRouteV1Schema>;
 export type DiscoveredOpportunityV1 = z.infer<typeof discoveredOpportunityV1Schema>;
 export type OpportunityDiscoveryResultV1 = z.infer<typeof opportunityDiscoveryResultV1Schema>;
 export type OpportunityLifecycleV1 = z.infer<typeof opportunityLifecycleV1Schema>;
+export type ProgrammaticLifecycleRecordV1 = z.infer<typeof programmaticLifecycleRecordV1Schema>;
+export type ProgrammaticLifecycleStateV1 = z.infer<typeof programmaticLifecycleStateV1Schema>;
+export type ProgrammaticScanSummaryV1 = z.infer<typeof programmaticScanSummaryV1Schema>;
 export type OpportunityTransitionV1 = z.infer<typeof opportunityTransitionV1Schema>;
 export type RouteEnvelopeV1 = z.infer<typeof routeEnvelopeV1Schema>;
 export type ExecutionResultV1 = z.infer<typeof executionResultV1Schema>;

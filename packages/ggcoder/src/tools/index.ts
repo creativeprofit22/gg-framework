@@ -12,6 +12,7 @@ import { createEditTool } from "./edit.js";
 import { createBashTool } from "./bash.js";
 import { createTauriPackageTool } from "./tauri-package.js";
 import { createProgrammaticProfileTool } from "./programmatic-profile.js";
+import { createProgrammaticScanTool } from "./programmatic-scan.js";
 import { createFindTool } from "./find.js";
 import { createGrepTool } from "./grep.js";
 import { createSearchCodeTool } from "./search-code.js";
@@ -215,6 +216,12 @@ export async function createTools(
       getSandboxPolicy: ops === localOperations ? opts?.getSandboxPolicy : undefined,
     }),
     createProgrammaticProfileTool(cwd, {
+      localFilesystem: ops === localOperations,
+      planModeRef,
+      onFileMutated: opts?.onFileMutated,
+      onPreFileMutation: opts?.onPreFileMutation,
+    }),
+    createProgrammaticScanTool(cwd, {
       localFilesystem: ops === localOperations,
       planModeRef,
       onFileMutated: opts?.onFileMutated,

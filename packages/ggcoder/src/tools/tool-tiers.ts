@@ -59,6 +59,7 @@ export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "source_path",
   "tauri_package",
   "programmatic_profile",
+  "programmatic_scan",
   "screenshot",
   "generate_image",
   "send_message",

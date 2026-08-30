@@ -3,10 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAppSidecarRoadmapPhaseAdvancementCoordinator } from "./app-sidecar-phase-advancement.js";
+import { AppSidecarCompletionIntentTracker } from "./app-sidecar-completion-intent.js";
 import {
   AppSidecarPhaseCompletionCoordinator,
   AppSidecarPhaseImplementationPlanTracker,
-  checkpointSettledPhaseImplementation,
 } from "./app-sidecar-phase-completion.js";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import {
@@ -116,7 +116,8 @@ describe("app-sidecar direct Roadmap completion", () => {
     const repository = new ProjectNotesRepository(agentDir);
     await repository.migrate(cwd, document());
     let latestSnapshot: ProjectNotesSnapshot | null = null;
-    let completionIntentId: string | undefined;
+    const completionIntents = new AppSidecarCompletionIntentTracker();
+    const completionIntentRun = completionIntents.beginRun();
     const host = new AppSidecarRoadmapToolHost({
       cwd,
       repository,
@@ -126,7 +127,7 @@ describe("app-sidecar direct Roadmap completion", () => {
         latestSnapshot = snapshot;
       },
       onCompletionIntent: (intent) => {
-        completionIntentId = intent.statusUpdateId;
+        completionIntents.record(intent);
       },
     });
 
@@ -148,7 +149,6 @@ describe("app-sidecar direct Roadmap completion", () => {
       result: "committed",
       statusOutcome: "completion-pending",
     });
-    expect(completionIntentId).toBe("completion-intent-current");
 
     const coordinator = new AppSidecarPhaseCompletionCoordinator({
       cwd,
@@ -157,19 +157,41 @@ describe("app-sidecar direct Roadmap completion", () => {
         latestSnapshot = snapshot;
       },
     });
-    const outcome = await checkpointSettledPhaseImplementation({
+    const finalizer = completionIntents.finalizeRun(completionIntentRun);
+    const outcome = await finalizer.checkpoint({
       coordinator,
       tracker: new AppSidecarPhaseImplementationPlanTracker(),
       checkpointId: "checkpoint-current",
-      completionIntentId,
       phaseId: "phase-1",
       expectedSession: session,
       currentPlanProgress: { total: 1, completed: [1] },
       runOutcome: "succeeded",
       timestamp: "2026-08-29T00:01:00.000Z",
     });
+    const repeatedOutcome = await finalizer.checkpoint({
+      coordinator,
+      tracker: new AppSidecarPhaseImplementationPlanTracker(),
+      checkpointId: "checkpoint-repeat",
+      phaseId: "phase-1",
+      expectedSession: session,
+      currentPlanProgress: { total: 1, completed: [1] },
+      runOutcome: "succeeded",
+      timestamp: "2026-08-29T00:01:01.000Z",
+    });
 
     expect(outcome).toMatchObject({ status: "committed", evaluation: { gateOutcome: "done" } });
+    expect(repeatedOutcome).not.toMatchObject({
+      status: "committed",
+      evaluation: { gateOutcome: "done" },
+    });
+    const settledSnapshot = await repository.load(cwd);
+    expect(settledSnapshot.status).toBe("ok");
+    if (settledSnapshot.status !== "ok") throw new Error("expected settled snapshot");
+    expect(
+      settledSnapshot.snapshot.document.phases[0]!.roadmapEvents.filter(
+        (event) => event.type === "phase-advancement-checkpoint",
+      ),
+    ).toHaveLength(1);
     expect(latestSnapshot!.document.phases[0]).toMatchObject({ status: "done" });
     expect(latestSnapshot!.document.phases[0]!.roadmapEvents).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ type: "completion-review" })]),
@@ -216,48 +238,87 @@ describe("app-sidecar direct Roadmap completion", () => {
     ).toHaveLength(1);
   });
 
-  it("leaves an interrupted owning run open and requires fresh completion evidence", async () => {
-    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-interrupted-phase-"));
-    roots.push(agentDir);
-    const cwd = "/project/interrupted-completion";
-    const repository = new ProjectNotesRepository(agentDir);
-    await repository.migrate(cwd, document());
-    await repository.recordRoadmapStatusUpdate(cwd, {
-      updateId: "completion-intent-interrupted",
-      phaseId: "phase-1",
-      expectedRevision: 1,
-      actor: "gg-coder",
-      transition: "done",
-      progress: "Verification passed before interruption",
-      blocker: null,
-      requiredExternalAction: null,
-      evidence: ["pnpm test exited successfully"],
-      verification: "passed",
-      verificationReason: null,
-      proposedReferences: [],
-      timestamp: NOW,
-      expectedSession: session,
-      requireBoundPhase: true,
-      autopilotEnabled: false,
-    });
+  it.each(["failed", "cancelled", "interrupted"] as const)(
+    "clears a Done intent after a %s owning run before the next run",
+    async (runOutcome) => {
+      const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), `roadmap-${runOutcome}-phase-`));
+      roots.push(agentDir);
+      const cwd = `/project/${runOutcome}-completion`;
+      const repository = new ProjectNotesRepository(agentDir);
+      await repository.migrate(cwd, document());
+      const completionIntents = new AppSidecarCompletionIntentTracker();
+      const completionIntentRun = completionIntents.beginRun();
+      const host = new AppSidecarRoadmapToolHost({
+        cwd,
+        repository,
+        reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+        projectAutopilot: { isEnabled: () => false },
+        broadcastNotesSnapshot: () => undefined,
+        onCompletionIntent: (intent) => {
+          completionIntents.record(intent);
+        },
+      });
+      await host.createSessionTools("coding", owningSession)[0]!.execute(
+        RoadmapStatusParams.parse({
+          update_id: `completion-intent-${runOutcome}`,
+          phase_id: "phase-1",
+          expected_revision: 1,
+          transition: "done",
+          progress: "Verification passed before the owning run ended",
+          evidence: ["pnpm test exited successfully"],
+          verification: { result: "passed" },
+        }),
+        {} as never,
+      );
+      const coordinator = new AppSidecarPhaseCompletionCoordinator({
+        cwd,
+        repository,
+        broadcastSnapshot: () => undefined,
+      });
+      const finalizer = completionIntents.finalizeRun(completionIntentRun);
 
-    const outcome = await repository.settlePhaseCompletion(cwd, {
-      checkpointId: "checkpoint-interrupted",
-      completionIntentId: "completion-intent-interrupted",
-      phaseId: "phase-1",
-      expectedSession: session,
-      planStepTotal: 1,
-      completedPlanSteps: [],
-      runOutcome: "interrupted",
-      timestamp: "2026-08-29T00:01:00.000Z",
-    });
-    expect(outcome).toMatchObject({
-      status: "open",
-      phase: { status: "in-progress" },
-      evaluation: {
-        targetStatus: null,
-        unmetGateCodes: expect.arrayContaining(["run-not-successful", "incomplete-plan"]),
-      },
-    });
-  });
+      const outcome = await finalizer.checkpoint({
+        coordinator,
+        tracker: new AppSidecarPhaseImplementationPlanTracker(),
+        checkpointId: `checkpoint-${runOutcome}`,
+        phaseId: "phase-1",
+        expectedSession: session,
+        currentPlanProgress: { total: 1, completed: [1] },
+        runOutcome,
+        timestamp: "2026-08-29T00:01:00.000Z",
+      });
+      const laterRun = completionIntents.beginRun();
+      const laterOutcome = await completionIntents.finalizeRun(laterRun).checkpoint({
+        coordinator,
+        tracker: new AppSidecarPhaseImplementationPlanTracker(),
+        checkpointId: `checkpoint-after-${runOutcome}`,
+        phaseId: "phase-1",
+        expectedSession: session,
+        currentPlanProgress: { total: 1, completed: [1] },
+        runOutcome: "succeeded",
+        timestamp: "2026-08-29T00:02:00.000Z",
+      });
+
+      expect(outcome).toMatchObject({
+        status: "open",
+        phase: { status: "in-progress" },
+        evaluation: {
+          targetStatus: null,
+          unmetGateCodes: expect.arrayContaining(["run-not-successful"]),
+        },
+        advancementCheckpoint: null,
+      });
+      expect(laterOutcome).not.toMatchObject({
+        status: "committed",
+        evaluation: { gateOutcome: "done" },
+      });
+      const snapshot = await repository.load(cwd);
+      expect(snapshot.status).toBe("ok");
+      if (snapshot.status !== "ok") throw new Error("expected final snapshot");
+      expect(snapshot.snapshot.document.phases[0]).toMatchObject({ status: "in-progress" });
+      expect(snapshot.snapshot.document.phases[0]!.roadmapEvents).not.toEqual(
+        expect.arrayContaining([expect.objectContaining({ type: "phase-advancement-checkpoint" })]),
+      );
+    },
+  );
 });

@@ -278,9 +278,9 @@ import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js
 import {
   AppSidecarPhaseCompletionCoordinator,
   AppSidecarPhaseImplementationPlanTracker,
-  checkpointSettledPhaseImplementation,
   restorePhaseImplementationPlanEvidence,
 } from "./app-sidecar-phase-completion.js";
+import { AppSidecarCompletionIntentTracker } from "./app-sidecar-completion-intent.js";
 import {
   AppSidecarPhaseCancellationCoordinator,
   type ActiveOperationCancellationResult,
@@ -297,7 +297,6 @@ import { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.j
 import {
   APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
   AppSidecarRoadmapToolHost,
-  type AppSidecarCompletionIntent,
 } from "./app-sidecar-roadmap-tool-host.js";
 import { AppSidecarRoadmapDraftCoordinator } from "./app-sidecar-roadmap-drafts.js";
 import { AppSidecarRoadmapDraftToolHost } from "./app-sidecar-roadmap-draft-tool-host.js";
@@ -2132,7 +2131,7 @@ async function createSession(
   let planGate!: AppSidecarPlanGate;
   const persistPlanGateMarker = (checkpoint: PersistedPlanReviewCheckpoint) =>
     session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
-  let roadmapCompletionIntent: AppSidecarCompletionIntent | null = null;
+  const roadmapCompletionIntents = new AppSidecarCompletionIntentTracker();
   const roadmapPhaseAdvancement = createAppSidecarRoadmapPhaseAdvancementCoordinator({
     repository: notesRepository,
     onCommittedSnapshot: broadcastNotesSnapshot,
@@ -2144,7 +2143,7 @@ async function createSession(
     reconciliations: roadmapReconciliations,
     projectAutopilot,
     onCompletionIntent: (intent) => {
-      roadmapCompletionIntent = intent;
+      roadmapCompletionIntents.record(intent);
     },
     broadcastNotesSnapshot,
     onError: (error, metadata) =>
@@ -3241,6 +3240,7 @@ async function createSession(
   // Core provider-run bracket. Standalone runs own a lifecycle generation;
   // injected autopilot runs share the cycle's outer generation.
   async function runAgent(label: string, run: () => Promise<void>): Promise<void> {
+    const completionIntentRun = roadmapCompletionIntents.beginRun();
     const ownsGeneration = !runLifecycle.running;
     const generation = ownsGeneration
       ? runLifecycle.begin(abortOwnedWork).generation
@@ -3261,6 +3261,8 @@ async function createSession(
         broadcastError("error", "run failed", err);
       }
     } finally {
+      const completionIntentFinalizer =
+        roadmapCompletionIntents.finalizeRun(completionIntentRun);
       const cancelled = runLifecycle.isCancellationRequested(generation);
       if (
         runSucceeded &&
@@ -3286,20 +3288,11 @@ async function createSession(
       const terminalPlanComplete =
         approvedPlanPath !== null ? await queueApprovedPlanProgressSync() : false;
       const activePhase = session.getActivePhaseContext();
-      const completionIntent = roadmapCompletionIntent;
-      roadmapCompletionIntent = null;
       if (activePhase?.executionStage === "implementing") {
-        const matchingCompletionIntent =
-          completionIntent?.phaseId === activePhase.phase.id &&
-          completionIntent.session.sessionId === activePhase.session.sessionId &&
-          completionIntent.session.sessionPath === activePhase.session.sessionPath
-            ? completionIntent.statusUpdateId
-            : undefined;
-        const completionOutcome = await checkpointSettledPhaseImplementation({
+        const completionOutcome = await completionIntentFinalizer.checkpoint({
           coordinator: phaseCompletion,
           tracker: phaseImplementationPlans,
           checkpointId: randomUUID(),
-          ...(matchingCompletionIntent ? { completionIntentId: matchingCompletionIntent } : {}),
           phaseId: activePhase.phase.id,
           expectedSession: activePhase.session,
           currentPlanProgress: planProgressPayload(),

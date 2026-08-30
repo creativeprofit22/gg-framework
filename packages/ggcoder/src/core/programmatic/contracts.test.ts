@@ -8,6 +8,7 @@ import {
   executionResultV1Schema,
   inventoryEntryV1Schema,
   inventoryV1Schema,
+  programmaticProfileV1Schema,
   opportunityDiscoveryResultV1Schema,
   opportunityIdentityV1Schema,
   opportunityLifecycleV1Schema,
@@ -25,6 +26,7 @@ const scannerProfile = {
   id: "ci-scanner",
   specialistCommand: "research",
 };
+const programmaticProfile = { version: 1, scanners: [scannerProfile] };
 const inventoryEntry = { path: "package.json", sha256: "b".repeat(64) };
 const inventory = {
   version: 1,
@@ -85,6 +87,7 @@ describe("programmatic contract fixtures", () => {
     ["repository path", repositoryRelativePathSchema, "src/index.ts"],
     ["configuration fingerprint", configurationFingerprintV1Schema, configurationFingerprint],
     ["scanner profile", scannerProfileV1Schema, scannerProfile],
+    ["programmatic profile", programmaticProfileV1Schema, programmaticProfile],
     ["inventory entry", inventoryEntryV1Schema, inventoryEntry],
     ["inventory", inventoryV1Schema, inventory],
     ["evidence location", evidenceLocationV1Schema, evidenceLocation],
@@ -109,6 +112,7 @@ describe("strict records", () => {
   const cases = [
     [configurationFingerprintV1Schema, { ...configurationFingerprint, unexpected: true }],
     [scannerProfileV1Schema, { ...scannerProfile, unexpected: true }],
+    [programmaticProfileV1Schema, { ...programmaticProfile, path: "profile.json" }],
     [inventoryEntryV1Schema, { ...inventoryEntry, unexpected: true }],
     [inventoryV1Schema, { ...inventory, unexpected: true }],
     [evidenceLocationV1Schema, { ...evidenceLocation, unexpected: true }],
@@ -224,6 +228,28 @@ describe("fingerprints and scanner profiles", () => {
     expect(
       configurationFingerprintV1Schema.safeParse({ ...configurationFingerprint, version: 2 })
         .success,
+    ).toBe(false);
+  });
+  it("keeps persisted profiles versioned, sorted, unique, and allowlisted", () => {
+    const second = { ...scannerProfile, id: "sweep-scanner", specialistCommand: "setup-sweep" };
+    expect(
+      programmaticProfileV1Schema.safeParse({ version: 2, scanners: [scannerProfile] }).success,
+    ).toBe(false);
+    expect(
+      programmaticProfileV1Schema.safeParse({ version: 1, scanners: [second, scannerProfile] })
+        .success,
+    ).toBe(false);
+    expect(
+      programmaticProfileV1Schema.safeParse({
+        version: 1,
+        scanners: [scannerProfile, scannerProfile],
+      }).success,
+    ).toBe(false);
+    expect(
+      programmaticProfileV1Schema.safeParse({
+        version: 1,
+        scanners: [{ ...scannerProfile, specialistCommand: "setup-programmatic" }],
+      }).success,
     ).toBe(false);
   });
 });

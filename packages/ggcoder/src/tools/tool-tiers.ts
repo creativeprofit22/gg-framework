@@ -58,6 +58,7 @@ export const CORE_TOOL_NAMES: readonly string[] = [
 export const DEFERRED_TOOL_NAMES: readonly string[] = [
   "source_path",
   "tauri_package",
+  "programmatic_profile",
   "screenshot",
   "generate_image",
   "send_message",

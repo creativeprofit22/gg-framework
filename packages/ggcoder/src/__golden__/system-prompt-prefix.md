@@ -75,6 +75,7 @@ Prefer `edit` over `write` for changes to existing files. Use `find`/`grep` rath
 
 Available on demand (call `tool_search` to load):
 - **tauri_package**: Deterministically inspect, set up, calibrate, package, or verify supported host-native Tauri v2 JSON apps; load it for /setup-tauri-package and /package-tauri.
+- **programmatic_profile**: Inspect/persist.
 - **source_path**: Resolve installed package/repo source via opensrc. Inspect the returned path with read/grep/find/ls before assuming a dependency API.
 - **screenshot**: Capture a headless-browser PNG of a URL or dev server to visually verify rendered UI; supports waits, click/type actions and viewport size.
 

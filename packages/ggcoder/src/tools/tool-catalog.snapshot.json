@@ -328,6 +328,91 @@
       "hash": "4dc53fc3b7ef09ca0560725d432bd2068be94c78d0585543b53a2972fbfcd788"
     },
     {
+      "name": "programmatic_profile",
+      "description": "Inspect a deterministic programmatic scanner-profile proposal, or persist that exact validated proposal after separate approval. Uses one fixed repository path and never runs scanners, specialists, or commands.",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "inspect",
+              "generate"
+            ]
+          },
+          "configuration_fingerprint": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "number",
+                "const": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "version",
+              "sha256"
+            ],
+            "additionalProperties": false
+          },
+          "profile": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "number",
+                "const": 1
+              },
+              "scanners": {
+                "maxItems": 64,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "version": {
+                      "type": "number",
+                      "const": 1
+                    },
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 100,
+                      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+                    },
+                    "specialistCommand": {
+                      "type": "string",
+                      "enum": [
+                        "research",
+                        "setup-sweep",
+                        "setup-tauri-package"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "version",
+                    "id",
+                    "specialistCommand"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "version",
+              "scanners"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "hash": "d23ce2b659da9757aa12e81fba12ebb536ee15359605191cc52310a825ca2551"
+    },
+    {
       "name": "read",
       "description": "Read a file's contents. Returns numbered lines (cat -n style). Output is truncated to 2000 lines or 50KB (whichever is hit first). If truncated, use offset/limit to read remaining sections. Reads images natively. Other binary files return a notice instead of content.",
       "schema": {

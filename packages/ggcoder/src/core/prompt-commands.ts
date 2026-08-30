@@ -256,6 +256,19 @@ Keep the command file under 30 lines.
 Report that /commit now automatically groups changes into ordered commits, verifies them, and pushes once; mention which local scripts/docs verified the commands.`,
   },
   {
+    name: "setup-programmatic",
+    aliases: [],
+    description: "Inspect and propose programmatic setup",
+    prompt: `# Inspect Programmatic Setup
+
+1. Load the deferred \`programmatic_profile\` tool using \`tool_search\`.
+2. Call \`programmatic_profile\` exactly once with \`action: "inspect"\`.
+3. Report its inventory, exact configuration fingerprint, exact profile, every route, exclusions, drift inputs, and fixed profile path without altering them.
+4. State explicitly that setup performed no writes.
+5. Stop for separate user approval. Do not call \`generate\`, run scanners or specialists, invoke shell commands, mutate files, or perform lifecycle work.
+6. Explain that a later explicit invocation must call the \`generate\` action with the exact returned fingerprint and profile.`,
+  },
+  {
     name: "setup-tauri-package",
     aliases: [],
     description: "Set up safe Tauri packaging",

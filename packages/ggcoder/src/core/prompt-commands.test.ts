@@ -215,6 +215,28 @@ describe("prompt commands", () => {
     expect(init?.prompt).not.toContain("Directory Structure Agent");
   });
 
+  it("keeps /setup-programmatic discovery-only and approval-separated", () => {
+    const setup = getPromptCommand("setup-programmatic");
+    const programmaticCommands = PROMPT_COMMANDS.filter((command) =>
+      command.name.includes("programmatic"),
+    );
+
+    expect(setup).toMatchObject({
+      name: "setup-programmatic",
+      aliases: [],
+      description: "Inspect and propose programmatic setup",
+    });
+    expect(programmaticCommands.map((command) => command.name)).toEqual(["setup-programmatic"]);
+    expect(setup?.prompt).toContain("Load the deferred `programmatic_profile`");
+    expect(setup?.prompt).toContain('exactly once with `action: "inspect"`');
+    expect(setup?.prompt).toContain("every route, exclusions, drift inputs");
+    expect(setup?.prompt).toContain("setup performed no writes");
+    expect(setup?.prompt).toContain("Stop for separate user approval");
+    expect(setup?.prompt).toContain("exact returned fingerprint and profile");
+    expect(setup?.prompt).not.toContain('action: "generate"');
+    expect(getPromptCommand("generate-programmatic-profile")).toBeUndefined();
+  });
+
   // These assertions lock the built-in prompt contract; generated harness behavior is
   // exercised only by the fixture suites that the prompt requires projects to create.
   it("prompt contract: registers /setup-tauri-package without an alias and resolves it by name", () => {

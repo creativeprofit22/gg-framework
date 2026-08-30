@@ -45,11 +45,31 @@ describe("tool tiers", () => {
     }
   });
 
+  it("keeps programmatic profile deferred, discoverable, and built in", () => {
+    expect(DEFERRED_TOOL_NAMES).toContain("programmatic_profile");
+    expect(DEFAULT_TOOL_NAMES).toContain("programmatic_profile");
+    expect(BUILTIN_TOOL_NAMES).toContain("programmatic_profile");
+    expect(TOOL_PROMPT_HINTS.programmatic_profile).toBe("Inspect/persist.");
+  });
+
   it("partitions tools by tier, preserving order within each tier", () => {
-    const tools = ["read", "source_path", "tauri_package", "edit", "screenshot", "bash"].map(stub);
+    const tools = [
+      "read",
+      "source_path",
+      "programmatic_profile",
+      "tauri_package",
+      "edit",
+      "screenshot",
+      "bash",
+    ].map(stub);
     const { core, deferred } = partitionToolsByTier(tools);
     expect(core.map((t) => t.name)).toEqual(["read", "edit", "bash"]);
-    expect(deferred.map((t) => t.name)).toEqual(["source_path", "tauri_package", "screenshot"]);
+    expect(deferred.map((t) => t.name)).toEqual([
+      "source_path",
+      "programmatic_profile",
+      "tauri_package",
+      "screenshot",
+    ]);
   });
 
   it("treats an unknown tool as core rather than hiding it", () => {

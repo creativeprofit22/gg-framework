@@ -22,6 +22,7 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "Resolve installed package/repo source via opensrc. Inspect the returned path with read/grep/find/ls before assuming a dependency API.",
   tauri_package:
     "Deterministically inspect, set up, calibrate, package, or verify supported host-native Tauri v2 JSON apps; load it for /setup-tauri-package and /package-tauri.",
+  programmatic_profile: "Inspect/persist.",
   web_search:
     "Search the web. Use before web_fetch to find pages; supports include/exclude_domains and a time_range recency filter.",
   web_fetch:
@@ -121,6 +122,7 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "interrupt_agent",
   "list_agents",
   "ls",
+  "programmatic_profile",
   "read",
   "screenshot",
   "send_message",
@@ -153,6 +155,7 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "ls",
   "source_path",
   "tauri_package",
+  "programmatic_profile",
   "web_fetch",
   "task_output",
   "task_stop",

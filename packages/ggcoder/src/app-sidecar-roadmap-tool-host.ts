@@ -1,6 +1,7 @@
 import type { AgentTool } from "@kenkaiiii/gg-agent";
 import type { Message } from "@kenkaiiii/gg-ai";
 import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-state.js";
+import type { PhaseImplementationPlanProgress } from "./app-sidecar-phase-completion.js";
 import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import type { ActivePhaseContextV1 } from "./phase-context.js";
 import type {
@@ -55,6 +56,10 @@ export interface AppSidecarRoadmapToolHostDependencies {
   repository: Pick<ProjectNotesRepository, "recordRoadmapStatusUpdate">;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
   projectAutopilot: Pick<AppSidecarProjectAutopilotState, "isEnabled">;
+  resolvePlanProgress(input: {
+    phaseId: string;
+    session: AppSidecarCompletionIntent["session"];
+  }): PhaseImplementationPlanProgress | null;
   broadcastNotesSnapshot(snapshot: ProjectNotesSnapshot): void;
   now?: () => string;
   onCompletionIntent?(intent: AppSidecarCompletionIntent): void;
@@ -119,6 +124,19 @@ export class AppSidecarRoadmapToolHost {
             unmetEvidenceCodes: verificationEvidence.unmetEvidenceCodes,
             message:
               "Done was not recorded. Passed verification requires one distinct, current-workspace classifier-approved command for each Done When criterion.",
+          };
+        }
+        const planProgress = this.dependencies.resolvePlanProgress({
+          phaseId: input.phase_id,
+          session: activePhase.session,
+        });
+        if (!planProgress) {
+          return {
+            result: "missing-plan-progress",
+            phaseId: input.phase_id,
+            revision: input.expected_revision,
+            message:
+              "Done was not recorded because same-session canonical plan progress is unavailable.",
           };
         }
       }

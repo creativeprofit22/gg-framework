@@ -69,6 +69,7 @@ describe("Roadmap Done verification evidence boundary", () => {
       repository: { recordRoadmapStatusUpdate },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => ({ total: 2, completed: [1, 2] }),
       broadcastNotesSnapshot: vi.fn(),
     });
     const output = await host
@@ -101,6 +102,7 @@ describe("Roadmap Done verification evidence boundary", () => {
       repository: { recordRoadmapStatusUpdate },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => ({ total: 2, completed: [1, 2] }),
       broadcastNotesSnapshot: vi.fn(),
     });
     const output = await host

@@ -2142,6 +2142,12 @@ async function createSession(
     repository: notesRepository,
     reconciliations: roadmapReconciliations,
     projectAutopilot,
+    resolvePlanProgress: ({ phaseId, session: expectedSession }) =>
+      phaseImplementationPlans.resolve({
+        phaseId,
+        session: expectedSession,
+        current: planProgressPayload(),
+      }),
     onCompletionIntent: (intent) => {
       roadmapCompletionIntents.record(intent);
     },

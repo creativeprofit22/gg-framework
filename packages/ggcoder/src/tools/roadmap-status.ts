@@ -322,7 +322,8 @@ export type RoadmapStatusToolResult =
         | "phase-archived"
         | "stale-session"
         | "invalid-reference"
-        | "verification-incomplete";
+        | "verification-incomplete"
+        | "missing-plan-progress";
       phaseId: string;
       revision?: number;
       owner?: { operationId: string; kind: string } | null;

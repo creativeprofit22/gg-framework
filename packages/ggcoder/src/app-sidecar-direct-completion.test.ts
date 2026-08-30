@@ -109,6 +109,53 @@ afterEach(async () => {
 });
 
 describe("app-sidecar direct Roadmap completion", () => {
+  it("leaves no completion-pending state or armed intent when canonical plan progress is missing", async () => {
+    const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-missing-plan-phase-"));
+    roots.push(agentDir);
+    const cwd = "/project/missing-plan-completion";
+    const repository = new ProjectNotesRepository(agentDir);
+    await repository.migrate(cwd, document());
+    const onCompletionIntent = vi.fn();
+    const broadcastNotesSnapshot = vi.fn();
+    const host = new AppSidecarRoadmapToolHost({
+      cwd,
+      repository,
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => null,
+      broadcastNotesSnapshot,
+      onCompletionIntent,
+    });
+
+    const statusOutput = await host.createSessionTools("coding", owningSession)[0]!.execute(
+      RoadmapStatusParams.parse({
+        update_id: "completion-intent-missing-plan",
+        phase_id: "phase-1",
+        expected_revision: 1,
+        transition: "done",
+        progress: "Verification passed without canonical plan progress",
+        evidence: ["pnpm test exited successfully"],
+        verification: { result: "passed" },
+      }),
+      {} as never,
+    );
+
+    expect(JSON.parse(String(statusOutput))).toMatchObject({
+      result: "missing-plan-progress",
+      phaseId: "phase-1",
+      revision: 1,
+    });
+    const unchanged = await repository.load(cwd);
+    expect(unchanged.status).toBe("ok");
+    if (unchanged.status !== "ok") throw new Error("expected unchanged snapshot");
+    expect(unchanged.snapshot.document.phases[0]).toMatchObject({
+      status: "in-progress",
+      roadmapEvents: [],
+    });
+    expect(broadcastNotesSnapshot).not.toHaveBeenCalled();
+    expect(onCompletionIntent).not.toHaveBeenCalled();
+  });
+
   it("moves In Progress directly to Done without Ken, Review, queue, or retry events", async () => {
     const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "roadmap-direct-phase-"));
     roots.push(agentDir);
@@ -123,6 +170,7 @@ describe("app-sidecar direct Roadmap completion", () => {
       repository,
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
+      resolvePlanProgress: () => ({ total: 1, completed: [1] }),
       broadcastNotesSnapshot: (snapshot) => {
         latestSnapshot = snapshot;
       },
@@ -253,6 +301,7 @@ describe("app-sidecar direct Roadmap completion", () => {
         repository,
         reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
         projectAutopilot: { isEnabled: () => false },
+        resolvePlanProgress: () => ({ total: 1, completed: [1] }),
         broadcastNotesSnapshot: () => undefined,
         onCompletionIntent: (intent) => {
           completionIntents.record(intent);

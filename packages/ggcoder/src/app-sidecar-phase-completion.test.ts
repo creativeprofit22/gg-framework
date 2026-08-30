@@ -143,6 +143,35 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
     expect(outcome).toMatchObject({ status: "committed", evaluation: { gateOutcome: "done" } });
   });
 
+  it("reports missing plan progress when a completion intent cannot settle", async () => {
+    const repo = repository();
+    const coordinator = new AppSidecarPhaseCompletionCoordinator({
+      cwd: "C:/project",
+      repository: repo,
+      broadcastSnapshot: vi.fn(),
+    });
+
+    const outcome = await checkpointSettledPhaseImplementation({
+      coordinator,
+      tracker: new AppSidecarPhaseImplementationPlanTracker(),
+      checkpointId: "checkpoint-missing-plan",
+      completionIntentId: "completion-intent-current",
+      phaseId: "phase-24",
+      expectedSession: session,
+      currentPlanProgress: { total: 0, completed: [] },
+      runOutcome: "succeeded",
+      timestamp: NOW,
+    });
+
+    expect(outcome).toEqual({
+      status: "missing-plan-progress",
+      completionIntentId: "completion-intent-current",
+      message: "Completion was not settled because same-session canonical plan progress is unavailable.",
+    });
+    expect(repo.recordImplementationCheckpoint).not.toHaveBeenCalled();
+    expect(repo.settlePhaseCompletion).not.toHaveBeenCalled();
+  });
+
   it("records ordinary failed runs without inventing completion intent", async () => {
     const repo = repository();
     const coordinator = new AppSidecarPhaseCompletionCoordinator({

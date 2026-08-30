@@ -64,6 +64,7 @@ describe("AppSidecarRoadmapToolHost", () => {
       repository: { recordRoadmapStatusUpdate: vi.fn() },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => null,
       broadcastNotesSnapshot: vi.fn(),
     });
 
@@ -87,6 +88,7 @@ describe("AppSidecarRoadmapToolHost", () => {
       repository: { recordRoadmapStatusUpdate },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => true },
+      resolvePlanProgress: () => ({ total: 1, completed: [1] }),
       broadcastNotesSnapshot: vi.fn(),
       onCompletionIntent,
     });
@@ -125,6 +127,7 @@ describe("AppSidecarRoadmapToolHost", () => {
       repository: { recordRoadmapStatusUpdate },
       reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
       projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => ({ total: 1, completed: [1] }),
       broadcastNotesSnapshot: vi.fn(),
     });
     const session = owningSession();
@@ -141,5 +144,34 @@ describe("AppSidecarRoadmapToolHost", () => {
       unmetEvidenceCodes: ["unmatched-evidence"],
     });
     expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects Done without canonical plan progress before recording completion-pending", async () => {
+    const recordRoadmapStatusUpdate = vi.fn();
+    const broadcastNotesSnapshot = vi.fn();
+    const onCompletionIntent = vi.fn();
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: { recordRoadmapStatusUpdate },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => null,
+      broadcastNotesSnapshot,
+      onCompletionIntent,
+    });
+
+    const output = await host
+      .createSessionTools("coding", owningSession)[0]!
+      .execute(doneInput(), {} as never);
+
+    expect(JSON.parse(String(output))).toMatchObject({
+      result: "missing-plan-progress",
+      phaseId: "phase-1",
+      revision: 4,
+      message: "Done was not recorded because same-session canonical plan progress is unavailable.",
+    });
+    expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
+    expect(broadcastNotesSnapshot).not.toHaveBeenCalled();
+    expect(onCompletionIntent).not.toHaveBeenCalled();
   });
 });

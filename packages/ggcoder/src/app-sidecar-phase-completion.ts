@@ -26,7 +26,12 @@ export interface PhaseCompletionRepository {
 export type PhaseCompletionCoordinatorOutcome =
   | ProjectNotesImplementationCheckpointOutcome
   | ProjectNotesPhaseCompletionSettlementOutcome
-  | { status: "storage-failure"; error: unknown };
+  | { status: "storage-failure"; error: unknown }
+  | {
+      status: "missing-plan-progress";
+      completionIntentId: string;
+      message: string;
+    };
 
 export interface PhaseImplementationPlanProgress {
   total: number;
@@ -171,7 +176,18 @@ export function checkpointSettledPhaseImplementation(input: {
     session: input.expectedSession,
     current: input.currentPlanProgress,
   });
-  if (!progress) return Promise.resolve(null);
+  if (!progress) {
+    return Promise.resolve(
+      input.completionIntentId
+        ? {
+            status: "missing-plan-progress",
+            completionIntentId: input.completionIntentId,
+            message:
+              "Completion was not settled because same-session canonical plan progress is unavailable.",
+          }
+        : null,
+    );
+  }
   const request = {
     checkpointId: input.checkpointId,
     phaseId: input.phaseId,

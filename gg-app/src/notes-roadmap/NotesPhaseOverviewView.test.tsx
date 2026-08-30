@@ -103,6 +103,29 @@ describe("manual completion approval", () => {
     expect(onSuccess).toHaveBeenCalledOnce();
   });
 
+  it("moves focus into the confirmation and restores it when cancelled", async () => {
+    render(
+      <ManualCompletionApprovalControl
+        phase={reviewPhase}
+        expectedRevision={7}
+        onPreview={async () => ({ status: "ready", checkpoint })}
+        onCommit={async () => ({ status: "nonce-not-found" })}
+        onSuccess={vi.fn()}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Review completion evidence" });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    const confirm = await screen.findByRole("button", { name: "Confirm completion" });
+    expect(document.activeElement).toBe(confirm);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Review completion evidence" }),
+    );
+  });
+
   it("refreshes typed stale results and offers no exception bypass", async () => {
     const onStale = vi.fn();
     render(

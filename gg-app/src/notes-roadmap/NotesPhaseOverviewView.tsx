@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { notesLifecyclePresentation } from "../notes-lifecycle-presentation";
 import { notesCompletionGateOverview } from "../NotesPhaseCompletionGates";
 import type {
@@ -256,6 +256,24 @@ export function ManualCompletionApprovalControl({
   >();
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
+  const previewTriggerRef = useRef<HTMLButtonElement>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const restoreFocusRef = useRef(false);
+
+  useEffect(() => {
+    if (preview) {
+      confirmRef.current?.focus();
+      return;
+    }
+    if (!restoreFocusRef.current) return;
+    restoreFocusRef.current = false;
+    previewTriggerRef.current?.focus();
+  }, [preview]);
+
+  const closePreview = (): void => {
+    restoreFocusRef.current = true;
+    setPreview(undefined);
+  };
   if (phase.status !== "review" || phase.archivedAt !== null) return null;
 
   const loadPreview = async (): Promise<void> => {
@@ -290,7 +308,7 @@ export function ManualCompletionApprovalControl({
         onSuccess();
         return;
       }
-      setPreview(undefined);
+      closePreview();
       setMessage(manualApprovalOutcomeMessage(outcome));
       if (outcome.status === "stale-revision") onSuccess();
     } catch (error) {
@@ -331,15 +349,20 @@ export function ManualCompletionApprovalControl({
             </div>
           </dl>
           <p>Confirming marks this phase Done. Any Notes change requires a fresh preview.</p>
-          <button type="button" disabled={pending} onClick={() => void commit()}>
+          <button ref={confirmRef} type="button" disabled={pending} onClick={() => void commit()}>
             {pending ? "Approving…" : "Confirm completion"}
           </button>
-          <button type="button" disabled={pending} onClick={() => setPreview(undefined)}>
+          <button type="button" disabled={pending} onClick={closePreview}>
             Cancel
           </button>
         </div>
       ) : (
-        <button type="button" disabled={pending} onClick={() => void loadPreview()}>
+        <button
+          ref={previewTriggerRef}
+          type="button"
+          disabled={pending}
+          onClick={() => void loadPreview()}
+        >
           {pending ? "Checking evidence…" : "Review completion evidence"}
         </button>
       )}

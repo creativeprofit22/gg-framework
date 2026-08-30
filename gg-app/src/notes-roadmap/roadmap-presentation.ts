@@ -1,4 +1,7 @@
-import { classifyRoadmapAutoStartEligibility } from "@kenkaiiii/gg-core/project-notes";
+import {
+  classifyRoadmapAutoStartEligibility,
+  isNotesDirectCompletionAuthority,
+} from "@kenkaiiii/gg-core/project-notes";
 import { MENTOR_DISPLAY_NAME, PRODUCT_DISPLAY_NAME } from "../brand";
 import type {
   NotesCompletionGateOutcome,
@@ -93,16 +96,23 @@ export function selectRoadmapAdvancement(phases: readonly NotesPhase[]): Roadmap
   ) {
     return null;
   }
-  const latestReview = [...latest.phase.roadmapEvents]
-    .reverse()
-    .find((event) => event.type === "completion-review");
-  if (
-    latestReview?.type !== "completion-review" ||
-    latestReview.id !== latest.checkpoint.completionReviewId ||
-    latestReview.reviewer !== latest.checkpoint.reviewer ||
-    latestReview.decision !== "accepted" ||
-    latestReview.gateOutcome !== "done"
-  ) {
+  const checkpoint = latest.checkpoint;
+  let authority = "recorded";
+  if ("completionReviewId" in checkpoint) {
+    authority = "reviewed";
+    const latestReview = [...latest.phase.roadmapEvents]
+      .reverse()
+      .find((event) => event.type === "completion-review");
+    if (
+      latestReview?.type !== "completion-review" ||
+      latestReview.id !== checkpoint.completionReviewId ||
+      latestReview.reviewer !== checkpoint.reviewer ||
+      latestReview.decision !== "accepted" ||
+      latestReview.gateOutcome !== "done"
+    ) {
+      return null;
+    }
+  } else if (!isNotesDirectCompletionAuthority(latest.phase, checkpoint)) {
     return null;
   }
   const nextPhase = phases.find((phase) => phase.id === latest.checkpoint.nextPhaseId);
@@ -116,8 +126,8 @@ export function selectRoadmapAdvancement(phases: readonly NotesPhase[]): Roadmap
       eligibility.kind === "none"
         ? `${nextPhase.title} is no longer an unbound automatic candidate. Restore it to Not started or Planning with automatic status and no linked session.`
         : eligibility.kind === "ambiguous"
-          ? `${eligibility.phases.length} unbound automatic phases are eligible. Leave only ${nextPhase.title} eligible before starting the reviewed target.`
-          : `The only eligible phase is ${eligibility.phase.title}, but the checkpoint targets ${nextPhase.title}. Restore the reviewed candidate set before starting.`;
+          ? `${eligibility.phases.length} unbound automatic phases are eligible. Leave only ${nextPhase.title} eligible before starting the ${authority} target.`
+          : `The only eligible phase is ${eligibility.phase.title}, but the checkpoint targets ${nextPhase.title}. Restore the ${authority} candidate set before starting.`;
   }
   return {
     checkpoint: latest.checkpoint,

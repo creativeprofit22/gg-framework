@@ -173,10 +173,10 @@ function renderActivityItem(item: ActivityItem): ReactNode {
   if (event.type === "completion-review") {
     return (
       <>
-        <strong>{roadmapReviewerLabel(event.reviewer)}</strong> {timestamp}
+        <strong>Legacy completion review history</strong> {timestamp}
         <p>
-          Final review submitted: {event.decision}. Applied gate outcome:
-          {` ${completionOutcomeLabel(event.gateOutcome)}.`}
+          {roadmapReviewerLabel(event.reviewer)} submitted {event.decision}. Applied historical gate
+          outcome: {completionOutcomeLabel(event.gateOutcome)}.
           {event.reason ? ` ${event.reason}` : ""}
         </p>
         {event.evidence.length > 0 && (
@@ -209,8 +209,11 @@ function renderActivityItem(item: ActivityItem): ReactNode {
   if (event.type === "phase-advancement-checkpoint") {
     return (
       <>
-        <strong>{roadmapReviewerLabel(event.reviewer)}</strong> {timestamp}
-        <p>Next phase is ready for explicit human confirmation.</p>
+        <strong>
+          {"reviewer" in event ? roadmapReviewerLabel(event.reviewer) : "Completion settlement"}
+        </strong>{" "}
+        {timestamp}
+        <p>Next phase advancement was authorized by durable completion evidence.</p>
       </>
     );
   }

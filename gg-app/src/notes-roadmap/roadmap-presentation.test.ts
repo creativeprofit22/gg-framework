@@ -32,7 +32,7 @@ function phase(id: string, order: number): NotesPhase {
   };
 }
 
-function completedWithCheckpoint(reviewer: "ken" | "ken-autopilot" = "ken"): NotesPhase {
+function completedWithLegacyCheckpoint(reviewer: "ken" | "ken-autopilot" = "ken"): NotesPhase {
   const source = phase("source", 0);
   source.status = "done";
   source.completedAt = NOW;
@@ -62,12 +62,58 @@ function completedWithCheckpoint(reviewer: "ken" | "ken-autopilot" = "ken"): Not
   return source;
 }
 
+function completedWithDirectCheckpoint(): NotesPhase {
+  const source = phase("source", 0);
+  const session = { sessionId: "session-1", sessionPath: "/session-1" };
+  source.status = "done";
+  source.completedAt = NOW;
+  source.session = session;
+  source.roadmapEvents.push(
+    {
+      type: "status-update",
+      id: "verification-1",
+      actor: "gg-coder",
+      transition: "done",
+      progress: "Completion evidence recorded.",
+      blocker: null,
+      requiredExternalAction: null,
+      evidence: ["pnpm test"],
+      verification: "passed",
+      verificationReason: null,
+      verificationSession: session,
+      statusOutcome: "completion-pending",
+      proposedReferences: [],
+      timestamp: NOW,
+    },
+    {
+      type: "implementation-checkpoint",
+      id: "implementation-1",
+      session,
+      planStepTotal: 1,
+      completedPlanSteps: [1],
+      runOutcome: "succeeded",
+      verificationStatusUpdateId: "verification-1",
+      timestamp: NOW,
+    },
+    {
+      type: "phase-advancement-checkpoint",
+      id: "checkpoint-1",
+      completedPhaseId: source.id,
+      nextPhaseId: "next",
+      implementationCheckpointId: "implementation-1",
+      verificationStatusUpdateId: "verification-1",
+      timestamp: NOW,
+    },
+  );
+  return source;
+}
+
 describe("selectRoadmapAdvancement", () => {
   it.each(["ken", "ken-autopilot"] as const)(
     "shows only a persisted unconfirmed %s checkpoint",
     (reviewer) => {
       expect(
-        selectRoadmapAdvancement([completedWithCheckpoint(reviewer), phase("next", 1)]),
+        selectRoadmapAdvancement([completedWithLegacyCheckpoint(reviewer), phase("next", 1)]),
       ).toMatchObject({
         checkpoint: { id: "checkpoint-1", reviewer },
         completedPhase: { id: "source" },
@@ -78,15 +124,66 @@ describe("selectRoadmapAdvancement", () => {
     },
   );
 
+  it("shows reviewer-free direct completion evidence", () => {
+    expect(
+      selectRoadmapAdvancement([completedWithDirectCheckpoint(), phase("next", 1)]),
+    ).toMatchObject({
+      checkpoint: {
+        id: "checkpoint-1",
+        implementationCheckpointId: "implementation-1",
+        verificationStatusUpdateId: "verification-1",
+      },
+      ready: true,
+      recoveryReason: null,
+    });
+  });
+
+  it.each(["malformed", "later-untyped"] as const)(
+    "rejects %s direct completion evidence",
+    (kind) => {
+      const source = completedWithDirectCheckpoint();
+      const verification = source.roadmapEvents.find(
+        (event) => event.type === "status-update",
+      );
+      const implementation = source.roadmapEvents.find(
+        (event) => event.type === "implementation-checkpoint",
+      );
+      if (kind === "malformed") {
+        if (verification?.type === "status-update") {
+          verification.transition = "in-progress";
+          verification.statusOutcome = "applied";
+        }
+        if (implementation?.type === "implementation-checkpoint") {
+          implementation.completedPlanSteps = [];
+        }
+      } else if (verification?.type === "status-update") {
+        source.roadmapEvents.splice(1, 0, {
+          ...verification,
+          id: "status-after-verification",
+          transition: "in-progress",
+          progress: "Work continued after verification.",
+          evidence: [],
+          verification: null,
+          verificationSession: null,
+          statusOutcome: "applied",
+        });
+      }
+
+      expect(selectRoadmapAdvancement([source, phase("next", 1)])).toBeNull();
+    },
+  );
+
   it("finds the unique eligible target before the completed source", () => {
     const target = phase("next", -1);
 
-    expect(selectRoadmapAdvancement([completedWithCheckpoint(), target])).toMatchObject({
+    expect(selectRoadmapAdvancement([completedWithDirectCheckpoint(), target])).toMatchObject({
       currentEligiblePhase: { id: "next" },
       ready: true,
       recoveryReason: null,
     });
-    expect(isRoadmapPhaseStartProtected([completedWithCheckpoint(), target], target.id)).toBe(true);
+    expect(isRoadmapPhaseStartProtected([completedWithDirectCheckpoint(), target], target.id)).toBe(
+      true,
+    );
   });
 
   it.each([
@@ -94,7 +191,7 @@ describe("selectRoadmapAdvancement", () => {
     ["different", -1, 2],
   ])("treats %s-order eligible candidates as ambiguous", (_label, leftOrder, rightOrder) => {
     const result = selectRoadmapAdvancement([
-      completedWithCheckpoint(),
+      completedWithDirectCheckpoint(),
       phase("next", leftOrder),
       phase("other", rightOrder),
     ]);
@@ -102,8 +199,15 @@ describe("selectRoadmapAdvancement", () => {
     expect(result).toMatchObject({
       currentEligiblePhase: null,
       ready: false,
-      recoveryReason: expect.stringContaining("2 unbound automatic phases are eligible"),
+      recoveryReason: expect.stringContaining("before starting the recorded target"),
     });
+    expect(
+      selectRoadmapAdvancement([
+        completedWithLegacyCheckpoint(),
+        phase("next", leftOrder),
+        phase("other", rightOrder),
+      ])?.recoveryReason,
+    ).toContain("before starting the reviewed target");
   });
 
   it("ignores bound and status-overridden phases when classifying the unique target", () => {
@@ -113,7 +217,12 @@ describe("selectRoadmapAdvancement", () => {
     overridden.overrides.status = { value: "not-started", source: "user", updatedAt: NOW };
 
     expect(
-      selectRoadmapAdvancement([bound, completedWithCheckpoint(), overridden, phase("next", 3)]),
+      selectRoadmapAdvancement([
+        bound,
+        completedWithDirectCheckpoint(),
+        overridden,
+        phase("next", 3),
+      ]),
     ).toMatchObject({
       currentEligiblePhase: { id: "next" },
       ready: true,
@@ -122,7 +231,7 @@ describe("selectRoadmapAdvancement", () => {
   });
 
   it("does not infer Start from a completion review without a checkpoint", () => {
-    const source = completedWithCheckpoint();
+    const source = completedWithLegacyCheckpoint();
     source.roadmapEvents = source.roadmapEvents.filter(
       (event) => event.type !== "phase-advancement-checkpoint",
     );
@@ -130,7 +239,7 @@ describe("selectRoadmapAdvancement", () => {
   });
 
   it("hides confirmed checkpoints and checkpoints with stale completion authority", () => {
-    const confirmed = completedWithCheckpoint();
+    const confirmed = completedWithDirectCheckpoint();
     confirmed.roadmapEvents.push({
       type: "phase-advancement-confirmation",
       id: "confirmation-1",
@@ -142,7 +251,7 @@ describe("selectRoadmapAdvancement", () => {
     });
     expect(selectRoadmapAdvancement([confirmed, phase("next", 1)])).toBeNull();
 
-    const stale = completedWithCheckpoint();
+    const stale = completedWithDirectCheckpoint();
     stale.overrides.status = { value: "done", source: "user", updatedAt: NOW };
     expect(selectRoadmapAdvancement([stale, phase("next", 1)])).toBeNull();
   });
@@ -151,7 +260,7 @@ describe("selectRoadmapAdvancement", () => {
     const target = phase("next", 1);
     target.session = { sessionId: "session-1", sessionPath: "/session-1" };
 
-    expect(selectRoadmapAdvancement([completedWithCheckpoint(), target])).toMatchObject({
+    expect(selectRoadmapAdvancement([completedWithDirectCheckpoint(), target])).toMatchObject({
       currentEligiblePhase: null,
       ready: false,
       recoveryReason: expect.stringContaining("no longer an unbound automatic candidate"),
@@ -159,7 +268,7 @@ describe("selectRoadmapAdvancement", () => {
   });
 
   it("keeps an archived or reordered target visible as a recoverable checkpoint", () => {
-    const source = completedWithCheckpoint();
+    const source = completedWithDirectCheckpoint();
     const target = phase("next", 1);
     target.archivedAt = NOW;
     const fallback = phase("fallback", 2);
@@ -168,7 +277,7 @@ describe("selectRoadmapAdvancement", () => {
       currentEligiblePhase: { id: "fallback" },
       ready: false,
       recoveryReason: expect.stringContaining(
-        "The only eligible phase is fallback, but the checkpoint targets next",
+        "Restore the recorded candidate set before starting.",
       ),
     });
     expect(isRoadmapPhaseStartProtected([source, target, fallback], fallback.id)).toBe(true);
@@ -181,7 +290,7 @@ describe("selectRoadmapAdvancement", () => {
   });
 
   it("blocks eligibility changes, but not order changes, for a ready checkpoint target", () => {
-    const source = completedWithCheckpoint();
+    const source = completedWithDirectCheckpoint();
     const target = phase("next", 1);
     const fallback = phase("fallback", 2);
     fallback.session = { sessionId: "session-1", sessionPath: "/session-1" };

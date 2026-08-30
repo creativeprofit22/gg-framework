@@ -12,7 +12,7 @@ async function setupSources(): Promise<string> {
   return [await fs.readFile(profilePath, "utf8"), await fs.readFile(toolPath, "utf8")].join("\n");
 }
 
-describe("programmatic setup scope", () => {
+describe("A touched-files-only bloat audit confirms no executable scanner, shell template, parallel command variant, dependency, or unrelated prompt refactor was added", () => {
   it("adds declarative JSON persistence without executable generation or orchestration", async () => {
     const source = await setupSources();
 

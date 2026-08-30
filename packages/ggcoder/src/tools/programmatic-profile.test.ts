@@ -11,6 +11,7 @@ import {
   type ProgrammaticProfileOperations,
 } from "../core/programmatic/profile.js";
 import { PROGRAMMATIC_PROFILE_PATH } from "../core/programmatic/inventory.js";
+import { getPromptCommand, PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import { canonicalJson } from "../core/tauri-package/paths.js";
 import {
   createProgrammaticProfileTool,
@@ -104,8 +105,8 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
-describe("programmatic_profile tool", () => {
-  it("inspects deterministically without files or mutation callbacks", async () => {
+describe("Targeted automated tests prove discovery-only behavior, approval separation, stale-proposal rejection, atomic persistence, and idempotence", () => {
+  it("The initial /setup-programmatic invocation inventories, proposes the exact profile and routes, reports exclusions and drift inputs, performs no writes, and stops for approval", async () => {
     const root = await repository();
     const before: string[] = [];
     const after: string[] = [];
@@ -149,9 +150,21 @@ describe("programmatic_profile tool", () => {
     expect(before).toEqual([]);
     expect(after).toEqual([]);
     await expect(fs.access(path.join(root, PROGRAMMATIC_PROFILE_PATH))).rejects.toThrow();
+
+    const setup = getPromptCommand("setup-programmatic");
+    expect(setup?.prompt).toContain('exactly once with `action: "inspect"`');
+    expect(setup?.prompt).toContain("every route, exclusions, drift inputs");
+    expect(setup?.prompt).toContain("setup performed no writes");
+    expect(setup?.prompt).toContain("Stop for separate user approval");
+    expect(setup?.prompt).not.toContain('action: "generate"');
+    expect(
+      PROMPT_COMMANDS.filter((command) => command.name.includes("programmatic")).map(
+        (command) => command.name,
+      ),
+    ).toEqual(["setup-programmatic"]);
   });
 
-  it("requires exact approved input, persists canonically, and is idempotent", async () => {
+  it("A separate explicit generation action writes only a validated, versioned declarative profile under .gg/programmatic/ using repository-relative paths and atomic replacement", async () => {
     const root = await repository();
     const before: string[] = [];
     const after: string[] = [];
@@ -188,7 +201,7 @@ describe("programmatic_profile tool", () => {
     expect(after).toEqual(before);
   });
 
-  it("rejects stale configuration and profile mismatch without writes", async () => {
+  it("Profile generation refuses stale approval input when the configuration fingerprint differs from the proposal", async () => {
     const root = await repository();
     const inspected = await inspect(root);
     const tool = createProgrammaticProfileTool(root);
@@ -256,7 +269,22 @@ describe("programmatic_profile tool", () => {
   });
 });
 
-describe("programmatic profile persistence failures", () => {
+describe("Initial setup and explicit regeneration are idempotent and preserve the previous valid profile on validation or write failure", () => {
+  it("keeps inspection and approved regeneration idempotent", async () => {
+    const root = await repository();
+    const first = await inspect(root);
+    const second = await inspect(root);
+    expect(second).toEqual(first);
+
+    const tool = createProgrammaticProfileTool(root);
+    const input: ToolInput = {
+      action: "generate",
+      configuration_fingerprint: first.configuration_fingerprint,
+      profile: first.profile,
+    };
+    expect(await execute(tool, input)).toMatchObject({ ok: true, changed: true });
+    expect(await execute(tool, input)).toMatchObject({ ok: true, changed: false });
+  });
   it("preserves the previous profile when a temporary write fails", async () => {
     const { root, inspected, destination, previousBytes } = await previousValidProfile();
     const operations: Partial<ProgrammaticProfileOperations> = {

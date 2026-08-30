@@ -42,7 +42,7 @@ export interface LocalForkBuildEnv {
   localPatched?: string;
   sourceRoot?: string;
   label?: string;
-  gitSha?: string;
+  sourceRevision?: string;
 }
 
 export function resolveLocalForkBuildEnv(
@@ -54,22 +54,21 @@ export function resolveLocalForkBuildEnv(
   const envSourceRoot = env.VITE_GG_SOURCE_ROOT ?? (detected ? sourceRoot : undefined);
   const label = env.VITE_GG_CUSTOM_BUILD_LABEL ?? (detected ? customBuildLabel : undefined);
   const explicitGitSha = env.VITE_GG_GIT_SHA?.trim() || undefined;
-  const gitSha =
+  const sourceRevision =
     explicitGitSha ?? (localPatched === "1" ? deriveGitSha()?.trim() || undefined : undefined);
 
-  if (localPatched === "1" && !gitSha) {
+  if (localPatched === "1" && !/^[0-9a-f]{40}$/i.test(sourceRevision ?? "")) {
     throw new Error(
-      "VITE_GG_GIT_SHA is required for a Local Fork build when Git metadata is unavailable. " +
-        "Set it to the source commit SHA (for example, VITE_GG_GIT_SHA=<commit-sha>).",
+      "VITE_GG_GIT_SHA must be the full 40-character source commit SHA for a Local Fork build.",
     );
   }
 
-  return { localPatched, sourceRoot: envSourceRoot, label, gitSha };
+  return { localPatched, sourceRoot: envSourceRoot, label, sourceRevision };
 }
 
 function buildEnvDefines(): Record<string, string> {
   const buildEnv = resolveLocalForkBuildEnv(process.env, isLocalForkCheckout(), () =>
-    git(["rev-parse", "--short", "HEAD"]),
+    git(["rev-parse", "HEAD"]),
   );
 
   return Object.fromEntries(
@@ -77,7 +76,7 @@ function buildEnvDefines(): Record<string, string> {
       "import.meta.env.VITE_GG_LOCAL_PATCHED": buildEnv.localPatched,
       "import.meta.env.VITE_GG_SOURCE_ROOT": buildEnv.sourceRoot,
       "import.meta.env.VITE_GG_CUSTOM_BUILD_LABEL": buildEnv.label,
-      "import.meta.env.VITE_GG_GIT_SHA": buildEnv.gitSha,
+      "import.meta.env.VITE_GG_GIT_SHA": buildEnv.sourceRevision,
     })
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => [key, JSON.stringify(value)]),

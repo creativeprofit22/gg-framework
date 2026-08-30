@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
     localPatched: true,
     sourceRoot: "C:/fork",
     customLabel: "Local Fork",
-    gitSha: "abc123",
+    sourceRevision: "a".repeat(40),
   },
 }));
 
@@ -56,7 +56,7 @@ describe("useAppUpdate local-fork isolation", () => {
     });
     const { result } = renderHook(() => useAppUpdate());
     await waitFor(() => expect(result.current.phase).toBe(phase));
-    expect(mocks.checkLocal).toHaveBeenCalledWith("C:/fork", "abc123");
+    expect(mocks.checkLocal).toHaveBeenCalledWith("C:/fork", "a".repeat(40));
     expect(mocks.check).not.toHaveBeenCalled();
     expect(result.current.localPatched).toBe(true);
   });

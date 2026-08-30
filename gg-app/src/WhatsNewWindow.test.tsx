@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { renderToStaticMarkup } from "react-dom/server";
 import { CHANGELOG } from "./changelog";
 import { LOCAL_CHANGELOG } from "./local-changelog";
+import localReleaseNotes from "./local-release-notes.json";
 import { WHATS_NEW_STORAGE_KEY } from "./whats-new";
 import { releaseText, WhatsNewWindow } from "./WhatsNewWindow";
 
@@ -137,7 +138,10 @@ describe("WhatsNewWindow", () => {
     expect(localTab.getAttribute("aria-selected")).toBe("true");
     expect(localTab.getAttribute("aria-controls")).toBe(localPanel.id);
     expect(localPanel.getAttribute("aria-labelledby")).toBe(localTab.id);
-    expect(within(localPanel).getByText(/Local updates now guard/)).toBeTruthy();
+    expect(within(localPanel).getByText(localReleaseNotes.label)).toBeTruthy();
+    for (const item of localReleaseNotes.sections.flatMap(({ items }) => items)) {
+      expect(within(localPanel).getByText(item)).toBeTruthy();
+    }
     expect(upstreamPanel.hidden).toBe(true);
     fireEvent.click(upstreamTab);
     expect(localPanel.hidden).toBe(true);

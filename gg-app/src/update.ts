@@ -97,7 +97,7 @@ export function useAppUpdate(): UpdateInfo {
       try {
         const status = await checkLocalPatchedUpdate(
           appBuildInfo.sourceRoot ?? "",
-          appBuildInfo.gitSha,
+          appBuildInfo.sourceRevision,
         );
         logInfo(`Local update status: ${status.origin}`);
         setPhase((current) =>

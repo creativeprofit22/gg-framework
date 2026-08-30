@@ -4,15 +4,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  committedReleaseNotes,
   freshInstallerForPlatform,
   installerManifest,
   LOCAL_FORK_IDENTITY,
+  releaseNotesEnvelope,
   runWithCargoTomlRestored,
   tauriBuildArgs,
+  validateLocalReleaseNotes,
   windowsNsisPayloadMetadata,
 } from "./build-local-hotfix.mjs";
 
 const temporaryDirectories: string[] = [];
+const sourceRevision = "a".repeat(40);
+const validReleaseNotes = {
+  schemaVersion: 1,
+  date: "2026-08-29",
+  label: "Roadmap completion now fails closed",
+  sections: [{ title: "Safer phase completion", items: ["Roadmap completion fails closed."] }],
+};
 
 afterEach(() => {
   for (const path of temporaryDirectories.splice(0)) {
@@ -105,12 +115,15 @@ describe("local installer manifest", () => {
     writeFileSync(installer, "installer bytes");
     writeFileSync(payload, "payload bytes");
 
-    const manifest = installerManifest(installer, payload);
+    const releaseMetadata = releaseNotesEnvelope(sourceRevision, validReleaseNotes);
+    const manifest = installerManifest(installer, payload, releaseMetadata);
 
     expect(manifest).toMatchObject({
+      schemaVersion: 2,
+      sourceRevision,
+      releaseNotes: releaseMetadata.releaseNotes,
       path: installer,
       size: Buffer.byteLength("installer bytes"),
-      schemaVersion: 1,
       identity: LOCAL_FORK_IDENTITY,
       payload: {
         name: "gg-coder-local-fork.exe",
@@ -122,6 +135,116 @@ describe("local installer manifest", () => {
     expect(manifest.payload.sha256).toBe(
       createHash("sha256").update("payload bytes").digest("hex"),
     );
+  });
+});
+
+describe("commit-bound Local Fork release notes", () => {
+  function releaseFixture(bytes?: Buffer): { root: string } {
+    const root = mkdtempSync(join(tmpdir(), "gg-local-release-notes-"));
+    temporaryDirectories.push(root);
+    const directory = join(root, "gg-app", "src");
+    mkdirSync(directory, { recursive: true });
+    if (bytes) writeFileSync(join(directory, "local-release-notes.json"), bytes);
+    return { root };
+  }
+
+  function fakeGit({
+    status = "",
+    tracked = true,
+    committedBytes = Buffer.from(JSON.stringify(validReleaseNotes)),
+    revision = sourceRevision,
+  } = {}) {
+    return (args: string[]): Buffer => {
+      if (args[0] === "status") return Buffer.from(status);
+      if (args[0] === "rev-parse") return Buffer.from(`${revision}\n`);
+      if (args[0] === "ls-files") {
+        if (!tracked) throw new Error("not tracked");
+        return Buffer.from("gg-app/src/local-release-notes.json\n");
+      }
+      if (args[0] === "show") return committedBytes;
+      throw new Error(`Unexpected Git command: ${args.join(" ")}`);
+    };
+  }
+
+  it("stamps deterministic envelope bytes with the full source revision", () => {
+    const first = releaseNotesEnvelope(sourceRevision.toUpperCase(), validReleaseNotes);
+    const second = releaseNotesEnvelope(sourceRevision, validReleaseNotes);
+    const envelopeBytes = Buffer.from(first.releaseNotes.base64, "base64");
+
+    expect(first).toEqual(second);
+    expect(first.sourceRevision).toBe(sourceRevision);
+    expect(first.releaseNotes.size).toBe(envelopeBytes.length);
+    expect(first.releaseNotes.sha256).toBe(
+      createHash("sha256").update(envelopeBytes).digest("hex"),
+    );
+    expect(JSON.parse(envelopeBytes.toString("utf8"))).toEqual({
+      schemaVersion: 1,
+      sourceRevision,
+      note: validReleaseNotes,
+    });
+  });
+
+  it.each([
+    ["unknown fields", { ...validReleaseNotes, surprise: true }],
+    ["empty label", { ...validReleaseNotes, label: "" }],
+    [
+      "oversized item",
+      {
+        ...validReleaseNotes,
+        sections: [{ title: "Section", items: ["x".repeat(501)] }],
+      },
+    ],
+    [
+      "unknown section fields",
+      {
+        ...validReleaseNotes,
+        sections: [{ title: "Section", items: ["Item"], surprise: true }],
+      },
+    ],
+  ])("rejects malformed notes with %s", (_name, note) => {
+    expect(() => validateLocalReleaseNotes(note)).toThrow(/release-note/);
+  });
+
+  it.each([
+    ["dirty", " M gg-app/src/file.ts"],
+    ["untracked", "?? surprise.txt"],
+  ])("rejects a %s worktree before reading notes", (_name, status) => {
+    const { root } = releaseFixture();
+    expect(() => committedReleaseNotes(root, fakeGit({ status }))).toThrow("clean worktree");
+  });
+
+  it("rejects missing or untracked release notes", () => {
+    const { root } = releaseFixture();
+    expect(() => committedReleaseNotes(root, fakeGit())).toThrow(/ENOENT/);
+    expect(() => committedReleaseNotes(root, fakeGit({ tracked: false }))).toThrow(
+      "tracked by Git",
+    );
+  });
+
+  it("rejects release-note bytes that differ from HEAD", () => {
+    const currentBytes = Buffer.from(JSON.stringify(validReleaseNotes));
+    const { root } = releaseFixture(currentBytes);
+    expect(() =>
+      committedReleaseNotes(root, fakeGit({ committedBytes: Buffer.from("stale") })),
+    ).toThrow("differ from the source commit");
+  });
+
+  it("rejects malformed committed release notes", () => {
+    const malformed = Buffer.from("{");
+    const { root } = releaseFixture(malformed);
+    expect(() => committedReleaseNotes(root, fakeGit({ committedBytes: malformed }))).toThrow(
+      "valid JSON",
+    );
+  });
+
+  it("loads committed note bytes into the manifest envelope", () => {
+    const currentBytes = Buffer.from(JSON.stringify(validReleaseNotes));
+    const { root } = releaseFixture(currentBytes);
+    const metadata = committedReleaseNotes(root, fakeGit({ committedBytes: currentBytes }));
+    expect(metadata.sourceRevision).toBe(sourceRevision);
+    expect(
+      JSON.parse(Buffer.from(metadata.releaseNotes.base64, "base64").toString("utf8")),
+    ).toEqual({ schemaVersion: 1, sourceRevision, note: validReleaseNotes });
   });
 });
 

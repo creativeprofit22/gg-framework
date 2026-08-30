@@ -6095,7 +6095,7 @@ fn stream_local_update_output<R: Read + Send + 'static>(
 }
 
 #[cfg(target_os = "windows")]
-fn local_patched_installer_handoff_command(repo: &Path) -> Command {
+fn local_patched_installer_handoff_command(repo: &Path, source_revision: &str) -> Command {
     let powershell =
         PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
             .join("System32")
@@ -6121,7 +6121,12 @@ fn local_patched_installer_handoff_command(repo: &Path) -> Command {
             .join("local-fixes")
             .join("latest-installer.json"),
     );
-    command.args(["-ExpectedVersion", env!("CARGO_PKG_VERSION")]);
+    command.args([
+        "-ExpectedVersion",
+        env!("CARGO_PKG_VERSION"),
+        "-ExpectedSourceRevision",
+        source_revision,
+    ]);
     command
 }
 
@@ -6131,17 +6136,22 @@ fn local_patched_installer_handoff_command(repo: &Path) -> Command {
 struct LocalPatchedInstallerHandoff {
     disposition: String,
     expected_version: String,
+    source_revision: String,
 }
 
 #[cfg(target_os = "windows")]
 fn parse_local_patched_installer_handoff(
     stdout: &[u8],
     expected_version: &str,
+    expected_source_revision: &str,
 ) -> Result<&'static str, String> {
     let result: LocalPatchedInstallerHandoff = serde_json::from_slice(stdout)
         .map_err(|error| format!("launcher returned malformed output: {error}"))?;
     if result.expected_version != expected_version {
         return Err("launcher did not confirm the expected version".into());
+    }
+    if result.source_revision != expected_source_revision {
+        return Err("launcher did not echo the expected source revision".into());
     }
     match result.disposition.as_str() {
         "install-scheduled" => Ok("install-scheduled"),
@@ -6152,11 +6162,18 @@ fn parse_local_patched_installer_handoff(
 
 #[cfg(target_os = "windows")]
 fn schedule_local_patched_installer_handoff(repo: &Path) -> Result<&'static str, String> {
-    let output = hide_console(&mut local_patched_installer_handoff_command(repo))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| format!("failed to start canonical launcher: {error}"))?;
+    let source_revision = local_patched_update::full_source_head(
+        &local_patched_update::BoundedGitRunner::default(),
+        repo,
+    )?;
+    let output = hide_console(&mut local_patched_installer_handoff_command(
+        repo,
+        &source_revision,
+    ))
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .output()
+    .map_err(|error| format!("failed to start canonical launcher: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "launcher exited with {}: {}",
@@ -6164,7 +6181,11 @@ fn schedule_local_patched_installer_handoff(repo: &Path) -> Result<&'static str,
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    parse_local_patched_installer_handoff(&output.stdout, env!("CARGO_PKG_VERSION"))
+    parse_local_patched_installer_handoff(
+        &output.stdout,
+        env!("CARGO_PKG_VERSION"),
+        &source_revision,
+    )
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -11737,9 +11758,10 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn local_patched_installer_handoff_uses_canonical_launcher_and_version() {
+    fn local_patched_installer_handoff_uses_canonical_launcher_and_revision() {
         let repo = Path::new(r"C:\repo");
-        let command = local_patched_installer_handoff_command(repo);
+        let source_revision = "0123456789abcdef0123456789abcdef01234567";
+        let command = local_patched_installer_handoff_command(repo, source_revision);
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -11766,30 +11788,52 @@ mod tests {
                 r"C:\repo\.gg\local-fixes\latest-installer.json",
                 "-ExpectedVersion",
                 env!("CARGO_PKG_VERSION"),
+                "-ExpectedSourceRevision",
+                source_revision,
             ]
         );
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn local_patched_installer_handoff_accepts_verified_no_install_result() {
+    fn local_patched_installer_handoff_requires_revision_echo() {
+        let source_revision = "0123456789abcdef0123456789abcdef01234567";
         for disposition in ["install-scheduled", "existing-and-verified"] {
             let stdout = format!(
-                r#"{{"disposition":"{disposition}","expectedVersion":"{}"}}"#,
+                r#"{{"disposition":"{disposition}","expectedVersion":"{}","sourceRevision":"{source_revision}"}}"#,
                 env!("CARGO_PKG_VERSION")
             );
             assert_eq!(
-                parse_local_patched_installer_handoff(stdout.as_bytes(), env!("CARGO_PKG_VERSION"))
-                    .expect("canonical launcher result"),
+                parse_local_patched_installer_handoff(
+                    stdout.as_bytes(),
+                    env!("CARGO_PKG_VERSION"),
+                    source_revision,
+                )
+                .expect("canonical launcher result"),
                 disposition
             );
         }
-        assert!(
-            parse_local_patched_installer_handoff(b"not-json", env!("CARGO_PKG_VERSION")).is_err()
+        assert!(parse_local_patched_installer_handoff(
+            b"not-json",
+            env!("CARGO_PKG_VERSION"),
+            source_revision,
+        )
+        .is_err());
+        assert!(parse_local_patched_installer_handoff(
+            br#"{"disposition":"unexpected","expectedVersion":"0.53.9","sourceRevision":"0123456789abcdef0123456789abcdef01234567"}"#,
+            env!("CARGO_PKG_VERSION"),
+            source_revision,
+        )
+        .is_err());
+        let mismatched = format!(
+            r#"{{"disposition":"install-scheduled","expectedVersion":"{}","sourceRevision":"{}"}}"#,
+            env!("CARGO_PKG_VERSION"),
+            "a".repeat(40),
         );
         assert!(parse_local_patched_installer_handoff(
-            br#"{"disposition":"unexpected","expectedVersion":"0.53.9"}"#,
+            mismatched.as_bytes(),
             env!("CARGO_PKG_VERSION"),
+            source_revision,
         )
         .is_err());
     }

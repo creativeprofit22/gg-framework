@@ -269,6 +269,31 @@ function changedDirtyFilePaths(files) {
   return changed;
 }
 
+function restoreSavedDirtyWork(options, manifest, files, initialStatus) {
+  if (manifest.dirtyWorkApplied) return;
+  const stashRef = options.dryRun ? "<saved-stash>" : manifest.stashOid;
+  requireSuccess(
+    run("git", ["stash", "apply", "--index", stashRef], options),
+    "Dirty work conflicted while restoring; the saved stash remains intact.",
+  );
+  if (options.dryRun) return;
+  restoreDirtyFileBytes(files);
+  manifest.dirtyWorkApplied = true;
+  const restoredStatus = capture("git", [
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+  ]).stdout;
+  if (restoredStatus !== initialStatus) {
+    throw new Error("Restored dirty-work status does not match the pre-update status.");
+  }
+  const changedPaths = changedDirtyFilePaths(files);
+  if (changedPaths.length > 0) {
+    throw new Error(`Dirty work was not restored byte-for-byte: ${changedPaths.join(", ")}.`);
+  }
+  writeJson(manifest.manifestPath, manifest);
+}
+
 function cargoVersion(text) {
   return text.match(/^version = "(\d+\.\d+\.\d+)"/m)?.[1] ?? "";
 }
@@ -605,30 +630,6 @@ async function main() {
       writeJson(manifestPath, manifest);
     }
 
-    if (hasDirtyWork) {
-      const stashRef = options.dryRun ? "<saved-stash>" : manifest.stashOid;
-      requireSuccess(
-        run("git", ["stash", "apply", "--index", stashRef], options),
-        "Dirty work conflicted while restoring; the saved stash remains intact.",
-      );
-      if (!options.dryRun) {
-        restoreDirtyFileBytes(dirtyFileBytes);
-        manifest.dirtyWorkApplied = true;
-        const restoredStatus = capture("git", [
-          "status",
-          "--porcelain=v1",
-          "--untracked-files=all",
-        ]).stdout;
-        if (restoredStatus !== initialStatus) {
-          throw new Error("Restored dirty-work status does not match the pre-update status.");
-        }
-        const changedPaths = changedDirtyFilePaths(dirtyFileBytes);
-        if (changedPaths.length > 0) {
-          throw new Error(`Dirty work was not restored byte-for-byte: ${changedPaths.join(", ")}.`);
-        }
-      }
-    }
-
     if (!options.dryRun) {
       verifyLocalForkIdentity();
       manifest.phase = "source-verified";
@@ -672,7 +673,22 @@ async function main() {
         writeJson(manifestPath, manifest);
       }
     }
+
+    if (hasDirtyWork) {
+      restoreSavedDirtyWork(options, manifest, dirtyFileBytes, initialStatus);
+    }
   } catch (error) {
+    if (hasDirtyWork && !options.dryRun && !manifest.dirtyWorkApplied && manifest.mergedHead) {
+      try {
+        restoreSavedDirtyWork(options, manifest, dirtyFileBytes, initialStatus);
+      } catch (restoreError) {
+        printRecovery(manifest);
+        const originalMessage = error instanceof Error ? error.message : String(error);
+        const restoreMessage =
+          restoreError instanceof Error ? restoreError.message : String(restoreError);
+        throw new Error(`${originalMessage} Dirty-work restoration also failed: ${restoreMessage}`);
+      }
+    }
     if (!options.dryRun) printRecovery(manifest);
     throw error;
   }

@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-08-29",
+  "label": "Roadmap completion now fails closed",
+  "sections": [
+    {
+      "title": "Safer phase completion",
+      "items": [
+        "A roadmap phase only finishes when the same coding session has matching plan progress.",
+        "If that progress is unavailable, the roadmap stays unchanged instead of entering a pending state."
+      ]
+    },
+    {
+      "title": "No stale follow-up",
+      "items": [
+        "A rejected completion does not arm a later completion, broadcast a false change, or start the next phase.",
+        "You get a clear message explaining that plan progress is missing, so the completion can be retried safely."
+      ]
+    }
+  ]
+}

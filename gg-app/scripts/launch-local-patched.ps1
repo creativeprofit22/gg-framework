@@ -3,7 +3,8 @@ param(
   [string]$MetadataPath,
   [string]$InstallerScriptPath,
   [string]$LogPath,
-  [string]$ExpectedVersion
+  [string]$ExpectedVersion,
+  [string]$ExpectedSourceRevision
 )
 
 Set-StrictMode -Version Latest
@@ -55,11 +56,130 @@ function Assert-Sha256([object]$Value, [string]$Description) {
   $text.ToLowerInvariant()
 }
 
+function Assert-FullSourceRevision([string]$Value, [string]$Description) {
+  if ($Value -notmatch '^[0-9a-fA-F]{40}$') {
+    throw "Invalid ${Description}: require a full 40-character Git SHA"
+  }
+  $Value.ToLowerInvariant()
+}
+
 function Assert-ExpectedVersion([string]$Value) {
   if ($Value -notmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
     throw 'Invalid expected version: require numeric major.minor.patch'
   }
   $Value
+}
+
+function Assert-ExactJsonProperties(
+  [object]$Object,
+  [string[]]$Names,
+  [string]$Description
+) {
+  if (-not $Object -or $Object -is [System.Array]) { throw "Malformed ${Description}: expected object" }
+  $actualNames = @($Object.PSObject.Properties.Name)
+  if ($actualNames.Count -ne $Names.Count) { throw "Malformed ${Description}: unexpected fields" }
+  foreach ($name in $Names) {
+    if (-not $Object.PSObject.Properties[$name]) { throw "Malformed ${Description}: missing $name" }
+  }
+}
+
+function Assert-BoundedNoteText(
+  [object]$Value,
+  [string]$Description,
+  [int]$MaximumLength
+) {
+  if ($Value -isnot [string] -or $Value.Length -lt 1 -or $Value.Length -gt $MaximumLength -or
+      $Value.Trim() -cne $Value -or $Value -match '[\x00-\x1f\x7f]') {
+    throw "Malformed Local Fork release notes: invalid $Description"
+  }
+  $Value
+}
+
+function Get-BytesSha256([byte[]]$Bytes) {
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    ([BitConverter]::ToString($sha256.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+  }
+}
+
+function Read-VerifiedReleaseNotes(
+  [object]$Manifest,
+  [string]$ExpectedSourceRevision
+) {
+  $expectedRevision = Assert-FullSourceRevision $ExpectedSourceRevision 'expected source revision'
+  $manifestRevision = Assert-FullSourceRevision `
+    ([string](Get-RequiredJsonProperty $Manifest 'sourceRevision' 'sourceRevision')) `
+    'manifest source revision'
+  if ($manifestRevision -cne $expectedRevision) {
+    throw 'Local Fork release-note source revision does not match the expected source revision'
+  }
+  $metadata = Get-RequiredJsonProperty $Manifest 'releaseNotes' 'releaseNotes'
+  Assert-ExactJsonProperties $metadata @('size', 'sha256', 'base64') 'Local Fork release-note metadata'
+  $sizeValue = Get-RequiredJsonProperty $metadata 'size' 'releaseNotes.size'
+  if ($sizeValue -isnot [int] -and $sizeValue -isnot [long]) {
+    throw 'Malformed Local Fork manifest: releaseNotes.size must be an integer'
+  }
+  $size = Assert-PositiveSize $sizeValue 'releaseNotes.size'
+  if ($size -gt 32768) { throw 'Malformed Local Fork manifest: releaseNotes.size is oversized' }
+  $digest = Assert-Sha256 (Get-RequiredJsonProperty $metadata 'sha256' 'releaseNotes.sha256') 'releaseNotes.sha256'
+  $base64 = Get-RequiredJsonProperty $metadata 'base64' 'releaseNotes.base64'
+  if ($base64 -isnot [string] -or [string]::IsNullOrWhiteSpace($base64)) {
+    throw 'Malformed Local Fork manifest: invalid releaseNotes.base64'
+  }
+  try { $bytes = [Convert]::FromBase64String($base64) } catch {
+    throw 'Malformed Local Fork manifest: invalid releaseNotes.base64'
+  }
+  if ([Convert]::ToBase64String($bytes) -cne $base64) {
+    throw 'Malformed Local Fork manifest: noncanonical releaseNotes.base64'
+  }
+  if ($bytes.Length -ne $size) { throw 'Local Fork release-note size mismatch' }
+  if ((Get-BytesSha256 $bytes) -cne $digest) { throw 'Local Fork release-note SHA-256 mismatch' }
+  try {
+    $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+    $envelope = $text | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    throw "Malformed Local Fork release-note envelope: $($_.Exception.Message)"
+  }
+  Assert-ExactJsonProperties $envelope @('schemaVersion', 'sourceRevision', 'note') 'Local Fork release-note envelope'
+  $envelopeSchema = Get-RequiredJsonProperty $envelope 'schemaVersion' 'release-note schemaVersion'
+  if ($envelopeSchema -isnot [int] -or $envelopeSchema -ne 1) {
+    throw 'Unsupported Local Fork release-note envelope schema'
+  }
+  $envelopeRevision = Assert-FullSourceRevision `
+    ([string](Get-RequiredJsonProperty $envelope 'sourceRevision' 'release-note sourceRevision')) `
+    'release-note source revision'
+  if ($envelopeRevision -cne $manifestRevision) {
+    throw 'Local Fork release-note envelope revision does not match the manifest revision'
+  }
+  $note = Get-RequiredJsonProperty $envelope 'note' 'release-note note'
+  Assert-ExactJsonProperties $note @('schemaVersion', 'date', 'label', 'sections') 'Local Fork release-note object'
+  $noteSchema = Get-RequiredJsonProperty $note 'schemaVersion' 'release-note note.schemaVersion'
+  if ($noteSchema -isnot [int] -or $noteSchema -ne 1) {
+    throw 'Unsupported Local Fork release-note schema'
+  }
+  $date = Assert-BoundedNoteText $note.date 'date' 10
+  $parsedDate = [DateTime]::MinValue
+  if (-not [DateTime]::TryParseExact($date, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::None, [ref]$parsedDate)) {
+    throw 'Malformed Local Fork release notes: invalid date'
+  }
+  $null = Assert-BoundedNoteText $note.label 'label' 120
+  $sections = @($note.sections)
+  if ($sections.Count -lt 1 -or $sections.Count -gt 8) {
+    throw 'Malformed Local Fork release notes: invalid sections'
+  }
+  foreach ($section in $sections) {
+    Assert-ExactJsonProperties $section @('title', 'items') 'Local Fork release-note section'
+    $null = Assert-BoundedNoteText $section.title 'section title' 120
+    $items = @($section.items)
+    if ($items.Count -lt 1 -or $items.Count -gt 10) {
+      throw 'Malformed Local Fork release notes: invalid section items'
+    }
+    foreach ($item in $items) { $null = Assert-BoundedNoteText $item 'section item' 500 }
+  }
+  [pscustomobject]@{ SourceRevision = $manifestRevision; Sha256 = $digest; Note = $note }
 }
 
 function Assert-PositiveSize([object]$Value, [string]$Description) {
@@ -104,6 +224,7 @@ function Assert-FileMetadata(
 
 function Read-CanonicalLocalForkManifest(
   [string]$Path,
+  [string]$ExpectedSourceRevision,
   [string]$AllowedRoot = $script:RepositoryRoot
 ) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -117,6 +238,11 @@ function Read-CanonicalLocalForkManifest(
   if (-not $manifest -or $manifest -is [System.Array]) {
     throw "Malformed Local Fork manifest '$Path': expected one JSON object"
   }
+  $schemaVersion = Get-RequiredJsonProperty $manifest 'schemaVersion' 'schemaVersion'
+  if ($schemaVersion -isnot [int] -or $schemaVersion -ne 2) {
+    throw 'Unsupported Local Fork installer manifest schema'
+  }
+  $releaseNotes = Read-VerifiedReleaseNotes $manifest $ExpectedSourceRevision
 
   $identity = Get-RequiredJsonProperty -Object $manifest -Name 'identity' -Description 'identity'
   $payload = Get-RequiredJsonProperty -Object $manifest -Name 'payload' -Description 'payload'
@@ -153,6 +279,8 @@ function Read-CanonicalLocalForkManifest(
     InstallerSha256 = $installerHash
     PayloadSize = $payloadSize
     PayloadSha256 = $payloadHash
+    SourceRevision = $releaseNotes.SourceRevision
+    ReleaseNotesSha256 = $releaseNotes.Sha256
   }
 }
 
@@ -198,7 +326,8 @@ function New-LocalForkInstallerEncodedCommand(
   [string]$ManifestPath,
   [string]$InstallerLogPath,
   [string]$AllowedRoot,
-  [string]$ExpectedVersion
+  [string]$ExpectedVersion,
+  [string]$ExpectedSourceRevision
 ) {
   $command = @(
     '&', (ConvertTo-SingleQuotedPowerShellLiteral $ScriptPath),
@@ -207,7 +336,8 @@ function New-LocalForkInstallerEncodedCommand(
     '-MetadataPath', (ConvertTo-SingleQuotedPowerShellLiteral $ManifestPath),
     '-LogPath', (ConvertTo-SingleQuotedPowerShellLiteral $InstallerLogPath),
     '-AllowedInstallerRoot', (ConvertTo-SingleQuotedPowerShellLiteral $AllowedRoot),
-    '-ExpectedVersion', (ConvertTo-SingleQuotedPowerShellLiteral $ExpectedVersion)
+    '-ExpectedVersion', (ConvertTo-SingleQuotedPowerShellLiteral $ExpectedVersion),
+    '-ExpectedSourceRevision', (ConvertTo-SingleQuotedPowerShellLiteral $ExpectedSourceRevision)
   ) -join ' '
   [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
 }
@@ -238,9 +368,11 @@ function Invoke-GuardedLocalForkInstaller(
   [string]$ManifestPath,
   [string]$AllowedRoot,
   [string]$InstallerLogPath,
-  [string]$ExpectedVersion
+  [string]$ExpectedVersion,
+  [string]$ExpectedSourceRevision
 ) {
   $validatedVersion = Assert-ExpectedVersion -Value $ExpectedVersion
+  $validatedRevision = Assert-FullSourceRevision $ExpectedSourceRevision 'expected source revision'
   $expectedScript = [IO.Path]::GetFullPath($script:DefaultInstallerScriptPath)
   $actualScript = Get-FullPath -Path $ScriptPath -Description 'Guarded installer script path'
   if (-not $actualScript.Equals($expectedScript, [StringComparison]::OrdinalIgnoreCase)) {
@@ -252,10 +384,12 @@ function Invoke-GuardedLocalForkInstaller(
   $actualManifest = Get-FullPath -Path $ManifestPath -Description 'Installer manifest path'
   $actualLog = Get-FullPath -Path $InstallerLogPath -Description 'Installer log path'
   $actualAllowedRoot = Get-FullPath -Path $AllowedRoot -Description 'Allowed installer root'
+  $null = Read-CanonicalLocalForkManifest -Path $actualManifest -AllowedRoot $actualAllowedRoot `
+    -ExpectedSourceRevision $validatedRevision
   $taskName = 'ggcoder-local-launch-{0}-{1}' -f $PID, [Guid]::NewGuid().ToString('N')
   $encodedCommand = New-LocalForkInstallerEncodedCommand -ScriptPath $actualScript -TaskName $taskName `
     -ManifestPath $actualManifest -InstallerLogPath $actualLog -AllowedRoot $actualAllowedRoot `
-    -ExpectedVersion $validatedVersion
+    -ExpectedVersion $validatedVersion -ExpectedSourceRevision $validatedRevision
   $powerShellPath = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\powershell.exe'
   if (-not (Test-Path -LiteralPath $powerShellPath -PathType Leaf)) {
     throw "System PowerShell executable is missing: $powerShellPath"
@@ -325,17 +459,20 @@ function Invoke-CanonicalLocalForkLaunch(
   [string]$AllowedInstallerRoot = $script:DefaultInstallerRoot,
   [string]$ExpectedExecutable = (Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\gg-coder-local-fork.exe'),
   [string]$LauncherLogPath = $script:DefaultLogPath,
-  [string]$ExpectedVersion
+  [string]$ExpectedVersion,
+  [string]$ExpectedSourceRevision
 ) {
   $validatedVersion = Assert-ExpectedVersion -Value $ExpectedVersion
+  $validatedRevision = Assert-FullSourceRevision $ExpectedSourceRevision 'expected source revision'
   $canonicalExecutable = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork\gg-coder-local-fork.exe'))
   $expectedFullPath = Get-FullPath -Path $ExpectedExecutable -Description 'Installed Local Fork executable path'
   if (-not $expectedFullPath.Equals($canonicalExecutable, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing non-canonical installed Local Fork path: $expectedFullPath"
   }
 
-  Write-LaunchLog "START manifest=$ManifestPath executable=$expectedFullPath" $LauncherLogPath
-  $manifest = Read-CanonicalLocalForkManifest -Path $ManifestPath -AllowedRoot $AllowedManifestRoot
+  Write-LaunchLog "START manifest=$ManifestPath executable=$expectedFullPath sourceRevision=$validatedRevision" $LauncherLogPath
+  $manifest = Read-CanonicalLocalForkManifest -Path $ManifestPath -AllowedRoot $AllowedManifestRoot `
+    -ExpectedSourceRevision $validatedRevision
   $initialProcesses = @(Get-LocalForkRootProcesses)
   $initialRoot = Assert-UnambiguousLocalForkProcess -Processes $initialProcesses -ExpectedExecutable $expectedFullPath
   $installedCurrent = Test-InstalledPayloadCurrent -Path $expectedFullPath -Manifest $manifest
@@ -344,13 +481,14 @@ function Invoke-CanonicalLocalForkLaunch(
     Write-LaunchLog "INSTALL required; installed payload missing or stale; expectedSha256=$($manifest.PayloadSha256)" $LauncherLogPath
     $handoff = Invoke-GuardedLocalForkInstaller -ScriptPath $GuardedInstallerPath -ManifestPath $manifest.ManifestPath `
       -AllowedRoot $AllowedInstallerRoot -InstallerLogPath (Join-Path (Split-Path -Parent $LauncherLogPath) 'install-local-patched.log') `
-      -ExpectedVersion $validatedVersion
+      -ExpectedVersion $validatedVersion -ExpectedSourceRevision $validatedRevision
     Write-LaunchLog "SUCCESS disposition=install-scheduled taskName=$($handoff.TaskName)" $LauncherLogPath
     return [pscustomobject]@{
       disposition = 'install-scheduled'
       manifestPath = $manifest.ManifestPath
       installerPath = $manifest.InstallerPath
       installerSha256 = $manifest.InstallerSha256
+      sourceRevision = $manifest.SourceRevision
       executablePath = $expectedFullPath
       taskName = $handoff.TaskName
       expectedVersion = $validatedVersion
@@ -369,9 +507,11 @@ function Invoke-CanonicalLocalForkLaunch(
   Write-LaunchLog "SUCCESS disposition=$disposition pid=$($liveRoot.ProcessId) path=$($liveRoot.ExecutablePath) sha256=$($liveRoot.Sha256)" $LauncherLogPath
   [pscustomobject]@{
     disposition = $disposition
+    expectedVersion = $validatedVersion
     manifestPath = $manifest.ManifestPath
     installerPath = $manifest.InstallerPath
     installerSha256 = $manifest.InstallerSha256
+    sourceRevision = $manifest.SourceRevision
     executablePath = $liveRoot.ExecutablePath
     executableSha256 = $liveRoot.Sha256
     pid = $liveRoot.ProcessId
@@ -387,7 +527,7 @@ if (-not $LibraryOnly) {
     $effectiveLogPath = if ($LogPath) { $LogPath } else { $script:DefaultLogPath }
     Invoke-CanonicalLocalForkLaunch -ManifestPath $effectiveMetadataPath `
       -GuardedInstallerPath $effectiveInstallerScript -LauncherLogPath $effectiveLogPath `
-      -ExpectedVersion $ExpectedVersion | ConvertTo-Json -Depth 4 -Compress
+      -ExpectedVersion $ExpectedVersion -ExpectedSourceRevision $ExpectedSourceRevision | ConvertTo-Json -Depth 4 -Compress
   } catch {
     $effectiveLogPath = if ($LogPath) { $LogPath } else { $script:DefaultLogPath }
     try { Write-LaunchLog "FAILED $($_.Exception.Message)" $effectiveLogPath } catch { }

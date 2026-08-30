@@ -7,16 +7,32 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const launcher = join(import.meta.dirname, "launch-local-patched.ps1");
 const fixtureRoots = [];
+const sourceRevision = "a".repeat(40);
+const releaseNote = {
+  schemaVersion: 1,
+  date: "2026-08-29",
+  label: "Roadmap completion now fails closed",
+  sections: [{ title: "Safer phase completion", items: ["Roadmap completion fails closed."] }],
+};
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function setReleaseEnvelope(manifest, envelope) {
+  const bytes = Buffer.from(JSON.stringify(envelope), "utf8");
+  manifest.releaseNotes = {
+    size: bytes.length,
+    sha256: sha256(bytes),
+    base64: bytes.toString("base64"),
+  };
 }
 
 function psLiteral(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
-function fixture({ installed = "current", malformed = false } = {}) {
+function fixture({ installed = "current", malformed = false, manifestMutator } = {}) {
   const root = mkdtempSync(join(tmpdir(), "gg-local-launcher-test-"));
   fixtureRoots.push(root);
   const localAppData = join(root, "local-app-data");
@@ -38,30 +54,28 @@ function fixture({ installed = "current", malformed = false } = {}) {
   if (malformed) {
     writeFileSync(manifestPath, "{ definitely-not-json");
   } else {
-    writeFileSync(
-      manifestPath,
-      JSON.stringify(
-        {
-          path: installerPath,
-          size: installer.length,
-          sha256: sha256(installer),
-          identity: {
-            productName: "GG Coder Local Fork",
-            identifier: "com.ggcoder.local-fork",
-            mainBinaryName: "gg-coder-local-fork",
-            executableName: "gg-coder-local-fork.exe",
-            installMode: "currentUser",
-          },
-          payload: {
-            name: "gg-coder-local-fork.exe",
-            size: payload.length,
-            sha256: sha256(payload),
-          },
-        },
-        null,
-        2,
-      ),
-    );
+    const manifest = {
+      schemaVersion: 2,
+      sourceRevision,
+      path: installerPath,
+      size: installer.length,
+      sha256: sha256(installer),
+      identity: {
+        productName: "GG Coder Local Fork",
+        identifier: "com.ggcoder.local-fork",
+        mainBinaryName: "gg-coder-local-fork",
+        executableName: "gg-coder-local-fork.exe",
+        installMode: "currentUser",
+      },
+      payload: {
+        name: "gg-coder-local-fork.exe",
+        size: payload.length,
+        sha256: sha256(payload),
+      },
+    };
+    setReleaseEnvelope(manifest, { schemaVersion: 1, sourceRevision, note: releaseNote });
+    manifestMutator?.(manifest);
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   }
   return {
     root,
@@ -72,6 +86,7 @@ function fixture({ installed = "current", malformed = false } = {}) {
     manifestPath,
     logPath,
     payloadHash: sha256(payload),
+    sourceRevision,
   };
 }
 
@@ -83,6 +98,7 @@ function runScenario(
     ambiguous = false,
     installerFailure = false,
     replaceDuringStability = false,
+    expectedSourceRevision = files.sourceRevision,
   } = {},
 ) {
   const wrongExecutable = join(files.root, "wrong", "gg-coder-local-fork.exe");
@@ -110,7 +126,7 @@ function Get-LocalForkRootProcesses {
   return @((New-MockRoot 4101 $path))
 }
 function Invoke-GuardedLocalForkInstaller {
-  param([string]$ScriptPath, [string]$ManifestPath, [string]$AllowedRoot, [string]$InstallerLogPath, [string]$ExpectedVersion)
+  param([string]$ScriptPath, [string]$ManifestPath, [string]$AllowedRoot, [string]$InstallerLogPath, [string]$ExpectedVersion, [string]$ExpectedSourceRevision)
   $script:InstallerCalls++
   $script:InstallerAllowedRoot = $AllowedRoot
   if (${installerFailure ? "$true" : "$false"}) { throw 'fixture installer failure' }
@@ -131,6 +147,7 @@ try {
     ExpectedExecutable = ${psLiteral(files.executablePath)}
     LauncherLogPath = ${psLiteral(files.logPath)}
     ExpectedVersion = '0.53.9'
+    ExpectedSourceRevision = ${psLiteral(expectedSourceRevision)}
   }
   $result = Invoke-CanonicalLocalForkLaunch @invokeParams
   [pscustomobject]@{ ok = $true; result = $result; installerCalls = $script:InstallerCalls; installerAllowedRoot = $script:InstallerAllowedRoot; starterCalls = $script:StarterCalls } | ConvertTo-Json -Depth 6 -Compress
@@ -148,7 +165,12 @@ try {
 
 function runTaskHandoff(
   files,
-  { startFailure = false, expectedVersion = "0.53.9", scriptPath } = {},
+  {
+    startFailure = false,
+    expectedVersion = "0.53.9",
+    expectedSourceRevision = files.sourceRevision,
+    scriptPath,
+  } = {},
 ) {
   const installerLogPath = join(files.root, "install logs", "guarded install.log");
   const driver = `
@@ -200,6 +222,7 @@ try {
     AllowedRoot = ${psLiteral(files.artifactRoot)}
     InstallerLogPath = ${psLiteral(installerLogPath)}
     ExpectedVersion = ${psLiteral(expectedVersion)}
+    ExpectedSourceRevision = ${psLiteral(expectedSourceRevision)}
   }
   $result = Invoke-GuardedLocalForkInstaller @invokeParams
   $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($script:CapturedEncodedCommand))
@@ -210,7 +233,7 @@ try {
     expectedManifestPath = [IO.Path]::GetFullPath($invokeParams.ManifestPath);
     expectedLogPath = [IO.Path]::GetFullPath($invokeParams.InstallerLogPath);
     expectedAllowedRoot = [IO.Path]::GetFullPath($invokeParams.AllowedRoot);
-    expectedVersion = $invokeParams.ExpectedVersion
+    expectedVersion = $invokeParams.ExpectedVersion; expectedSourceRevision = $invokeParams.ExpectedSourceRevision
   } | ConvertTo-Json -Depth 6 -Compress
 } catch {
   [pscustomobject]@{
@@ -263,6 +286,7 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
       starterCalls: 0,
       result: {
         disposition: "existing-and-verified",
+        sourceRevision: files.sourceRevision,
         executableSha256: files.payloadHash,
         pid: 4101,
       },
@@ -283,6 +307,7 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
         starterCalls: 0,
         result: {
           disposition: "install-scheduled",
+          sourceRevision: files.sourceRevision,
           taskName: "fixture-installer-task",
         },
       });
@@ -315,6 +340,9 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
       `-AllowedInstallerRoot ${psLiteral(result.expectedAllowedRoot)}`,
     );
     expect(result.decodedCommand).toContain(`-ExpectedVersion ${psLiteral("0.53.9")}`);
+    expect(result.decodedCommand).toContain(
+      `-ExpectedSourceRevision ${psLiteral(files.sourceRevision)}`,
+    );
     expect(result.taskName).toMatch(/^ggcoder-local-launch-\d+-[0-9a-f]{32}$/);
   });
 
@@ -325,6 +353,16 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
       const result = runTaskHandoff(files, { expectedVersion });
       expect(result).toMatchObject({ ok: false, registerCalls: 0, startCalls: 0 });
       expect(result.error).toContain("expected version");
+    },
+  );
+
+  it.each(["", "abc123", "g".repeat(40)])(
+    "rejects malformed expected source revision %j before task registration",
+    (expectedSourceRevision) => {
+      const files = fixture({ installed: "missing" });
+      const result = runTaskHandoff(files, { expectedSourceRevision });
+      expect(result).toMatchObject({ ok: false, registerCalls: 0, startCalls: 0 });
+      expect(result.error).toContain("expected source revision");
     },
   );
 
@@ -354,6 +392,69 @@ describe.runIf(process.platform === "win32")("canonical Local Fork launcher", ()
     const result = runScenario(files, { live: false });
     expect(result).toMatchObject({ ok: false, installerCalls: 0, starterCalls: 0 });
     expect(result.error).toContain("Malformed Local Fork manifest");
+  });
+
+  it.each([
+    ["missing schema", (manifest) => delete manifest.schemaVersion],
+    ["legacy schema", (manifest) => (manifest.schemaVersion = 1)],
+    ["missing notes", (manifest) => delete manifest.releaseNotes],
+    ["invalid base64", (manifest) => (manifest.releaseNotes.base64 = "%%%%")],
+    ["wrong note size", (manifest) => manifest.releaseNotes.size++],
+    ["tampered note digest", (manifest) => (manifest.releaseNotes.sha256 = "0".repeat(64))],
+    [
+      "another envelope revision",
+      (manifest) =>
+        setReleaseEnvelope(manifest, {
+          schemaVersion: 1,
+          sourceRevision: "b".repeat(40),
+          note: releaseNote,
+        }),
+    ],
+    [
+      "unknown envelope field",
+      (manifest) =>
+        setReleaseEnvelope(manifest, {
+          schemaVersion: 1,
+          sourceRevision,
+          note: releaseNote,
+          surprise: true,
+        }),
+    ],
+    [
+      "unknown note field",
+      (manifest) =>
+        setReleaseEnvelope(manifest, {
+          schemaVersion: 1,
+          sourceRevision,
+          note: { ...releaseNote, surprise: true },
+        }),
+    ],
+    [
+      "empty note item",
+      (manifest) =>
+        setReleaseEnvelope(manifest, {
+          schemaVersion: 1,
+          sourceRevision,
+          note: {
+            ...releaseNote,
+            sections: [{ title: "Safer phase completion", items: [""] }],
+          },
+        }),
+    ],
+  ])("rejects %s before process or installer actions", (_name, manifestMutator) => {
+    const files = fixture({ manifestMutator });
+    const result = runScenario(files, { live: false });
+    expect(result).toMatchObject({ ok: false, installerCalls: 0, starterCalls: 0 });
+  });
+
+  it("rejects caller and manifest revision mismatches before process actions", () => {
+    const files = fixture();
+    const result = runScenario(files, {
+      live: false,
+      expectedSourceRevision: "b".repeat(40),
+    });
+    expect(result).toMatchObject({ ok: false, installerCalls: 0, starterCalls: 0 });
+    expect(result.error).toContain("does not match the expected source revision");
   });
 
   it("fails closed when the named root process has the wrong executable path", () => {

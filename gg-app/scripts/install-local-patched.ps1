@@ -7,6 +7,7 @@ param(
   [string]$LogPath,
   [string]$AllowedInstallerRoot,
   [string]$ExpectedVersion,
+  [string]$ExpectedSourceRevision,
   [switch]$LibraryOnly
 )
 
@@ -344,7 +345,29 @@ function Move-InstallDirectoryToBackup([string]$InstallDirectory, [string]$Backu
   }
 }
 
-function Read-VerifiedInstallerManifest([string]$Path, [string]$AllowedRoot) {
+function Read-CommitBoundReleaseMetadata(
+  [string]$Path,
+  [string]$AllowedRoot,
+  [string]$ExpectedSourceRevision
+) {
+  $launcherPath = Join-Path $PSScriptRoot 'launch-local-patched.ps1'
+  $null = Assert-NoReparsePointTraversal -Path $launcherPath -Description 'Release-note validator path'
+  if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
+    throw "Release-note validator is missing: $launcherPath"
+  }
+  & {
+    param($ValidatorPath, $ManifestPath, $InstallerRoot, $SourceRevision)
+    . $ValidatorPath -LibraryOnly
+    Read-CanonicalLocalForkManifest -Path $ManifestPath -AllowedRoot $InstallerRoot `
+      -ExpectedSourceRevision $SourceRevision
+  } $launcherPath $Path $AllowedRoot $ExpectedSourceRevision
+}
+
+function Read-VerifiedInstallerManifest(
+  [string]$Path,
+  [string]$AllowedRoot,
+  [Parameter(Mandatory = $true)][string]$ExpectedSourceRevision
+) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     throw "Installer manifest not found: $Path"
   }
@@ -355,9 +378,11 @@ function Read-VerifiedInstallerManifest([string]$Path, [string]$AllowedRoot) {
     throw "Installer manifest is not valid JSON: $Path ($($_.Exception.Message))"
   }
 
-  if ($manifest.schemaVersion -ne 1) {
-    throw "Installer manifest schemaVersion must be 1: $($manifest.schemaVersion)"
+  if ($manifest.schemaVersion -isnot [int] -or $manifest.schemaVersion -ne 2) {
+    throw "Installer manifest schemaVersion must be 2: $($manifest.schemaVersion)"
   }
+  $releaseMetadata = Read-CommitBoundReleaseMetadata -Path $Path -AllowedRoot $AllowedRoot `
+    -ExpectedSourceRevision $ExpectedSourceRevision
   $expectedIdentity = @{
     productName = 'GG Coder Local Fork'
     identifier = 'com.ggcoder.local-fork'
@@ -433,6 +458,8 @@ function Read-VerifiedInstallerManifest([string]$Path, [string]$AllowedRoot) {
     InstallMode = [string]$manifest.identity.installMode
     PayloadSize = $payloadSize
     PayloadSha256 = $payloadSha256.ToUpperInvariant()
+    SourceRevision = $releaseMetadata.SourceRevision
+    ReleaseNotesSha256 = $releaseMetadata.ReleaseNotesSha256
   }
 }
 
@@ -623,6 +650,13 @@ function Get-FileMetadata([string]$Path) {
     Size = [int64]$item.Length
     Sha256 = Get-Sha256 -Path $Path
   }
+}
+
+function Assert-ExpectedSourceRevision([string]$Value) {
+  if ($Value -notmatch '^[0-9a-fA-F]{40}$') {
+    throw 'Invalid expected source revision: require a full 40-character Git SHA'
+  }
+  $Value.ToLowerInvariant()
 }
 
 function Assert-ExpectedVersion([string]$Value) {
@@ -1005,6 +1039,7 @@ function Invoke-VerifiedInstallTransaction(
 
 function Invoke-LocalPatchedInstall {
   $validatedExpectedVersion = Assert-ExpectedVersion -Value $ExpectedVersion
+  $validatedExpectedSourceRevision = Assert-ExpectedSourceRevision -Value $ExpectedSourceRevision
   $installDir = Join-Path $env:LOCALAPPDATA 'GG Coder Local Fork'
   $installedExe = Join-Path $installDir 'gg-coder-local-fork.exe'
   $stableInstallDir = Join-Path $env:LOCALAPPDATA 'GG Coder'
@@ -1029,8 +1064,9 @@ function Invoke-LocalPatchedInstall {
     Start-Sleep -Seconds $DelaySeconds
 
     Write-Step "Reading Local Fork installer manifest from: $MetadataPath"
-    $installerMetadata = Read-VerifiedInstallerManifest -Path $MetadataPath -AllowedRoot $AllowedInstallerRoot
-    Write-Step "Installer and payload metadata verified: installer=$($installerMetadata.Sha256) payload=$($installerMetadata.PayloadSha256)"
+    $installerMetadata = Read-VerifiedInstallerManifest -Path $MetadataPath -AllowedRoot $AllowedInstallerRoot `
+      -ExpectedSourceRevision $validatedExpectedSourceRevision
+    Write-Step "Installer, payload, and release notes verified: installer=$($installerMetadata.Sha256) payload=$($installerMetadata.PayloadSha256) sourceRevision=$($installerMetadata.SourceRevision) releaseNotes=$($installerMetadata.ReleaseNotesSha256)"
 
     $wasRunning = @(Get-AppRootSnapshots -InstalledExecutable $installedExe).Count -gt 0
     $transactionStarted = $false
@@ -1038,11 +1074,14 @@ function Invoke-LocalPatchedInstall {
       $wasRunning = Stop-GgCoderForInstall -InstallDirectory $installDir -InstalledExecutable $installedExe `
         -GraceSeconds $GracefulShutdownSeconds
 
-      $reverified = Read-VerifiedInstallerManifest -Path $MetadataPath -AllowedRoot $AllowedInstallerRoot
+      $reverified = Read-VerifiedInstallerManifest -Path $MetadataPath -AllowedRoot $AllowedInstallerRoot `
+        -ExpectedSourceRevision $validatedExpectedSourceRevision
       if ($reverified.Path -ne $installerMetadata.Path -or
           $reverified.Sha256 -ne $installerMetadata.Sha256 -or
           $reverified.PayloadSha256 -ne $installerMetadata.PayloadSha256 -or
-          $reverified.PayloadSize -ne $installerMetadata.PayloadSize) {
+          $reverified.PayloadSize -ne $installerMetadata.PayloadSize -or
+          $reverified.SourceRevision -ne $installerMetadata.SourceRevision -or
+          $reverified.ReleaseNotesSha256 -ne $installerMetadata.ReleaseNotesSha256) {
         throw 'Installer manifest changed during shutdown; installation aborted'
       }
       Write-Step 'Installer and expected payload reverified after shutdown'

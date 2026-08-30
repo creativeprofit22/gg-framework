@@ -4,7 +4,7 @@ Official GG App updates replace the installed binary and cannot preserve source-
 
 ## Protected checkout
 
-Local-patched mode auto-detects the canonical `custom/local-customizations` branch, the temporary `custom/local-customizations-v2` cutover branch, and the configured fork origin. Detection fails closed when Git metadata is unavailable. For detached builds with accessible Git metadata, set `VITE_GG_LOCAL_PATCHED=1` and `VITE_GG_SOURCE_ROOT=<repo>` explicitly; the commit SHA is derived automatically. For exported builds without Git metadata, also set `VITE_GG_GIT_SHA=<source-commit-sha>`; the Vite build fails rather than producing a Local Fork whose update status cannot be determined.
+Local-patched mode auto-detects the canonical `custom/local-customizations` branch, the temporary `custom/local-customizations-v2` cutover branch, and the configured fork origin. Detection fails closed when Git metadata is unavailable. For detached builds with accessible Git metadata, set `VITE_GG_LOCAL_PATCHED=1` and `VITE_GG_SOURCE_ROOT=<repo>` explicitly; the full 40-character commit SHA is derived automatically. For exported builds without Git metadata, also set `VITE_GG_GIT_SHA=<full-40-character-source-commit-sha>`; the Vite build fails rather than producing a Local Fork whose update status cannot be determined.
 
 The updater accepts `custom/local-customizations` by default and temporarily accepts `custom/local-customizations-v2` during the cutover. `custom/local-customizations-safety` is a read-only reference and is never an update target. Use `--allow-other-branch` only for an intentional branch override.
 
@@ -25,9 +25,9 @@ The workflow defaults to `upstream/main` and:
 4. Creates `gg-local-before-update-*` at the old `HEAD` before merging.
 5. Stashes tracked and untracked work and records the stash OID.
 6. Merges upstream with `--no-ff --no-commit`, stopping before a merge commit when semantic conflict review is required.
-7. Commits a clean merge, restores dirty work byte-for-byte, and keeps the backup branch until verification completes.
-8. Verifies Supah Coder branding, production and local native identity isolation, source-update routing, and four-file version lockstep.
-9. Runs required checks and builds a fresh Windows NSIS installer with a recorded SHA-256.
+7. Commits a clean merge while keeping the recorded dirty-work stash active.
+8. Verifies identity and runs required checks against only committed source bytes.
+9. Builds a fresh Windows NSIS installer, then restores dirty work byte-for-byte.
 10. Retains the backup branch. The app never pushes; CLI push requires an explicit normal fast-forward push.
 
 Preview the exact plan without mutation:
@@ -46,7 +46,7 @@ pnpm --filter gg-app update:local-fixes -- --allow-other-branch --no-build --no-
 
 ## Conflict recovery
 
-A merge conflict, dirty-work restore conflict, identity drift, changed merge result, or failed check stops before build and push. The backup branch and recorded stash remain available. Follow the printed manifest instructions, then:
+A merge conflict, dirty-work restore conflict, identity drift, changed merge result, failed check, or failed build stops before push. Dirty bytes stay stashed through checks and packaging. After either success or a check/build failure, the workflow reapplies them and verifies both Git status and captured file bytes. If automatic restoration itself conflicts, the backup branch, stash, patch, and byte snapshots remain available. Follow the printed manifest instructions, then:
 
 ```bash
 git status
@@ -63,13 +63,19 @@ Follow the manifest's `phase` and `dirtyWorkApplied` fields before touching the 
 
 ## Build a local-patched installer
 
-Before producing a patched installer, prepend one stable-ID entry to `src/local-changelog.ts` for each genuinely user-facing local change. Never rewrite an ID after shipping.
+The current user-facing release entry lives in `src/local-release-notes.json`. Keep schema version 1, use only `date`, `label`, and bounded `sections` with `title` and `items`, and commit the file before building. `src/local-changelog.ts` validates and prepends that object to the immutable Local Fork history.
 
 ```bash
 pnpm --filter gg-app build:local-patched
 ```
 
-`build:local-hotfix` remains an alias. The protected updater currently requires Windows and verifies a newly written NSIS `.exe` under `src-tauri/target/release/bundle/nsis`; `.gg/local-fixes/latest-installer.json` records its path, size, timestamp, and SHA-256.
+`build:local-hotfix` remains an alias. Direct builds require a completely clean worktree, including no untracked files, and require the note bytes to be tracked and identical to `HEAD`. The protected updater satisfies this while dirty user files remain in its stash.
+
+The generated `.gg/local-fixes/latest-installer.json` uses schema 2. One record binds the full `sourceRevision`, installer SHA-256, patched executable SHA-256, and `releaseNotes` envelope size, SHA-256, and canonical base64 bytes. The decoded envelope uses schema 1 and contains that same revision plus the strictly validated note object.
+
+After updating source, native code resolves the checkout's full `git rev-parse HEAD` and invokes `launch-local-patched.ps1` with `-MetadataPath <schema-2-manifest> -ExpectedVersion <numeric-version> -ExpectedSourceRevision <full-40-character-HEAD>`. The launcher propagates the same revision to `install-local-patched.ps1`. Both scripts reject missing fields, legacy schemas, malformed or oversized notes, invalid base64, byte-size or digest changes, and any revision mismatch before scheduling, app shutdown, or installer execution.
+
+The installer built at `16bf3d94` with SHA-256 `e535852c162c637131e67b241b9e1bf08e62b70b4197924107927b7eb1e4dcdb` predates this contract and contains no compiled current release note. It cannot be upgraded in place and is intentionally rejected as notes-missing. Build a replacement only from a later clean commit containing this contract and note source; its `sourceRevision` must be that replacement commit, not `16bf3d94`.
 
 ## Verified fork push
 

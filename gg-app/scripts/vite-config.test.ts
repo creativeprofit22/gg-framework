@@ -2,16 +2,19 @@ import { describe, expect, it, vi } from "vitest";
 import { resolveLocalForkBuildEnv } from "../vite.config";
 
 describe("Local Fork Vite build environment", () => {
-  it("derives the SHA for explicit local mode when Git metadata is available", () => {
-    const deriveGitSha = vi.fn(() => "abc1234");
+  const derivedRevision = "a".repeat(40);
+  const explicitRevision = "b".repeat(40);
+
+  it("derives the full source revision for explicit local mode", () => {
+    const deriveGitSha = vi.fn(() => derivedRevision);
 
     expect(
       resolveLocalForkBuildEnv({ VITE_GG_LOCAL_PATCHED: "1" }, false, deriveGitSha),
-    ).toMatchObject({ localPatched: "1", gitSha: "abc1234" });
+    ).toMatchObject({ localPatched: "1", sourceRevision: derivedRevision });
     expect(deriveGitSha).toHaveBeenCalledOnce();
   });
 
-  it("uses an explicit SHA for an exported build without Git metadata", () => {
+  it("uses an explicit full revision for an exported build", () => {
     const deriveGitSha = vi.fn(() => null);
 
     expect(
@@ -19,7 +22,7 @@ describe("Local Fork Vite build environment", () => {
         {
           VITE_GG_LOCAL_PATCHED: "1",
           VITE_GG_SOURCE_ROOT: "/exported/gg-framework",
-          VITE_GG_GIT_SHA: "deadbeef",
+          VITE_GG_GIT_SHA: explicitRevision,
         },
         false,
         deriveGitSha,
@@ -27,14 +30,18 @@ describe("Local Fork Vite build environment", () => {
     ).toMatchObject({
       localPatched: "1",
       sourceRoot: "/exported/gg-framework",
-      gitSha: "deadbeef",
+      sourceRevision: explicitRevision,
     });
     expect(deriveGitSha).not.toHaveBeenCalled();
   });
 
-  it("rejects an explicit local build without Git metadata or a SHA", () => {
+  it.each([undefined, "deadbeef"])("rejects missing or abbreviated revision %s", (revision) => {
     expect(() =>
-      resolveLocalForkBuildEnv({ VITE_GG_LOCAL_PATCHED: "1" }, false, () => null),
-    ).toThrow(/VITE_GG_GIT_SHA is required.*Git metadata is unavailable/);
+      resolveLocalForkBuildEnv(
+        { VITE_GG_LOCAL_PATCHED: "1", VITE_GG_GIT_SHA: revision },
+        false,
+        () => null,
+      ),
+    ).toThrow(/full 40-character source commit SHA/);
   });
 });

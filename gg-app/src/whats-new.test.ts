@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { CHANGELOG } from "./changelog";
 import { LOCAL_CHANGELOG } from "./local-changelog";
+import localReleaseNotes from "./local-release-notes.json";
 import {
   LEGACY_WHATS_NEW_STORAGE_KEY,
   WHATS_NEW_STORAGE_KEY,
@@ -142,15 +143,12 @@ describe("What's New feeds", () => {
     expect(limited[1].items).toHaveLength(20);
   });
 
-  it("keeps the latest Local Fork release notes complete", () => {
+  it("keeps the latest Local Fork release notes identical to the source contract", () => {
     expect(LOCAL_CHANGELOG[0]).toEqual({
-      id: "local-2026-08-28-roadmap-and-streaming",
-      label: "August 28 update",
-      date: "2026-08-28",
-      items: [
-        "Roadmap work now starts automatically only when exactly one eligible phase is available. Ambiguous choices stay manual, and manual Ken still requires an explicit Start.",
-        "Streaming replies now reveal smoothly and stay pinned while preserving the Local Fork’s multi-pane workspace.",
-      ],
+      id: "local-2026-08-29-roadmap-completion-fails-closed",
+      label: localReleaseNotes.label,
+      date: localReleaseNotes.date,
+      items: localReleaseNotes.sections.flatMap(({ items }) => items),
     });
   });
 

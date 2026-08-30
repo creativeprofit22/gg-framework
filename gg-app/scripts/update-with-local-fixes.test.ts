@@ -46,7 +46,7 @@ function configureRepository(repo: string): void {
 }
 
 function writeIdentityFixture(repo: string): void {
-  write(join(repo, ".gitignore"), ".gg/\n");
+  write(join(repo, ".gitignore"), ".gg/\ngg-app/src-tauri/target/\n");
   write(join(repo, "package.json"), '{"private":true}\n');
   write(join(repo, "gg-app/package.json"), '{"version":"1.2.3"}\n');
   write(join(repo, "gg-app/index.html"), "<title>Supah Coder</title>\n");
@@ -409,6 +409,51 @@ describe("local-fixes updater", () => {
     expect(context.decisions).toHaveLength(decisions.decisions.length);
   }, 30_000);
 
+  it.skipIf(process.platform !== "win32")(
+    "keeps dirty bytes stashed through packaging and restores them afterward",
+    () => {
+      const fixture = createUpdateFixture();
+      const bin = join(fixture.root, "bin");
+      const buildStatusPath = join(fixture.root, "build-status.txt");
+      mkdirSync(bin);
+      write(
+        join(bin, "fake-pnpm.cjs"),
+        [
+          'const { execFileSync } = require("node:child_process");',
+          'const { mkdirSync, writeFileSync } = require("node:fs");',
+          'const { join } = require("node:path");',
+          'writeFileSync(process.env.GG_TEST_BUILD_STATUS, execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"]));',
+          'const output = join(process.cwd(), "gg-app", "src-tauri", "target", "release", "bundle", "nsis");',
+          "mkdirSync(output, { recursive: true });",
+          'writeFileSync(join(output, "GG Coder Local Fork_1.2.3_x64-setup.exe"), "installer");',
+        ].join("\n"),
+      );
+      write(
+        join(bin, "pnpm.cmd"),
+        `@echo off\r\n"${process.execPath}" "%~dp0fake-pnpm.cjs" %*\r\nexit /b %errorlevel%\r\n`,
+      );
+
+      const result = runUpdater(fixture.repo, ["--no-install", "--no-check"], {
+        GG_TEST_BUILD_STATUS: buildStatusPath,
+        PATH: `${bin};${process.env.PATH ?? ""}`,
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(buildStatusPath, "utf8")).toBe("");
+      expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(
+        fixture.initialDirtyStatus,
+      );
+      expect(readFileSync(join(fixture.repo, "local-two.txt"), "utf8")).toBe(
+        "two\ndirty tracked\n",
+      );
+      expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe(
+        "dirty untracked\n",
+      );
+      expect(git(fixture.repo, "stash", "list")).toBe("");
+    },
+    30_000,
+  );
+
   it("stops on conflicts with the backup branch and dirty-work stash intact", () => {
     const fixture = createUpdateFixture(true);
     const result = runUpdater(fixture.repo, ["--no-install", "--no-build", "--no-check"]);
@@ -455,6 +500,13 @@ describe("local-fixes updater", () => {
     expect(manifest).not.toHaveProperty("decisionsPath");
     expect(existsSync(join(syncDir, "decisions.json"))).toBe(false);
     expect(manifest.dirtyWorkApplied).toBe(true);
+    expect(git(fixture.repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe(
+      fixture.initialDirtyStatus,
+    );
+    expect(readFileSync(join(fixture.repo, "local-two.txt"), "utf8")).toBe("two\ndirty tracked\n");
+    expect(readFileSync(join(fixture.repo, "dirty-untracked.txt"), "utf8")).toBe(
+      "dirty untracked\n",
+    );
   }, 30_000);
 
   it("rejects push when checks or build are disabled", () => {

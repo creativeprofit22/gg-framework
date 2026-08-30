@@ -332,6 +332,23 @@ impl ChildContainment {
     fn terminate(&self) {}
 }
 
+pub(crate) fn full_source_head(runner: &dyn GitRunner, repo: &Path) -> Result<String, String> {
+    let head = runner
+        .run(repo, &["rev-parse", "HEAD"], LOCAL_GIT_TIMEOUT)
+        .map_err(|error| format!("failed to inspect local source HEAD: {error}"))?;
+    if !head.status.success() {
+        return Err(command_failure(
+            "failed to inspect local source HEAD",
+            &head,
+        ));
+    }
+    let revision = output_text(&head.stdout);
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("The local source checkout HEAD is not a full 40-character Git SHA.".into());
+    }
+    Ok(revision.to_ascii_lowercase())
+}
+
 pub(crate) fn check_local_patched_update(
     runner: &dyn GitRunner,
     repo: &Path,
@@ -543,6 +560,24 @@ mod tests {
     fn exit_status(code: i32) -> ExitStatus {
         use std::os::unix::process::ExitStatusExt;
         ExitStatus::from_raw(code << 8)
+    }
+
+    #[test]
+    fn full_source_head_requires_and_normalizes_exact_revision() {
+        let runner = FakeRunner::new(vec![response(
+            0,
+            "ABCDEF0123456789ABCDEF0123456789ABCDEF01\n",
+        )]);
+        assert_eq!(
+            full_source_head(&runner, Path::new("repo")).unwrap(),
+            "abcdef0123456789abcdef0123456789abcdef01"
+        );
+    }
+
+    #[test]
+    fn full_source_head_rejects_abbreviated_revision() {
+        let runner = FakeRunner::new(vec![response(0, "abcdef0\n")]);
+        assert!(full_source_head(&runner, Path::new("repo")).is_err());
     }
 
     #[test]

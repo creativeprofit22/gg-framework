@@ -25,7 +25,132 @@ export const LOCAL_TAURI_CONFIG = Object.freeze({
   bundle: { createUpdaterArtifacts: false },
   plugins: { updater: { endpoints: [] } },
 });
-export const LOCAL_INSTALLER_MANIFEST_SCHEMA_VERSION = 1;
+export const LOCAL_INSTALLER_MANIFEST_SCHEMA_VERSION = 2;
+const RELEASE_NOTES_PATH = "gg-app/src/local-release-notes.json";
+const MAX_RELEASE_NOTES_BYTES = 32 * 1024;
+
+function exactKeys(value, keys) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key))
+  );
+}
+
+function boundedText(value, field, maxLength) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maxLength ||
+    value.trim() !== value ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    throw new Error(`Invalid Local Fork release-note ${field}.`);
+  }
+  return value;
+}
+
+export function validateLocalReleaseNotes(value) {
+  if (!exactKeys(value, ["schemaVersion", "date", "label", "sections"])) {
+    throw new Error("Invalid Local Fork release-note fields.");
+  }
+  if (value.schemaVersion !== 1) {
+    throw new Error("Unsupported Local Fork release-note schema.");
+  }
+  const date = boundedText(value.date, "date", 10);
+  if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(date) ||
+    Number.isNaN(Date.parse(`${date}T00:00:00Z`)) ||
+    new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date
+  ) {
+    throw new Error("Invalid Local Fork release-note date.");
+  }
+  const label = boundedText(value.label, "label", 120);
+  if (!Array.isArray(value.sections) || value.sections.length < 1 || value.sections.length > 8) {
+    throw new Error("Invalid Local Fork release-note sections.");
+  }
+  const sections = value.sections.map((section, sectionIndex) => {
+    if (!exactKeys(section, ["title", "items"])) {
+      throw new Error(`Invalid Local Fork release-note section ${sectionIndex + 1}.`);
+    }
+    const title = boundedText(section.title, `section ${sectionIndex + 1} title`, 120);
+    if (!Array.isArray(section.items) || section.items.length < 1 || section.items.length > 10) {
+      throw new Error(`Invalid Local Fork release-note section ${sectionIndex + 1} items.`);
+    }
+    const items = section.items.map((item, itemIndex) =>
+      boundedText(item, `section ${sectionIndex + 1} item ${itemIndex + 1}`, 500),
+    );
+    return { title, items };
+  });
+  return { schemaVersion: 1, date, label, sections };
+}
+
+export function releaseNotesEnvelope(sourceRevision, note) {
+  if (!/^[0-9a-f]{40}$/i.test(sourceRevision)) {
+    throw new Error("Local Fork source revision must be a full 40-character Git SHA.");
+  }
+  const validatedNote = validateLocalReleaseNotes(note);
+  const envelopeBytes = Buffer.from(
+    JSON.stringify({
+      schemaVersion: 1,
+      sourceRevision: sourceRevision.toLowerCase(),
+      note: validatedNote,
+    }),
+    "utf8",
+  );
+  return {
+    sourceRevision: sourceRevision.toLowerCase(),
+    releaseNotes: {
+      size: envelopeBytes.length,
+      sha256: createHash("sha256").update(envelopeBytes).digest("hex"),
+      base64: envelopeBytes.toString("base64"),
+    },
+  };
+}
+
+function gitBytes(root, args) {
+  return execFileSync("git", args, { cwd: root, stdio: ["ignore", "pipe", "ignore"] });
+}
+
+/** @param {string} root @param {(args: string[]) => Uint8Array} [runGit] */
+export function committedReleaseNotes(root, runGit = (args) => gitBytes(root, args)) {
+  const status = Buffer.from(runGit(["status", "--porcelain=v1", "--untracked-files=all"]));
+  if (status.toString("utf8").trim()) {
+    throw new Error("Local Fork builds require a clean worktree, including no untracked files.");
+  }
+  const sourceRevision = Buffer.from(runGit(["rev-parse", "--verify", "HEAD^{commit}"]))
+    .toString("utf8")
+    .trim();
+  if (!/^[0-9a-f]{40}$/i.test(sourceRevision)) {
+    throw new Error("Could not resolve the full Local Fork source revision.");
+  }
+  try {
+    runGit(["ls-files", "--error-unmatch", "--", RELEASE_NOTES_PATH]);
+  } catch {
+    throw new Error("Local Fork release notes must be tracked by Git.");
+  }
+  const currentBytes = readFileSync(join(root, ...RELEASE_NOTES_PATH.split("/")));
+  const committedBytes = Buffer.from(runGit(["show", `HEAD:${RELEASE_NOTES_PATH}`]));
+  if (!currentBytes.equals(committedBytes)) {
+    throw new Error("Local Fork release notes differ from the source commit.");
+  }
+  if (currentBytes.length === 0 || currentBytes.length > MAX_RELEASE_NOTES_BYTES) {
+    throw new Error("Local Fork release-note file is empty or oversized.");
+  }
+  const text = currentBytes.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(currentBytes)) {
+    throw new Error("Local Fork release notes must be valid UTF-8.");
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("Local Fork release notes must be valid JSON.");
+  }
+  return releaseNotesEnvelope(sourceRevision, parsed);
+}
 
 function run(command, args) {
   console.log(`> ${command} ${args.join(" ")}`);
@@ -225,15 +350,18 @@ export function windowsNsisPayloadMetadata(payloadPath) {
 export function installerManifest(
   installerPath,
   payloadPath,
+  releaseMetadata,
   payloadMetadata = fileMetadata(payloadPath),
 ) {
   const installerStats = statSync(installerPath);
   return {
+    schemaVersion: LOCAL_INSTALLER_MANIFEST_SCHEMA_VERSION,
+    sourceRevision: releaseMetadata.sourceRevision,
+    releaseNotes: releaseMetadata.releaseNotes,
     path: installerPath,
     size: installerStats.size,
     mtimeMs: installerStats.mtimeMs,
     sha256: createHash("sha256").update(readFileSync(installerPath)).digest("hex"),
-    schemaVersion: LOCAL_INSTALLER_MANIFEST_SCHEMA_VERSION,
     identity: LOCAL_FORK_IDENTITY,
     payload: {
       name: basename(payloadPath),
@@ -253,6 +381,8 @@ function writeInstallerManifest(metadata) {
 }
 
 async function main() {
+  const releaseMetadata = committedReleaseNotes(repoRoot);
+  env.VITE_GG_GIT_SHA = releaseMetadata.sourceRevision;
   const baseConfig = JSON.parse(readFileSync(join(srcTauri, "tauri.conf.json"), "utf8"));
   const cargoTomlPath = join(srcTauri, "Cargo.toml");
   const localConfig = JSON.parse(readFileSync(localTauriConfigPath(), "utf8"));
@@ -302,7 +432,7 @@ async function main() {
   }
   const payloadMetadata =
     process.platform === "win32" ? windowsNsisPayloadMetadata(payload) : fileMetadata(payload);
-  writeInstallerManifest(installerManifest(installer, payload, payloadMetadata));
+  writeInstallerManifest(installerManifest(installer, payload, releaseMetadata, payloadMetadata));
 }
 
 const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

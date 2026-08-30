@@ -1,3 +1,12 @@
+import releaseNotesJson from "./local-release-notes.json";
+
+export interface LocalReleaseNotes {
+  schemaVersion: 1;
+  date: string;
+  label: string;
+  sections: Array<{ title: string; items: string[] }>;
+}
+
 /**
  * User-facing release notes for the Local Fork. Prepend an entry whenever a
  * genuinely user-facing local change ships. IDs are immutable after shipping:
@@ -14,8 +23,41 @@ export interface LocalChangelogEntry {
   items: string[];
 }
 
+function requireCurrentReleaseNotes(value: unknown): LocalReleaseNotes {
+  const note = value as Partial<LocalReleaseNotes> | null;
+  if (
+    !note ||
+    note.schemaVersion !== 1 ||
+    typeof note.date !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(note.date) ||
+    typeof note.label !== "string" ||
+    !Array.isArray(note.sections) ||
+    note.sections.length === 0 ||
+    !note.sections.every(
+      (section) =>
+        section &&
+        typeof section.title === "string" &&
+        section.title.length > 0 &&
+        Array.isArray(section.items) &&
+        section.items.length > 0 &&
+        section.items.every((item) => typeof item === "string" && item.length > 0),
+    )
+  ) {
+    throw new Error("Invalid Local Fork release notes");
+  }
+  return note as LocalReleaseNotes;
+}
+
+export const CURRENT_LOCAL_RELEASE_NOTES = requireCurrentReleaseNotes(releaseNotesJson);
+
 /** Newest first. Maintained only by the Local Fork release flow. */
 export const LOCAL_CHANGELOG: LocalChangelogEntry[] = [
+  {
+    id: "local-2026-08-29-roadmap-completion-fails-closed",
+    label: CURRENT_LOCAL_RELEASE_NOTES.label,
+    date: CURRENT_LOCAL_RELEASE_NOTES.date,
+    items: CURRENT_LOCAL_RELEASE_NOTES.sections.flatMap(({ items }) => items),
+  },
   {
     id: "local-2026-08-28-roadmap-and-streaming",
     label: "August 28 update",

@@ -16,6 +16,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const scriptPath = join(import.meta.dirname, "install-local-patched.ps1");
 const temporaryDirectories = [];
+const sourceRevision = "a".repeat(40);
 const processTreeFixtureSource = String.raw`
 using System;
 using System.Diagnostics;
@@ -55,7 +56,7 @@ function psLiteral(value) {
 }
 
 function runPowerShell(body, options = {}) {
-  const command = `& { . ${psLiteral(scriptPath)} -TaskName 'test-only' -ExpectedVersion '0.53.9' -LibraryOnly; ${body} }`;
+  const command = `& { . ${psLiteral(scriptPath)} -TaskName 'test-only' -ExpectedVersion '0.53.9' -ExpectedSourceRevision ${psLiteral(sourceRevision)} -LibraryOnly; ${body} }`;
   return spawnSync(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -117,13 +118,29 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function setReleaseEnvelope(manifest, envelope) {
+  const bytes = Buffer.from(JSON.stringify(envelope), "utf8");
+  manifest.releaseNotes = {
+    size: bytes.length,
+    sha256: sha256(bytes),
+    base64: bytes.toString("base64"),
+  };
+}
+
+function updateReleaseEnvelope(manifest, update) {
+  const envelope = JSON.parse(Buffer.from(manifest.releaseNotes.base64, "base64").toString("utf8"));
+  update(envelope);
+  setReleaseEnvelope(manifest, envelope);
+}
+
 function localForkManifest(installerPath, installerBytes, payloadBytes) {
-  return {
+  const manifest = {
+    schemaVersion: 2,
+    sourceRevision,
     path: installerPath,
     size: installerBytes.length,
     mtimeMs: Date.now(),
     sha256: sha256(installerBytes),
-    schemaVersion: 1,
     identity: {
       productName: "GG Coder Local Fork",
       identifier: "com.ggcoder.local-fork",
@@ -137,6 +154,17 @@ function localForkManifest(installerPath, installerBytes, payloadBytes) {
       sha256: sha256(payloadBytes),
     },
   };
+  setReleaseEnvelope(manifest, {
+    schemaVersion: 1,
+    sourceRevision,
+    note: {
+      schemaVersion: 1,
+      date: "2026-08-29",
+      label: "Roadmap completion now fails closed",
+      sections: [{ title: "Safer phase completion", items: ["Roadmap completion fails closed."] }],
+    },
+  });
+  return manifest;
 }
 
 function installerFixture() {
@@ -513,7 +541,7 @@ windowsDescribe("detached local installer helper", () => {
     const fixture = installerFixture();
 
     const result = runPowerShell(
-      `$result = Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)}; $result | ConvertTo-Json -Compress`,
+      `$result = Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)} -ExpectedSourceRevision ${psLiteral(sourceRevision)}; $result | ConvertTo-Json -Compress`,
     );
 
     expect(result.status, result.stderr).toBe(0);
@@ -531,17 +559,57 @@ windowsDescribe("detached local installer helper", () => {
     });
   });
 
+  it.each([
+    ["legacy schema", (manifest) => (manifest.schemaVersion = 1)],
+    ["missing notes", (manifest) => delete manifest.releaseNotes],
+    ["invalid note base64", (manifest) => (manifest.releaseNotes.base64 = "%%%%")],
+    ["wrong note size", (manifest) => manifest.releaseNotes.size++],
+    ["tampered note digest", (manifest) => (manifest.releaseNotes.sha256 = "0".repeat(64))],
+    ["another manifest revision", (manifest) => (manifest.sourceRevision = "b".repeat(40))],
+    [
+      "another envelope revision",
+      (manifest) =>
+        updateReleaseEnvelope(manifest, (envelope) => (envelope.sourceRevision = "b".repeat(40))),
+    ],
+    [
+      "malformed note fields",
+      (manifest) => updateReleaseEnvelope(manifest, (envelope) => (envelope.note.surprise = true)),
+    ],
+  ])("rejects %s before stopping the app or starting installation", (_name, mutateManifest) => {
+    const fixture = installerFixture();
+    mutateManifest(fixture.manifest);
+    writeFileSync(fixture.metadataPath, JSON.stringify(fixture.manifest));
+    const logPath = join(fixture.root, "release-note-rejection.log");
+
+    const result = runPowerShell(
+      `$script:InstallLogPath = ${psLiteral(logPath)}; $MetadataPath = ${psLiteral(fixture.metadataPath)}; ` +
+        `$AllowedInstallerRoot = ${psLiteral(fixture.installerRoot)}; $DelaySeconds = 0; $script:stopCalls = 0; $script:installCalls = 0; ` +
+        `function Stop-GgCoderForInstall { $script:stopCalls += 1 }; function Invoke-VerifiedInstallTransaction { $script:installCalls += 1 }; ` +
+        `$failure = ''; try { Invoke-LocalPatchedInstall 6>$null } catch { $failure = $_.Exception.Message }; ` +
+        `[pscustomobject]@{ Failure = $failure; StopCalls = $script:stopCalls; InstallCalls = $script:installCalls } | ConvertTo-Json -Compress`,
+      { env: { ...process.env, LOCALAPPDATA: fixture.root } },
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      Failure: expect.any(String),
+      StopCalls: 0,
+      InstallCalls: 0,
+    });
+    expect(JSON.parse(result.stdout.trim()).Failure).not.toBe("");
+  });
+
   it("rejects a manifest for a non-Local Fork identity", () => {
     const fixture = installerFixture();
     fixture.manifest.identity.identifier = "com.ggcoder.app";
     writeFileSync(fixture.metadataPath, JSON.stringify(fixture.manifest));
 
     const result = runPowerShell(
-      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)}`,
+      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)} -ExpectedSourceRevision ${psLiteral(sourceRevision)}`,
     );
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("Local Fork identity mismatch for identifier");
+    expect(result.stderr).toContain("identity.identifier must equal");
   });
 
   it("rejects a manifest whose SHA-256 does not match the installer", () => {
@@ -550,11 +618,11 @@ windowsDescribe("detached local installer helper", () => {
     writeFileSync(fixture.metadataPath, JSON.stringify(fixture.manifest));
 
     const result = runPowerShell(
-      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)}`,
+      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)} -ExpectedSourceRevision ${psLiteral(sourceRevision)}`,
     );
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("Installer SHA-256 mismatch");
+    expect(result.stderr).toContain("installer SHA-256 mismatch");
   });
 
   it("rejects a manifest path outside the allowed NSIS output directory", () => {
@@ -565,11 +633,11 @@ windowsDescribe("detached local installer helper", () => {
     writeFileSync(fixture.metadataPath, JSON.stringify(fixture.manifest));
 
     const result = runPowerShell(
-      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)}`,
+      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)} -ExpectedSourceRevision ${psLiteral(sourceRevision)}`,
     );
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("outside the allowed NSIS output directory");
+    expect(result.stderr).toContain("installer path escapes its allowed root");
   });
 
   it("rejects a log path reached through a junction before writing", () => {
@@ -605,7 +673,7 @@ windowsDescribe("detached local installer helper", () => {
     writeFileSync(fixture.metadataPath, JSON.stringify(fixture.manifest));
 
     const result = runPowerShell(
-      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)}`,
+      `Read-VerifiedInstallerManifest -Path ${psLiteral(fixture.metadataPath)} -AllowedRoot ${psLiteral(fixture.installerRoot)} -ExpectedSourceRevision ${psLiteral(sourceRevision)}`,
     );
 
     expect(result.status).not.toBe(0);

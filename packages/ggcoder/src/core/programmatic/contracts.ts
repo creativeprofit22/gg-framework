@@ -7,8 +7,12 @@ const LIMITS = {
   pathChars: 500,
   scannerIdChars: 100,
   opportunityKeyChars: 500,
+  opportunityTextChars: 4_000,
   inventoryScanners: 64,
   inventoryEntries: 10_000,
+  discoveryOpportunities: 1_000,
+  opportunityPaths: 200,
+  opportunityRisks: 50,
   evidenceItems: 200,
   evidenceSourceChars: 100,
   evidenceCodeChars: 100,
@@ -24,11 +28,7 @@ const stableIdSchema = z
   .max(LIMITS.scannerIdChars)
   .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const boundedString = (max: number) => z.string().min(1).max(max);
-const specialistCommandSchema = z.enum([
-  "research",
-  "setup-sweep",
-  "setup-tauri-package",
-]);
+const specialistCommandSchema = z.enum(["research", "setup-sweep", "setup-tauri-package"]);
 const lifecycleStateSchema = z.enum(["discovered", "queued", "running", "completed", "dismissed"]);
 const positiveSafeIntegerSchema = z
   .number()
@@ -122,6 +122,7 @@ export const evidenceLocationV1Schema = z
   });
 
 export const evidenceItemV1Schema = z.strictObject({
+  basis: z.enum(["observed", "inferred", "assumed"]),
   source: boundedString(LIMITS.evidenceSourceChars),
   code: boundedString(LIMITS.evidenceCodeChars),
   severity: z.enum(["info", "warning", "error"]),
@@ -134,13 +135,67 @@ export const evidenceV1Schema = z.strictObject({
   items: z.array(evidenceItemV1Schema).max(LIMITS.evidenceItems),
 });
 
+const repositoryPathArraySchema = z
+  .array(repositoryRelativePathSchema)
+  .min(1)
+  .max(LIMITS.opportunityPaths)
+  .refine(isStrictlyAscending, "paths must be unique and sorted ascending");
+const boundedStringArray = (maxItems: number) =>
+  z.array(boundedString(LIMITS.opportunityTextChars)).min(1).max(maxItems);
+
 export const opportunityIdentityV1Schema = z.strictObject({
   version: versionSchema,
-  scannerId: stableIdSchema,
-  specialistCommand: specialistCommandSchema,
+  id: sha256Schema,
+  detectorId: stableIdSchema,
   key: boundedString(LIMITS.opportunityKeyChars),
   path: repositoryRelativePathSchema.optional(),
 });
+
+export const routableOpportunityRouteV1Schema = z.strictObject({
+  status: z.literal("routable"),
+  specialistCommand: specialistCommandSchema,
+});
+
+export const unroutableOpportunityRouteV1Schema = z.strictObject({
+  status: z.literal("unroutable"),
+});
+
+export const opportunityRouteV1Schema = z.discriminatedUnion("status", [
+  routableOpportunityRouteV1Schema,
+  unroutableOpportunityRouteV1Schema,
+]);
+
+export const discoveredOpportunityV1Schema = z
+  .strictObject({
+    version: versionSchema,
+    identity: opportunityIdentityV1Schema,
+    representativeCase: repositoryRelativePathSchema,
+    repeatableTrigger: boundedString(LIMITS.opportunityTextChars),
+    inputPaths: repositoryPathArraySchema,
+    currentProcess: boundedString(LIMITS.opportunityTextChars),
+    expectedOutput: boundedString(LIMITS.opportunityTextChars),
+    verification: boundedString(LIMITS.opportunityTextChars),
+    risks: boundedStringArray(LIMITS.opportunityRisks),
+    confidence: z.enum(["low", "medium", "high"]),
+    mutationPaths: repositoryPathArraySchema,
+    evidence: evidenceV1Schema,
+    route: opportunityRouteV1Schema,
+  })
+  .refine(
+    (value) =>
+      value.evidence.items.some((item) => item.basis === "observed" && item.location !== undefined),
+    { path: ["evidence", "items"], message: "a located observed evidence item is required" },
+  );
+
+export const opportunityDiscoveryResultV1Schema = z
+  .strictObject({
+    version: versionSchema,
+    opportunities: z.array(discoveredOpportunityV1Schema).max(LIMITS.discoveryOpportunities),
+  })
+  .refine((value) => isStrictlyAscending(value.opportunities.map(({ identity }) => identity.id)), {
+    path: ["opportunities"],
+    message: "opportunity IDs must be unique and sorted ascending",
+  });
 
 export const opportunityLifecycleV1Schema = z.strictObject({
   version: versionSchema,
@@ -162,13 +217,12 @@ export const opportunityTransitionV1Schema = z
 export const routeEnvelopeV1Schema = z
   .strictObject({
     version: versionSchema,
-    opportunity: opportunityIdentityV1Schema,
-    specialistCommand: specialistCommandSchema,
+    opportunity: discoveredOpportunityV1Schema,
     configurationFingerprint: configurationFingerprintV1Schema,
   })
-  .refine((value) => value.specialistCommand === value.opportunity.specialistCommand, {
-    path: ["specialistCommand"],
-    message: "route specialist must match opportunity specialist",
+  .refine((value) => value.opportunity.route.status === "routable", {
+    path: ["opportunity", "route"],
+    message: "only routable opportunities can form execution routes",
   });
 
 export const executionResultV1Schema = z.strictObject({
@@ -187,6 +241,9 @@ export type EvidenceLocationV1 = z.infer<typeof evidenceLocationV1Schema>;
 export type EvidenceItemV1 = z.infer<typeof evidenceItemV1Schema>;
 export type EvidenceV1 = z.infer<typeof evidenceV1Schema>;
 export type OpportunityIdentityV1 = z.infer<typeof opportunityIdentityV1Schema>;
+export type OpportunityRouteV1 = z.infer<typeof opportunityRouteV1Schema>;
+export type DiscoveredOpportunityV1 = z.infer<typeof discoveredOpportunityV1Schema>;
+export type OpportunityDiscoveryResultV1 = z.infer<typeof opportunityDiscoveryResultV1Schema>;
 export type OpportunityLifecycleV1 = z.infer<typeof opportunityLifecycleV1Schema>;
 export type OpportunityTransitionV1 = z.infer<typeof opportunityTransitionV1Schema>;
 export type RouteEnvelopeV1 = z.infer<typeof routeEnvelopeV1Schema>;

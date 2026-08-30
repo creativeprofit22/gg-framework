@@ -1,17 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   configurationFingerprintV1Schema,
+  discoveredOpportunityV1Schema,
   evidenceItemV1Schema,
   evidenceLocationV1Schema,
   evidenceV1Schema,
   executionResultV1Schema,
   inventoryEntryV1Schema,
   inventoryV1Schema,
+  opportunityDiscoveryResultV1Schema,
   opportunityIdentityV1Schema,
   opportunityLifecycleV1Schema,
+  opportunityRouteV1Schema,
   opportunityTransitionV1Schema,
   repositoryRelativePathSchema,
   routeEnvelopeV1Schema,
+  routableOpportunityRouteV1Schema,
   scannerProfileV1Schema,
 } from "./contracts.js";
 
@@ -25,14 +29,12 @@ const inventoryEntry = { path: "package.json", sha256: "b".repeat(64) };
 const inventory = {
   version: 1,
   configurationFingerprint,
-  scanners: [
-    scannerProfile,
-    { version: 1, id: "sweep-scanner", specialistCommand: "setup-sweep" },
-  ],
+  scanners: [scannerProfile, { version: 1, id: "sweep-scanner", specialistCommand: "setup-sweep" }],
   entries: [inventoryEntry, { path: "src/index.ts", sha256: "c".repeat(64) }],
 };
 const evidenceLocation = { path: "src/index.ts", startLine: 10, endLine: 12 };
 const evidenceItem = {
+  basis: "observed",
   source: "ci-scanner",
   code: "missing-ci",
   severity: "warning",
@@ -42,17 +44,32 @@ const evidenceItem = {
 const evidence = { version: 1, items: [evidenceItem] };
 const opportunity = {
   version: 1,
-  scannerId: "ci-scanner",
-  specialistCommand: "research",
+  id: "d".repeat(64),
+  detectorId: "ci-scanner",
   key: "missing-ci",
-  path: ".github/workflows/ci.yml",
+  path: "src/index.ts",
 };
+const discoveredOpportunity = {
+  version: 1,
+  identity: opportunity,
+  representativeCase: "src/index.ts",
+  repeatableTrigger: "A source tree exists without continuous integration.",
+  inputPaths: ["package.json", "src/index.ts"],
+  currentProcess: "Continuous integration is configured manually.",
+  expectedOutput: "A repeatable continuous integration workflow.",
+  verification: "Run the repository checks in continuous integration.",
+  risks: ["A generated workflow could omit a repository-specific check."],
+  confidence: "medium",
+  mutationPaths: [".github/workflows/ci.yml"],
+  evidence,
+  route: { status: "routable", specialistCommand: "research" },
+};
+const discoveryResult = { version: 1, opportunities: [discoveredOpportunity] };
 const lifecycle = { version: 1, opportunity, state: "discovered" };
 const transition = { version: 1, opportunity, from: "discovered", to: "queued" };
 const route = {
   version: 1,
-  opportunity,
-  specialistCommand: "research",
+  opportunity: discoveredOpportunity,
   configurationFingerprint,
 };
 const executionResult = {
@@ -74,6 +91,9 @@ describe("programmatic contract fixtures", () => {
     ["evidence item", evidenceItemV1Schema, evidenceItem],
     ["evidence", evidenceV1Schema, evidence],
     ["opportunity identity", opportunityIdentityV1Schema, opportunity],
+    ["opportunity route", opportunityRouteV1Schema, discoveredOpportunity.route],
+    ["discovered opportunity", discoveredOpportunityV1Schema, discoveredOpportunity],
+    ["discovery result", opportunityDiscoveryResultV1Schema, discoveryResult],
     ["opportunity lifecycle", opportunityLifecycleV1Schema, lifecycle],
     ["opportunity transition", opportunityTransitionV1Schema, transition],
     ["route envelope", routeEnvelopeV1Schema, route],
@@ -95,6 +115,13 @@ describe("strict records", () => {
     [evidenceItemV1Schema, { ...evidenceItem, unexpected: true }],
     [evidenceV1Schema, { ...evidence, rawOutput: "unbounded output" }],
     [opportunityIdentityV1Schema, { ...opportunity, unexpected: true }],
+    [opportunityRouteV1Schema, { ...discoveredOpportunity.route, command: "arbitrary" }],
+    [discoveredOpportunityV1Schema, { ...discoveredOpportunity, prompt: "implement this" }],
+    [
+      discoveredOpportunityV1Schema,
+      { ...discoveredOpportunity, implementationPrompt: "implement this" },
+    ],
+    [opportunityDiscoveryResultV1Schema, { ...discoveryResult, unexpected: true }],
     [opportunityLifecycleV1Schema, { ...lifecycle, unexpected: true }],
     [opportunityTransitionV1Schema, { ...transition, unexpected: true }],
     [routeEnvelopeV1Schema, { ...route, command: "arbitrary command" }],
@@ -171,7 +198,8 @@ describe("fingerprints and scanner profiles", () => {
         scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand }).success,
       ).toBe(true);
       expect(
-        opportunityIdentityV1Schema.safeParse({ ...opportunity, specialistCommand }).success,
+        routableOpportunityRouteV1Schema.safeParse({ status: "routable", specialistCommand })
+          .success,
       ).toBe(true);
     },
   );
@@ -184,11 +212,11 @@ describe("fingerprints and scanner profiles", () => {
     "package-tauri",
     "research --force",
   ])("rejects unsupported specialist %j", (specialistCommand) => {
+    expect(scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand }).success).toBe(
+      false,
+    );
     expect(
-      scannerProfileV1Schema.safeParse({ ...scannerProfile, specialistCommand }).success,
-    ).toBe(false);
-    expect(
-      opportunityIdentityV1Schema.safeParse({ ...opportunity, specialistCommand }).success,
+      routableOpportunityRouteV1Schema.safeParse({ status: "routable", specialistCommand }).success,
     ).toBe(false);
   });
 
@@ -228,6 +256,8 @@ describe("canonical inventory", () => {
 
 describe("bounded structured evidence", () => {
   it.each([
+    { ...evidenceItem, basis: undefined },
+    { ...evidenceItem, basis: "reported" },
     { ...evidenceItem, source: "a".repeat(101) },
     { ...evidenceItem, code: "a".repeat(101) },
     { ...evidenceItem, message: "a".repeat(4_001) },
@@ -249,6 +279,85 @@ describe("bounded structured evidence", () => {
     { path: "src/index.ts", startLine: Number.MAX_SAFE_INTEGER + 1 },
   ])("rejects invalid evidence line ranges", (location) => {
     expect(evidenceLocationV1Schema.safeParse(location).success).toBe(false);
+  });
+});
+
+describe("discovered opportunity boundaries", () => {
+  it.each([
+    "representativeCase",
+    "repeatableTrigger",
+    "inputPaths",
+    "currentProcess",
+    "expectedOutput",
+    "verification",
+    "risks",
+    "confidence",
+    "mutationPaths",
+    "evidence",
+    "identity",
+    "route",
+  ])("requires %s", (field) => {
+    const incomplete = { ...discoveredOpportunity } as Record<string, unknown>;
+    delete incomplete[field];
+    expect(discoveredOpportunityV1Schema.safeParse(incomplete).success).toBe(false);
+  });
+
+  it("keeps evidence bases distinct with bounded normalized paths", () => {
+    for (const basis of ["observed", "inferred", "assumed"]) {
+      expect(evidenceItemV1Schema.safeParse({ ...evidenceItem, basis }).success).toBe(true);
+    }
+    expect(
+      evidenceItemV1Schema.safeParse({ ...evidenceItem, message: "a".repeat(4_001) }).success,
+    ).toBe(false);
+    for (const path of ["../src/index.ts", "/src/index.ts", "C:\\src\\index.ts"]) {
+      expect(
+        evidenceItemV1Schema.safeParse({
+          ...evidenceItem,
+          location: { path },
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("requires at least one located observed item", () => {
+    expect(
+      discoveredOpportunityV1Schema.safeParse({
+        ...discoveredOpportunity,
+        evidence: { version: 1, items: [{ ...evidenceItem, basis: "inferred" }] },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("enforces exact route discrimination", () => {
+    expect(opportunityRouteV1Schema.safeParse({ status: "unroutable" }).success).toBe(true);
+    expect(
+      opportunityRouteV1Schema.safeParse({
+        status: "unroutable",
+        specialistCommand: "research",
+      }).success,
+    ).toBe(false);
+    expect(opportunityRouteV1Schema.safeParse({ status: "routable" }).success).toBe(false);
+  });
+
+  it("requires unique opportunity IDs in ascending order", () => {
+    const later = {
+      ...discoveredOpportunity,
+      identity: { ...opportunity, id: "e".repeat(64) },
+    };
+    expect(
+      opportunityDiscoveryResultV1Schema.safeParse({
+        version: 1,
+        opportunities: [discoveredOpportunity, later],
+      }).success,
+    ).toBe(true);
+    for (const opportunities of [
+      [later, discoveredOpportunity],
+      [discoveredOpportunity, discoveredOpportunity],
+    ]) {
+      expect(
+        opportunityDiscoveryResultV1Schema.safeParse({ version: 1, opportunities }).success,
+      ).toBe(false);
+    }
   });
 });
 
@@ -291,10 +400,11 @@ describe("opportunity lifecycle transitions", () => {
 });
 
 describe("route and execution boundaries", () => {
-  it("rejects a route/opportunity specialist mismatch", () => {
-    expect(
-      routeEnvelopeV1Schema.safeParse({ ...route, specialistCommand: "setup-sweep" }).success,
-    ).toBe(false);
+  it("rejects unroutable opportunities as execution routes", () => {
+    const unroutable = { ...discoveredOpportunity, route: { status: "unroutable" } };
+    expect(routeEnvelopeV1Schema.safeParse({ ...route, opportunity: unroutable }).success).toBe(
+      false,
+    );
   });
 
   it.each(["succeeded", "failed", "cancelled", "blocked"])(

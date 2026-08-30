@@ -217,6 +217,7 @@ describe("prompt commands", () => {
 
   it("keeps /setup-programmatic discovery-only and approval-separated", () => {
     const setup = getPromptCommand("setup-programmatic");
+    const scan = getPromptCommand("programmatic");
     const programmaticCommands = PROMPT_COMMANDS.filter((command) =>
       command.name.includes("programmatic"),
     );
@@ -226,7 +227,11 @@ describe("prompt commands", () => {
       aliases: [],
       description: "Inspect and propose programmatic setup",
     });
-    expect(programmaticCommands.map((command) => command.name)).toEqual(["setup-programmatic"]);
+    expect(scan?.input).toEqual({ text: "none", references: "none", attachments: "none" });
+    expect(programmaticCommands.map((command) => command.name)).toEqual([
+      "setup-programmatic",
+      "programmatic",
+    ]);
     expect(setup?.prompt).toContain("Load the deferred `programmatic_profile`");
     expect(setup?.prompt).toContain('exactly once with `action: "inspect"`');
     expect(setup?.prompt).toContain("every route, exclusions, drift inputs");
@@ -235,6 +240,22 @@ describe("prompt commands", () => {
     expect(setup?.prompt).toContain("exact returned fingerprint and profile");
     expect(setup?.prompt).not.toContain('action: "generate"');
     expect(getPromptCommand("generate-programmatic-profile")).toBeUndefined();
+  });
+
+  it("renders /programmatic discovery only when the scan tool is unavailable", () => {
+    const deferred = getPromptCommand("programmatic", () => false)!.prompt;
+    const eager = getPromptCommand("programmatic", (name) => name === "programmatic_scan")!.prompt;
+
+    expect(deferred).toContain("Load the deferred `programmatic_scan` tool using `tool_search`");
+    expect(eager).not.toContain("tool_search");
+    for (const prompt of [deferred, eager]) {
+      expect(prompt.match(/Call `programmatic_scan`/g)).toHaveLength(1);
+      expect(prompt).toContain("exactly once with an empty argument object");
+      expect(prompt).toContain("Report only the tool's bounded result");
+      expect(prompt).toContain(
+        "Never accept or invent paths, scanners, commands, opportunities, lifecycle actions, specialist runs, or shell work.",
+      );
+    }
   });
 
   // These assertions lock the built-in prompt contract; generated harness behavior is

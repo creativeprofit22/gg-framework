@@ -1,8 +1,11 @@
+import type { SlashCommandInputPolicy } from "@kenkaiiii/gg-core";
+
 export interface ChatResearchCommandMetadata {
   name: "research";
   aliases: readonly string[];
   description: string;
   usage: "/research [optional focus]";
+  input: SlashCommandInputPolicy;
   source: "built-in";
 }
 
@@ -12,6 +15,11 @@ export const CHAT_RESEARCH_COMMAND: ChatResearchCommandMetadata = Object.freeze(
   aliases: Object.freeze([]),
   description: "Research this conversation and draft net-new Roadmap phases",
   usage: "/research [optional focus]",
+  input: {
+    text: "optional",
+    references: "optional",
+    attachments: "none",
+  } satisfies SlashCommandInputPolicy,
   source: "built-in",
 });
 

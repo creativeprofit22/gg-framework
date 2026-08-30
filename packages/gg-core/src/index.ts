@@ -25,3 +25,4 @@ export * from "./phase-binding-protocol.js";
 export * from "./phase-start-protocol.js";
 export * from "./roadmap-workflow.js";
 export * from "./plan-review.js";
+export * from "./slash-command-contract.js";

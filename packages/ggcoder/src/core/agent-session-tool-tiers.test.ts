@@ -121,6 +121,14 @@ describe("AgentSession built-in tool tiering", () => {
       for (const name of ["read", "edit", "bash", "grep", "code_nav"]) {
         expect(live).toContain(name);
       }
+
+      await session.prompt("/programmatic");
+      const commandPrompt = String(
+        session.getMessages().find((message) => message.role === "user")?.content,
+      );
+      expect(commandPrompt).toContain(
+        "Load the deferred `programmatic_scan` tool using `tool_search`",
+      );
     } finally {
       await session.dispose();
     }
@@ -250,7 +258,18 @@ describe("AgentSession built-in tool tiering", () => {
       const live = liveToolNames(session);
       expect(live).toContain("source_path");
       expect(live).toContain("screenshot");
+      expect(live).toContain("programmatic_scan");
+      expect(live).not.toContain("tool_search");
       expect(String(session.getMessages()[0]?.content ?? "")).not.toContain("Available on demand");
+
+      await session.prompt("/programmatic");
+      const commandPrompt = String(
+        session.getMessages().find((message) => message.role === "user")?.content,
+      );
+      expect(commandPrompt).toContain(
+        "Call `programmatic_scan` exactly once with an empty argument object",
+      );
+      expect(commandPrompt).not.toContain("tool_search");
     } finally {
       await session.dispose();
     }

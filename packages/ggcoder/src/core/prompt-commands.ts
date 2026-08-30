@@ -3,6 +3,10 @@
  * into the agent loop. Each command maps to a full prompt the agent executes.
  */
 
+import {
+  SLASH_COMMAND_INPUT_NONE,
+  type SlashCommandInputPolicy,
+} from "@kenkaiiii/gg-core";
 import { isGgApp } from "./runtime-mode.js";
 
 export interface PromptCommand {
@@ -10,6 +14,8 @@ export interface PromptCommand {
   aliases: string[];
   description: string;
   prompt: string;
+  /** Omitted commands preserve the normal free-text argument behavior. */
+  input?: SlashCommandInputPolicy;
 }
 
 const IS_GG_APP = isGgApp();
@@ -40,6 +46,18 @@ const spawnParallel = (count: string | number): string =>
  */
 const KENCODE_UNLOCK_NOTE =
   'If the `mcp__kencode-search__*` tools aren\'t active yet, call `tool_search` (e.g. "search public code") first to unlock them.';
+
+function renderProgrammaticPrompt(scanRegistered: boolean): string {
+  const steps = [
+    ...(scanRegistered ? [] : ["Load the deferred `programmatic_scan` tool using `tool_search`."]),
+    "Call `programmatic_scan` exactly once with an empty argument object.",
+    "Report only the tool's bounded result.",
+    "Never accept or invent paths, scanners, commands, opportunities, lifecycle actions, specialist runs, or shell work.",
+  ];
+  return `# Scan Programmatic Opportunities\n\n${steps
+    .map((step, index) => `${index + 1}. ${step}`)
+    .join("\n")}`;
+}
 
 export const PROMPT_COMMANDS: PromptCommand[] = [
   {
@@ -267,6 +285,13 @@ Report that /commit now automatically groups changes into ordered commits, verif
 4. State explicitly that setup performed no writes.
 5. Stop for separate user approval. Do not call \`generate\`, run scanners or specialists, invoke shell commands, mutate files, or perform lifecycle work.
 6. Explain that a later explicit invocation must call the \`generate\` action with the exact returned fingerprint and profile.`,
+  },
+  {
+    name: "programmatic",
+    aliases: [],
+    description: "Scan programmatic opportunities",
+    input: { ...SLASH_COMMAND_INPUT_NONE },
+    prompt: renderProgrammaticPrompt(false),
   },
   {
     name: "setup-tauri-package",
@@ -508,7 +533,14 @@ After presenting the list, ask which (if any) to install. Install nothing withou
   },
 ];
 
-/** Look up a prompt command by name or alias */
-export function getPromptCommand(name: string): PromptCommand | undefined {
-  return PROMPT_COMMANDS.find((cmd) => cmd.name === name || cmd.aliases.includes(name));
+/** Look up a prompt command by name or alias and render session-aware instructions. */
+export function getPromptCommand(
+  name: string,
+  isToolRegistered: (toolName: string) => boolean = () => false,
+): PromptCommand | undefined {
+  const command = PROMPT_COMMANDS.find(
+    (candidate) => candidate.name === name || candidate.aliases.includes(name),
+  );
+  if (command?.name !== "programmatic") return command;
+  return { ...command, prompt: renderProgrammaticPrompt(isToolRegistered("programmatic_scan")) };
 }

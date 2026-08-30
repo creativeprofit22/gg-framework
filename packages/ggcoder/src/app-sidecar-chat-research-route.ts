@@ -1,3 +1,4 @@
+import type { SlashCommandsResponse } from "@kenkaiiii/gg-core";
 import {
   APP_SIDECAR_CHAT_COMMANDS,
   executeChatResearchHandoff,
@@ -21,8 +22,10 @@ export interface AppSidecarChatResearchPromptOptions<Session> {
 /** Return the isolated chat catalog, or null so coding command discovery continues unchanged. */
 export function appSidecarChatCommandsResponse(
   mode: "code" | "chat",
-): { commands: typeof APP_SIDECAR_CHAT_COMMANDS } | null {
-  return mode === "chat" ? { commands: APP_SIDECAR_CHAT_COMMANDS } : null;
+): SlashCommandsResponse | null {
+  return mode === "chat"
+    ? { commands: APP_SIDECAR_CHAT_COMMANDS.map((command) => ({ ...command, aliases: [...command.aliases] })) }
+    : null;
 }
 
 /**

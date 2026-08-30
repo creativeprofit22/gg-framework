@@ -8,6 +8,7 @@ import {
   commitChatResearchTransition,
   resolveChatResearchCommandRoute,
 } from "./app-sidecar-chat-research-handoff.js";
+import { appSidecarCodeCommandsResponse } from "./app-sidecar-command-listing.js";
 import {
   appSidecarChatCommandsResponse,
   handleAppSidecarChatResearchPrompt,
@@ -128,7 +129,15 @@ async function startRouteHarness(
         res,
         200,
         chatCommands ?? {
-          commands: [{ name: "commit", aliases: [], description: "Commit changes" }],
+          commands: [
+            {
+              name: "commit",
+              aliases: [],
+              description: "Commit changes",
+              input: { text: "optional", references: "optional", attachments: "optional" },
+              source: "built-in",
+            },
+          ],
         },
       );
       return;
@@ -278,6 +287,7 @@ describe("app-sidecar chat Research HTTP routes", () => {
             aliases: [],
             description: "Research this conversation and draft net-new Roadmap phases",
             usage: "/research [optional focus]",
+            input: { text: "optional", references: "optional", attachments: "none" },
             source: "built-in",
           },
         ],
@@ -286,8 +296,24 @@ describe("app-sidecar chat Research HTTP routes", () => {
     expect(await getJson(coding.baseUrl, "/commands")).toEqual({
       status: 200,
       body: {
-        commands: [{ name: "commit", aliases: [], description: "Commit changes" }],
+        commands: [
+          {
+            name: "commit",
+            aliases: [],
+            description: "Commit changes",
+            input: { text: "optional", references: "optional", attachments: "optional" },
+            source: "built-in",
+          },
+        ],
       },
+    });
+  });
+
+  it("advertises /programmatic as fixed-input in coding discovery", async () => {
+    const response = await appSidecarCodeCommandsResponse(process.cwd());
+    expect(response.commands.find((command) => command.name === "programmatic")).toMatchObject({
+      input: { text: "none", references: "none", attachments: "none" },
+      source: "built-in",
     });
   });
 

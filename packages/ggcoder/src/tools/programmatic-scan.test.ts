@@ -20,6 +20,7 @@ import {
   buildProgrammaticProfileProposal,
   persistProgrammaticProfile,
 } from "../core/programmatic/profile.js";
+import { PROMPT_COMMANDS } from "../core/prompt-commands.js";
 import { createProgrammaticProfileTool } from "./programmatic-profile.js";
 import { createProgrammaticScanTool } from "./programmatic-scan.js";
 
@@ -67,6 +68,24 @@ afterEach(async () => {
 });
 
 describe("`/programmatic` validates the stored profile and configuration fingerprint before running a read-only scan", () => {
+  it("loads and invokes only the argument-free scan tool once", () => {
+    const command = PROMPT_COMMANDS.find(({ name }) => name === "programmatic");
+
+    expect(command).toMatchObject({
+      aliases: [],
+      description: "Scan programmatic opportunities",
+    });
+    expect(command?.prompt).toContain(
+      "Load the deferred `programmatic_scan` tool using `tool_search`.",
+    );
+    expect(command?.prompt.match(/Call `[^`]+`/g)).toEqual(["Call `programmatic_scan`"]);
+    expect(command?.prompt).toContain("exactly once with an empty argument object");
+    expect(command?.prompt).toContain("Report only the tool's bounded result");
+    expect(command?.prompt).toContain(
+      "Never accept or invent paths, scanners, commands, opportunities, lifecycle actions, specialist runs, or shell work.",
+    );
+  });
+
   it("fails before inventory for an invalid profile and persists only a validated fingerprint", async () => {
     const root = await repository();
     await generateProfile(root);

@@ -1327,6 +1327,22 @@ export class AgentSession {
     return withMcpToolIdentity(stub, identity);
   }
 
+  /** Return an actionable error when a built-in command rejects this input. */
+  promptInputPolicyError(content: string, attachmentCount = 0): string | null {
+    if (this.opts.coderSlashCommands === false) return null;
+    const parsed = this.slashCommands.parse(content);
+    if (!parsed) return null;
+    const command = getPromptCommand(parsed.name);
+    if (!command?.input) return null;
+    if (
+      (parsed.args && command.input.text === "none") ||
+      (attachmentCount > 0 && command.input.attachments === "none")
+    ) {
+      return `/${command.name} accepts no arguments, file references, or attachments.`;
+    }
+    return null;
+  }
+
   /**
    * Resolve a `/name [args]` input to the prompt template it expands into, or
    * null when it isn't a prompt-template command for THIS session (an ordinary
@@ -1336,7 +1352,9 @@ export class AgentSession {
    */
   private async resolveSlashInput(
     content: string,
-  ): Promise<{ kind: "template"; fullPrompt: string } | { kind: "command" } | null> {
+  ): Promise<
+    { kind: "template"; fullPrompt: string } | { kind: "command"; result?: string } | null
+  > {
     const parsedInput = this.slashCommands.parse(content);
     const coderCommands = this.opts.coderSlashCommands !== false;
     // Non-coder agents only intercept commands registered in their own registry.
@@ -1347,12 +1365,18 @@ export class AgentSession {
         : null;
     if (!parsed) return null;
     // GG Coder alone can resolve its prompt-template and project commands.
-    const builtinPromptCmd = coderCommands ? getPromptCommand(parsed.name) : undefined;
+    const builtinPromptCmd = coderCommands
+      ? getPromptCommand(parsed.name, (toolName) =>
+          this.tools.some((tool) => tool.name === toolName),
+        )
+      : undefined;
     const customCmds = coderCommands ? await loadCustomCommands(this.cwd) : [];
     const customPromptCmd = !builtinPromptCmd
       ? customCmds.find((c) => c.name === parsed.name)
       : undefined;
     const promptText = builtinPromptCmd?.prompt ?? customPromptCmd?.prompt;
+    const inputPolicyError = this.promptInputPolicyError(content);
+    if (inputPolicyError) return { kind: "command", result: inputPolicyError };
     // No template body — a registry/action command that runs and returns text
     // instead of becoming a user message.
     if (!promptText) return { kind: "command" };
@@ -1404,8 +1428,9 @@ export class AgentSession {
       return;
     }
     if (slash?.kind === "command") {
-      const cmdContext = this.createSlashCommandContext();
-      const result = await this.slashCommands.execute(content, cmdContext);
+      const result =
+        slash.result ??
+        (await this.slashCommands.execute(content, this.createSlashCommandContext()));
       if (result) {
         this.eventBus.emit("text_delta", { text: result + "\n" });
       }
@@ -1426,12 +1451,17 @@ export class AgentSession {
    * Prompt with multimodal attachments (images / videos) alongside optional
    * text. Images and videos become native content blocks the model can see;
    * non-media files are surfaced as a text note with their saved path so the
-   * agent can open them with its tools. Slash-command parsing is skipped —
-   * attachments are always a direct conversational turn.
+   * agent can open them with its tools. Attachment turns skip normal slash
+   * expansion, but fixed-input prompt commands still fail closed here.
    */
   async promptWithAttachments(text: string, attachments: SessionAttachment[]): Promise<void> {
     if (attachments.length === 0) {
       await this.prompt(text);
+      return;
+    }
+    const inputPolicyError = this.promptInputPolicyError(text, attachments.length);
+    if (inputPolicyError) {
+      this.eventBus.emit("text_delta", { text: inputPolicyError + "\n" });
       return;
     }
     await this.adoptDeferredCheckpointBeforePrompt();
@@ -3129,6 +3159,8 @@ export class AgentSession {
    *  as steering. Returns the new queue length. No-op semantics are the caller's
    *  concern. */
   queueMessage(text: string, attachments: SessionAttachment[] = []): number {
+    const inputPolicyError = this.promptInputPolicyError(text, attachments.length);
+    if (inputPolicyError) throw new Error(inputPolicyError);
     this.queueSeq += 1;
     this.userQueue.push({ id: `q${this.queueSeq}`, text, attachments });
     return this.userQueue.length;

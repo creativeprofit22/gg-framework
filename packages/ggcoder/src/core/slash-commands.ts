@@ -75,9 +75,10 @@ export class SlashCommandRegistry {
   parse(input: string): { name: string; args: string } | null {
     const trimmed = input.trim();
     if (!trimmed.startsWith("/")) return null;
-    const spaceIndex = trimmed.indexOf(" ");
-    const name = spaceIndex === -1 ? trimmed.slice(1) : trimmed.slice(1, spaceIndex);
-    const args = spaceIndex === -1 ? "" : trimmed.slice(spaceIndex + 1).trim();
+    const commandText = trimmed.slice(1);
+    const separatorIndex = commandText.search(/\s/);
+    const name = separatorIndex === -1 ? commandText : commandText.slice(0, separatorIndex);
+    const args = separatorIndex === -1 ? "" : commandText.slice(separatorIndex + 1).trim();
     return { name, args };
   }
 

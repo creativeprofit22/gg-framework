@@ -33,10 +33,12 @@ describe("A touched-files-only bloat audit confirms no executable scanner, shell
   });
 
   it("registers one setup command and no parallel generation command", () => {
-    const commands = PROMPT_COMMANDS.filter((command) => command.name.includes("programmatic"));
-    expect(commands.map((command) => command.name)).toEqual(["setup-programmatic"]);
+    const setupCommands = PROMPT_COMMANDS.filter(
+      (command) => command.name.startsWith("setup-") && command.name.includes("programmatic"),
+    );
+    expect(setupCommands.map((command) => command.name)).toEqual(["setup-programmatic"]);
     expect(getPromptCommand("generate-programmatic-profile")).toBeUndefined();
-    expect(commands[0]?.prompt).not.toContain('action: "generate"');
+    expect(setupCommands[0]?.prompt).not.toContain('action: "generate"');
   });
 
   it("uses only standard, installed, or repository-local imports", async () => {

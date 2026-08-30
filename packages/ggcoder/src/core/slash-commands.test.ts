@@ -30,6 +30,15 @@ function context(overrides: Partial<SlashCommandContext> = {}): SlashCommandCont
   };
 }
 
+describe("slash-command parsing", () => {
+  it.each([" ", "\t", "\n", "\r\n"])("splits command arguments on %j whitespace", (separator) => {
+    expect(registry().parse(`/programmatic${separator}any text`)).toEqual({
+      name: "programmatic",
+      args: "any text",
+    });
+  });
+});
+
 describe("/remove-dir", () => {
   it("requires a current root when no path is supplied", async () => {
     await expect(registry().execute("/remove-dir", context())).resolves.toContain(

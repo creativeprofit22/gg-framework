@@ -17,6 +17,7 @@ describe("chat Research command", () => {
       aliases: [],
       description: "Research this conversation and draft net-new Roadmap phases",
       usage: "/research [optional focus]",
+      input: { text: "optional", references: "optional", attachments: "none" },
       source: "built-in",
     });
     expect(APP_SIDECAR_CHAT_COMMANDS).toEqual([CHAT_RESEARCH_COMMAND]);

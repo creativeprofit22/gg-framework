@@ -174,6 +174,7 @@ import {
 } from "./core/thinking-level.js";
 import { PROMPT_COMMANDS } from "./core/prompt-commands.js";
 import { loadCustomCommands } from "./core/custom-commands.js";
+import { appSidecarCodeCommandsResponse } from "./app-sidecar-command-listing.js";
 import { discoverProjects } from "./core/project-discovery.js";
 import { listSidecarSessions } from "./app-sidecar-sessions.js";
 import {
@@ -4965,47 +4966,7 @@ async function createSession(
         json(res, 200, chatCommands);
         return;
       }
-      // Workflow commands with agent functionality: built-in prompt templates +
-      // the user's own `.gg/commands/*.md`.
-      void (async () => {
-        const builtins = PROMPT_COMMANDS.map((c) => ({
-          name: c.name,
-          aliases: c.aliases,
-          description: c.description,
-          source: "built-in" as const,
-        }));
-        // Desktop-safe registry actions belong in the same picker as workflows.
-        // Most registry commands have dedicated app controls or TUI-only flows;
-        // multi-root management has no other affordance, so expose only these.
-        const workspaceActions = [
-          {
-            name: "add-dir",
-            aliases: ["adddir"],
-            description: "Add another project folder to this workspace",
-            source: "built-in" as const,
-          },
-          {
-            name: "remove-dir",
-            aliases: ["removedir"],
-            description: "Remove an added project folder from this workspace",
-            source: "built-in" as const,
-          },
-        ];
-        const custom = (await loadCustomCommands(cwd))
-          // A custom command can't shadow a built-in name or app action.
-          .filter(
-            (c) =>
-              !PROMPT_COMMANDS.some((b) => b.name === c.name) &&
-              !workspaceActions.some((action) => action.name === c.name),
-          )
-          .map((c) => ({
-            name: c.name,
-            aliases: [] as string[],
-            description: c.description,
-            source: "custom" as const,
-          }));
-        json(res, 200, { commands: [...workspaceActions, ...builtins, ...custom] });
-      })();
+      void appSidecarCodeCommandsResponse(cwd).then((response) => json(res, 200, response));
       return;
     }
 
@@ -5092,6 +5053,11 @@ async function createSession(
           }
           if (!text.trim() && attachments.length === 0) {
             json(res, 400, { error: "empty prompt" });
+            return;
+          }
+          const inputPolicyError = session.promptInputPolicyError(text, attachments.length);
+          if (inputPolicyError) {
+            json(res, 400, { error: "command_input_not_allowed", message: inputPolicyError });
             return;
           }
           // A typed prompt supersedes any question parked on the user: they

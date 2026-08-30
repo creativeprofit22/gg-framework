@@ -165,7 +165,7 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
       PROMPT_COMMANDS.filter((command) => command.name.includes("programmatic")).map(
         (command) => command.name,
       ),
-    ).toEqual(["setup-programmatic"]);
+    ).toEqual(["setup-programmatic", "programmatic"]);
   });
 
   it("A separate explicit generation action writes only a validated, versioned declarative profile under .gg/programmatic/ using repository-relative paths and atomic replacement", async () => {

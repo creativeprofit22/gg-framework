@@ -696,7 +696,7 @@ export function NotesRoadmapArchive({ phases, onRestorePhase }: ArchiveProps): R
                       type: "restore",
                       phaseId: phase.id,
                     })
-                      ? "Restoring this phase would replace the target protected by a pending advancement review."
+                      ? "Restoring this phase would replace the target protected by a pending phase advancement."
                       : undefined
                   }
                   onClick={() => {

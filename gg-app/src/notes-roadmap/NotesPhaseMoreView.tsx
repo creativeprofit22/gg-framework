@@ -379,7 +379,7 @@ export function NotesPhaseMoreControls(): ReactElement {
                 }
                 title={
                   isTopologyMutationBlocked({ type: "resume-status", phaseId: phase.id })
-                    ? "Resuming this phase would replace the target protected by a pending advancement review."
+                    ? "Resuming this phase would replace the target protected by a pending phase advancement."
                     : undefined
                 }
                 onClick={resumeAutomaticStatus}
@@ -408,7 +408,7 @@ export function NotesPhaseMoreControls(): ReactElement {
             }
             title={
               isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "up" })
-                ? "This move would change the target protected by a pending advancement review."
+                ? "This move would change the target protected by a pending phase advancement."
                 : undefined
             }
             onClick={() => onMovePhase(phase.id, "up")}
@@ -424,7 +424,7 @@ export function NotesPhaseMoreControls(): ReactElement {
             }
             title={
               isTopologyMutationBlocked({ type: "move", phaseId: phase.id, direction: "down" })
-                ? "This move would change the target protected by a pending advancement review."
+                ? "This move would change the target protected by a pending phase advancement."
                 : undefined
             }
             onClick={() => onMovePhase(phase.id, "down")}

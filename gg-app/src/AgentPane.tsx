@@ -438,8 +438,40 @@ const SCHEDULE_COMMAND: SlashCommand = {
   name: "schedule",
   aliases: ["sched"],
   description: "Run a prompt on a repeating schedule — <prompt> | 15m | [times]",
+  input: { text: "optional", references: "optional", attachments: "optional" },
   source: "built-in",
 };
+
+function slashCommandForInput(
+  input: string,
+  commands: SlashCommand[],
+): { command: SlashCommand; args: string } | null {
+  const match = /^\s*\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(input);
+  if (!match) return null;
+  const command = commands.find(
+    (candidate) => candidate.name === match[1] || candidate.aliases.includes(match[1]!),
+  );
+  return command ? { command, args: match[2]?.trim() ?? "" } : null;
+}
+
+export function noInputSlashSubmissionError(
+  input: string,
+  commands: SlashCommand[],
+  attachmentCount: number,
+  referencedFileCount: number,
+): string | null {
+  const match = slashCommandForInput(input, commands);
+  if (!match) return null;
+  const blocked = [
+    match.args && match.command.input.text === "none" ? "additional text" : null,
+    referencedFileCount > 0 && match.command.input.references === "none"
+      ? "file references"
+      : null,
+    attachmentCount > 0 && match.command.input.attachments === "none" ? "attachments" : null,
+  ].filter((kind): kind is string => kind !== null);
+  if (blocked.length === 0) return null;
+  return `/${match.command.name} does not accept ${blocked.join(", ")}. Remove them and send the command again.`;
+}
 
 // Thinking-tier color, mirroring the ggcoder TUI footer's getThinkingColor:
 // warmer/more saturated as the tier rises; xhigh/max are "max power" hot pink.
@@ -787,6 +819,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // Files referenced via `@`, tracked as chips (NOT left in the input text).
   // Their paths are appended to the prompt on submit.
   const [mentionedPaths, setMentionedPaths] = useState<string[]>([]);
+  const matchedSlashCommand = slashCommandForInput(input, commands)?.command ?? null;
+  const noInputSlashCommand =
+    matchedSlashCommand?.input.text === "none" ? matchedSlashCommand : null;
+  const noReferenceSlashCommand =
+    matchedSlashCommand?.input.references === "none" ? matchedSlashCommand : null;
+  const noAttachmentSlashCommand =
+    matchedSlashCommand?.input.attachments === "none" ? matchedSlashCommand : null;
+  const noInputSlashCommandRef = useRef<SlashCommand | null>(null);
+  const noReferenceSlashCommandRef = useRef<SlashCommand | null>(null);
+  const noAttachmentSlashCommandRef = useRef<SlashCommand | null>(null);
+  noInputSlashCommandRef.current = noInputSlashCommand;
+  noReferenceSlashCommandRef.current = noReferenceSlashCommand;
+  noAttachmentSlashCommandRef.current = noAttachmentSlashCommand;
   // Footer extras mirrored from the sidecar: live background tasks and the
   // running context-window usage (input-side tokens of the latest turn).
   const [tasks, setTasks] = useState<BackgroundTask[]>([]);
@@ -1104,7 +1149,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   }, [isFileDragOver]);
 
   const insertDroppedFolderPaths = useCallback((paths: string[]): void => {
-    if (paths.length === 0) return;
+    if (paths.length === 0 || noInputSlashCommandRef.current) return;
     const text = paths.join(" ");
     setInput((prev) => {
       if (!prev.trim()) return text;
@@ -2075,13 +2120,19 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       return;
     }
 
-    // Fill the input with the command; the user can add args or press Enter.
-    const next = `/${cmd.name} `;
+    const next = cmd.input.text === "none" ? `/${cmd.name}` : `/${cmd.name} `;
     setInput(next);
     setSlashIndex(0);
-    // Keep the caret state in sync with the filled text, so an argument hint
-    // (e.g. `/schedule`) highlights the right slot instead of a stale offset.
     setCaret(next.length);
+    if (cmd.input.references === "none") {
+      setMention(null);
+      setMentionedPaths([]);
+    }
+    if (cmd.input.attachments === "none") {
+      setAttachments([]);
+      setIsFileDragOver(false);
+    }
+    if (cmd.input.text === "none") setEnhancement(null);
     requestAnimationFrame(() => inputRef.current?.focus());
   }
 
@@ -2116,13 +2167,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   // Sync the mention picker to the current input + caret on every change.
   function updateMention(text: string, caret: number): void {
-    setMention(detectMention(text, caret));
+    setMention(noReferenceSlashCommandRef.current ? null : detectMention(text, caret));
   }
 
   // Debounced file search whenever the active mention query changes. Skipped when
   // `@Ken` is active so typing `@ken` never spawns a file lookup or picker.
   useEffect(() => {
-    if (mention === null || kenActive) {
+    if (mention === null || kenActive || noReferenceSlashCommand) {
       setFileMatches([]);
       return;
     }
@@ -2139,13 +2190,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [mention, kenActive, searchFiles]);
+  }, [mention, kenActive, noReferenceSlashCommand, searchFiles]);
 
   // Pick a file: drop the typed `@query` from the input, add the file as a chip
   // (deduped), and restore the caret where the token was. The path lives in chip
   // state, never in the textarea text.
   function pickMentionFile(file: FileHit): void {
-    if (mention === null) return;
+    if (mention === null || noReferenceSlashCommandRef.current) return;
     const el = inputRef.current;
     const caret = el?.selectionStart ?? input.length;
     const head = input.slice(0, mention.start);
@@ -2735,6 +2786,30 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     }
     if (!readyRef.current || planReview !== null) return;
     if (!trimmed && attachments.length === 0 && mentionedPaths.length === 0) return;
+    const noInputError = noInputSlashSubmissionError(
+      input,
+      commands,
+      attachments.length,
+      mentionedPaths.length,
+    );
+    if (noInputError) {
+      const match = slashCommandForInput(input, commands);
+      if (match?.args && match.command.input.text === "none") {
+        setInput(`/${match.command.name}`);
+      }
+      if (match?.command.input.references === "none") {
+        setMention(null);
+        setMentionedPaths([]);
+      }
+      if (match?.command.input.attachments === "none") setAttachments([]);
+      pushItem({
+        kind: "error",
+        id: nextId(),
+        headline: "Command input blocked",
+        guidance: noInputError,
+      });
+      return;
+    }
 
     // `/schedule` registers a recurring prompt instead of sending anything now.
     // An invalid draft is refused outright — sending it would run the raw command
@@ -2862,10 +2937,13 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
 
   // ── Attachment intake (paste / attach button / whole-window drag-drop) ──
   async function addFiles(files: FileList | File[]): Promise<void> {
+    if (noAttachmentSlashCommandRef.current) return;
     const list = Array.from(files);
-    const pendings = await Promise.all(list.map((f) => fileToPending(f).catch(() => null)));
-    const ok = pendings.filter((p): p is PendingAttachment => p !== null);
-    if (ok.length > 0) setAttachments((prev) => [...prev, ...ok]);
+    const pendings = await Promise.all(list.map((file) => fileToPending(file).catch(() => null)));
+    const ok = pendings.filter((pending): pending is PendingAttachment => pending !== null);
+    if (ok.length > 0 && !noAttachmentSlashCommandRef.current) {
+      setAttachments((previous) => [...previous, ...ok]);
+    }
   }
 
   // Native Tauri drop events hand us absolute paths, not browser File objects
@@ -2873,23 +2951,35 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
   // report a path at all — see build_app_window). Non-directory paths are read
   // here and staged exactly like a picked/pasted file.
   async function addNativeDroppedFiles(paths: string[]): Promise<void> {
-    if (paths.length === 0) return;
-    const results = await Promise.all(paths.map((p) => readDroppedFileAttachment(p)));
+    if (paths.length === 0 || noAttachmentSlashCommandRef.current) return;
+    const results = await Promise.all(paths.map((path) => readDroppedFileAttachment(path)));
     const ok = results
-      .filter((a): a is Attachment => a !== null)
-      .map((a) => attachmentToPending(a));
-    if (ok.length > 0) setAttachments((prev) => [...prev, ...ok]);
+      .filter((attachment): attachment is Attachment => attachment !== null)
+      .map((attachment) => attachmentToPending(attachment));
+    if (ok.length > 0 && !noAttachmentSlashCommandRef.current) {
+      setAttachments((previous) => [...previous, ...ok]);
+    }
   }
 
   function handleWindowDragEnter(e: React.DragEvent<HTMLDivElement>): void {
-    if (!hasDraggedFiles(e.dataTransfer) || !canHandleWindowFileDrop()) return;
+    if (
+      noAttachmentSlashCommandRef.current ||
+      !hasDraggedFiles(e.dataTransfer) ||
+      !canHandleWindowFileDrop()
+    )
+      return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
     setIsFileDragOver(true);
   }
 
   function handleWindowDragOver(e: React.DragEvent<HTMLDivElement>): void {
-    if (!hasDraggedFiles(e.dataTransfer) || !canHandleWindowFileDrop()) return;
+    if (
+      noAttachmentSlashCommandRef.current ||
+      !hasDraggedFiles(e.dataTransfer) ||
+      !canHandleWindowFileDrop()
+    )
+      return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "copy";
     setIsFileDragOver(true);
@@ -2906,7 +2996,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
     if (!hasDraggedFiles(e.dataTransfer)) return;
     e.preventDefault();
     setIsFileDragOver(false);
-    if (!canHandleWindowFileDrop()) return;
+    if (noAttachmentSlashCommandRef.current || !canHandleWindowFileDrop()) return;
     const files = filesForAttachment(e.dataTransfer);
     if (files.length > 0) void addFiles(files);
   }
@@ -3585,7 +3675,7 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             />
           )
         )}
-        {mentionOpen && (
+        {mentionOpen && !noReferenceSlashCommand && (
           <FileMentionMenu
             files={fileMatches}
             activeIndex={clampedFileIndex}
@@ -3603,17 +3693,24 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
             type="file"
             multiple
             accept="image/*,video/*"
+            disabled={planReview !== null || noAttachmentSlashCommand !== null}
             style={{ display: "none" }}
-            onChange={(e) => {
-              if (e.target.files) void addFiles(e.target.files);
-              e.target.value = "";
+            onChange={(event) => {
+              if (event.target.files) void addFiles(event.target.files);
+              event.target.value = "";
             }}
           />
           <button
             className="icon-circle"
             aria-label="Attach files"
-            title={planReview !== null ? "Resolve the pending plan first" : "Attach files"}
-            disabled={planReview !== null}
+            title={
+              noAttachmentSlashCommand
+                ? `/${noAttachmentSlashCommand.name} does not accept attachments`
+                : planReview !== null
+                  ? "Resolve the pending plan first"
+                  : "Attach files"
+            }
+            disabled={planReview !== null || noAttachmentSlashCommand !== null}
             onClick={() => fileInputRef.current?.click()}
           >
             <Paperclip size={15} strokeWidth={1.8} />
@@ -3644,11 +3741,14 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
               ref={attachInput}
               className={`input${enhanceAnim ? " input-anim" : ""}${kenActive ? " input-ken" : ""}`}
               rows={1}
-              // Lock the input while the dissolve→decode animation plays: the caret
-              // is invisible, so typing would be silently discarded and Enter would
-              // submit the un-enhanced draft mid-animation.
-              readOnly={enhanceAnim !== null}
+              // No-input commands stay keyboard-submittable while preventing edits.
+              readOnly={enhanceAnim !== null || noInputSlashCommand !== null}
               disabled={planReview !== null}
+              title={
+                noInputSlashCommand
+                  ? `Send /${noInputSlashCommand.name} as-is; it accepts no added input`
+                  : undefined
+              }
               value={input}
               placeholder={
                 planReview !== null
@@ -3657,23 +3757,30 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                     ? "Ask anything…"
                     : displayPlaceholder
               }
-              onPaste={(e) => {
-                const files = Array.from(e.clipboardData.files);
-                if (files.length > 0) {
-                  e.preventDefault();
-                  void addFiles(files);
+              onPaste={(event) => {
+                if (noInputSlashCommandRef.current) {
+                  event.preventDefault();
+                  return;
                 }
+                const files = Array.from(event.clipboardData.files);
+                if (files.length === 0) return;
+                event.preventDefault();
+                if (!noAttachmentSlashCommandRef.current) void addFiles(files);
               }}
-              onChange={(e) => {
-                setInput(e.target.value);
+              onChange={(event) => {
+                if (noInputSlashCommandRef.current) return;
+                setInput(event.target.value);
                 setSlashIndex(0);
-                setCaret(e.target.selectionStart ?? e.target.value.length);
+                setCaret(event.target.selectionStart ?? event.target.value.length);
                 // Typing exits history-recall mode so ↑/↓ start fresh next time.
                 if (historyIndex !== null) setHistoryIndex(null);
                 // Drop the enhancement the instant the text diverges from it, so
                 // the highlighted preview/bubble never misalign with edited text.
-                if (enhancement && e.target.value !== enhancement.plain) setEnhancement(null);
-                updateMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+                if (enhancement && event.target.value !== enhancement.plain) setEnhancement(null);
+                updateMention(
+                  event.target.value,
+                  event.target.selectionStart ?? event.target.value.length,
+                );
               }}
               onClick={(e) => {
                 const el = e.currentTarget;

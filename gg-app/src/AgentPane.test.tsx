@@ -176,7 +176,7 @@ vi.mock("./agent", async (importOriginal) => {
   };
 });
 
-import { AgentPane } from "./AgentPane";
+import { AgentPane, noInputSlashSubmissionError } from "./AgentPane";
 import { NewSessionError, PlanMutationError } from "./agent";
 import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type { AgentState, PaneAgentClient, PaneSessionTarget } from "./agent";
@@ -708,6 +708,7 @@ describe("AgentPane lifecycle", () => {
         name: "research",
         aliases: [],
         description: "Research this conversation and draft net-new Roadmap phases",
+        input: { text: "optional", references: "optional", attachments: "optional" },
         source: "built-in",
       },
     ]);
@@ -903,6 +904,106 @@ describe("AgentPane lifecycle", () => {
     expect(screen.getByRole("heading", { name: "Release hardening" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Create phase" })).toBeTruthy();
   });
+
+  it("inserts fixed-input commands exactly and disables composer additions", async () => {
+    const pane = client("pane-no-input-select", 8);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "programmatic",
+        aliases: [],
+        description: "Scan programmatic opportunities",
+        input: { text: "none", references: "none", attachments: "none" },
+        source: "built-in",
+      },
+    ]);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+
+    fireEvent.change(input, { target: { value: "/" } });
+    fireEvent.click(await screen.findByText("/programmatic"));
+
+    expect((input as HTMLTextAreaElement).value).toBe("/programmatic");
+    expect((input as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(pane.sendPrompt).toHaveBeenCalledWith("/programmatic", [], undefined),
+    );
+  });
+
+  it("blocks malformed fixed-input submissions with actionable guidance", async () => {
+    const pane = client("pane-no-input-submit", 9);
+    vi.mocked(pane.listCommands).mockResolvedValue([
+      {
+        name: "programmatic",
+        aliases: [],
+        description: "Scan programmatic opportunities",
+        input: { text: "none", references: "none", attachments: "none" },
+        source: "built-in",
+      },
+    ]);
+    render(<AgentPane client={pane} target={target} />);
+    const input = await screen.findByRole("textbox");
+    await waitFor(() => expect(pane.listCommands).toHaveBeenCalled());
+
+    fireEvent.change(input, { target: { value: "/programmatic caller instructions" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(await screen.findByText("Command input blocked")).toBeTruthy();
+    expect(screen.getByText(/does not accept additional text/)).toBeTruthy();
+    expect((input as HTMLTextAreaElement).value).toBe("/programmatic");
+    expect(pane.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "arguments",
+      "/programmatic caller instructions",
+      { text: "none", references: "optional", attachments: "optional" } as const,
+      0,
+      0,
+      "additional text",
+    ],
+    [
+      "attachments",
+      "/programmatic",
+      { text: "optional", references: "optional", attachments: "none" } as const,
+      1,
+      0,
+      "attachments",
+    ],
+    [
+      "referenced files",
+      "/programmatic",
+      { text: "optional", references: "none", attachments: "optional" } as const,
+      0,
+      1,
+      "file references",
+    ],
+  ])(
+    "independently rejects fixed-input submission %s",
+    (_kind, text, inputPolicy, attachments, references, expected) => {
+      expect(
+        noInputSlashSubmissionError(
+          text,
+          [
+            {
+              name: "programmatic",
+              aliases: [],
+              description: "Scan",
+              input: inputPolicy,
+              source: "built-in",
+            },
+          ],
+          attachments,
+          references,
+        ),
+      ).toContain(expected);
+    },
+  );
 
   it("rehydrates a persisted plan review before any SSE event", async () => {
     const pane = client("pane-plan-restart", 8);

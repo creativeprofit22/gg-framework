@@ -17,9 +17,23 @@ const COMMANDS: SlashCommand[] = [
     name: "schedule",
     aliases: ["sched"],
     description: "Run a prompt on a repeating schedule",
+    input: { text: "optional", references: "optional", attachments: "optional" },
     source: "built-in",
   },
-  { name: "plan", aliases: [], description: "Plan before building", source: "built-in" },
+  {
+    name: "plan",
+    aliases: [],
+    description: "Plan before building",
+    input: { text: "optional", references: "optional", attachments: "optional" },
+    source: "built-in",
+  },
+  {
+    name: "programmatic",
+    aliases: [],
+    description: "Scan programmatic opportunities",
+    input: { text: "none", references: "none", attachments: "none" },
+    source: "built-in",
+  },
 ];
 
 describe("SlashMenu", () => {
@@ -28,10 +42,11 @@ describe("SlashMenu", () => {
     expect(screen.getByText("plays")).toBeTruthy();
   });
 
-  it("lists each command with its name and description", () => {
+  it("lists argument and no-input commands", () => {
     render(<SlashMenu commands={COMMANDS} activeIndex={0} onSelect={vi.fn()} onHover={vi.fn()} />);
     expect(screen.getByText("/schedule")).toBeTruthy();
     expect(screen.getByText("Run a prompt on a repeating schedule")).toBeTruthy();
+    expect(screen.getByText("/programmatic")).toBeTruthy();
   });
 
   it("selects a command on click", () => {

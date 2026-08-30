@@ -1738,8 +1738,14 @@ describe("ProjectNotes", () => {
         client={client}
         onStartNextPhase={onStartNextPhase}
         commands={[
-          { name: "Diff", aliases: ["compare"], description: "Compare", source: "custom" },
-          { name: "trace", aliases: [], description: "Trace", source: "custom" },
+          {
+            name: "Diff",
+            aliases: ["compare"],
+            description: "Compare",
+            input: { text: "optional", references: "optional", attachments: "optional" },
+            source: "custom",
+          },
+          { name: "trace", aliases: [], description: "Trace", input: { text: "optional", references: "optional", attachments: "optional" }, source: "custom" },
         ]}
         onRunCommand={onRunCommand}
       />,

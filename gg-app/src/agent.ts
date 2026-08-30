@@ -6,11 +6,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { error as logError, info as logInfo } from "@tauri-apps/plugin-log";
+import { isSlashCommandsResponse } from "@kenkaiiii/gg-core";
 import type {
   PendingPlanReview,
   PlanAcceptResult,
   PlanMutationFailure,
   PlanRevisionResult,
+  SlashCommandListing,
+  SlashCommandsResponse,
 } from "@kenkaiiii/gg-core";
 export type {
   PendingPlanReview,
@@ -637,13 +640,7 @@ export interface ModelOption {
   supportsThinking?: boolean;
 }
 
-export interface SlashCommand {
-  name: string;
-  aliases: string[];
-  description: string;
-  /** "built-in" prompt template or a user ".gg/commands" custom command. */
-  source?: "built-in" | "custom";
-}
+export type SlashCommand = SlashCommandListing;
 
 export interface DiscoveredProject {
   name: string;
@@ -1693,8 +1690,9 @@ export async function cycleThinking(): Promise<ThinkingState | null> {
 /** List workflow (prompt-template) slash commands the agent can run. */
 export async function listCommands(): Promise<SlashCommand[]> {
   try {
-    const res = await invoke<{ commands: SlashCommand[] }>("agent_commands", { paneId: "primary" });
-    return res.commands ?? [];
+    const response = await invoke<SlashCommandsResponse>("agent_commands", { paneId: "primary" });
+    if (!isSlashCommandsResponse(response)) throw new Error("Invalid slash-command discovery response");
+    return [...response.commands];
   } catch (e) {
     await logError(`agent_commands failed: ${String(e)}`);
     return [];
@@ -3220,7 +3218,14 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
         return null;
       }
     },
-    listCommands: () => safeArray("agent_commands", "commands"),
+    async listCommands() {
+      try {
+        const response = await call<SlashCommandsResponse>("agent_commands");
+        return isSlashCommandsResponse(response) ? [...response.commands] : [];
+      } catch {
+        return [];
+      }
+    },
     listModels: () => safeArray("agent_models", "models"),
     async switchModel(model) {
       try {

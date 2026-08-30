@@ -6,6 +6,7 @@ const command = (name: string, aliases: string[] = []): SlashCommand => ({
   name,
   aliases,
   description: name,
+  input: { text: "optional", references: "optional", attachments: "optional" },
   source: "custom",
 });
 

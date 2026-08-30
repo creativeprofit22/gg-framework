@@ -75,11 +75,11 @@ export function notesCompletionGateOverview(phase: NotesPhase): NotesCompletionG
     (event): event is NotesRoadmapImplementationCheckpoint =>
       event.type === "implementation-checkpoint",
   );
-  const latestVerification = latestRoadmapEvent(
+  const latestReport = latestRoadmapEvent(
     phase,
-    (event): event is NotesRoadmapStatusUpdate =>
-      event.type === "status-update" && event.verification !== null,
+    (event): event is NotesRoadmapStatusUpdate => event.type === "status-update",
   );
+  const latestVerification = latestReport?.verification !== null ? latestReport : null;
   const review = latestRoadmapEvent(
     phase,
     (event): event is NotesRoadmapCompletionReview => event.type === "completion-review",
@@ -91,8 +91,7 @@ export function notesCompletionGateOverview(phase: NotesPhase): NotesCompletionG
       phase,
       reviewIndex,
       (event): event is NotesRoadmapImplementationCheckpoint | NotesRoadmapStatusUpdate =>
-        event.type === "implementation-checkpoint" ||
-        (event.type === "status-update" && event.verification !== null),
+        event.type === "implementation-checkpoint" || event.type === "status-update",
     ) !== null;
   const implementation =
     review && !hasNewerEvidence
@@ -259,11 +258,11 @@ export function NotesPhaseCompletionGates({ phase }: { phase: NotesPhase }): Rea
     (event): event is NotesRoadmapImplementationCheckpoint =>
       event.type === "implementation-checkpoint",
   );
-  const latestVerification = latestRoadmapEvent(
+  const latestReport = latestRoadmapEvent(
     phase,
-    (event): event is NotesRoadmapStatusUpdate =>
-      event.type === "status-update" && event.verification !== null,
+    (event): event is NotesRoadmapStatusUpdate => event.type === "status-update",
   );
+  const latestVerification = latestReport?.verification !== null ? latestReport : null;
   const latestCompletionReview = latestRoadmapEvent(
     phase,
     (event): event is NotesRoadmapCompletionReview => event.type === "completion-review",
@@ -297,8 +296,7 @@ export function NotesPhaseCompletionGates({ phase }: { phase: NotesPhase }): Rea
     ? latestRoadmapEventAfter(
         phase,
         latestCompletionReviewIndex,
-        (event): event is NotesRoadmapStatusUpdate =>
-          event.type === "status-update" && event.verification !== null,
+        (event): event is NotesRoadmapStatusUpdate => event.type === "status-update",
       )
     : null;
   const acceptedVerificationException =
@@ -307,11 +305,12 @@ export function NotesPhaseCompletionGates({ phase }: { phase: NotesPhase }): Rea
     latestCompletionReview.verificationStatusUpdateId === displayedVerification.id
       ? latestCompletionReview
       : null;
-  const handoffVerification = latestRoadmapEvent(
+  const handoffReport = latestRoadmapEvent(
     phase,
     (event): event is NotesRoadmapStatusUpdate =>
-      event.type === "status-update" && event.actor === "gg-coder" && event.verification !== null,
+      event.type === "status-update" && event.actor === "gg-coder",
   );
+  const handoffVerification = handoffReport?.verification !== null ? handoffReport : null;
   const criterionEvidence = phase.doneWhen.map((criterion, index) => ({
     criterion,
     evidence: handoffVerification?.evidence[index] ?? null,

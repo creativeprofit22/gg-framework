@@ -1905,6 +1905,43 @@ describe("ProjectNotes", () => {
     expect(screen.getByRole("heading", { name: "Latest report" })).toBeTruthy();
   });
 
+  it("does not reuse typed verification after a later untyped report", async () => {
+    const cwd = "/work/completion-superseded";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("superseded completion evidence");
+    const selected = phase("completion-superseded", "review");
+    selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
+    selected.roadmapEvents = [
+      verificationReport("passed"),
+      {
+        ...verificationReport("passed"),
+        id: "status-after-verification",
+        transition: "in-progress",
+        progress: "Work continued after verification.",
+        evidence: [],
+        verification: null,
+        verificationReason: null,
+        verificationSession: null,
+        statusOutcome: "applied",
+        timestamp: "2026-07-15T12:02:00.000Z",
+      },
+    ];
+    document.phases = [selected];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase(selected.title);
+    selectPhaseView("Completion");
+
+    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
+    const verificationGate = Array.from(gates?.querySelectorAll(":scope > dl > div") ?? []).find(
+      (row) => row.querySelector("dt")?.textContent === "Verification",
+    );
+    expect(verificationGate?.textContent).toContain("Typed verification has not been recorded.");
+    expect(verificationGate?.textContent).not.toContain("Passed");
+    expect(gates?.textContent).not.toContain("Ready for Supah review");
+  });
+
   it("shows ordered completion evidence when the phase is ready for Ken review", async () => {
     const cwd = "/work/completion-review-ready";
     const client = new FakeProjectNotesClient(cwd);

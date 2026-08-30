@@ -1,7 +1,6 @@
-import fs from "node:fs/promises";
-import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { loadGitignore } from "./gitignore.js";
 import { resolvePath } from "./path-utils.js";
 
 const FindParams = z.object({
@@ -59,16 +58,4 @@ export function createFindTool(cwd: string): AgentTool<typeof FindParams> {
       return output;
     },
   };
-}
-
-async function loadGitignore(dir: string): Promise<string[]> {
-  try {
-    const content = await fs.readFile(path.join(dir, ".gitignore"), "utf-8");
-    return content
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith("#"));
-  } catch {
-    return [];
-  }
 }

@@ -1,11 +1,11 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
+import { chunkFile, bm25Rank, CHUNKABLE_EXTENSIONS, type Chunk } from "../core/code-retrieval.js";
+import { loadGitignore } from "./gitignore.js";
+import { localOperations, type ToolOperations } from "./operations.js";
 import { resolvePath, toPosixPath } from "./path-utils.js";
 import { truncateTail } from "./truncate.js";
-import { localOperations, type ToolOperations } from "./operations.js";
-import { chunkFile, bm25Rank, CHUNKABLE_EXTENSIONS, type Chunk } from "../core/code-retrieval.js";
 
 const SearchCodeParams = z.object({
   query: z.string().describe("Natural-language description of the code you're looking for"),
@@ -98,16 +98,4 @@ export function createSearchCodeTool(
       return body;
     },
   };
-}
-
-async function loadGitignore(dir: string): Promise<string[]> {
-  try {
-    const content = await fs.readFile(path.join(dir, ".gitignore"), "utf-8");
-    return content
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith("#"));
-  } catch {
-    return [];
-  }
 }

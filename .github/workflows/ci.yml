@@ -52,6 +52,10 @@ jobs:
       - name: Release CI gate fixtures
         run: pnpm test:release-ci-gate
 
+      - name: Lint ggcoder programmatic sources
+        shell: bash
+        run: pnpm --filter @kenkaiiii/ggcoder lint:programmatic
+
       # `shell: bash` on EVERY multi-line step is load-bearing, not cosmetic.
       # On Windows the default shell is PowerShell, which does not abort a
       # multi-line script when an intermediate command exits non-zero — only the

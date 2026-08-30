@@ -59,6 +59,25 @@ test("required check name stays synchronized with the aggregate CI job", () => {
   assert.match(workflow, /needs: \[test, app\]/);
 });
 
+test("ggcoder programmatic lint remains a non-mutating CI gate", () => {
+  const packageJson = JSON.parse(
+    readFileSync(new URL("../packages/ggcoder/package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(
+    packageJson.scripts["lint:programmatic"],
+    'eslint "src/core/programmatic/*.ts" src/core/prompt-commands.ts src/core/prompt-commands.test.ts "src/tools/programmatic-*.ts" src/tools/index.ts src/tools/prompt-hints.ts src/tools/tool-tiers.ts',
+  );
+
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  const lintStep = workflow.match(
+    /      - name: Lint ggcoder programmatic sources\r?\n[\s\S]*?(?=\r?\n      - name:)/,
+  )?.[0];
+  assert.ok(lintStep);
+  assert.match(lintStep, /shell: bash/);
+  assert.match(lintStep, /pnpm --filter @kenkaiiii\/ggcoder lint:programmatic/);
+  assert.doesNotMatch(lintStep, /--fix/);
+});
+
 test("roadmap reliability native smoke remains an isolated Windows app gate", () => {
   const packageJson = JSON.parse(
     readFileSync(new URL("../gg-app/package.json", import.meta.url), "utf8"),

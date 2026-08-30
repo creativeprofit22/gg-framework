@@ -94,6 +94,7 @@
     "clean": "node --eval \"fs.rmSync('dist', { recursive: true, force: true })\"",
     "build": "pnpm clean && tsc -p tsconfig.build.json",
     "check": "tsc --noEmit",
+    "lint:programmatic": "eslint \"src/core/programmatic/*.ts\" src/core/prompt-commands.ts src/core/prompt-commands.test.ts \"src/tools/programmatic-*.ts\" src/tools/index.ts src/tools/prompt-hints.ts src/tools/tool-tiers.ts",
     "test": "node scripts/run-tests.mjs",
     "test:parallel": "vitest run --exclude src/tools/bash-timeout.test.ts --exclude src/app-sidecar-auth-broadcast.test.ts --exclude src/core/subagent-manager.test.ts",
     "test:windows-serial": "vitest run src/tools/bash-timeout.test.ts src/app-sidecar-auth-broadcast.test.ts src/core/subagent-manager.test.ts --no-file-parallelism",

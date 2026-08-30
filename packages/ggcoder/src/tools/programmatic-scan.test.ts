@@ -9,12 +9,17 @@ import type {
 import {
   configurationFingerprintV1Schema,
   programmaticLifecycleStateV1Schema,
+  programmaticProfileEnvelopeV1Schema,
 } from "../core/programmatic/contracts.js";
 import {
   PROGRAMMATIC_STATE_PATH,
   runProgrammaticScan,
 } from "../core/programmatic/lifecycle.js";
 import { PROGRAMMATIC_PROFILE_PATH } from "../core/programmatic/inventory.js";
+import {
+  buildProgrammaticProfileProposal,
+  persistProgrammaticProfile,
+} from "../core/programmatic/profile.js";
 import { createProgrammaticProfileTool } from "./programmatic-profile.js";
 import { createProgrammaticScanTool } from "./programmatic-scan.js";
 
@@ -95,5 +100,53 @@ describe("`/programmatic` validates the stored profile and configuration fingerp
     expect(result).toMatchObject({ ok: true, changed: true, recovered: false });
     expect(result).not.toHaveProperty("inventory");
     expect(state.configurationFingerprint).toEqual(fingerprint);
+  });
+
+  it("rejects configuration drift in the final commit window without creating lifecycle state", async () => {
+    const root = await repository();
+    await generateProfile(root);
+
+    const result = await runProgrammaticScan(root, {
+      onPreFileMutation: async () => {
+        await fs.writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: "stale-configuration",
+      changed: false,
+    });
+    await expect(fs.access(path.join(root, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
+  });
+
+  it("serializes profile replacement against the final lifecycle commit window", async () => {
+    const root = await repository();
+    await generateProfile(root);
+    const profilePath = path.join(root, PROGRAMMATIC_PROFILE_PATH);
+    const stored = programmaticProfileEnvelopeV1Schema.parse(
+      JSON.parse(await fs.readFile(profilePath, "utf8")) as unknown,
+    );
+    await fs.writeFile(profilePath, JSON.stringify(stored, null, 2));
+    const proposal = await buildProgrammaticProfileProposal(root);
+    let replacementResult: Awaited<ReturnType<typeof persistProgrammaticProfile>> | undefined;
+
+    const result = await runProgrammaticScan(root, {
+      onPreFileMutation: async () => {
+        replacementResult = await persistProgrammaticProfile(
+          root,
+          proposal.configurationFingerprint,
+          proposal.profile,
+        );
+      },
+    });
+
+    expect(replacementResult).toMatchObject({ ok: true, changed: true });
+    expect(result).toMatchObject({
+      ok: false,
+      error: "stale-configuration",
+      changed: false,
+    });
+    await expect(fs.access(path.join(root, PROGRAMMATIC_STATE_PATH))).rejects.toThrow();
   });
 });

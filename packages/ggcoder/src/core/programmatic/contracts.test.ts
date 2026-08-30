@@ -11,6 +11,7 @@ import {
   PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT,
   programmaticLifecycleRecordV1Schema,
   programmaticLifecycleStateV1Schema,
+  programmaticProfileEnvelopeV1Schema,
   programmaticProfileV1Schema,
   programmaticScanSummaryV1Schema,
   opportunityDiscoveryResultV1Schema,
@@ -31,6 +32,11 @@ const scannerProfile = {
   specialistCommand: "research",
 };
 const programmaticProfile = { version: 1, scanners: [scannerProfile] };
+const programmaticProfileEnvelope = {
+  version: 1,
+  configurationFingerprint,
+  profile: programmaticProfile,
+};
 const inventoryEntry = { path: "package.json", sha256: "b".repeat(64) };
 const inventory = {
   version: 1,
@@ -113,6 +119,11 @@ describe("programmatic contract fixtures", () => {
     ["configuration fingerprint", configurationFingerprintV1Schema, configurationFingerprint],
     ["scanner profile", scannerProfileV1Schema, scannerProfile],
     ["programmatic profile", programmaticProfileV1Schema, programmaticProfile],
+    [
+      "programmatic profile envelope",
+      programmaticProfileEnvelopeV1Schema,
+      programmaticProfileEnvelope,
+    ],
     ["inventory entry", inventoryEntryV1Schema, inventoryEntry],
     ["inventory", inventoryV1Schema, inventory],
     ["evidence location", evidenceLocationV1Schema, evidenceLocation],
@@ -141,6 +152,7 @@ describe("strict records", () => {
     [configurationFingerprintV1Schema, { ...configurationFingerprint, unexpected: true }],
     [scannerProfileV1Schema, { ...scannerProfile, unexpected: true }],
     [programmaticProfileV1Schema, { ...programmaticProfile, path: "profile.json" }],
+    [programmaticProfileEnvelopeV1Schema, { ...programmaticProfileEnvelope, unexpected: true }],
     [inventoryEntryV1Schema, { ...inventoryEntry, unexpected: true }],
     [inventoryV1Schema, { ...inventory, unexpected: true }],
     [evidenceLocationV1Schema, { ...evidenceLocation, unexpected: true }],
@@ -261,7 +273,7 @@ describe("fingerprints and scanner profiles", () => {
         .success,
     ).toBe(false);
   });
-  it("keeps persisted profiles versioned, sorted, unique, and allowlisted", () => {
+  it("keeps persisted profiles versioned, sorted, unique, allowlisted, and fingerprint-bound", () => {
     const second = { ...scannerProfile, id: "sweep-scanner", specialistCommand: "setup-sweep" };
     expect(
       programmaticProfileV1Schema.safeParse({ version: 2, scanners: [scannerProfile] }).success,
@@ -280,6 +292,13 @@ describe("fingerprints and scanner profiles", () => {
       programmaticProfileV1Schema.safeParse({
         version: 1,
         scanners: [{ ...scannerProfile, specialistCommand: "setup-programmatic" }],
+      }).success,
+    ).toBe(false);
+    expect(programmaticProfileEnvelopeV1Schema.safeParse(programmaticProfile).success).toBe(false);
+    expect(
+      programmaticProfileEnvelopeV1Schema.safeParse({
+        ...programmaticProfileEnvelope,
+        configurationFingerprint: { ...configurationFingerprint, sha256: "invalid" },
       }).success,
     ).toBe(false);
   });

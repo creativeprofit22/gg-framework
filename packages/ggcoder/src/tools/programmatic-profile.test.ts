@@ -91,7 +91,11 @@ async function previousValidProfile(): Promise<{
   });
   expect(generated).toMatchObject({ ok: true, changed: true });
   const destination = path.join(root, PROGRAMMATIC_PROFILE_PATH);
-  const previousBytes = `${canonicalJson(inspected.profile)}\n`;
+  const previousBytes = `${canonicalJson({
+    version: 1,
+    configurationFingerprint: inspected.configuration_fingerprint,
+    profile: inspected.profile,
+  })}\n`;
   await fs.writeFile(destination, previousBytes);
   return { root, inspected, destination, previousBytes };
 }
@@ -190,7 +194,11 @@ describe("Targeted automated tests prove discovery-only behavior, approval separ
       path: PROGRAMMATIC_PROFILE_PATH,
     });
     expect(await fs.readFile(path.join(root, PROGRAMMATIC_PROFILE_PATH), "utf8")).toBe(
-      canonicalJson(inspected.profile),
+      canonicalJson({
+        version: 1,
+        configurationFingerprint: inspected.configuration_fingerprint,
+        profile: inspected.profile,
+      }),
     );
     expect(await execute(tool, input)).toMatchObject({
       action: "generate",

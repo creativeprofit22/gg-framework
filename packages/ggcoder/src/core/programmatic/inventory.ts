@@ -58,6 +58,7 @@ export const PROGRAMMATIC_INVENTORY_EXCLUSIONS = [
   ".gg/programmatic/state.previous.json",
   ".gg/programmatic/.state.tmp",
   ".gg/programmatic/.state.previous.tmp",
+  ".gg/programmatic/profile.json.lock",
   ".gg/programmatic/state.json.lock",
 ] as const;
 

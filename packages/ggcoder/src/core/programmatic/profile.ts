@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Stats } from "node:fs";
+import { withFileLock } from "@kenkaiiii/gg-core";
 import type {
   ConfigurationFingerprintV1,
   InventoryEntryV1,
@@ -11,6 +12,7 @@ import type {
 import {
   configurationFingerprintV1Schema,
   PROGRAMMATIC_CONTRACT_VERSION,
+  programmaticProfileEnvelopeV1Schema,
   programmaticProfileV1Schema,
 } from "./contracts.js";
 import {
@@ -224,7 +226,12 @@ export async function persistProgrammaticProfile(
   await ensureDirectory(profileDirectory, operations);
   await rejectLinks(root, ".gg/programmatic");
 
-  const bytes = Buffer.from(canonicalJson(profile), "utf8");
+  const envelope = programmaticProfileEnvelopeV1Schema.parse({
+    version: PROGRAMMATIC_CONTRACT_VERSION,
+    configurationFingerprint: fingerprint,
+    profile,
+  });
+  const bytes = Buffer.from(canonicalJson(envelope), "utf8");
   const existing = await readExistingProfile(destination, operations);
   if (existing?.equals(bytes)) {
     return {
@@ -240,7 +247,7 @@ export async function persistProgrammaticProfile(
   try {
     await operations.writeFile(temporary, bytes, { flag: "wx" });
     const temporaryBytes = await operations.readFile(temporary);
-    const validatedTemporary = programmaticProfileV1Schema.parse(
+    const validatedTemporary = programmaticProfileEnvelopeV1Schema.parse(
       JSON.parse(temporaryBytes.toString("utf8")) as unknown,
     );
     if (
@@ -249,23 +256,35 @@ export async function persistProgrammaticProfile(
     ) {
       throw new Error("Temporary profile validation failed");
     }
-    const current = await buildProfileProposal(root, `.gg/programmatic/${temporaryName}`);
-    if (!sameValue(fingerprint, current.configurationFingerprint)) {
-      return staleResult(fingerprint, current.configurationFingerprint);
-    }
-    if (!sameValue(profile, current.profile)) return mismatchResult(current.profile, profile);
-    await rejectLinks(root, ".gg/programmatic");
-    await options.onPreMutation?.(PROGRAMMATIC_PROFILE_PATH);
-    await operations.rename(temporary, destination);
-    await options.onCommitted?.(PROGRAMMATIC_PROFILE_PATH);
+
+    return await withFileLock(destination, async () => {
+      const lockedExisting = await readExistingProfile(destination, operations);
+      if (lockedExisting?.equals(bytes)) {
+        return {
+          ok: true,
+          changed: false,
+          path: PROGRAMMATIC_PROFILE_PATH,
+          configurationFingerprint: fingerprint,
+        };
+      }
+
+      const current = await buildProfileProposal(root, `.gg/programmatic/${temporaryName}`);
+      if (!sameValue(fingerprint, current.configurationFingerprint)) {
+        return staleResult(fingerprint, current.configurationFingerprint);
+      }
+      if (!sameValue(profile, current.profile)) return mismatchResult(current.profile, profile);
+      await rejectLinks(root, ".gg/programmatic");
+      await options.onPreMutation?.(PROGRAMMATIC_PROFILE_PATH);
+      await operations.rename(temporary, destination);
+      await options.onCommitted?.(PROGRAMMATIC_PROFILE_PATH);
+      return {
+        ok: true,
+        changed: true,
+        path: PROGRAMMATIC_PROFILE_PATH,
+        configurationFingerprint: fingerprint,
+      };
+    });
   } finally {
     await operations.rm(temporary, { force: true });
   }
-
-  return {
-    ok: true,
-    changed: true,
-    path: PROGRAMMATIC_PROFILE_PATH,
-    configurationFingerprint: fingerprint,
-  };
 }

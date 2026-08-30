@@ -1,5 +1,4 @@
 import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises";
-import path from "node:path";
 import type { Stats } from "node:fs";
 import { withFileLock } from "@kenkaiiii/gg-core";
 import type {
@@ -7,7 +6,7 @@ import type {
   OpportunityDiscoveryResultV1,
   ProgrammaticLifecycleRecordV1,
   ProgrammaticLifecycleStateV1,
-  ProgrammaticProfileV1,
+  ProgrammaticProfileEnvelopeV1,
   ProgrammaticScanSummaryV1,
 } from "./contracts.js";
 import {
@@ -16,7 +15,7 @@ import {
   PROGRAMMATIC_CONTRACT_VERSION,
   PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT,
   programmaticLifecycleStateV1Schema,
-  programmaticProfileV1Schema,
+  programmaticProfileEnvelopeV1Schema,
   programmaticScanSummaryV1Schema,
 } from "./contracts.js";
 import {
@@ -72,6 +71,7 @@ export type RunProgrammaticScanResult =
       error:
         | "profile-missing"
         | "profile-invalid"
+        | "stale-configuration"
         | "scan-failed"
         | "state-corrupt"
         | "persistence-failed";
@@ -210,9 +210,11 @@ async function replaceStateFile(
   state: ProgrammaticLifecycleStateV1,
   operations: ProgrammaticLifecycleOperations,
   options: RunProgrammaticScanOptions,
+  revalidateCommit: () => Promise<void>,
 ): Promise<void> {
   const destination = containedPath(root, repositoryPath);
   const temporary = containedPath(root, temporaryRepositoryPath);
+  const profilePath = containedPath(root, PROGRAMMATIC_PROFILE_PATH);
   const bytes = Buffer.from(canonicalJson(state), "utf8");
   await operations.rm(temporary, { force: true });
   try {
@@ -226,7 +228,10 @@ async function replaceStateFile(
     }
     await rejectLinks(root, repositoryPath, true);
     await options.onPreFileMutation?.(repositoryPath);
-    await operations.rename(temporary, destination);
+    await withFileLock(profilePath, async () => {
+      await revalidateCommit();
+      await operations.rename(temporary, destination);
+    });
     await options.onFileMutated?.(repositoryPath);
   } finally {
     await operations.rm(temporary, { force: true });
@@ -236,18 +241,58 @@ async function replaceStateFile(
 async function loadProfile(
   root: string,
   operations: ProgrammaticLifecycleOperations,
-): Promise<{ status: "missing" } | { status: "invalid" } | { status: "valid"; profile: ProgrammaticProfileV1 }> {
+): Promise<
+  | { status: "missing" }
+  | { status: "invalid" }
+  | { status: "valid"; envelope: ProgrammaticProfileEnvelopeV1; bytes: Buffer }
+> {
   const profilePath = containedPath(root, PROGRAMMATIC_PROFILE_PATH);
   try {
     await rejectLinks(root, PROGRAMMATIC_PROFILE_PATH);
     const stat = await operations.lstat(profilePath);
     if (stat.isSymbolicLink() || !stat.isFile()) return { status: "invalid" };
-    const profile = programmaticProfileV1Schema.parse(
-      JSON.parse((await operations.readFile(profilePath)).toString("utf8")) as unknown,
+    const bytes = await operations.readFile(profilePath);
+    const envelope = programmaticProfileEnvelopeV1Schema.parse(
+      JSON.parse(bytes.toString("utf8")) as unknown,
     );
-    return { status: "valid", profile };
+    await rejectLinks(root, PROGRAMMATIC_PROFILE_PATH);
+    return { status: "valid", envelope, bytes };
   } catch (error) {
     return isMissing(error) ? { status: "missing" } : { status: "invalid" };
+  }
+}
+
+class StaleConfigurationError extends Error {}
+
+async function ensureProfileUnchanged(
+  root: string,
+  operations: ProgrammaticLifecycleOperations,
+  expectedBytes: Buffer,
+): Promise<void> {
+  const current = await loadProfile(root, operations);
+  if (current.status !== "valid" || !current.bytes.equals(expectedBytes)) {
+    throw new StaleConfigurationError("Programmatic profile changed during scanning");
+  }
+}
+
+async function ensureCommitInputsUnchanged(
+  root: string,
+  operations: ProgrammaticLifecycleOperations,
+  inventoryOperations: Partial<InventoryOperations> | undefined,
+  expectedProfileBytes: Buffer,
+  expectedFingerprint: ConfigurationFingerprintV1,
+): Promise<void> {
+  await ensureProfileUnchanged(root, operations, expectedProfileBytes);
+
+  const inventory = await buildProgrammaticInventory(root, { operations: inventoryOperations });
+  const currentFingerprint = configurationFingerprintV1Schema.parse(
+    inventory.inventory.configurationFingerprint,
+  );
+  if (
+    currentFingerprint.version !== expectedFingerprint.version ||
+    currentFingerprint.sha256 !== expectedFingerprint.sha256
+  ) {
+    throw new StaleConfigurationError("Programmatic configuration changed during scanning");
   }
 }
 
@@ -280,9 +325,22 @@ export async function runProgrammaticScan(
       operations: options.inventoryOperations,
     });
     fingerprint = configurationFingerprintV1Schema.parse(inventory.inventory.configurationFingerprint);
+    if (
+      loadedProfile.envelope.configurationFingerprint.version !== fingerprint.version ||
+      loadedProfile.envelope.configurationFingerprint.sha256 !== fingerprint.sha256
+    ) {
+      return errorResult(
+        "stale-configuration",
+        "Programmatic configuration changed after profile approval.",
+        fingerprint,
+      );
+    }
     const discovered = discoverProgrammaticOpportunities(inventory.inventory);
     const configured = new Map(
-      loadedProfile.profile.scanners.map((scanner) => [scanner.id, scanner.specialistCommand]),
+      loadedProfile.envelope.profile.scanners.map((scanner) => [
+        scanner.id,
+        scanner.specialistCommand,
+      ]),
     );
     discovery = opportunityDiscoveryResultV1Schema.parse({
       version: PROGRAMMATIC_CONTRACT_VERSION,
@@ -304,6 +362,17 @@ export async function runProgrammaticScan(
   try {
     return await withFileLock(statePath, async () => {
       await rejectLinks(root, ".gg/programmatic");
+      const revalidateProfile = () =>
+        ensureProfileUnchanged(root, operations, loadedProfile.bytes);
+      const revalidateCommit = () =>
+        ensureCommitInputsUnchanged(
+          root,
+          operations,
+          options.inventoryOperations,
+          loadedProfile.bytes,
+          fingerprint,
+        );
+      await revalidateProfile();
       await operations.rm(containedPath(root, STATE_TEMPORARY_PATH), { force: true });
       await operations.rm(containedPath(root, PREVIOUS_STATE_TEMPORARY_PATH), { force: true });
       const primary = await readStateCandidate(statePath, operations);
@@ -337,6 +406,7 @@ export async function runProgrammaticScan(
       const nextBytes = Buffer.from(canonicalJson(reconciled.state), "utf8");
       const unchanged = loaded.status === "valid" && loaded.bytes.equals(nextBytes);
       if (unchanged && !recovered) {
+        await revalidateProfile();
         return {
           ok: true,
           changed: false,
@@ -356,6 +426,7 @@ export async function runProgrammaticScan(
             loaded.state,
             operations,
             options,
+            revalidateCommit,
           );
         }
       }
@@ -366,6 +437,7 @@ export async function runProgrammaticScan(
         reconciled.state,
         operations,
         options,
+        revalidateCommit,
       );
       return {
         ok: true,
@@ -376,7 +448,10 @@ export async function runProgrammaticScan(
         summary: reconciled.summary,
       };
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof StaleConfigurationError) {
+      return errorResult("stale-configuration", error.message, fingerprint);
+    }
     return errorResult(
       "persistence-failed",
       "Lifecycle state could not be persisted.",

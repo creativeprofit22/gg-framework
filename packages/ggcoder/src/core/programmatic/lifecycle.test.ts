@@ -18,7 +18,7 @@ import {
   reconcileProgrammaticLifecycle,
   runProgrammaticScan,
 } from "./lifecycle.js";
-import { canonicalJson } from "../tauri-package/paths.js";
+import { buildProgrammaticProfileProposal, persistProgrammaticProfile } from "./profile.js";
 
 const roots: string[] = [];
 const fingerprint = { version: 1 as const, sha256: "a".repeat(64) };
@@ -68,6 +68,16 @@ function discovery(...opportunities: DiscoveredOpportunityV1[]) {
   };
 }
 
+async function approveProfile(root: string): Promise<void> {
+  const proposal = await buildProgrammaticProfileProposal(root);
+  const persisted = await persistProgrammaticProfile(
+    root,
+    proposal.configurationFingerprint,
+    proposal.profile,
+  );
+  if (!persisted.ok) throw new Error(`Profile approval failed: ${persisted.error}`);
+}
+
 async function createRepository(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), "gg-programmatic-lifecycle-"));
   roots.push(root);
@@ -77,19 +87,7 @@ async function createRepository(): Promise<string> {
   await writeFile(path.join(root, "package.json"), '{"name":"fixture"}\n');
   await writeFile(path.join(root, "src-tauri/Cargo.toml"), "[package]\nname = 'fixture'\n");
   await writeFile(path.join(root, "src-tauri/tauri.conf.json"), "{}\n");
-  await writeFile(
-    path.join(root, ".gg/programmatic/profile.json"),
-    canonicalJson({
-      version: 1,
-      scanners: [
-        {
-          version: 1,
-          id: "tauri-package-shape",
-          specialistCommand: "setup-tauri-package",
-        },
-      ],
-    }),
-  );
+  await approveProfile(root);
   return root;
 }
 
@@ -221,6 +219,7 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
       const primaryPath = path.join(root, PROGRAMMATIC_STATE_PATH);
       const before = await readFile(primaryPath);
       await writeFile(path.join(root, "package.json"), '{"name":"changed"}\n');
+      await approveProfile(root);
       const stateTemporary = `${path.sep}.state.tmp`;
 
       const result = await runProgrammaticScan(root, {
@@ -262,6 +261,7 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
     const unrelated = path.join(root, ".gg/programmatic/unrelated.tmp");
     await writeFile(temporary, "stale");
     await writeFile(unrelated, "keep");
+    await approveProfile(root);
 
     expect(await runProgrammaticScan(root)).toMatchObject({ ok: true });
     await expect(readFile(temporary)).rejects.toMatchObject({ code: "ENOENT" });

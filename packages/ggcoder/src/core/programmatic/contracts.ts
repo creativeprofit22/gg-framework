@@ -85,6 +85,12 @@ export const programmaticProfileV1Schema = z
     message: "scanner IDs must be unique and sorted ascending",
   });
 
+export const programmaticProfileEnvelopeV1Schema = z.strictObject({
+  version: versionSchema,
+  configurationFingerprint: configurationFingerprintV1Schema,
+  profile: programmaticProfileV1Schema,
+});
+
 export const inventoryEntryV1Schema = z.strictObject({
   path: repositoryRelativePathSchema,
   sha256: sha256Schema,
@@ -288,6 +294,7 @@ export const executionResultV1Schema = z.strictObject({
 export type ConfigurationFingerprintV1 = z.infer<typeof configurationFingerprintV1Schema>;
 export type ScannerProfileV1 = z.infer<typeof scannerProfileV1Schema>;
 export type ProgrammaticProfileV1 = z.infer<typeof programmaticProfileV1Schema>;
+export type ProgrammaticProfileEnvelopeV1 = z.infer<typeof programmaticProfileEnvelopeV1Schema>;
 export type InventoryEntryV1 = z.infer<typeof inventoryEntryV1Schema>;
 export type InventoryV1 = z.infer<typeof inventoryV1Schema>;
 export type EvidenceLocationV1 = z.infer<typeof evidenceLocationV1Schema>;

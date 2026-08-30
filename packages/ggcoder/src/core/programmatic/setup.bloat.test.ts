@@ -48,7 +48,8 @@ describe("A touched-files-only bloat audit confirms no executable scanner, shell
           specifier?.startsWith(".") ||
           specifier?.startsWith("node:") ||
           specifier === "zod" ||
-          specifier === "@kenkaiiii/gg-agent",
+          specifier === "@kenkaiiii/gg-agent" ||
+          specifier === "@kenkaiiii/gg-core",
       ),
     ).toBe(true);
   });

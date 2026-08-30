@@ -3,6 +3,7 @@ import { notesLifecyclePresentation } from "../notes-lifecycle-presentation";
 import { notesCompletionGateOverview } from "../NotesPhaseCompletionGates";
 import type {
   ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalGateCode,
   ManualCompletionApprovalPreviewOutcome,
   NotesPhase,
   NotesRoadmapStatusUpdate,
@@ -20,6 +21,25 @@ import {
   savedPromptPreview,
   visibleRoadmapAttentionReason,
 } from "./roadmap-presentation";
+
+const MANUAL_COMPLETION_APPROVAL_GATE_LABELS = {
+  "phase-not-found": "The phase no longer exists.",
+  "already-done": "The phase is already Done.",
+  "inactive-phase": "The phase must be active before completion can be approved.",
+  "archived-phase": "Restore the phase before approving completion.",
+  "missing-implementation": "No successful implementation checkpoint is available.",
+  "run-not-successful": "The latest implementation run did not succeed.",
+  "incomplete-plan": "The latest implementation checkpoint is incomplete.",
+  "missing-verification": "No current verification result is available.",
+  "stale-verification": "Verification does not match the latest successful implementation.",
+  "failed-verification": "The latest verification failed.",
+  "verification-exception": "The verification exception request is no longer current.",
+  "stale-session": "The evidence belongs to another session.",
+  "unresolved-approval": "Resolve the pending approval before completion.",
+  "unresolved-attention": "Resolve the phase attention item before completion.",
+  "status-override": "Clear the manual status override before approving completion.",
+  "evidence-mismatch": "Completion evidence changed. Review the current evidence again.",
+} as const satisfies Record<ManualCompletionApprovalGateCode, string>;
 
 export function NotesPhaseOverviewView(): ReactElement {
   const {
@@ -274,7 +294,12 @@ export function ManualCompletionApprovalControl({
     restoreFocusRef.current = true;
     setPreview(undefined);
   };
-  if (phase.status !== "review" || phase.archivedAt !== null) return null;
+  if (
+    phase.archivedAt !== null ||
+    ["not-started", "planning", "cancelled", "done"].includes(phase.status)
+  ) {
+    return null;
+  }
 
   const loadPreview = async (): Promise<void> => {
     if (expectedRevision === null) {
@@ -322,7 +347,10 @@ export function ManualCompletionApprovalControl({
     <section className="notes-manual-completion" aria-labelledby={`manual-completion-${phase.id}`}>
       <div>
         <h4 id={`manual-completion-${phase.id}`}>Manual completion</h4>
-        <p>Requires current passed verification after the latest successful implementation.</p>
+        <p>
+          Current passed verification or an explicit current exception request may be approved after
+          successful implementation.
+        </p>
       </div>
       {preview ? (
         <div
@@ -382,20 +410,7 @@ function manualApprovalOutcomeMessage(
     return "Notes changed. Refresh and review the current evidence again.";
   }
   if (outcome.status === "unmet-gate") {
-    const labels: Record<string, string> = {
-      "inactive-phase": "The phase must be in Review before completion can be approved.",
-      "missing-implementation": "No successful implementation checkpoint is available.",
-      "run-not-successful": "The latest implementation run did not succeed.",
-      "incomplete-plan": "The latest implementation checkpoint is incomplete.",
-      "missing-verification": "No current verification result is available.",
-      "stale-verification": "Verification predates the latest implementation checkpoint.",
-      "failed-verification": "The latest verification failed.",
-      "verification-exception": "Manual approval cannot accept a verification exception.",
-      "stale-session": "The evidence belongs to another session.",
-      "unresolved-approval": "Resolve the pending approval before completion.",
-      "unresolved-attention": "Resolve the phase attention item before completion.",
-    };
-    return labels[outcome.code] ?? "Current evidence does not satisfy completion gates.";
+    return MANUAL_COMPLETION_APPROVAL_GATE_LABELS[outcome.code];
   }
   if (outcome.status === "nonce-expired" || outcome.status === "nonce-not-found") {
     return "The approval preview expired. Review the current evidence again.";
@@ -627,11 +642,11 @@ function PhaseOverview({
             </dd>
           </div>
           <div>
-            <dt>Final review</dt>
-            <dd className={`notes-phase-overview-tone-${completion.review.tone}`}>
-              <strong>{completion.review.label}</strong>
-              {completion.review.detail && (
-                <span title={completion.review.detail}>{completion.review.detail}</span>
+            <dt>Settlement</dt>
+            <dd className={`notes-phase-overview-tone-${completion.settlement.tone}`}>
+              <strong>{completion.settlement.label}</strong>
+              {completion.settlement.detail && (
+                <span title={completion.settlement.detail}>{completion.settlement.detail}</span>
               )}
             </dd>
           </div>

@@ -1688,22 +1688,30 @@ describe("ProjectNotes", () => {
     ).toBe(false);
   });
 
-  it("offers persisted next-phase and resolved command actions without conflating authority", async () => {
+  it("offers direct next-phase evidence and reviewer-neutral recovery copy", async () => {
     const cwd = "/work/manual-next-phase";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("manual next phase");
     const completed = phase("completed", "done");
     completed.title = "Completed foundation";
-    const review = completionReview({ reviewer: "ken" });
+    completed.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
     completed.roadmapEvents = [
-      review,
+      {
+        ...verificationReport("passed"),
+        transition: "done",
+        statusOutcome: "completion-pending",
+      },
+      {
+        ...implementationCheckpoint(),
+        verificationStatusUpdateId: "verification-ui-passed",
+      },
       {
         type: "phase-advancement-checkpoint",
         id: "checkpoint-next",
-        completionReviewId: review.id,
         completedPhaseId: completed.id,
         nextPhaseId: "next",
-        reviewer: "ken",
+        implementationCheckpointId: "checkpoint-ui",
+        verificationStatusUpdateId: "verification-ui-passed",
         timestamp: NOW,
       },
     ];
@@ -1746,6 +1754,13 @@ describe("ProjectNotes", () => {
     expect(screen.getByRole("button", { name: "Run /compare" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Run /trace" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Run /parity" })).toBeNull();
+    selectNotesTab("Archive");
+    const restore = screen.getByRole("button", { name: "Restore phase: Phase archived" });
+    expect((restore as HTMLButtonElement).disabled).toBe(true);
+    expect(restore.title).toBe(
+      "Restoring this phase would replace the target protected by a pending phase advancement.",
+    );
+    selectNotesTab("Roadmap");
     fireEvent.click(screen.getByRole("button", { name: "Run /compare" }));
     expect(onRunCommand).toHaveBeenCalledExactlyOnceWith("/Diff");
     expect(screen.getByRole("button", { name: "Start next phase" })).toBeTruthy();
@@ -1846,7 +1861,10 @@ describe("ProjectNotes", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
     selectNotesTab("Roadmap");
-    expect(screen.getByRole("region", { name: "Resolve target for Reviewed target" })).toBeTruthy();
+    const recovery = screen.getByRole("region", { name: "Resolve target for Reviewed target" });
+    expect(recovery.textContent).toContain(
+      "Reviewed target is no longer an unbound automatic candidate.",
+    );
     expect(
       (screen.getByRole("button", { name: "Start next phase" }) as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -1885,11 +1903,11 @@ describe("ProjectNotes", () => {
     expect(onStartPhase).not.toHaveBeenCalled();
   });
 
-  it("renders empty completion gates before the latest report", async () => {
+  it("renders empty completion gates before a completion intent", async () => {
     const cwd = "/work/completion-empty";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("empty completion evidence");
-    const selected = phase("completion-empty", "review");
+    const selected = phase("completion-empty", "in-progress");
     document.phases = [selected];
     client.seed(cwd, document);
     render(<ProjectNotes cwd={cwd} client={client} />);
@@ -1900,19 +1918,49 @@ describe("ProjectNotes", () => {
     const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
     expect(gates?.textContent).toContain("Completion evidence has not been recorded.");
     expect(gates?.textContent).toContain("Typed verification has not been recorded.");
-    expect(gates?.textContent).toContain("Final review has not been recorded.");
-    selectPhaseView("Activity");
-    expect(screen.getByRole("heading", { name: "Latest report" })).toBeTruthy();
+    expect(gates?.textContent).toContain("Not requested");
+    expect(gates?.textContent).not.toContain("Final review");
+  });
+
+  it("shows Done intent pending until the owning run settles", async () => {
+    const cwd = "/work/completion-pending";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("pending completion evidence");
+    const selected = phase("completion-pending", "in-progress");
+    selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
+    selected.roadmapEvents = [
+      {
+        ...verificationReport("passed"),
+        transition: "done",
+        statusOutcome: "completion-pending",
+      },
+    ];
+    document.phases = [selected];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    await openRoadmapPhase(selected.title);
+    selectPhaseView("Completion");
+
+    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
+    expect(gates?.textContent).toContain("Passed");
+    expect(gates?.textContent).toContain("Pending");
+    expect(gates?.textContent).toContain("Waiting for the owning implementation run to settle.");
+    expect(gates?.textContent).not.toContain("reviewer");
   });
 
   it("does not reuse typed verification after a later untyped report", async () => {
     const cwd = "/work/completion-superseded";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("superseded completion evidence");
-    const selected = phase("completion-superseded", "review");
+    const selected = phase("completion-superseded", "in-progress");
     selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
     selected.roadmapEvents = [
-      verificationReport("passed"),
+      {
+        ...verificationReport("passed"),
+        transition: "done",
+        statusOutcome: "completion-pending",
+      },
       {
         ...verificationReport("passed"),
         id: "status-after-verification",
@@ -1939,50 +1987,26 @@ describe("ProjectNotes", () => {
     );
     expect(verificationGate?.textContent).toContain("Typed verification has not been recorded.");
     expect(verificationGate?.textContent).not.toContain("Passed");
-    expect(gates?.textContent).not.toContain("Ready for Supah review");
+    expect(gates?.textContent).not.toContain("Ready to settle");
   });
 
-  it("shows ordered completion evidence when the phase is ready for Ken review", async () => {
-    const cwd = "/work/completion-review-ready";
+  it("shows exact failed and incomplete run settlement blockers", async () => {
+    const cwd = "/work/completion-open";
     const client = new FakeProjectNotesClient(cwd);
-    const document = notes("review-ready completion evidence");
-    const selected = phase("completion-review-ready", "review");
-    selected.doneWhen = ["Focused tests pass", "Package build passes"];
+    const document = notes("open completion evidence");
+    const selected = phase("completion-open", "in-progress");
     selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
-    selected.roadmapEvents = [verificationReport("passed")];
-    document.phases = [selected];
-    client.seed(cwd, document);
-    render(<ProjectNotes cwd={cwd} client={client} />);
-
-    await openRoadmapPhase(selected.title);
-    selectPhaseView("Completion");
-
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    expect(gates?.textContent).toContain("Ready for Supah review");
-    expect(gates?.textContent).toContain("Focused tests pass");
-    expect(gates?.textContent).toContain("pnpm test passed");
-    expect(gates?.textContent).toContain("Package build passes");
-    expect(gates?.textContent).toContain("pnpm build passed");
-  });
-
-  it("explains partial implementation, failed verification, and rejected review", async () => {
-    const cwd = "/work/completion-failed";
-    const client = new FakeProjectNotesClient(cwd);
-    const document = notes("failed completion evidence");
-    const selected = phase("completion-failed", "needs-attention");
-    selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
-    const failedReason = "Typecheck failed in the production sidecar bundle.";
     selected.roadmapEvents = [
-      implementationCheckpoint([1]),
-      verificationReport("failed", failedReason),
-      completionReview({
-        decision: "rejected",
-        evidence: [],
-        reason: "Fix the sidecar bundle and rerun every check.",
-        verificationStatusUpdateId: "verification-ui-failed",
-        gateOutcome: "needs-attention",
-        unmetGateCodes: ["incomplete-plan", "failed-verification"],
-      }),
+      {
+        ...verificationReport("passed"),
+        transition: "done",
+        statusOutcome: "completion-pending",
+      },
+      {
+        ...implementationCheckpoint([1], "interrupted"),
+        verificationStatusUpdateId: "verification-ui-passed",
+        timestamp: "2026-07-15T12:02:00.000Z",
+      },
     ];
     document.phases = [selected];
     client.seed(cwd, document);
@@ -1993,124 +2017,28 @@ describe("ProjectNotes", () => {
 
     const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
     expect(gates?.textContent).toContain("1 of 2 plan steps");
-    expect(gates?.textContent).toContain("Failed");
-    expect(gates?.textContent).toContain(failedReason);
-    expect(gates?.textContent).toContain("Rejected by Autopilot Supah");
-    expect(gates?.textContent).toContain(
-      "The implementation checkpoint used by this final review does not complete every canonical plan step.",
-    );
-    expect(gates?.textContent).toContain("The verification used by this final review failed.");
-
-    selectPhaseView("Activity");
-    fireEvent.click(screen.getByText(/Activity history/));
-    expect(screen.getByText(/Implementation checkpoint: 1 of 2 plan steps/)).toBeTruthy();
-    expect(
-      screen.getByText(
-        /Final review submitted: rejected\. Applied gate outcome: Needs attention\./,
-      ),
-    ).toBeTruthy();
+    expect(gates?.textContent).toContain("was interrupted");
+    expect(gates?.textContent).toContain("Open");
+    expect(gates?.textContent).not.toContain("Final review pending");
   });
 
-  it("labels an accepted verification exception with requester and reviewer timestamps", async () => {
-    const cwd = "/work/completion-exception";
-    const client = new FakeProjectNotesClient(cwd);
-    const document = notes("exception completion evidence");
-    const selected = phase("completion-exception", "done");
-    selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
-    selected.roadmapEvents = [
-      implementationCheckpoint(),
-      verificationReport("exception-requested", "The native screen reader is unavailable in CI."),
-      completionReview({
-        verificationStatusUpdateId: "verification-ui-exception-requested",
-        acceptsVerificationException: true,
-      }),
-    ];
-    document.phases = [selected];
-    client.seed(cwd, document);
-    render(<ProjectNotes cwd={cwd} client={client} />);
-
-    await openRoadmapPhase(selected.title);
-    selectPhaseView("Completion");
-
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    expect(gates?.textContent).toContain("Exception requested");
-    expect(gates?.textContent).toContain("Reported by Supah Coder");
-    expect(gates?.textContent).toContain("The native screen reader is unavailable in CI.");
-    expect(gates?.textContent).toContain("Exception accepted by Autopilot Supah");
-    expect(gates?.querySelectorAll("time")).toHaveLength(4);
-  });
-
-  it("keeps reviewed evidence and recovery paired when newer evidence is appended", async () => {
-    const cwd = "/work/completion-reviewed-evidence";
-    const client = new FakeProjectNotesClient(cwd);
-    const document = notes("reviewed completion evidence");
-    const selected = phase("completion-reviewed-evidence", "needs-attention");
-    selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
-    const reviewedFailureReason = "The reviewed verification failed before the rerun.";
-    selected.roadmapEvents = [
-      implementationCheckpoint([1]),
-      verificationReport("failed", reviewedFailureReason),
-      completionReview({
-        decision: "rejected",
-        evidence: [],
-        reason: "Complete the remaining step and rerun verification.",
-        verificationStatusUpdateId: "verification-ui-failed",
-        gateOutcome: "needs-attention",
-        unmetGateCodes: ["incomplete-plan", "failed-verification"],
-      }),
-      {
-        ...implementationCheckpoint([1, 2, 3]),
-        id: "checkpoint-ui-newer",
-        planStepTotal: 3,
-        timestamp: "2026-07-15T12:03:00.000Z",
-      },
-      {
-        ...verificationReport("passed"),
-        id: "verification-ui-passed-newer",
-        evidence: ["Newer verification was not reviewed."],
-        statusOutcome: "same-status",
-        timestamp: "2026-07-15T12:04:00.000Z",
-      },
-    ];
-    document.phases = [selected];
-    client.seed(cwd, document);
-    render(<ProjectNotes cwd={cwd} client={client} />);
-
-    await openRoadmapPhase(selected.title);
-    selectPhaseView("Completion");
-
-    const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
-    const gateRows = gates?.querySelectorAll("dl > div");
-    const implementationGate = gateRows?.item(1);
-    const verificationGate = gateRows?.item(2);
-
-    expect(implementationGate?.textContent).toContain("Evidence used by this final review.");
-    expect(implementationGate?.textContent).toContain("1 of 2 plan steps");
-    expect(implementationGate?.textContent).toContain("Newer unreviewed evidence");
-    expect(implementationGate?.textContent).toContain("3 of 3 plan steps");
-    expect(verificationGate?.textContent).toContain("Evidence used by this final review.");
-    expect(verificationGate?.textContent).toContain("Failed");
-    expect(verificationGate?.textContent).toContain(reviewedFailureReason);
-    expect(verificationGate?.textContent).toContain("Newer unreviewed evidence");
-    expect(verificationGate?.textContent).toContain("Passed");
-    expect(verificationGate?.textContent).toContain("Newer verification was not reviewed.");
-    expect(gates?.textContent).toContain("Rejected by Autopilot Supah");
-    expect(gates?.textContent).toContain(
-      "The implementation checkpoint used by this final review does not complete every canonical plan step.",
-    );
-    expect(gates?.textContent).toContain("The verification used by this final review failed.");
-  });
-
-  it("shows successful Done evidence while keeping archive separate", async () => {
+  it("shows direct Done evidence while keeping archive separate", async () => {
     const cwd = "/work/completion-done";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("done completion evidence");
     const selected = phase("completion-done", "done");
     selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
     selected.roadmapEvents = [
-      implementationCheckpoint(),
-      verificationReport("passed"),
-      completionReview(),
+      {
+        ...verificationReport("passed"),
+        transition: "done",
+        statusOutcome: "completion-pending",
+      },
+      {
+        ...implementationCheckpoint(),
+        verificationStatusUpdateId: "verification-ui-passed",
+        timestamp: "2026-07-15T12:02:00.000Z",
+      },
     ];
     document.phases = [selected];
     client.seed(cwd, document);
@@ -2122,193 +2050,71 @@ describe("ProjectNotes", () => {
     const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
     expect(gates?.textContent).toContain("2 of 2 plan steps");
     expect(gates?.textContent).toContain("Passed");
-    expect(gates?.textContent).toContain("Accepted by Autopilot Supah");
-    expect(gates?.textContent).toContain("Done is complete. Archiving remains a separate action.");
+    expect(gates?.textContent).toContain("Settled");
+    expect(gates?.textContent).toContain("All automatic completion gates passed.");
+    expect(gates?.textContent).not.toContain("Accepted by");
     selectPhaseView("More");
     expect(screen.getByRole("button", { name: "Archive phase" })).toBeTruthy();
   });
 
-  it("keeps a manual override authoritative with long localized completion evidence", async () => {
+  it("keeps manual overrides authoritative and offers exception approval", async () => {
     const cwd = "/work/completion-override";
     const client = new FakeProjectNotesClient(cwd);
     const document = notes("override completion evidence");
-    const selected = phase("completion-override", "review");
+    const selected = phase("completion-override", "in-progress");
     selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
-    selected.overrides.status = { value: "review", source: "user", updatedAt: NOW };
+    selected.overrides.status = { value: "in-progress", source: "user", updatedAt: NOW };
     const longReason =
       "Überprüfung ausstehend: 長いローカライズ済みの検証理由を折り返して表示します。".repeat(8);
     selected.roadmapEvents = [
-      implementationCheckpoint(),
       verificationReport("exception-requested", longReason),
-      completionReview({
+      {
+        ...implementationCheckpoint(),
         verificationStatusUpdateId: "verification-ui-exception-requested",
-        gateOutcome: "manual-override",
-        unmetGateCodes: ["verification-exception-not-accepted"],
-      }),
+        timestamp: "2026-07-15T12:02:00.000Z",
+      },
     ];
     document.phases = [selected];
     client.seed(cwd, document);
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     await openRoadmapPhase(selected.title);
+    const manualCompletion = screen
+      .getByRole("heading", { name: "Manual completion" })
+      .closest("section");
+    expect(manualCompletion?.textContent).toContain(
+      "Current passed verification or an explicit current exception request may be approved after successful implementation.",
+    );
     selectPhaseView("Completion");
 
     const gates = screen.getByRole("heading", { name: "Completion gates" }).closest("section");
     expect(gates?.textContent).toContain(longReason);
-    expect(gates?.textContent).toContain(
-      "The review is recorded, but the user status override remains authoritative.",
+    expect(globalThis.document.querySelector(".notes-phase-overview")?.textContent).toContain(
+      "Manual override protected",
     );
     expect(gates?.textContent).toContain(
-      "The verification exception still needs reviewer acceptance.",
+      "Automatic completion cannot replace the user-selected state.",
     );
   });
 
-  it.each([
-    {
-      state: "missing",
-      status: "review",
-      events: [],
-      outcome: "Evidence missing",
-      gates: ["Missing", "Missing", "Missing"],
-    },
-    {
-      state: "blocked",
-      status: "needs-attention",
-      events: [implementationCheckpoint([1])],
-      outcome: "Completion blocked",
-      gates: ["Blocked", "Missing", "Missing"],
-    },
-    {
-      state: "implementation failed",
-      status: "needs-attention",
-      events: [implementationCheckpoint([1], "failed")],
-      outcome: "Completion blocked",
-      gates: ["Failed", "Missing", "Missing"],
-    },
-    {
-      state: "failed",
-      status: "needs-attention",
-      events: [implementationCheckpoint(), verificationReport("failed")],
-      outcome: "Verification failed",
-      gates: ["Complete", "Failed", "Missing"],
-    },
-    {
-      state: "exception",
-      status: "review",
-      events: [implementationCheckpoint(), verificationReport("exception-requested")],
-      outcome: "Exception pending",
-      gates: ["Complete", "Exception requested", "Missing"],
-    },
-    {
-      state: "accepted",
-      status: "done",
-      events: [implementationCheckpoint(), verificationReport("passed"), completionReview()],
-      outcome: "Accepted",
-      gates: ["Complete", "Passed", "Accepted"],
-    },
-    {
-      state: "accepted exception",
-      status: "done",
-      events: [
-        implementationCheckpoint(),
-        verificationReport("exception-requested"),
-        completionReview({
-          verificationStatusUpdateId: "verification-ui-exception-requested",
-          acceptsVerificationException: true,
-        }),
-      ],
-      outcome: "Accepted with exception",
-      gates: ["Complete", "Exception requested", "Accepted"],
-    },
-    {
-      state: "rejected",
-      status: "needs-attention",
-      events: [
-        implementationCheckpoint([1]),
-        verificationReport("failed"),
-        completionReview({
-          decision: "rejected",
-          reason: "Repair the failed check.",
-          verificationStatusUpdateId: "verification-ui-failed",
-          gateOutcome: "needs-attention",
-          unmetGateCodes: ["incomplete-plan", "failed-verification"],
-        }),
-      ],
-      outcome: "Review rejected",
-      gates: ["Blocked", "Failed", "Rejected"],
-    },
-    {
-      state: "manual override",
-      status: "review",
-      manualOverride: true,
-      events: [
-        implementationCheckpoint(),
-        verificationReport("exception-requested"),
-        completionReview({
-          verificationStatusUpdateId: "verification-ui-exception-requested",
-          gateOutcome: "manual-override",
-          unmetGateCodes: ["verification-exception-not-accepted"],
-        }),
-      ],
-      outcome: "Manual override protected",
-      gates: ["Complete", "Exception requested", "Accepted"],
-    },
-  ] as const)(
-    "summarizes $state completion state in the compact phase overview",
-    async ({ state, status, events, outcome, gates, ...fixture }) => {
-      const cwd = `/work/phase-overview-${state.replace(/\s/g, "-")}`;
-      const client = new FakeProjectNotesClient(cwd);
-      const notesDocument = notes(`${state} overview evidence`);
-      const selected = phase(`overview-${state}`, status);
-      selected.session = { sessionId: "session-ui", sessionPath: "/sessions/ui.jsonl" };
-      selected.roadmapEvents = [...events];
-      if (fixture.manualOverride) {
-        selected.overrides.status = { value: status, source: "user", updatedAt: NOW };
-      }
-      notesDocument.phases = [selected];
-      client.seed(cwd, notesDocument);
-      render(<ProjectNotes cwd={cwd} client={client} />);
-
-      await openRoadmapPhase(selected.title);
-
-      const overview = document.querySelector(".notes-phase-overview");
-      expect(overview).toBeTruthy();
-      expect(overview?.textContent).toContain(outcome);
-      for (const gate of gates) expect(overview?.textContent).toContain(gate);
-      if (fixture.manualOverride) {
-        expect(overview?.textContent).toContain("Manual override");
-      }
-    },
-  );
-
-  it("marks an accepted review stale when newer completion evidence is appended", async () => {
-    const cwd = "/work/phase-overview-newer-evidence";
+  it("labels historical completion-review events as legacy history", async () => {
+    const cwd = "/work/completion-legacy-history";
     const client = new FakeProjectNotesClient(cwd);
-    const notesDocument = notes("newer overview evidence");
-    const selected = phase("overview-newer-evidence", "done");
+    const document = notes("legacy completion history");
+    const selected = phase("completion-legacy-history", "done");
     selected.roadmapEvents = [
       implementationCheckpoint(),
       verificationReport("passed"),
       completionReview(),
-      {
-        ...verificationReport("passed"),
-        id: "verification-ui-newer",
-        timestamp: "2026-07-15T12:03:00.000Z",
-      },
     ];
-    notesDocument.phases = [selected];
-    client.seed(cwd, notesDocument);
+    document.phases = [selected];
+    client.seed(cwd, document);
     render(<ProjectNotes cwd={cwd} client={client} />);
 
     await openRoadmapPhase(selected.title);
+    selectPhaseView("Activity");
 
-    const overview = document.querySelector(".notes-phase-overview");
-    expect(overview?.textContent).toContain("Final review pending");
-    expect(overview?.textContent).toContain("Review needed");
-    expect(overview?.textContent).toContain(
-      "Newer completion evidence requires another final review.",
-    );
-    expect(overview?.textContent).not.toContain("OutcomeAccepted");
+    expect(screen.getByText("Legacy completion review history")).toBeTruthy();
   });
 
   it("summarizes report, reminder, references, next action, and a collapsed Saved prompt", async () => {

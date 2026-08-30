@@ -32,6 +32,7 @@ export {
 } from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
 export type {
   ManualCompletionApprovalCommitOutcome,
+  ManualCompletionApprovalGateCode,
   ManualCompletionApprovalPreviewOutcome,
 } from "@kenkaiiii/gg-core/manual-completion-approval-protocol";
 export {

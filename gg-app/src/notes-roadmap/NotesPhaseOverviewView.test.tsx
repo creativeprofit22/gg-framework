@@ -66,11 +66,10 @@ describe("manual completion approval", () => {
     session: previousSession,
     implementationCheckpointId: "implementation-1",
     verificationStatusUpdateId: "verification-1",
-    finalReviewId: "review-1",
     expiresAt: "2026-08-27T21:30:00.000Z",
   };
 
-  it("shows current evidence before explicit confirmation", async () => {
+  it("shows current evidence for active phases before explicit confirmation", async () => {
     const onCommit = vi.fn(async () => ({
       status: "committed" as const,
       revision: 8,
@@ -80,7 +79,7 @@ describe("manual completion approval", () => {
     const onSuccess = vi.fn();
     render(
       <ManualCompletionApprovalControl
-        phase={reviewPhase}
+        phase={phase}
         expectedRevision={7}
         onPreview={async () => ({ status: "ready", checkpoint })}
         onCommit={onCommit}
@@ -88,6 +87,11 @@ describe("manual completion approval", () => {
       />,
     );
 
+    expect(
+      screen.getByText(
+        "Current passed verification or an explicit current exception request may be approved after successful implementation.",
+      ),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
     expect(await screen.findByText("implementation-1")).toBeTruthy();
     expect(screen.getByText("verification-1")).toBeTruthy();
@@ -126,7 +130,7 @@ describe("manual completion approval", () => {
     );
   });
 
-  it("refreshes typed stale results and offers no exception bypass", async () => {
+  it("refreshes typed stale results and explains non-current gates", async () => {
     const onStale = vi.fn();
     render(
       <ManualCompletionApprovalControl
@@ -159,7 +163,7 @@ describe("manual completion approval", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
     expect(
-      await screen.findByText("Manual approval cannot accept a verification exception."),
+      await screen.findByText("The verification exception request is no longer current."),
     ).toBeTruthy();
 
     cleanup();
@@ -174,7 +178,7 @@ describe("manual completion approval", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Review completion evidence" }));
     expect(
-      await screen.findByText("The phase must be in Review before completion can be approved."),
+      await screen.findByText("The phase must be active before completion can be approved."),
     ).toBeTruthy();
   });
 

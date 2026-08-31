@@ -84,6 +84,41 @@ export interface NotesSessionLink {
   sessionPath: string | null;
 }
 
+export interface NotesRepositoryIdentityV1 {
+  projectKey: string;
+  identityHash: string;
+  rootCommit: string | null;
+}
+
+export interface NotesWorkspaceSnapshotV1 {
+  version: 1;
+  repository: NotesRepositoryIdentityV1;
+  headCommit: string;
+  worktreeDigest: string;
+  clean: boolean;
+}
+
+export type NotesPlanStepState = "pending" | "completed" | "needs-revalidation";
+
+export interface NotesPlanStepV1 {
+  id: string;
+  index: number;
+  text: string;
+  state: NotesPlanStepState;
+  completedAt: string | null;
+  workspace: NotesWorkspaceSnapshotV1 | null;
+}
+
+export interface NotesApprovedPlanV1 {
+  planId: string;
+  contentHash: string;
+  snapshotPath: string;
+  approvedAt: string;
+  approvedRevision: number;
+  baseCommit: string | null;
+  steps: NotesPlanStepV1[];
+}
+
 /** Durable/reference consumers may omit capture provenance but share all source semantics. */
 export type NotesReferenceProjection = Omit<NotesReference, "capturedAt">;
 

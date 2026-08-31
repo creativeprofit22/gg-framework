@@ -9,6 +9,7 @@ import type * as GgAgentModule from "@kenkaiiii/gg-agent";
 import { MODELS } from "./model-registry.js";
 import { estimateConversationTokens } from "./compaction/token-estimator.js";
 import type * as McpModule from "./mcp/index.js";
+import { approvedPlanContentHash } from "./session-manager.js";
 import { useFakeHome } from "../test-support/fake-home.js";
 
 const shouldCompactMock = vi.hoisted(() => vi.fn());
@@ -192,6 +193,54 @@ describe("AgentSession worker auto-compaction", () => {
       expect.objectContaining({ provider: "anthropic", model: "claude-test" }),
     );
   }, 15_000);
+});
+
+describe("AgentSession canonical plan compaction", () => {
+  it("preserves exact canonical plan bytes through compaction and resume", async () => {
+    const content =
+      "<!-- gg-plan-status: approved -->\n# Canonical plan\n\n## Steps\n1. Resume it.";
+    shouldCompactMock.mockReturnValue(false);
+    compactMock.mockResolvedValue(
+      compactionResult([
+        { role: "system", content: "worker system prompt" },
+        { role: "user", content: "[session compacted] Continue the canonical plan." },
+      ]),
+    );
+    const { AgentSession } = await import("./agent-session.js");
+    const session = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "worker system prompt",
+    });
+    await session.initialize();
+    await session.hydrateCanonicalApprovedPlan({
+      checkpointId: "canonical-plan",
+      generation: 3,
+      content,
+      contentHash: approvedPlanContentHash(content),
+      state: "implementation-prompt-started",
+      approvedPlanPath: path.join(tmpProject, ".gg", "plans", "approved", "canonical-plan.md"),
+    });
+    await session.compact();
+    const compactedPath = session.getState().sessionPath;
+    await session.dispose();
+
+    const resumed = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      systemPrompt: "worker system prompt",
+      sessionId: compactedPath,
+    });
+    await resumed.initialize();
+    expect(resumed.getApprovedPlanConsumption()).toMatchObject({
+      content,
+      contentHash: approvedPlanContentHash(content),
+      state: "implementation-prompt-started",
+    });
+    await resumed.dispose();
+  });
 });
 
 describe("AgentSession verification evidence compaction", () => {

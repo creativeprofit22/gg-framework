@@ -1598,6 +1598,28 @@ export class SessionManager {
     return runs;
   }
 
+  getApprovedPlanPhaseContext(entries: SessionEntry[]): ActivePhaseContextV1 | undefined {
+    let active: ActivePhaseContextV1 | undefined;
+    let approved: ActivePhaseContextV1 | undefined;
+    for (const entry of entries) {
+      if (entry.type !== "custom") continue;
+      if (entry.kind === ACTIVE_PHASE_CONTEXT_CLEAR_KIND) {
+        if (parseActivePhaseContextClear(entry.data)) active = undefined;
+        continue;
+      }
+      if (entry.kind === ACTIVE_PHASE_CONTEXT_KIND) {
+        active = parseActivePhaseContext(entry.data) ?? undefined;
+        continue;
+      }
+      if (entry.kind !== APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND) continue;
+      const plan = parseApprovedPlanConsumption(entry.data);
+      if (!plan) continue;
+      if (plan.state === "completed") approved = undefined;
+      else if (plan.state === "approval-committed") approved = active;
+    }
+    return approved ? structuredClone(approved) : undefined;
+  }
+
   /** Reduce append-only plan snapshots/transitions in file order. */
   getApprovedPlanConsumption(entries: SessionEntry[]): ApprovedPlanConsumptionRecord | undefined {
     let current: ApprovedPlanConsumptionRecord | undefined;

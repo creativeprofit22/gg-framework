@@ -278,6 +278,8 @@ export interface AgentSessionOptions {
    * compact-on-load behavior for CLI resume/`ggcoder continue`.
    */
   deferLoadCompaction?: boolean;
+  /** Keep restored plan content out of prompts until its durable artifact is validated. */
+  deferApprovedPlanHydration?: boolean;
   /**
    * Plan-mode callbacks. When provided, the `enter_plan`/`exit_plan` tools are
    * registered and the session manages plan-mode restrictions + system-prompt
@@ -576,6 +578,8 @@ export class AgentSession {
   private approvedPlanPath?: string;
   private approvedPlanContent?: string;
   private approvedPlanConsumption?: ApprovedPlanConsumptionRecord;
+  private approvedPlanPhaseContext?: ActivePhaseContextV1;
+  private approvedPlanHydrationDeferred: boolean;
   /** Extra workspace roots added with `/add-dir` (resolved, de-duplicated). */
   private additionalRoots: string[] = [];
   /** Durable selected Roadmap phase, restored before the next provider turn. */
@@ -634,6 +638,7 @@ export class AgentSession {
     this.thinkingLevel = options.thinkingLevel;
     this.customSystemPrompt = options.systemPrompt;
     this.agentPrompt = options.agentPrompt;
+    this.approvedPlanHydrationDeferred = options.deferApprovedPlanHydration ?? false;
   }
 
   /**
@@ -3399,6 +3404,7 @@ export class AgentSession {
   async setApprovedPlan(approvedPlanPath: string | undefined): Promise<void> {
     this.approvedPlanPath = approvedPlanPath;
     this.approvedPlanConsumption = undefined;
+    this.approvedPlanPhaseContext = undefined;
     await this.rebuildSystemPromptInPlace();
   }
 
@@ -3416,14 +3422,56 @@ export class AgentSession {
       state: "approval-committed",
     };
     await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, record);
+    this.approvedPlanHydrationDeferred = false;
     this.approvedPlanConsumption = record;
+    this.approvedPlanPhaseContext = this.activePhaseContext
+      ? structuredClone(this.activePhaseContext)
+      : undefined;
     this.approvedPlanPath = record.approvedPlanPath;
     await this.rebuildSystemPromptInPlace();
     return structuredClone(record);
   }
 
+  async hydrateCanonicalApprovedPlan(
+    input: Omit<ApprovedPlanConsumptionRecord, "version">,
+  ): Promise<ApprovedPlanConsumptionRecord> {
+    if (!this.sessionPath) throw new Error("Cannot hydrate approved plan without a session path.");
+    if (input.state === "completed") throw new Error("Cannot hydrate a completed approved plan.");
+    if (approvedPlanContentHash(input.content) !== input.contentHash) {
+      throw new Error("Canonical approved plan content does not match its durable hash.");
+    }
+    const record: ApprovedPlanConsumptionRecord = { version: 1, ...input };
+    const current = this.approvedPlanConsumption;
+    if (
+      !current ||
+      current.checkpointId !== record.checkpointId ||
+      current.generation !== record.generation ||
+      current.content !== record.content ||
+      current.contentHash !== record.contentHash ||
+      current.state !== record.state ||
+      current.approvedPlanPath !== record.approvedPlanPath
+    ) {
+      await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, record);
+    }
+    this.approvedPlanHydrationDeferred = false;
+    this.approvedPlanConsumption = record;
+    this.approvedPlanPath = record.approvedPlanPath;
+    this.approvedPlanPhaseContext = this.activePhaseContext
+      ? structuredClone(this.activePhaseContext)
+      : undefined;
+    await this.rebuildSystemPromptInPlace();
+    this.refreshSystemPromptTail();
+    return structuredClone(record);
+  }
+
   getApprovedPlanConsumption(): ApprovedPlanConsumptionRecord | undefined {
     return this.approvedPlanConsumption ? structuredClone(this.approvedPlanConsumption) : undefined;
+  }
+
+  getApprovedPlanPhaseContext(): ActivePhaseContextV1 | undefined {
+    return this.approvedPlanPhaseContext
+      ? structuredClone(this.approvedPlanPhaseContext)
+      : undefined;
   }
 
   async markApprovedPlanImplementationPromptStarted(): Promise<ApprovedPlanConsumptionRecord> {
@@ -3452,6 +3500,7 @@ export class AgentSession {
     };
     await this.sessionManager.appendApprovedPlanConsumptionRequired(this.sessionPath, completed);
     this.approvedPlanConsumption = undefined;
+    this.approvedPlanPhaseContext = undefined;
     this.approvedPlanPath = undefined;
     await this.rebuildSystemPromptInPlace();
   }
@@ -3609,12 +3658,14 @@ export class AgentSession {
       this.cwd,
       this.skills,
       planMode,
-      this.approvedPlanConsumption
-        ? {
-            content: this.approvedPlanConsumption.content,
-            approvedPlanPath: this.approvedPlanConsumption.approvedPlanPath,
-          }
-        : approvedPlanPath,
+      this.approvedPlanHydrationDeferred
+        ? undefined
+        : this.approvedPlanConsumption
+          ? {
+              content: this.approvedPlanConsumption.content,
+              approvedPlanPath: this.approvedPlanConsumption.approvedPlanPath,
+            }
+          : approvedPlanPath,
       toolNames,
       undefined,
       this.provider,
@@ -4347,6 +4398,7 @@ export class AgentSession {
     });
     if (this.activePhaseContext) this.restorePlanStateFromActivePhase(this.activePhaseContext);
     this.approvedPlanConsumption = this.sessionManager.getApprovedPlanConsumption(loaded.entries);
+    this.approvedPlanPhaseContext = this.sessionManager.getApprovedPlanPhaseContext(loaded.entries);
     if (this.approvedPlanConsumption) {
       this.approvedPlanPath = this.approvedPlanConsumption.approvedPlanPath;
     }

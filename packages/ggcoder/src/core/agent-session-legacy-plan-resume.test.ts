@@ -145,4 +145,46 @@ describe("legacy approved-plan recovery on Windows", () => {
     await normalChat.dispose();
     await recovered.dispose();
   });
+
+  it("quarantines restored plan content until canonical hydration", async () => {
+    const { AgentSession } = await import("./agent-session.js");
+    const legacyContent = "# STALE-PLAN-CONTENT\n\n## Steps\n1. Do not hydrate this.";
+    const original = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+    });
+    await original.initialize();
+    await original.persistApprovedPlanConsumption({
+      checkpointId: "durable-plan",
+      generation: 2,
+      content: legacyContent,
+      contentHash: approvedPlanContentHash(legacyContent),
+      approvedPlanPath: path.join(tmpProject, ".gg", "plans", "legacy.md"),
+    });
+    await original.dispose();
+
+    const recovered = new AgentSession({
+      provider: "anthropic",
+      model: "claude-test",
+      cwd: tmpProject,
+      sessionId: await findSessionFile(),
+      deferApprovedPlanHydration: true,
+    });
+    await recovered.initialize();
+    expect(String(recovered.getMessages()[0]?.content)).not.toContain("STALE-PLAN-CONTENT");
+    expect(recovered.getApprovedPlanConsumption()?.content).toBe(legacyContent);
+
+    const canonicalContent = "<!-- gg-plan-status: approved -->\n# CANONICAL-PLAN-CONTENT";
+    await recovered.hydrateCanonicalApprovedPlan({
+      checkpointId: "durable-plan",
+      generation: 2,
+      content: canonicalContent,
+      contentHash: approvedPlanContentHash(canonicalContent),
+      state: "implementation-prompt-started",
+      approvedPlanPath: path.join(tmpProject, ".gg", "plans", "canonical.md"),
+    });
+    expect(String(recovered.getMessages()[0]?.content)).toContain("CANONICAL-PLAN-CONTENT");
+    await recovered.dispose();
+  });
 });

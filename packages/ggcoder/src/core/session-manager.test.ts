@@ -28,6 +28,7 @@ import {
   type TurnMetricPayload,
   type CustomEntry,
 } from "./session-manager.js";
+import { ACTIVE_PHASE_CONTEXT_KIND } from "../phase-context.js";
 
 const tempDirs: string[] = [];
 
@@ -855,6 +856,48 @@ describe("approved plan consumption", () => {
     });
   });
 
+  it("binds a legacy approved plan to the phase active when approval was recorded", async () => {
+    const manager = new SessionManager(await makeTempDir());
+    const phaseContext = (phaseId: string, sessionPath: string) => ({
+      version: 1 as const,
+      projectKey: "c:/project",
+      phase: {
+        id: phaseId,
+        title: phaseId,
+        goal: "goal",
+        doneWhen: ["done"],
+        sourcePrompt: null,
+        status: "in-progress" as const,
+        archivedAt: null,
+      },
+      session: { sessionId: phaseId, sessionPath },
+      references: [],
+      executionStage: "implementing" as const,
+      approvedPlanPath: `${sessionPath}.md`,
+    });
+    const content = "# Plan\n\n## Steps\n1. Implement it.";
+    const entries: SessionEntry[] = [
+      {
+        type: "custom", kind: ACTIVE_PHASE_CONTEXT_KIND, id: "phase-4", parentId: null,
+        timestamp: "2026-08-30T10:00:00.000Z", data: phaseContext("phase-4", "phase-4.jsonl"),
+      },
+      {
+        type: "custom", kind: APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND, id: "approved", parentId: null,
+        timestamp: "2026-08-30T10:01:00.000Z",
+        data: {
+          version: 1, checkpointId: "5ab5bc79-2d1b-4578-b6d3-7035a4723a91", generation: 1,
+          content, contentHash: approvedPlanContentHash(content), state: "approval-committed",
+        },
+      },
+      {
+        type: "custom", kind: ACTIVE_PHASE_CONTEXT_KIND, id: "phase-5", parentId: null,
+        timestamp: "2026-08-30T10:02:00.000Z",
+        data: phaseContext("a639ff7d-64bf-4abe-a38e-cf6cae0acac2", "phase-5.jsonl"),
+      },
+    ];
+
+    expect(manager.getApprovedPlanPhaseContext(entries)?.phase.id).toBe("phase-4");
+  });
   it("ignores substituted content whose hash no longer matches", async () => {
     const manager = new SessionManager(await makeTempDir());
     const entries: SessionEntry[] = [

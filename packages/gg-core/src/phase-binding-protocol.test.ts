@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { isPhaseBindingOutcome, isPhaseBindingRequest } from "./phase-binding-protocol.js";
+import {
+  isPhaseBindingOutcome,
+  isPhaseBindingProtocolRequest,
+  isPhaseBindingRequest,
+  isPhaseLease,
+  isPhaseLeaseOutcome,
+  isPhaseLeaseRequest,
+} from "./phase-binding-protocol.js";
 
 const previousSession = { sessionId: "session-a", sessionPath: "C:\\sessions\\a.jsonl" };
 const request = {
@@ -72,5 +79,92 @@ describe("phase binding protocol", () => {
     { status: "corrupt", primary: "unknown", backup: null },
   ])("rejects malformed outcomes %o", (outcome) => {
     expect(isPhaseBindingOutcome(outcome)).toBe(false);
+  });
+});
+
+
+describe("phase lease protocol", () => {
+  const lease = {
+    version: 1,
+    projectKey: "c:/work/project",
+    phaseId: "phase-1",
+    planId: "plan-1",
+    leaseId: "lease-1",
+    fence: 2,
+    holder: {
+      daemonInstanceId: "daemon-1",
+      sessionId: "session-a",
+      sessionPath: "C:\\sessions\\a.jsonl",
+      processId: 123,
+    },
+    runState: "idle",
+    acquiredAt: "2026-08-30T10:00:00.000Z",
+    renewedAt: "2026-08-30T10:00:30.000Z",
+    expiresAt: "2026-08-30T10:02:30.000Z",
+    operationId: "operation-1",
+  };
+  const acquire = {
+    version: 2,
+    action: "acquire",
+    phaseId: "phase-1",
+    expectedProjectKey: "c:/work/project",
+    expectedRevision: 4,
+    planId: "plan-1",
+    operationId: "operation-1",
+    lease: null,
+  };
+
+  it("accepts strict v2 lease requests and leases", () => {
+    expect(isPhaseLeaseRequest(acquire)).toBe(true);
+    expect(isPhaseBindingProtocolRequest(acquire)).toBe(true);
+    expect(isPhaseLease(lease)).toBe(true);
+    expect(
+      isPhaseLeaseRequest({
+        ...acquire,
+        action: "renew",
+        lease: { leaseId: lease.leaseId, fence: lease.fence },
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    { ...acquire, extra: true },
+    { ...acquire, action: "renew" },
+    { ...acquire, planId: "" },
+    { ...acquire, expectedRevision: -1 },
+    { ...acquire, lease: { leaseId: "lease-1", fence: 0 } },
+  ])("rejects malformed lease requests %o", (value) => {
+    expect(isPhaseLeaseRequest(value)).toBe(false);
+  });
+
+  it.each([
+    { ...lease, fence: 0 },
+    { ...lease, phaseId: "" },
+    { ...lease, expiresAt: lease.renewedAt },
+    { ...lease, holder: { ...lease.holder, processId: -1 } },
+    { ...lease, acquiredAt: "later" },
+  ])("rejects malformed leases %o", (value) => {
+    expect(isPhaseLease(value)).toBe(false);
+  });
+
+  it("validates typed lease outcomes and cross-phase identity", () => {
+    expect(
+      isPhaseLeaseOutcome({
+        status: "acquired",
+        roadmapRevision: 4,
+        leaseRevision: 1,
+        phaseId: "phase-1",
+        lease,
+      }),
+    ).toBe(true);
+    expect(
+      isPhaseLeaseOutcome({
+        status: "acquired",
+        roadmapRevision: 4,
+        leaseRevision: 1,
+        phaseId: "phase-2",
+        lease,
+      }),
+    ).toBe(false);
   });
 });

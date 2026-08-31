@@ -48,6 +48,76 @@ export type PhaseBindingOutcome =
       backup: ProjectNotesCorruptReason | null;
     };
 
+export interface PhaseLeaseHolderV1 {
+  daemonInstanceId: string;
+  sessionId: string;
+  sessionPath: string | null;
+  processId: number;
+}
+
+export interface PhaseLeaseV1 {
+  version: 1;
+  projectKey: string;
+  phaseId: string;
+  planId: string | null;
+  leaseId: string;
+  fence: number;
+  holder: PhaseLeaseHolderV1;
+  runState: "idle" | "running";
+  acquiredAt: string;
+  renewedAt: string;
+  expiresAt: string;
+  operationId: string;
+}
+
+export interface PhaseLeaseTokenV1 {
+  leaseId: string;
+  fence: number;
+}
+
+export type PhaseLeaseAction = "inspect" | "acquire" | "renew";
+
+export interface PhaseLeaseRequestV2 {
+  version: 2;
+  action: PhaseLeaseAction;
+  phaseId: string;
+  expectedProjectKey: string;
+  expectedRevision: number;
+  planId: string | null;
+  operationId: string;
+  lease: PhaseLeaseTokenV1 | null;
+}
+
+export type PhaseBindingProtocolRequest = PhaseBindingRequest | PhaseLeaseRequestV2;
+
+export type PhaseLeaseOutcome =
+  | {
+      status: "inspected" | "acquired" | "renewed" | "duplicate";
+      roadmapRevision: number;
+      leaseRevision: number;
+      phaseId: string;
+      lease: PhaseLeaseV1 | null;
+    }
+  | {
+      status: "phase-lease-held" | "phase-lease-lost" | "lease-owner-unreachable";
+      roadmapRevision: number;
+      leaseRevision: number;
+      currentLease: PhaseLeaseV1 | null;
+    }
+  | {
+      status: "operation-conflict" | "stale-revision";
+      roadmapRevision: number;
+      leaseRevision: number;
+    }
+  | { status: "project-mismatch"; roadmapRevision: number; currentProjectKey: string }
+  | { status: "phase-not-found" | "phase-archived" | "phase-terminal" | "plan-mismatch" }
+  | { status: "missing" }
+  | {
+      status: "corrupt";
+      primary: ProjectNotesCorruptReason | null;
+      backup: ProjectNotesCorruptReason | null;
+    };
+
 const REQUEST_KEYS = [
   "version",
   "action",
@@ -57,6 +127,32 @@ const REQUEST_KEYS = [
   "expectedPreviousSession",
   "operationId",
   "confirmRebind",
+] as const;
+const LEASE_REQUEST_KEYS = [
+  "version",
+  "action",
+  "phaseId",
+  "expectedProjectKey",
+  "expectedRevision",
+  "planId",
+  "operationId",
+  "lease",
+] as const;
+const LEASE_TOKEN_KEYS = ["leaseId", "fence"] as const;
+const LEASE_HOLDER_KEYS = ["daemonInstanceId", "sessionId", "sessionPath", "processId"] as const;
+const LEASE_KEYS = [
+  "version",
+  "projectKey",
+  "phaseId",
+  "planId",
+  "leaseId",
+  "fence",
+  "holder",
+  "runState",
+  "acquiredAt",
+  "renewedAt",
+  "expiresAt",
+  "operationId",
 ] as const;
 const COMMITTED_KEYS = ["status", "revision", "phaseId", "previousSession", "session"] as const;
 const ALREADY_BOUND_KEYS = ["status", "revision", "phaseId", "session"] as const;
@@ -72,6 +168,11 @@ const CORRUPT_REASONS: ReadonlySet<string> = new Set([
 ]);
 const MAX_ID_LENGTH = 256;
 const MAX_PROJECT_KEY_LENGTH = 4096;
+export function isPhaseBindingProtocolRequest(
+  value: unknown,
+): value is PhaseBindingProtocolRequest {
+  return isPhaseBindingRequest(value) || isPhaseLeaseRequest(value);
+}
 
 export function isPhaseBindingRequest(value: unknown): value is PhaseBindingRequest {
   if (!isRecordWithExactKeys(value, REQUEST_KEYS)) return false;
@@ -90,6 +191,49 @@ export function isPhaseBindingRequest(value: unknown): value is PhaseBindingRequ
   return value.action === "bind-current"
     ? value.expectedPreviousSession === null && !value.confirmRebind
     : value.expectedPreviousSession !== null && value.confirmRebind;
+}
+
+export function isPhaseLeaseRequest(value: unknown): value is PhaseLeaseRequestV2 {
+  if (!isRecordWithExactKeys(value, LEASE_REQUEST_KEYS)) return false;
+  if (
+    value.version !== 2 ||
+    (value.action !== "inspect" &&
+      value.action !== "acquire" &&
+      value.action !== "renew") ||
+    !isBoundedString(value.phaseId, MAX_ID_LENGTH) ||
+    !isBoundedString(value.expectedProjectKey, MAX_PROJECT_KEY_LENGTH) ||
+    !isRevision(value.expectedRevision) ||
+    (value.planId !== null && !isBoundedString(value.planId, MAX_ID_LENGTH)) ||
+    !isBoundedString(value.operationId, MAX_ID_LENGTH) ||
+    !isNullableLeaseToken(value.lease)
+  ) {
+    return false;
+  }
+  return value.action === "renew" ? value.lease !== null : value.lease === null;
+}
+
+export function isPhaseLease(value: unknown): value is PhaseLeaseV1 {
+  if (!isRecordWithExactKeys(value, LEASE_KEYS)) return false;
+  if (
+    value.version !== 1 ||
+    !isBoundedString(value.projectKey, MAX_PROJECT_KEY_LENGTH) ||
+    !isBoundedString(value.phaseId, MAX_ID_LENGTH) ||
+    (value.planId !== null && !isBoundedString(value.planId, MAX_ID_LENGTH)) ||
+    !isBoundedString(value.leaseId, MAX_ID_LENGTH) ||
+    !isPositiveSafeInteger(value.fence) ||
+    !isPhaseLeaseHolder(value.holder) ||
+    (value.runState !== "idle" && value.runState !== "running") ||
+    !isTimestamp(value.acquiredAt) ||
+    !isTimestamp(value.renewedAt) ||
+    !isTimestamp(value.expiresAt) ||
+    !isBoundedString(value.operationId, MAX_ID_LENGTH)
+  ) {
+    return false;
+  }
+  const acquiredAt = Date.parse(value.acquiredAt as string);
+  const renewedAt = Date.parse(value.renewedAt as string);
+  const expiresAt = Date.parse(value.expiresAt as string);
+  return acquiredAt <= renewedAt && renewedAt < expiresAt;
 }
 
 export function isPhaseBindingOutcome(value: unknown): value is PhaseBindingOutcome {
@@ -150,12 +294,119 @@ export function isPhaseBindingOutcome(value: unknown): value is PhaseBindingOutc
   return false;
 }
 
+export function isPhaseLeaseOutcome(value: unknown): value is PhaseLeaseOutcome {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const status = (value as { status?: unknown }).status;
+  if (
+    status === "inspected" ||
+    status === "acquired" ||
+    status === "renewed" ||
+    status === "duplicate"
+  ) {
+    return (
+      isRecordWithExactKeys(value, [
+        "status",
+        "roadmapRevision",
+        "leaseRevision",
+        "phaseId",
+        "lease",
+      ]) &&
+      isRevision(value.roadmapRevision) &&
+      isRevision(value.leaseRevision) &&
+      isBoundedString(value.phaseId, MAX_ID_LENGTH) &&
+      (value.lease === null ||
+        (isPhaseLease(value.lease) && value.lease.phaseId === value.phaseId))
+    );
+  }
+  if (
+    status === "phase-lease-held" ||
+    status === "phase-lease-lost" ||
+    status === "lease-owner-unreachable"
+  ) {
+    return (
+      isRecordWithExactKeys(value, [
+        "status",
+        "roadmapRevision",
+        "leaseRevision",
+        "currentLease",
+      ]) &&
+      isRevision(value.roadmapRevision) &&
+      isRevision(value.leaseRevision) &&
+      (value.currentLease === null || isPhaseLease(value.currentLease))
+    );
+  }
+  if (status === "operation-conflict" || status === "stale-revision") {
+    return (
+      isRecordWithExactKeys(value, ["status", "roadmapRevision", "leaseRevision"]) &&
+      isRevision(value.roadmapRevision) &&
+      isRevision(value.leaseRevision)
+    );
+  }
+  if (status === "project-mismatch") {
+    return (
+      isRecordWithExactKeys(value, ["status", "roadmapRevision", "currentProjectKey"]) &&
+      isRevision(value.roadmapRevision) &&
+      isBoundedString(value.currentProjectKey, MAX_PROJECT_KEY_LENGTH)
+    );
+  }
+  if (
+    status === "phase-not-found" ||
+    status === "phase-archived" ||
+    status === "phase-terminal" ||
+    status === "plan-mismatch" ||
+    status === "missing"
+  ) {
+    return isRecordWithExactKeys(value, STATUS_KEYS);
+  }
+  if (status === "corrupt") {
+    return (
+      isRecordWithExactKeys(value, CORRUPT_KEYS) &&
+      (value.primary === null ||
+        (typeof value.primary === "string" && CORRUPT_REASONS.has(value.primary))) &&
+      (value.backup === null ||
+        (typeof value.backup === "string" && CORRUPT_REASONS.has(value.backup)))
+    );
+  }
+  return false;
+}
+
+function isPhaseLeaseHolder(value: unknown): value is PhaseLeaseHolderV1 {
+  return (
+    isRecordWithExactKeys(value, LEASE_HOLDER_KEYS) &&
+    isBoundedString(value.daemonInstanceId, MAX_ID_LENGTH) &&
+    isBoundedString(value.sessionId, MAX_ID_LENGTH) &&
+    (value.sessionPath === null || isBoundedString(value.sessionPath, MAX_PROJECT_KEY_LENGTH)) &&
+    isPositiveSafeInteger(value.processId)
+  );
+}
+
+function isNullableLeaseToken(value: unknown): value is PhaseLeaseTokenV1 | null {
+  return (
+    value === null ||
+    (isRecordWithExactKeys(value, LEASE_TOKEN_KEYS) &&
+      isBoundedString(value.leaseId, MAX_ID_LENGTH) &&
+      isPositiveSafeInteger(value.fence))
+  );
+}
+
 function isNullableSessionLink(value: unknown): value is NotesSessionLink | null {
   return value === null || isNotesSessionLink(value);
 }
 
 function isRevision(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+function isTimestamp(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  );
 }
 
 function isBoundedString(value: unknown, maximum: number): value is string {

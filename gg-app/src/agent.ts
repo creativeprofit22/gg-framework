@@ -37,6 +37,8 @@ import {
   isManualCompletionApprovalCommitOutcome,
   isManualCompletionApprovalPreviewOutcome,
   isPhaseBindingOutcome,
+  isPhaseExecutionReconciliationOutcome,
+  isPhaseExecutionReconciliationRequestV3,
   isProjectNotesMigrationOutcome,
   isProjectNotesReadOutcome,
   isProjectNotesStorageDiagnostics,
@@ -1691,7 +1693,8 @@ export async function cycleThinking(): Promise<ThinkingState | null> {
 export async function listCommands(): Promise<SlashCommand[]> {
   try {
     const response = await invoke<SlashCommandsResponse>("agent_commands", { paneId: "primary" });
-    if (!isSlashCommandsResponse(response)) throw new Error("Invalid slash-command discovery response");
+    if (!isSlashCommandsResponse(response))
+      throw new Error("Invalid slash-command discovery response");
     return [...response.commands];
   } catch (e) {
     await logError(`agent_commands failed: ${String(e)}`);
@@ -2932,6 +2935,16 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async bindRoadmapPhase(request) {
       const outcome = await call<unknown>("agent_notes_phase_binding", { request });
       if (!isPhaseBindingOutcome(outcome)) throw new Error("invalid phase binding response");
+      return outcome;
+    },
+    async reconcileRoadmapPhaseExecution(request) {
+      if (!isPhaseExecutionReconciliationRequestV3(request)) {
+        throw new Error("invalid phase execution reconciliation request");
+      }
+      const outcome = await call<unknown>("agent_notes_phase_binding", { request });
+      if (!isPhaseExecutionReconciliationOutcome(outcome)) {
+        throw new Error("invalid phase execution reconciliation response");
+      }
       return outcome;
     },
     async previewManualCompletionApproval(phaseId, expectedRevision) {

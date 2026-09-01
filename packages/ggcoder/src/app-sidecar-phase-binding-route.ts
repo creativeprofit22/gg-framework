@@ -2,6 +2,7 @@ import {
   isPhaseBindingProtocolRequest,
   type PhaseBindingOutcome,
   type PhaseBindingProtocolRequest,
+  type PhaseExecutionReconciliationOutcome,
   type PhaseLeaseOutcome,
 } from "@kenkaiiii/gg-core/phase-binding-protocol";
 import { requestPathname } from "./app-sidecar-http-json.js";
@@ -20,7 +21,7 @@ export function parsePhaseBindingBody(value: unknown): PhaseBindingProtocolReque
 }
 
 export function phaseBindingHttpStatus(
-  outcome: PhaseBindingOutcome | PhaseLeaseOutcome,
+  outcome: PhaseBindingOutcome | PhaseLeaseOutcome | PhaseExecutionReconciliationOutcome,
 ): number {
   switch (outcome.status) {
     case "committed":
@@ -29,11 +30,13 @@ export function phaseBindingHttpStatus(
     case "inspected":
     case "acquired":
     case "renewed":
+    case "reconciled":
       return 200;
     case "phase-not-found":
     case "missing":
       return 404;
     case "corrupt":
+    case "lease-corrupt":
       return 500;
     default:
       return 409;

@@ -1528,14 +1528,19 @@ async fn agent_notes_phase_binding(
     request: serde_json::Value,
     client: tauri::State<'_, reqwest::Client>,
 ) -> Result<serde_json::Value, String> {
+    validate_public_phase_binding_request(&request)?;
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
+    let kind = match request.get("version").and_then(serde_json::Value::as_u64) {
+        Some(3) => RoadmapTypedResponseKind::PhaseExecutionReconciliation,
+        _ => RoadmapTypedResponseKind::PhaseBinding,
+    };
     roadmap_typed_request(
         client
             .post(format!("{}{NOTES_PHASE_BINDING_PATH}", sidecar_base(port)))
             .header("x-gg-session", &gg_sid)
             .json(&request),
-        RoadmapTypedResponseKind::PhaseBinding,
+        kind,
     )
     .await
 }
@@ -1593,10 +1598,23 @@ async fn agent_notes_completion_approval_commit(
 
 const ROADMAP_TYPED_RESPONSE_MAX_BYTES: usize = 256 * 1024;
 const ROADMAP_TYPED_RESPONSE_ERROR: &str = "invalid Roadmap response from daemon";
+const PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR: &str =
+    "invalid phase execution reconciliation request";
+
+fn validate_public_phase_binding_request(request: &serde_json::Value) -> Result<(), String> {
+    if request.get("version").and_then(serde_json::Value::as_u64) == Some(3)
+        && !is_phase_execution_reconciliation_request(request)
+    {
+        return Err(PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR.to_string());
+    }
+    Ok(())
+}
+
 
 #[derive(Clone, Copy)]
 enum RoadmapTypedResponseKind {
     PhaseBinding,
+    PhaseExecutionReconciliation,
     ManualCompletionPreview,
     ManualCompletionCommit,
 }
@@ -1617,7 +1635,7 @@ async fn roadmap_typed_response(
     kind: RoadmapTypedResponseKind,
 ) -> Result<serde_json::Value, String> {
     let status = response.status();
-    if !matches!(status.as_u16(), 200 | 404 | 409 | 410) {
+    if !matches!(status.as_u16(), 200 | 404 | 409 | 410 | 500) {
         return Err(ROADMAP_TYPED_RESPONSE_ERROR.to_string());
     }
     let is_json = response
@@ -1673,6 +1691,25 @@ fn is_roadmap_typed_outcome(
             | "missing-session-path" => http_status == 409,
             _ => false,
         },
+        RoadmapTypedResponseKind::PhaseExecutionReconciliation => match status {
+            "reconciled" | "duplicate" => http_status == 200,
+            "phase-not-found" | "missing" => http_status == 404,
+            "corrupt" | "lease-corrupt" => http_status == 500,
+            "stale-revision"
+            | "operation-conflict"
+            | "project-mismatch"
+            | "phase-archived"
+            | "phase-terminal"
+            | "execution-missing"
+            | "reconciliation-not-required"
+            | "repository-mismatch"
+            | "plan-mismatch"
+            | "plan-hash-mismatch"
+            | "workspace-mismatch"
+            | "phase-lease-lost"
+            | "missing-session-path" => http_status == 409,
+            _ => false,
+        },
         RoadmapTypedResponseKind::ManualCompletionPreview => match status {
             "ready" => http_status == 200,
             "missing" => http_status == 404,
@@ -1690,6 +1727,9 @@ fn is_roadmap_typed_outcome(
     status_matches
         && match kind {
             RoadmapTypedResponseKind::PhaseBinding => is_phase_binding_outcome(value),
+            RoadmapTypedResponseKind::PhaseExecutionReconciliation => {
+                is_phase_execution_reconciliation_outcome(value)
+            }
             RoadmapTypedResponseKind::ManualCompletionPreview => {
                 is_manual_completion_preview_outcome(value)
             }
@@ -1719,6 +1759,221 @@ fn is_roadmap_bounded_string(value: Option<&serde_json::Value>, max_length: usiz
         .is_some_and(|candidate| {
             !candidate.trim().is_empty() && candidate.encode_utf16().count() <= max_length
         })
+}
+
+fn is_roadmap_lower_hex(value: Option<&serde_json::Value>, length: usize) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| {
+            candidate.len() == length
+                && candidate
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+fn is_roadmap_timestamp(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|candidate| chrono::DateTime::parse_from_rfc3339(candidate).is_ok())
+}
+
+fn is_roadmap_safe_relative_path(value: Option<&serde_json::Value>) -> bool {
+    let Some(candidate) = value.and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    if !is_roadmap_bounded_string(value, 4096)
+        || candidate.contains('\0')
+        || candidate.starts_with('/')
+        || candidate.starts_with('\\')
+        || candidate.as_bytes().get(1) == Some(&b':')
+    {
+        return false;
+    }
+    candidate
+        .split(['/', '\\'])
+        .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn is_notes_repository_identity(value: Option<&serde_json::Value>) -> bool {
+    let Some(object) = value
+        .and_then(serde_json::Value::as_object)
+        .filter(|object| has_exact_keys(object, &["projectKey", "identityHash", "rootCommit"]))
+    else {
+        return false;
+    };
+    is_roadmap_bounded_string(object.get("projectKey"), 4096)
+        && is_roadmap_lower_hex(object.get("identityHash"), 64)
+        && object
+            .get("rootCommit")
+            .is_some_and(|commit| commit.is_null() || is_roadmap_lower_hex(Some(commit), 40))
+}
+
+fn is_phase_execution_reconciliation_request(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object().filter(|object| {
+        has_exact_keys(
+            object,
+            &[
+                "version",
+                "action",
+                "phaseId",
+                "expectedProjectKey",
+                "expectedRevision",
+                "operationId",
+                "repository",
+                "plan",
+                "workspace",
+            ],
+        )
+    }) else {
+        return false;
+    };
+    let Some(plan) = object
+        .get("plan")
+        .and_then(serde_json::Value::as_object)
+        .filter(|plan| {
+            has_exact_keys(
+                plan,
+                &[
+                    "planId",
+                    "contentHash",
+                    "snapshotPath",
+                    "approvedAt",
+                    "approvedRevision",
+                    "baseCommit",
+                ],
+            )
+        })
+    else {
+        return false;
+    };
+    let Some(workspace) = object
+        .get("workspace")
+        .and_then(serde_json::Value::as_object)
+        .filter(|workspace| {
+            has_exact_keys(
+                workspace,
+                &[
+                    "version",
+                    "repository",
+                    "headCommit",
+                    "worktreeDigest",
+                    "clean",
+                ],
+            )
+        })
+    else {
+        return false;
+    };
+    object.get("version").and_then(serde_json::Value::as_u64) == Some(3)
+        && object.get("action").and_then(serde_json::Value::as_str) == Some("reconcile-execution")
+        && is_roadmap_bounded_string(object.get("phaseId"), 256)
+        && is_roadmap_bounded_string(object.get("expectedProjectKey"), 4096)
+        && is_roadmap_revision(object.get("expectedRevision"))
+        && is_roadmap_bounded_string(object.get("operationId"), 256)
+        && is_notes_repository_identity(object.get("repository"))
+        && is_roadmap_bounded_string(plan.get("planId"), 256)
+        && is_roadmap_lower_hex(plan.get("contentHash"), 64)
+        && is_roadmap_safe_relative_path(plan.get("snapshotPath"))
+        && is_roadmap_timestamp(plan.get("approvedAt"))
+        && is_roadmap_revision(plan.get("approvedRevision"))
+        && plan
+            .get("baseCommit")
+            .is_some_and(|commit| commit.is_null() || is_roadmap_lower_hex(Some(commit), 40))
+        && workspace.get("version").and_then(serde_json::Value::as_u64) == Some(1)
+        && is_notes_repository_identity(workspace.get("repository"))
+        && workspace.get("repository") == object.get("repository")
+        && is_roadmap_lower_hex(workspace.get("headCommit"), 40)
+        && is_roadmap_lower_hex(workspace.get("worktreeDigest"), 64)
+        && workspace
+            .get("clean")
+            .and_then(serde_json::Value::as_bool)
+            .is_some()
+}
+
+fn is_roadmap_bounded_string_array(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items.len() <= 10_000
+                && items
+                    .iter()
+                    .all(|item| is_roadmap_bounded_string(Some(item), 256))
+        })
+}
+
+fn is_project_notes_corrupt_reason(value: &serde_json::Value) -> bool {
+    value.is_null()
+        || value.as_str().is_some_and(|reason| {
+            matches!(
+                reason,
+                "malformed-json" | "invalid-envelope" | "project-key-mismatch"
+            )
+        })
+}
+
+fn is_phase_execution_reconciliation_outcome(value: &serde_json::Value) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    match status {
+        "reconciled" | "duplicate" => exact_roadmap_object(
+            value,
+            &[
+                "status",
+                "revision",
+                "phaseId",
+                "preservedStepIds",
+                "revalidationStepIds",
+                "revalidationEvidenceCount",
+                "reconciledAt",
+            ],
+        )
+        .is_some_and(|object| {
+            is_roadmap_revision(object.get("revision"))
+                && is_roadmap_bounded_string(object.get("phaseId"), 256)
+                && is_roadmap_bounded_string_array(object.get("preservedStepIds"))
+                && is_roadmap_bounded_string_array(object.get("revalidationStepIds"))
+                && is_roadmap_revision(object.get("revalidationEvidenceCount"))
+                && is_roadmap_timestamp(object.get("reconciledAt"))
+        }),
+        "stale-revision" | "operation-conflict" => {
+            exact_roadmap_object(value, &["status", "revision"])
+                .is_some_and(|object| is_roadmap_revision(object.get("revision")))
+        }
+        "project-mismatch" => {
+            exact_roadmap_object(value, &["status", "revision", "currentProjectKey"]).is_some_and(
+                |object| {
+                    is_roadmap_revision(object.get("revision"))
+                        && is_roadmap_bounded_string(object.get("currentProjectKey"), 4096)
+                },
+            )
+        }
+        "phase-not-found"
+        | "phase-archived"
+        | "phase-terminal"
+        | "execution-missing"
+        | "reconciliation-not-required"
+        | "repository-mismatch"
+        | "plan-mismatch"
+        | "plan-hash-mismatch"
+        | "workspace-mismatch"
+        | "phase-lease-lost"
+        | "lease-corrupt"
+        | "missing-session-path"
+        | "missing" => exact_roadmap_object(value, &["status"]).is_some(),
+        "corrupt" => {
+            exact_roadmap_object(value, &["status", "primary", "backup"]).is_some_and(|object| {
+                object
+                    .get("primary")
+                    .is_some_and(is_project_notes_corrupt_reason)
+                    && object
+                        .get("backup")
+                        .is_some_and(is_project_notes_corrupt_reason)
+            })
+        }
+        _ => false,
+    }
 }
 
 fn is_notes_session_link(value: Option<&serde_json::Value>) -> bool {
@@ -10056,6 +10311,24 @@ mod tests {
             ),
             (
                 reqwest::StatusCode::OK,
+                serde_json::json!({
+                    "status": "reconciled",
+                    "revision": 8,
+                    "phaseId": "phase-1",
+                    "preservedStepIds": ["step-1"],
+                    "revalidationStepIds": ["step-2"],
+                    "revalidationEvidenceCount": 1,
+                    "reconciledAt": "2026-08-31T10:05:00.000Z"
+                }),
+                RoadmapTypedResponseKind::PhaseExecutionReconciliation,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                serde_json::json!({ "status": "workspace-mismatch" }),
+                RoadmapTypedResponseKind::PhaseExecutionReconciliation,
+            ),
+            (
+                reqwest::StatusCode::OK,
                 serde_json::json!({ "status": "ready", "checkpoint": checkpoint }),
                 RoadmapTypedResponseKind::ManualCompletionPreview,
             ),
@@ -10146,6 +10419,12 @@ mod tests {
                 "application/json",
                 r#"{"status":"corrupt","primary":"malformed-json","backup":null}"#,
                 RoadmapTypedResponseKind::PhaseBinding,
+            ),
+            (
+                reqwest::StatusCode::CONFLICT,
+                "application/json",
+                r#"{"status":"workspace-mismatch","detail":"unexpected"}"#,
+                RoadmapTypedResponseKind::PhaseExecutionReconciliation,
             ),
         ];
 
@@ -11057,6 +11336,53 @@ mod tests {
         assert!(error.contains("cancel_failed"));
         assert!(error.contains("runState"));
         assert!(error.contains("running"));
+    }
+
+    #[test]
+    fn phase_reconciliation_native_boundary_rejects_malformed_requests() {
+        let repository = serde_json::json!({
+            "projectKey": "c:/project",
+            "identityHash": "a".repeat(64),
+            "rootCommit": "b".repeat(40)
+        });
+        let request = serde_json::json!({
+            "version": 3,
+            "action": "reconcile-execution",
+            "phaseId": "phase-1",
+            "expectedProjectKey": "c:/project",
+            "expectedRevision": 4,
+            "operationId": "reconcile-1",
+            "repository": repository.clone(),
+            "plan": {
+                "planId": "plan-1",
+                "contentHash": "c".repeat(64),
+                "snapshotPath": ".gg/plans/plan-1.md",
+                "approvedAt": "2026-08-31T10:00:00.000Z",
+                "approvedRevision": 3,
+                "baseCommit": "b".repeat(40)
+            },
+            "workspace": {
+                "version": 1,
+                "repository": repository.clone(),
+                "headCommit": "d".repeat(40),
+                "worktreeDigest": "e".repeat(64),
+                "clean": true
+            }
+        });
+        assert_eq!(validate_public_phase_binding_request(&request), Ok(()));
+
+        let mut malformed = request.clone();
+        malformed["workspace"]["clean"] = serde_json::json!("yes");
+        assert_eq!(
+            validate_public_phase_binding_request(&malformed),
+            Err(PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR.to_string())
+        );
+        let mut extra = request;
+        extra["unexpected"] = serde_json::json!(true);
+        assert_eq!(
+            validate_public_phase_binding_request(&extra),
+            Err(PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR.to_string())
+        );
     }
 
     #[test]

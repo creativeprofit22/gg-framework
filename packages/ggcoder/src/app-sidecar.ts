@@ -4661,9 +4661,11 @@ ${checkpoints}`;
             return;
           }
           const binding =
-            request.version === 2
-              ? phaseBinding.lease(request, session)
-              : phaseBinding.bind(request, session);
+            request.version === 3
+              ? phaseBinding.reconcilePhaseExecution(request, session)
+              : request.version === 2
+                ? phaseBinding.lease(request, session)
+                : phaseBinding.bind(request, session);
           return binding.then((outcome) => {
             json(res, phaseBindingHttpStatus(outcome), outcome);
           });
@@ -7374,7 +7376,9 @@ ${checkpoints}`;
     kenAutoAbort.abort();
     await kenSession?.dispose().catch(() => {});
     await kenAutoSession?.dispose().catch(() => {});
-    await session.dispose().catch((error) => captureSidecarError(error, "app-sidecar.session-disposal"));
+    await session
+      .dispose()
+      .catch((error) => captureSidecarError(error, "app-sidecar.session-disposal"));
   }
 
   return {

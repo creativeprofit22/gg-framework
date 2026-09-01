@@ -32,6 +32,8 @@ import type {
   ProjectNotesSnapshot,
   ProjectNotesStorageDiagnostics,
   PhaseBindingOutcome,
+  PhaseExecutionReconciliationOutcome,
+  PhaseExecutionReconciliationRequestV3,
   ReminderClaimOutcome,
   ReminderReserveOutcome,
 } from "./notes-types";
@@ -306,6 +308,8 @@ class FakeProjectNotesClient implements NotesClient {
   readonly claimCalls: Array<{ leaseToken: string; channel: string; permission: string }> = [];
   readonly reserveOutcomes: ReminderReserveOutcome[] = [];
   claimOutcome: ReminderClaimOutcome | null = null;
+  readonly reconciliationCalls: PhaseExecutionReconciliationRequestV3[] = [];
+  reconciliationOutcome: PhaseExecutionReconciliationOutcome = { status: "missing" };
   constructor(cwd: string) {
     this.cwd = cwd;
   }
@@ -348,6 +352,22 @@ class FakeProjectNotesClient implements NotesClient {
     return { status: "missing" };
   }
 
+  async reconcileRoadmapPhaseExecution(
+    request: PhaseExecutionReconciliationRequestV3,
+  ): Promise<PhaseExecutionReconciliationOutcome> {
+    this.reconciliationCalls.push(request);
+    const outcome = this.reconciliationOutcome;
+    if (outcome.status !== "reconciled" && outcome.status !== "duplicate") return outcome;
+    const projectKey = canonicalProjectKey(this.cwd);
+    const current = this.snapshots.get(projectKey);
+    if (!current) return { status: "missing" };
+    const document = structuredClone(current.document);
+    const selectedPhase = document.phases.find((candidate) => candidate.id === request.phaseId);
+    if (!selectedPhase?.execution) return { status: "execution-missing" };
+    selectedPhase.execution.state = "implementing";
+    this.snapshots.set(projectKey, { projectKey, revision: outcome.revision, document });
+    return outcome;
+  }
   async previewManualCompletionApproval(): Promise<ManualCompletionApprovalPreviewOutcome> {
     return { status: "missing" };
   }
@@ -1745,7 +1765,13 @@ describe("ProjectNotes", () => {
             input: { text: "optional", references: "optional", attachments: "optional" },
             source: "custom",
           },
-          { name: "trace", aliases: [], description: "Trace", input: { text: "optional", references: "optional", attachments: "optional" }, source: "custom" },
+          {
+            name: "trace",
+            aliases: [],
+            description: "Trace",
+            input: { text: "optional", references: "optional", attachments: "optional" },
+            source: "custom",
+          },
         ]}
         onRunCommand={onRunCommand}
       />,

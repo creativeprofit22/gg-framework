@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { PhaseBindingOutcome } from "@kenkaiiii/gg-core/phase-binding-protocol";
+import type {
+  PhaseBindingOutcome,
+  PhaseExecutionReconciliationRequestV3,
+} from "@kenkaiiii/gg-core/phase-binding-protocol";
 import {
   isPhaseBindingRoute,
   parsePhaseBindingBody,
@@ -18,6 +21,39 @@ const body = {
   },
   operationId: "operation-1",
   confirmRebind: true,
+};
+
+const reconciliationRequest: PhaseExecutionReconciliationRequestV3 = {
+  version: 3,
+  action: "reconcile-execution",
+  phaseId: "phase-1",
+  expectedProjectKey: "c:/work/project",
+  expectedRevision: 4,
+  operationId: "reconcile-1",
+  plan: {
+    planId: "plan-1",
+    contentHash: "a".repeat(64),
+    snapshotPath: ".gg/plans/plan-1.md",
+    approvedAt: "2026-08-31T10:00:00.000Z",
+    approvedRevision: 3,
+    baseCommit: "c".repeat(40),
+  },
+  repository: {
+    projectKey: "c:/work/project",
+    identityHash: "b".repeat(64),
+    rootCommit: "c".repeat(40),
+  },
+  workspace: {
+    version: 1,
+    repository: {
+      projectKey: "c:/work/project",
+      identityHash: "b".repeat(64),
+      rootCommit: "c".repeat(40),
+    },
+    headCommit: "d".repeat(40),
+    worktreeDigest: "e".repeat(64),
+    clean: true,
+  },
 };
 
 describe("phase binding route", () => {
@@ -63,6 +99,17 @@ describe("phase binding route", () => {
   ] as const)("maps %o to HTTP %s", (outcome, status) => {
     expect(phaseBindingHttpStatus(outcome as PhaseBindingOutcome)).toBe(status);
   });
+  it("parses reconciliation and rejects malformed payloads", () => {
+    expect(parsePhaseBindingBody(reconciliationRequest)).toEqual(reconciliationRequest);
+    expect(
+      parsePhaseBindingBody({
+        ...reconciliationRequest,
+        workspace: { ...reconciliationRequest.workspace, clean: "yes" },
+      }),
+    ).toBeNull();
+    expect(parsePhaseBindingBody({ ...reconciliationRequest, unexpected: true })).toBeNull();
+  });
+
   it("rejects caller-supplied V2 predecessor proof", () => {
     expect(
       parsePhaseBindingBody({
@@ -115,4 +162,19 @@ describe("phase binding route", () => {
     expect(phaseBindingHttpStatus(outcome as PhaseBindingOutcome)).toBe(status);
   });
 
+  it("maps reconciliation success and typed denials without translation", () => {
+    expect(
+      phaseBindingHttpStatus({
+        status: "reconciled",
+        revision: 5,
+        phaseId: "phase-1",
+        preservedStepIds: ["step-1"],
+        revalidationStepIds: ["step-2"],
+        revalidationEvidenceCount: 1,
+        reconciledAt: "2026-08-31T10:05:00.000Z",
+      }),
+    ).toBe(200);
+    expect(phaseBindingHttpStatus({ status: "workspace-mismatch" })).toBe(409);
+    expect(phaseBindingHttpStatus({ status: "lease-corrupt" })).toBe(500);
+  });
 });

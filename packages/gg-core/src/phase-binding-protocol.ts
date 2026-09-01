@@ -98,7 +98,7 @@ export interface PhaseLeaseRequestV2 {
 export type PhaseBindingProtocolRequest =
   | PhaseBindingRequest
   | PhaseLeaseRequestV2
-;
+  | PhaseExecutionReconciliationRequestV3;
 
 export type PhaseLeaseOutcome =
   | {
@@ -351,7 +351,8 @@ export function isPhaseBindingProtocolRequest(
 ): value is PhaseBindingProtocolRequest {
   return (
     isPhaseBindingRequest(value) ||
-    isPhaseLeaseRequest(value)
+    isPhaseLeaseRequest(value) ||
+    isPhaseExecutionReconciliationRequestV3(value)
   );
 }
 
@@ -505,8 +506,7 @@ export function isPhaseLeaseOutcome(value: unknown): value is PhaseLeaseOutcome 
       isRevision(value.roadmapRevision) &&
       isRevision(value.leaseRevision) &&
       isBoundedString(value.phaseId, MAX_ID_LENGTH) &&
-      (value.lease === null ||
-        (isPhaseLease(value.lease) && value.lease.phaseId === value.phaseId))
+      (value.lease === null || (isPhaseLease(value.lease) && value.lease.phaseId === value.phaseId))
     );
   }
   if (

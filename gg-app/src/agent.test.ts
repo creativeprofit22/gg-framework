@@ -12,6 +12,39 @@ vi.mock("@tauri-apps/plugin-log", () => ({ error: vi.fn(), info: vi.fn() }));
 
 import { createPaneAgentClient } from "./agent";
 
+const reconciliationRequest = {
+  version: 3 as const,
+  action: "reconcile-execution" as const,
+  phaseId: "phase-1",
+  expectedProjectKey: "c:/work/project",
+  expectedRevision: 4,
+  operationId: "reconcile-1",
+  repository: {
+    projectKey: "c:/work/project",
+    identityHash: "a".repeat(64),
+    rootCommit: "b".repeat(40),
+  },
+  plan: {
+    planId: "plan-1",
+    contentHash: "c".repeat(64),
+    snapshotPath: ".gg/plans/plan-1.md",
+    approvedAt: "2026-08-31T10:00:00.000Z",
+    approvedRevision: 3,
+    baseCommit: "b".repeat(40),
+  },
+  workspace: {
+    version: 1 as const,
+    repository: {
+      projectKey: "c:/work/project",
+      identityHash: "a".repeat(64),
+      rootCommit: "b".repeat(40),
+    },
+    headCommit: "d".repeat(40),
+    worktreeDigest: "e".repeat(64),
+    clean: true,
+  },
+};
+
 const diagnostics = {
   version: 1,
   applicationIdentity: "com.ggcoder.local-fork",
@@ -65,6 +98,47 @@ describe("pane Notes storage diagnostics", () => {
     });
   });
 
+  it("propagates exact reconciliation success and typed denials", async () => {
+    const reconciled = {
+      status: "reconciled",
+      revision: 5,
+      phaseId: "phase-1",
+      preservedStepIds: ["step-1"],
+      revalidationStepIds: ["step-2"],
+      revalidationEvidenceCount: 1,
+      reconciledAt: "2026-08-31T10:05:00.000Z",
+    };
+    invoke
+      .mockResolvedValueOnce(reconciled)
+      .mockResolvedValueOnce({ status: "workspace-mismatch" });
+    const client = createPaneAgentClient("pane-a");
+
+    await expect(client.reconcileRoadmapPhaseExecution(reconciliationRequest)).resolves.toEqual(
+      reconciled,
+    );
+    await expect(client.reconcileRoadmapPhaseExecution(reconciliationRequest)).resolves.toEqual({
+      status: "workspace-mismatch",
+    });
+    expect(invoke).toHaveBeenCalledWith("agent_notes_phase_binding", {
+      paneId: "pane-a",
+      request: reconciliationRequest,
+    });
+  });
+  it("rejects malformed reconciliation requests and responses", async () => {
+    const client = createPaneAgentClient("pane-a");
+    await expect(
+      client.reconcileRoadmapPhaseExecution({
+        ...reconciliationRequest,
+        workspace: { ...reconciliationRequest.workspace, clean: "yes" },
+      } as never),
+    ).rejects.toThrow("invalid phase execution reconciliation request");
+    expect(invoke).not.toHaveBeenCalled();
+
+    invoke.mockResolvedValue({ status: "workspace-mismatch", detail: "unexpected" });
+    await expect(client.reconcileRoadmapPhaseExecution(reconciliationRequest)).rejects.toThrow(
+      "invalid phase execution reconciliation response",
+    );
+  });
   it("parses typed manual completion domain outcomes", async () => {
     invoke
       .mockResolvedValueOnce({ status: "unmet-gate", revision: 2, code: "stale-verification" })

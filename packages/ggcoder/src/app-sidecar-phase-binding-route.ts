@@ -30,6 +30,7 @@ export function phaseBindingHttpStatus(
     case "inspected":
     case "acquired":
     case "renewed":
+    case "released":
     case "reconciled":
       return 200;
     case "phase-not-found":

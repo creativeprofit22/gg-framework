@@ -613,3 +613,86 @@ describe("compaction checkpoint", () => {
     expect(events).not.toContain("compaction-end");
   });
 });
+
+describe("durable approval checkpoint", () => {
+  it("persists the canonical plan before moving the lease to a fresh session", async () => {
+    const events: string[] = [];
+    const session = createSession(events);
+    const repository: PhaseCheckpointRepository = {
+      approvePhaseExecutionPlan: vi.fn(async () => {
+        events.push("durable-plan-persisted");
+        return { status: "committed" as const, snapshot, phase: successfulOutcome.phase };
+      }),
+      load: vi.fn(async () => ({ status: "ok" as const, snapshot, recoveredFromBackup: false })),
+      updatePhaseSessionLink: vi.fn(async () => {
+        events.push("unexpected-session-link");
+        return successfulOutcome;
+      }),
+    };
+    const handoffSnapshot = { ...snapshot, revision: snapshot.revision + 1 };
+    const request = {
+      operationId: "plan-1",
+      phaseId: context.phase.id,
+      expectedRevision: 1,
+      repository: {
+        projectKey: context.projectKey,
+        identityHash: "1".repeat(64),
+        rootCommit: "2".repeat(40),
+      },
+      plan: {
+        planId: "plan-1",
+        contentHash: "3".repeat(64),
+        snapshotPath: ".gg/plans/approved/plan-1.md",
+        approvedAt: "2026-08-30T10:00:00.000Z",
+        approvedRevision: 2,
+        baseCommit: "4".repeat(40),
+        steps: [
+          {
+            id: "5".repeat(64),
+            index: 1,
+            text: "Persist plan",
+            state: "pending" as const,
+            completedAt: null,
+            workspace: null,
+          },
+        ],
+      },
+      lastSession: context.session,
+    };
+
+    await expect(
+      commitPlanApprovalCheckpoint({
+        session,
+        repository,
+        cwd: "/project",
+        planPath: request.plan.snapshotPath,
+        durablePlan: {
+          request,
+          mutateWithLeaseFence: async (operation) => {
+            events.push("lease-fence-validated");
+            return { status: "executed" as const, value: await operation() };
+          },
+          moveLeaseToFreshSession: async (received) => {
+            expect(received).toBe(snapshot);
+            events.push("lease-moved");
+            return handoffSnapshot;
+          },
+        },
+        prepareFreshSession: async () => {
+          events.push("fresh-session-prepared");
+          return 1;
+        },
+      }),
+    ).resolves.toMatchObject({
+      planTotal: 1,
+      phaseLink: { status: "synchronized", snapshot: handoffSnapshot },
+    });
+    expect(events).toEqual([
+      "lease-fence-validated",
+      "durable-plan-persisted",
+      "fresh-session-prepared",
+      "lease-moved",
+      "stage-persisted",
+    ]);
+  });
+});

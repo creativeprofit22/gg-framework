@@ -174,10 +174,10 @@ export class RoadmapPhaseLeaseRepository {
         currentProjectKey: context.projectKey,
       };
     }
-    if (context.phaseStatus === "done") {
+    if (request.action !== "release" && context.phaseStatus === "done") {
       return { status: "phase-terminal" };
     }
-    if (request.planId !== context.planId) {
+    if (request.action !== "release" && request.planId !== context.planId) {
       return { status: "plan-mismatch" };
     }
 
@@ -245,9 +245,17 @@ export class RoadmapPhaseLeaseRepository {
   ): Promise<PhaseLeaseOutcome> {
     const { request, context, holder } = input;
     const current = state.leases[request.phaseId] ?? null;
-    if (request.action === "renew") {
+    if (request.action === "renew" || request.action === "release") {
       if (!current || !tokenMatches(request, current) || !sameHolder(current.holder, holder)) {
         return leaseFailure("phase-lease-lost", context, state, current);
+      }
+      if (request.action === "release") {
+        if ((input.runState ?? current.runState) === "running") {
+          return leaseFailure("phase-lease-held", context, state, current);
+        }
+        delete state.leases[request.phaseId];
+        state.leaseRevision += 1;
+        return leaseOutcome("released", context, state, null);
       }
       const now = this.now();
       const renewed = {
@@ -336,7 +344,7 @@ async function defaultProcessLiveness(
 }
 
 function leaseOutcome(
-  status: "inspected" | "acquired" | "renewed",
+  status: "inspected" | "acquired" | "renewed" | "released",
   context: PhaseLeaseContext,
   state: StoredPhaseLeasesV1,
   lease: StoredPhaseLeaseV1 | null,
@@ -420,6 +428,7 @@ function duplicateOutcome(outcome: PhaseLeaseOutcome): PhaseLeaseOutcome {
   if (
     outcome.status === "acquired" ||
     outcome.status === "renewed" ||
+    outcome.status === "released" ||
     outcome.status === "inspected"
   ) {
     return { ...outcome, status: "duplicate" };
@@ -429,7 +438,7 @@ function duplicateOutcome(outcome: PhaseLeaseOutcome): PhaseLeaseOutcome {
 
 function isCommittedOutcome(outcome: PhaseLeaseOutcome): boolean {
   return (
-    outcome.status === "acquired" || outcome.status === "renewed"
+    outcome.status === "acquired" || outcome.status === "renewed" || outcome.status === "released"
   );
 }
 

@@ -138,6 +138,83 @@ describe("roadmap phase lease repository", () => {
     expect(conflict).toMatchObject({ status: "operation-conflict", leaseRevision: 1 });
   });
 
+  it("denies running release, then idempotently releases the settled holder", async () => {
+    const leases = repository();
+    const acquired = await leases.execute({
+      cwd,
+      request: request("acquire", "acquire"),
+      holder: holderA,
+      context,
+    });
+    if (acquired.status !== "acquired" || !acquired.lease) throw new Error("expected lease");
+    now += 30_000;
+    const token = { leaseId: acquired.lease.leaseId, fence: acquired.lease.fence };
+    await expect(
+      leases.execute({
+        cwd,
+        request: request("release", "release-local-running", token),
+        holder: holderA,
+        context,
+        runState: "running",
+      }),
+    ).resolves.toMatchObject({ status: "phase-lease-held", leaseRevision: 1 });
+    const renewed = await leases.execute({
+      cwd,
+      request: request("renew", "renew-running", token),
+      holder: holderA,
+      context,
+      runState: "running",
+    });
+    expect(renewed).toMatchObject({
+      status: "renewed",
+      roadmapRevision: context.roadmapRevision,
+      leaseRevision: 2,
+      lease: { fence: token.fence, runState: "running" },
+    });
+    expect(
+      await leases.execute({
+        cwd,
+        request: request("release", "release-running", token),
+        holder: holderA,
+        context,
+      }),
+    ).toMatchObject({ status: "phase-lease-held", leaseRevision: 2 });
+
+    await leases.execute({
+      cwd,
+      request: request("renew", "renew-idle", token),
+      holder: holderA,
+      context,
+      runState: "idle",
+    });
+    await expect(
+      leases.execute({
+        cwd,
+        request: request("release", "stale-holder-release", token),
+        holder: holderB,
+        context,
+      }),
+    ).resolves.toMatchObject({ status: "phase-lease-lost", leaseRevision: 3 });
+    const releaseInput = {
+      cwd,
+      request: request("release", "release", token),
+      holder: holderA,
+      context: { ...context, phaseStatus: "done" as const, planId: null },
+    };
+    const released = await leases.execute(releaseInput);
+    const duplicate = await leases.execute(releaseInput);
+    expect(released).toMatchObject({ status: "released", leaseRevision: 4, lease: null });
+    expect(duplicate).toMatchObject({ status: "duplicate", leaseRevision: 4, lease: null });
+    expect(
+      await leases.execute({
+        cwd,
+        request: request("renew", "stale-renew", token),
+        holder: holderA,
+        context,
+      }),
+    ).toMatchObject({ status: "phase-lease-lost", leaseRevision: 4 });
+  });
+
   it("executes mutations only for the current unexpired fence", async () => {
     const leases = repository();
     const acquired = await leases.execute({

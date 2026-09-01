@@ -152,6 +152,7 @@ export function createAppSidecarRoadmapPhaseAdvancementCoordinator(options: {
   mutateWithLeaseFence?<T>(
     operation: () => Promise<T>,
   ): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }>;
+  releaseCompletedPhaseLease?(operationId: string): Promise<void>;
 }): AppSidecarRoadmapPhaseAdvancementCoordinator {
   const now = options.now ?? (() => new Date().toISOString());
 
@@ -183,6 +184,7 @@ export function createAppSidecarRoadmapPhaseAdvancementCoordinator(options: {
     const outcome = mutation.value;
     if (outcome.status === "accepted" || outcome.status === "already-bound") {
       options.onCommittedSnapshot?.(outcome.snapshot);
+      await options.releaseCompletedPhaseLease?.(`${outcome.operationId}:phase-lease-release`);
       await session.setActivePhaseContext(
         createActivePhaseContext({
           projectKey: outcome.snapshot.projectKey,

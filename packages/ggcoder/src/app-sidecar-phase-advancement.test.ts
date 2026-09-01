@@ -392,14 +392,25 @@ describe("AppSidecarRoadmapPhaseAdvancementCoordinator", () => {
       },
     };
     let context: ActivePhaseContextV1 | undefined;
+    const lifecycle: string[] = [];
     const session: RoadmapPhaseAdvancementSession = {
       getState: () => ({ cwd: "/project", ...sessionLink }),
       async setActivePhaseContext(next) {
+        lifecycle.push("context");
         context = next;
       },
     };
+    let leaseMutations = 0;
+    const mutateWithLeaseFence = async <T>(operation: () => Promise<T>) => {
+      leaseMutations += 1;
+      return { status: "executed" as const, value: await operation() };
+    };
     const coordinator = createAppSidecarRoadmapPhaseAdvancementCoordinator({
       repository,
+      mutateWithLeaseFence,
+      releaseCompletedPhaseLease: async (operationId) => {
+        lifecycle.push(`release:${operationId}`);
+      },
       now: () => LATER,
     });
 
@@ -412,6 +423,11 @@ describe("AppSidecarRoadmapPhaseAdvancementCoordinator", () => {
           destinationSession: sessionLink,
         }),
       ],
+    ]);
+    expect(leaseMutations).toBe(1);
+    expect(lifecycle).toEqual([
+      "release:automatic-phase-advancement:checkpoint-auto:phase-lease-release",
+      "context",
     ]);
     expect(context).toMatchObject({
       phase: { id: "next" },

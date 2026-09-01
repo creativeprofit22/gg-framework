@@ -113,12 +113,14 @@ export function restorePhaseImplementationPlanEvidence(input: {
     const completed = plan.steps
       .filter((step) => step.state === "completed")
       .map((step) => step.index);
-    return input.tracker.resolve({
-      phaseId: input.phase.id,
-      session: input.expectedSession,
-      planHash: plan.contentHash,
-      current: { total: plan.steps.length, completed },
-    }) !== null;
+    return (
+      input.tracker.resolve({
+        phaseId: input.phase.id,
+        session: input.expectedSession,
+        planHash: plan.contentHash,
+        current: { total: plan.steps.length, completed },
+      }) !== null
+    );
   }
   if (!input.phase.session || !notesSessionLinksEqual(input.phase.session, input.expectedSession)) {
     return false;
@@ -152,6 +154,7 @@ export interface PhaseCompletionCoordinatorOptions {
   mutateWithLeaseFence?<T>(
     operation: () => Promise<T>,
   ): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }>;
+  releaseCompletedPhaseLease?(operationId: string): Promise<void>;
   onError?(
     error: unknown,
     kind: "implementation-checkpoint" | "completion-settlement" | "completion-recovery",
@@ -177,6 +180,7 @@ export class AppSidecarPhaseCompletionCoordinator {
     const outcome = await this.enqueue("completion-settlement", () =>
       this.options.repository.settlePhaseCompletion(this.options.cwd, request),
     );
+    await this.releaseCompletedLease(outcome, request.completionIntentId);
     return outcome;
   }
 
@@ -192,7 +196,9 @@ export class AppSidecarPhaseCompletionCoordinator {
     }
     const loaded = await repository.load(this.options.cwd);
     if (loaded.status !== "ok") return null;
-    const phase = loaded.snapshot.document.phases.find((candidate) => candidate.id === input.phaseId);
+    const phase = loaded.snapshot.document.phases.find(
+      (candidate) => candidate.id === input.phaseId,
+    );
     const pending = phase?.execution?.pendingCompletion;
     if (!phase?.execution?.plan || !pending) return null;
     if (!repository.settleDurablePhaseCompletion) {
@@ -217,7 +223,10 @@ export class AppSidecarPhaseCompletionCoordinator {
     } catch (error) {
       return { status: "storage-failure", error };
     }
-    if (input.runOutcome !== "succeeded" || !workspaceSnapshotsEqual(workspace, pending.workspace)) {
+    if (
+      input.runOutcome !== "succeeded" ||
+      !workspaceSnapshotsEqual(workspace, pending.workspace)
+    ) {
       return this.enqueue("completion-recovery", () =>
         repository.clearDurablePhaseCompletion!(this.options.cwd, {
           phaseId: phase.id,
@@ -236,7 +245,27 @@ export class AppSidecarPhaseCompletionCoordinator {
         workspace: pending.workspace,
       }),
     );
+    await this.releaseCompletedLease(outcome, pending.completionId);
     return outcome;
+  }
+
+  private async releaseCompletedLease(
+    outcome: PhaseCompletionCoordinatorOutcome,
+    completionId: string,
+  ): Promise<void> {
+    if (
+      (outcome.status === "committed" || outcome.status === "duplicate") &&
+      "phase" in outcome &&
+      outcome.phase.status === "done" &&
+      "advancementCheckpoint" in outcome &&
+      outcome.advancementCheckpoint === null
+    ) {
+      try {
+        await this.options.releaseCompletedPhaseLease?.(`${completionId}:phase-lease-release`);
+      } catch (error) {
+        this.options.onError?.(error, "completion-settlement");
+      }
+    }
   }
 
   private enqueue(

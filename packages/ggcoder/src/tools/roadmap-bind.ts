@@ -68,6 +68,7 @@ const renewSchema = z
     lease: leaseTokenSchema,
   })
   .strict();
+const releaseSchema = renewSchema.extend({ action: z.literal("release") }).strict();
 const takeoverSchema = renewSchema
   .extend({
     action: z.literal("takeover"),
@@ -82,6 +83,7 @@ export const RoadmapBindParams = z.discriminatedUnion("action", [
   rebindSchema,
   acquireSchema,
   renewSchema,
+  releaseSchema,
   takeoverSchema,
 ]);
 
@@ -172,7 +174,7 @@ const rawInputSchema = {
       required: phaseLeaseRequired,
       additionalProperties: false,
     },
-    ...(["renew"] as const).map((action) => ({
+    ...(["renew", "release"] as const).map((action) => ({
       type: "object",
       properties: { action: { const: action }, ...phaseLeaseProperties, lease: leaseProperty },
       required: [...phaseLeaseRequired, "lease"],
@@ -201,7 +203,7 @@ export function createRoadmapBindTool(
   return {
     name: "roadmap_bind",
     description:
-      "Inspect Roadmap binding state; keep V1 session binding compatibility; or acquire, renew, and safely take over V2 phase leases for this authenticated session.",
+      "Inspect Roadmap binding state; keep V1 session binding compatibility; or acquire, renew, release, and safely take over V2 phase leases for this authenticated session.",
     parameters: RoadmapBindParams,
     rawInputSchema,
     executionMode: "sequential",

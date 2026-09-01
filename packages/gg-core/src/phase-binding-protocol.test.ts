@@ -84,7 +84,6 @@ describe("phase binding protocol", () => {
   });
 });
 
-
 describe("phase lease protocol", () => {
   const lease = {
     version: 1,
@@ -133,29 +132,41 @@ describe("phase lease protocol", () => {
     expect(
       isPhaseLeaseRequest({
         ...acquire,
+        action: "release",
+        lease: { leaseId: lease.leaseId, fence: lease.fence },
+      }),
+    ).toBe(true);
+    expect(
+      isPhaseLeaseRequest({
+        ...acquire,
         action: "takeover",
         lease: { leaseId: lease.leaseId, fence: lease.fence },
         confirmTakeover: true,
-        takeoverReason: "Continue recovery in this session",
+        takeoverReason: "Move settled work to this session",
       }),
     ).toBe(true);
   });
 
-  it("rejects release requests and released outcomes", () => {
-    const release = {
-      ...acquire,
-      action: "release",
-      lease: { leaseId: lease.leaseId, fence: lease.fence },
-    };
-    expect(isPhaseLeaseRequest(release)).toBe(false);
-    expect(isPhaseBindingProtocolRequest(release)).toBe(false);
+  it("rejects caller-supplied predecessor proof and private holder tokens", () => {
     expect(
-      isPhaseLeaseOutcome({
-        status: "released",
-        roadmapRevision: 4,
-        leaseRevision: 2,
-        phaseId: "phase-1",
-        lease: null,
+      isPhaseLeaseRequest({
+        ...acquire,
+        action: "takeover",
+        lease: { leaseId: lease.leaseId, fence: lease.fence },
+        confirmTakeover: true,
+        takeoverReason: "Forged supervisor proof",
+        predecessorProof: {
+          daemonInstanceId: "daemon-1",
+          processId: 123,
+          processStartToken: "process-start-1",
+          terminatedAt: "2026-08-30T10:00:31.000Z",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isPhaseLease({
+        ...lease,
+        holder: { ...lease.holder, processStartToken: "process-start-1" },
       }),
     ).toBe(false);
   });
@@ -163,6 +174,7 @@ describe("phase lease protocol", () => {
   it.each([
     { ...acquire, extra: true },
     { ...acquire, action: "renew" },
+    { ...acquire, confirmTakeover: true },
     { ...acquire, planId: "" },
     { ...acquire, expectedRevision: -1 },
     { ...acquire, lease: { leaseId: "lease-1", fence: 0 } },

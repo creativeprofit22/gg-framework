@@ -73,4 +73,52 @@ describe("roadmap_bind tool", () => {
       false,
     );
   });
+
+  it("maps V2 release with the exact lease fence", async () => {
+    const handle = vi.fn(async () => ({
+      status: "released" as const,
+      roadmapRevision: 4,
+      leaseRevision: 8,
+      phaseId: "phase-1",
+      lease: null,
+    }));
+    const tool = createRoadmapBindTool(handle);
+
+    await tool.execute(
+      {
+        action: "release",
+        phase_id: "phase-1",
+        expected_project_key: "c:/work/project",
+        expected_revision: 4,
+        plan_id: "plan-1",
+        operation_id: "release-1",
+        lease: { lease_id: "lease-1", fence: 7 },
+      },
+      {} as never,
+    );
+
+    expect(handle).toHaveBeenCalledWith({
+      version: 2,
+      action: "release",
+      phaseId: "phase-1",
+      expectedProjectKey: "c:/work/project",
+      expectedRevision: 4,
+      planId: "plan-1",
+      operationId: "release-1",
+      lease: { leaseId: "lease-1", fence: 7 },
+      confirmTakeover: false,
+      takeoverReason: null,
+      predecessorProof: null,
+    });
+    expect(
+      RoadmapBindParams.safeParse({
+        action: "release",
+        phase_id: "phase-1",
+        expected_project_key: "c:/work/project",
+        expected_revision: 4,
+        plan_id: "plan-1",
+        operation_id: "release-1",
+      }).success,
+    ).toBe(false);
+  });
 });

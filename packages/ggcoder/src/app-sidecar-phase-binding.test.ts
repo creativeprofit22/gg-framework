@@ -348,6 +348,40 @@ describe("app sidecar phase binding service", () => {
     expect(destination.setRoadmapPhaseLeaseMarker).toHaveBeenCalledTimes(2);
   });
 
+  it("releases the current fence and clears markers after committed or duplicate release", async () => {
+    const { cwd, repository, agentDir } = await setup("lease-release");
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: new RoadmapPhaseLeaseRepository(agentDir, {
+        now: () => new Date("2026-08-30T10:00:00.000Z"),
+        createId: () => "lease-release",
+      }),
+      daemonInstanceId: "daemon-release",
+      processId: 123,
+      processStartToken: "start-release",
+    });
+    const destination = new FakeSession(cwd, sessionB);
+    await service.lease(leaseRequest(cwd, "acquire-release"), destination);
+    const lingeringMarker = destination.leaseMarker;
+    const lingeringContext = destination.active;
+    if (!lingeringMarker || !lingeringContext) throw new Error("expected acquired lease");
+
+    await expect(service.releaseCurrent("release-current", destination)).resolves.toMatchObject({
+      status: "released",
+      lease: null,
+    });
+    expect(destination.leaseMarker).toBeUndefined();
+
+    destination.leaseMarker = lingeringMarker;
+    destination.active = lingeringContext;
+    await expect(service.releaseCurrent("release-current", destination)).resolves.toMatchObject({
+      status: "duplicate",
+      lease: null,
+    });
+    expect(destination.leaseMarker).toBeUndefined();
+    expect(destination.clearReasons).toEqual(["cleared", "cleared"]);
+  });
+
   it("recovers a lease immediately after a proved daemon restart", async () => {
     const { cwd, repository, agentDir } = await setup("supervised-restart");
     const leaseRepository = new RoadmapPhaseLeaseRepository(agentDir, {
@@ -685,9 +719,7 @@ describe("app sidecar phase binding service", () => {
       reconciledAt: "2026-08-31T10:03:00.000Z",
     });
     expect(onCommittedSnapshot).toHaveBeenCalledTimes(2);
-    expect(onCommittedSnapshot).toHaveBeenLastCalledWith(
-      expect.objectContaining({ revision: 4 }),
-    );
+    expect(onCommittedSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ revision: 4 }));
   });
 
   it("denies reconciliation before the repository write when the lease fence is absent", async () => {

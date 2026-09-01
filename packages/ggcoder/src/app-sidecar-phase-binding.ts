@@ -53,6 +53,7 @@ export interface PhaseBindingSession {
 export interface AppSidecarPhaseBindingService {
   bind(request: PhaseBindingRequest, session: PhaseBindingSession): Promise<PhaseBindingOutcome>;
   lease(request: PhaseLeaseRequestV2, session: PhaseBindingSession): Promise<PhaseLeaseOutcome>;
+  releaseCurrent(operationId: string, session: PhaseBindingSession): Promise<PhaseLeaseOutcome>;
   reconcilePhaseExecution(
     request: PhaseExecutionReconciliationRequestV3,
     session: PhaseBindingSession,
@@ -146,6 +147,30 @@ export function createAppSidecarPhaseBindingService(
 
     async lease(request, session) {
       return executePhaseLease(options, request, session);
+    },
+
+    async releaseCurrent(operationId, session) {
+      const marker = session.getRoadmapPhaseLeaseMarker?.();
+      if (!marker) return { status: "missing" };
+      const loaded = await options.repository.load(session.getState().cwd);
+      if (loaded.status !== "ok") return loaded;
+      return executePhaseLease(
+        options,
+        {
+          version: 2,
+          action: "release",
+          phaseId: marker.phaseId,
+          expectedProjectKey: marker.projectKey,
+          expectedRevision: loaded.snapshot.revision,
+          planId: marker.planId,
+          operationId,
+          lease: { leaseId: marker.leaseId, fence: marker.fence },
+          confirmTakeover: false,
+          takeoverReason: null,
+          predecessorProof: null,
+        },
+        session,
+      );
     },
 
     async reconcilePhaseExecution(request, session) {
@@ -547,7 +572,7 @@ async function executePhaseLease(
     (candidate) => candidate.id === request.phaseId,
   );
   if (!phase) return { status: "phase-not-found" };
-  if (phase.archivedAt !== null) {
+  if (phase.archivedAt !== null && request.action !== "release") {
     return { status: "phase-archived" };
   }
   const input = {
@@ -602,6 +627,11 @@ async function executePhaseLease(
       if (latestPhase.status === "done") return { status: "phase-terminal" };
       return { status: "plan-mismatch" };
     }
+  } else if (
+    outcome.status === "released" ||
+    (request.action === "release" && outcome.status === "duplicate" && outcome.lease === null)
+  ) {
+    await clearSessionContext(session, "cleared");
   }
   return outcome;
 }

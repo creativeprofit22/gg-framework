@@ -1995,6 +1995,7 @@ async function createSession(
     repository: notesRepository,
     broadcastSnapshot: broadcastNotesSnapshot,
     mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
+    releaseCompletedPhaseLease: releaseOrDeferCompletedPhaseLease,
     captureWorkspaceSnapshot: durableRoadmapExecution
       ? async () => {
           const loaded = await notesRepository.load(cwd);
@@ -2209,12 +2210,49 @@ async function createSession(
     session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
   const roadmapCompletionIntents = new AppSidecarCompletionIntentTracker();
   let activeRunGeneration = 0;
+  let deferredPhaseLeaseReleaseOperationId: string | null = null;
+  async function releaseCurrentPhaseLease(operationId: string): Promise<void> {
+    if (!session.getRoadmapPhaseLeaseMarker()) return;
+    if (session.getPhaseLeaseRunState() === "running") {
+      deferredPhaseLeaseReleaseOperationId = operationId;
+      throw new Error("Phase lease release deferred until the provider run settles.");
+    }
+    const outcome = await phaseBinding.releaseCurrent(operationId, session);
+    if (
+      outcome.status === "released" ||
+      (outcome.status === "duplicate" && outcome.lease === null)
+    ) {
+      if (deferredPhaseLeaseReleaseOperationId === operationId) {
+        deferredPhaseLeaseReleaseOperationId = null;
+      }
+      return;
+    }
+    throw new Error(`Phase lease release failed: ${outcome.status}`);
+  }
+  async function releaseOrDeferCompletedPhaseLease(operationId: string): Promise<void> {
+    if (session.getPhaseLeaseRunState() === "running") {
+      deferredPhaseLeaseReleaseOperationId = operationId;
+      return;
+    }
+    await releaseCurrentPhaseLease(operationId);
+  }
   const roadmapPhaseAdvancement = createAppSidecarRoadmapPhaseAdvancementCoordinator({
     repository: notesRepository,
     onCommittedSnapshot: broadcastNotesSnapshot,
     mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
+    releaseCompletedPhaseLease: releaseCurrentPhaseLease,
     isAutopilotEnabled: (projectCwd) => projectAutopilot.isEnabled(projectCwd),
   });
+  async function settleDeferredPhaseLeaseRelease(): Promise<boolean> {
+    const operationId = deferredPhaseLeaseReleaseOperationId;
+    if (!operationId) return false;
+    const advancement = await roadmapPhaseAdvancement.recover(session);
+    if (advancement.status !== "accepted" && advancement.status !== "already-bound") {
+      await releaseCurrentPhaseLease(operationId);
+    }
+    deferredPhaseLeaseReleaseOperationId = null;
+    return true;
+  }
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
     cwd,
     repository: notesRepository,
@@ -3703,7 +3741,9 @@ async function createSession(
       if (ownsGeneration) {
         finishOwnedGeneration(generation, false, runSucceeded ? "completed" : "failed");
         await runJournalPersistence;
-        await renewCurrentPhaseLease(`run:${generation}:idle`);
+        if (!(await settleDeferredPhaseLeaseRelease())) {
+          await renewCurrentPhaseLease(`run:${generation}:idle`);
+        }
       }
       let terminalPlanComplete = false;
       if (approvedPlanPath !== null) {
@@ -3740,7 +3780,7 @@ async function createSession(
               });
             }
           } catch (error) {
-            throw error;
+            if (!deferredPhaseLeaseReleaseOperationId) throw error;
           }
         }
       }
@@ -3829,7 +3869,9 @@ async function createSession(
           state: "completed",
         });
         const advancement = await roadmapPhaseAdvancement.recover(session);
-        if (advancement.status === "phase-lease-lost") {
+        if (advancement.status === "none" || advancement.status === "missing-session-path") {
+          await releaseCurrentPhaseLease(`${checkpoint.checkpointId}:phase-lease-release`);
+        } else if (advancement.status === "phase-lease-lost") {
           throw new Error("Plan-only advancement lost its phase lease.");
         }
         return {
@@ -7376,9 +7418,17 @@ ${checkpoints}`;
     kenAutoAbort.abort();
     await kenSession?.dispose().catch(() => {});
     await kenAutoSession?.dispose().catch(() => {});
+    const disposalLease = session.getRoadmapPhaseLeaseMarker();
     await session
-      .dispose()
-      .catch((error) => captureSidecarError(error, "app-sidecar.session-disposal"));
+      .dispose(
+        disposalLease
+          ? () =>
+              releaseCurrentPhaseLease(
+                `session-dispose:${disposalLease.leaseId}:${disposalLease.fence}`,
+              )
+          : undefined,
+      )
+      .catch((error) => captureSidecarError(error, "app-sidecar.phase-lease-disposal"));
   }
 
   return {

@@ -88,10 +88,16 @@ function pendingDurablePhase() {
       approvedAt: NOW,
       approvedRevision: 2,
       baseCommit: workspace.headCommit,
-      steps: [{
-        id: "6".repeat(64), index: 1, text: "Complete", state: "completed",
-        completedAt: NOW, workspace,
-      }],
+      steps: [
+        {
+          id: "6".repeat(64),
+          index: 1,
+          text: "Complete",
+          state: "completed",
+          completedAt: NOW,
+          workspace,
+        },
+      ],
     },
     evidence: [],
     pendingCompletion: {
@@ -181,8 +187,22 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
         approvedRevision: 2,
         baseCommit: workspace.headCommit,
         steps: [
-          { id: "6".repeat(64), index: 1, text: "First", state: "completed", completedAt: NOW, workspace },
-          { id: "7".repeat(64), index: 2, text: "Second", state: "pending", completedAt: null, workspace: null },
+          {
+            id: "6".repeat(64),
+            index: 1,
+            text: "First",
+            state: "completed",
+            completedAt: NOW,
+            workspace,
+          },
+          {
+            id: "7".repeat(64),
+            index: 2,
+            text: "Second",
+            state: "pending",
+            completedAt: null,
+            workspace: null,
+          },
         ],
       },
       evidence: [],
@@ -192,18 +212,30 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
     };
     const tracker = new AppSidecarPhaseImplementationPlanTracker();
     const freshSession = { sessionId: "fresh", sessionPath: "/sessions/fresh.jsonl" };
-    expect(restorePhaseImplementationPlanEvidence({ tracker, phase: durable, expectedSession: freshSession })).toBe(true);
     expect(
-      tracker.resolve({ phaseId: durable.id, session: freshSession, current: { total: 0, completed: [] } }),
+      restorePhaseImplementationPlanEvidence({
+        tracker,
+        phase: durable,
+        expectedSession: freshSession,
+      }),
+    ).toBe(true);
+    expect(
+      tracker.resolve({
+        phaseId: durable.id,
+        session: freshSession,
+        current: { total: 0, completed: [] },
+      }),
     ).toEqual({ total: 2, completed: [1] });
   });
 
-  it("settles direct completion", async () => {
+  it("settles direct completion and releases its settled lease", async () => {
     const repo = repository();
+    const releaseCompletedPhaseLease = vi.fn(async () => {});
     const coordinator = new AppSidecarPhaseCompletionCoordinator({
       cwd: "C:/project",
       repository: repo,
       broadcastSnapshot: vi.fn(),
+      releaseCompletedPhaseLease,
     });
     const tracker = new AppSidecarPhaseImplementationPlanTracker();
 
@@ -230,6 +262,9 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
       timestamp: NOW,
     });
     expect(outcome).toMatchObject({ status: "committed", evaluation: { gateOutcome: "done" } });
+    expect(releaseCompletedPhaseLease).toHaveBeenCalledWith(
+      "completion-intent-current:phase-lease-release",
+    );
   });
 
   it("does not settle after the session loses its lease fence", async () => {
@@ -300,7 +335,9 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
       recoveredFromBackup: false,
     }));
     repo.clearDurablePhaseCompletion = vi.fn(async () => ({
-      status: "committed" as const, snapshot: snapshot(candidate), phase: candidate,
+      status: "committed" as const,
+      snapshot: snapshot(candidate),
+      phase: candidate,
     }));
     const coordinator = new AppSidecarPhaseCompletionCoordinator({
       cwd: "C:/project",
@@ -346,7 +383,8 @@ describe("AppSidecarPhaseCompletionCoordinator", () => {
     expect(outcome).toEqual({
       status: "missing-plan-progress",
       completionIntentId: "completion-intent-current",
-      message: "Completion was not settled because same-session canonical plan progress is unavailable.",
+      message:
+        "Completion was not settled because same-session canonical plan progress is unavailable.",
     });
     expect(repo.recordImplementationCheckpoint).not.toHaveBeenCalled();
     expect(repo.settlePhaseCompletion).not.toHaveBeenCalled();

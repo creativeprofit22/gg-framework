@@ -79,7 +79,7 @@ export interface PhaseLeaseTokenV1 {
   fence: number;
 }
 
-export type PhaseLeaseAction = "inspect" | "acquire" | "renew" | "takeover";
+export type PhaseLeaseAction = "inspect" | "acquire" | "renew" | "release" | "takeover";
 
 export interface PhaseLeaseRequestV2 {
   version: 2;
@@ -102,7 +102,7 @@ export type PhaseBindingProtocolRequest =
 
 export type PhaseLeaseOutcome =
   | {
-      status: "inspected" | "acquired" | "renewed" | "duplicate";
+      status: "inspected" | "acquired" | "renewed" | "released" | "duplicate";
       roadmapRevision: number;
       leaseRevision: number;
       phaseId: string;
@@ -382,6 +382,7 @@ export function isPhaseLeaseRequest(value: unknown): value is PhaseLeaseRequestV
     (value.action !== "inspect" &&
       value.action !== "acquire" &&
       value.action !== "renew" &&
+      value.action !== "release" &&
       value.action !== "takeover") ||
     !isBoundedString(value.phaseId, MAX_ID_LENGTH) ||
     !isBoundedString(value.expectedProjectKey, MAX_PROJECT_KEY_LENGTH) ||
@@ -398,7 +399,7 @@ export function isPhaseLeaseRequest(value: unknown): value is PhaseLeaseRequestV
   if (value.action === "inspect" || value.action === "acquire") {
     return value.lease === null && !value.confirmTakeover && value.takeoverReason === null;
   }
-  if (value.action === "renew") {
+  if (value.action === "renew" || value.action === "release") {
     return value.lease !== null && !value.confirmTakeover && value.takeoverReason === null;
   }
   return value.lease !== null && value.confirmTakeover && value.takeoverReason !== null;
@@ -493,6 +494,7 @@ export function isPhaseLeaseOutcome(value: unknown): value is PhaseLeaseOutcome 
     status === "inspected" ||
     status === "acquired" ||
     status === "renewed" ||
+    status === "released" ||
     status === "duplicate"
   ) {
     return (
@@ -506,7 +508,9 @@ export function isPhaseLeaseOutcome(value: unknown): value is PhaseLeaseOutcome 
       isRevision(value.roadmapRevision) &&
       isRevision(value.leaseRevision) &&
       isBoundedString(value.phaseId, MAX_ID_LENGTH) &&
-      (value.lease === null || (isPhaseLease(value.lease) && value.lease.phaseId === value.phaseId))
+      (value.lease === null ||
+        (isPhaseLease(value.lease) && value.lease.phaseId === value.phaseId)) &&
+      (status !== "released" || value.lease === null)
     );
   }
   if (

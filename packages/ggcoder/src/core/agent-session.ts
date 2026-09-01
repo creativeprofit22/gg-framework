@@ -4399,19 +4399,23 @@ export class AgentSession {
     await this.disposeMcpResources(manager, leases);
   }
 
-  async dispose(): Promise<void> {
+  async dispose(beforeSessionReset?: () => Promise<void>): Promise<void> {
     this.managerAbortSignal?.removeEventListener("abort", this.managerAbortHandler);
     this.processManager?.shutdownAll();
     this.lspManager?.shutdownAll();
     await Promise.all([this.subAgentManager?.shutdownAll(), this.disposeMcpConnections()]);
     await this.extensionLoader.deactivateAll();
-    this.setSessionPath("");
-    this.eventBus.removeAllListeners();
-    this.messages = [];
-    this.tools.splice(0, this.tools.length);
-    this.registeredTools.clear();
-    this.unavailableToolNames.clear();
-    this.toolCapabilityPolicy = null;
+    try {
+      await beforeSessionReset?.();
+    } finally {
+      this.setSessionPath("");
+      this.eventBus.removeAllListeners();
+      this.messages = [];
+      this.tools.splice(0, this.tools.length);
+      this.registeredTools.clear();
+      this.unavailableToolNames.clear();
+      this.toolCapabilityPolicy = null;
+    }
   }
 
   // ── Private ────────────────────────────────────────────

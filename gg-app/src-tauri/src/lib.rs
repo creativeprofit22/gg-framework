@@ -1652,11 +1652,10 @@ fn validate_public_phase_binding_request(request: &serde_json::Value) -> Result<
     }
 }
 
-
 #[derive(Clone, Copy)]
 enum RoadmapTypedResponseKind {
-    PhaseLease,
     PhaseBinding,
+    PhaseLease,
     PhaseExecutionReconciliation,
     ManualCompletionPreview,
     ManualCompletionCommit,
@@ -1733,6 +1732,7 @@ fn is_roadmap_typed_outcome(
             | "phase-terminal"
             | "missing-session-path" => http_status == 409,
             _ => false,
+        },
         RoadmapTypedResponseKind::PhaseLease => match status {
             "inspected" | "acquired" | "renewed" | "released" | "duplicate" => http_status == 200,
             "phase-not-found" | "missing" => http_status == 404,
@@ -1747,7 +1747,6 @@ fn is_roadmap_typed_outcome(
             | "phase-terminal"
             | "plan-mismatch" => http_status == 409,
             _ => false,
-        },
         },
         RoadmapTypedResponseKind::PhaseExecutionReconciliation => match status {
             "reconciled" | "duplicate" => http_status == 200,
@@ -1784,8 +1783,8 @@ fn is_roadmap_typed_outcome(
     };
     status_matches
         && match kind {
-            RoadmapTypedResponseKind::PhaseLease => is_phase_lease_outcome(value),
             RoadmapTypedResponseKind::PhaseBinding => is_phase_binding_outcome(value),
+            RoadmapTypedResponseKind::PhaseLease => is_phase_lease_outcome(value),
             RoadmapTypedResponseKind::PhaseExecutionReconciliation => {
                 is_phase_execution_reconciliation_outcome(value)
             }
@@ -2116,6 +2115,7 @@ fn is_phase_binding_outcome(value: &serde_json::Value) -> bool {
         _ => false,
     }
 }
+
 fn is_phase_lease_holder(value: Option<&serde_json::Value>) -> bool {
     let Some(object) = value
         .and_then(serde_json::Value::as_object)
@@ -2265,7 +2265,6 @@ fn is_phase_lease_outcome(value: &serde_json::Value) -> bool {
         _ => false,
     }
 }
-
 
 fn is_manual_completion_gate_code(value: Option<&serde_json::Value>) -> bool {
     value
@@ -9277,6 +9276,7 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             emit_daemon_error(&app, &message);
             return;
         }
+    };
     let (daemon_instance_id, process_start_token) =
         match (generate_daemon_auth_token(), generate_daemon_auth_token()) {
             (Ok(instance_id), Ok(start_token)) => (instance_id, start_token),
@@ -9294,7 +9294,6 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             .clone()
     } else {
         None
-    };
     };
     log::info!(
         "{}",
@@ -9318,18 +9317,18 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         // GG_APP_LISTENING handshake.
         .env("GG_APP_PORT", "0")
         .env("GG_APP_AUTH_TOKEN", &auth_token)
+        .env("GG_APP_TOKEN", &app.state::<Daemon>().token)
         .env("GG_DAEMON_INSTANCE_ID", &daemon_instance_id)
         .env("GG_PROCESS_START_TOKEN", &process_start_token)
-        .env("GG_APP_TOKEN", &app.state::<Daemon>().token)
         .env("GG_APP_SIDECAR_LOG_FILE", &sidecar_log)
         .env("ERROR_MOM_RELEASE", env!("CARGO_PKG_VERSION"))
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(proof) = predecessor_proof.as_ref() {
         if let Ok(serialized) = serde_json::to_string(proof) {
             cmd.env("GG_DAEMON_PREDECESSOR_PROOF", serialized);
         }
     }
-        .stderr(Stdio::piped());
     if identifier == PRODUCTION_APP_IDENTIFIER {
         cmd.env_remove("GG_AGENT_DIR");
     } else {
@@ -9389,12 +9388,12 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     {
         let daemon: State<Daemon> = app.state();
         *daemon.child.lock().unwrap() = Some(child);
+        *daemon.auth_token.lock().unwrap() = Some(auth_token);
         *daemon.process_identity.lock().unwrap() = Some(DaemonProcessIdentity {
             daemon_instance_id,
             process_id: daemon_pid,
             process_start_token,
         });
-        *daemon.auth_token.lock().unwrap() = Some(auth_token);
     }
 
     if let Some(stdout) = stdout {
@@ -9488,12 +9487,12 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                             terminate_child(old_child, termination_reason);
                         }
                     }
+                }
                 if let Some(identity) = daemon.process_identity.lock().unwrap().take() {
                     if identity.process_id == daemon_pid {
                         *daemon.predecessor_proof.lock().unwrap() =
                             Some(DaemonPredecessorProof::from_terminated(identity));
                     }
-                }
                 }
                 let mut attempts = daemon.respawn_attempts.lock().unwrap();
                 if planned || started_at.elapsed() >= DAEMON_STABLE_UPTIME {
@@ -11584,6 +11583,14 @@ mod tests {
     }
 
     #[test]
+    fn daemon_respawns_with_bounded_exponential_backoff() {
+        let delays: Vec<u64> = (1..=DAEMON_MAX_RESPAWNS)
+            .map(|attempt| daemon_respawn_delay(attempt).unwrap().as_secs())
+            .collect();
+        assert_eq!(delays, vec![1, 2, 4, 8, 16]);
+    }
+
+    #[test]
     fn phase_reconciliation_native_boundary_rejects_malformed_requests() {
         let repository = serde_json::json!({
             "projectKey": "c:/project",
@@ -11631,11 +11638,6 @@ mod tests {
     }
 
     #[test]
-    fn daemon_respawns_with_bounded_exponential_backoff() {
-        let delays: Vec<u64> = (1..=DAEMON_MAX_RESPAWNS)
-            .map(|attempt| daemon_respawn_delay(attempt).unwrap().as_secs())
-            .collect();
-        assert_eq!(delays, vec![1, 2, 4, 8, 16]);
     fn phase_lease_native_boundary_rejects_caller_predecessor_proof() {
         let mut request = serde_json::json!({
             "version": 2,

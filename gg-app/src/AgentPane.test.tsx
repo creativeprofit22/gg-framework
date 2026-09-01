@@ -180,6 +180,8 @@ import {
   AgentPane,
   noInputSlashSubmissionError,
   preferredRoadmapPhaseSession,
+  resolveRoadmapPhaseResume,
+  resolveRoadmapPhaseResumeFromNotes,
 } from "./AgentPane";
 import { NewSessionError, PlanMutationError } from "./agent";
 import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
@@ -402,6 +404,54 @@ describe("preferredRoadmapPhaseSession", () => {
     expect(preferredRoadmapPhaseSession({ session: compatibility }, implementation)).toBe(
       compatibility,
     );
+  });
+
+  it("blocks reconciliation instead of returning a stale session while preserving Resume", () => {
+    const stale = { sessionId: "planning", sessionPath: "/planning.jsonl" };
+    const implementation = { sessionId: "implementation", sessionPath: "/implementation.jsonl" };
+
+    const blocked = resolveRoadmapPhaseResume(
+      {
+        session: stale,
+        execution: { state: "needs-reconciliation", lastSession: implementation },
+      },
+      stale,
+    );
+    expect(blocked).toEqual({
+      status: "blocked",
+      message:
+        "Resume is blocked until this phase is reconciled. Open Project Notes, select Roadmap, then choose Reconcile.",
+    });
+    expect("session" in blocked).toBe(false);
+    expect(
+      resolveRoadmapPhaseResume(
+        { session: stale, execution: { state: "implementing", lastSession: implementation } },
+        stale,
+      ),
+    ).toEqual({ status: "ready", session: implementation });
+    expect(resolveRoadmapPhaseResume({ session: stale }, implementation)).toEqual({
+      status: "ready",
+      session: stale,
+    });
+  });
+
+  it("fails closed when Notes state cannot be verified while preserving missing legacy Notes", async () => {
+    const pane = client("resume-preflight", 1);
+    const compatibility = { sessionId: "planning", sessionPath: "/planning.jsonl" };
+    vi.mocked(pane.getNotes).mockRejectedValueOnce(new Error("Notes unavailable"));
+
+    await expect(
+      resolveRoadmapPhaseResumeFromNotes(pane, "phase-1", compatibility),
+    ).resolves.toEqual({
+      status: "blocked",
+      message:
+        "Couldn’t verify whether this phase needs reconciliation. Open Project Notes and retry Resume.",
+    });
+
+    vi.mocked(pane.getNotes).mockResolvedValueOnce({ status: "missing" });
+    await expect(
+      resolveRoadmapPhaseResumeFromNotes(pane, "legacy-phase", compatibility),
+    ).resolves.toEqual({ status: "ready", session: compatibility });
   });
 });
 
@@ -946,9 +996,9 @@ describe("AgentPane lifecycle", () => {
 
     expect((input as HTMLTextAreaElement).value).toBe("/programmatic");
     expect((input as HTMLTextAreaElement).readOnly).toBe(true);
-    expect((screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled).toBe(
-      true,
-    );
+    expect(
+      (screen.getByRole("button", { name: "Attach files" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
     await waitFor(() =>
       expect(pane.sendPrompt).toHaveBeenCalledWith("/programmatic", [], undefined),

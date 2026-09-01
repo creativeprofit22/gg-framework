@@ -99,6 +99,58 @@ function phase(id: string, status: NotesPhaseStatus, withReminder = false): Note
   };
 }
 
+function reconciliationPhase(id: string, cwd: string): NotesPhase {
+  const selectedPhase = phase(id, "in-progress");
+  selectedPhase.session = { sessionId: `session-${id}`, sessionPath: `/sessions/${id}.jsonl` };
+  const repository = {
+    projectKey: canonicalProjectKey(cwd),
+    identityHash: "identity-ui",
+    rootCommit: "root-ui",
+  };
+  selectedPhase.execution = {
+    version: 1,
+    state: "needs-reconciliation",
+    repository,
+    plan: {
+      planId: "plan-ui",
+      contentHash: "plan-hash-ui",
+      snapshotPath: ".gg/plans/phase-ui.md",
+      approvedAt: NOW,
+      approvedRevision: 1,
+      baseCommit: "root-ui",
+      steps: [
+        {
+          id: "step-preserved",
+          index: 0,
+          text: "Preserve completed work",
+          state: "completed",
+          completedAt: NOW,
+          workspace: {
+            version: 1,
+            repository,
+            headCommit: "head-ui",
+            worktreeDigest: "workspace-ui",
+            clean: false,
+          },
+        },
+        {
+          id: "step-revalidate",
+          index: 1,
+          text: "Revalidate changed work",
+          state: "needs-revalidation",
+          completedAt: null,
+          workspace: null,
+        },
+      ],
+    },
+    evidence: [],
+    pendingCompletion: null,
+    lastSession: selectedPhase.session,
+    migration: { source: "native", reconciledAt: null },
+  };
+  return selectedPhase;
+}
+
 type PhaseSessionFixture = "unbound" | "missing-path" | "path-present";
 
 function phaseSession(fixture: PhaseSessionFixture): NotesPhase["session"] {
@@ -310,6 +362,7 @@ class FakeProjectNotesClient implements NotesClient {
   claimOutcome: ReminderClaimOutcome | null = null;
   readonly reconciliationCalls: PhaseExecutionReconciliationRequestV3[] = [];
   reconciliationOutcome: PhaseExecutionReconciliationOutcome = { status: "missing" };
+  getNotesCalls = 0;
   constructor(cwd: string) {
     this.cwd = cwd;
   }
@@ -320,6 +373,7 @@ class FakeProjectNotesClient implements NotesClient {
   }
 
   async getNotes(): Promise<ProjectNotesReadOutcome> {
+    this.getNotesCalls += 1;
     if (this.getOutcome) return this.getOutcome;
     const snapshot = this.snapshots.get(canonicalProjectKey(this.cwd));
     return snapshot
@@ -368,6 +422,7 @@ class FakeProjectNotesClient implements NotesClient {
     this.snapshots.set(projectKey, { projectKey, revision: outcome.revision, document });
     return outcome;
   }
+
   async previewManualCompletionApproval(): Promise<ManualCompletionApprovalPreviewOutcome> {
     return { status: "missing" };
   }
@@ -2564,6 +2619,108 @@ describe("ProjectNotes", () => {
     fireEvent.click(savedPrompt.querySelector("summary")!);
     expect(savedPrompt.open).toBe(true);
     expect(savedPrompt.querySelector("pre")?.textContent).toBe(prompt);
+  });
+
+  it("blocks roadmap and detail actions while reconciliation is required", async () => {
+    const cwd = "/work/reconciliation-blocked";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("reconciliation blocked");
+    const selected = reconciliationPhase("blocked", cwd);
+    document.phases = [selected];
+    client.seed(cwd, document);
+    render(<ProjectNotes cwd={cwd} client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Notes" }));
+    selectNotesTab("Roadmap");
+    expect(screen.getByText("Needs reconciliation:")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: `Resume phase: ${selected.title}` }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: `Inspect phase: ${selected.title}` }));
+    expect(
+      (screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.getByText("Resume and completion are blocked")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Review completion evidence" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect((screen.getByRole("button", { name: "Reconcile" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+  });
+
+  it("refreshes Notes and reports reconciliation preservation counts", async () => {
+    const cwd = "/work/reconciliation-success";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("reconciliation success");
+    const selected = reconciliationPhase("success", cwd);
+    document.phases = [selected];
+    client.seed(cwd, document);
+    client.reconciliationOutcome = {
+      status: "reconciled",
+      revision: 2,
+      phaseId: selected.id,
+      preservedStepIds: ["step-preserved"],
+      revalidationStepIds: ["step-revalidate"],
+      revalidationEvidenceCount: 2,
+      reconciledAt: "2026-07-15T12:03:00.000Z",
+    };
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    await openRoadmapPhase(selected.title);
+    const readsBeforeReconciliation = client.getNotesCalls;
+
+    fireEvent.click(screen.getByRole("button", { name: "Reconcile" }));
+
+    expect(await screen.findByText("Safe progress was preserved")).toBeTruthy();
+    expect(
+      screen.getByText("1 preserved steps · 1 revalidation steps · 2 evidence checks"),
+    ).toBeTruthy();
+    await waitFor(() => expect(client.getNotesCalls).toBeGreaterThan(readsBeforeReconciliation));
+    expect(client.reconciliationCalls).toHaveLength(1);
+    expect(client.reconciliationCalls[0]).toMatchObject({
+      version: 3,
+      action: "reconcile-execution",
+      phaseId: selected.id,
+      expectedProjectKey: canonicalProjectKey(cwd),
+      expectedRevision: 1,
+      repository: selected.execution?.repository,
+      plan: {
+        planId: "plan-ui",
+        contentHash: "plan-hash-ui",
+        snapshotPath: ".gg/plans/phase-ui.md",
+        approvedRevision: 1,
+      },
+      workspace: selected.execution?.plan?.steps[0]?.workspace,
+    });
+    expect(
+      (screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("keeps reconciliation blocked and displays typed denial outcomes", async () => {
+    const cwd = "/work/reconciliation-denied";
+    const client = new FakeProjectNotesClient(cwd);
+    const document = notes("reconciliation denied");
+    const selected = reconciliationPhase("denied", cwd);
+    document.phases = [selected];
+    client.seed(cwd, document);
+    client.reconciliationOutcome = { status: "workspace-mismatch" };
+    render(<ProjectNotes cwd={cwd} client={client} />);
+    await openRoadmapPhase(selected.title);
+
+    fireEvent.click(screen.getByRole("button", { name: "Reconcile" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Reconciliation denied: workspace-mismatch.",
+    );
+    expect(screen.getByText("Resume and completion are blocked")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Resume phase" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.getByRole("button", { name: "Reconcile" })).toBeTruthy();
   });
 
   it.each(PHASE_ACTION_MATRIX)(

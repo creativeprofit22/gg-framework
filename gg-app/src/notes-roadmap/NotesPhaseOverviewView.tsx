@@ -279,6 +279,7 @@ export function ManualCompletionApprovalControl({
   const previewTriggerRef = useRef<HTMLButtonElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
+  const reconciliationBlocked = phase.execution?.state === "needs-reconciliation";
 
   useEffect(() => {
     if (preview) {
@@ -302,6 +303,7 @@ export function ManualCompletionApprovalControl({
   }
 
   const loadPreview = async (): Promise<void> => {
+    if (reconciliationBlocked) return;
     if (expectedRevision === null) {
       setMessage("Notes are still loading. Refresh before approving completion.");
       return;
@@ -323,7 +325,7 @@ export function ManualCompletionApprovalControl({
   };
 
   const commit = async (): Promise<void> => {
-    if (!preview) return;
+    if (!preview || reconciliationBlocked) return;
     setPending(true);
     setMessage("");
     try {
@@ -377,7 +379,12 @@ export function ManualCompletionApprovalControl({
             </div>
           </dl>
           <p>Confirming marks this phase Done. Any Notes change requires a fresh preview.</p>
-          <button ref={confirmRef} type="button" disabled={pending} onClick={() => void commit()}>
+          <button
+            ref={confirmRef}
+            type="button"
+            disabled={pending || reconciliationBlocked}
+            onClick={() => void commit()}
+          >
             {pending ? "Approving…" : "Confirm completion"}
           </button>
           <button type="button" disabled={pending} onClick={closePreview}>
@@ -388,11 +395,19 @@ export function ManualCompletionApprovalControl({
         <button
           ref={previewTriggerRef}
           type="button"
-          disabled={pending}
+          disabled={pending || reconciliationBlocked}
+          title={
+            reconciliationBlocked ? "Reconcile this phase before approving completion." : undefined
+          }
           onClick={() => void loadPreview()}
         >
           {pending ? "Checking evidence…" : "Review completion evidence"}
         </button>
+      )}
+      {reconciliationBlocked && (
+        <p className="notes-phase-action-feedback">
+          Reconcile this phase before approving completion.
+        </p>
       )}
       {message && (
         <p className="notes-phase-action-feedback" role="status">
@@ -505,6 +520,9 @@ export function PhaseRebindControl({
       </div>
       {preview ? (
         <div className="notes-phase-rebind-confirm" role="group" aria-label="Confirm phase rebind">
+          {phase.execution?.state === "needs-reconciliation" && (
+            <p className="notes-phase-attention">Plan or workspace reconciliation is required.</p>
+          )}
           <dl>
             <div>
               <dt>From</dt>

@@ -372,6 +372,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             activeReminderCount={activeReminderCount}
             authorityReady={authorityReady}
             expectedRevision={revision}
+            expectedProjectKey={cwd ? canonicalProjectKey(cwd) : null}
             initialRoadmapPhaseId={roadmapTargetPhaseId}
             persistenceStatus={<NotesPersistenceStatus {...notesPersistenceStatus(diagnostics)} />}
             onChangeCurrentFocus={changeCurrentFocus}
@@ -404,6 +405,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onStartPhase={onStartPhase}
             onGetStorageDiagnostics={() => client.getNotesDiagnostics()}
             onRebindPhase={(request) => client.bindRoadmapPhase(request)}
+            onReconcilePhaseExecution={(request) => client.reconcileRoadmapPhaseExecution(request)}
             onPreviewManualCompletionApproval={(phaseId, expectedRevision) =>
               client.previewManualCompletionApproval(phaseId, expectedRevision)
             }
@@ -421,6 +423,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
               refresh();
               setShowNotes(false);
             }}
+            onReconciliationSuccess={refresh}
             onChangeHandoff={changeHandoff}
             onHandoffPresented={markHandoffPresented}
             onClose={() => setShowNotes(false)}

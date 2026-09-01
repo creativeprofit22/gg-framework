@@ -9,6 +9,7 @@ import {
 import { NotesPhaseMoreControls, NotesPhaseReminderView } from "./NotesPhaseMoreView";
 import { NotesPhaseOverviewView } from "./NotesPhaseOverviewView";
 import { NotesPhaseReferencesView } from "./NotesPhaseReferencesView";
+import { NotesPhaseReconciliationBanner } from "./NotesPhaseReconciliationBanner";
 import { NotesPhaseViewNavigation } from "./NotesPhaseViewNavigation";
 
 export function NotesPhaseDetail(props: NotesPhaseDetailProps): ReactElement {
@@ -39,6 +40,7 @@ function NotesPhaseDetailBody(): ReactElement {
     cancelEdit,
     onClose,
   } = useNotesPhaseDetail();
+  const reconciliationBlocked = phase.execution?.state === "needs-reconciliation";
 
   return (
     <section className="notes-phase-detail" aria-labelledby={`notes-phase-detail-${phase.id}`}>
@@ -53,8 +55,14 @@ function NotesPhaseDetailBody(): ReactElement {
               ref={primaryActionRef}
               type="button"
               className="notes-roadmap-primary"
-              disabled={controlsDisabled || phaseStartDisabled}
-              title={phaseStartDisabled ? (startUnavailableReason ?? undefined) : undefined}
+              disabled={controlsDisabled || phaseStartDisabled || reconciliationBlocked}
+              title={
+                reconciliationBlocked
+                  ? "Reconcile this phase before resuming its session."
+                  : phaseStartDisabled
+                    ? (startUnavailableReason ?? undefined)
+                    : undefined
+              }
               onClick={() => void runPhaseAction()}
             >
               {pending
@@ -86,6 +94,8 @@ function NotesPhaseDetailBody(): ReactElement {
           </button>
         </div>
       </div>
+
+      <NotesPhaseReconciliationBanner />
 
       <NotesPhaseViewNavigation
         phaseId={phase.id}

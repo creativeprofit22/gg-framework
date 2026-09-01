@@ -21,6 +21,8 @@ import type {
   NotesSessionLink,
   PhaseBindingOutcome,
   PhaseBindingRequest,
+  PhaseExecutionReconciliationOutcome,
+  PhaseExecutionReconciliationRequestV3,
   ProjectNotesStorageDiagnostics,
   PhaseRunCancellationResult,
   NotesTask,
@@ -50,6 +52,7 @@ interface Props {
   activeReminderCount: number;
   authorityReady: boolean;
   expectedRevision: number | null;
+  expectedProjectKey: string | null;
   initialRoadmapPhaseId?: string | null;
   persistenceStatus: React.ReactNode;
   onChangeCurrentFocus(value: string): void;
@@ -110,6 +113,9 @@ interface Props {
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onGetStorageDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onReconcilePhaseExecution(
+    request: PhaseExecutionReconciliationRequestV3,
+  ): Promise<PhaseExecutionReconciliationOutcome>;
   onPreviewManualCompletionApproval(
     phaseId: string,
     expectedRevision: number,
@@ -123,6 +129,7 @@ interface Props {
   phaseStartUnavailableReason: string | null;
   phaseActionDisabled: boolean;
   onPhaseActionSuccess(): void;
+  onReconciliationSuccess(): void;
   onChangeHandoff(text: string): void;
   onHandoffPresented(text: string, updatedAt: string): void;
   onClose(): void;
@@ -150,6 +157,7 @@ export function NotesModal({
   activeReminderCount,
   authorityReady,
   expectedRevision,
+  expectedProjectKey,
   initialRoadmapPhaseId = null,
   persistenceStatus,
   onChangeCurrentFocus,
@@ -182,6 +190,7 @@ export function NotesModal({
   onStartPhase,
   onGetStorageDiagnostics,
   onRebindPhase,
+  onReconcilePhaseExecution,
   onPreviewManualCompletionApproval,
   onCommitManualCompletionApproval,
   onStartNextPhase,
@@ -192,6 +201,7 @@ export function NotesModal({
   phaseStartUnavailableReason,
   phaseActionDisabled,
   onPhaseActionSuccess,
+  onReconciliationSuccess,
   onChangeHandoff,
   onHandoffPresented,
   onClose,
@@ -349,6 +359,7 @@ export function NotesModal({
                   references={references}
                   authorityReady={authorityReady}
                   expectedRevision={expectedRevision}
+                  expectedProjectKey={expectedProjectKey}
                   initialSelectedPhaseId={initialRoadmapPhaseId}
                   openSource={openSource}
                   onCreatePhase={onCreatePhase}
@@ -369,6 +380,7 @@ export function NotesModal({
                   onStartPhase={onStartPhase}
                   onGetStorageDiagnostics={onGetStorageDiagnostics}
                   onRebindPhase={onRebindPhase}
+                  onReconcilePhaseExecution={onReconcilePhaseExecution}
                   onPreviewManualCompletionApproval={onPreviewManualCompletionApproval}
                   onCommitManualCompletionApproval={onCommitManualCompletionApproval}
                   onStartNextPhase={onStartNextPhase}
@@ -379,6 +391,7 @@ export function NotesModal({
                   startUnavailableReason={phaseStartUnavailableReason}
                   actionDisabled={phaseActionDisabled}
                   onActionSuccess={onPhaseActionSuccess}
+                  onReconciliationSuccess={onReconciliationSuccess}
                   onCreateReference={() => {
                     selectTab("reference");
                     setReferenceCreateRequest((request) => request + 1);

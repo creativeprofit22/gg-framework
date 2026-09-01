@@ -464,9 +464,7 @@ export function noInputSlashSubmissionError(
   if (!match) return null;
   const blocked = [
     match.args && match.command.input.text === "none" ? "additional text" : null,
-    referencedFileCount > 0 && match.command.input.references === "none"
-      ? "file references"
-      : null,
+    referencedFileCount > 0 && match.command.input.references === "none" ? "file references" : null,
     attachmentCount > 0 && match.command.input.attachments === "none" ? "attachments" : null,
   ].filter((kind): kind is string => kind !== null);
   if (blocked.length === 0) return null;
@@ -560,6 +558,47 @@ export function preferredRoadmapPhaseSession(
   compatibilitySession: NotesSessionLink,
 ): NotesSessionLink {
   return phase?.execution?.lastSession ?? phase?.session ?? compatibilitySession;
+}
+
+export function resolveRoadmapPhaseResume(
+  phase:
+    | {
+        session: NotesSessionLink | null;
+        execution?: { state?: string; lastSession: NotesSessionLink | null } | null;
+      }
+    | undefined,
+  compatibilitySession: NotesSessionLink,
+): { status: "blocked"; message: string } | { status: "ready"; session: NotesSessionLink } {
+  if (phase?.execution?.state === "needs-reconciliation") {
+    return {
+      status: "blocked",
+      message:
+        "Resume is blocked until this phase is reconciled. Open Project Notes, select Roadmap, then choose Reconcile.",
+    };
+  }
+  return { status: "ready", session: preferredRoadmapPhaseSession(phase, compatibilitySession) };
+}
+
+export async function resolveRoadmapPhaseResumeFromNotes(
+  client: Pick<PaneAgentClient, "getNotes">,
+  phaseId: string,
+  compatibilitySession: NotesSessionLink,
+): Promise<ReturnType<typeof resolveRoadmapPhaseResume>> {
+  try {
+    const opened = await client.getNotes();
+    return opened.status === "ok"
+      ? resolveRoadmapPhaseResume(
+          opened.snapshot.document.phases.find((phase) => phase.id === phaseId),
+          compatibilitySession,
+        )
+      : resolveRoadmapPhaseResume(undefined, compatibilitySession);
+  } catch {
+    return {
+      status: "blocked",
+      message:
+        "Couldn’t verify whether this phase needs reconciliation. Open Project Notes and retry Resume.",
+    };
+  }
 }
 
 export function AgentPane(props: AgentPaneProps): React.ReactElement {
@@ -3196,17 +3235,9 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       }
       const currentCwd = stateRef.current?.cwd;
       if (!currentCwd) throw new Error("The project session is not ready.");
-      try {
-        const opened = await client.getNotes();
-        if (opened.status === "ok") {
-          link = preferredRoadmapPhaseSession(
-            opened.snapshot.document.phases.find((phase) => phase.id === phaseId),
-            link,
-          );
-        }
-      } catch {
-        // Compatibility: legacy Resume remains available when Notes cannot be refreshed.
-      }
+      const resolution = await resolveRoadmapPhaseResumeFromNotes(client, phaseId, link);
+      if (resolution.status === "blocked") throw new Error(resolution.message);
+      link = resolution.session;
       if (link.sessionPath === null) {
         const recovered = await startRoadmapPhase(phaseId);
         if (recovered.status === "failed") throw new Error(recovered.message);

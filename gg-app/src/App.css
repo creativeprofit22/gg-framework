@@ -8238,7 +8238,8 @@ select {
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
-.notes-roadmap-attention {
+.notes-roadmap-attention,
+.notes-roadmap-reconciliation {
   margin: 10px 0 0;
   padding-inline-start: 10px;
   border-inline-start: 2px solid var(--warning);
@@ -8247,7 +8248,8 @@ select {
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.notes-roadmap-attention strong {
+.notes-roadmap-attention strong,
+.notes-roadmap-reconciliation strong {
   color: var(--warning);
 }
 .notes-roadmap-criteria {
@@ -8344,6 +8346,60 @@ select {
   font-size: 14px;
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+
+.notes-phase-reconciliation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 12px 10px;
+  padding: 12px;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, var(--border));
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface-1));
+}
+
+.notes-phase-reconciliation.is-success {
+  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
+  background: color-mix(in srgb, var(--success) 8%, var(--surface-1));
+}
+
+.notes-phase-reconciliation h4,
+.notes-phase-reconciliation p {
+  margin: 0;
+}
+
+.notes-phase-reconciliation h4 {
+  margin-top: 2px;
+  font-size: 13px;
+}
+
+.notes-phase-reconciliation p:not(.notes-phase-reconciliation-kicker) {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.notes-phase-reconciliation .notes-phase-reconciliation-kicker {
+  color: var(--warning);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.notes-phase-reconciliation.is-success .notes-phase-reconciliation-kicker {
+  color: var(--success);
+}
+
+.notes-phase-reconciliation .notes-phase-reconciliation-error {
+  color: var(--error);
+}
+
+.notes-phase-reconciliation > button {
+  flex: 0 0 auto;
 }
 
 .notes-phase-views {
@@ -10318,6 +10374,16 @@ select {
   .roadmap-reminder-alert-actions {
     flex-wrap: wrap;
   }
+
+  .notes-phase-reconciliation {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .notes-phase-reconciliation > button {
+    width: 100%;
+  }
+
   .notes-phase-views {
     display: none;
   }

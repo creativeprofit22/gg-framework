@@ -33,6 +33,8 @@ import type {
   NotesSessionLink,
   PhaseBindingOutcome,
   PhaseBindingRequest,
+  PhaseExecutionReconciliationOutcome,
+  PhaseExecutionReconciliationRequestV3,
   PhaseStartResult,
   ProjectNotesStorageDiagnostics,
 } from "./notes-types";
@@ -42,6 +44,7 @@ interface RoadmapProps {
   references: NotesReference[];
   authorityReady: boolean;
   expectedRevision: number | null;
+  expectedProjectKey: string | null;
   initialSelectedPhaseId?: string | null;
   openSource?: OpenReferenceUrl;
   onCreatePhase(input: NotesPhaseInput): void;
@@ -88,6 +91,9 @@ interface RoadmapProps {
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onGetStorageDiagnostics?(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase?(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onReconcilePhaseExecution?(
+    request: PhaseExecutionReconciliationRequestV3,
+  ): Promise<PhaseExecutionReconciliationOutcome>;
   onPreviewManualCompletionApproval?(
     phaseId: string,
     expectedRevision: number,
@@ -101,6 +107,7 @@ interface RoadmapProps {
   startUnavailableReason: string | null;
   actionDisabled: boolean;
   onActionSuccess(): void;
+  onReconciliationSuccess(): void;
 }
 
 interface ArchiveProps {
@@ -115,6 +122,7 @@ export function NotesRoadmap({
   references,
   authorityReady,
   expectedRevision,
+  expectedProjectKey,
   initialSelectedPhaseId = null,
   openSource = openReferenceUrl,
   onCreatePhase,
@@ -138,6 +146,7 @@ export function NotesRoadmap({
     throw new Error("Storage diagnostics are unavailable.");
   },
   onRebindPhase = async () => ({ status: "missing" }),
+  onReconcilePhaseExecution = async () => ({ status: "missing" }),
   onPreviewManualCompletionApproval = async () => ({ status: "missing" }),
   onCommitManualCompletionApproval = async () => ({ status: "nonce-not-found" }),
   onStartNextPhase,
@@ -148,6 +157,7 @@ export function NotesRoadmap({
   startUnavailableReason,
   actionDisabled,
   onActionSuccess,
+  onReconciliationSuccess,
 }: RoadmapProps): React.ReactElement {
   const visiblePhases = phases.filter((phase) => phase.archivedAt === null);
   const currentTime = useRoadmapCurrentTime(phases);
@@ -232,7 +242,13 @@ export function NotesRoadmap({
       selectPhase(phase.id);
       return;
     }
-    if (pendingPhaseId !== null || actionDisabled) return;
+    if (
+      pendingPhaseId !== null ||
+      actionDisabled ||
+      phase.execution?.state === "needs-reconciliation"
+    ) {
+      return;
+    }
     if (
       (action === "Start" || action === "Recover") &&
       (startUnavailableReason !== null || isRoadmapPhaseStartProtected(phases, phase.id))
@@ -320,6 +336,7 @@ export function NotesRoadmap({
         phase: selectedPhase,
         currentTime,
         expectedRevision,
+        expectedProjectKey,
         references,
         authorityReady,
         openSource,
@@ -401,6 +418,7 @@ export function NotesRoadmap({
         onStartPhase,
         onGetStorageDiagnostics,
         onRebindPhase,
+        onReconcilePhaseExecution,
         onPreviewManualCompletionApproval,
         onCommitManualCompletionApproval,
         onResumePhase,
@@ -410,6 +428,7 @@ export function NotesRoadmap({
         actionDisabled,
         onPendingChange: (pending) => setPendingPhaseId(pending ? selectedPhase.id : null),
         onActionSuccess,
+        onReconciliationSuccess,
       }
     : null;
 
@@ -558,6 +577,7 @@ export function NotesRoadmap({
               const actionLabel = phaseActionLabel(phase, action);
               const lifecycle = notesLifecyclePresentation(phase);
               const blocker = activeRoadmapBlocker(phase);
+              const reconciliationBlocked = phase.execution?.state === "needs-reconciliation";
               const detailProps =
                 selectedPhaseDetailProps?.phase.id === phase.id ? selectedPhaseDetailProps : null;
               return (
@@ -602,6 +622,12 @@ export function NotesRoadmap({
                       </p>
                     )}
 
+                    {reconciliationBlocked && (
+                      <p className="notes-roadmap-reconciliation" role="status">
+                        <strong>Needs reconciliation:</strong> Resume and completion are blocked.
+                      </p>
+                    )}
+
                     {phase.doneWhen.length > 0 && (
                       <section
                         className="notes-roadmap-criteria"
@@ -633,6 +659,7 @@ export function NotesRoadmap({
                           disabled={
                             pendingPhaseId !== null ||
                             actionDisabled ||
+                            reconciliationBlocked ||
                             ((action === "Start" || action === "Recover") &&
                               (startUnavailableReason !== null ||
                                 isRoadmapPhaseStartProtected(phases, phase.id)))

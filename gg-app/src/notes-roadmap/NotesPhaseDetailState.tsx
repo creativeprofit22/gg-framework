@@ -33,6 +33,8 @@ import type {
   NotesSessionLink,
   PhaseBindingOutcome,
   PhaseBindingRequest,
+  PhaseExecutionReconciliationOutcome,
+  PhaseExecutionReconciliationRequestV3,
   PhaseStartResult,
   ProjectNotesStorageDiagnostics,
 } from "../notes-types";
@@ -54,6 +56,7 @@ export interface NotesPhaseDetailProps {
   phase: NotesPhase;
   currentTime: Date;
   expectedRevision: number | null;
+  expectedProjectKey: string | null;
   references: NotesReference[];
   authorityReady: boolean;
   openSource: OpenReferenceUrl;
@@ -99,6 +102,9 @@ export interface NotesPhaseDetailProps {
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onGetStorageDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onReconcilePhaseExecution(
+    request: PhaseExecutionReconciliationRequestV3,
+  ): Promise<PhaseExecutionReconciliationOutcome>;
   onPreviewManualCompletionApproval(
     phaseId: string,
     expectedRevision: number,
@@ -109,6 +115,7 @@ export interface NotesPhaseDetailProps {
   actionDisabled: boolean;
   onPendingChange(pending: boolean): void;
   onActionSuccess(): void;
+  onReconciliationSuccess(): void;
 }
 
 export interface PhaseEditDraft {
@@ -234,10 +241,11 @@ export function NotesPhaseDetailProvider({
     reminderFallbackValue,
   );
   const primaryActionRef = useRef<HTMLButtonElement>(null);
-  const action = primaryAction(phase);
+  const authoritativeSession = phase.execution?.lastSession ?? phase.session;
+  const action = primaryAction({ ...phase, session: authoritativeSession });
   const effectiveAction = raceLink ? sessionAction(raceLink) : action;
   const effectiveActionLabel = phaseActionLabel(phase, effectiveAction);
-  const resumeLink = raceLink ?? phase.session;
+  const resumeLink = raceLink ?? authoritativeSession;
   const controlsDisabled = actionDisabled || pending || pendingRoadmapAction !== null;
   const cancellationDisabled = pending || pendingRoadmapAction !== null;
   const latestReport = latestRoadmapReport(phase);
@@ -254,18 +262,19 @@ export function NotesPhaseDetailProvider({
   const canPauseAutomation =
     phase.overrides.status === null && phase.status !== "done" && phase.status !== "cancelled";
   const canCancelRun =
-    phase.session !== null &&
+    authoritativeSession !== null &&
     (phase.status === "planning" ||
       phase.status === "waiting-for-approval" ||
       phase.status === "in-progress" ||
       phase.status === "review");
   const phaseStartDisabled =
-    (effectiveAction === "Start" || effectiveAction === "Recover") &&
-    startUnavailableReason !== null;
+    phase.execution?.state === "needs-reconciliation" ||
+    ((effectiveAction === "Start" || effectiveAction === "Recover") &&
+      startUnavailableReason !== null);
 
   useEffect(() => {
-    if (phase.session) setRaceLink(null);
-  }, [phase.session]);
+    if (authoritativeSession) setRaceLink(null);
+  }, [authoritativeSession]);
 
   useEffect(() => {
     setPhaseDraft((current) => reconcilePhaseEditDraft(current, phase, editing));

@@ -1,4 +1,7 @@
 import type {
+  ProjectNotesExecutionPlanRequest,
+  ProjectNotesExecutionMutationOutcome,
+  ProjectNotesLoadOutcome,
   ProjectNotesPhaseLinkOutcome,
   ProjectNotesSnapshot,
 } from "./project-notes-repository.js";
@@ -15,6 +18,8 @@ export type PhaseCheckpointErrorCode =
   | "phase-not-found"
   | "phase-archived"
   | "phase-link-persistence-failed"
+  | "phase-plan-persistence-failed"
+  | "phase-lease-persistence-failed"
   | "phase-lifecycle-persistence-failed"
   | "stale-phase-session";
 
@@ -55,6 +60,11 @@ export interface PhaseCheckpointSession {
 }
 
 export interface PhaseCheckpointRepository {
+  approvePhaseExecutionPlan?(
+    cwd: string,
+    request: ProjectNotesExecutionPlanRequest,
+  ): Promise<ProjectNotesExecutionMutationOutcome>;
+  load?(cwd: string): Promise<ProjectNotesLoadOutcome>;
   updatePhaseSessionLink(
     cwd: string,
     phaseId: string,
@@ -154,13 +164,36 @@ export async function commitPlanApprovalCheckpoint(input: {
   ) => Promise<PhaseLifecycleReconcileOutcome>;
   prepareFreshSession: () => Promise<number>;
   restorePreviousSession?: () => Promise<void>;
+  durablePlan?: {
+    request: ProjectNotesExecutionPlanRequest;
+    mutateWithLeaseFence?<T>(
+      operation: () => Promise<T>,
+    ): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }>;
+    moveLeaseToFreshSession: (snapshot: ProjectNotesSnapshot) => Promise<ProjectNotesSnapshot>;
+  };
   onSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
 }): Promise<PlanApprovalCheckpointResult> {
   const previousActivePhase = input.session.getActivePhaseContext();
   let planTotal: number;
   let phaseLink: ActivePhaseLinkSyncResult;
   try {
+    let durableSnapshot = input.durablePlan
+      ? await persistDurableApprovedPlan(input, previousActivePhase)
+      : null;
     planTotal = await input.prepareFreshSession();
+    if (durableSnapshot && input.durablePlan) {
+      try {
+        durableSnapshot = await input.durablePlan.moveLeaseToFreshSession(durableSnapshot);
+      } catch (cause) {
+        throw new PhaseCheckpointError(
+          "phase-lease-persistence-failed",
+          previousActivePhase?.phase.id ?? input.durablePlan.request.phaseId,
+          "The approved plan was saved, but its lease could not move to the fresh session.",
+          "Resume the phase to recover its durable plan and lease.",
+          { cause },
+        );
+      }
+    }
     const stage = await persistActivePhaseStage({
       session: input.session,
       executionStage: "implementing",
@@ -175,12 +208,16 @@ export async function commitPlanApprovalCheckpoint(input: {
         "The plan is still pending. Resume the linked phase, then retry approval.",
       );
     }
-    phaseLink = await syncActivePhaseSessionLink({
-      ...input,
-      expectedPreviousSession: previousActivePhase?.session,
-      onSnapshot: undefined,
-    });
-    if (phaseLink.status === "no-active-phase") return { planTotal, phaseLink };
+    if (durableSnapshot) {
+      phaseLink = { status: "synchronized", snapshot: durableSnapshot, context: stage.context };
+    } else {
+      phaseLink = await syncActivePhaseSessionLink({
+        ...input,
+        expectedPreviousSession: previousActivePhase?.session,
+        onSnapshot: undefined,
+      });
+      if (phaseLink.status === "no-active-phase") return { planTotal, phaseLink };
+    }
   } catch (error) {
     if (previousActivePhase && input.restorePreviousSession) {
       try {
@@ -234,6 +271,74 @@ export async function commitPlanApprovalCheckpoint(input: {
     input.onSnapshot?.(phaseLink.snapshot);
   }
   return { planTotal, phaseLink };
+}
+
+async function persistDurableApprovedPlan(
+  input: {
+    session: PhaseCheckpointSession;
+    repository: PhaseCheckpointRepository;
+    cwd: string;
+    durablePlan?: {
+      request: ProjectNotesExecutionPlanRequest;
+      mutateWithLeaseFence?<T>(
+        operation: () => Promise<T>,
+      ): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }>;
+      moveLeaseToFreshSession: (snapshot: ProjectNotesSnapshot) => Promise<ProjectNotesSnapshot>;
+    };
+  },
+  activePhase: ActivePhaseContextV1 | undefined,
+): Promise<ProjectNotesSnapshot> {
+  const durable = input.durablePlan;
+  if (!durable || !input.repository.approvePhaseExecutionPlan || !input.repository.load) {
+    throw new PhaseCheckpointError(
+      "phase-plan-persistence-failed",
+      activePhase?.phase.id ?? durable?.request.phaseId ?? "unknown",
+      "Durable phase plan storage is unavailable.",
+      "Resume with durable Roadmap execution enabled, then retry approval.",
+    );
+  }
+  let outcome: ProjectNotesExecutionMutationOutcome;
+  try {
+    const mutation = durable.mutateWithLeaseFence
+      ? await durable.mutateWithLeaseFence(() =>
+          input.repository.approvePhaseExecutionPlan!(input.cwd, durable.request),
+        )
+      : {
+          status: "executed" as const,
+          value: await input.repository.approvePhaseExecutionPlan(input.cwd, durable.request),
+        };
+    if (mutation.status !== "executed") {
+      throw new PhaseCheckpointError(
+        "phase-lease-persistence-failed",
+        durable.request.phaseId,
+        "The approved plan was not saved because this session lost its phase lease.",
+        "Resume the phase safely, then approve the plan again.",
+      );
+    }
+    outcome = mutation.value;
+  } catch (cause) {
+    if (cause instanceof PhaseCheckpointError) throw cause;
+    throw new PhaseCheckpointError(
+      "phase-plan-persistence-failed",
+      durable.request.phaseId,
+      "The approved plan could not be saved to Project Notes.",
+      "The plan remains recoverable from its immutable snapshot. Fix Notes storage, then retry.",
+      { cause },
+    );
+  }
+  if (outcome.status === "committed") return outcome.snapshot;
+  if (outcome.status === "duplicate") {
+    const loaded = await input.repository.load(input.cwd);
+    if (loaded.status === "ok") return loaded.snapshot;
+  }
+  throw new PhaseCheckpointError(
+    "phase-plan-persistence-failed",
+    durable.request.phaseId,
+    `The approved plan was not committed (${outcome.status}).`,
+    outcome.status === "stale-revision"
+      ? "Reload the Roadmap and retry approval once."
+      : "Resume the phase and reconcile its approved plan before retrying.",
+  );
 }
 
 /**

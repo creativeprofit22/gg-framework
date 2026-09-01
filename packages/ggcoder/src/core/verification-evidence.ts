@@ -1,5 +1,10 @@
+import { createHash } from "node:crypto";
 import type { ContentPart, Message, ToolResult } from "@kenkaiiii/gg-ai";
-import { NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH } from "@kenkaiiii/gg-core/project-notes";
+import {
+  NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH,
+  type NotesVerificationEvidenceV1,
+  type NotesWorkspaceSnapshotV1,
+} from "@kenkaiiii/gg-core/project-notes";
 import { hasUnsafeShellSyntax, splitShellCommandSegments } from "../tools/read-only-bash.js";
 
 export interface VerificationCommandClassification {
@@ -8,6 +13,8 @@ export interface VerificationCommandClassification {
   candidate: boolean;
   reason: string;
 }
+
+export const ROADMAP_VERIFICATION_CLASSIFIER_VERSION = "roadmap-verification-v1";
 
 export interface VerificationEvidence {
   command: string;
@@ -287,6 +294,210 @@ function resultText(result: ToolResult): string {
     .join("\n");
 }
 
+export function roadmapCriterionId(index: number, criterion: string): string {
+  return createHash("sha256").update(`${index}\0${criterion.trim().replace(/\s+/g, " ")}`).digest("hex");
+}
+
+const GENERIC_VERIFICATION_COMMAND_DISPLAY = "Approved verification command";
+const REDACTED_COMMAND_VALUE = "[REDACTED]";
+const SENSITIVE_COMMAND_NAME =
+  /(?:^|[-_])(?:auth(?:orization)?|token|password|passwd|passphrase|secret|credential|api[-_]?key|access[-_]?key|private[-_]?key|client[-_]?secret|key|user(?:name)?|cookie)(?:$|[-_])/i;
+
+interface VerificationDisplayToken {
+  value: string;
+  quoted: boolean;
+}
+
+function tokenizeVerificationDisplay(command: string): VerificationDisplayToken[] | null {
+  if (!command || /[^\x20-\x7e]/.test(command)) return null;
+  const tokens: VerificationDisplayToken[] = [];
+  let value = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let quoted = false;
+  let started = false;
+  const flush = () => {
+    if (!started) return;
+    tokens.push({ value, quoted });
+    value = "";
+    quoted = false;
+    started = false;
+  };
+
+  for (const character of command) {
+    if (escaped) {
+      value += character;
+      escaped = false;
+      started = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      else if (character === "\\" && quote === '"') escaped = true;
+      else value += character;
+      started = true;
+      quoted = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      quoted = true;
+      started = true;
+    } else if (character === "\\") {
+      escaped = true;
+      started = true;
+    } else if (/\s/.test(character)) {
+      flush();
+    } else {
+      value += character;
+      started = true;
+    }
+  }
+  if (quote || escaped) return null;
+  flush();
+  return tokens.length > 0 ? tokens : null;
+}
+
+function isSensitiveCommandName(value: string): boolean {
+  const name = value.replace(/^--?/, "");
+  return SENSITIVE_COMMAND_NAME.test(name) || /(?:Auth|Token|Password|Secret|Credential|Key)$/.test(name);
+}
+
+function renderVerificationDisplayToken(token: VerificationDisplayToken): string {
+  return token.quoted || /\s/.test(token.value) ? JSON.stringify(token.value) : token.value;
+}
+
+/** Format untrusted verifier commands for durable Notes without exposing credential arguments. */
+export function formatVerificationCommandDisplay(command: string): string {
+  const tokens = tokenizeVerificationDisplay(command);
+  if (!tokens) return GENERIC_VERIFICATION_COMMAND_DISPLAY;
+  const display: string[] = [];
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    const assignmentIndex = token.value.indexOf("=");
+    if (assignmentIndex > 0) {
+      display.push(`${token.value.slice(0, assignmentIndex)}=${REDACTED_COMMAND_VALUE}`);
+      continue;
+    }
+
+    const headerName = /^([^:]+):/.exec(token.value)?.[1];
+    if (headerName && isSensitiveCommandName(headerName)) {
+      display.push(`${headerName}: ${REDACTED_COMMAND_VALUE}`);
+      continue;
+    }
+
+    const isHeaderFlag = token.value === "-H" || token.value.toLowerCase() === "--header";
+    const isSensitiveShortFlag = /^-[pPktu]$/.test(token.value);
+    if (isHeaderFlag || isSensitiveShortFlag || isSensitiveCommandName(token.value)) {
+      const next = tokens[index + 1];
+      if (next?.value === "=" || next?.value === ":") {
+        return GENERIC_VERIFICATION_COMMAND_DISPLAY;
+      }
+      display.push(renderVerificationDisplayToken(token));
+      if (next) {
+        display.push(REDACTED_COMMAND_VALUE);
+        index += 1;
+      }
+      continue;
+    }
+
+    if (/^(?:bearer|basic)$/i.test(token.value)) {
+      display.push(token.value, REDACTED_COMMAND_VALUE);
+      if (tokens[index + 1]) index += 1;
+      continue;
+    }
+    if (token.quoted || /:\/\/[^/\s@]+@/.test(token.value)) {
+      return GENERIC_VERIFICATION_COMMAND_DISPLAY;
+    }
+    display.push(renderVerificationDisplayToken(token));
+  }
+
+  const formatted = display.join(" ").slice(0, NOTES_ROADMAP_EVIDENCE_ITEM_MAX_LENGTH);
+  return formatted || GENERIC_VERIFICATION_COMMAND_DISPLAY;
+}
+export function createDurableVerificationEvidence(input: {
+  coverage: readonly RoadmapVerificationCriterionCoverage[];
+  workspace: NotesWorkspaceSnapshotV1;
+  observedAt: string;
+}): NotesVerificationEvidenceV1[] {
+  return input.coverage.map((coverage) => ({
+    commandHash: createHash("sha256").update(coverage.command).digest("hex"),
+    commandDisplay: formatVerificationCommandDisplay(coverage.command),
+    exitCode: 0,
+    classifierVersion: ROADMAP_VERIFICATION_CLASSIFIER_VERSION,
+    verdict: "approved",
+    criterionId: roadmapCriterionId(coverage.criterionIndex, coverage.criterion),
+    observedAt: input.observedAt,
+    workspace: structuredClone(input.workspace),
+  }));
+}
+
+export interface DurableVerificationEvidenceEvaluation {
+  ready: boolean;
+  staleCriterionIds: string[];
+  missingCriterionIds: string[];
+  criterionCoverage: RoadmapVerificationCriterionCoverage[];
+}
+
+export function evaluateDurableVerificationEvidence(input: {
+  doneWhen: readonly string[];
+  evidence: readonly NotesVerificationEvidenceV1[];
+  workspace: NotesWorkspaceSnapshotV1;
+  classifierVersion?: string;
+}): DurableVerificationEvidenceEvaluation {
+  const classifierVersion = input.classifierVersion ?? ROADMAP_VERIFICATION_CLASSIFIER_VERSION;
+  const staleCriterionIds: string[] = [];
+  const missingCriterionIds: string[] = [];
+  const criterionCoverage: RoadmapVerificationCriterionCoverage[] = [];
+  const commandHashes = new Set<string>();
+  for (let offset = 0; offset < input.doneWhen.length; offset += 1) {
+    const criterion = input.doneWhen[offset] ?? "";
+    const criterionId = roadmapCriterionId(offset + 1, criterion);
+    const candidates = input.evidence.filter((item) => item.criterionId === criterionId);
+    const current = [...candidates].reverse().find((item) =>
+      item.exitCode === 0 &&
+      item.verdict === "approved" &&
+      item.classifierVersion === classifierVersion &&
+      workspaceEvidenceMatches(item.workspace, input.workspace),
+    );
+    if (!current) {
+      (candidates.length > 0 ? staleCriterionIds : missingCriterionIds).push(criterionId);
+      continue;
+    }
+    if (commandHashes.has(current.commandHash)) {
+      missingCriterionIds.push(criterionId);
+      continue;
+    }
+    commandHashes.add(current.commandHash);
+    criterionCoverage.push({
+      criterionIndex: offset + 1,
+      criterion,
+      evidence: current.commandDisplay,
+      command: current.commandDisplay,
+    });
+  }
+  return {
+    ready: criterionCoverage.length === input.doneWhen.length,
+    staleCriterionIds,
+    missingCriterionIds,
+    criterionCoverage,
+  };
+}
+
+function workspaceEvidenceMatches(
+  left: NotesWorkspaceSnapshotV1,
+  right: NotesWorkspaceSnapshotV1,
+): boolean {
+  return left.version === right.version &&
+    left.repository.projectKey === right.repository.projectKey &&
+    left.repository.identityHash === right.repository.identityHash &&
+    left.repository.rootCommit === right.repository.rootCommit &&
+    left.headCommit === right.headCommit &&
+    left.worktreeDigest === right.worktreeDigest &&
+    left.clean === right.clean;
+}
+
 /** Extract harness-owned evidence from completed bash calls in a transcript. */
 export function collectVerificationEvidence(messages: readonly Message[]): VerificationEvidence[] {
   const calls = new Map<
@@ -341,6 +552,8 @@ export function collectVerificationEvidence(messages: readonly Message[]): Verif
 
 export type RoadmapShellEvidence = Omit<VerificationEvidence, "status"> & {
   status: VerificationEvidence["status"] | "unclassified";
+  workspace?: NotesWorkspaceSnapshotV1;
+  classifierVersion?: string;
 };
 
 function collectShellEvidence(messages: readonly Message[]): RoadmapShellEvidence[] {
@@ -453,6 +666,7 @@ export class SessionVerificationEvidenceLedger {
     args: Record<string, unknown>;
     isError: boolean;
     details?: unknown;
+    workspace?: NotesWorkspaceSnapshotV1;
   }): void {
     if (isWorkspaceMutation(input)) this.generation += 1;
     if (input.name !== "bash") return;
@@ -495,6 +709,10 @@ export class SessionVerificationEvidenceLedger {
         status: passed ? "passed" : "failed",
         reason: passed ? classification.reason : "bounded check did not exit successfully",
       };
+    }
+    if (input.workspace) {
+      evidence.workspace = structuredClone(input.workspace);
+      evidence.classifierVersion = ROADMAP_VERIFICATION_CLASSIFIER_VERSION;
     }
     this.entries.delete(executionId);
     this.entries.set(executionId, { generation: this.generation, evidence });

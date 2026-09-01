@@ -119,8 +119,46 @@ export interface NotesApprovedPlanV1 {
   steps: NotesPlanStepV1[];
 }
 
+export interface NotesVerificationEvidenceV1 {
+  commandHash: string;
+  commandDisplay: string;
+  exitCode: number;
+  classifierVersion: string;
+  verdict: "approved" | "rejected";
+  criterionId: string;
+  observedAt: string;
+  workspace: NotesWorkspaceSnapshotV1;
+  /** Omitted evidence is current for backward compatibility. */
+  state?: "current" | "needs-revalidation";
+}
+
+export interface NotesPendingCompletionV1 {
+  completionId: string;
+  statusRevision: number;
+  runJournal: { sessionPath: string | null; generation: number };
+  planHash: string;
+  workspace: NotesWorkspaceSnapshotV1;
+}
+
+export type NotesPhaseExecutionState =
+  | "needs-plan"
+  | "implementing"
+  | "needs-reconciliation"
+  | "completion-pending"
+  | "completed";
+
 export interface NotesPhaseExecutionV1 {
+  version: 1;
+  state: NotesPhaseExecutionState;
+  repository: NotesRepositoryIdentityV1;
+  plan: NotesApprovedPlanV1 | null;
+  evidence: NotesVerificationEvidenceV1[];
+  pendingCompletion: NotesPendingCompletionV1 | null;
   lastSession: NotesSessionLink | null;
+  migration: {
+    source: "native" | "legacy-session";
+    reconciledAt: string | null;
+  };
 }
 
 /** Durable/reference consumers may omit capture provenance but share all source semantics. */
@@ -443,8 +481,8 @@ export interface NotesPhase {
   sourcePrompt: string;
   referenceIds: string[];
   session: NotesSessionLink | null;
-  /** Durable implementation transcript; absent only before additive v3 migration. */
-  execution?: NotesPhaseExecutionV1 | null;
+  /** Additive v3 durable execution state. Absence means legacy session-owned execution. */
+  execution?: NotesPhaseExecutionV1;
   reminder: NotesReminder | null;
   attentionReason: string | null;
   createdAt: string;
@@ -721,15 +759,62 @@ const PHASE_KEYS = [
   "lifecycleEvents",
   "roadmapEvents",
 ];
-const PHASE_KEYS_WITHOUT_EXECUTION = PHASE_KEYS.filter((key) => key !== "execution");
-const LEGACY_V3_PHASE_REQUIRED_KEYS = PHASE_KEYS_WITHOUT_EXECUTION.filter(
+const LEGACY_PHASE_KEYS = PHASE_KEYS.filter((key) => key !== "execution");
+const LEGACY_V3_PHASE_REQUIRED_KEYS = LEGACY_PHASE_KEYS.filter(
   (key) =>
     key !== "archivedAt" &&
     key !== "pendingAutomaticLifecycleTransition" &&
     key !== "roadmapEvents",
 );
 const SESSION_KEYS = ["sessionId", "sessionPath"];
-const PHASE_EXECUTION_KEYS = ["lastSession"];
+const REPOSITORY_IDENTITY_KEYS = ["projectKey", "identityHash", "rootCommit"];
+const WORKSPACE_SNAPSHOT_KEYS = [
+  "version",
+  "repository",
+  "headCommit",
+  "worktreeDigest",
+  "clean",
+];
+const PLAN_STEP_KEYS = ["id", "index", "text", "state", "completedAt", "workspace"];
+const APPROVED_PLAN_KEYS = [
+  "planId",
+  "contentHash",
+  "snapshotPath",
+  "approvedAt",
+  "approvedRevision",
+  "baseCommit",
+  "steps",
+];
+const VERIFICATION_EVIDENCE_KEYS = [
+  "commandHash",
+  "commandDisplay",
+  "exitCode",
+  "classifierVersion",
+  "verdict",
+  "criterionId",
+  "observedAt",
+  "workspace",
+];
+const VERIFICATION_EVIDENCE_STATE_KEYS = [...VERIFICATION_EVIDENCE_KEYS, "state"];
+const PENDING_COMPLETION_KEYS = [
+  "completionId",
+  "statusRevision",
+  "runJournal",
+  "planHash",
+  "workspace",
+];
+const RUN_JOURNAL_KEYS = ["sessionPath", "generation"];
+const EXECUTION_MIGRATION_KEYS = ["source", "reconciledAt"];
+const PHASE_EXECUTION_KEYS = [
+  "version",
+  "state",
+  "repository",
+  "plan",
+  "evidence",
+  "pendingCompletion",
+  "lastSession",
+  "migration",
+];
 const LEGACY_REMINDER_KEYS = ["id", "dueAt", "note", "createdAt"];
 const REMINDER_KEYS = ["id", "occurrenceKey", "dueAt", "note", "createdAt", "lastDelivery"];
 const REMINDER_DELIVERY_KEYS = ["occurrenceKey", "attemptedAt", "channel", "permission"];
@@ -1580,6 +1665,284 @@ function validateReferenceCoordinates(
   return null;
 }
 
+export function validateNotesPhaseExecution(
+  value: unknown,
+  pathPrefix = "execution",
+): NotesValidationError | null {
+  if (!isRecordWithKeys(value, PHASE_EXECUTION_KEYS)) {
+    return validationError(pathPrefix, `expected exactly: ${PHASE_EXECUTION_KEYS.join(", ")}`);
+  }
+  if (value.version !== 1) return validationError(`${pathPrefix}.version`, "expected 1");
+  if (
+    value.state !== "needs-plan" &&
+    value.state !== "implementing" &&
+    value.state !== "needs-reconciliation" &&
+    value.state !== "completion-pending" &&
+    value.state !== "completed"
+  ) {
+    return validationError(`${pathPrefix}.state`, "unknown execution state");
+  }
+  const repositoryError = validateRepositoryIdentity(value.repository, `${pathPrefix}.repository`);
+  if (repositoryError) return repositoryError;
+  const repository = value.repository as unknown as NotesRepositoryIdentityV1;
+  const planError = validateApprovedPlan(value.plan, `${pathPrefix}.plan`, repository);
+  if (planError) return planError;
+  if ((value.state === "needs-plan" && value.plan !== null) ||
+      (value.state !== "needs-plan" && value.state !== "needs-reconciliation" && value.plan === null)) {
+    return validationError(`${pathPrefix}.plan`, "plan does not match execution state");
+  }
+  if (!Array.isArray(value.evidence)) {
+    return validationError(`${pathPrefix}.evidence`, "expected an array");
+  }
+  for (let index = 0; index < value.evidence.length; index += 1) {
+    const evidenceError = validateVerificationEvidence(
+      value.evidence[index],
+      `${pathPrefix}.evidence[${index}]`,
+      repository,
+    );
+    if (evidenceError) return evidenceError;
+  }
+  const pendingError = validatePendingCompletion(
+    value.pendingCompletion,
+    `${pathPrefix}.pendingCompletion`,
+    repository,
+  );
+  if (pendingError) return pendingError;
+  const pendingCompletion = value.pendingCompletion as NotesPendingCompletionV1 | null;
+  const plan = value.plan as NotesApprovedPlanV1 | null;
+  if (
+    (value.state === "completion-pending" && pendingCompletion === null) ||
+    ((value.state === "needs-plan" || value.state === "implementing" ||
+      value.state === "needs-reconciliation") && pendingCompletion !== null)
+  ) {
+    return validationError(
+      `${pathPrefix}.pendingCompletion`,
+      "pending completion does not match state",
+    );
+  }
+  if (pendingCompletion !== null && plan !== null && pendingCompletion.planHash !== plan.contentHash) {
+    return validationError(
+      `${pathPrefix}.pendingCompletion.planHash`,
+      "must match approved plan",
+    );
+  }
+  const sessionError = validateNotesSessionLink(value.lastSession, `${pathPrefix}.lastSession`);
+  if (sessionError) return sessionError;
+  if (
+    !isRecordWithKeys(value.migration, EXECUTION_MIGRATION_KEYS) &&
+    !isRecordWithKeys(value.migration, EXECUTION_MIGRATION_KEYS)
+  ) {
+    return validationError(`${pathPrefix}.migration`, "invalid migration marker");
+  }
+  if (value.migration.source !== "native" && value.migration.source !== "legacy-session") {
+    return validationError(`${pathPrefix}.migration.source`, "unknown migration source");
+  }
+  if (!isNullableTimestamp(value.migration.reconciledAt)) {
+    return validationError(`${pathPrefix}.migration.reconciledAt`, "expected an ISO timestamp or null");
+  }
+
+  return null;
+}
+
+function validateRepositoryIdentity(
+  value: unknown,
+  pathPrefix: string,
+): NotesValidationError | null {
+  if (!isRecordWithKeys(value, REPOSITORY_IDENTITY_KEYS)) {
+    return validationError(pathPrefix, "invalid repository identity");
+  }
+  if (!isNonEmptyString(value.projectKey) || value.projectKey.length > 4096) {
+    return validationError(`${pathPrefix}.projectKey`, "expected a bounded project key");
+  }
+  if (!isSha256(value.identityHash)) {
+    return validationError(`${pathPrefix}.identityHash`, "expected a lowercase SHA-256 hash");
+  }
+  if (value.rootCommit !== null && !isGitCommit(value.rootCommit)) {
+    return validationError(`${pathPrefix}.rootCommit`, "expected a lowercase Git commit or null");
+  }
+  return null;
+}
+
+function validateWorkspaceSnapshot(
+  value: unknown,
+  pathPrefix: string,
+  expectedRepository: NotesRepositoryIdentityV1,
+): NotesValidationError | null {
+  if (!isRecordWithKeys(value, WORKSPACE_SNAPSHOT_KEYS)) {
+    return validationError(pathPrefix, "invalid workspace snapshot");
+  }
+  if (value.version !== 1) return validationError(`${pathPrefix}.version`, "expected 1");
+  const repositoryError = validateRepositoryIdentity(value.repository, `${pathPrefix}.repository`);
+  if (repositoryError) return repositoryError;
+  if (!sameRepositoryIdentity(value.repository as unknown as NotesRepositoryIdentityV1, expectedRepository)) {
+    return validationError(`${pathPrefix}.repository`, "must match phase repository");
+  }
+  if (!isGitCommit(value.headCommit)) {
+    return validationError(`${pathPrefix}.headCommit`, "expected a lowercase Git commit");
+  }
+  if (!isSha256(value.worktreeDigest)) {
+    return validationError(`${pathPrefix}.worktreeDigest`, "expected a lowercase SHA-256 hash");
+  }
+  if (typeof value.clean !== "boolean") {
+    return validationError(`${pathPrefix}.clean`, "expected a boolean");
+  }
+  return null;
+}
+
+export function isNotesRepositoryIdentityV1(value: unknown): value is NotesRepositoryIdentityV1 {
+  return validateRepositoryIdentity(value, "repository") === null;
+}
+
+export function isNotesWorkspaceSnapshotV1(value: unknown): value is NotesWorkspaceSnapshotV1 {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const repository = (value as { repository?: unknown }).repository;
+  if (!isNotesRepositoryIdentityV1(repository)) return false;
+  return validateWorkspaceSnapshot(value, "workspace", repository) === null;
+}
+
+function validateApprovedPlan(
+  value: unknown,
+  pathPrefix: string,
+  repository: NotesRepositoryIdentityV1,
+): NotesValidationError | null {
+  if (value === null) return null;
+  if (!isRecordWithKeys(value, APPROVED_PLAN_KEYS)) {
+    return validationError(pathPrefix, "invalid approved plan");
+  }
+  if (!isBoundedNonEmptyString(value.planId, 256)) {
+    return validationError(`${pathPrefix}.planId`, "expected a bounded plan ID");
+  }
+  if (!isSha256(value.contentHash)) {
+    return validationError(`${pathPrefix}.contentHash`, "expected a lowercase SHA-256 hash");
+  }
+  if (!isSafeRelativePath(value.snapshotPath)) {
+    return validationError(`${pathPrefix}.snapshotPath`, "expected a contained relative path");
+  }
+  if (!isTimestamp(value.approvedAt)) {
+    return validationError(`${pathPrefix}.approvedAt`, "expected an ISO timestamp");
+  }
+  if (!isNonNegativeSafeInteger(value.approvedRevision)) {
+    return validationError(`${pathPrefix}.approvedRevision`, "expected a non-negative revision");
+  }
+  if (value.baseCommit !== null && !isGitCommit(value.baseCommit)) {
+    return validationError(`${pathPrefix}.baseCommit`, "expected a lowercase Git commit or null");
+  }
+  if (!Array.isArray(value.steps) || value.steps.length === 0) {
+    return validationError(`${pathPrefix}.steps`, "expected at least one plan step");
+  }
+  const ids = new Set<string>();
+  for (let index = 0; index < value.steps.length; index += 1) {
+    const step = value.steps[index];
+    const stepPath = `${pathPrefix}.steps[${index}]`;
+    if (!isRecordWithKeys(step, PLAN_STEP_KEYS)) {
+      return validationError(stepPath, "invalid plan step");
+    }
+    if (!isSha256(step.id) || ids.has(step.id as string)) {
+      return validationError(`${stepPath}.id`, "expected a unique lowercase SHA-256 hash");
+    }
+    ids.add(step.id as string);
+    if (step.index !== index + 1) {
+      return validationError(`${stepPath}.index`, `expected ${index + 1}`);
+    }
+    if (!isBoundedNonEmptyString(step.text, 4096)) {
+      return validationError(`${stepPath}.text`, "expected bounded step text");
+    }
+    if (
+      step.state !== "pending" &&
+      step.state !== "completed" &&
+      step.state !== "needs-revalidation"
+    ) {
+      return validationError(`${stepPath}.state`, "unknown plan step state");
+    }
+    if (!isNullableTimestamp(step.completedAt)) {
+      return validationError(`${stepPath}.completedAt`, "expected an ISO timestamp or null");
+    }
+    if (step.workspace !== null) {
+      const workspaceError = validateWorkspaceSnapshot(step.workspace, `${stepPath}.workspace`, repository);
+      if (workspaceError) return workspaceError;
+    }
+    if (step.state === "pending" && (step.completedAt !== null || step.workspace !== null)) {
+      return validationError(stepPath, "pending steps may not claim completion");
+    }
+    if (step.state === "completed" && (step.completedAt === null || step.workspace === null)) {
+      return validationError(stepPath, "completed steps require timestamped workspace evidence");
+    }
+  }
+  return null;
+}
+
+function validateVerificationEvidence(
+  value: unknown,
+  pathPrefix: string,
+  repository: NotesRepositoryIdentityV1,
+): NotesValidationError | null {
+  if (
+    !isRecordWithKeys(value, VERIFICATION_EVIDENCE_KEYS) &&
+    !isRecordWithKeys(value, VERIFICATION_EVIDENCE_STATE_KEYS)
+  ) {
+    return validationError(pathPrefix, "invalid verification evidence");
+  }
+  if (!isSha256(value.commandHash)) {
+    return validationError(`${pathPrefix}.commandHash`, "expected a lowercase SHA-256 hash");
+  }
+  if (!isBoundedNonEmptyString(value.commandDisplay, 1024)) {
+    return validationError(`${pathPrefix}.commandDisplay`, "expected a bounded command summary");
+  }
+  if (!isNonNegativeSafeInteger(value.exitCode)) {
+    return validationError(`${pathPrefix}.exitCode`, "expected a non-negative exit code");
+  }
+  if (!isBoundedNonEmptyString(value.classifierVersion, 64)) {
+    return validationError(`${pathPrefix}.classifierVersion`, "expected a bounded classifier version");
+  }
+  if (value.verdict !== "approved" && value.verdict !== "rejected") {
+    return validationError(`${pathPrefix}.verdict`, "unknown classifier verdict");
+  }
+  if (!isBoundedNonEmptyString(value.criterionId, 256)) {
+    return validationError(`${pathPrefix}.criterionId`, "expected a bounded criterion ID");
+  }
+  if (!isTimestamp(value.observedAt)) {
+    return validationError(`${pathPrefix}.observedAt`, "expected an ISO timestamp");
+  }
+  if (
+    "state" in value &&
+    value.state !== "current" &&
+    value.state !== "needs-revalidation"
+  ) {
+    return validationError(`${pathPrefix}.state`, "unknown evidence state");
+  }
+  return validateWorkspaceSnapshot(value.workspace, `${pathPrefix}.workspace`, repository);
+}
+
+function validatePendingCompletion(
+  value: unknown,
+  pathPrefix: string,
+  repository: NotesRepositoryIdentityV1,
+): NotesValidationError | null {
+  if (value === null) return null;
+  if (!isRecordWithKeys(value, PENDING_COMPLETION_KEYS)) {
+    return validationError(pathPrefix, "invalid pending completion");
+  }
+  if (!isBoundedNonEmptyString(value.completionId, 256)) {
+    return validationError(`${pathPrefix}.completionId`, "expected a bounded completion ID");
+  }
+  if (!isNonNegativeSafeInteger(value.statusRevision)) {
+    return validationError(`${pathPrefix}.statusRevision`, "expected a non-negative revision");
+  }
+  if (!isRecordWithKeys(value.runJournal, RUN_JOURNAL_KEYS)) {
+    return validationError(`${pathPrefix}.runJournal`, "invalid run journal");
+  }
+  if (!isNullableNonEmptyString(value.runJournal.sessionPath)) {
+    return validationError(`${pathPrefix}.runJournal.sessionPath`, "expected a path or null");
+  }
+  if (!isNonNegativeSafeInteger(value.runJournal.generation)) {
+    return validationError(`${pathPrefix}.runJournal.generation`, "expected a non-negative generation");
+  }
+  if (!isSha256(value.planHash)) {
+    return validationError(`${pathPrefix}.planHash`, "expected a lowercase SHA-256 hash");
+  }
+  return validateWorkspaceSnapshot(value.workspace, `${pathPrefix}.workspace`, repository);
+}
+
 function validatePhase(
   value: unknown,
   index: number,
@@ -1587,14 +1950,8 @@ function validatePhase(
   knownPhaseIds: ReadonlySet<string>,
 ): NotesValidationError | null {
   const pathPrefix = `phases[${index}]`;
-  if (
-    !isRecord(value) ||
-    (!hasExactKeys(value, PHASE_KEYS) && !hasExactKeys(value, PHASE_KEYS_WITHOUT_EXECUTION))
-  ) {
-    return validationError(
-      pathPrefix,
-      `expected exactly: ${PHASE_KEYS.join(", ")} (execution may be omitted)`,
-    );
+  if (!isRecordWithKeys(value, PHASE_KEYS) && !isRecordWithKeys(value, LEGACY_PHASE_KEYS)) {
+    return validationError(pathPrefix, `expected legacy fields with optional execution`);
   }
   if (!isNonEmptyString(value.id))
     return validationError(`${pathPrefix}.id`, "expected a stable ID");
@@ -1622,18 +1979,12 @@ function validatePhase(
   if (referenceIdsError) return referenceIdsError;
   const sessionError = validateNotesSessionLink(value.session, `${pathPrefix}.session`);
   if (sessionError) return sessionError;
-  if (value.execution !== undefined && value.execution !== null) {
-    if (!isRecordWithKeys(value.execution, PHASE_EXECUTION_KEYS)) {
-      return validationError(
-        `${pathPrefix}.execution`,
-        "expected lastSession or null",
-      );
-    }
-    const executionSessionError = validateNotesSessionLink(
-      value.execution.lastSession,
-      `${pathPrefix}.execution.lastSession`,
+  if ("execution" in value) {
+    const executionError = validateNotesPhaseExecution(
+      value.execution,
+      `${pathPrefix}.execution`,
     );
-    if (executionSessionError) return executionSessionError;
+    if (executionError) return executionError;
   }
   const reminderError = validateReminder(value.reminder, `${pathPrefix}.reminder`);
   if (reminderError) return reminderError;
@@ -2774,6 +3125,36 @@ function isTimestamp(value: unknown): value is string {
 
 function isNullableTimestamp(value: unknown): value is string | null {
   return value === null || isTimestamp(value);
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function isGitCommit(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isSafeRelativePath(value: unknown): value is string {
+  if (!isBoundedNonEmptyString(value, 4096) || value.includes("\0")) return false;
+  if (/^(?:[a-zA-Z]:|[\\/])/.test(value)) return false;
+  const segments = value.replace(/\\/g, "/").split("/");
+  return segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
+function sameRepositoryIdentity(
+  left: NotesRepositoryIdentityV1,
+  right: NotesRepositoryIdentityV1,
+): boolean {
+  return (
+    left.projectKey === right.projectKey &&
+    left.identityHash === right.identityHash &&
+    left.rootCommit === right.rootCommit
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

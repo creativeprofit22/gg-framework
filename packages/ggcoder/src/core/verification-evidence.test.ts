@@ -4,9 +4,125 @@ import {
   SessionVerificationEvidenceLedger,
   classifyVerificationCommand,
   collectVerificationEvidence,
+  createDurableVerificationEvidence,
+  evaluateDurableVerificationEvidence,
   evaluateRoadmapVerificationEvidence,
+  formatVerificationCommandDisplay,
   partitionVerificationMessagesForWorkspaceMutation,
 } from "./verification-evidence.js";
+
+describe("durable verification evidence", () => {
+  const repository = {
+    projectKey: "C:/project",
+    identityHash: "1".repeat(64),
+    rootCommit: "2".repeat(40),
+  };
+  const workspace = {
+    version: 1 as const,
+    repository,
+    headCommit: "3".repeat(40),
+    worktreeDigest: "4".repeat(64),
+    clean: true,
+  };
+
+  it("binds classifier-approved commands to exact criterion and workspace identities", () => {
+    const evidence = createDurableVerificationEvidence({
+      coverage: [{
+        criterionIndex: 1,
+        criterion: "Tests pass",
+        evidence: "pnpm test",
+        command: "pnpm test",
+      }],
+      workspace,
+      observedAt: "2026-08-30T10:00:00.000Z",
+    });
+    expect(evaluateDurableVerificationEvidence({ doneWhen: ["Tests pass"], evidence, workspace })).toMatchObject({
+      ready: true,
+      staleCriterionIds: [],
+      missingCriterionIds: [],
+    });
+    expect(
+      evaluateDurableVerificationEvidence({
+        doneWhen: ["Tests pass"],
+        evidence,
+        workspace: { ...workspace, worktreeDigest: "5".repeat(64) },
+      }),
+    ).toMatchObject({ ready: false, staleCriterionIds: [evidence[0]!.criterionId] });
+    expect(
+      evaluateDurableVerificationEvidence({
+        doneWhen: ["Tests pass"],
+        evidence,
+        workspace,
+        classifierVersion: "roadmap-verification-v2",
+      }),
+    ).toMatchObject({ ready: false, staleCriterionIds: [evidence[0]!.criterionId] });
+  });
+
+  it("hashes exact commands while keeping secret-like values out of durable displays", () => {
+    const commands = [
+      "pnpm test -- --token=synthetic-token-4f93a8",
+      "pnpm test -- --password synthetic-password-8b27",
+      'pnpm test -- --header "Authorization: Bearer synthetic-header-6d51"',
+      "pnpm test -- API_KEY=synthetic-key-2c74",
+      "pnpm test -- --token='unterminated-synthetic-token",
+    ];
+    const evidence = createDurableVerificationEvidence({
+      coverage: commands.map((command, index) => ({
+        criterionIndex: index + 1,
+        criterion: `Criterion ${index + 1}`,
+        evidence: command,
+        command,
+      })),
+      workspace,
+      observedAt: "2026-08-30T10:00:00.000Z",
+    });
+
+    expect(evidence.map((item) => item.commandHash)).toEqual([
+      "50c7de277d4a0807ed6cfff53ccc7ae26be29b9df51b350f5189cad82115490c",
+      "258efab2c490fe69f30b1182c864e13d0da1bb70bc4a0a0304dbafb402a3a43a",
+      "407bf90ef56389db2e42d541c7f424ee9334f29f5d2c19efb1f5c2bb9896c215",
+      "7fc9fb739b3fd19d11e11125412870412b3e3b02ac2fd52be536302c61016bff",
+      "9a155faebe516364242bab6c7d5e26e2bc78d4b0e11e3a929b740bdad5bd1865",
+    ]);
+    expect(evidence.map((item) => item.commandDisplay)).toEqual([
+      "pnpm test -- --token=[REDACTED]",
+      "pnpm test -- --password [REDACTED]",
+      "pnpm test -- --header [REDACTED]",
+      "pnpm test -- API_KEY=[REDACTED]",
+      "Approved verification command",
+    ]);
+    expect(JSON.stringify(evidence)).not.toMatch(/synthetic-(?:token|password|header|key)/);
+    expect(formatVerificationCommandDisplay("pnpm test -- TOKEN = synthetic-spaced-value")).toBe(
+      "Approved verification command",
+    );
+    expect(formatVerificationCommandDisplay("pnpm test -- -k synthetic-short-value")).toBe(
+      "pnpm test -- -k [REDACTED]",
+    );
+
+    const sameDisplayEvidence = createDurableVerificationEvidence({
+      coverage: [
+        { criterionIndex: 1, criterion: "First", evidence: "first", command: commands[0]! },
+        {
+          criterionIndex: 2,
+          criterion: "Second",
+          evidence: "second",
+          command: "pnpm test -- --token=another-synthetic-value",
+        },
+      ],
+      workspace,
+      observedAt: "2026-08-30T10:00:00.000Z",
+    });
+    expect(sameDisplayEvidence[0]!.commandDisplay).toBe(sameDisplayEvidence[1]!.commandDisplay);
+    expect(sameDisplayEvidence[0]!.commandHash).not.toBe(sameDisplayEvidence[1]!.commandHash);
+    expect(
+      evaluateDurableVerificationEvidence({
+        doneWhen: ["First", "Second"],
+        evidence: sameDisplayEvidence,
+        workspace,
+      }).ready,
+    ).toBe(true);
+  });
+});
 
 describe("classifyVerificationCommand", () => {
   it.each([

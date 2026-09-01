@@ -1,9 +1,28 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { NotesApprovedPlanV1 } from "@kenkaiiii/gg-core";
+import type {
+  NotesApprovedPlanV1,
+  NotesPlanStepV1,
+  NotesRepositoryIdentityV1,
+  NotesVerificationEvidenceV1,
+  NotesWorkspaceSnapshotV1,
+} from "@kenkaiiii/gg-core";
 import { approvedPlanArtifactContent } from "./app-sidecar-plan-gate.js";
 import { extractPlanSteps } from "./utils/plan-steps.js";
+
+const GIT_TIMEOUT_MS = 10_000;
+const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+
+export class RepositoryUnverifiableError extends Error {
+  readonly code = "repository-unverifiable";
+
+  constructor(message = "The Git repository could not be verified.") {
+    super(message);
+    this.name = "RepositoryUnverifiableError";
+  }
+}
 
 export interface ApprovedPlanInput {
   planId: string;
@@ -178,7 +197,202 @@ export function createApprovedPlan(input: ApprovedPlanInput): NotesApprovedPlanV
   };
 }
 
+export function workspaceSnapshotsEqual(
+  left: NotesWorkspaceSnapshotV1,
+  right: NotesWorkspaceSnapshotV1,
+): boolean {
+  return (
+    left.version === right.version &&
+    left.repository.projectKey === right.repository.projectKey &&
+    constantTimeHexEqual(left.repository.identityHash, right.repository.identityHash) &&
+    left.repository.rootCommit === right.repository.rootCommit &&
+    left.headCommit === right.headCommit &&
+    constantTimeHexEqual(left.worktreeDigest, right.worktreeDigest) &&
+    left.clean === right.clean
+  );
+}
+
+export function isEvidenceCurrent(
+  evidence: NotesVerificationEvidenceV1,
+  current: NotesWorkspaceSnapshotV1,
+  classifierVersion: string,
+): boolean {
+  return (
+    evidence.state !== "needs-revalidation" &&
+    evidence.exitCode === 0 &&
+    evidence.verdict === "approved" &&
+    evidence.classifierVersion === classifierVersion &&
+    workspaceSnapshotsEqual(evidence.workspace, current)
+  );
+}
+
+export async function captureGitWorkspaceSnapshot(
+  cwd: string,
+  projectKey: string,
+): Promise<NotesWorkspaceSnapshotV1> {
+  const root = await gitText(cwd, ["rev-parse", "--show-toplevel"]);
+  if (!root) throw new RepositoryUnverifiableError();
+  const repository = await captureRepositoryIdentity(root, projectKey);
+  const headCommit = await gitText(root, ["rev-parse", "HEAD"]);
+  if (!/^[a-f0-9]{40}$/.test(headCommit)) throw new RepositoryUnverifiableError();
+
+  let prior = await captureWorktree(root);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const next = await captureWorktree(root);
+    if (prior.digest === next.digest && prior.clean === next.clean) {
+      return {
+        version: 1,
+        repository,
+        headCommit,
+        worktreeDigest: next.digest,
+        clean: next.clean,
+      };
+    }
+    prior = next;
+  }
+  throw new RepositoryUnverifiableError("The workspace changed while it was being captured.");
+}
+
+export async function captureRepositoryIdentity(
+  cwd: string,
+  projectKey: string,
+): Promise<NotesRepositoryIdentityV1> {
+  const roots = (await gitText(cwd, ["rev-list", "--max-parents=0", "HEAD"]))
+    .split(/\r?\n/)
+    .filter((value) => /^[a-f0-9]{40}$/.test(value))
+    .sort();
+  if (roots.length === 0) throw new RepositoryUnverifiableError();
+  const remote = await tryGitText(cwd, ["remote", "get-url", "origin"]);
+  const identityHash = sha256(
+    JSON.stringify({ roots, remote: remote ? normalizeRemoteIdentity(remote) : null }),
+  );
+  return { projectKey, identityHash, rootCommit: roots.length === 1 ? roots[0]! : null };
+}
+
+interface WorktreeCapture {
+  digest: string;
+  clean: boolean;
+}
+
+async function captureWorktree(root: string): Promise<WorktreeCapture> {
+  const [status, index, trackedChanges, untracked] = await Promise.all([
+    runGit(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+    runGit(root, ["ls-files", "--stage", "-z"]),
+    runGit(root, ["diff", "--name-only", "-z", "--diff-filter=ACDMRTUXB"]),
+    runGit(root, ["ls-files", "--others", "--exclude-standard", "-z"]),
+  ]);
+  const entries = [...new Set([...nulList(trackedChanges), ...nulList(untracked)])].sort();
+  const hash = createHash("sha256");
+  hash.update("index\0").update(index).update("\0status\0").update(status);
+  for (const relative of entries) {
+    hash.update("\0path\0").update(relative).update("\0content\0");
+    await hashContainedPath(hash, root, relative);
+  }
+  return { digest: hash.digest("hex"), clean: status.length === 0 };
+}
+
+async function hashContainedPath(
+  hash: ReturnType<typeof createHash>,
+  root: string,
+  relative: string,
+) {
+  if (!relative || path.isAbsolute(relative) || relative.split(/[\\/]/).includes("..")) {
+    throw new RepositoryUnverifiableError("Git returned an unsafe workspace path.");
+  }
+  const absolute = path.resolve(root, relative);
+  const contained = path.relative(root, absolute);
+  if (contained.startsWith("..") || path.isAbsolute(contained)) {
+    throw new RepositoryUnverifiableError("Git returned a path outside the repository.");
+  }
+  let stat;
+  try {
+    stat = await fs.lstat(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      hash.update("deleted");
+      return;
+    }
+    throw error;
+  }
+  if (stat.isSymbolicLink()) {
+    hash.update("symlink\0").update(await fs.readlink(absolute));
+    return;
+  }
+  if (!stat.isFile()) throw new RepositoryUnverifiableError("Workspace entry is not a file.");
+  hash.update(`file\0${stat.mode & 0o111 ? "executable" : "regular"}\0`);
+  const handle = await fs.open(absolute, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
+function nulList(value: Buffer): string[] {
+  return value
+    .toString("utf8")
+    .split("\0")
+    .filter(Boolean)
+    .map((entry) => entry.replace(/\\/g, "/"));
+}
+
+function normalizeRemoteIdentity(remote: string): string {
+  const trimmed = remote.trim();
+  try {
+    const url = new URL(trimmed);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    url.pathname = url.pathname.replace(/\.git\/?$/i, "").replace(/\/$/, "");
+    return url.toString();
+  } catch {
+    const scp = /^(?:[^@/:]+@)?([^:]+):(.+)$/.exec(trimmed);
+    if (scp) return `${scp[1]!.toLowerCase()}:${scp[2]!.replace(/\.git\/?$/i, "")}`;
+    return `local:${sha256(trimmed.replace(/\\/g, "/"))}`;
+  }
+}
+
 function constantTimeHexEqual(left: string, right: string): boolean {
   if (!/^[a-f0-9]{64}$/.test(left) || !/^[a-f0-9]{64}$/.test(right)) return false;
   return timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+}
+
+async function gitText(cwd: string, args: string[]): Promise<string> {
+  try {
+    return (await runGit(cwd, args)).toString("utf8").trim();
+  } catch {
+    throw new RepositoryUnverifiableError();
+  }
+}
+
+async function tryGitText(cwd: string, args: string[]): Promise<string | null> {
+  try {
+    return (await runGit(cwd, args)).toString("utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function runGit(cwd: string, args: string[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      args,
+      { cwd, encoding: "buffer", timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_MAX_BUFFER },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout));
+      },
+    );
+  });
 }

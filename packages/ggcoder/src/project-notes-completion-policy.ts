@@ -98,7 +98,9 @@ export function evaluateDirectPhaseCompletion({
   const latestVerification = latestTypedVerification(phase);
   const unmet = new Set<NotesCompletionUnmetGateCode>();
 
-  if (!notesSessionLinksEqual(phase.session, expectedSession)) unmet.add("stale-session");
+  if (phase.execution === undefined && !notesSessionLinksEqual(phase.session, expectedSession)) {
+    unmet.add("stale-session");
+  }
   if (
     phase.archivedAt !== null ||
     ["not-started", "planning", "cancelled"].includes(phase.status)

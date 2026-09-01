@@ -30,10 +30,13 @@ import {
   validateNotesDocumentV3,
   validateNotesImplementationCheckpointFields,
   type NotesDocumentV3,
+  type NotesApprovedPlanV1,
   type NotesImplementationRunOutcome,
   type NotesLifecycleEventKind,
   type NotesLifecycleEventSource,
+  type NotesPendingCompletionV1,
   type NotesPhase,
+  type NotesPhaseExecutionV1,
   type NotesPhaseStatus,
   type NotesReference,
   type NotesReminderDeliveryChannel,
@@ -51,8 +54,11 @@ import {
   type NotesRoadmapStatusOutcome,
   type NotesRoadmapStatusUpdate,
   type NotesRoadmapTransition,
+  type NotesRepositoryIdentityV1,
   type NotesSessionLink,
   type NotesValidationError,
+  type NotesVerificationEvidenceV1,
+  type NotesWorkspaceSnapshotV1,
   type NotesValidationResult,
   type NotesVerificationStatus,
   type ProjectNotesCorruptReason,
@@ -73,6 +79,7 @@ import {
   evaluateManualCompletionApproval,
   type PhaseCompletionEvaluation,
 } from "./project-notes-completion-policy.js";
+import { workspaceSnapshotsEqual } from "./roadmap-phase-execution.js";
 
 export interface StoredProjectNotesV1 {
   storeVersion: 1;
@@ -297,6 +304,7 @@ export interface ProjectNotesRoadmapStatusRequest {
   expectedSession?: NotesSessionLink | null;
   requireBoundPhase?: boolean;
   autopilotEnabled: boolean;
+  durableCompletion?: Omit<NotesPendingCompletionV1, "completionId" | "statusRevision">;
 }
 
 export interface ProjectNotesRoadmapProposalOutcome {
@@ -319,7 +327,7 @@ export interface ProjectNotesImplementationCheckpointRequest {
 export type ProjectNotesImplementationCheckpointOutcome =
   | { status: "committed"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
   | { status: "duplicate"; revision: number; phaseId: string }
-  | { status: "duplicate-id-conflict"; revision: number }
+  | { status: "duplicate-id-conflict" | "operation-conflict"; revision: number }
   | { status: "invalid-checkpoint"; message: string }
   | { status: "phase-not-found" | "phase-archived" | "stale-session" }
   | { status: "missing" }
@@ -327,6 +335,7 @@ export type ProjectNotesImplementationCheckpointOutcome =
 
 export interface ProjectNotesPhaseCompletionSettlementRequest extends ProjectNotesImplementationCheckpointRequest {
   completionIntentId: string;
+  expectedRevision?: number;
 }
 
 export type ProjectNotesPhaseCompletionSettlementOutcome =
@@ -344,9 +353,87 @@ export type ProjectNotesPhaseCompletionSettlementOutcome =
       evaluation: PhaseCompletionEvaluation;
       advancementCheckpoint: NotesRoadmapPhaseAdvancementCheckpoint | null;
     }
-  | { status: "duplicate-id-conflict"; revision: number }
+  | { status: "duplicate-id-conflict" | "operation-conflict" | "stale-revision"; revision: number }
   | { status: "invalid-checkpoint" | "completion-intent-missing"; message: string }
   | { status: "phase-not-found" | "phase-archived" | "stale-session" }
+  | { status: "missing" }
+  | ({ status: "corrupt" } & ProjectNotesCorruption);
+
+export interface ProjectNotesExecutionPlanRequest {
+  operationId: string;
+  phaseId: string;
+  expectedRevision: number;
+  repository: NotesRepositoryIdentityV1;
+  plan: NotesApprovedPlanV1;
+  lastSession: NotesSessionLink | null;
+}
+
+export interface ProjectNotesExecutionImportRequest {
+  operationId: string;
+  phaseId: string;
+  expectedRevision: number;
+  execution: NotesPhaseExecutionV1;
+}
+
+export interface ProjectNotesExecutionStepRequest {
+  phaseId: string;
+  expectedRevision: number;
+  planHash: string;
+  stepId: string;
+  completedAt: string;
+  workspace: NotesWorkspaceSnapshotV1;
+}
+
+export interface ProjectNotesExecutionEvidenceRequest {
+  phaseId: string;
+  expectedRevision: number;
+  planHash: string;
+  evidence: NotesVerificationEvidenceV1;
+}
+
+export interface ProjectNotesPendingCompletionRequest {
+  phaseId: string;
+  expectedRevision: number;
+  pendingCompletion: NotesPendingCompletionV1;
+}
+
+export interface ProjectNotesClearPendingCompletionRequest {
+  phaseId: string;
+  expectedRevision: number;
+  completionId: string;
+  currentWorkspace: NotesWorkspaceSnapshotV1;
+}
+
+export interface ProjectNotesDurableSettlementRequest {
+  phaseId: string;
+  expectedRevision: number;
+  completionId: string;
+  planHash: string;
+  workspace: NotesWorkspaceSnapshotV1;
+}
+
+export type ProjectNotesDurableSettlementOutcome =
+  | ProjectNotesPhaseCompletionSettlementOutcome
+  | {
+      status: "operation-conflict" | "plan-mismatch" | "workspace-mismatch";
+      revision: number;
+    }
+  | { status: "execution-missing" | "completion-intent-missing" };
+
+export type ProjectNotesExecutionMutationOutcome =
+  | { status: "committed"; snapshot: ProjectNotesSnapshot; phase: NotesPhase }
+  | { status: "duplicate" | "operation-conflict" | "stale-revision"; revision: number }
+  | {
+      status:
+        | "phase-not-found"
+        | "phase-archived"
+        | "execution-missing"
+        | "plan-mismatch"
+        | "step-not-found"
+        | "step-order-invalid"
+        | "workspace-mismatch"
+        | "completion-intent-missing";
+    }
   | { status: "missing" }
   | ({ status: "corrupt" } & ProjectNotesCorruption);
 
@@ -367,7 +454,7 @@ export type ProjectNotesRoadmapStatusOutcome =
       proposals: ProjectNotesRoadmapProposalOutcome[];
     }
   | { status: "verification-incomplete"; revision: number; message: string }
-  | { status: "duplicate-id-conflict"; revision: number }
+  | { status: "duplicate-id-conflict" | "operation-conflict"; revision: number }
   | { status: "stale-revision"; revision: number }
   | {
       status: "phase-not-found" | "phase-archived" | "phase-not-bound" | "stale-session";
@@ -1276,6 +1363,16 @@ function sameRoadmapStatusPayload(
   );
 }
 
+function sameDurableCompletionPayload(
+  pending: NotesPendingCompletionV1 | null | undefined,
+  request: ProjectNotesRoadmapStatusRequest,
+): boolean {
+  if (!request.durableCompletion) return true;
+  if (!pending || pending.completionId !== request.updateId) return false;
+  const { completionId: _completionId, statusRevision: _statusRevision, ...stored } = pending;
+  return isDeepStrictEqual(stored, request.durableCompletion);
+}
+
 export class ProjectNotesRepository {
   private readonly fileSystem: ProjectNotesFileSystem;
   private readonly lock: <T>(filePath: string, operation: () => Promise<T>) => Promise<T>;
@@ -1703,6 +1800,333 @@ export class ProjectNotesRepository {
     });
   }
 
+  async approvePhaseExecutionPlan(
+    cwd: string,
+    request: ProjectNotesExecutionPlanRequest,
+  ): Promise<ProjectNotesExecutionMutationOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      if (currentPhase.execution) {
+        return isDeepStrictEqual(currentPhase.execution.repository, request.repository) &&
+          isDeepStrictEqual(currentPhase.execution.plan, request.plan)
+          ? { status: "duplicate", revision }
+          : { status: "operation-conflict", revision };
+      }
+      if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      phase.execution = {
+        version: 1,
+        state: "implementing",
+        repository: structuredClone(request.repository),
+        plan: structuredClone(request.plan),
+        evidence: [],
+        pendingCompletion: null,
+        lastSession: request.lastSession ? { ...request.lastSession } : null,
+        migration: { source: "native", reconciledAt: request.plan.approvedAt },
+      };
+      const timestamp = chronologicalRoadmapTimestamp(phase, request.plan.approvedAt);
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Approved durable phase plan created invalid Notes",
+      });
+      return { status: "committed", snapshot: toSnapshot(next), phase: structuredClone(phase) };
+    });
+  }
+
+  async checkpointPhaseExecutionStep(
+    cwd: string,
+    request: ProjectNotesExecutionStepRequest,
+  ): Promise<ProjectNotesExecutionMutationOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const execution = currentPhase.execution;
+      if (!execution?.plan) return { status: "execution-missing" };
+      if (executionRequiresReconciliation(currentPhase)) {
+        return { status: "operation-conflict", revision };
+      }
+      if (execution.plan.contentHash !== request.planHash) return { status: "plan-mismatch" };
+      if (!isDeepStrictEqual(execution.repository, request.workspace.repository)) {
+        return { status: "workspace-mismatch" };
+      }
+      const stepIndex = execution.plan.steps.findIndex((step) => step.id === request.stepId);
+      if (stepIndex < 0) return { status: "step-not-found" };
+      const currentStep = execution.plan.steps[stepIndex]!;
+      if (currentStep.state === "completed") return { status: "duplicate", revision };
+      if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (execution.plan.steps.slice(0, stepIndex).some((step) => step.state !== "completed")) {
+        return { status: "step-order-invalid" };
+      }
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      const step = phase.execution!.plan!.steps[stepIndex]!;
+      step.state = "completed";
+      step.completedAt = request.completedAt;
+      step.workspace = structuredClone(request.workspace);
+      phase.execution!.state = "implementing";
+      phase.execution!.pendingCompletion = null;
+      const timestamp = chronologicalRoadmapTimestamp(phase, request.completedAt);
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Durable phase checkpoint created invalid Notes",
+      });
+      return { status: "committed", snapshot: toSnapshot(next), phase: structuredClone(phase) };
+    });
+  }
+
+  async recordPhaseExecutionEvidence(
+    cwd: string,
+    request: ProjectNotesExecutionEvidenceRequest,
+  ): Promise<ProjectNotesExecutionMutationOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const execution = currentPhase.execution;
+      if (!execution?.plan) return { status: "execution-missing" };
+      if (executionRequiresReconciliation(currentPhase)) {
+        return { status: "operation-conflict", revision };
+      }
+      if (execution.plan.contentHash !== request.planHash) return { status: "plan-mismatch" };
+      const prior = execution.evidence.find(
+        (item) =>
+          item.commandHash === request.evidence.commandHash &&
+          item.criterionId === request.evidence.criterionId,
+      );
+      if (prior) {
+        return isDeepStrictEqual(prior, request.evidence)
+          ? { status: "duplicate", revision }
+          : { status: "operation-conflict", revision };
+      }
+      if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      phase.execution!.evidence.push(structuredClone(request.evidence));
+      const timestamp = chronologicalRoadmapTimestamp(phase, request.evidence.observedAt);
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Durable phase evidence created invalid Notes",
+      });
+      return { status: "committed", snapshot: toSnapshot(next), phase: structuredClone(phase) };
+    });
+  }
+
+  async beginDurablePhaseCompletion(
+    cwd: string,
+    request: ProjectNotesPendingCompletionRequest,
+  ): Promise<ProjectNotesExecutionMutationOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const execution = currentPhase.execution;
+      if (!execution?.plan) return { status: "execution-missing" };
+      if (executionRequiresReconciliation(currentPhase)) {
+        return { status: "operation-conflict", revision };
+      }
+      if (execution.pendingCompletion) {
+        return isDeepStrictEqual(execution.pendingCompletion, request.pendingCompletion)
+          ? { status: "duplicate", revision }
+          : { status: "operation-conflict", revision };
+      }
+      if (execution.plan.contentHash !== request.pendingCompletion.planHash) {
+        return { status: "plan-mismatch" };
+      }
+      if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
+      if (execution.plan.steps.some((step) => step.state !== "completed")) {
+        return { status: "step-order-invalid" };
+      }
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      phase.execution!.state = "completion-pending";
+      phase.execution!.pendingCompletion = structuredClone(request.pendingCompletion);
+      const timestamp = chronologicalRoadmapTimestamp(phase, phase.updatedAt);
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Durable completion intent created invalid Notes",
+      });
+      return { status: "committed", snapshot: toSnapshot(next), phase: structuredClone(phase) };
+    });
+  }
+
+  async clearDurablePhaseCompletion(
+    cwd: string,
+    request: ProjectNotesClearPendingCompletionRequest,
+  ): Promise<ProjectNotesExecutionMutationOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const pending = currentPhase.execution?.pendingCompletion;
+      if (!currentPhase.execution) return { status: "execution-missing" };
+      if (executionRequiresReconciliation(currentPhase)) {
+        return { status: "operation-conflict", revision };
+      }
+      if (!pending) return { status: "duplicate", revision };
+      if (pending.completionId !== request.completionId)
+        return { status: "operation-conflict", revision };
+      if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      phase.execution!.state = "implementing";
+      phase.execution!.pendingCompletion = null;
+      phase.execution!.evidence = phase.execution!.evidence.filter((item) =>
+        isDeepStrictEqual(item.workspace, request.currentWorkspace),
+      );
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Durable completion rollback created invalid Notes",
+      });
+      return { status: "committed", snapshot: toSnapshot(next), phase: structuredClone(phase) };
+    });
+  }
+
+  async settleDurablePhaseCompletion(
+    cwd: string,
+    request: ProjectNotesDurableSettlementRequest,
+  ): Promise<ProjectNotesDurableSettlementOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const execution = currentPhase.execution;
+      if (!execution?.plan) return { status: "execution-missing" };
+      if (executionRequiresReconciliation(currentPhase)) {
+        return { status: "operation-conflict", revision };
+      }
+      const pending = execution.pendingCompletion;
+      if (!pending || pending.completionId !== request.completionId) {
+        return { status: "completion-intent-missing" };
+      }
+      if (
+        pending.planHash !== request.planHash ||
+        execution.plan.contentHash !== request.planHash
+      ) {
+        return { status: "operation-conflict", revision };
+      }
+      if (!isDeepStrictEqual(pending.workspace, request.workspace)) {
+        return { status: "operation-conflict", revision };
+      }
+
+      const priorImplementation = currentPhase.roadmapEvents.find(
+        (event): event is NotesRoadmapImplementationCheckpoint =>
+          event.type === "implementation-checkpoint" &&
+          event.verificationStatusUpdateId === request.completionId,
+      );
+      if (priorImplementation) {
+        const advancementCheckpoint =
+          currentPhase.roadmapEvents.find(
+            (event): event is NotesRoadmapPhaseAdvancementCheckpoint =>
+              event.type === "phase-advancement-checkpoint" &&
+              "verificationStatusUpdateId" in event &&
+              event.verificationStatusUpdateId === request.completionId &&
+              event.implementationCheckpointId === priorImplementation.id,
+          ) ?? null;
+        return {
+          status: "duplicate",
+          revision,
+          phase: structuredClone(currentPhase),
+          evaluation: evaluateDirectPhaseCompletion({
+            phase: currentPhase,
+            expectedSession: priorImplementation.session,
+            implementationCheckpointId: priorImplementation.id,
+            verificationStatusUpdateId: request.completionId,
+          }),
+          advancementCheckpoint: advancementCheckpoint
+            ? structuredClone(advancementCheckpoint)
+            : null,
+        };
+      }
+
+      if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
+      const verification = currentPhase.roadmapEvents.find(
+        (event): event is NotesRoadmapStatusUpdate =>
+          event.type === "status-update" && event.id === request.completionId,
+      );
+      if (!verification?.verificationSession) {
+        return {
+          status: "completion-intent-missing",
+          message: "The durable completion verification event is unavailable.",
+        };
+      }
+
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      const checkpoint: NotesRoadmapImplementationCheckpoint = {
+        type: "implementation-checkpoint",
+        id: this.createId(),
+        session: verification.verificationSession,
+        planStepTotal: execution.plan.steps.length,
+        completedPlanSteps: execution.plan.steps.map((step) => step.index),
+        runOutcome: "succeeded",
+        verificationStatusUpdateId: request.completionId,
+        timestamp: verification.timestamp,
+      };
+      phase.roadmapEvents.push(checkpoint);
+      const evaluation = evaluateDirectPhaseCompletion({
+        phase,
+        expectedSession: verification.verificationSession,
+        implementationCheckpointId: checkpoint.id,
+        verificationStatusUpdateId: request.completionId,
+      });
+      phase.execution!.state = "completed";
+
+      let advancementCheckpoint: NotesRoadmapPhaseAdvancementCheckpoint | null = null;
+      const targetStatus = evaluation.targetStatus;
+      applyCompletionEvaluation(phase, evaluation, verification.timestamp, () => this.createId());
+      if (evaluation.gateOutcome === "done") {
+        const eligibility = classifyRoadmapAutoStartEligibility(document.phases, phase.id);
+        if (eligibility.kind === "unique") {
+          advancementCheckpoint = {
+            type: "phase-advancement-checkpoint",
+            id: this.createId(),
+            implementationCheckpointId: checkpoint.id,
+            verificationStatusUpdateId: request.completionId,
+            completedPhaseId: phase.id,
+            nextPhaseId: eligibility.phase.id,
+            timestamp: verification.timestamp,
+          };
+          phase.roadmapEvents.push(advancementCheckpoint);
+        }
+      }
+
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Durable completion settlement created invalid Notes",
+      });
+      return {
+        status: targetStatus === null ? "open" : "committed",
+        snapshot: toSnapshot(next),
+        phase: structuredClone(phase),
+        evaluation,
+        advancementCheckpoint: advancementCheckpoint
+          ? structuredClone(advancementCheckpoint)
+          : null,
+      };
+    });
+  }
+
   async recordRoadmapStatusUpdate(
     cwd: string,
     request: ProjectNotesRoadmapStatusRequest,
@@ -1712,6 +2136,9 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (request.transition === "done" && executionRequiresReconciliation(currentPhase)) {
+        return { status: "operation-conflict", revision };
+      }
       const normalizedReferences = request.proposedReferences.map(
         normalizeRoadmapProposedReference,
       );
@@ -1721,8 +2148,17 @@ export class ProjectNotesRepository {
           event.type === "status-update" && event.id === request.updateId,
       );
       if (prior) {
-        if (!sameRoadmapStatusPayload(prior, normalizedRequest)) {
-          return { status: "duplicate-id-conflict", revision };
+        if (
+          !sameRoadmapStatusPayload(prior, normalizedRequest) ||
+          !sameDurableCompletionPayload(
+            currentPhase.execution?.pendingCompletion,
+            normalizedRequest,
+          )
+        ) {
+          return {
+            status: request.durableCompletion ? "operation-conflict" : "duplicate-id-conflict",
+            revision,
+          };
         }
         return {
           status: "duplicate",
@@ -1739,12 +2175,14 @@ export class ProjectNotesRepository {
       }
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
       if (
+        currentPhase.execution === undefined &&
         (request.requireBoundPhase || request.verification !== null) &&
         currentPhase.session === null
       ) {
         return { status: "phase-not-bound" };
       }
       if (
+        currentPhase.execution === undefined &&
         request.expectedSession !== undefined &&
         !notesSessionLinksEqual(currentPhase.session, request.expectedSession)
       ) {
@@ -1764,6 +2202,44 @@ export class ProjectNotesRepository {
             revision,
             message: "Done requires exactly one evidence item per Done When criterion.",
           };
+        }
+      }
+      if (request.durableCompletion) {
+        const execution = currentPhase.execution;
+        if (
+          request.actor !== "gg-coder" ||
+          request.transition !== "done" ||
+          request.expectedRevision === undefined
+        ) {
+          return {
+            status: "verification-incomplete",
+            revision,
+            message: "Durable completion requires a revision-bound GG Coder Done report.",
+          };
+        }
+        if (!execution?.plan) {
+          return {
+            status: "verification-incomplete",
+            revision,
+            message: "Durable completion requires an approved execution plan.",
+          };
+        }
+        if (execution.plan.contentHash !== request.durableCompletion.planHash) {
+          return {
+            status: "verification-incomplete",
+            revision,
+            message: "Durable completion does not match the approved execution plan.",
+          };
+        }
+        if (execution.plan.steps.some((step) => step.state !== "completed")) {
+          return {
+            status: "verification-incomplete",
+            revision,
+            message: "Durable completion requires every execution step to be completed.",
+          };
+        }
+        if (execution.pendingCompletion !== null) {
+          return { status: "operation-conflict", revision };
         }
       }
       const timestamp = chronologicalRoadmapTimestamp(currentPhase, request.timestamp);
@@ -1803,6 +2279,14 @@ export class ProjectNotesRepository {
         statusOutcome,
         this.createId,
       );
+      if (request.durableCompletion) {
+        phase.execution!.state = "completion-pending";
+        phase.execution!.pendingCompletion = {
+          ...structuredClone(request.durableCompletion),
+          completionId: request.updateId,
+          statusRevision: revision + 1,
+        };
+      }
       const validation = validateNotesDocumentV3(document);
       if (!validation.ok) {
         if (validation.error.path.includes("proposedReferences")) {
@@ -1844,6 +2328,7 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (currentPhase.execution !== undefined) return { status: "operation-conflict", revision };
       const prior = currentPhase.roadmapEvents.find(
         (event): event is NotesRoadmapImplementationCheckpoint =>
           event.type === "implementation-checkpoint" && event.id === request.checkpointId,
@@ -1878,8 +2363,14 @@ export class ProjectNotesRepository {
       if (currentPhase.roadmapEvents.some((event) => event.id === request.checkpointId)) {
         return { status: "duplicate-id-conflict", revision };
       }
+      if (request.expectedRevision !== undefined && request.expectedRevision !== revision) {
+        return { status: "stale-revision", revision };
+      }
       if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
-      if (!notesSessionLinksEqual(currentPhase.session, request.expectedSession)) {
+      if (
+        currentPhase.execution === undefined &&
+        !notesSessionLinksEqual(currentPhase.session, request.expectedSession)
+      ) {
         return { status: "stale-session" };
       }
       const completionIntent = currentPhase.roadmapEvents.find(
@@ -1914,6 +2405,9 @@ export class ProjectNotesRepository {
       });
       let advancementCheckpoint: NotesRoadmapPhaseAdvancementCheckpoint | null = null;
       if (evaluation.targetStatus === "done") {
+        if (phase.execution?.pendingCompletion?.completionId === request.completionIntentId) {
+          phase.execution.state = "completed";
+        }
         applyCompletionEvaluation(phase, evaluation, timestamp, this.createId);
         const eligibility = classifyRoadmapAutoStartEligibility(document.phases, phase.id);
         if (eligibility.kind === "unique") {
@@ -1958,6 +2452,9 @@ export class ProjectNotesRepository {
       const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
       if (phaseIndex < 0) return { status: "phase-not-found" };
       const currentPhase = current.document.phases[phaseIndex]!;
+      if (executionRequiresReconciliation(currentPhase)) {
+        return { status: "operation-conflict", revision };
+      }
       const prior = currentPhase.roadmapEvents.find(
         (event): event is NotesRoadmapImplementationCheckpoint =>
           event.type === "implementation-checkpoint" && event.id === request.checkpointId,
@@ -2984,6 +3481,10 @@ function serializeEnvelope(envelope: StoredProjectNotesV1): string {
   return `${JSON.stringify(envelope, null, 2)}\n`;
 }
 
+function executionRequiresReconciliation(phase: NotesPhase): boolean {
+  return phase.execution?.state === "needs-reconciliation";
+}
+
 function manualApprovalFacts(
   current: StoredProjectNotesV1,
   phaseId: string,
@@ -2992,6 +3493,9 @@ function manualApprovalFacts(
   const phase = current.document.phases.find((candidate) => candidate.id === phaseId);
   if (!phase) {
     return { status: "unmet-gate", revision: current.revision, code: "phase-not-found" };
+  }
+  if (executionRequiresReconciliation(phase)) {
+    return { status: "unmet-gate", revision: current.revision, code: "inactive-phase" };
   }
   const evaluation = evaluateManualCompletionApproval(phase, expectedSession);
   if (evaluation.status !== "eligible") {

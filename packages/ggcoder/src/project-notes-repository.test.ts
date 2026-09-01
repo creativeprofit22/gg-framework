@@ -899,7 +899,20 @@ describe("ProjectNotesRepository phase binding compare-and-swap", () => {
     document.phases[0]!.session = session;
     document.phases[0]!.overrides.status = null;
     if (executionSession) {
-      document.phases[0]!.execution = { lastSession: executionSession };
+      document.phases[0]!.execution = {
+        version: 1,
+        state: "needs-reconciliation",
+        repository: {
+          projectKey: canonicalProjectKey(cwd),
+          identityHash: "1".repeat(64),
+          rootCommit: "2".repeat(40),
+        },
+        plan: null,
+        evidence: [],
+        pendingCompletion: null,
+        lastSession: executionSession,
+        migration: { source: "legacy-session", reconciledAt: null },
+      };
     }
     await new ProjectNotesRepository(agentDir).migrate(cwd, document);
     return { cwd, repository: new ProjectNotesRepository(agentDir) };

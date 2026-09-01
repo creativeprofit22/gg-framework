@@ -317,10 +317,16 @@ export type RoadmapStatusToolResult =
         | "notes-missing"
         | "notes-corrupt"
         | "duplicate-id-conflict"
+        | "operation-conflict"
         | "stale-revision"
         | "phase-not-found"
         | "phase-archived"
         | "stale-session"
+        | "phase-lease-lost"
+        | "plan-not-approved"
+        | "plan-snapshot-missing"
+        | "plan-reconciliation-required"
+        | "repository-unverifiable"
         | "invalid-reference"
         | "verification-incomplete"
         | "missing-plan-progress";
@@ -330,6 +336,8 @@ export type RoadmapStatusToolResult =
       path?: string;
       message?: string;
       unmetEvidenceCodes?: RoadmapVerificationEvidenceUnmetCode[];
+      staleCriterionIds?: string[];
+      missingCriterionIds?: string[];
     };
 
 export function createRoadmapStatusTool(

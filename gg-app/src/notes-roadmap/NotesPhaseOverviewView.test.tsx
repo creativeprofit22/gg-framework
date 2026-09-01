@@ -2,12 +2,7 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-  NotesPhase,
-  PhaseBindingOutcome,
-  PhaseBindingRequest,
-  ProjectNotesStorageDiagnostics,
-} from "../notes-types";
+import type { NotesPhase, PhaseLeaseOutcome, ProjectNotesStorageDiagnostics } from "../notes-types";
 import { ManualCompletionApprovalControl, PhaseRebindControl } from "./NotesPhaseOverviewView";
 
 const previousSession = { sessionId: "session-a", sessionPath: "C:\\sessions\\a.jsonl" };
@@ -219,24 +214,38 @@ describe("manual completion approval", () => {
 });
 
 describe("phase rebind confirmation", () => {
-  it("shows both session identities and derives the destination from diagnostics", async () => {
-    const onRebind = vi.fn(
-      async (_request: PhaseBindingRequest): Promise<PhaseBindingOutcome> => ({
-        status: "committed",
-        revision: 8,
-        phaseId: "phase-1",
-        previousSession,
-        session: diagnostics.currentSession,
-      }),
-    );
+  it("acquires an unheld writer lease using the inspected destination", async () => {
+    const onMutateLease = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: "inspected",
+        roadmapRevision: 7,
+        leaseRevision: 0,
+        phaseId: phase.id,
+        lease: null,
+      })
+      .mockResolvedValueOnce({
+        status: "acquired",
+        roadmapRevision: 7,
+        leaseRevision: 1,
+        phaseId: phase.id,
+        lease: null,
+      })
+      .mockResolvedValueOnce({
+        status: "inspected",
+        roadmapRevision: 7,
+        leaseRevision: 1,
+        phaseId: phase.id,
+        lease: null,
+      });
     const onSuccess = vi.fn();
     render(
       <PhaseRebindControl
         phase={phase}
         expectedRevision={7}
         onInspect={async () => diagnostics}
-        onRebind={onRebind}
-        onMutateLease={async () => ({ status: "missing" })}
+        onRebind={async () => ({ status: "missing" })}
+        onMutateLease={onMutateLease}
         onSuccess={onSuccess}
         idFactory={() => "operation-1"}
       />,
@@ -246,20 +255,17 @@ describe("phase rebind confirmation", () => {
     expect(await screen.findByText("session-a")).toBeTruthy();
     expect(screen.getByText("session-b")).toBeTruthy();
     expect(screen.getByText("7")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm rebind" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm safe takeover" }));
 
-    expect(onRebind).toHaveBeenCalledWith({
-      version: 1,
-      action: "rebind-current",
-      phaseId: "phase-1",
-      expectedProjectKey: "c:/work/project",
-      expectedRevision: 7,
-      expectedPreviousSession: previousSession,
-      operationId: "operation-1",
-      confirmRebind: true,
-    });
-    expect(JSON.stringify(onRebind.mock.calls[0]![0])).not.toContain("destination");
-    expect(await screen.findByText("Phase authority moved to this session.")).toBeTruthy();
+    expect(onMutateLease).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        action: "acquire",
+        expectedProjectKey: diagnostics.projectKey,
+        confirmTakeover: false,
+      }),
+    );
+    expect(await screen.findByText("Phase writer lease moved to this session.")).toBeTruthy();
     expect(onSuccess).toHaveBeenCalledOnce();
   });
 
@@ -323,8 +329,10 @@ describe("phase rebind confirmation", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase writer" }));
-    expect(await screen.findByText(/Current writer: session-a/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Confirm safe takeover" }));
+    expect(await screen.findByText(/Current writer: session-a.*state idle/)).toBeTruthy();
+    const takeoverButton = screen.getByRole("button", { name: "Confirm safe takeover" });
+    expect(takeoverButton.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(takeoverButton);
 
     expect(onMutateLease.mock.calls[1]![0]).toMatchObject({
       action: "takeover",
@@ -332,7 +340,9 @@ describe("phase rebind confirmation", () => {
       confirmTakeover: true,
     });
     expect(await screen.findByText("Phase writer lease moved to this session.")).toBeTruthy();
-    expect(screen.getByText(/Current writer: session-b · fence 5 · expires .*2027/)).toBeTruthy();
+    expect(
+      screen.getByText(/Current writer: session-b · fence 5 · state idle · expires .*2027/),
+    ).toBeTruthy();
     expect(screen.queryByText(/Current writer: session-a/)).toBeNull();
   });
 
@@ -407,7 +417,7 @@ describe("phase rebind confirmation", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Confirm safe takeover" }));
 
     expect(
-      await screen.findByText(/Current writer: session-b · fence 6 · expires .*2027/),
+      await screen.findByText(/Current writer: session-b · fence 6 · state idle · expires .*2027/),
     ).toBeTruthy();
     expect(onMutateLease).toHaveBeenNthCalledWith(
       3,
@@ -416,26 +426,121 @@ describe("phase rebind confirmation", () => {
     expect(onSuccess).toHaveBeenCalledOnce();
   });
 
-  it("requires refresh after a typed stale revision", async () => {
+  it("disables takeover while the current writer is running", async () => {
+    const onMutateLease = vi.fn(
+      async (): Promise<PhaseLeaseOutcome> => ({
+        status: "inspected",
+        roadmapRevision: 7,
+        leaseRevision: 1,
+        phaseId: phase.id,
+        lease: {
+          version: 1,
+          projectKey: diagnostics.projectKey,
+          phaseId: phase.id,
+          planId: null,
+          leaseId: "lease-1",
+          fence: 4,
+          holder: {
+            daemonInstanceId: "daemon-a",
+            sessionId: "session-a",
+            sessionPath: previousSession.sessionPath,
+            processId: 42,
+          },
+          runState: "running",
+          acquiredAt: "2026-08-30T10:00:00.000Z",
+          renewedAt: "2026-08-30T10:00:30.000Z",
+          expiresAt: "2026-08-30T10:02:30.000Z",
+          operationId: "acquire-1",
+        },
+      }),
+    );
     render(
       <PhaseRebindControl
         phase={phase}
         expectedRevision={7}
         onInspect={async () => diagnostics}
-        onRebind={async () => ({ status: "stale-revision", revision: 8 })}
-        onMutateLease={async () => ({ status: "missing" })}
+        onRebind={async () => ({ status: "missing" })}
+        onMutateLease={onMutateLease}
+        onSuccess={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase writer" }));
+
+    expect(await screen.findByText(/Current writer: session-a.*state running/)).toBeTruthy();
+    expect(
+      screen.getByText("Stop the current run and wait for it to settle before taking over."),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm safe takeover" }));
+    expect(onMutateLease).toHaveBeenCalledOnce();
+  });
+
+  it.each<[PhaseLeaseOutcome, string]>([
+    [{ status: "phase-not-found" }, "This phase no longer exists. Refresh Notes."],
+    [
+      { status: "project-mismatch", roadmapRevision: 7, currentProjectKey: "other-project" },
+      "This pane is using a different project store. Reopen the correct project.",
+    ],
+    [
+      { status: "operation-conflict", roadmapRevision: 7, leaseRevision: 1 },
+      "This writer operation conflicts with an earlier request. Refresh and inspect again.",
+    ],
+    [
+      { status: "corrupt", primary: "malformed-json", backup: null },
+      "Project Notes are corrupt. Restore a valid Notes file before retrying.",
+    ],
+    [{ status: "missing" }, "Project Notes are missing. Restore or recreate them before retrying."],
+  ])("maps $status to a safe action", async (outcome, expectedMessage) => {
+    render(
+      <PhaseRebindControl
+        phase={phase}
+        expectedRevision={7}
+        onInspect={async () => diagnostics}
+        onRebind={async () => ({ status: "missing" })}
+        onMutateLease={async () => outcome}
+        onSuccess={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase writer" }));
+
+    expect(await screen.findByText(expectedMessage)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Confirm safe takeover" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Confirm rebind" })).toBeNull();
+  });
+
+  it("requires refresh after a typed stale revision", async () => {
+    const onMutateLease = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: "inspected",
+        roadmapRevision: 7,
+        leaseRevision: 0,
+        phaseId: phase.id,
+        lease: null,
+      })
+      .mockResolvedValueOnce({
+        status: "stale-revision",
+        roadmapRevision: 8,
+        leaseRevision: 1,
+      });
+    render(
+      <PhaseRebindControl
+        phase={phase}
+        expectedRevision={7}
+        onInspect={async () => diagnostics}
+        onRebind={async () => ({ status: "missing" })}
+        onMutateLease={onMutateLease}
         onSuccess={vi.fn()}
         idFactory={() => "operation-1"}
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect phase writer" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Confirm rebind" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm safe takeover" }));
 
     expect(
-      await screen.findByText(
-        "Notes changed. Refresh diagnostics and confirm the current revision again.",
-      ),
+      await screen.findByText("Notes changed. Refresh the phase before retrying."),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Inspect phase writer" })).toBeTruthy();
   });

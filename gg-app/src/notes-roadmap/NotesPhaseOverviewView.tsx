@@ -492,7 +492,7 @@ export function PhaseRebindControl({
         predecessorProof: null,
       });
       setLeasePreview(lease.status === "inspected" ? lease : null);
-      if (lease.status !== "inspected" && lease.status !== "missing") {
+      if (lease.status !== "inspected") {
         setMessage(phaseLeaseOutcomeMessage(lease));
         return;
       }
@@ -505,7 +505,14 @@ export function PhaseRebindControl({
   };
 
   const confirm = async (): Promise<void> => {
-    if (!preview || expectedRevision === null || !phase.session) return;
+    if (
+      !preview ||
+      expectedRevision === null ||
+      !phase.session ||
+      (leasePreview?.status === "inspected" && leasePreview.lease?.runState === "running")
+    ) {
+      return;
+    }
     setPending(true);
     setMessage("");
     try {
@@ -598,12 +605,21 @@ export function PhaseRebindControl({
       {preview ? (
         <div className="notes-phase-rebind-confirm" role="group" aria-label="Confirm phase rebind">
           {leasePreview?.status === "inspected" && leasePreview.lease && (
-            <p>
-              Current writer: {leasePreview.lease.holder.sessionId} · fence{" "}
-              {leasePreview.lease.fence}
-              {" · expires "}
-              {formatDateTime(leasePreview.lease.expiresAt)}
-            </p>
+            <>
+              <p>
+                Current writer: {leasePreview.lease.holder.sessionId} · fence{" "}
+                {leasePreview.lease.fence}
+                {" · state "}
+                {leasePreview.lease.runState}
+                {" · expires "}
+                {formatDateTime(leasePreview.lease.expiresAt)}
+              </p>
+              {leasePreview.lease.runState === "running" && (
+                <p className="notes-phase-attention">
+                  Stop the current run and wait for it to settle before taking over.
+                </p>
+              )}
+            </>
           )}
           {phase.execution?.state === "needs-reconciliation" && (
             <p className="notes-phase-attention">Plan or workspace reconciliation is required.</p>
@@ -622,7 +638,14 @@ export function PhaseRebindControl({
               <dd>{expectedRevision}</dd>
             </div>
           </dl>
-          <button type="button" disabled={pending} onClick={() => void confirm()}>
+          <button
+            type="button"
+            disabled={
+              pending ||
+              (leasePreview?.status === "inspected" && leasePreview.lease?.runState === "running")
+            }
+            onClick={() => void confirm()}
+          >
             {pending ? "Transferring…" : leasePreview ? "Confirm safe takeover" : "Confirm rebind"}
           </button>
           <button
@@ -662,6 +685,16 @@ function phaseLeaseOutcomeMessage(outcome: PhaseLeaseOutcome): string {
       return "This pane lost the writer lease. Resume the current writer before changing the phase.";
     case "stale-revision":
       return "Notes changed. Refresh the phase before retrying.";
+    case "phase-not-found":
+      return "This phase no longer exists. Refresh Notes.";
+    case "project-mismatch":
+      return "This pane is using a different project store. Reopen the correct project.";
+    case "operation-conflict":
+      return "This writer operation conflicts with an earlier request. Refresh and inspect again.";
+    case "corrupt":
+      return "Project Notes are corrupt. Restore a valid Notes file before retrying.";
+    case "missing":
+      return "Project Notes are missing. Restore or recreate them before retrying.";
     case "plan-mismatch":
       return "The approved plan changed. Reconcile the phase before taking over.";
     case "phase-archived":
@@ -687,6 +720,12 @@ function phaseBindingOutcomeMessage(outcome: PhaseBindingOutcome): string {
       return "This phase can no longer be rebound.";
     case "missing-session-path":
       return "Save this session before rebinding the phase.";
+    case "phase-not-found":
+      return "This phase no longer exists. Refresh Notes.";
+    case "corrupt":
+      return "Project Notes are corrupt. Restore a valid Notes file before retrying.";
+    case "missing":
+      return "Project Notes are missing. Restore or recreate them before retrying.";
     default:
       return "The phase binding changed. Refresh Notes and try again.";
   }

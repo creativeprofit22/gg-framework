@@ -112,6 +112,9 @@ describe("phase lease protocol", () => {
     planId: "plan-1",
     operationId: "operation-1",
     lease: null,
+    confirmTakeover: false,
+    takeoverReason: null,
+    predecessorProof: null,
   };
 
   it("accepts strict v2 lease requests and leases", () => {
@@ -125,6 +128,34 @@ describe("phase lease protocol", () => {
         lease: { leaseId: lease.leaseId, fence: lease.fence },
       }),
     ).toBe(true);
+    expect(
+      isPhaseLeaseRequest({
+        ...acquire,
+        action: "takeover",
+        lease: { leaseId: lease.leaseId, fence: lease.fence },
+        confirmTakeover: true,
+        takeoverReason: "Continue recovery in this session",
+      }),
+    ).toBe(true);
+  });
+
+  it("rejects release requests and released outcomes", () => {
+    const release = {
+      ...acquire,
+      action: "release",
+      lease: { leaseId: lease.leaseId, fence: lease.fence },
+    };
+    expect(isPhaseLeaseRequest(release)).toBe(false);
+    expect(isPhaseBindingProtocolRequest(release)).toBe(false);
+    expect(
+      isPhaseLeaseOutcome({
+        status: "released",
+        roadmapRevision: 4,
+        leaseRevision: 2,
+        phaseId: "phase-1",
+        lease: null,
+      }),
+    ).toBe(false);
   });
 
   it.each([

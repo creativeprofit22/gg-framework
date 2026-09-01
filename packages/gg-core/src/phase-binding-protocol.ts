@@ -244,7 +244,6 @@ export function isPhaseLeaseRequest(value: unknown): value is PhaseLeaseRequestV
     (value.action !== "inspect" &&
       value.action !== "acquire" &&
       value.action !== "renew" &&
-      value.action !== "release" &&
       value.action !== "takeover") ||
     !isBoundedString(value.phaseId, MAX_ID_LENGTH) ||
     !isBoundedString(value.expectedProjectKey, MAX_PROJECT_KEY_LENGTH) ||
@@ -261,7 +260,7 @@ export function isPhaseLeaseRequest(value: unknown): value is PhaseLeaseRequestV
   if (value.action === "inspect" || value.action === "acquire") {
     return value.lease === null && !value.confirmTakeover && value.takeoverReason === null;
   }
-  if (value.action === "renew" || value.action === "release") {
+  if (value.action === "renew") {
     return value.lease !== null && !value.confirmTakeover && value.takeoverReason === null;
   }
   return value.lease !== null && value.confirmTakeover && value.takeoverReason !== null;
@@ -356,7 +355,6 @@ export function isPhaseLeaseOutcome(value: unknown): value is PhaseLeaseOutcome 
     status === "inspected" ||
     status === "acquired" ||
     status === "renewed" ||
-    status === "released" ||
     status === "duplicate"
   ) {
     return (
@@ -371,8 +369,7 @@ export function isPhaseLeaseOutcome(value: unknown): value is PhaseLeaseOutcome 
       isRevision(value.leaseRevision) &&
       isBoundedString(value.phaseId, MAX_ID_LENGTH) &&
       (value.lease === null ||
-        (isPhaseLease(value.lease) && value.lease.phaseId === value.phaseId)) &&
-      (status !== "released" || value.lease === null)
+        (isPhaseLease(value.lease) && value.lease.phaseId === value.phaseId))
     );
   }
   if (
@@ -470,18 +467,6 @@ function isBoundedString(value: unknown, maximum: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= maximum;
 }
 
-
-
-
-
-function isSafeRelativePath(value: unknown): value is string {
-  if (!isBoundedString(value, MAX_PROJECT_KEY_LENGTH) || value.includes("\0")) return false;
-  if (/^(?:[a-zA-Z]:|[\\/])/.test(value)) return false;
-  return value
-    .replace(/\\/g, "/")
-    .split("/")
-    .every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
-}
 
 function isRecordWithExactKeys<const Keys extends readonly string[]>(
   value: unknown,

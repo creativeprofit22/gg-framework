@@ -525,6 +525,33 @@ export function PhaseRebindControl({
           predecessorProof: null,
         });
         if (outcome.status === "acquired" || outcome.status === "duplicate") {
+          const current =
+            outcome.lease !== null
+              ? outcome
+              : await onMutateLease({
+                  version: 2,
+                  action: "inspect",
+                  phaseId: phase.id,
+                  expectedProjectKey: preview.projectKey,
+                  expectedRevision,
+                  planId: phase.execution?.plan?.planId ?? null,
+                  operationId: idFactory(),
+                  lease: null,
+                  confirmTakeover: false,
+                  takeoverReason: null,
+                  predecessorProof: null,
+                });
+          if (
+            current.status !== "inspected" &&
+            current.status !== "acquired" &&
+            current.status !== "duplicate"
+          ) {
+            setLeasePreview(null);
+            setPreview(null);
+            setMessage(phaseLeaseOutcomeMessage(current));
+            return;
+          }
+          setLeasePreview({ ...current, status: "inspected" });
           setMessage("Phase writer lease moved to this session.");
           onSuccess();
           return;
@@ -572,7 +599,9 @@ export function PhaseRebindControl({
         <div className="notes-phase-rebind-confirm" role="group" aria-label="Confirm phase rebind">
           {leasePreview?.status === "inspected" && leasePreview.lease && (
             <p>
-              Current writer: {leasePreview.lease.holder.sessionId} · expires{" "}
+              Current writer: {leasePreview.lease.holder.sessionId} · fence{" "}
+              {leasePreview.lease.fence}
+              {" · expires "}
               {formatDateTime(leasePreview.lease.expiresAt)}
             </p>
           )}

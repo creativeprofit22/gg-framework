@@ -283,6 +283,17 @@ describe("phase rebind confirmation", () => {
       expiresAt: "2026-08-30T10:02:30.000Z",
       operationId: "acquire-1",
     };
+    const acquiredLease = {
+      ...lease,
+      fence: 5,
+      holder: {
+        ...lease.holder,
+        daemonInstanceId: "daemon-b",
+        sessionId: "session-b",
+        sessionPath: diagnostics.currentSession.sessionPath,
+      },
+      expiresAt: "2027-08-30T10:02:30.000Z",
+    };
     const onMutateLease = vi
       .fn()
       .mockResolvedValueOnce({
@@ -297,7 +308,7 @@ describe("phase rebind confirmation", () => {
         roadmapRevision: 7,
         leaseRevision: 2,
         phaseId: phase.id,
-        lease: { ...lease, fence: 5 },
+        lease: acquiredLease,
       });
     render(
       <PhaseRebindControl
@@ -321,6 +332,88 @@ describe("phase rebind confirmation", () => {
       confirmTakeover: true,
     });
     expect(await screen.findByText("Phase writer lease moved to this session.")).toBeTruthy();
+    expect(screen.getByText(/Current writer: session-b · fence 5 · expires .*2027/)).toBeTruthy();
+    expect(screen.queryByText(/Current writer: session-a/)).toBeNull();
+  });
+
+  it("re-inspects a nullable duplicate before showing the successful lease", async () => {
+    const oldLease = {
+      version: 1 as const,
+      projectKey: diagnostics.projectKey,
+      phaseId: phase.id,
+      planId: null,
+      leaseId: "lease-1",
+      fence: 4,
+      holder: {
+        daemonInstanceId: "daemon-a",
+        sessionId: "session-a",
+        sessionPath: previousSession.sessionPath,
+        processId: 42,
+      },
+      runState: "idle" as const,
+      acquiredAt: "2026-08-30T10:00:00.000Z",
+      renewedAt: "2026-08-30T10:00:30.000Z",
+      expiresAt: "2026-08-30T10:02:30.000Z",
+      operationId: "acquire-1",
+    };
+    const currentLease = {
+      ...oldLease,
+      fence: 6,
+      holder: {
+        ...oldLease.holder,
+        daemonInstanceId: "daemon-b",
+        sessionId: "session-b",
+        sessionPath: diagnostics.currentSession.sessionPath,
+      },
+      expiresAt: "2027-08-30T10:04:30.000Z",
+    };
+    const onSuccess = vi.fn();
+    const onMutateLease = vi
+      .fn()
+      .mockResolvedValueOnce({
+        status: "inspected",
+        roadmapRevision: 7,
+        leaseRevision: 1,
+        phaseId: phase.id,
+        lease: oldLease,
+      })
+      .mockResolvedValueOnce({
+        status: "duplicate",
+        roadmapRevision: 7,
+        leaseRevision: 2,
+        phaseId: phase.id,
+        lease: null,
+      })
+      .mockResolvedValueOnce({
+        status: "inspected",
+        roadmapRevision: 7,
+        leaseRevision: 2,
+        phaseId: phase.id,
+        lease: currentLease,
+      });
+    render(
+      <PhaseRebindControl
+        phase={phase}
+        expectedRevision={7}
+        onInspect={async () => diagnostics}
+        onRebind={async () => ({ status: "missing" })}
+        onMutateLease={onMutateLease}
+        onSuccess={onSuccess}
+        idFactory={() => "operation-lease"}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect phase writer" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm safe takeover" }));
+
+    expect(
+      await screen.findByText(/Current writer: session-b · fence 6 · expires .*2027/),
+    ).toBeTruthy();
+    expect(onMutateLease).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ action: "inspect", lease: null, confirmTakeover: false }),
+    );
+    expect(onSuccess).toHaveBeenCalledOnce();
   });
 
   it("requires refresh after a typed stale revision", async () => {

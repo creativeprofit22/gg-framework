@@ -33,6 +33,7 @@ export interface BoundPhaseSession {
   initialize(): Promise<void>;
   getState(): BoundPhaseSessionState;
   setActivePhaseContext(context: ActivePhaseContextV1): Promise<void>;
+  clearActivePhaseContext?(reason: "binding-compensation"): Promise<void>;
   setIdealReviewSuppressed(suppressed: boolean): void;
   prompt(text: string): Promise<void>;
   dispose(): void | Promise<void>;

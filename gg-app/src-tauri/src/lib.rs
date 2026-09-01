@@ -91,6 +91,34 @@ use tauri::{
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonProcessIdentity {
+    daemon_instance_id: String,
+    process_id: u32,
+    process_start_token: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DaemonPredecessorProof {
+    daemon_instance_id: String,
+    process_id: u32,
+    process_start_token: String,
+    terminated_at: String,
+}
+
+impl DaemonPredecessorProof {
+    fn from_terminated(identity: DaemonProcessIdentity) -> Self {
+        Self {
+            daemon_instance_id: identity.daemon_instance_id,
+            process_id: identity.process_id,
+            process_start_token: identity.process_start_token,
+            terminated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        }
+    }
+}
+
 /// The single shared Node daemon process. Every window's `AgentSession` lives
 /// inside this one process as an in-process object, addressed by a session id
 /// (see `Windows`). Replaces the old one-sidecar-process-per-window model: one
@@ -114,6 +142,10 @@ struct Daemon {
     planned_reload: AtomicBool,
     /// Window labels awaiting a complete pane recovery before model refresh.
     model_refresh_windows: Mutex<HashSet<String>>,
+    /// Exact native-supervised process identity currently holding Roadmap leases.
+    process_identity: Mutex<Option<DaemonProcessIdentity>>,
+    /// Proof that the immediately preceding daemon was reaped before respawn.
+    predecessor_proof: Mutex<Option<DaemonPredecessorProof>>,
     /// Per-launch bearer token required as `x-gg-token` on every daemon request.
     token: String,
 }
@@ -1532,6 +1564,7 @@ async fn agent_notes_phase_binding(
     let port = port_for(&webview).ok_or("daemon not ready")?;
     let gg_sid = pane_session_for(&webview, &pane_id).ok_or("session not ready")?;
     let kind = match request.get("version").and_then(serde_json::Value::as_u64) {
+        Some(2) => RoadmapTypedResponseKind::PhaseLease,
         Some(3) => RoadmapTypedResponseKind::PhaseExecutionReconciliation,
         _ => RoadmapTypedResponseKind::PhaseBinding,
     };
@@ -1598,21 +1631,31 @@ async fn agent_notes_completion_approval_commit(
 
 const ROADMAP_TYPED_RESPONSE_MAX_BYTES: usize = 256 * 1024;
 const ROADMAP_TYPED_RESPONSE_ERROR: &str = "invalid Roadmap response from daemon";
+const PHASE_LEASE_PREDECESSOR_PROOF_ERROR: &str =
+    "phase lease predecessor proof is native supervisor-only";
 const PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR: &str =
     "invalid phase execution reconciliation request";
 
 fn validate_public_phase_binding_request(request: &serde_json::Value) -> Result<(), String> {
-    if request.get("version").and_then(serde_json::Value::as_u64) == Some(3)
-        && !is_phase_execution_reconciliation_request(request)
-    {
-        return Err(PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR.to_string());
+    match request.get("version").and_then(serde_json::Value::as_u64) {
+        Some(2)
+            if request
+                .get("predecessorProof")
+                .is_some_and(|proof| !proof.is_null()) =>
+        {
+            Err(PHASE_LEASE_PREDECESSOR_PROOF_ERROR.to_string())
+        }
+        Some(3) if !is_phase_execution_reconciliation_request(request) => {
+            Err(PHASE_EXECUTION_RECONCILIATION_REQUEST_ERROR.to_string())
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 
 #[derive(Clone, Copy)]
 enum RoadmapTypedResponseKind {
+    PhaseLease,
     PhaseBinding,
     PhaseExecutionReconciliation,
     ManualCompletionPreview,
@@ -1690,6 +1733,21 @@ fn is_roadmap_typed_outcome(
             | "phase-terminal"
             | "missing-session-path" => http_status == 409,
             _ => false,
+        RoadmapTypedResponseKind::PhaseLease => match status {
+            "inspected" | "acquired" | "renewed" | "released" | "duplicate" => http_status == 200,
+            "phase-not-found" | "missing" => http_status == 404,
+            "corrupt" => http_status == 500,
+            "phase-lease-held"
+            | "phase-lease-lost"
+            | "lease-owner-unreachable"
+            | "operation-conflict"
+            | "stale-revision"
+            | "project-mismatch"
+            | "phase-archived"
+            | "phase-terminal"
+            | "plan-mismatch" => http_status == 409,
+            _ => false,
+        },
         },
         RoadmapTypedResponseKind::PhaseExecutionReconciliation => match status {
             "reconciled" | "duplicate" => http_status == 200,
@@ -1726,6 +1784,7 @@ fn is_roadmap_typed_outcome(
     };
     status_matches
         && match kind {
+            RoadmapTypedResponseKind::PhaseLease => is_phase_lease_outcome(value),
             RoadmapTypedResponseKind::PhaseBinding => is_phase_binding_outcome(value),
             RoadmapTypedResponseKind::PhaseExecutionReconciliation => {
                 is_phase_execution_reconciliation_outcome(value)
@@ -2057,6 +2116,156 @@ fn is_phase_binding_outcome(value: &serde_json::Value) -> bool {
         _ => false,
     }
 }
+fn is_phase_lease_holder(value: Option<&serde_json::Value>) -> bool {
+    let Some(object) = value
+        .and_then(serde_json::Value::as_object)
+        .filter(|object| {
+            has_exact_keys(
+                object,
+                &["daemonInstanceId", "sessionId", "sessionPath", "processId"],
+            )
+        })
+    else {
+        return false;
+    };
+    is_roadmap_bounded_string(object.get("daemonInstanceId"), 256)
+        && is_roadmap_bounded_string(object.get("sessionId"), 256)
+        && object
+            .get("sessionPath")
+            .is_some_and(|path| path.is_null() || is_roadmap_bounded_string(Some(path), 4096))
+        && object
+            .get("processId")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|id| id > 0 && id <= 9_007_199_254_740_991)
+}
+
+fn is_phase_lease(value: Option<&serde_json::Value>) -> bool {
+    let Some(object) = value
+        .and_then(serde_json::Value::as_object)
+        .filter(|object| {
+            has_exact_keys(
+                object,
+                &[
+                    "version",
+                    "projectKey",
+                    "phaseId",
+                    "planId",
+                    "leaseId",
+                    "fence",
+                    "holder",
+                    "runState",
+                    "acquiredAt",
+                    "renewedAt",
+                    "expiresAt",
+                    "operationId",
+                ],
+            )
+        })
+    else {
+        return false;
+    };
+    let timestamps = ["acquiredAt", "renewedAt", "expiresAt"].map(|key| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    });
+    object.get("version").and_then(serde_json::Value::as_u64) == Some(1)
+        && is_roadmap_bounded_string(object.get("projectKey"), 4096)
+        && is_roadmap_bounded_string(object.get("phaseId"), 256)
+        && object
+            .get("planId")
+            .is_some_and(|plan| plan.is_null() || is_roadmap_bounded_string(Some(plan), 256))
+        && is_roadmap_bounded_string(object.get("leaseId"), 256)
+        && object
+            .get("fence")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|fence| fence > 0 && fence <= 9_007_199_254_740_991)
+        && is_phase_lease_holder(object.get("holder"))
+        && object
+            .get("runState")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|state| matches!(state, "idle" | "running"))
+        && timestamps.iter().all(Option::is_some)
+        && timestamps[0] <= timestamps[1]
+        && timestamps[1] < timestamps[2]
+        && is_roadmap_bounded_string(object.get("operationId"), 256)
+}
+
+fn is_phase_lease_outcome(value: &serde_json::Value) -> bool {
+    let Some(status) = value.get("status").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    match status {
+        "inspected" | "acquired" | "renewed" | "released" | "duplicate" => {
+            let Some(object) = exact_roadmap_object(
+                value,
+                &[
+                    "status",
+                    "roadmapRevision",
+                    "leaseRevision",
+                    "phaseId",
+                    "lease",
+                ],
+            ) else {
+                return false;
+            };
+            let lease_valid = object.get("lease").is_some_and(|lease| {
+                lease.is_null()
+                    || (is_phase_lease(Some(lease))
+                        && lease.get("phaseId") == object.get("phaseId"))
+            });
+            is_roadmap_revision(object.get("roadmapRevision"))
+                && is_roadmap_revision(object.get("leaseRevision"))
+                && is_roadmap_bounded_string(object.get("phaseId"), 256)
+                && lease_valid
+                && (status != "released"
+                    || object.get("lease").is_some_and(|lease| lease.is_null()))
+        }
+        "phase-lease-held" | "phase-lease-lost" | "lease-owner-unreachable" => {
+            let Some(object) = exact_roadmap_object(
+                value,
+                &["status", "roadmapRevision", "leaseRevision", "currentLease"],
+            ) else {
+                return false;
+            };
+            is_roadmap_revision(object.get("roadmapRevision"))
+                && is_roadmap_revision(object.get("leaseRevision"))
+                && object
+                    .get("currentLease")
+                    .is_some_and(|lease| lease.is_null() || is_phase_lease(Some(lease)))
+        }
+        "operation-conflict" | "stale-revision" => {
+            exact_roadmap_object(value, &["status", "roadmapRevision", "leaseRevision"])
+                .is_some_and(|object| {
+                    is_roadmap_revision(object.get("roadmapRevision"))
+                        && is_roadmap_revision(object.get("leaseRevision"))
+                })
+        }
+        "project-mismatch" => {
+            exact_roadmap_object(value, &["status", "roadmapRevision", "currentProjectKey"])
+                .is_some_and(|object| {
+                    is_roadmap_revision(object.get("roadmapRevision"))
+                        && is_roadmap_bounded_string(object.get("currentProjectKey"), 4096)
+                })
+        }
+        "phase-not-found" | "phase-archived" | "phase-terminal" | "plan-mismatch" | "missing" => {
+            exact_roadmap_object(value, &["status"]).is_some()
+        }
+        "corrupt" => {
+            let Some(object) = exact_roadmap_object(value, &["status", "primary", "backup"]) else {
+                return false;
+            };
+            ["primary", "backup"].iter().all(|key| {
+                object
+                    .get(*key)
+                    .is_some_and(|reason| reason.is_null() || reason.is_string())
+            })
+        }
+        _ => false,
+    }
+}
+
 
 fn is_manual_completion_gate_code(value: Option<&serde_json::Value>) -> bool {
     value
@@ -9068,6 +9277,24 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
             emit_daemon_error(&app, &message);
             return;
         }
+    let (daemon_instance_id, process_start_token) =
+        match (generate_daemon_auth_token(), generate_daemon_auth_token()) {
+            (Ok(instance_id), Ok(start_token)) => (instance_id, start_token),
+            (Err(message), _) | (_, Err(message)) => {
+                log::error!("{message}");
+                emit_daemon_error(&app, &message);
+                return;
+            }
+        };
+    let predecessor_proof = if is_respawn {
+        app.state::<Daemon>()
+            .predecessor_proof
+            .lock()
+            .unwrap()
+            .clone()
+    } else {
+        None
+    };
     };
     log::info!(
         "{}",
@@ -9091,10 +9318,17 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
         // GG_APP_LISTENING handshake.
         .env("GG_APP_PORT", "0")
         .env("GG_APP_AUTH_TOKEN", &auth_token)
+        .env("GG_DAEMON_INSTANCE_ID", &daemon_instance_id)
+        .env("GG_PROCESS_START_TOKEN", &process_start_token)
         .env("GG_APP_TOKEN", &app.state::<Daemon>().token)
         .env("GG_APP_SIDECAR_LOG_FILE", &sidecar_log)
         .env("ERROR_MOM_RELEASE", env!("CARGO_PKG_VERSION"))
         .stdout(Stdio::piped())
+    if let Some(proof) = predecessor_proof.as_ref() {
+        if let Ok(serialized) = serde_json::to_string(proof) {
+            cmd.env("GG_DAEMON_PREDECESSOR_PROOF", serialized);
+        }
+    }
         .stderr(Stdio::piped());
     if identifier == PRODUCTION_APP_IDENTIFIER {
         cmd.env_remove("GG_AGENT_DIR");
@@ -9155,6 +9389,11 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
     {
         let daemon: State<Daemon> = app.state();
         *daemon.child.lock().unwrap() = Some(child);
+        *daemon.process_identity.lock().unwrap() = Some(DaemonProcessIdentity {
+            daemon_instance_id,
+            process_id: daemon_pid,
+            process_start_token,
+        });
         *daemon.auth_token.lock().unwrap() = Some(auth_token);
     }
 
@@ -9249,6 +9488,12 @@ fn spawn_daemon(app: tauri::AppHandle, is_respawn: bool) {
                             terminate_child(old_child, termination_reason);
                         }
                     }
+                if let Some(identity) = daemon.process_identity.lock().unwrap().take() {
+                    if identity.process_id == daemon_pid {
+                        *daemon.predecessor_proof.lock().unwrap() =
+                            Some(DaemonPredecessorProof::from_terminated(identity));
+                    }
+                }
                 }
                 let mut attempts = daemon.respawn_attempts.lock().unwrap();
                 if planned || started_at.elapsed() >= DAEMON_STABLE_UPTIME {
@@ -11391,6 +11636,86 @@ mod tests {
             .map(|attempt| daemon_respawn_delay(attempt).unwrap().as_secs())
             .collect();
         assert_eq!(delays, vec![1, 2, 4, 8, 16]);
+    fn phase_lease_native_boundary_rejects_caller_predecessor_proof() {
+        let mut request = serde_json::json!({
+            "version": 2,
+            "predecessorProof": null
+        });
+        assert_eq!(validate_public_phase_binding_request(&request), Ok(()));
+
+        request["predecessorProof"] = serde_json::json!({
+            "daemonInstanceId": "daemon-a",
+            "processId": 42,
+            "processStartToken": "start-a",
+            "terminatedAt": "2026-08-30T10:00:00.000Z"
+        });
+        assert_eq!(
+            validate_public_phase_binding_request(&request),
+            Err(PHASE_LEASE_PREDECESSOR_PROOF_ERROR.to_string())
+        );
+    }
+
+    #[test]
+    fn phase_lease_native_boundary_rejects_cross_phase_and_extra_fields() {
+        let lease = serde_json::json!({
+            "version": 1,
+            "projectKey": "c:/project",
+            "phaseId": "phase-1",
+            "planId": null,
+            "leaseId": "lease-1",
+            "fence": 1,
+            "holder": {
+                "daemonInstanceId": "daemon-a",
+                "sessionId": "session-a",
+                "sessionPath": null,
+                "processId": 42
+            },
+            "runState": "idle",
+            "acquiredAt": "2026-08-30T10:00:00.000Z",
+            "renewedAt": "2026-08-30T10:00:30.000Z",
+            "expiresAt": "2026-08-30T10:02:30.000Z",
+            "operationId": "acquire-1"
+        });
+        let mut private_lease = lease.clone();
+        private_lease["holder"]["processStartToken"] = serde_json::json!("start-a");
+        assert!(!is_phase_lease(Some(&private_lease)));
+
+        let outcome = serde_json::json!({
+            "status": "inspected",
+            "roadmapRevision": 7,
+            "leaseRevision": 1,
+            "phaseId": "phase-1",
+            "lease": lease
+        });
+        assert!(is_roadmap_typed_outcome(
+            RoadmapTypedResponseKind::PhaseLease,
+            200,
+            &outcome,
+        ));
+
+        let mut mismatch = outcome.clone();
+        mismatch["phaseId"] = serde_json::json!("phase-2");
+        assert!(!is_phase_lease_outcome(&mismatch));
+        let mut extra = outcome;
+        extra["unexpected"] = serde_json::json!(true);
+        assert!(!is_phase_lease_outcome(&extra));
+    }
+
+    #[test]
+    fn supervised_restart_proof_preserves_exact_terminated_identity() {
+        let identity = DaemonProcessIdentity {
+            daemon_instance_id: "daemon-a".into(),
+            process_id: 42,
+            process_start_token: "start-a".into(),
+        };
+        let proof = DaemonPredecessorProof::from_terminated(identity);
+        let value = serde_json::to_value(proof).unwrap();
+        assert_eq!(value["daemonInstanceId"], "daemon-a");
+        assert_eq!(value["processId"], 42);
+        assert_eq!(value["processStartToken"], "start-a");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(value["terminatedAt"].as_str().unwrap()).is_ok()
+        );
     }
 
     #[test]

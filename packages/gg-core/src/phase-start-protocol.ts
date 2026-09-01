@@ -1,3 +1,4 @@
+import { isPhaseLease, type PhaseLeaseV1 } from "./phase-binding-protocol.js";
 import { isNotesSessionLink } from "./project-notes.js";
 
 export const PHASE_START_STATUSES = ["accepted", "already-bound", "failed"] as const;
@@ -18,6 +19,13 @@ export const PHASE_START_FAILURE_CODES = [
   "phase-archived",
   "phase-inactive",
   "advancement-confirmation-required",
+  "phase-lease-held",
+  "phase-lease-lost",
+  "lease-owner-unreachable",
+  "plan-not-approved",
+  "plan-snapshot-missing",
+  "plan-reconciliation-required",
+  "repository-unverifiable",
   "notes-missing",
   "notes-corrupt",
   "launch-failed",
@@ -30,18 +38,29 @@ export interface PhaseStartSession {
   sessionPath: string | null;
 }
 
+export type PhaseStartReconciliationOutcome =
+  | "ready"
+  | "needs-plan"
+  | "needs-reconciliation"
+  | "completion-pending"
+  | "completed";
+
 export type PhaseStartResult =
   | {
       status: "accepted";
       operationId: string;
       session: PhaseStartSession;
       packageTokenCount: number;
+      lease?: PhaseLeaseV1;
+      reconciliation?: PhaseStartReconciliationOutcome;
     }
   | {
       status: "already-bound";
       operationId: string;
       session: PhaseStartSession;
       packageTokenCount: 0;
+      lease?: PhaseLeaseV1;
+      reconciliation?: PhaseStartReconciliationOutcome;
     }
   | {
       status: "failed";
@@ -52,7 +71,14 @@ export type PhaseStartResult =
 
 export type LegacyPhaseStartFailureCode = Exclude<
   PhaseStartFailureCode,
-  "advancement-confirmation-required"
+  | "advancement-confirmation-required"
+  | "phase-lease-held"
+  | "phase-lease-lost"
+  | "lease-owner-unreachable"
+  | "plan-not-approved"
+  | "plan-snapshot-missing"
+  | "plan-reconciliation-required"
+  | "repository-unverifiable"
 >;
 
 export type LegacyPhaseStartResult =
@@ -66,16 +92,33 @@ export type LegacyPhaseStartResult =
 
 /** Downgrades the v2-only advancement gate for clients using the original closed code set. */
 export function toLegacyPhaseStartResult(result: PhaseStartResult): LegacyPhaseStartResult {
-  if (result.status !== "failed" || result.code !== "advancement-confirmation-required") {
+  if (result.status !== "failed" || LEGACY_PHASE_START_FAILURE_CODE_SET.has(result.code)) {
+    if (result.status === "accepted" || result.status === "already-bound") {
+      const { lease: _lease, reconciliation: _reconciliation, ...legacy } = result;
+      return legacy;
+    }
     return result as LegacyPhaseStartResult;
   }
   return {
     ...result,
-    code: "phase-inactive",
+    code: result.code === "advancement-confirmation-required" ? "phase-inactive" : "launch-failed",
   };
 }
 
 const PHASE_START_FAILURE_CODE_SET: ReadonlySet<string> = new Set(PHASE_START_FAILURE_CODES);
+const V2_PHASE_START_FAILURE_CODE_SET: ReadonlySet<string> = new Set([
+  "advancement-confirmation-required",
+  "phase-lease-held",
+  "phase-lease-lost",
+  "lease-owner-unreachable",
+  "plan-not-approved",
+  "plan-snapshot-missing",
+  "plan-reconciliation-required",
+  "repository-unverifiable",
+]);
+const LEGACY_PHASE_START_FAILURE_CODE_SET: ReadonlySet<string> = new Set(
+  PHASE_START_FAILURE_CODES.filter((code) => !V2_PHASE_START_FAILURE_CODE_SET.has(code)),
+);
 
 export function isPhaseStartFailureCode(value: unknown): value is PhaseStartFailureCode {
   return typeof value === "string" && PHASE_START_FAILURE_CODE_SET.has(value);
@@ -88,14 +131,25 @@ export function isPhaseStartSession(value: unknown): value is PhaseStartSession 
 export function isPhaseStartResult(value: unknown): value is PhaseStartResult {
   if (!isRecord(value)) return false;
   if (value.status === "accepted" || value.status === "already-bound") {
+    const legacy = hasExactKeys(value, ["status", "operationId", "session", "packageTokenCount"]);
+    const durable = hasExactKeys(value, [
+      "status",
+      "operationId",
+      "session",
+      "packageTokenCount",
+      "lease",
+      "reconciliation",
+    ]);
     return (
-      hasExactKeys(value, ["status", "operationId", "session", "packageTokenCount"]) &&
+      (legacy || durable) &&
       isNonEmptyString(value.operationId) &&
       isPhaseStartSession(value.session) &&
       Number.isInteger(value.packageTokenCount) &&
       (value.status === "accepted"
         ? (value.packageTokenCount as number) >= 0
-        : value.packageTokenCount === 0)
+        : value.packageTokenCount === 0) &&
+      (!durable ||
+        (isPhaseLease(value.lease) && isPhaseStartReconciliationOutcome(value.reconciliation)))
     );
   }
   return (
@@ -104,6 +158,18 @@ export function isPhaseStartResult(value: unknown): value is PhaseStartResult {
     isPhaseStartFailureCode(value.code) &&
     (value.operationId === null || isNonEmptyString(value.operationId)) &&
     isNonEmptyString(value.message)
+  );
+}
+
+function isPhaseStartReconciliationOutcome(
+  value: unknown,
+): value is PhaseStartReconciliationOutcome {
+  return (
+    value === "ready" ||
+    value === "needs-plan" ||
+    value === "needs-reconciliation" ||
+    value === "completion-pending" ||
+    value === "completed"
   );
 }
 

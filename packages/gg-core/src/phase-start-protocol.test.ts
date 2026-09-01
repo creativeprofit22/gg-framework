@@ -77,4 +77,52 @@ describe("phase-start protocol", () => {
 
     expect(toLegacyPhaseStartResult(result)).toBe(result);
   });
+  it("accepts durable lease and reconciliation outcomes", () => {
+    const lease = {
+      version: 1 as const,
+      projectKey: "c:/work/project",
+      phaseId: "phase-1",
+      planId: "plan-1",
+      leaseId: "lease-1",
+      fence: 1,
+      holder: {
+        daemonInstanceId: "daemon-1",
+        sessionId: session.sessionId,
+        sessionPath: session.sessionPath,
+        processId: 123,
+      },
+      runState: "idle" as const,
+      acquiredAt: "2026-08-30T10:00:00.000Z",
+      renewedAt: "2026-08-30T10:00:30.000Z",
+      expiresAt: "2026-08-30T10:02:30.000Z",
+      operationId: "operation-1",
+    };
+    const result = {
+      status: "accepted" as const,
+      operationId: "operation-1",
+      session,
+      packageTokenCount: 12,
+      lease,
+      reconciliation: "ready" as const,
+    };
+
+    expect(isPhaseStartResult(result)).toBe(true);
+    expect(toLegacyPhaseStartResult(result)).toEqual({
+      status: "accepted",
+      operationId: "operation-1",
+      session,
+      packageTokenCount: 12,
+    });
+    expect(isPhaseStartResult({ ...result, reconciliation: "unknown" })).toBe(false);
+  });
+
+  it("downgrades durable-only recovery failures for legacy clients", () => {
+    const result = {
+      status: "failed",
+      code: "plan-reconciliation-required",
+      operationId: "operation-1",
+      message: "Reconcile the approved plan before resuming.",
+    } satisfies PhaseStartResult;
+    expect(toLegacyPhaseStartResult(result)).toMatchObject({ code: "launch-failed" });
+  });
 });

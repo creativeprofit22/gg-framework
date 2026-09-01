@@ -10384,6 +10384,17 @@ select {
     width: 100%;
   }
 
+  .notes-manual-completion,
+  .notes-phase-rebind {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .notes-manual-completion > button,
+  .notes-phase-rebind > button {
+    width: 100%;
+  }
+
   .notes-phase-views {
     display: none;
   }

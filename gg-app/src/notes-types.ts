@@ -26,6 +26,8 @@ import type {
   PhaseBindingRequest,
   PhaseExecutionReconciliationOutcome,
   PhaseExecutionReconciliationRequestV3,
+  PhaseLeaseOutcome,
+  PhaseLeaseRequestV2,
 } from "@kenkaiiii/gg-core/phase-binding-protocol";
 import type { ProjectNotesStorageDiagnostics } from "@kenkaiiii/gg-core/project-notes-diagnostics";
 export {
@@ -42,12 +44,16 @@ export {
   isPhaseBindingRequest,
   isPhaseExecutionReconciliationOutcome,
   isPhaseExecutionReconciliationRequestV3,
+  isPhaseLeaseOutcome,
+  isPhaseLeaseRequest,
 } from "@kenkaiiii/gg-core/phase-binding-protocol";
 export type {
   PhaseBindingOutcome,
   PhaseBindingRequest,
   PhaseExecutionReconciliationOutcome,
   PhaseExecutionReconciliationRequestV3,
+  PhaseLeaseOutcome,
+  PhaseLeaseRequestV2,
 } from "@kenkaiiii/gg-core/phase-binding-protocol";
 export { isProjectNotesStorageDiagnostics } from "@kenkaiiii/gg-core/project-notes-diagnostics";
 export type { ProjectNotesStorageDiagnostics } from "@kenkaiiii/gg-core/project-notes-diagnostics";
@@ -380,6 +386,7 @@ export interface NotesClient {
   getNotes(): Promise<ProjectNotesReadOutcome>;
   getNotesDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   bindRoadmapPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  mutateRoadmapPhaseLease(request: PhaseLeaseRequestV2): Promise<PhaseLeaseOutcome>;
   reconcileRoadmapPhaseExecution(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;

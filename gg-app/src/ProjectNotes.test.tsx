@@ -34,6 +34,7 @@ import type {
   PhaseBindingOutcome,
   PhaseExecutionReconciliationOutcome,
   PhaseExecutionReconciliationRequestV3,
+  PhaseLeaseOutcome,
   ReminderClaimOutcome,
   ReminderReserveOutcome,
 } from "./notes-types";
@@ -403,6 +404,10 @@ class FakeProjectNotesClient implements NotesClient {
   }
 
   async bindRoadmapPhase(): Promise<PhaseBindingOutcome> {
+    return { status: "missing" };
+  }
+
+  async mutateRoadmapPhaseLease(): Promise<PhaseLeaseOutcome> {
     return { status: "missing" };
   }
 

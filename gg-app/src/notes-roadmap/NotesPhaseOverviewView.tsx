@@ -9,6 +9,8 @@ import type {
   NotesRoadmapStatusUpdate,
   PhaseBindingOutcome,
   PhaseBindingRequest,
+  PhaseLeaseOutcome,
+  PhaseLeaseRequestV2,
   ProjectNotesStorageDiagnostics,
 } from "../notes-types";
 import { useNotesPhaseDetail } from "./NotesPhaseDetailState";
@@ -55,6 +57,7 @@ export function NotesPhaseOverviewView(): ReactElement {
     expectedRevision,
     onGetStorageDiagnostics,
     onRebindPhase,
+    onMutatePhaseLease,
     onPreviewManualCompletionApproval,
     onCommitManualCompletionApproval,
     onActionSuccess,
@@ -182,6 +185,7 @@ export function NotesPhaseOverviewView(): ReactElement {
         expectedRevision={expectedRevision}
         onInspect={onGetStorageDiagnostics}
         onRebind={onRebindPhase}
+        onMutateLease={onMutatePhaseLease}
         onSuccess={onActionSuccess}
       />
       <div className="notes-phase-content">
@@ -438,6 +442,7 @@ export function PhaseRebindControl({
   expectedRevision,
   onInspect,
   onRebind,
+  onMutateLease,
   onSuccess,
   idFactory = () => crypto.randomUUID(),
 }: {
@@ -445,10 +450,12 @@ export function PhaseRebindControl({
   expectedRevision: number | null;
   onInspect(): Promise<ProjectNotesStorageDiagnostics>;
   onRebind(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onMutateLease(request: PhaseLeaseRequestV2): Promise<PhaseLeaseOutcome>;
   onSuccess(): void;
   idFactory?(): string;
 }): ReactElement | null {
   const [preview, setPreview] = useState<ProjectNotesStorageDiagnostics | null>(null);
+  const [leasePreview, setLeasePreview] = useState<PhaseLeaseOutcome | null>(null);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
   if (!phase.session) return null;
@@ -471,6 +478,24 @@ export function PhaseRebindControl({
         setMessage("The phase binding changed. Refresh Notes before rebinding.");
         return;
       }
+      const lease = await onMutateLease({
+        version: 2,
+        action: "inspect",
+        phaseId: phase.id,
+        expectedProjectKey: diagnostics.projectKey,
+        expectedRevision,
+        planId: phase.execution?.plan?.planId ?? null,
+        operationId: idFactory(),
+        lease: null,
+        confirmTakeover: false,
+        takeoverReason: null,
+        predecessorProof: null,
+      });
+      setLeasePreview(lease.status === "inspected" ? lease : null);
+      if (lease.status !== "inspected" && lease.status !== "missing") {
+        setMessage(phaseLeaseOutcomeMessage(lease));
+        return;
+      }
       setPreview(diagnostics);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Binding diagnostics are unavailable.");
@@ -484,6 +509,31 @@ export function PhaseRebindControl({
     setPending(true);
     setMessage("");
     try {
+      if (leasePreview?.status === "inspected") {
+        const currentLease = leasePreview.lease;
+        const outcome = await onMutateLease({
+          version: 2,
+          action: currentLease ? "takeover" : "acquire",
+          phaseId: phase.id,
+          expectedProjectKey: preview.projectKey,
+          expectedRevision,
+          planId: phase.execution?.plan?.planId ?? null,
+          operationId: idFactory(),
+          lease: currentLease ? { leaseId: currentLease.leaseId, fence: currentLease.fence } : null,
+          confirmTakeover: currentLease !== null,
+          takeoverReason: currentLease ? "explicit desktop takeover" : null,
+          predecessorProof: null,
+        });
+        if (outcome.status === "acquired" || outcome.status === "duplicate") {
+          setMessage("Phase writer lease moved to this session.");
+          onSuccess();
+          return;
+        }
+        setLeasePreview(null);
+        setPreview(null);
+        setMessage(phaseLeaseOutcomeMessage(outcome));
+        return;
+      }
       const outcome = await onRebind({
         version: 1,
         action: "rebind-current",
@@ -520,6 +570,12 @@ export function PhaseRebindControl({
       </div>
       {preview ? (
         <div className="notes-phase-rebind-confirm" role="group" aria-label="Confirm phase rebind">
+          {leasePreview?.status === "inspected" && leasePreview.lease && (
+            <p>
+              Current writer: {leasePreview.lease.holder.sessionId} · expires{" "}
+              {formatDateTime(leasePreview.lease.expiresAt)}
+            </p>
+          )}
           {phase.execution?.state === "needs-reconciliation" && (
             <p className="notes-phase-attention">Plan or workspace reconciliation is required.</p>
           )}
@@ -538,15 +594,22 @@ export function PhaseRebindControl({
             </div>
           </dl>
           <button type="button" disabled={pending} onClick={() => void confirm()}>
-            {pending ? "Rebinding…" : "Confirm rebind"}
+            {pending ? "Transferring…" : leasePreview ? "Confirm safe takeover" : "Confirm rebind"}
           </button>
-          <button type="button" disabled={pending} onClick={() => setPreview(null)}>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={() => {
+              setPreview(null);
+              setLeasePreview(null);
+            }}
+          >
             Cancel
           </button>
         </div>
       ) : (
         <button type="button" disabled={pending} onClick={() => void inspect()}>
-          {pending ? "Checking binding…" : "Rebind to this session"}
+          {pending ? "Checking writer…" : "Inspect phase writer"}
         </button>
       )}
       {message && (
@@ -556,6 +619,28 @@ export function PhaseRebindControl({
       )}
     </section>
   );
+}
+
+function phaseLeaseOutcomeMessage(outcome: PhaseLeaseOutcome): string {
+  switch (outcome.status) {
+    case "phase-lease-held":
+      return outcome.currentLease?.runState === "running"
+        ? "The current writer is still running. Stop it before taking over."
+        : "The current writer still holds a live lease. Retry after it settles or expires.";
+    case "lease-owner-unreachable":
+      return "Writer liveness could not be proved. Close the old app process, then retry.";
+    case "phase-lease-lost":
+      return "This pane lost the writer lease. Resume the current writer before changing the phase.";
+    case "stale-revision":
+      return "Notes changed. Refresh the phase before retrying.";
+    case "plan-mismatch":
+      return "The approved plan changed. Reconcile the phase before taking over.";
+    case "phase-archived":
+    case "phase-terminal":
+      return "This phase can no longer be taken over.";
+    default:
+      return "The phase writer changed. Refresh and inspect it again.";
+  }
 }
 
 function phaseBindingOutcomeMessage(outcome: PhaseBindingOutcome): string {

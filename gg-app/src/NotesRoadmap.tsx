@@ -35,6 +35,8 @@ import type {
   PhaseBindingRequest,
   PhaseExecutionReconciliationOutcome,
   PhaseExecutionReconciliationRequestV3,
+  PhaseLeaseOutcome,
+  PhaseLeaseRequestV2,
   PhaseStartResult,
   ProjectNotesStorageDiagnostics,
 } from "./notes-types";
@@ -91,6 +93,7 @@ interface RoadmapProps {
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onGetStorageDiagnostics?(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase?(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onMutatePhaseLease?(request: PhaseLeaseRequestV2): Promise<PhaseLeaseOutcome>;
   onReconcilePhaseExecution?(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;
@@ -146,6 +149,7 @@ export function NotesRoadmap({
     throw new Error("Storage diagnostics are unavailable.");
   },
   onRebindPhase = async () => ({ status: "missing" }),
+  onMutatePhaseLease = async () => ({ status: "missing" }),
   onReconcilePhaseExecution = async () => ({ status: "missing" }),
   onPreviewManualCompletionApproval = async () => ({ status: "missing" }),
   onCommitManualCompletionApproval = async () => ({ status: "nonce-not-found" }),
@@ -418,6 +422,7 @@ export function NotesRoadmap({
         onStartPhase,
         onGetStorageDiagnostics,
         onRebindPhase,
+        onMutatePhaseLease,
         onReconcilePhaseExecution,
         onPreviewManualCompletionApproval,
         onCommitManualCompletionApproval,

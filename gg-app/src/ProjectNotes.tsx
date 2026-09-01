@@ -405,6 +405,7 @@ export const ProjectNotes = forwardRef<ProjectNotesPromptActions, Props>(functio
             onStartPhase={onStartPhase}
             onGetStorageDiagnostics={() => client.getNotesDiagnostics()}
             onRebindPhase={(request) => client.bindRoadmapPhase(request)}
+            onMutatePhaseLease={(request) => client.mutateRoadmapPhaseLease(request)}
             onReconcilePhaseExecution={(request) => client.reconcileRoadmapPhaseExecution(request)}
             onPreviewManualCompletionApproval={(phaseId, expectedRevision) =>
               client.previewManualCompletionApproval(phaseId, expectedRevision)

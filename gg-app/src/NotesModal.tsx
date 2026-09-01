@@ -23,6 +23,8 @@ import type {
   PhaseBindingRequest,
   PhaseExecutionReconciliationOutcome,
   PhaseExecutionReconciliationRequestV3,
+  PhaseLeaseOutcome,
+  PhaseLeaseRequestV2,
   ProjectNotesStorageDiagnostics,
   PhaseRunCancellationResult,
   NotesTask,
@@ -113,6 +115,7 @@ interface Props {
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onGetStorageDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onMutatePhaseLease(request: PhaseLeaseRequestV2): Promise<PhaseLeaseOutcome>;
   onReconcilePhaseExecution(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;
@@ -190,6 +193,7 @@ export function NotesModal({
   onStartPhase,
   onGetStorageDiagnostics,
   onRebindPhase,
+  onMutatePhaseLease,
   onReconcilePhaseExecution,
   onPreviewManualCompletionApproval,
   onCommitManualCompletionApproval,
@@ -380,6 +384,7 @@ export function NotesModal({
                   onStartPhase={onStartPhase}
                   onGetStorageDiagnostics={onGetStorageDiagnostics}
                   onRebindPhase={onRebindPhase}
+                  onMutatePhaseLease={onMutatePhaseLease}
                   onReconcilePhaseExecution={onReconcilePhaseExecution}
                   onPreviewManualCompletionApproval={onPreviewManualCompletionApproval}
                   onCommitManualCompletionApproval={onCommitManualCompletionApproval}

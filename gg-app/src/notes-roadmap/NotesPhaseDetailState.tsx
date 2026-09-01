@@ -35,6 +35,8 @@ import type {
   PhaseBindingRequest,
   PhaseExecutionReconciliationOutcome,
   PhaseExecutionReconciliationRequestV3,
+  PhaseLeaseOutcome,
+  PhaseLeaseRequestV2,
   PhaseStartResult,
   ProjectNotesStorageDiagnostics,
 } from "../notes-types";
@@ -102,6 +104,7 @@ export interface NotesPhaseDetailProps {
   onStartPhase(phaseId: string): Promise<PhaseStartResult>;
   onGetStorageDiagnostics(): Promise<ProjectNotesStorageDiagnostics>;
   onRebindPhase(request: PhaseBindingRequest): Promise<PhaseBindingOutcome>;
+  onMutatePhaseLease(request: PhaseLeaseRequestV2): Promise<PhaseLeaseOutcome>;
   onReconcilePhaseExecution(
     request: PhaseExecutionReconciliationRequestV3,
   ): Promise<PhaseExecutionReconciliationOutcome>;

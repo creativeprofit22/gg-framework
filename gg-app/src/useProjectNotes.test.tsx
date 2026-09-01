@@ -19,6 +19,7 @@ import type {
   ProjectNotesStorageDiagnostics,
   PhaseBindingOutcome,
   PhaseExecutionReconciliationOutcome,
+  PhaseLeaseOutcome,
 } from "./notes-types";
 import { useProjectNotes } from "./useProjectNotes";
 
@@ -304,9 +305,14 @@ class FakeNotesClient implements NotesClient {
     return { status: "missing" };
   }
 
+  async mutateRoadmapPhaseLease(): Promise<PhaseLeaseOutcome> {
+    return { status: "missing" };
+  }
+
   async reconcileRoadmapPhaseExecution(): Promise<PhaseExecutionReconciliationOutcome> {
     return { status: "missing" };
   }
+
   async previewManualCompletionApproval(): Promise<ManualCompletionApprovalPreviewOutcome> {
     return { status: "missing" };
   }

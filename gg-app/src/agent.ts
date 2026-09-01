@@ -39,6 +39,8 @@ import {
   isPhaseBindingOutcome,
   isPhaseExecutionReconciliationOutcome,
   isPhaseExecutionReconciliationRequestV3,
+  isPhaseLeaseOutcome,
+  isPhaseLeaseRequest,
   isProjectNotesMigrationOutcome,
   isProjectNotesReadOutcome,
   isProjectNotesStorageDiagnostics,
@@ -2935,6 +2937,12 @@ export function createPaneAgentClient(paneId: string): PaneAgentClient {
     async bindRoadmapPhase(request) {
       const outcome = await call<unknown>("agent_notes_phase_binding", { request });
       if (!isPhaseBindingOutcome(outcome)) throw new Error("invalid phase binding response");
+      return outcome;
+    },
+    async mutateRoadmapPhaseLease(request) {
+      if (!isPhaseLeaseRequest(request)) throw new Error("invalid phase lease request");
+      const outcome = await call<unknown>("agent_notes_phase_binding", { request });
+      if (!isPhaseLeaseOutcome(outcome)) throw new Error("invalid phase lease response");
       return outcome;
     },
     async reconcileRoadmapPhaseExecution(request) {

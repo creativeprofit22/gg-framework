@@ -196,6 +196,17 @@ describe("AppSidecarPlanGate", () => {
     expect(String(result)).toContain("write is restricted in plan mode");
   });
 
+  it("verifies Git before persisting an approved Roadmap plan snapshot", async () => {
+    const source = await fs.readFile(new URL("./app-sidecar.ts", import.meta.url), "utf8");
+    const approvalStart = source.indexOf("commitApproval: async (checkpoint) => {");
+    const captureIndex = source.indexOf("captureGitWorkspaceSnapshot", approvalStart);
+    const persistIndex = source.indexOf("persistApprovedPlanSnapshot", approvalStart);
+
+    expect(approvalStart).toBeGreaterThanOrEqual(0);
+    expect(captureIndex).toBeGreaterThan(approvalStart);
+    expect(persistIndex).toBeGreaterThan(captureIndex);
+  });
+
   it("approves the persisted snapshot instead of caller paths or later file bytes", async () => {
     let diskContent = "original reviewed plan";
     const persisted: PersistedPlanReviewCheckpoint[] = [];

@@ -244,6 +244,7 @@ import {
   createApprovedPlan,
   isLegacyPlanImportEligible,
   PlanSnapshotResumeError,
+  RepositoryUnverifiableError,
   resolveExecutionPlanSnapshot,
 } from "./roadmap-phase-execution.js";
 import {
@@ -1531,6 +1532,8 @@ async function main(): Promise<void> {
                 code: err.code,
                 snapshotPath: err.snapshotPath,
               });
+            } else if (err instanceof RepositoryUnverifiableError) {
+              daemonJson(res, 409, { error: message, code: err.code });
             } else {
               daemonJson(res, 500, { error: message });
             }
@@ -3704,6 +3707,7 @@ async function createSession(
     const cancelGenAtStart = cancelGeneration;
     const assistantsBeforeRun = countAssistantMessages(session.getMessages());
     let runSucceeded = false;
+    let advancementError: { cause: unknown } | null = null;
     broadcast("run_start", { text: label, runState: runLifecycle.state });
     try {
       if (ownsGeneration) {
@@ -3780,7 +3784,7 @@ async function createSession(
               });
             }
           } catch (error) {
-            if (!deferredPhaseLeaseReleaseOperationId) throw error;
+            if (!deferredPhaseLeaseReleaseOperationId) advancementError = { cause: error };
           }
         }
       }
@@ -3819,6 +3823,7 @@ async function createSession(
       });
       broadcast("extras", footerExtras());
     }
+    if (advancementError) throw advancementError.cause;
   }
 
   const planHandoff = new AppSidecarPlanHandoff({
@@ -3833,14 +3838,27 @@ async function createSession(
       };
     },
     commitApproval: async (checkpoint) => {
+      const previousActivePhase = session.getActivePhaseContext();
+      const approvalWorkspace =
+        durableRoadmapExecution && previousActivePhase
+          ? await (async () => {
+              const loaded = await notesRepository.load(cwd);
+              if (loaded.status !== "ok") {
+                throw new Error("Project Notes are unavailable for durable plan approval.");
+              }
+              return {
+                loaded,
+                workspace: await captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey),
+              };
+            })()
+          : undefined;
       const approvedPlanPath = await persistApprovedPlanSnapshot(cwd, checkpoint);
       if (hasPlanOnlyBoundary(checkpoint.content)) {
-        const activePhase = session.getActivePhaseContext();
-        if (activePhase) {
+        if (previousActivePhase) {
           const checkpointOutcome = await phaseCompletion.checkpoint({
             checkpointId: checkpoint.checkpointId,
-            phaseId: activePhase.phase.id,
-            expectedSession: activePhase.session,
+            phaseId: previousActivePhase.phase.id,
+            expectedSession: previousActivePhase.session,
             // The phase deliverable is the reviewed plan itself. Its implementation
             // steps belong to later Roadmap phases and must not gate this contract phase.
             planStepTotal: 1,
@@ -3881,17 +3899,12 @@ async function createSession(
         };
       }
 
-      const previousActivePhase = session.getActivePhaseContext();
       const previousPhaseSessionPath = previousActivePhase?.session.sessionPath;
       const previousLeaseMarker = session.getRoadmapPhaseLeaseMarker();
       const durablePlan =
-        durableRoadmapExecution && previousActivePhase
+        previousActivePhase && approvalWorkspace
           ? await (async () => {
-              const loaded = await notesRepository.load(cwd);
-              if (loaded.status !== "ok") {
-                throw new Error("Project Notes are unavailable for durable plan approval.");
-              }
-              const workspace = await captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
+              const { loaded, workspace } = approvalWorkspace;
               const relativePlanPath = path
                 .relative(cwd, approvedPlanPath)
                 .split(path.sep)
@@ -6546,11 +6559,22 @@ ${checkpoints}`;
           } satisfies PlanAcceptResult);
         } catch (err) {
           captureSidecarError(err, "app-sidecar.plan.accept");
+          const activePhase = session.getActivePhaseContext();
           if (err instanceof PhaseCheckpointError) {
             json(res, 409, {
               status: "failed",
               operationId: mutation.operationId,
               ...phaseCheckpointFailurePayload(err),
+            } satisfies PlanMutationFailure);
+          } else if (err instanceof RepositoryUnverifiableError && activePhase) {
+            json(res, 409, {
+              status: "failed",
+              code: err.code,
+              operationId: mutation.operationId,
+              message: err.message,
+              guidance: "Open this project from a Git repository, then retry approval.",
+              retryable: true,
+              phaseId: activePhase.phase.id,
             } satisfies PlanMutationFailure);
           } else {
             json(res, 500, { error: err instanceof Error ? err.message : String(err) });

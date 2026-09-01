@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
+import { RepositoryUnverifiableError } from "./roadmap-phase-execution.js";
 import {
   APP_SIDECAR_KEN_ALLOWED_TOOL_NAMES,
   AppSidecarRoadmapToolHost,
@@ -269,6 +270,48 @@ describe("AppSidecarRoadmapToolHost", () => {
     expect(JSON.parse(String(output))).toMatchObject({
       result: "verification-incomplete",
       unmetEvidenceCodes: ["unmatched-evidence"],
+    });
+    expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
+  });
+
+  it("returns repository-unverifiable without recording done status", async () => {
+    const recordRoadmapStatusUpdate = vi.fn();
+    const phase = {
+      id: "phase-1",
+      execution: {
+        plan: { contentHash: "5".repeat(64), steps: [{ state: "completed" }] },
+        evidence: [],
+      },
+    };
+    const host = new AppSidecarRoadmapToolHost({
+      cwd: "/project",
+      repository: {
+        load: async () => ({
+          status: "ok" as const,
+          snapshot: { revision: 4, document: { phases: [phase] } } as never,
+          recoveredFromBackup: false,
+        }),
+        recordPhaseExecutionEvidence: vi.fn(),
+        recordRoadmapStatusUpdate,
+      },
+      reconciliations: new AppSidecarRoadmapReconciliationCoordinator(),
+      projectAutopilot: { isEnabled: () => false },
+      resolvePlanProgress: () => null,
+      captureWorkspaceSnapshot: async () => {
+        throw new RepositoryUnverifiableError();
+      },
+      getRunGeneration: () => 1,
+      broadcastNotesSnapshot: vi.fn(),
+    });
+
+    const output = await host
+      .createSessionTools("coding", owningSession)[0]!
+      .execute(doneInput(), {} as never);
+
+    expect(JSON.parse(String(output))).toMatchObject({
+      result: "repository-unverifiable",
+      phaseId: "phase-1",
+      revision: 4,
     });
     expect(recordRoadmapStatusUpdate).not.toHaveBeenCalled();
   });

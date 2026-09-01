@@ -5,6 +5,7 @@ import type { AppSidecarProjectAutopilotState } from "./app-sidecar-autopilot-st
 import type { PhaseImplementationPlanProgress } from "./app-sidecar-phase-completion.js";
 import type { AppSidecarRoadmapReconciliationCoordinator } from "./app-sidecar-roadmap-reconciliation.js";
 import type { ActivePhaseContextV1 } from "./phase-context.js";
+import { RepositoryUnverifiableError } from "./roadmap-phase-execution.js";
 import type {
   NotesReference,
   ProjectNotesRepository,
@@ -68,7 +69,8 @@ export interface AppSidecarRoadmapToolHostDependencies {
   repository: Pick<ProjectNotesRepository, "recordRoadmapStatusUpdate"> &
     Partial<
       Pick<
-        ProjectNotesRepository, "load" | "checkpointPhaseExecutionStep" | "recordPhaseExecutionEvidence"
+        ProjectNotesRepository,
+        "load" | "checkpointPhaseExecutionStep" | "recordPhaseExecutionEvidence"
       >
     >;
   reconciliations: AppSidecarRoadmapReconciliationCoordinator;
@@ -254,17 +256,25 @@ export class AppSidecarRoadmapToolHost {
     let workspace: NotesWorkspaceSnapshotV1;
     try {
       workspace = await captureWorkspaceSnapshot();
-    } catch {
+    } catch (error) {
       return {
         kind: "failure",
         expectedRevision,
-        result: {
-          result: "verification-incomplete",
-          phaseId: input.phase_id,
-          revision: expectedRevision,
-          unmetEvidenceCodes: ["stale-evidence", "missing-approved-evidence"],
-          message: "Done was not recorded because the Git workspace could not be verified.",
-        },
+        result:
+          error instanceof RepositoryUnverifiableError
+            ? {
+                result: "repository-unverifiable",
+                phaseId: input.phase_id,
+                revision: expectedRevision,
+                message: error.message,
+              }
+            : {
+                result: "verification-incomplete",
+                phaseId: input.phase_id,
+                revision: expectedRevision,
+                unmetEvidenceCodes: ["stale-evidence", "missing-approved-evidence"],
+                message: "Done was not recorded because the Git workspace could not be verified.",
+              },
       };
     }
 

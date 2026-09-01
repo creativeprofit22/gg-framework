@@ -18,9 +18,12 @@ import { canonicalProjectKey } from "../project-notes-repository.js";
 import {
   ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
   ACTIVE_PHASE_CONTEXT_KIND,
+  ROADMAP_PHASE_LEASE_KIND,
   parseActivePhaseContext,
+  parseRoadmapPhaseLeaseMarker,
   parseActivePhaseContextClear,
   type ActivePhaseContextV1,
+  type RoadmapPhaseLeaseMarkerV1,
 } from "../phase-context.js";
 import {
   archiveColdSession,
@@ -1444,7 +1447,9 @@ export class SessionManager {
 
   async appendRequiredEntry(sessionPath: string, entry: SessionEntry): Promise<void> {
     const requiredCustomKinds = new Set([
+      ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
       ACTIVE_PHASE_CONTEXT_KIND,
+      ROADMAP_PHASE_LEASE_KIND,
       APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND,
       APP_MARKER_CUSTOM_KIND,
       RUN_STARTED_CUSTOM_KIND,
@@ -1783,6 +1788,22 @@ export class SessionManager {
       }
     }
     return activeContext;
+  }
+
+  getRoadmapPhaseLeaseMarker(
+    entries: SessionEntry[],
+    expected?: { projectKey?: string; phaseId?: string },
+  ): RoadmapPhaseLeaseMarkerV1 | undefined {
+    let marker: RoadmapPhaseLeaseMarkerV1 | undefined;
+    for (const entry of entries) {
+      if (entry.type !== "custom" || entry.kind !== ROADMAP_PHASE_LEASE_KIND) continue;
+      const parsed = parseRoadmapPhaseLeaseMarker(entry.data, expected);
+      if (parsed) marker = parsed;
+      else log("WARN", "session", "Ignoring malformed Roadmap phase lease metadata", {
+        entryId: entry.id,
+      });
+    }
+    return marker;
   }
 
   /** Read all persisted Ken turns in file order. Returns them regardless of

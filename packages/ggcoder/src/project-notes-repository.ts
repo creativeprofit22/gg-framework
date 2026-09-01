@@ -375,6 +375,13 @@ export interface ProjectNotesExecutionImportRequest {
   execution: NotesPhaseExecutionV1;
 }
 
+export interface ProjectNotesExecutionReconciliationRequiredRequest {
+  phaseId: string;
+  expectedRevision: number;
+  planHash: string;
+  timestamp: string;
+}
+
 export interface ProjectNotesExecutionStepRequest {
   phaseId: string;
   expectedRevision: number;
@@ -1835,6 +1842,70 @@ export class ProjectNotesRepository {
       const next = await this.commitDocument(paths, current, document, {
         validationMode: "validated",
         context: "Approved durable phase plan created invalid Notes",
+      });
+      return { status: "committed", snapshot: toSnapshot(next), phase: structuredClone(phase) };
+    });
+  }
+
+  async importLegacyPhaseExecution(
+    cwd: string,
+    request: ProjectNotesExecutionImportRequest,
+  ): Promise<ProjectNotesExecutionMutationOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      if (currentPhase.execution) {
+        return isDeepStrictEqual(currentPhase.execution, request.execution)
+          ? { status: "duplicate", revision }
+          : { status: "operation-conflict", revision };
+      }
+      if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      phase.execution = structuredClone(request.execution);
+      const candidate =
+        request.execution.migration.reconciledAt ??
+        request.execution.plan?.approvedAt ??
+        phase.updatedAt;
+      const timestamp = chronologicalRoadmapTimestamp(phase, candidate);
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Legacy durable phase import created invalid Notes",
+      });
+      return { status: "committed", snapshot: toSnapshot(next), phase: structuredClone(phase) };
+    });
+  }
+
+  async markPhaseExecutionNeedsReconciliation(
+    cwd: string,
+    request: ProjectNotesExecutionReconciliationRequiredRequest,
+  ): Promise<ProjectNotesExecutionMutationOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const execution = currentPhase.execution;
+      if (!execution?.plan) return { status: "execution-missing" };
+      if (execution.plan.contentHash !== request.planHash) return { status: "plan-mismatch" };
+      if (execution.state === "needs-reconciliation") return { status: "duplicate", revision };
+      if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      phase.execution!.state = "needs-reconciliation";
+      phase.execution!.pendingCompletion = null;
+      const timestamp = chronologicalRoadmapTimestamp(phase, request.timestamp);
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Plan snapshot reconciliation state created invalid Notes",
       });
       return { status: "committed", snapshot: toSnapshot(next), phase: structuredClone(phase) };
     });

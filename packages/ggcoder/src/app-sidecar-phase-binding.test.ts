@@ -8,22 +8,32 @@ import {
   type NotesDocumentV3,
   type ProjectNotesSnapshot,
 } from "@kenkaiiii/gg-core/project-notes";
-import type { PhaseBindingRequest } from "@kenkaiiii/gg-core/phase-binding-protocol";
+import type {
+  PhaseBindingRequest,
+  PhaseLeaseRequestV2,
+} from "@kenkaiiii/gg-core/phase-binding-protocol";
 import {
   createAppSidecarPhaseBindingService,
   type PhaseBindingSession,
 } from "./app-sidecar-phase-binding.js";
 import type { ActivePhaseContextV1 } from "./phase-context.js";
 import { ProjectNotesRepository } from "./project-notes-repository.js";
+import {
+  PHASE_LEASE_TTL_MS,
+  RoadmapPhaseLeaseRepository,
+} from "./roadmap-phase-lease-repository.js";
+import type { RoadmapPhaseLeaseMarkerV1 } from "./phase-context.js";
 
 const roots: string[] = [];
 const sessionA = { sessionId: "session-a", sessionPath: "/sessions/a.jsonl" };
 const sessionB = { sessionId: "session-b", sessionPath: "/sessions/b.jsonl" };
+const sessionC = { sessionId: "session-c", sessionPath: "/sessions/c.jsonl" };
 
 class FakeSession implements PhaseBindingSession {
   active: ActivePhaseContextV1 | undefined;
   readonly setCalls: Array<ActivePhaseContextV1 | undefined> = [];
   readonly clearReasons: string[] = [];
+  leaseMarker: RoadmapPhaseLeaseMarkerV1 | undefined;
 
   constructor(
     readonly cwd: string,
@@ -48,6 +58,15 @@ class FakeSession implements PhaseBindingSession {
   ) {
     this.clearReasons.push(reason);
     this.active = undefined;
+    this.leaseMarker = undefined;
+  }
+
+  getRoadmapPhaseLeaseMarker() {
+    return this.leaseMarker;
+  }
+
+  async setRoadmapPhaseLeaseMarker(marker: RoadmapPhaseLeaseMarkerV1) {
+    this.leaseMarker = marker;
   }
 }
 
@@ -81,7 +100,7 @@ async function setup(name: string, previousSession = sessionA) {
   document.phases = [phase];
   const migrated = await repository.migrate(cwd, document);
   if (migrated.status !== "ok") throw new Error(`Failed binding fixture: ${migrated.status}`);
-  return { cwd, repository };
+  return { cwd, repository, agentDir: path.join(root, "agent") };
 }
 
 function request(cwd: string, overrides: Partial<PhaseBindingRequest> = {}): PhaseBindingRequest {
@@ -95,6 +114,22 @@ function request(cwd: string, overrides: Partial<PhaseBindingRequest> = {}): Pha
     operationId: "operation-1",
     confirmRebind: true,
     ...overrides,
+  };
+}
+
+function leaseRequest(cwd: string, operationId: string): PhaseLeaseRequestV2 {
+  return {
+    version: 2,
+    action: "acquire",
+    phaseId: "phase-1",
+    expectedProjectKey: canonicalProjectKey(cwd),
+    expectedRevision: 1,
+    planId: null,
+    operationId,
+    lease: null,
+    confirmTakeover: false,
+    takeoverReason: null,
+    predecessorProof: null,
   };
 }
 
@@ -152,7 +187,10 @@ describe("app sidecar phase binding service", () => {
     }));
     const onCommittedSnapshot = vi.fn();
     const service = createAppSidecarPhaseBindingService({
-      repository: { load: (project) => repository.load(project), bindPhaseToCurrentSession },
+      repository: {
+        load: (project) => repository.load(project),
+        bindPhaseToCurrentSession,
+      },
       onCommittedSnapshot,
     });
     const session = new FakeSession(cwd, sessionB);
@@ -171,7 +209,10 @@ describe("app sidecar phase binding service", () => {
     const { cwd, repository } = await setup("context-failure");
     const bindPhaseToCurrentSession = vi.fn(repository.bindPhaseToCurrentSession.bind(repository));
     const service = createAppSidecarPhaseBindingService({
-      repository: { load: (project) => repository.load(project), bindPhaseToCurrentSession },
+      repository: {
+        load: (project) => repository.load(project),
+        bindPhaseToCurrentSession,
+      },
     });
     const session = new FakeSession(cwd, sessionB);
     session.setActivePhaseContext = vi.fn(async () => {
@@ -210,4 +251,326 @@ describe("app sidecar phase binding service", () => {
     });
     expect(session.setCalls).toHaveLength(0);
   });
+  it("maps legacy binds to fenced leases and advances the Notes session revision", async () => {
+    const { cwd, repository, agentDir } = await setup("leases");
+    let leaseId = 0;
+    const leaseRepository = new RoadmapPhaseLeaseRepository(agentDir, {
+      now: () => new Date("2026-08-30T10:00:00.000Z"),
+      createId: () => `lease-${++leaseId}`,
+      processLiveness: async () => "alive",
+    });
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository,
+      daemonInstanceId: "daemon-1",
+      processId: 123,
+      processStartToken: "start-1",
+    });
+    const destination = new FakeSession(cwd, sessionB);
+    const first = await service.bind(request(cwd), destination);
+    expect(first).toMatchObject({
+      status: "committed",
+      revision: 2,
+      session: sessionB,
+    });
+    expect(destination.leaseMarker).toMatchObject({ leaseId: "lease-1", fence: 1 });
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2, document: { phases: [{ session: sessionB }] } },
+    });
+
+    const competitor = new FakeSession(cwd, sessionC);
+    expect(
+      await service.bind(
+        request(cwd, {
+          action: "bind-current",
+          expectedPreviousSession: null,
+          confirmRebind: false,
+          operationId: "competitor",
+          expectedRevision: 2,
+        }),
+        competitor,
+      ),
+    ).toMatchObject({ status: "already-bound", revision: 2, session: sessionB });
+
+    expect(
+      await service.bind(
+        request(cwd, {
+          expectedPreviousSession: sessionB,
+          expectedRevision: 2,
+          operationId: "move",
+        }),
+        competitor,
+      ),
+    ).toMatchObject({ status: "committed", revision: 3, session: sessionC });
+    expect(competitor.leaseMarker).toMatchObject({ leaseId: "lease-2", fence: 2 });
+    await expect(service.reconcile(destination)).resolves.toBe("cleared");
+    expect(destination.clearReasons).toEqual(["phase-rebound"]);
+    await expect(service.reconcile(competitor)).resolves.toBe("consistent");
+  });
+
+  it("commits Notes before markers and replays the lease after Notes revision advances", async () => {
+    const { cwd, repository, agentDir } = await setup("lease-notes-order");
+    const leases = new RoadmapPhaseLeaseRepository(agentDir, {
+      now: () => new Date("2026-08-30T10:00:00.000Z"),
+      createId: () => "ordered-lease",
+    });
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: leases,
+      daemonInstanceId: "daemon-order",
+      processId: 123,
+      processStartToken: "start-order",
+      now: () => "2026-08-30T10:00:00.000Z",
+    });
+    const destination = new FakeSession(cwd, sessionB);
+    const persistMarker = destination.setRoadmapPhaseLeaseMarker.bind(destination);
+    destination.setRoadmapPhaseLeaseMarker = vi.fn(async (marker) => {
+      await expect(repository.load(cwd)).resolves.toMatchObject({
+        status: "ok",
+        snapshot: { revision: 2, document: { phases: [{ session: sessionB }] } },
+      });
+      await persistMarker(marker);
+    });
+    const acquire = leaseRequest(cwd, "ordered-acquire");
+
+    await expect(service.lease(acquire, destination)).resolves.toMatchObject({
+      status: "acquired",
+      roadmapRevision: 2,
+    });
+    await expect(service.lease(acquire, destination)).resolves.toMatchObject({
+      status: "duplicate",
+      roadmapRevision: 2,
+    });
+    expect(destination.setRoadmapPhaseLeaseMarker).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers a lease immediately after a proved daemon restart", async () => {
+    const { cwd, repository, agentDir } = await setup("supervised-restart");
+    const leaseRepository = new RoadmapPhaseLeaseRepository(agentDir, {
+      now: () => new Date("2026-08-30T10:00:01.000Z"),
+      createId: () => "lease-restart",
+      processLiveness: async () => "alive",
+    });
+    const oldService = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository,
+      daemonInstanceId: "daemon-old",
+      processId: 123,
+      processStartToken: "start-old",
+    });
+    const previous = new FakeSession(cwd, sessionB);
+    await oldService.bind(request(cwd), previous);
+    if (!previous.active || !previous.leaseMarker) throw new Error("expected bound lease");
+
+    const resumed = new FakeSession(cwd, {
+      sessionId: "session-resumed",
+      sessionPath: sessionB.sessionPath,
+    });
+    resumed.active = previous.active;
+    resumed.leaseMarker = previous.leaseMarker;
+    const newService = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository,
+      daemonInstanceId: "daemon-new",
+      processId: 456,
+      processStartToken: "start-new",
+      predecessorProof: {
+        daemonInstanceId: "daemon-old",
+        processId: 123,
+        processStartToken: "start-old",
+        terminatedAt: "2026-08-30T10:00:00.500Z",
+      },
+    });
+
+    await expect(newService.reconcile(resumed)).resolves.toBe("consistent");
+    expect(resumed.active?.session).toEqual({
+      sessionId: "session-resumed",
+      sessionPath: sessionB.sessionPath,
+    });
+    expect(resumed.leaseMarker).toMatchObject({ fence: 2, daemonInstanceId: "daemon-new" });
+    expect(resumed.clearReasons).toEqual([]);
+  });
+
+  it("recreates missing markers from Notes after the binding CAS committed", async () => {
+    const { cwd, repository, agentDir } = await setup("notes-cas-marker");
+    const binding = createAppSidecarPhaseBindingService({ repository });
+    const interrupted = new FakeSession(cwd, sessionB);
+    interrupted.setActivePhaseContext = vi.fn(async () => {
+      throw new Error("marker append interrupted");
+    });
+    await expect(binding.bind(request(cwd), interrupted)).rejects.toThrow(
+      "marker append interrupted",
+    );
+
+    const resumed = new FakeSession(cwd, sessionB);
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: new RoadmapPhaseLeaseRepository(agentDir, {
+        now: () => new Date("2026-08-30T10:00:00.000Z"),
+        createId: () => "lease-from-notes",
+      }),
+      daemonInstanceId: "daemon-resumed",
+      processId: 456,
+      processStartToken: "start-resumed",
+      now: () => "2026-08-30T10:00:00.000Z",
+    });
+
+    await expect(service.reconcile(resumed)).resolves.toBe("consistent");
+    expect(resumed.active).toMatchObject({ phase: { id: "phase-1" }, session: sessionB });
+    expect(resumed.leaseMarker).toMatchObject({ leaseId: "lease-from-notes", fence: 1 });
+  });
+
+  it("takes an expired lease only after its holder is proven dead", async () => {
+    const { cwd, repository, agentDir } = await setup("expired-dead", sessionB);
+    let now = Date.parse("2026-08-30T10:00:00.000Z");
+    let liveness: "alive" | "dead" | "unknown" = "alive";
+    let leaseId = 0;
+    const leases = new RoadmapPhaseLeaseRepository(agentDir, {
+      now: () => new Date(now),
+      createId: () => `lease-${++leaseId}`,
+      processLiveness: async () => liveness,
+    });
+    const previous = new FakeSession(cwd, sessionB);
+    const oldService = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: leases,
+      daemonInstanceId: "daemon-old",
+      processId: 123,
+      processStartToken: "start-old",
+      now: () => new Date(now).toISOString(),
+    });
+    await oldService.lease(leaseRequest(cwd, "initial-acquire"), previous);
+
+    now += PHASE_LEASE_TTL_MS + 1;
+    liveness = "dead";
+    const resumed = new FakeSession(cwd, {
+      sessionId: "session-resumed",
+      sessionPath: sessionB.sessionPath,
+    });
+    const newService = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: leases,
+      daemonInstanceId: "daemon-new",
+      processId: 456,
+      processStartToken: "start-new",
+      now: () => new Date(now).toISOString(),
+    });
+
+    await expect(newService.reconcile(resumed)).resolves.toBe("consistent");
+    expect(resumed.leaseMarker).toMatchObject({ leaseId: "lease-2", fence: 2 });
+  });
+
+  it("fails closed when an expired holder's liveness is uncertain", async () => {
+    const { cwd, repository, agentDir } = await setup("expired-unknown", sessionB);
+    let now = Date.parse("2026-08-30T10:00:00.000Z");
+    let liveness: "alive" | "dead" | "unknown" = "alive";
+    const leases = new RoadmapPhaseLeaseRepository(agentDir, {
+      now: () => new Date(now),
+      createId: () => "lease-uncertain",
+      processLiveness: async () => liveness,
+    });
+    const previous = new FakeSession(cwd, sessionB);
+    await createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: leases,
+      daemonInstanceId: "daemon-old",
+      processId: 123,
+      processStartToken: "start-old",
+      now: () => new Date(now).toISOString(),
+    }).lease(leaseRequest(cwd, "initial-acquire"), previous);
+
+    now += PHASE_LEASE_TTL_MS + 1;
+    liveness = "unknown";
+    const resumed = new FakeSession(cwd, {
+      sessionId: "session-resumed",
+      sessionPath: sessionB.sessionPath,
+    });
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: leases,
+      daemonInstanceId: "daemon-new",
+      processId: 456,
+      processStartToken: "start-new",
+      now: () => new Date(now).toISOString(),
+    });
+
+    await expect(service.reconcile(resumed)).resolves.toBe("cleared");
+    expect(resumed.active).toBeUndefined();
+    expect(resumed.leaseMarker).toBeUndefined();
+  });
+
+  it("recovers a crash after lease acquisition and reruns legacy import behind its fence", async () => {
+    const { cwd, repository, agentDir } = await setup("migration-crash", sessionB);
+    let now = Date.parse("2026-08-30T10:00:00.000Z");
+    let liveness: "alive" | "dead" = "alive";
+    let leaseId = 0;
+    const leases = new RoadmapPhaseLeaseRepository(agentDir, {
+      now: () => new Date(now),
+      createId: () => `migration-lease-${++leaseId}`,
+      processLiveness: async () => liveness,
+    });
+    const interrupted = new FakeSession(cwd, sessionB);
+    interrupted.setActivePhaseContext = vi.fn(async () => {
+      throw new Error("crashed before import");
+    });
+    const oldService = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: leases,
+      daemonInstanceId: "daemon-old",
+      processId: 123,
+      processStartToken: "start-old",
+      now: () => new Date(now).toISOString(),
+    });
+    await expect(
+      oldService.lease(leaseRequest(cwd, "migration-acquire"), interrupted),
+    ).rejects.toThrow("crashed before import");
+
+    now += PHASE_LEASE_TTL_MS + 1;
+    liveness = "dead";
+    const resumed = new FakeSession(cwd, {
+      sessionId: "session-resumed",
+      sessionPath: sessionB.sessionPath,
+    });
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: leases,
+      daemonInstanceId: "daemon-new",
+      processId: 456,
+      processStartToken: "start-new",
+      now: () => new Date(now).toISOString(),
+    });
+    await expect(service.reconcile(resumed)).resolves.toBe("consistent");
+
+    const execution = {
+      version: 1 as const,
+      state: "needs-reconciliation" as const,
+      repository: {
+        projectKey: canonicalProjectKey(cwd),
+        identityHash: "1".repeat(64),
+        rootCommit: "2".repeat(40),
+      },
+      plan: null,
+      evidence: [],
+      pendingCompletion: null,
+      lastSession: { sessionId: "session-resumed", sessionPath: sessionB.sessionPath },
+      migration: { source: "legacy-session" as const, reconciledAt: null },
+    };
+    const importExecution = () =>
+      repository.importLegacyPhaseExecution(cwd, {
+        operationId: "legacy-migration:phase-1",
+        phaseId: "phase-1",
+        expectedRevision: 2,
+        execution,
+      });
+    await expect(service.withLeaseFence(resumed, importExecution)).resolves.toMatchObject({
+      status: "executed",
+      value: { status: "committed", snapshot: { revision: 3 } },
+    });
+    await expect(service.withLeaseFence(resumed, importExecution)).resolves.toMatchObject({
+      status: "executed",
+      value: { status: "duplicate", revision: 3 },
+    });
+  });
+
 });

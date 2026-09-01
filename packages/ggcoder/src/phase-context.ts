@@ -12,6 +12,7 @@ import {
 export const ACTIVE_PHASE_CONTEXT_KIND = "active_phase_context";
 export const ACTIVE_PHASE_CONTEXT_CLEAR_KIND = "active_phase_context_clear";
 export const ACTIVE_PHASE_CONTEXT_VERSION = 1 as const;
+export const ROADMAP_PHASE_LEASE_KIND = "roadmap_phase_lease";
 /** Hard ceiling for the system suffix plus initial request. Identities are never dropped. */
 export const ACTIVE_PHASE_PACKAGE_TOKEN_BUDGET = 16_000;
 export const ACTIVE_PHASE_PROSE_LIMIT = 4_096;
@@ -54,6 +55,17 @@ export interface ActivePhaseContextClearV1 {
   reason: ActivePhaseContextClearReason;
 }
 
+export interface RoadmapPhaseLeaseMarkerV1 {
+  version: 1;
+  projectKey: string;
+  phaseId: string;
+  planId: string | null;
+  planHash: string | null;
+  leaseId: string;
+  fence: number;
+  daemonInstanceId: string;
+}
+
 export interface ActivePhasePackage {
   context: ActivePhaseContextV1;
   systemPromptSuffix: string;
@@ -78,6 +90,16 @@ const CONTEXT_KEYS = [
   "approvedPlanPath",
 ] as const;
 const CLEAR_KEYS = ["version", "projectKey", "phaseId", "reason"] as const;
+const LEASE_MARKER_KEYS = [
+  "version",
+  "projectKey",
+  "phaseId",
+  "planId",
+  "planHash",
+  "leaseId",
+  "fence",
+  "daemonInstanceId",
+] as const;
 const CLEAR_REASONS = new Set<ActivePhaseContextClearReason>([
   "cleared",
   "binding-compensation",
@@ -128,6 +150,33 @@ function isNullableString(value: unknown): value is string | null {
 
 function isReference(value: unknown): value is ActivePhaseReferenceV1 {
   return validateNotesReferenceProjection(value, "activePhaseContext.references[]") === null;
+}
+
+export function parseRoadmapPhaseLeaseMarker(
+  value: unknown,
+  expected?: { projectKey?: string; phaseId?: string },
+): RoadmapPhaseLeaseMarkerV1 | null {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== LEASE_MARKER_KEYS.length ||
+    !hasOnlyKeys(value, LEASE_MARKER_KEYS) ||
+    value.version !== 1 ||
+    !isNonEmptyString(value.projectKey) ||
+    !isNonEmptyString(value.phaseId) ||
+    (value.planId !== null && !isNonEmptyString(value.planId)) ||
+    (value.planHash !== null &&
+      (typeof value.planHash !== "string" || !/^[a-f0-9]{64}$/.test(value.planHash))) ||
+    !isNonEmptyString(value.leaseId) ||
+    typeof value.fence !== "number" ||
+    !Number.isSafeInteger(value.fence) ||
+    value.fence <= 0 ||
+    !isNonEmptyString(value.daemonInstanceId) ||
+    (expected?.projectKey !== undefined && value.projectKey !== expected.projectKey) ||
+    (expected?.phaseId !== undefined && value.phaseId !== expected.phaseId)
+  ) {
+    return null;
+  }
+  return value as unknown as RoadmapPhaseLeaseMarkerV1;
 }
 
 export function parseActivePhaseContextClear(

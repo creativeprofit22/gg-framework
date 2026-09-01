@@ -1,5 +1,8 @@
 export interface DisposablePhaseCandidate {
-  session: { dispose: () => void | Promise<void> };
+  session: {
+    clearActivePhaseContext?: (reason: "binding-compensation") => Promise<void>;
+    dispose: () => void | Promise<void>;
+  };
 }
 
 /** Owns initialized phase candidates until promotion or terminal disposal. */
@@ -17,7 +20,7 @@ export class AppSidecarPhaseCandidateStore<TCandidate extends DisposablePhaseCan
 
   async add(phaseId: string, candidate: TCandidate): Promise<void> {
     if (this.#disposed || this.#candidates.has(phaseId)) {
-      await Promise.allSettled([Promise.resolve().then(() => candidate.session.dispose())]);
+      await disposeCandidateSession(candidate);
       throw new Error(
         this.#disposed
           ? "Cannot retain a phase candidate after its logical session was disposed."
@@ -37,7 +40,7 @@ export class AppSidecarPhaseCandidateStore<TCandidate extends DisposablePhaseCan
   async disposeCandidate(phaseId: string): Promise<boolean> {
     const candidate = this.take(phaseId);
     if (!candidate) return false;
-    await Promise.allSettled([Promise.resolve().then(() => candidate.session.dispose())]);
+    await disposeCandidateSession(candidate);
     return true;
   }
 
@@ -45,9 +48,7 @@ export class AppSidecarPhaseCandidateStore<TCandidate extends DisposablePhaseCan
   async clear(): Promise<void> {
     const candidates = [...this.#candidates.values()];
     this.#candidates.clear();
-    await Promise.allSettled(
-      candidates.map((candidate) => Promise.resolve().then(() => candidate.session.dispose())),
-    );
+    await Promise.allSettled(candidates.map((candidate) => disposeCandidateSession(candidate)));
   }
 
   /** Permanently closes the owner and disposes every candidate still retained. */
@@ -55,4 +56,9 @@ export class AppSidecarPhaseCandidateStore<TCandidate extends DisposablePhaseCan
     this.#disposed = true;
     await this.clear();
   }
+}
+
+async function disposeCandidateSession(candidate: DisposablePhaseCandidate): Promise<void> {
+  await candidate.session.clearActivePhaseContext?.("binding-compensation");
+  await candidate.session.dispose();
 }

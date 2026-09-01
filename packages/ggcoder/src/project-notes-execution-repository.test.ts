@@ -82,6 +82,30 @@ async function approve() {
 }
 
 describe("Project Notes durable phase execution", () => {
+  it("persists snapshot reconciliation before execution can resume", async () => {
+    await expect(approve()).resolves.toMatchObject({ status: "committed" });
+    const plan = approvedPlan();
+    const request = {
+      phaseId: document.phases[0]!.id,
+      expectedRevision: 2,
+      planHash: plan.contentHash,
+      timestamp: "2026-08-31T10:00:00.000Z",
+    };
+
+    await expect(
+      repository.markPhaseExecutionNeedsReconciliation(cwd, request),
+    ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 3 } });
+    await expect(
+      repository.markPhaseExecutionNeedsReconciliation(cwd, request),
+    ).resolves.toMatchObject({ status: "duplicate", revision: 3 });
+    const loaded = await repository.load(cwd);
+    expect(loaded.status).toBe("ok");
+    if (loaded.status !== "ok") throw new Error("Expected persisted Project Notes");
+    expect(
+      loaded.snapshot.document.phases.find((phase) => phase.id === request.phaseId)?.execution
+        ?.state,
+    ).toBe("needs-reconciliation");
+  });
   it("settles once after a crash, unrelated revision, and retry", async () => {
     const approval = await approve();
     expect(approval).toMatchObject({ status: "committed", snapshot: { revision: 2 } });
@@ -339,4 +363,172 @@ describe("Project Notes durable phase execution", () => {
       ),
     ).toHaveLength(1);
   });
+
+  it("rejects every completion mutation during reconciliation without writing", async () => {
+    const plan = approvedPlan();
+    const phaseId = document.phases[0]!.id;
+    const session = document.phases[0]!.session;
+    if (!session) throw new Error("Expected a bound phase session");
+
+    await approve();
+    await repository.markPhaseExecutionNeedsReconciliation(cwd, {
+      phaseId,
+      expectedRevision: 2,
+      planHash: plan.contentHash,
+      timestamp: "2026-08-31T10:00:00.000Z",
+    });
+    const before = await repository.load(cwd);
+    expect(before).toMatchObject({ status: "ok", snapshot: { revision: 3 } });
+    if (before.status !== "ok") throw new Error("Expected persisted Project Notes");
+
+    const implementation = {
+      checkpointId: "implementation-while-reconciling",
+      phaseId,
+      expectedSession: session,
+      planStepTotal: plan.steps.length,
+      completedPlanSteps: plan.steps.map((_step, index) => index + 1),
+      runOutcome: "succeeded" as const,
+      timestamp: "2026-08-31T10:01:00.000Z",
+    };
+    const pendingCompletion = {
+      completionId: "completion-while-reconciling",
+      statusRevision: 3,
+      runJournal: { sessionPath: session.sessionPath!, generation: 1 },
+      planHash: plan.contentHash,
+      workspace,
+    };
+    const conflict = { status: "operation-conflict", revision: 3 };
+
+    await expect(
+      repository.checkpointPhaseExecutionStep(cwd, {
+        phaseId,
+        expectedRevision: 3,
+        planHash: plan.contentHash,
+        stepId: plan.steps[0]!.id,
+        completedAt: "2026-08-31T10:01:00.000Z",
+        workspace,
+      }),
+    ).resolves.toEqual(conflict);
+    await expect(
+      repository.recordPhaseExecutionEvidence(cwd, {
+        phaseId,
+        expectedRevision: 3,
+        planHash: plan.contentHash,
+        evidence: {
+          commandHash: "5".repeat(64),
+          commandDisplay: "pnpm test",
+          exitCode: 0,
+          classifierVersion: "roadmap-v1",
+          verdict: "approved",
+          criterionId: "criterion-1",
+          observedAt: "2026-08-31T10:01:00.000Z",
+          workspace,
+        },
+      }),
+    ).resolves.toEqual(conflict);
+    await expect(
+      repository.beginDurablePhaseCompletion(cwd, {
+        phaseId,
+        expectedRevision: 3,
+        pendingCompletion,
+      }),
+    ).resolves.toEqual(conflict);
+    await expect(
+      repository.clearDurablePhaseCompletion(cwd, {
+        phaseId,
+        expectedRevision: 3,
+        completionId: pendingCompletion.completionId,
+        currentWorkspace: workspace,
+      }),
+    ).resolves.toEqual(conflict);
+    await expect(
+      repository.settleDurablePhaseCompletion(cwd, {
+        phaseId,
+        expectedRevision: 3,
+        completionId: pendingCompletion.completionId,
+        planHash: plan.contentHash,
+        workspace,
+      }),
+    ).resolves.toEqual(conflict);
+    await expect(
+      repository.recordRoadmapStatusUpdate(cwd, {
+        updateId: pendingCompletion.completionId,
+        phaseId,
+        expectedRevision: 3,
+        actor: "gg-coder",
+        transition: "done",
+        progress: "Implementation completed",
+        blocker: null,
+        requiredExternalAction: null,
+        evidence: document.phases[0]!.doneWhen.map((criterion) => `Verified: ${criterion}`),
+        verification: "passed",
+        verificationReason: null,
+        proposedReferences: [],
+        timestamp: "2026-08-31T10:01:00.000Z",
+        expectedSession: session,
+        requireBoundPhase: true,
+        autopilotEnabled: false,
+        durableCompletion: {
+          runJournal: pendingCompletion.runJournal,
+          planHash: plan.contentHash,
+          workspace,
+        },
+      }),
+    ).resolves.toEqual(conflict);
+    await expect(
+      repository.settlePhaseCompletion(cwd, {
+        ...implementation,
+        expectedRevision: 3,
+        completionIntentId: pendingCompletion.completionId,
+      }),
+    ).resolves.toEqual(conflict);
+    await expect(repository.recordImplementationCheckpoint(cwd, implementation)).resolves.toEqual(
+      conflict,
+    );
+    await expect(
+      repository.previewManualCompletionApproval(cwd, phaseId, 3, session),
+    ).resolves.toEqual({ status: "unmet-gate", revision: 3, code: "inactive-phase" });
+    await expect(
+      repository.commitManualCompletionApproval(cwd, {
+        phaseId,
+        expectedRevision: 3,
+        expectedSession: session,
+        implementationCheckpointId: implementation.checkpointId,
+        verificationStatusUpdateId: pendingCompletion.completionId,
+        approvalId: "manual-approval-while-reconciling",
+        timestamp: "2026-08-31T10:01:00.000Z",
+      }),
+    ).resolves.toEqual({ status: "unmet-gate", revision: 3, code: "inactive-phase" });
+
+    await expect(repository.load(cwd)).resolves.toEqual(before);
+  });
+
+  it("imports once and clears failed completion while dropping stale evidence", async () => {
+    const plan = approvedPlan();
+    const execution = {
+      version: 1 as const,
+      state: "needs-reconciliation" as const,
+      repository: identity,
+      plan,
+      evidence: [],
+      pendingCompletion: null,
+      lastSession: document.phases[0]!.session,
+      migration: { source: "legacy-session" as const, reconciledAt: null },
+    };
+    const request = {
+      operationId: "legacy-import-1",
+      phaseId: document.phases[0]!.id,
+      expectedRevision: 1,
+      execution,
+    };
+    expect(await repository.importLegacyPhaseExecution(cwd, request)).toMatchObject({
+      status: "committed",
+      snapshot: { revision: 2 },
+    });
+    expect(await repository.importLegacyPhaseExecution(cwd, request)).toMatchObject({
+      status: "duplicate",
+      revision: 2,
+    });
+  });
+
 });

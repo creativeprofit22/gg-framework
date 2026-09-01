@@ -27,7 +27,7 @@ import { PROMPT_COMMANDS, getPromptCommand } from "./prompt-commands.js";
 import { loadCustomCommands } from "./custom-commands.js";
 import { SettingsManager } from "./settings-manager.js";
 import { AuthStorage } from "./auth-storage.js";
-import { dualAuthProvider } from "@kenkaiiii/gg-core";
+import { dualAuthProvider, type NotesWorkspaceSnapshotV1 } from "@kenkaiiii/gg-core";
 import { getClaudeCliUserAgent } from "./claude-code-version.js";
 import { kimiCodingHeaders, isKimiCodingEndpoint } from "./oauth/kimi.js";
 import { isGrokCliEndpoint } from "./oauth/xai.js";
@@ -154,9 +154,11 @@ import {
 } from "./verification-gate.js";
 import {
   SessionVerificationEvidenceLedger,
+  classifyVerificationCommand,
   evaluateRoadmapVerificationEvidence as evaluateRoadmapVerificationEvidenceCore,
   partitionVerificationMessagesForWorkspaceMutation,
   type RoadmapVerificationEvidenceEvaluation,
+  type SessionVerificationEvidenceLedgerSnapshot,
 } from "./verification-evidence.js";
 
 import { findUserSessionPrompt, getUserSessionPrompt } from "./session-preview.js";
@@ -164,12 +166,15 @@ import { normalizeMessageImages } from "./message-images.js";
 import {
   ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
   ACTIVE_PHASE_CONTEXT_KIND,
+  ROADMAP_PHASE_LEASE_KIND,
   buildActivePhaseVerificationFollowUp,
   parseActivePhaseContext,
+  parseRoadmapPhaseLeaseMarker,
   renderActivePhasePackage,
   type ActivePhaseContextClearReason,
   type ActivePhaseContextV1,
   type ActivePhaseExecutionStage,
+  type RoadmapPhaseLeaseMarkerV1,
 } from "../phase-context.js";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
@@ -288,6 +293,8 @@ export interface AgentSessionOptions {
    */
   onEnterPlan?: (reason?: string) => void | Promise<void>;
   onExitPlan?: (planPath: string, content: string) => Promise<string>;
+  /** Captures exact Git state when a bounded verification command settles. */
+  captureVerificationWorkspace?: () => Promise<NotesWorkspaceSnapshotV1>;
   /**
    * If provided, the session's tool set is filtered to ONLY these tool names
    * after `createTools()` runs, and the system prompt's Tools section lists only
@@ -584,6 +591,9 @@ export class AgentSession {
   private additionalRoots: string[] = [];
   /** Durable selected Roadmap phase, restored before the next provider turn. */
   private activePhaseContext?: ActivePhaseContextV1;
+  private roadmapPhaseLeaseMarker?: RoadmapPhaseLeaseMarkerV1;
+  private runJournal: RunJournalEntry[] = [];
+  private phaseLeaseRunState: "idle" | "running" = "idle";
 
   private sessionId = "";
   private checkpointGeneration = 0;
@@ -1635,10 +1645,18 @@ export class AgentSession {
         const name = call?.name ?? "";
         const args = call?.args;
         if (call) {
+          const command = typeof call.args.command === "string" ? call.args.command : "";
+          const workspace =
+            call.name === "bash" &&
+            classifyVerificationCommand(command).candidate &&
+            this.opts.captureVerificationWorkspace
+              ? await this.opts.captureVerificationWorkspace().catch(() => undefined)
+              : undefined;
           this.verificationEvidenceLedger.recordToolResult({
             ...call,
             isError: event.isError,
             details: event.details,
+            workspace,
           });
         }
         this.hookStats.toolCalls += 1;
@@ -3015,6 +3033,7 @@ export class AgentSession {
       await this.createNewSession();
       await this.subAgentManager?.resetParentSession(this.sessionId);
       await this.rePersistActivePhaseContext();
+      await this.rePersistRoadmapPhaseLeaseMarker();
     }
     this.eventBus.emit("session_start", { sessionId: this.sessionId });
   }
@@ -3765,8 +3784,56 @@ export class AgentSession {
     });
   }
 
+  getVerificationEvidenceLedgerSnapshot(): SessionVerificationEvidenceLedgerSnapshot {
+    return this.verificationEvidenceLedger.snapshot();
+  }
+
   getActivePhaseContext(): ActivePhaseContextV1 | undefined {
     return this.activePhaseContext ? structuredClone(this.activePhaseContext) : undefined;
+  }
+
+  getPhaseLeaseRunState(): "idle" | "running" {
+    return this.phaseLeaseRunState;
+  }
+
+  setPhaseLeaseRunState(state: "idle" | "running"): void {
+    this.phaseLeaseRunState = state;
+  }
+
+  getRoadmapPhaseLeaseMarker(): RoadmapPhaseLeaseMarkerV1 | undefined {
+    return this.roadmapPhaseLeaseMarker ? structuredClone(this.roadmapPhaseLeaseMarker) : undefined;
+  }
+
+  async setRoadmapPhaseLeaseMarker(marker: RoadmapPhaseLeaseMarkerV1): Promise<void> {
+    const parsed = parseRoadmapPhaseLeaseMarker(marker, {
+      projectKey: canonicalProjectKey(this.cwd),
+      phaseId: this.activePhaseContext?.phase.id,
+    });
+    if (!parsed) throw new Error("Cannot persist malformed Roadmap phase lease metadata.");
+    if (!this.sessionPath) throw new Error("Roadmap phase leases require a persistent session.");
+    const entry: CustomEntry = {
+      type: "custom",
+      kind: ROADMAP_PHASE_LEASE_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: parsed,
+    };
+    await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
+    this.roadmapPhaseLeaseMarker = parsed;
+  }
+
+  private async rePersistRoadmapPhaseLeaseMarker(): Promise<void> {
+    if (!this.roadmapPhaseLeaseMarker || !this.sessionPath) return;
+    const entry: CustomEntry = {
+      type: "custom",
+      kind: ROADMAP_PHASE_LEASE_KIND,
+      id: crypto.randomUUID(),
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      data: this.roadmapPhaseLeaseMarker,
+    };
+    await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
   }
 
   async setActivePhaseContext(context: ActivePhaseContextV1 | undefined): Promise<void> {
@@ -3807,6 +3874,7 @@ export class AgentSession {
       await this.sessionManager.appendRequiredEntry(this.sessionPath, entry);
     }
     this.activePhaseContext = undefined;
+    this.roadmapPhaseLeaseMarker = undefined;
     this.refreshSystemPromptTail();
   }
 
@@ -4107,12 +4175,15 @@ export class AgentSession {
    */
   async persistRunStarted(generation: number): Promise<void> {
     if (!this.sessionPath) return;
+    const startedAt = new Date().toISOString();
+    const afterMessageCount = this.persistedTranscriptCount();
     await this.sessionManager.appendRunStarted(this.sessionPath, {
       version: 1,
       generation,
-      startedAt: new Date().toISOString(),
-      afterMessageCount: this.persistedTranscriptCount(),
+      startedAt,
+      afterMessageCount,
     });
+    this.runJournal.push({ generation, startedAt, afterMessageCount });
   }
 
   /** Close the run journal. Its absence is what marks a run as crashed. */
@@ -4123,6 +4194,18 @@ export class AgentSession {
       generation,
       outcome,
     });
+    const run = [...this.runJournal].reverse().find((entry) => entry.generation === generation);
+    if (run) run.outcome = outcome;
+  }
+
+  getRunJournal(): RunJournalEntry[] {
+    return structuredClone(this.runJournal);
+  }
+
+  async getRunJournalForSession(sessionPath: string): Promise<RunJournalEntry[]> {
+    if (sessionPath === this.sessionPath) return this.getRunJournal();
+    const loaded = await this.sessionManager.load(sessionPath);
+    return this.sessionManager.getRunJournal(loaded.entries);
   }
 
   private async rePersistApprovedPlanConsumption(): Promise<void> {
@@ -4396,6 +4479,10 @@ export class AgentSession {
     this.activePhaseContext = this.sessionManager.getActivePhaseContext(loaded.entries, {
       projectKey: expectedProjectKey,
     });
+    this.roadmapPhaseLeaseMarker = this.sessionManager.getRoadmapPhaseLeaseMarker(loaded.entries, {
+      projectKey: expectedProjectKey,
+      phaseId: this.activePhaseContext?.phase.id,
+    });
     if (this.activePhaseContext) this.restorePlanStateFromActivePhase(this.activePhaseContext);
     this.approvedPlanConsumption = this.sessionManager.getApprovedPlanConsumption(loaded.entries);
     this.approvedPlanPhaseContext = this.sessionManager.getApprovedPlanPhaseContext(loaded.entries);
@@ -4409,7 +4496,8 @@ export class AgentSession {
     // A run that opened the journal and never closed it died mid-flight. Read
     // it here, before anything rewrites the file, and report it once the
     // transcript is in place.
-    const interruptedRuns = this.sessionManager.getUnfinishedRuns(loaded.entries);
+    this.runJournal = this.sessionManager.getRunJournal(loaded.entries);
+    const interruptedRuns = this.runJournal.filter((run) => run.outcome === undefined);
 
     // Track the current leaf for subsequent entries
     this.currentLeafId = loaded.header.leafId;

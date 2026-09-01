@@ -213,6 +213,7 @@ import {
 import type { ElicitResult } from "@modelcontextprotocol/client";
 import { createAskUserBridge, type AskUserResult } from "./core/ask-user.js";
 import { createAskUserTool } from "./tools/ask-user.js";
+import type { NotesPhaseExecutionV1 } from "@kenkaiiii/gg-core/project-notes";
 import { buildSnapshot, levelForXp, rankForLevel } from "./core/progress/ranks.js";
 import { loadProgress, peekProgress, updateProgress } from "./core/progress/store.js";
 import { awardPrompt, awardCommits } from "./core/progress/engine.js";
@@ -232,6 +233,19 @@ import {
   createAppSidecarPhaseBindingService,
   type AppSidecarPhaseBindingService,
 } from "./app-sidecar-phase-binding.js";
+import {
+  isRoadmapPhaseLeasePredecessorProofV1,
+  PHASE_LEASE_RENEW_INTERVAL_MS,
+  RoadmapPhaseLeaseRepository,
+  type RoadmapPhaseLeasePredecessorProofV1,
+} from "./roadmap-phase-lease-repository.js";
+import {
+  captureGitWorkspaceSnapshot,
+  createApprovedPlan,
+  isLegacyPlanImportEligible,
+  PlanSnapshotResumeError,
+  resolveExecutionPlanSnapshot,
+} from "./roadmap-phase-execution.js";
 import {
   isPhaseBindingRoute,
   parsePhaseBindingBody,
@@ -255,6 +269,7 @@ import {
 import { handlePhaseStartRoute } from "./app-sidecar-phase-route.js";
 import {
   AppSidecarPlanGate,
+  approvedPlanArtifactContent,
   hasPlanOnlyBoundary,
   planGateConflictCode,
   type PersistedPlanReviewCheckpoint,
@@ -970,6 +985,30 @@ function hasDaemonAuth(req: http.IncomingMessage, expectedToken: string): boolea
   return typeof provided === "string" && provided === expectedToken;
 }
 
+type RoadmapDurabilityDiagnostic =
+  | "legacy-plan-missing"
+  | "legacy-plan-identity-mismatch"
+  | "phase-lease-lost";
+const roadmapDurabilityDiagnostics = new Map<RoadmapDurabilityDiagnostic, number>();
+
+function recordRoadmapDurabilityDiagnostic(code: RoadmapDurabilityDiagnostic): void {
+  const count = (roadmapDurabilityDiagnostics.get(code) ?? 0) + 1;
+  roadmapDurabilityDiagnostics.set(code, count);
+  log("INFO", "roadmap-durability", "typed compatibility diagnostic", { code, count });
+}
+
+function parseDaemonPredecessorProof(
+  raw: string | undefined,
+): RoadmapPhaseLeasePredecessorProofV1 | undefined {
+  if (!raw) return undefined;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return isRoadmapPhaseLeasePredecessorProofV1(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function main(): Promise<void> {
   // Hidden persistent-worker dispatch must win before strict JSON/server parsing.
   if (process.argv.includes("--subagent-worker")) {
@@ -1091,6 +1130,18 @@ async function main(): Promise<void> {
 
   const oauthInFlightProviders = new Set<string>();
   const notesRepository = new ProjectNotesRepository(paths.agentDir);
+  const durableRoadmapExecution = process.env.GG_ROADMAP_DURABLE_EXECUTION === "1";
+  log("INFO", "roadmap-durability", "feature rollout state", {
+    enabled: durableRoadmapExecution,
+    contractVersion: 1,
+  });
+  const phaseLeaseRepository = durableRoadmapExecution
+    ? new RoadmapPhaseLeaseRepository(paths.agentDir)
+    : undefined;
+  const daemonInstanceId = process.env.GG_DAEMON_INSTANCE_ID?.trim() || randomUUID();
+  const processStartToken =
+    process.env.GG_PROCESS_START_TOKEN?.trim() || `${process.pid}:${Date.now()}`;
+  const predecessorProof = parseDaemonPredecessorProof(process.env.GG_DAEMON_PREDECESSOR_PROOF);
   const storageDiagnostics = createAppSidecarStorageDiagnostics({
     applicationIdentity,
     agentDataRoot: paths.agentDir,
@@ -1118,6 +1169,11 @@ async function main(): Promise<void> {
   const phaseBinding = createAppSidecarPhaseBindingService({
     repository: notesRepository,
     onCommittedSnapshot: broadcastNotesSnapshot,
+    leaseRepository: phaseLeaseRepository,
+    daemonInstanceId,
+    processId: process.pid,
+    processStartToken,
+    predecessorProof,
   });
   const manualCompletionApproval = createManualCompletionApprovalService({
     repository: notesRepository,
@@ -1452,6 +1508,7 @@ async function main(): Promise<void> {
                 projectAutopilot,
                 broadcastNotesSnapshot,
                 sharedMcpPool,
+                durableRoadmapExecution,
               },
               { id, mode, chatAgent, cwd: sessionCwd, sessionPath },
             );
@@ -1468,7 +1525,15 @@ async function main(): Promise<void> {
             const message = err instanceof Error ? err.message : String(err);
             captureSidecarError(err, "app-sidecar.session.create");
             log("ERROR", "app-sidecar", "session create failed", { message });
-            daemonJson(res, 500, { error: message });
+            if (err instanceof PlanSnapshotResumeError) {
+              daemonJson(res, 409, {
+                error: message,
+                code: err.code,
+                snapshotPath: err.snapshotPath,
+              });
+            } else {
+              daemonJson(res, 500, { error: message });
+            }
           }
         });
         return;
@@ -1884,6 +1949,7 @@ async function createSession(
     projectAutopilot: AppSidecarProjectAutopilotState;
     broadcastNotesSnapshot: (snapshot: ProjectNotesSnapshot) => void;
     sharedMcpPool: SharedMcpClientPool;
+    durableRoadmapExecution: boolean;
   },
   opts: {
     id: string;
@@ -1914,6 +1980,7 @@ async function createSession(
     projectAutopilot,
     broadcastNotesSnapshot,
     sharedMcpPool,
+    durableRoadmapExecution,
   } = deps;
   const paths = deps.paths;
   const mode = opts.mode;
@@ -1927,6 +1994,14 @@ async function createSession(
     cwd,
     repository: notesRepository,
     broadcastSnapshot: broadcastNotesSnapshot,
+    mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
+    captureWorkspaceSnapshot: durableRoadmapExecution
+      ? async () => {
+          const loaded = await notesRepository.load(cwd);
+          if (loaded.status !== "ok") throw new Error("Project Notes unavailable");
+          return captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
+        }
+      : undefined,
     onError: (error) => captureSidecarError(error, "app-sidecar.phase-completion"),
   });
   const phaseImplementationPlans = new AppSidecarPhaseImplementationPlanTracker();
@@ -2133,9 +2208,11 @@ async function createSession(
   const persistPlanGateMarker = (checkpoint: PersistedPlanReviewCheckpoint) =>
     session.persistRequiredAppMarker("plan_gate", checkpoint as unknown as Record<string, unknown>);
   const roadmapCompletionIntents = new AppSidecarCompletionIntentTracker();
+  let activeRunGeneration = 0;
   const roadmapPhaseAdvancement = createAppSidecarRoadmapPhaseAdvancementCoordinator({
     repository: notesRepository,
     onCommittedSnapshot: broadcastNotesSnapshot,
+    mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
     isAutopilotEnabled: (projectCwd) => projectAutopilot.isEnabled(projectCwd),
   });
   const roadmapToolHost = new AppSidecarRoadmapToolHost({
@@ -2143,6 +2220,15 @@ async function createSession(
     repository: notesRepository,
     reconciliations: roadmapReconciliations,
     projectAutopilot,
+    captureWorkspaceSnapshot: durableRoadmapExecution
+      ? async () => {
+          const loaded = await notesRepository.load(cwd);
+          if (loaded.status !== "ok") throw new Error("Project Notes unavailable");
+          return captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
+        }
+      : undefined,
+    getRunGeneration: () => activeRunGeneration,
+    mutateWithLeaseFence: (operation) => phaseBinding.withLeaseFence(session, operation),
     resolvePlanProgress: ({ phaseId, session: expectedSession }) =>
       phaseImplementationPlans.resolve({
         phaseId,
@@ -2171,6 +2257,14 @@ async function createSession(
       ...(active ?? {}),
       sessionId: sessionPath,
       signal: abort.signal,
+      deferApprovedPlanHydration: durableRoadmapExecution,
+      captureVerificationWorkspace: durableRoadmapExecution
+        ? async () => {
+            const loaded = await notesRepository.load(cwd);
+            if (loaded.status !== "ok") throw new Error("Project Notes unavailable");
+            return captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
+          }
+        : undefined,
       onEnterPlan: async (reason) => {
         deactivateApprovedPlan();
         await created.setPlanMode(true);
@@ -2207,7 +2301,9 @@ async function createSession(
                 activePhaseContext: created.getActivePhaseContext(),
               });
             }
-            return phaseBinding.bind(input, created);
+            return input.version === 2
+              ? phaseBinding.lease(input, created)
+              : phaseBinding.bind(input, created);
           }),
         ],
       ),
@@ -2242,14 +2338,6 @@ async function createSession(
   }
   await session.initialize();
   planGate = new AppSidecarPlanGate(session.getAppMarkers(), persistPlanGateMarker);
-  if (mode === "code") {
-    await phaseBinding.reconcile(session);
-    await roadmapPhaseAdvancement
-      .recover(session)
-      .catch((error) =>
-        captureSidecarError(error, "app-sidecar.roadmap-phase-advancement-restore"),
-      );
-  }
   const phaseLifecycle = new AppSidecarPhaseLifecycleCoordinator({
     cwd,
     repository: notesRepository,
@@ -2748,6 +2836,20 @@ async function createSession(
     );
   }
 
+  async function durableApprovedPlanComplete(): Promise<boolean> {
+    const activePhase = session.getActivePhaseContext();
+    if (!activePhase) return false;
+    const loaded = await notesRepository.load(cwd);
+    if (loaded.status !== "ok") return false;
+    const plan = loaded.snapshot.document.phases.find((phase) => phase.id === activePhase.phase.id)
+      ?.execution?.plan;
+    return (
+      plan != null &&
+      plan.steps.length === approvedPlanTotal &&
+      plan.steps.every((step) => step.state === "completed")
+    );
+  }
+
   function queueApprovedPlanProgressSync(): Promise<boolean> {
     const generation = approvedPlanGeneration;
     planProgressSync = planProgressSync
@@ -2786,31 +2888,260 @@ async function createSession(
     if (!options?.retainImplementationEvidence) phaseImplementationPlans.clear();
   }
 
+  if (durableRoadmapExecution && mode === "code") {
+    await phaseBinding.reconcile(session);
+    const active = session.getActivePhaseContext();
+    const consumption = session.getApprovedPlanConsumption();
+    const planContext = session.getApprovedPlanPhaseContext();
+    // Re-read authoritative Notes only after reconciliation owns a lease fence.
+    const loaded = await notesRepository.load(cwd);
+    const phase =
+      loaded.status === "ok" && active
+        ? loaded.snapshot.document.phases.find((candidate) => candidate.id === active.phase.id)
+        : undefined;
+    if (loaded.status === "ok" && phase && !phase.execution) {
+      const workspace = await captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
+      const currentSessionPath = session.getState().sessionPath;
+      const exactLegacyPlan = consumption
+        ? isLegacyPlanImportEligible({
+            projectKey: loaded.snapshot.projectKey,
+            phaseId: phase.id,
+            phaseSessionPath: phase.session?.sessionPath ?? null,
+            currentSessionPath,
+            planId: consumption.checkpointId,
+            planState: consumption.state,
+            planProjectKey: planContext?.projectKey ?? null,
+            planPhaseId: planContext?.phase.id ?? null,
+            planSessionPath: planContext?.session.sessionPath ?? null,
+          })
+        : false;
+      let execution: NotesPhaseExecutionV1 = {
+        version: 1,
+        state: "needs-reconciliation",
+        repository: workspace.repository,
+        plan: null,
+        evidence: [],
+        pendingCompletion: null,
+        lastSession: phase.session,
+        migration: { source: "legacy-session", reconciledAt: null },
+      };
+      if (!consumption) recordRoadmapDurabilityDiagnostic("legacy-plan-missing");
+      else if (!exactLegacyPlan) {
+        recordRoadmapDurabilityDiagnostic("legacy-plan-identity-mismatch");
+      }
+      if (exactLegacyPlan && consumption) {
+        const timestamp = phase.updatedAt;
+        const approvedPlanPath = await persistApprovedPlanSnapshot(cwd, {
+          version: 1,
+          checkpointId: consumption.checkpointId,
+          generation: consumption.generation,
+          planPath: consumption.approvedPlanPath ?? "legacy-session",
+          content: consumption.content,
+          contentHash: consumption.contentHash,
+          state: "human-approved",
+          reviewStatus: "ready",
+          actor: "user",
+          timestamp,
+          feedback: null,
+        });
+        const content = approvedPlanArtifactContent(consumption.content);
+        const plan = createApprovedPlan({
+          planId: consumption.checkpointId,
+          content,
+          snapshotPath: path.relative(cwd, approvedPlanPath).split(path.sep).join("/"),
+          approvedAt: timestamp,
+          approvedRevision: loaded.snapshot.revision + 1,
+          baseCommit: workspace.headCommit,
+        });
+        const markers = new Set<number>();
+        for (const message of session.getMessages()) {
+          if (message.role !== "assistant") continue;
+          const text =
+            typeof message.content === "string"
+              ? message.content
+              : message.content
+                  .map((part) => (part.type === "text" && "text" in part ? part.text : ""))
+                  .join("");
+          for (const match of text.matchAll(/\[DONE:(\d+)\]/gi)) markers.add(Number(match[1]));
+        }
+        let completedPrefix = 0;
+        while (markers.has(completedPrefix + 1)) completedPrefix += 1;
+        plan.steps = plan.steps.map((step) =>
+          step.index <= completedPrefix
+            ? { ...step, state: "needs-revalidation", completedAt: timestamp }
+            : step,
+        );
+        execution = {
+          ...execution,
+          state: "implementing",
+          plan,
+          migration: { source: "legacy-session", reconciledAt: new Date().toISOString() },
+        };
+      }
+      const imported = await phaseBinding.withLeaseFence(session, () =>
+        notesRepository.importLegacyPhaseExecution(cwd, {
+          operationId: `legacy-migration:${phase.id}`,
+          phaseId: phase.id,
+          expectedRevision: loaded.snapshot.revision,
+          execution,
+        }),
+      );
+      if (
+        imported.status === "executed" &&
+        (imported.value.status === "committed" || imported.value.status === "duplicate")
+      ) {
+        // Import changes plan identity; rotate the fence from the new Notes snapshot.
+        await phaseBinding.reconcile(session);
+      }
+    }
+    await roadmapPhaseAdvancement
+      .recover(session)
+      .catch((error) =>
+        captureSidecarError(error, "app-sidecar.roadmap-phase-advancement-restore"),
+      );
+  }
+
+  const durableActivePhase = session.getActivePhaseContext();
+  if (durableActivePhase?.executionStage === "implementing") {
+    const loaded = await notesRepository.load(cwd);
+    const phase =
+      loaded.status === "ok"
+        ? loaded.snapshot.document.phases.find(
+            (candidate) => candidate.id === durableActivePhase.phase.id,
+          )
+        : undefined;
+    if (durableRoadmapExecution && (loaded.status !== "ok" || !phase?.execution)) {
+      throw new PlanSnapshotResumeError(
+        "reconciliation-required",
+        durableActivePhase.approvedPlanPath ?? "",
+      );
+    }
+    if (loaded.status === "ok" && phase?.execution && durableRoadmapExecution) {
+      const plan = phase.execution.plan;
+      if (!plan || phase.execution.state === "needs-reconciliation") {
+        throw new PlanSnapshotResumeError(
+          "reconciliation-required",
+          plan?.snapshotPath ?? durableActivePhase.approvedPlanPath ?? "",
+        );
+      }
+      const consumption = session.getApprovedPlanConsumption();
+      const planContext = session.getApprovedPlanPhaseContext();
+      const resolved = await resolveExecutionPlanSnapshot({
+        cwd,
+        plan,
+        ...(consumption
+          ? {
+              recovery: {
+                projectKey: loaded.snapshot.projectKey,
+                phaseId: phase.id,
+                phaseSessionPath:
+                  phase.execution.lastSession?.sessionPath ?? phase.session?.sessionPath ?? null,
+                currentSessionPath: session.getState().sessionPath,
+                planId: consumption.checkpointId,
+                checkpointId: consumption.checkpointId,
+                planState: consumption.state,
+                planProjectKey: planContext?.projectKey ?? null,
+                planPhaseId: planContext?.phase.id ?? null,
+                planSessionPath: planContext?.session.sessionPath ?? null,
+                content: consumption.content,
+                contentHash: consumption.contentHash,
+              },
+            }
+          : {}),
+      });
+      if (resolved.status !== "ready") {
+        const marked = await phaseBinding.withLeaseFence(session, () =>
+          notesRepository.markPhaseExecutionNeedsReconciliation(cwd, {
+            phaseId: phase.id,
+            expectedRevision: loaded.snapshot.revision,
+            planHash: plan.contentHash,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        if (
+          marked.status !== "executed" ||
+          (marked.value.status !== "committed" && marked.value.status !== "duplicate")
+        ) {
+          throw new Error("Could not persist plan snapshot reconciliation state.");
+        }
+        if (marked.value.status === "committed") broadcastNotesSnapshot(marked.value.snapshot);
+        throw new PlanSnapshotResumeError(resolved.status, resolved.path);
+      }
+      const state: "approval-committed" | "implementation-prompt-started" =
+        consumption?.state === "approval-committed"
+          ? "approval-committed"
+          : "implementation-prompt-started";
+      const canonicalConsumption = {
+        checkpointId: plan.planId,
+        generation: consumption?.generation ?? 0,
+        content: resolved.content,
+        contentHash: plan.contentHash,
+        state,
+        approvedPlanPath: resolved.path,
+      };
+      await session.updateActivePhaseStage("implementing", resolved.path);
+      await session.hydrateCanonicalApprovedPlan(canonicalConsumption);
+    }
+    if (phase?.execution) {
+      restorePhaseImplementationPlanEvidence({
+        tracker: phaseImplementationPlans,
+        phase,
+        expectedSession: durableActivePhase.session,
+      });
+      const pending = phase.execution.pendingCompletion;
+      if (pending?.runJournal.sessionPath) {
+        const journal = await session
+          .getRunJournalForSession(pending.runJournal.sessionPath)
+          .catch(() => []);
+        const run = [...journal]
+          .reverse()
+          .find((entry) => entry.generation === pending.runJournal.generation);
+        if (run?.outcome) {
+          const expectedSession = {
+            sessionId:
+              phase.execution.lastSession?.sessionId ?? durableActivePhase.session.sessionId,
+            sessionPath: pending.runJournal.sessionPath,
+          };
+          const recovered = await phaseCompletion.settleDurableRun({
+            phaseId: phase.id,
+            expectedSession,
+            runGeneration: run.generation,
+            runOutcome:
+              run.outcome === "completed"
+                ? "succeeded"
+                : run.outcome === "aborted"
+                  ? "cancelled"
+                  : "failed",
+          });
+          if (
+            (recovered?.status === "committed" || recovered?.status === "duplicate") &&
+            "advancementCheckpoint" in recovered &&
+            recovered.advancementCheckpoint
+          ) {
+            await roadmapPhaseAdvancement.recover(session);
+          }
+        }
+      }
+    }
+  }
+
   const restoredApprovedPlan = session.getApprovedPlanConsumption();
   const restoredApprovedPlanPath =
-    restoredApprovedPlan?.approvedPlanPath ?? session.getActivePhaseContext()?.approvedPlanPath;
+    restoredApprovedPlan?.approvedPlanPath ??
+    (durableRoadmapExecution ? undefined : session.getActivePhaseContext()?.approvedPlanPath);
   if (restoredApprovedPlanPath || restoredApprovedPlan) {
-    try {
-      await activateApprovedPlan(restoredApprovedPlanPath, restoredApprovedPlan?.content);
-      for (const message of session.getMessages()) {
-        const text =
-          typeof message.content === "string"
-            ? message.content
-            : message.content
-                .map((content) =>
-                  content.type === "text" && "text" in content ? content.text : "",
-                )
-                .join("");
-        recordApprovedPlanMarkers(text);
-      }
-      await queueApprovedPlanProgressSync();
-    } catch (error) {
-      captureSidecarError(error, "app-sidecar.plan.restore-progress");
-      log("WARN", "app-sidecar", "approved plan progress restore failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
+    await activateApprovedPlan(restoredApprovedPlanPath, restoredApprovedPlan?.content);
+    for (const message of session.getMessages()) {
+      const text =
+        typeof message.content === "string"
+          ? message.content
+          : message.content
+              .map((content) => (content.type === "text" && "text" in content ? content.text : ""))
+              .join("");
+      recordApprovedPlanMarkers(text);
     }
-  } else {
+    await queueApprovedPlanProgressSync();
+  } else if (!durableRoadmapExecution) {
     const activePhase = session.getActivePhaseContext();
     if (activePhase?.executionStage === "implementing") {
       const loaded = await notesRepository.load(cwd);
@@ -2906,29 +3237,105 @@ async function createSession(
   // flipping `running` — that stretch awaits, so Node yields inside it. See
   // RunClaim.
   const runClaim = new RunClaim();
+  let runJournalPersistence: Promise<void> = Promise.resolve();
   const runLifecycle = new RunLifecycle(
     (runState) => {
       running = runState !== "idle";
+      session.setPhaseLeaseRunState(running ? "running" : "idle");
       if (runState === "cancelling") broadcast("run_cancelling", { runState });
     },
     // Durable run journal. Fire-and-forget on purpose: an unwritten journal
     // entry is a missed crash hint, while a journal write that throws inside
     // begin()/settle() would break run ownership itself.
     {
-      started: (generation) =>
-        void session.persistRunStarted(generation).catch((err) => {
-          log("WARN", "app-sidecar", "failed to journal run start", {
-            error: err instanceof Error ? err.message : String(err),
+      started: (generation) => {
+        activeRunGeneration = generation;
+        runJournalPersistence = runJournalPersistence
+          .then(() => session.persistRunStarted(generation))
+          .catch((err) => {
+            log("WARN", "app-sidecar", "failed to journal run start", {
+              error: err instanceof Error ? err.message : String(err),
+            });
           });
-        }),
-      finished: (generation, outcome) =>
-        void session.persistRunFinished(generation, outcome).catch((err) => {
-          log("WARN", "app-sidecar", "failed to journal run finish", {
-            error: err instanceof Error ? err.message : String(err),
+      },
+      finished: (generation, outcome) => {
+        runJournalPersistence = runJournalPersistence
+          .then(() => session.persistRunFinished(generation, outcome))
+          .catch((err) => {
+            log("WARN", "app-sidecar", "failed to journal run finish", {
+              error: err instanceof Error ? err.message : String(err),
+            });
           });
-        }),
+      },
     },
   );
+  async function renewCurrentPhaseLease(operationId: string): Promise<void> {
+    const marker = session.getRoadmapPhaseLeaseMarker();
+    const active = session.getActivePhaseContext();
+    if (!marker || !active) return;
+    const loaded = await notesRepository.load(cwd);
+    if (loaded.status !== "ok") throw new Error("Project Notes unavailable for lease renewal.");
+    const outcome = await phaseBinding.lease(
+      {
+        version: 2,
+        action: "renew",
+        phaseId: marker.phaseId,
+        expectedProjectKey: loaded.snapshot.projectKey,
+        expectedRevision: loaded.snapshot.revision,
+        planId: marker.planId,
+        operationId: `${operationId}:${marker.leaseId}`,
+        lease: { leaseId: marker.leaseId, fence: marker.fence },
+        confirmTakeover: false,
+        takeoverReason: null,
+        predecessorProof: null,
+      },
+      session,
+    );
+    if (outcome.status === "renewed" || outcome.status === "duplicate") return;
+    if (outcome.status === "phase-lease-lost") {
+      recordRoadmapDurabilityDiagnostic("phase-lease-lost");
+      await session.clearActivePhaseContext("phase-rebound");
+    }
+    throw new Error(`Phase lease renewal failed: ${outcome.status}`);
+  }
+
+  const phaseLeaseHeartbeat = durableRoadmapExecution
+    ? setInterval(() => {
+        const marker = session.getRoadmapPhaseLeaseMarker();
+        const active = session.getActivePhaseContext();
+        if (!marker || !active) return;
+        void notesRepository
+          .load(cwd)
+          .then(async (loaded) => {
+            if (loaded.status !== "ok") return;
+            const outcome = await phaseBinding.lease(
+              {
+                version: 2,
+                action: "renew",
+                phaseId: marker.phaseId,
+                expectedProjectKey: loaded.snapshot.projectKey,
+                expectedRevision: loaded.snapshot.revision,
+                planId: marker.planId,
+                operationId: `heartbeat:${marker.leaseId}:${randomUUID()}`,
+                lease: { leaseId: marker.leaseId, fence: marker.fence },
+                confirmTakeover: false,
+                takeoverReason: null,
+                predecessorProof: null,
+              },
+              session,
+            );
+            if (outcome.status === "phase-lease-lost") {
+              recordRoadmapDurabilityDiagnostic("phase-lease-lost");
+              await session.clearActivePhaseContext("phase-rebound");
+              broadcast("error", {
+                message: "Roadmap phase lease lost; this session is now read-only.",
+              });
+            }
+          })
+          .catch((error) => captureSidecarError(error, "app-sidecar.phase-lease-heartbeat"));
+      }, PHASE_LEASE_RENEW_INTERVAL_MS)
+    : null;
+  phaseLeaseHeartbeat?.unref();
   const cancelledRunEndGenerations = new Set<number>();
   let pendingCancelDrain: { generation: number; text: string } | null = null;
   // Bumped by /cancel — a run whose cancel generation changed mid-flight was
@@ -3261,6 +3668,9 @@ async function createSession(
     let runSucceeded = false;
     broadcast("run_start", { text: label, runState: runLifecycle.state });
     try {
+      if (ownsGeneration) {
+        await renewCurrentPhaseLease(`run:${generation}:running`);
+      }
       if (!runLifecycle.isCancellationRequested(generation)) await run();
       runSucceeded = true;
     } catch (err) {
@@ -3268,8 +3678,7 @@ async function createSession(
         broadcastError("error", "run failed", err);
       }
     } finally {
-      const completionIntentFinalizer =
-        roadmapCompletionIntents.finalizeRun(completionIntentRun);
+      const completionIntentFinalizer = roadmapCompletionIntents.finalizeRun(completionIntentRun);
       const cancelled = runLifecycle.isCancellationRequested(generation);
       if (
         runSucceeded &&
@@ -3290,10 +3699,19 @@ async function createSession(
       // A run may have opened/closed issues or PRs — refresh fire-and-forget so
       // teardown isn't delayed by the network. Broadcasts itself on change.
       void refreshGitHubCounts();
-      // Persist this run's implementation checkpoint. A Done intent is consumed once
-      // and can complete only after this owning run has settled.
-      const terminalPlanComplete =
-        approvedPlanPath !== null ? await queueApprovedPlanProgressSync() : false;
+      // Settle and fsync the owning run journal before consuming durable completion intent.
+      if (ownsGeneration) {
+        finishOwnedGeneration(generation, false, runSucceeded ? "completed" : "failed");
+        await runJournalPersistence;
+        await renewCurrentPhaseLease(`run:${generation}:idle`);
+      }
+      let terminalPlanComplete = false;
+      if (approvedPlanPath !== null) {
+        const markerComplete = await queueApprovedPlanProgressSync();
+        terminalPlanComplete = durableRoadmapExecution
+          ? await durableApprovedPlanComplete()
+          : markerComplete;
+      }
       const activePhase = session.getActivePhaseContext();
       if (activePhase?.executionStage === "implementing") {
         const completionOutcome = await completionIntentFinalizer.checkpoint({
@@ -3302,8 +3720,11 @@ async function createSession(
           checkpointId: randomUUID(),
           phaseId: activePhase.phase.id,
           expectedSession: activePhase.session,
-          currentPlanProgress: planProgressPayload(),
+          currentPlanProgress: durableRoadmapExecution
+            ? { total: 0, completed: [] }
+            : planProgressPayload(),
           runOutcome: cancelled ? "cancelled" : runSucceeded ? "succeeded" : "failed",
+          runGeneration: generation,
           timestamp: new Date().toISOString(),
         });
         if (
@@ -3311,11 +3732,15 @@ async function createSession(
           "advancementCheckpoint" in completionOutcome &&
           completionOutcome.advancementCheckpoint
         ) {
-          const advancement = await roadmapPhaseAdvancement.recover(session);
-          if (advancement.status === "stale" || advancement.status === "invalid-confirmation") {
-            log("WARN", "app-sidecar", "automatic roadmap phase binding deferred", {
-              outcome: advancement,
-            });
+          try {
+            const advancement = await roadmapPhaseAdvancement.recover(session);
+            if (advancement.status === "stale" || advancement.status === "invalid-confirmation") {
+              log("WARN", "app-sidecar", "automatic roadmap phase binding deferred", {
+                outcome: advancement,
+              });
+            }
+          } catch (error) {
+            throw error;
           }
         }
       }
@@ -3334,9 +3759,6 @@ async function createSession(
             message: error instanceof Error ? error.message : String(error),
           });
         }
-      }
-      if (ownsGeneration) {
-        finishOwnedGeneration(generation, false, runSucceeded ? "completed" : "failed");
       }
       // A cancelled injected run is still owned by the surrounding autopilot
       // cycle; its outer finalizer emits the one terminal cancelled run_end.
@@ -3406,6 +3828,10 @@ async function createSession(
           generation: committed.generation,
           state: "completed",
         });
+        const advancement = await roadmapPhaseAdvancement.recover(session);
+        if (advancement.status === "phase-lease-lost") {
+          throw new Error("Plan-only advancement lost its phase lease.");
+        }
         return {
           checkpointId: committed.checkpointId,
           generation: committed.generation,
@@ -3413,7 +3839,73 @@ async function createSession(
         };
       }
 
-      const previousPhaseSessionPath = session.getActivePhaseContext()?.session.sessionPath;
+      const previousActivePhase = session.getActivePhaseContext();
+      const previousPhaseSessionPath = previousActivePhase?.session.sessionPath;
+      const previousLeaseMarker = session.getRoadmapPhaseLeaseMarker();
+      const durablePlan =
+        durableRoadmapExecution && previousActivePhase
+          ? await (async () => {
+              const loaded = await notesRepository.load(cwd);
+              if (loaded.status !== "ok") {
+                throw new Error("Project Notes are unavailable for durable plan approval.");
+              }
+              const workspace = await captureGitWorkspaceSnapshot(cwd, loaded.snapshot.projectKey);
+              const relativePlanPath = path
+                .relative(cwd, approvedPlanPath)
+                .split(path.sep)
+                .join("/");
+              const plan = createApprovedPlan({
+                planId: checkpoint.checkpointId,
+                content: approvedPlanArtifactContent(checkpoint.content),
+                snapshotPath: relativePlanPath,
+                approvedAt: checkpoint.timestamp,
+                approvedRevision: loaded.snapshot.revision + 1,
+                baseCommit: workspace.headCommit,
+              });
+              return {
+                request: {
+                  operationId: checkpoint.checkpointId,
+                  phaseId: previousActivePhase.phase.id,
+                  expectedRevision: loaded.snapshot.revision,
+                  repository: workspace.repository,
+                  plan,
+                  lastSession: previousActivePhase.session,
+                },
+                mutateWithLeaseFence: <T>(operation: () => Promise<T>) =>
+                  phaseBinding.withLeaseFence(session, operation),
+                moveLeaseToFreshSession: async (snapshot: ProjectNotesSnapshot) => {
+                  const action = previousLeaseMarker ? ("takeover" as const) : ("acquire" as const);
+                  const outcome = await phaseBinding.lease(
+                    {
+                      version: 2,
+                      action,
+                      phaseId: previousActivePhase.phase.id,
+                      expectedProjectKey: snapshot.projectKey,
+                      expectedRevision: snapshot.revision,
+                      planId: plan.planId,
+                      operationId: `${checkpoint.checkpointId}:fresh-session`,
+                      lease: previousLeaseMarker
+                        ? { leaseId: previousLeaseMarker.leaseId, fence: previousLeaseMarker.fence }
+                        : null,
+                      confirmTakeover: action === "takeover",
+                      takeoverReason:
+                        action === "takeover" ? "Move approved work to its fresh session" : null,
+                      predecessorProof: null,
+                    },
+                    session,
+                  );
+                  if (outcome.status !== "acquired" && outcome.status !== "duplicate") {
+                    throw new Error(`Fresh phase lease failed: ${outcome.status}`);
+                  }
+                  const latest = await notesRepository.load(cwd);
+                  if (latest.status !== "ok") {
+                    throw new Error(`Fresh phase session could not be reloaded: ${latest.status}`);
+                  }
+                  return latest.snapshot;
+                },
+              };
+            })()
+          : undefined;
       await commitPlanApprovalCheckpoint({
         session,
         repository: notesRepository,
@@ -3422,15 +3914,19 @@ async function createSession(
         prepareFreshSession: async () => {
           await session.newSession(true);
           injectedAutopilotPrompts = [];
+          const promptContent = durablePlan
+            ? approvedPlanArtifactContent(checkpoint.content)
+            : checkpoint.content;
           await session.persistApprovedPlanConsumption({
             checkpointId: checkpoint.checkpointId,
             generation: checkpoint.generation,
-            content: checkpoint.content,
-            contentHash: checkpoint.contentHash,
+            content: promptContent,
+            contentHash: durablePlan?.request.plan.contentHash ?? checkpoint.contentHash,
             approvedPlanPath,
           });
-          return activateApprovedPlan(approvedPlanPath, checkpoint.content);
+          return activateApprovedPlan(approvedPlanPath, promptContent);
         },
+        durablePlan,
         restorePreviousSession: previousPhaseSessionPath
           ? async () => {
               await session.loadSessionCheckpoint(previousPhaseSessionPath);
@@ -3454,8 +3950,9 @@ async function createSession(
       try {
         await runAgent(IMPLEMENT_PLAN_PROMPT, async () => {
           await commitActivePhaseImplementationStart();
+          const implementationPrompt = await currentImplementationPlanPrompt();
           await session.runApprovedPlanImplementation(
-            IMPLEMENT_PLAN_PROMPT,
+            implementationPrompt,
             runLifecycle.generation,
           );
         });
@@ -3595,12 +4092,28 @@ async function createSession(
     }
   }
 
-  // The prompt fed to the fresh session after a plan is accepted — the SAME
-  // string the webview sends on a manual Accept (see PlanReviewModal's accept
-  // handler in gg-app/src/App.tsx). Keep the two in lockstep so auto- and
-  // manual approval produce identical implementation turns.
+  // Keep this base prompt aligned with the webview's manual Accept copy.
+  // Durable execution appends canonical checkpoint coordinates server-side.
   const IMPLEMENT_PLAN_PROMPT =
     "The plan has been approved. Implement it now, following each step in order.";
+
+  async function currentImplementationPlanPrompt(): Promise<string> {
+    if (!durableRoadmapExecution) return IMPLEMENT_PLAN_PROMPT;
+    const activePhase = session.getActivePhaseContext();
+    if (!activePhase) return IMPLEMENT_PLAN_PROMPT;
+    const loaded = await notesRepository.load(cwd);
+    if (loaded.status !== "ok") return IMPLEMENT_PLAN_PROMPT;
+    const plan = loaded.snapshot.document.phases.find((phase) => phase.id === activePhase.phase.id)
+      ?.execution?.plan;
+    if (!plan) return IMPLEMENT_PLAN_PROMPT;
+    const checkpoints = plan.steps
+      .map((step) => `- Step ${step.index}: step_id=${step.id}`)
+      .join("\n");
+    return `${IMPLEMENT_PLAN_PROMPT}
+
+After completing each step, call roadmap_checkpoint before continuing. Use phase_id=${activePhase.phase.id}, plan_hash=${plan.contentHash}, and initially expected_revision=${loaded.snapshot.revision}; after any stale-revision result, retry with its returned revision, then use each successful call's returned revision for the next call.
+${checkpoints}`;
+  }
 
   async function startRoadmapPhase(
     phaseId: string,
@@ -4147,7 +4660,11 @@ async function createSession(
             json(res, 400, { status: "invalid-request" });
             return;
           }
-          return phaseBinding.bind(request, session).then((outcome) => {
+          const binding =
+            request.version === 2
+              ? phaseBinding.lease(request, session)
+              : phaseBinding.bind(request, session);
+          return binding.then((outcome) => {
             json(res, phaseBindingHttpStatus(outcome), outcome);
           });
         })
@@ -6849,6 +7366,7 @@ async function createSession(
     if (gitPoll) clearTimeout(gitPoll);
     gitHubPollStopped = true;
     if (gitHubPoll) clearTimeout(gitHubPoll);
+    if (phaseLeaseHeartbeat) clearInterval(phaseLeaseHeartbeat);
     // Stop the Telegram serve loop + dispose its per-chat sessions.
     if (serveController) await serveController.stop().catch(() => {});
     for (const c of clients) c.res.end();
@@ -6856,7 +7374,7 @@ async function createSession(
     kenAutoAbort.abort();
     await kenSession?.dispose().catch(() => {});
     await kenAutoSession?.dispose().catch(() => {});
-    await session.dispose().catch(() => {});
+    await session.dispose().catch((error) => captureSidecarError(error, "app-sidecar.session-disposal"));
   }
 
   return {

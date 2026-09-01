@@ -1,7 +1,8 @@
 import {
-  isPhaseBindingRequest,
+  isPhaseBindingProtocolRequest,
   type PhaseBindingOutcome,
-  type PhaseBindingRequest,
+  type PhaseBindingProtocolRequest,
+  type PhaseLeaseOutcome,
 } from "@kenkaiiii/gg-core/phase-binding-protocol";
 import { requestPathname } from "./app-sidecar-http-json.js";
 
@@ -14,15 +15,20 @@ export function isPhaseBindingRoute(
   return method === "POST" && !!requestUrl && requestPathname(requestUrl) === PHASE_BINDING_ROUTE;
 }
 
-export function parsePhaseBindingBody(value: unknown): PhaseBindingRequest | null {
-  return isPhaseBindingRequest(value) ? value : null;
+export function parsePhaseBindingBody(value: unknown): PhaseBindingProtocolRequest | null {
+  return isPhaseBindingProtocolRequest(value) ? value : null;
 }
 
-export function phaseBindingHttpStatus(outcome: PhaseBindingOutcome): number {
+export function phaseBindingHttpStatus(
+  outcome: PhaseBindingOutcome | PhaseLeaseOutcome,
+): number {
   switch (outcome.status) {
     case "committed":
     case "duplicate":
     case "already-bound":
+    case "inspected":
+    case "acquired":
+    case "renewed":
       return 200;
     case "phase-not-found":
     case "missing":

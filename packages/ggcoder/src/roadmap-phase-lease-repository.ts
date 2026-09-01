@@ -26,6 +26,12 @@ export interface RoadmapPhaseLeaseHolderV1 extends PhaseLeaseHolderV1 {
   processStartToken: string;
 }
 
+export interface RoadmapPhaseLeasePredecessorProofV1 {
+  daemonInstanceId: string;
+  processId: number;
+  processStartToken: string;
+  terminatedAt: string;
+}
 
 interface StoredPhaseLeaseV1 extends Omit<PhaseLeaseV1, "holder"> {
   holder: RoadmapPhaseLeaseHolderV1;
@@ -140,6 +146,23 @@ export class RoadmapPhaseLeaseRepository {
   }
 
   async execute(input: PhaseLeaseExecutionInput): Promise<PhaseLeaseOutcome> {
+    return this.executeInternal(input, null);
+  }
+
+  async reconcileTakeover(
+    input: PhaseLeaseExecutionInput,
+    predecessorProof: RoadmapPhaseLeasePredecessorProofV1,
+  ): Promise<PhaseLeaseOutcome> {
+    if (input.request.action !== "takeover") {
+      throw new Error("supervised predecessor proof requires a takeover request");
+    }
+    return this.executeInternal(input, predecessorProof);
+  }
+
+  private async executeInternal(
+    input: PhaseLeaseExecutionInput,
+    predecessorProof: RoadmapPhaseLeasePredecessorProofV1 | null,
+  ): Promise<PhaseLeaseOutcome> {
     const { request, context } = input;
     if (request.phaseId !== context.phaseId) return { status: "phase-not-found" };
     if (
@@ -178,7 +201,7 @@ export class RoadmapPhaseLeaseRepository {
         return leaseOutcome("inspected", context, state, state.leases[request.phaseId] ?? null);
       }
 
-      const payloadHash = operationPayloadHash(input);
+      const payloadHash = operationPayloadHash(input, predecessorProof);
       const prior = state.operations.find(
         (operation) => operation.operationId === request.operationId,
       );
@@ -199,7 +222,7 @@ export class RoadmapPhaseLeaseRepository {
         };
       }
 
-      const outcome = await this.applyMutation(state, input);
+      const outcome = await this.applyMutation(state, input, predecessorProof);
       if (!isCommittedOutcome(outcome)) return outcome;
       const storedOutcome = structuredClone(outcome);
       state.operations.push({
@@ -218,6 +241,7 @@ export class RoadmapPhaseLeaseRepository {
   private async applyMutation(
     state: StoredPhaseLeasesV1,
     input: PhaseLeaseExecutionInput,
+    predecessorProof: RoadmapPhaseLeasePredecessorProofV1 | null,
   ): Promise<PhaseLeaseOutcome> {
     const { request, context, holder } = input;
     const current = state.leases[request.phaseId] ?? null;
@@ -247,7 +271,12 @@ export class RoadmapPhaseLeaseRepository {
       return this.acquire(state, input);
     }
 
-    return leaseFailure("phase-lease-lost", context, state, current);
+    if (!current || !tokenMatches(request, current)) {
+      return leaseFailure("phase-lease-lost", context, state, current);
+    }
+    const takeover = await this.canTakeover(current, holder, predecessorProof);
+    if (takeover !== "replace") return leaseFailure(takeover, context, state, current);
+    return this.acquire(state, input);
   }
 
   private acquire(state: StoredPhaseLeasesV1, input: PhaseLeaseExecutionInput): PhaseLeaseOutcome {
@@ -280,6 +309,18 @@ export class RoadmapPhaseLeaseRepository {
     if (liveness === "dead") return "replace";
     if (Date.parse(current.expiresAt) > this.now().getTime()) return "phase-lease-held";
     return liveness === "unknown" ? "lease-owner-unreachable" : "phase-lease-held";
+  }
+
+  private async canTakeover(
+    current: StoredPhaseLeaseV1,
+    destination: RoadmapPhaseLeaseHolderV1,
+    proof: RoadmapPhaseLeasePredecessorProofV1 | null,
+  ): Promise<"replace" | "phase-lease-held" | "lease-owner-unreachable"> {
+    if (proofMatches(proof, current.holder, this.now().getTime())) return "replace";
+    if (current.holder.daemonInstanceId === destination.daemonInstanceId) {
+      return current.runState === "idle" ? "replace" : "phase-lease-held";
+    }
+    return this.canReplaceExpired(current);
   }
 }
 
@@ -343,6 +384,19 @@ function isRoadmapPhaseLeaseHolder(value: unknown): value is RoadmapPhaseLeaseHo
   );
 }
 
+export function isRoadmapPhaseLeasePredecessorProofV1(
+  value: unknown,
+): value is RoadmapPhaseLeasePredecessorProofV1 {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["daemonInstanceId", "processId", "processStartToken", "terminatedAt"]) &&
+    isBoundedInternalString(value.daemonInstanceId) &&
+    isPositiveInteger(value.processId) &&
+    isBoundedInternalString(value.processStartToken) &&
+    typeof value.terminatedAt === "string" &&
+    Number.isFinite(Date.parse(value.terminatedAt))
+  );
+}
 
 function isBoundedInternalString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 256;
@@ -374,7 +428,9 @@ function duplicateOutcome(outcome: PhaseLeaseOutcome): PhaseLeaseOutcome {
 }
 
 function isCommittedOutcome(outcome: PhaseLeaseOutcome): boolean {
-  return outcome.status === "acquired" || outcome.status === "renewed";
+  return (
+    outcome.status === "acquired" || outcome.status === "renewed"
+  );
 }
 
 function tokenMatches(request: PhaseLeaseRequestV2, lease: StoredPhaseLeaseV1): boolean {
@@ -391,14 +447,31 @@ function sameHolder(left: RoadmapPhaseLeaseHolderV1, right: RoadmapPhaseLeaseHol
   );
 }
 
+function proofMatches(
+  proof: RoadmapPhaseLeasePredecessorProofV1 | null,
+  holder: RoadmapPhaseLeaseHolderV1,
+  now: number,
+): boolean {
+  return (
+    proof !== null &&
+    proof.daemonInstanceId === holder.daemonInstanceId &&
+    proof.processId === holder.processId &&
+    proof.processStartToken === holder.processStartToken &&
+    Date.parse(proof.terminatedAt) <= now
+  );
+}
 
-function operationPayloadHash(input: PhaseLeaseExecutionInput): string {
+function operationPayloadHash(
+  input: PhaseLeaseExecutionInput,
+  predecessorProof: RoadmapPhaseLeasePredecessorProofV1 | null,
+): string {
   return createHash("sha256")
     .update(
       JSON.stringify({
         request: input.request,
         holder: input.holder,
         runState: input.runState ?? null,
+        predecessorProof,
       }),
     )
     .digest("hex");

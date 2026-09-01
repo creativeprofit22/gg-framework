@@ -37,12 +37,14 @@ export interface AppSidecarRoadmapPhaseAdvancementCoordinator {
     expectedRevision: number,
     session: RoadmapPhaseAdvancementSession,
   ): Promise<
-    ProjectNotesAutomaticPhaseAdvancementOutcome | { status: "none" | "missing-session-path" }
+    | ProjectNotesAutomaticPhaseAdvancementOutcome
+    | { status: "none" | "missing-session-path" | "phase-lease-lost" }
   >;
   recover(
     session: RoadmapPhaseAdvancementSession,
   ): Promise<
-    ProjectNotesAutomaticPhaseAdvancementOutcome | { status: "none" | "missing-session-path" }
+    | ProjectNotesAutomaticPhaseAdvancementOutcome
+    | { status: "none" | "missing-session-path" | "phase-lease-lost" }
   >;
 }
 
@@ -147,6 +149,9 @@ export function createAppSidecarRoadmapPhaseAdvancementCoordinator(options: {
   onCommittedSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
   isAutopilotEnabled?: (cwd: string) => boolean;
   now?: () => string;
+  mutateWithLeaseFence?<T>(
+    operation: () => Promise<T>,
+  ): Promise<{ status: "executed"; value: T } | { status: "phase-lease-lost" | "corrupt" }>;
 }): AppSidecarRoadmapPhaseAdvancementCoordinator {
   const now = options.now ?? (() => new Date().toISOString());
 
@@ -164,12 +169,18 @@ export function createAppSidecarRoadmapPhaseAdvancementCoordinator(options: {
       return { status: "none" } as const;
     }
     if (!state.sessionPath) return { status: "missing-session-path" } as const;
-    const outcome = await options.repository.confirmAutomaticPhaseAdvancement(state.cwd, {
-      checkpointId: checkpoint.id,
-      expectedRevision,
-      destinationSession: { sessionId: state.sessionId, sessionPath: state.sessionPath },
-      timestamp: now(),
-    });
+    const operation = () =>
+      options.repository.confirmAutomaticPhaseAdvancement(state.cwd, {
+        checkpointId: checkpoint.id,
+        expectedRevision,
+        destinationSession: { sessionId: state.sessionId, sessionPath: state.sessionPath },
+        timestamp: now(),
+      });
+    const mutation = options.mutateWithLeaseFence
+      ? await options.mutateWithLeaseFence(operation)
+      : { status: "executed" as const, value: await operation() };
+    if (mutation.status !== "executed") return { status: "phase-lease-lost" } as const;
+    const outcome = mutation.value;
     if (outcome.status === "accepted" || outcome.status === "already-bound") {
       options.onCommittedSnapshot?.(outcome.snapshot);
       await session.setActivePhaseContext(

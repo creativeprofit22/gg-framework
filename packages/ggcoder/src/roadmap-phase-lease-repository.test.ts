@@ -65,6 +65,9 @@ function request(
     planId: context.planId,
     operationId,
     lease,
+    confirmTakeover: action === "takeover",
+    takeoverReason: action === "takeover" ? "Move settled work" : null,
+    predecessorProof: null,
   };
 }
 
@@ -212,7 +215,7 @@ describe("roadmap phase lease repository", () => {
     expect(
       await leases.execute({
         cwd,
-        request: request("acquire", "replace-dead"),
+        request: request("acquire", "recover-dead"),
         holder: holderB,
         context,
       }),
@@ -223,4 +226,52 @@ describe("roadmap phase lease repository", () => {
     });
   });
 
+  it("allows only idle same-daemon takeover without predecessor proof", async () => {
+    const leases = repository();
+    const acquired = await leases.execute({
+      cwd,
+      request: request("acquire", "acquire"),
+      holder: holderA,
+      context,
+    });
+    if (acquired.status !== "acquired" || !acquired.lease) throw new Error("expected lease");
+    const destination = { ...holderB, daemonInstanceId: holderA.daemonInstanceId };
+    const token = { leaseId: acquired.lease.leaseId, fence: acquired.lease.fence };
+    const moved = await leases.execute({
+      cwd,
+      request: request("takeover", "move", token),
+      holder: destination,
+      context,
+    });
+    expect(moved).toMatchObject({
+      status: "acquired",
+      lease: { fence: 2, holder: publicHolder(destination) },
+    });
+
+    if (moved.status !== "acquired" || !moved.lease) throw new Error("expected moved lease");
+    const runningToken = { leaseId: moved.lease.leaseId, fence: moved.lease.fence };
+    await leases.execute({
+      cwd,
+      request: request("renew", "running", runningToken),
+      holder: destination,
+      context,
+      runState: "running",
+    });
+    expect(
+      await leases.execute({
+        cwd,
+        request: {
+          ...request("takeover", "denied", runningToken),
+          predecessorProof: {
+            daemonInstanceId: destination.daemonInstanceId,
+            processId: destination.processId,
+            processStartToken: destination.processStartToken,
+            terminatedAt: new Date(now - 1).toISOString(),
+          },
+        } as unknown as PhaseLeaseRequestV2,
+        holder: holderA,
+        context,
+      }),
+    ).toMatchObject({ status: "phase-lease-held" });
+  });
 });

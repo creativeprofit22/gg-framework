@@ -28,7 +28,11 @@ import {
   type TurnMetricPayload,
   type CustomEntry,
 } from "./session-manager.js";
-import { ACTIVE_PHASE_CONTEXT_KIND } from "../phase-context.js";
+import {
+  ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
+  ACTIVE_PHASE_CONTEXT_KIND,
+  ROADMAP_PHASE_LEASE_KIND,
+} from "../phase-context.js";
 
 const tempDirs: string[] = [];
 
@@ -91,6 +95,54 @@ describe("SessionManager redaction boundary", () => {
     expect(persisted).toContain("[REDACTED]");
     expect(messageEntry.message.content).toContain(canary);
     expect(customEntry.data).toEqual({ error: `failed with ${canary}`, accessToken: canary });
+  });
+});
+
+describe("SessionManager required phase markers", () => {
+  it("durably persists active phase clear markers", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const session = await manager.create("/repo", "anthropic", "test-model");
+    await manager.appendRequiredEntry(session.path, {
+      type: "custom",
+      kind: ACTIVE_PHASE_CONTEXT_CLEAR_KIND,
+      id: "clear-1",
+      parentId: null,
+      timestamp: "2026-08-30T10:00:00.000Z",
+      data: {
+        version: 1,
+        projectKey: "/repo",
+        phaseId: "phase-1",
+        reason: "binding-compensation",
+      },
+    });
+    expect(await readFile(session.path, "utf8")).toContain(ACTIVE_PHASE_CONTEXT_CLEAR_KIND);
+  });
+
+  it("durably restores strict Roadmap lease hints", async () => {
+    const sessionsDir = await makeTempDir();
+    const manager = new SessionManager(sessionsDir);
+    const session = await manager.create("/repo", "anthropic", "test-model");
+    const marker = {
+      version: 1 as const,
+      projectKey: "/repo",
+      phaseId: "phase-1",
+      planId: "plan-1",
+      planHash: "a".repeat(64),
+      leaseId: "lease-1",
+      fence: 2,
+      daemonInstanceId: "daemon-1",
+    };
+    await manager.appendRequiredEntry(session.path, {
+      type: "custom",
+      kind: ROADMAP_PHASE_LEASE_KIND,
+      id: "lease-marker-1",
+      parentId: null,
+      timestamp: "2026-08-30T10:00:00.000Z",
+      data: marker,
+    });
+    const loaded = await manager.load(session.path);
+    expect(manager.getRoadmapPhaseLeaseMarker(loaded.entries, { projectKey: "/repo" })).toEqual(marker);
   });
 });
 

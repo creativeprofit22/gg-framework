@@ -75,7 +75,7 @@ export interface PhaseLeaseTokenV1 {
   fence: number;
 }
 
-export type PhaseLeaseAction = "inspect" | "acquire" | "renew";
+export type PhaseLeaseAction = "inspect" | "acquire" | "renew" | "takeover";
 
 export interface PhaseLeaseRequestV2 {
   version: 2;
@@ -86,9 +86,15 @@ export interface PhaseLeaseRequestV2 {
   planId: string | null;
   operationId: string;
   lease: PhaseLeaseTokenV1 | null;
+  confirmTakeover: boolean;
+  takeoverReason: string | null;
+  predecessorProof: null;
 }
 
-export type PhaseBindingProtocolRequest = PhaseBindingRequest | PhaseLeaseRequestV2;
+export type PhaseBindingProtocolRequest =
+  | PhaseBindingRequest
+  | PhaseLeaseRequestV2
+;
 
 export type PhaseLeaseOutcome =
   | {
@@ -118,6 +124,8 @@ export type PhaseLeaseOutcome =
       backup: ProjectNotesCorruptReason | null;
     };
 
+
+
 const REQUEST_KEYS = [
   "version",
   "action",
@@ -137,6 +145,9 @@ const LEASE_REQUEST_KEYS = [
   "planId",
   "operationId",
   "lease",
+  "confirmTakeover",
+  "takeoverReason",
+  "predecessorProof",
 ] as const;
 const LEASE_TOKEN_KEYS = ["leaseId", "fence"] as const;
 const LEASE_HOLDER_KEYS = ["daemonInstanceId", "sessionId", "sessionPath", "processId"] as const;
@@ -154,6 +165,34 @@ const LEASE_KEYS = [
   "expiresAt",
   "operationId",
 ] as const;
+const RECONCILIATION_PLAN_KEYS = [
+  "planId",
+  "contentHash",
+  "snapshotPath",
+  "approvedAt",
+  "approvedRevision",
+  "baseCommit",
+] as const;
+const RECONCILIATION_REQUEST_KEYS = [
+  "version",
+  "action",
+  "phaseId",
+  "expectedProjectKey",
+  "expectedRevision",
+  "operationId",
+  "repository",
+  "plan",
+  "workspace",
+] as const;
+const RECONCILIATION_SUCCESS_KEYS = [
+  "status",
+  "revision",
+  "phaseId",
+  "preservedStepIds",
+  "revalidationStepIds",
+  "revalidationEvidenceCount",
+  "reconciledAt",
+] as const;
 const COMMITTED_KEYS = ["status", "revision", "phaseId", "previousSession", "session"] as const;
 const ALREADY_BOUND_KEYS = ["status", "revision", "phaseId", "session"] as const;
 const REVISION_KEYS = ["status", "revision"] as const;
@@ -168,10 +207,15 @@ const CORRUPT_REASONS: ReadonlySet<string> = new Set([
 ]);
 const MAX_ID_LENGTH = 256;
 const MAX_PROJECT_KEY_LENGTH = 4096;
+
+
 export function isPhaseBindingProtocolRequest(
   value: unknown,
 ): value is PhaseBindingProtocolRequest {
-  return isPhaseBindingRequest(value) || isPhaseLeaseRequest(value);
+  return (
+    isPhaseBindingRequest(value) ||
+    isPhaseLeaseRequest(value)
+  );
 }
 
 export function isPhaseBindingRequest(value: unknown): value is PhaseBindingRequest {
@@ -199,17 +243,28 @@ export function isPhaseLeaseRequest(value: unknown): value is PhaseLeaseRequestV
     value.version !== 2 ||
     (value.action !== "inspect" &&
       value.action !== "acquire" &&
-      value.action !== "renew") ||
+      value.action !== "renew" &&
+      value.action !== "release" &&
+      value.action !== "takeover") ||
     !isBoundedString(value.phaseId, MAX_ID_LENGTH) ||
     !isBoundedString(value.expectedProjectKey, MAX_PROJECT_KEY_LENGTH) ||
     !isRevision(value.expectedRevision) ||
     (value.planId !== null && !isBoundedString(value.planId, MAX_ID_LENGTH)) ||
     !isBoundedString(value.operationId, MAX_ID_LENGTH) ||
-    !isNullableLeaseToken(value.lease)
+    !isNullableLeaseToken(value.lease) ||
+    typeof value.confirmTakeover !== "boolean" ||
+    (value.takeoverReason !== null && !isBoundedString(value.takeoverReason, 1024)) ||
+    value.predecessorProof !== null
   ) {
     return false;
   }
-  return value.action === "renew" ? value.lease !== null : value.lease === null;
+  if (value.action === "inspect" || value.action === "acquire") {
+    return value.lease === null && !value.confirmTakeover && value.takeoverReason === null;
+  }
+  if (value.action === "renew" || value.action === "release") {
+    return value.lease !== null && !value.confirmTakeover && value.takeoverReason === null;
+  }
+  return value.lease !== null && value.confirmTakeover && value.takeoverReason !== null;
 }
 
 export function isPhaseLease(value: unknown): value is PhaseLeaseV1 {
@@ -301,6 +356,7 @@ export function isPhaseLeaseOutcome(value: unknown): value is PhaseLeaseOutcome 
     status === "inspected" ||
     status === "acquired" ||
     status === "renewed" ||
+    status === "released" ||
     status === "duplicate"
   ) {
     return (
@@ -315,7 +371,8 @@ export function isPhaseLeaseOutcome(value: unknown): value is PhaseLeaseOutcome 
       isRevision(value.leaseRevision) &&
       isBoundedString(value.phaseId, MAX_ID_LENGTH) &&
       (value.lease === null ||
-        (isPhaseLease(value.lease) && value.lease.phaseId === value.phaseId))
+        (isPhaseLease(value.lease) && value.lease.phaseId === value.phaseId)) &&
+      (status !== "released" || value.lease === null)
     );
   }
   if (
@@ -411,6 +468,19 @@ function isTimestamp(value: unknown): value is string {
 
 function isBoundedString(value: unknown, maximum: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= maximum;
+}
+
+
+
+
+
+function isSafeRelativePath(value: unknown): value is string {
+  if (!isBoundedString(value, MAX_PROJECT_KEY_LENGTH) || value.includes("\0")) return false;
+  if (/^(?:[a-zA-Z]:|[\\/])/.test(value)) return false;
+  return value
+    .replace(/\\/g, "/")
+    .split("/")
+    .every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
 }
 
 function isRecordWithExactKeys<const Keys extends readonly string[]>(

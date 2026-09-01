@@ -63,4 +63,56 @@ describe("phase binding route", () => {
   ] as const)("maps %o to HTTP %s", (outcome, status) => {
     expect(phaseBindingHttpStatus(outcome as PhaseBindingOutcome)).toBe(status);
   });
+  it("rejects caller-supplied V2 predecessor proof", () => {
+    expect(
+      parsePhaseBindingBody({
+        version: 2,
+        action: "takeover",
+        phaseId: "phase-1",
+        expectedProjectKey: "c:/work/project",
+        expectedRevision: 4,
+        planId: "plan-1",
+        operationId: "operation-2",
+        lease: { leaseId: "lease-1", fence: 1 },
+        confirmTakeover: true,
+        takeoverReason: "caller takeover",
+        predecessorProof: {
+          daemonInstanceId: "daemon-a",
+          processId: 42,
+          processStartToken: "start-a",
+          terminatedAt: "2026-08-30T10:00:00.000Z",
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it.each([
+    [
+      {
+        status: "committed",
+        revision: 5,
+        phaseId: "phase-1",
+        previousSession: body.expectedPreviousSession,
+        session: body.expectedPreviousSession,
+      },
+      200,
+    ],
+    [
+      {
+        status: "already-bound",
+        revision: 5,
+        phaseId: "phase-1",
+        session: body.expectedPreviousSession,
+      },
+      200,
+    ],
+    [{ status: "phase-not-found" }, 404],
+    [{ status: "missing" }, 404],
+    [{ status: "stale-revision", revision: 5 }, 409],
+    [{ status: "missing-session-path" }, 409],
+    [{ status: "corrupt", primary: "malformed-json", backup: null }, 500],
+  ] as const)("maps %o to HTTP %s", (outcome, status) => {
+    expect(phaseBindingHttpStatus(outcome as PhaseBindingOutcome)).toBe(status);
+  });
+
 });

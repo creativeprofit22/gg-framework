@@ -119,6 +119,10 @@ export interface NotesApprovedPlanV1 {
   steps: NotesPlanStepV1[];
 }
 
+export interface NotesPhaseExecutionV1 {
+  lastSession: NotesSessionLink | null;
+}
+
 /** Durable/reference consumers may omit capture provenance but share all source semantics. */
 export type NotesReferenceProjection = Omit<NotesReference, "capturedAt">;
 
@@ -439,6 +443,8 @@ export interface NotesPhase {
   sourcePrompt: string;
   referenceIds: string[];
   session: NotesSessionLink | null;
+  /** Durable implementation transcript; absent only before additive v3 migration. */
+  execution?: NotesPhaseExecutionV1 | null;
   reminder: NotesReminder | null;
   attentionReason: string | null;
   createdAt: string;
@@ -703,6 +709,7 @@ const PHASE_KEYS = [
   "sourcePrompt",
   "referenceIds",
   "session",
+  "execution",
   "reminder",
   "attentionReason",
   "createdAt",
@@ -714,13 +721,15 @@ const PHASE_KEYS = [
   "lifecycleEvents",
   "roadmapEvents",
 ];
-const LEGACY_V3_PHASE_REQUIRED_KEYS = PHASE_KEYS.filter(
+const PHASE_KEYS_WITHOUT_EXECUTION = PHASE_KEYS.filter((key) => key !== "execution");
+const LEGACY_V3_PHASE_REQUIRED_KEYS = PHASE_KEYS_WITHOUT_EXECUTION.filter(
   (key) =>
     key !== "archivedAt" &&
     key !== "pendingAutomaticLifecycleTransition" &&
     key !== "roadmapEvents",
 );
 const SESSION_KEYS = ["sessionId", "sessionPath"];
+const PHASE_EXECUTION_KEYS = ["lastSession"];
 const LEGACY_REMINDER_KEYS = ["id", "dueAt", "note", "createdAt"];
 const REMINDER_KEYS = ["id", "occurrenceKey", "dueAt", "note", "createdAt", "lastDelivery"];
 const REMINDER_DELIVERY_KEYS = ["occurrenceKey", "attemptedAt", "channel", "permission"];
@@ -1578,8 +1587,14 @@ function validatePhase(
   knownPhaseIds: ReadonlySet<string>,
 ): NotesValidationError | null {
   const pathPrefix = `phases[${index}]`;
-  if (!isRecordWithKeys(value, PHASE_KEYS)) {
-    return validationError(pathPrefix, `expected exactly: ${PHASE_KEYS.join(", ")}`);
+  if (
+    !isRecord(value) ||
+    (!hasExactKeys(value, PHASE_KEYS) && !hasExactKeys(value, PHASE_KEYS_WITHOUT_EXECUTION))
+  ) {
+    return validationError(
+      pathPrefix,
+      `expected exactly: ${PHASE_KEYS.join(", ")} (execution may be omitted)`,
+    );
   }
   if (!isNonEmptyString(value.id))
     return validationError(`${pathPrefix}.id`, "expected a stable ID");
@@ -1607,6 +1622,19 @@ function validatePhase(
   if (referenceIdsError) return referenceIdsError;
   const sessionError = validateNotesSessionLink(value.session, `${pathPrefix}.session`);
   if (sessionError) return sessionError;
+  if (value.execution !== undefined && value.execution !== null) {
+    if (!isRecordWithKeys(value.execution, PHASE_EXECUTION_KEYS)) {
+      return validationError(
+        `${pathPrefix}.execution`,
+        "expected lastSession or null",
+      );
+    }
+    const executionSessionError = validateNotesSessionLink(
+      value.execution.lastSession,
+      `${pathPrefix}.execution.lastSession`,
+    );
+    if (executionSessionError) return executionSessionError;
+  }
   const reminderError = validateReminder(value.reminder, `${pathPrefix}.reminder`);
   if (reminderError) return reminderError;
   if (!isNullableNonEmptyString(value.attentionReason)) {

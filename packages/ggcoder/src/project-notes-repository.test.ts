@@ -888,12 +888,19 @@ describe("ProjectNotesRepository phase binding compare-and-swap", () => {
   const sessionA = { sessionId: "session-a", sessionPath: "/sessions/a.jsonl" };
   const sessionB = { sessionId: "session-b", sessionPath: "/sessions/b.jsonl" };
 
-  async function bindingRepository(name: string, session: typeof sessionA | null) {
+  async function bindingRepository(
+    name: string,
+    session: typeof sessionA | null,
+    executionSession?: typeof sessionA,
+  ) {
     const agentDir = await tempAgentDir();
     const cwd = path.join(agentDir, name);
     const document = notes();
     document.phases[0]!.session = session;
     document.phases[0]!.overrides.status = null;
+    if (executionSession) {
+      document.phases[0]!.execution = { lastSession: executionSession };
+    }
     await new ProjectNotesRepository(agentDir).migrate(cwd, document);
     return { cwd, repository: new ProjectNotesRepository(agentDir) };
   }
@@ -951,6 +958,32 @@ describe("ProjectNotesRepository phase binding compare-and-swap", () => {
             },
           ],
         },
+      },
+    });
+  });
+
+  it("moves execution and compatibility sessions with semantic replay safety", async () => {
+    const { cwd, repository } = await bindingRepository(
+      "rebind-execution-session",
+      sessionA,
+      sessionA,
+    );
+
+    await expect(repository.bindPhaseToCurrentSession(cwd, request(cwd))).resolves.toMatchObject({
+      status: "committed",
+      revision: 2,
+    });
+    await expect(
+      repository.bindPhaseToCurrentSession(
+        cwd,
+        request(cwd, { operationId: "semantic-replay", expectedRevision: 1 }),
+      ),
+    ).resolves.toMatchObject({ status: "already-bound", revision: 2, session: sessionB });
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: {
+        revision: 2,
+        document: { phases: [{ session: sessionB, execution: { lastSession: sessionB } }] },
       },
     });
   });

@@ -176,7 +176,11 @@ vi.mock("./agent", async (importOriginal) => {
   };
 });
 
-import { AgentPane, noInputSlashSubmissionError } from "./AgentPane";
+import {
+  AgentPane,
+  noInputSlashSubmissionError,
+  preferredRoadmapPhaseSession,
+} from "./AgentPane";
 import { NewSessionError, PlanMutationError } from "./agent";
 import type { Item, PaneInputActions, PaneSnapshot } from "./AgentPane";
 import type { AgentState, PaneAgentClient, PaneSessionTarget } from "./agent";
@@ -382,6 +386,23 @@ afterEach(() => {
   nativeMocks.appUpdate.localPatched = true;
   nativeMocks.appUpdate.install.mockReset();
   vi.useRealTimers();
+});
+
+describe("preferredRoadmapPhaseSession", () => {
+  it("prefers the execution transcript and falls back to the compatibility session", () => {
+    const compatibility = { sessionId: "planning", sessionPath: "/planning.jsonl" };
+    const implementation = { sessionId: "implementation", sessionPath: "/implementation.jsonl" };
+
+    expect(
+      preferredRoadmapPhaseSession(
+        { session: compatibility, execution: { lastSession: implementation } },
+        compatibility,
+      ),
+    ).toBe(implementation);
+    expect(preferredRoadmapPhaseSession({ session: compatibility }, implementation)).toBe(
+      compatibility,
+    );
+  });
 });
 
 describe("AgentPane automatic update footer banner", () => {

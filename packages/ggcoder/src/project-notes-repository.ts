@@ -2339,6 +2339,17 @@ export class ProjectNotesRepository {
 
     return this.withLockedCurrent(cwd, async (paths, current) => {
       const revision = current.revision;
+      if (current.projectKey !== request.expectedProjectKey) {
+        return { status: "project-mismatch", revision, currentProjectKey: current.projectKey };
+      }
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const executionSession = currentPhase.execution?.lastSession ?? null;
+      const alreadyBound =
+        notesSessionLinksEqual(currentPhase.session, request.destinationSession) &&
+        (!currentPhase.execution ||
+          notesSessionLinksEqual(executionSession, request.destinationSession));
       for (const candidate of current.document.phases) {
         const prior = candidate.roadmapEvents.find((event) => event.id === request.operationId);
         if (!prior) continue;
@@ -2357,19 +2368,17 @@ export class ProjectNotesRepository {
             session: structuredClone(prior.session),
           };
         }
+        if (alreadyBound) {
+          return {
+            status: "already-bound",
+            revision,
+            phaseId: request.phaseId,
+            session: structuredClone(request.destinationSession),
+          };
+        }
         return { status: "duplicate-id-conflict", revision };
       }
-
-      if (current.projectKey !== request.expectedProjectKey) {
-        return { status: "project-mismatch", revision, currentProjectKey: current.projectKey };
-      }
-      if (revision !== request.expectedRevision) return { status: "stale-revision", revision };
-      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
-      if (phaseIndex < 0) return { status: "phase-not-found" };
-      const currentPhase = current.document.phases[phaseIndex]!;
-      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
-      if (currentPhase.status === "done") return { status: "phase-terminal" };
-      if (notesSessionLinksEqual(currentPhase.session, request.destinationSession)) {
+      if (alreadyBound) {
         return {
           status: "already-bound",
           revision,
@@ -2377,11 +2386,21 @@ export class ProjectNotesRepository {
           session: structuredClone(request.destinationSession),
         };
       }
-      if (!notesSessionLinksEqual(currentPhase.session, request.expectedPreviousSession)) {
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (currentPhase.status === "done") return { status: "phase-terminal" };
+      if (revision !== request.expectedRevision) return { status: "stale-revision", revision };
+      const compatibilityCanMove =
+        notesSessionLinksEqual(currentPhase.session, request.expectedPreviousSession) ||
+        notesSessionLinksEqual(currentPhase.session, request.destinationSession);
+      const executionCanMove =
+        !currentPhase.execution ||
+        notesSessionLinksEqual(executionSession, request.expectedPreviousSession) ||
+        notesSessionLinksEqual(executionSession, request.destinationSession);
+      if (!compatibilityCanMove || !executionCanMove) {
         return {
           status: "stale-previous-session",
           revision,
-          currentSession: structuredClone(currentPhase.session),
+          currentSession: structuredClone(executionSession ?? currentPhase.session),
         };
       }
 
@@ -2398,6 +2417,9 @@ export class ProjectNotesRepository {
         timestamp,
       };
       phase.session = structuredClone(request.destinationSession);
+      if (phase.execution) {
+        phase.execution.lastSession = structuredClone(request.destinationSession);
+      }
       phase.roadmapEvents.push(binding);
       phase.updatedAt = timestamp;
       document.updatedAt = timestamp;

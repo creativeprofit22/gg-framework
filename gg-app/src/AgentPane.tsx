@@ -550,6 +550,18 @@ export interface AgentPaneProps {
   onLifecycleError?: (error: unknown) => void;
 }
 
+export function preferredRoadmapPhaseSession(
+  phase:
+    | {
+        session: NotesSessionLink | null;
+        execution?: { lastSession: NotesSessionLink | null } | null;
+      }
+    | undefined,
+  compatibilitySession: NotesSessionLink,
+): NotesSessionLink {
+  return phase?.execution?.lastSession ?? phase?.session ?? compatibilitySession;
+}
+
 export function AgentPane(props: AgentPaneProps): React.ReactElement {
   const paneId = props.paneId ?? props.client?.paneId ?? "primary";
   const kind = props.kind ?? (paneId === "primary" ? "primary" : "auxiliary");
@@ -3184,6 +3196,17 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
       }
       const currentCwd = stateRef.current?.cwd;
       if (!currentCwd) throw new Error("The project session is not ready.");
+      try {
+        const opened = await client.getNotes();
+        if (opened.status === "ok") {
+          link = preferredRoadmapPhaseSession(
+            opened.snapshot.document.phases.find((phase) => phase.id === phaseId),
+            link,
+          );
+        }
+      } catch {
+        // Compatibility: legacy Resume remains available when Notes cannot be refreshed.
+      }
       if (link.sessionPath === null) {
         const recovered = await startRoadmapPhase(phaseId);
         if (recovered.status === "failed") throw new Error(recovered.message);

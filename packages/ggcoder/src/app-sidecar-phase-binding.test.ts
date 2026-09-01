@@ -161,13 +161,13 @@ describe("app sidecar phase binding service", () => {
       status: "stale-revision",
       revision: 2,
     });
-    expect(session.setCalls).toHaveLength(1);
-    expect(session.clearReasons).toEqual(["binding-compensation"]);
+    expect(session.setCalls).toHaveLength(0);
+    expect(session.clearReasons).toEqual([]);
     expect(session.active).toBeUndefined();
     expect(onCommittedSnapshot).not.toHaveBeenCalled();
   });
 
-  it("does not call the repository when context persistence fails", async () => {
+  it("keeps authoritative Notes committed when context persistence fails", async () => {
     const { cwd, repository } = await setup("context-failure");
     const bindPhaseToCurrentSession = vi.fn(repository.bindPhaseToCurrentSession.bind(repository));
     const service = createAppSidecarPhaseBindingService({
@@ -179,7 +179,11 @@ describe("app sidecar phase binding service", () => {
     });
 
     await expect(service.bind(request(cwd), session)).rejects.toThrow("transcript append failed");
-    expect(bindPhaseToCurrentSession).not.toHaveBeenCalled();
+    expect(bindPhaseToCurrentSession).toHaveBeenCalledOnce();
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2, document: { phases: [{ session: sessionB }] } },
+    });
   });
 
   it("clears a former session after restoration detects a rebind", async () => {

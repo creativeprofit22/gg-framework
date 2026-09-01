@@ -64,7 +64,6 @@ export function createAppSidecarPhaseBindingService(
         session: destinationSession,
         executionStage: "implementing",
       });
-      await session.setActivePhaseContext(activeContext);
       const repositoryRequest: ProjectNotesPhaseBindingRequest = {
         action: request.action,
         phaseId: request.phaseId,
@@ -75,12 +74,17 @@ export function createAppSidecarPhaseBindingService(
         destinationSession,
         timestamp: now(),
       };
-      let outcome: PhaseBindingOutcome;
-      try {
-        outcome = await options.repository.bindPhaseToCurrentSession(state.cwd, repositoryRequest);
-      } catch (error) {
-        await clearSessionContext(session, "binding-compensation");
-        throw error;
+      const outcome = await options.repository.bindPhaseToCurrentSession(
+        state.cwd,
+        repositoryRequest,
+      );
+      if (
+        outcome.status === "committed" ||
+        outcome.status === "duplicate" ||
+        outcome.status === "already-bound"
+      ) {
+        // Notes commits first. A marker failure can be retried without leaving a losing session active.
+        await session.setActivePhaseContext(activeContext);
       }
       if (outcome.status === "committed") {
         await publishCommittedNotesSnapshot(
@@ -89,8 +93,6 @@ export function createAppSidecarPhaseBindingService(
           outcome.revision,
           options.onCommittedSnapshot,
         );
-      } else if (outcome.status !== "duplicate" && outcome.status !== "already-bound") {
-        await clearSessionContext(session, "binding-compensation");
       }
       return outcome;
     },

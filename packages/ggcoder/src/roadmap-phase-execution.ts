@@ -45,6 +45,12 @@ export interface LegacyPlanImportIdentity {
   planSessionPath: string | null;
 }
 
+export interface PlanReconciliationResult {
+  steps: NotesPlanStepV1[];
+  changed: boolean;
+  needsRevalidation: string[];
+}
+
 export type PlanSnapshotResumeCode = "plan-snapshot-missing" | "reconciliation-required";
 
 export class PlanSnapshotResumeError extends Error {
@@ -212,6 +218,27 @@ export function workspaceSnapshotsEqual(
   );
 }
 
+export function reconcilePlanSteps(
+  steps: readonly NotesPlanStepV1[],
+  current: NotesWorkspaceSnapshotV1,
+  isAncestor: (commit: string, descendant: string) => boolean,
+): PlanReconciliationResult {
+  const needsRevalidation: string[] = [];
+  let changed = false;
+  const reconciled = steps.map((step) => {
+    if (step.state === "pending" || step.workspace === null) return step;
+    const valid = step.workspace.clean
+      ? isAncestor(step.workspace.headCommit, current.headCommit)
+      : workspaceSnapshotsEqual(step.workspace, current);
+    if (valid) return step;
+    needsRevalidation.push(step.id);
+    if (step.state === "needs-revalidation") return step;
+    changed = true;
+    return { ...step, state: "needs-revalidation" as const };
+  });
+  return { steps: changed ? reconciled : [...steps], changed, needsRevalidation };
+}
+
 export function isEvidenceCurrent(
   evidence: NotesVerificationEvidenceV1,
   current: NotesWorkspaceSnapshotV1,
@@ -267,6 +294,19 @@ export async function captureRepositoryIdentity(
     JSON.stringify({ roots, remote: remote ? normalizeRemoteIdentity(remote) : null }),
   );
   return { projectKey, identityHash, rootCommit: roots.length === 1 ? roots[0]! : null };
+}
+
+export async function isGitAncestor(
+  cwd: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  try {
+    await runGit(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 interface WorktreeCapture {

@@ -1,6 +1,10 @@
 import {
+  isNotesRepositoryIdentityV1,
   isNotesSessionLink,
+  isNotesWorkspaceSnapshotV1,
+  type NotesRepositoryIdentityV1,
   type NotesSessionLink,
+  type NotesWorkspaceSnapshotV1,
   type ProjectNotesCorruptReason,
 } from "./project-notes.js";
 
@@ -124,7 +128,60 @@ export type PhaseLeaseOutcome =
       backup: ProjectNotesCorruptReason | null;
     };
 
+export interface PhaseExecutionPlanExpectationV1 {
+  planId: string;
+  contentHash: string;
+  snapshotPath: string;
+  approvedAt: string;
+  approvedRevision: number;
+  baseCommit: string | null;
+}
 
+export interface PhaseExecutionReconciliationRequestV3 {
+  version: 3;
+  action: "reconcile-execution";
+  phaseId: string;
+  expectedProjectKey: string;
+  expectedRevision: number;
+  operationId: string;
+  repository: NotesRepositoryIdentityV1;
+  plan: PhaseExecutionPlanExpectationV1;
+  workspace: NotesWorkspaceSnapshotV1;
+}
+
+export type PhaseExecutionReconciliationOutcome =
+  | {
+      status: "reconciled" | "duplicate";
+      revision: number;
+      phaseId: string;
+      preservedStepIds: string[];
+      revalidationStepIds: string[];
+      revalidationEvidenceCount: number;
+      reconciledAt: string;
+    }
+  | { status: "stale-revision" | "operation-conflict"; revision: number }
+  | { status: "project-mismatch"; revision: number; currentProjectKey: string }
+  | {
+      status:
+        | "phase-not-found"
+        | "phase-archived"
+        | "phase-terminal"
+        | "execution-missing"
+        | "reconciliation-not-required"
+        | "repository-mismatch"
+        | "plan-mismatch"
+        | "plan-hash-mismatch"
+        | "workspace-mismatch"
+        | "phase-lease-lost"
+        | "lease-corrupt"
+        | "missing-session-path";
+    }
+  | { status: "missing" }
+  | {
+      status: "corrupt";
+      primary: ProjectNotesCorruptReason | null;
+      backup: ProjectNotesCorruptReason | null;
+    };
 
 const REQUEST_KEYS = [
   "version",
@@ -207,7 +264,87 @@ const CORRUPT_REASONS: ReadonlySet<string> = new Set([
 ]);
 const MAX_ID_LENGTH = 256;
 const MAX_PROJECT_KEY_LENGTH = 4096;
+export function isPhaseExecutionReconciliationRequestV3(
+  value: unknown,
+): value is PhaseExecutionReconciliationRequestV3 {
+  if (!isRecordWithExactKeys(value, RECONCILIATION_REQUEST_KEYS)) return false;
+  const plan = value.plan;
+  return (
+    value.version === 3 &&
+    value.action === "reconcile-execution" &&
+    isBoundedString(value.phaseId, MAX_ID_LENGTH) &&
+    isBoundedString(value.expectedProjectKey, MAX_PROJECT_KEY_LENGTH) &&
+    isRevision(value.expectedRevision) &&
+    isBoundedString(value.operationId, MAX_ID_LENGTH) &&
+    isNotesRepositoryIdentityV1(value.repository) &&
+    isRecordWithExactKeys(plan, RECONCILIATION_PLAN_KEYS) &&
+    isBoundedString(plan.planId, MAX_ID_LENGTH) &&
+    isSha256(plan.contentHash) &&
+    isSafeRelativePath(plan.snapshotPath) &&
+    isTimestamp(plan.approvedAt) &&
+    isRevision(plan.approvedRevision) &&
+    (plan.baseCommit === null || isGitCommit(plan.baseCommit)) &&
+    isNotesWorkspaceSnapshotV1(value.workspace) &&
+    sameRepository(value.repository, value.workspace.repository)
+  );
+}
 
+export function isPhaseExecutionReconciliationOutcome(
+  value: unknown,
+): value is PhaseExecutionReconciliationOutcome {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  const status = candidate.status;
+  if (status === "reconciled" || status === "duplicate") {
+    return (
+      isRecordWithExactKeys(candidate, RECONCILIATION_SUCCESS_KEYS) &&
+      isRevision(candidate.revision) &&
+      isBoundedString(candidate.phaseId, MAX_ID_LENGTH) &&
+      isBoundedStringArray(candidate.preservedStepIds) &&
+      isBoundedStringArray(candidate.revalidationStepIds) &&
+      isRevision(candidate.revalidationEvidenceCount) &&
+      isTimestamp(candidate.reconciledAt)
+    );
+  }
+  if (status === "stale-revision" || status === "operation-conflict") {
+    return isRecordWithExactKeys(candidate, REVISION_KEYS) && isRevision(candidate.revision);
+  }
+  if (status === "project-mismatch") {
+    return (
+      isRecordWithExactKeys(candidate, PROJECT_MISMATCH_KEYS) &&
+      isRevision(candidate.revision) &&
+      isBoundedString(candidate.currentProjectKey, MAX_PROJECT_KEY_LENGTH)
+    );
+  }
+  if (status === "corrupt") {
+    return (
+      isRecordWithExactKeys(candidate, CORRUPT_KEYS) &&
+      (candidate.primary === null ||
+        (typeof candidate.primary === "string" && CORRUPT_REASONS.has(candidate.primary))) &&
+      (candidate.backup === null ||
+        (typeof candidate.backup === "string" && CORRUPT_REASONS.has(candidate.backup)))
+    );
+  }
+  return (
+    typeof status === "string" &&
+    [
+      "phase-not-found",
+      "phase-archived",
+      "phase-terminal",
+      "execution-missing",
+      "reconciliation-not-required",
+      "repository-mismatch",
+      "plan-mismatch",
+      "plan-hash-mismatch",
+      "workspace-mismatch",
+      "phase-lease-lost",
+      "lease-corrupt",
+      "missing-session-path",
+      "missing",
+    ].includes(status) &&
+    isRecordWithExactKeys(candidate, STATUS_KEYS)
+  );
+}
 
 export function isPhaseBindingProtocolRequest(
   value: unknown,
@@ -467,6 +604,41 @@ function isBoundedString(value: unknown, maximum: number): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.length <= maximum;
 }
 
+function isBoundedStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 10_000 &&
+    value.every((item) => isBoundedString(item, MAX_ID_LENGTH))
+  );
+}
+
+function sameRepository(
+  left: NotesRepositoryIdentityV1,
+  right: NotesRepositoryIdentityV1,
+): boolean {
+  return (
+    left.projectKey === right.projectKey &&
+    left.identityHash === right.identityHash &&
+    left.rootCommit === right.rootCommit
+  );
+}
+
+function isSha256(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function isGitCommit(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
+}
+
+function isSafeRelativePath(value: unknown): value is string {
+  if (!isBoundedString(value, MAX_PROJECT_KEY_LENGTH) || value.includes("\0")) return false;
+  if (/^(?:[a-zA-Z]:|[\\/])/.test(value)) return false;
+  return value
+    .replace(/\\/g, "/")
+    .split("/")
+    .every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
 
 function isRecordWithExactKeys<const Keys extends readonly string[]>(
   value: unknown,

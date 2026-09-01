@@ -9,6 +9,8 @@ import type {
 import type {
   PhaseBindingAction,
   PhaseBindingOutcome,
+  PhaseExecutionReconciliationOutcome,
+  PhaseExecutionReconciliationRequestV3,
 } from "@kenkaiiii/gg-core/phase-binding-protocol";
 import { withFileLock } from "@kenkaiiii/gg-core";
 import {
@@ -79,7 +81,7 @@ import {
   evaluateManualCompletionApproval,
   type PhaseCompletionEvaluation,
 } from "./project-notes-completion-policy.js";
-import { workspaceSnapshotsEqual } from "./roadmap-phase-execution.js";
+import { reconcilePlanSteps, workspaceSnapshotsEqual } from "./roadmap-phase-execution.js";
 
 export interface StoredProjectNotesV1 {
   storeVersion: 1;
@@ -381,6 +383,26 @@ export interface ProjectNotesExecutionReconciliationRequiredRequest {
   planHash: string;
   timestamp: string;
 }
+
+export interface ProjectNotesExecutionReconciliationRequest extends PhaseExecutionReconciliationRequestV3 {
+  currentWorkspace: NotesWorkspaceSnapshotV1;
+  cleanAncestorStepIds: string[];
+  reconciledAt: string;
+}
+
+type ProjectNotesExecutionReconciliationSuccess = Extract<
+  PhaseExecutionReconciliationOutcome,
+  { status: "reconciled" | "duplicate" }
+>;
+
+export type ProjectNotesExecutionReconciliationOutcome =
+  | Exclude<PhaseExecutionReconciliationOutcome, ProjectNotesExecutionReconciliationSuccess>
+  | (Omit<ProjectNotesExecutionReconciliationSuccess, "status"> & {
+      status: "reconciled";
+      snapshot: ProjectNotesSnapshot;
+      phase: NotesPhase;
+    })
+  | (Omit<ProjectNotesExecutionReconciliationSuccess, "status"> & { status: "duplicate" });
 
 export interface ProjectNotesExecutionStepRequest {
   phaseId: string;
@@ -1380,6 +1402,38 @@ function sameDurableCompletionPayload(
   return isDeepStrictEqual(stored, request.durableCompletion);
 }
 
+function reconciliationSummary(phase: NotesPhase): {
+  preservedStepIds: string[];
+  revalidationStepIds: string[];
+  revalidationEvidenceCount: number;
+  reconciledAt: string;
+} {
+  const execution = phase.execution!;
+  return {
+    preservedStepIds: execution
+      .plan!.steps.filter((step) => step.state === "completed")
+      .map((step) => step.id),
+    revalidationStepIds: execution
+      .plan!.steps.filter((step) => step.state === "needs-revalidation")
+      .map((step) => step.id),
+    revalidationEvidenceCount: execution.evidence.filter(
+      (evidence) => evidence.state === "needs-revalidation",
+    ).length,
+    reconciledAt: execution.migration.reconciledAt ?? phase.updatedAt,
+  };
+}
+
+function reconciliationDuplicateOutcome(
+  phase: NotesPhase,
+  revision: number,
+): Omit<ProjectNotesExecutionReconciliationSuccess, "status"> & { status: "duplicate" } {
+  return {
+    status: "duplicate",
+    revision,
+    phaseId: phase.id,
+    ...reconciliationSummary(phase),
+  };
+}
 export class ProjectNotesRepository {
   private readonly fileSystem: ProjectNotesFileSystem;
   private readonly lock: <T>(filePath: string, operation: () => Promise<T>) => Promise<T>;
@@ -1911,6 +1965,112 @@ export class ProjectNotesRepository {
     });
   }
 
+  async reconcilePhaseExecution(
+    cwd: string,
+    request: ProjectNotesExecutionReconciliationRequest,
+  ): Promise<ProjectNotesExecutionReconciliationOutcome> {
+    return this.withLockedCurrent(cwd, async (paths, current) => {
+      const revision = current.revision;
+      if (request.expectedProjectKey !== current.projectKey) {
+        return { status: "project-mismatch", revision, currentProjectKey: current.projectKey };
+      }
+      const phaseIndex = current.document.phases.findIndex((phase) => phase.id === request.phaseId);
+      if (phaseIndex < 0) return { status: "phase-not-found" };
+      const currentPhase = current.document.phases[phaseIndex]!;
+      const execution = currentPhase.execution;
+      if (!execution?.plan) return { status: "execution-missing" };
+
+      const requestHash = createHash("sha256")
+        .update(
+          JSON.stringify({
+            phaseId: request.phaseId,
+            expectedProjectKey: request.expectedProjectKey,
+            expectedRevision: request.expectedRevision,
+            repository: request.repository,
+            plan: request.plan,
+            workspace: request.workspace,
+          }),
+        )
+        .digest("hex");
+      if (execution.migration.reconciliation?.operationId === request.operationId) {
+        if (execution.migration.reconciliation.requestHash !== requestHash) {
+          return { status: "operation-conflict", revision };
+        }
+        return reconciliationDuplicateOutcome(currentPhase, revision);
+      }
+
+      if (!isDeepStrictEqual(execution.repository, request.repository)) {
+        return { status: "repository-mismatch" };
+      }
+      if (execution.plan.planId !== request.plan.planId) return { status: "plan-mismatch" };
+      if (execution.plan.contentHash !== request.plan.contentHash) {
+        return { status: "plan-hash-mismatch" };
+      }
+      if (
+        execution.plan.snapshotPath !== request.plan.snapshotPath ||
+        execution.plan.approvedAt !== request.plan.approvedAt ||
+        execution.plan.approvedRevision !== request.plan.approvedRevision ||
+        execution.plan.baseCommit !== request.plan.baseCommit
+      ) {
+        return { status: "plan-mismatch" };
+      }
+      if (!isDeepStrictEqual(request.workspace, request.currentWorkspace)) {
+        return { status: "workspace-mismatch" };
+      }
+      if (!isDeepStrictEqual(execution.repository, request.currentWorkspace.repository)) {
+        return { status: "repository-mismatch" };
+      }
+      if (request.expectedRevision !== revision) return { status: "stale-revision", revision };
+      if (currentPhase.archivedAt !== null) return { status: "phase-archived" };
+      if (currentPhase.status === "done" || currentPhase.status === "cancelled") {
+        return { status: "phase-terminal" };
+      }
+      if (execution.state !== "needs-reconciliation") {
+        return { status: "reconciliation-not-required" };
+      }
+
+      const ancestorPairs = new Set(
+        execution.plan.steps.flatMap((step) => {
+          if (!request.cleanAncestorStepIds.includes(step.id) || !step.workspace?.clean) return [];
+          return [`${step.workspace.headCommit}\0${request.currentWorkspace.headCommit}`];
+        }),
+      );
+      const reconciledSteps = reconcilePlanSteps(
+        execution.plan.steps,
+        request.currentWorkspace,
+        (ancestor, descendant) => ancestorPairs.has(`${ancestor}\0${descendant}`),
+      );
+      const document = structuredClone(current.document);
+      const phase = document.phases[phaseIndex]!;
+      const nextExecution = phase.execution!;
+      nextExecution.plan!.steps = reconciledSteps.steps;
+      nextExecution.evidence = nextExecution.evidence.map((evidence) =>
+        evidence.state !== "needs-revalidation" &&
+        workspaceSnapshotsEqual(evidence.workspace, request.currentWorkspace)
+          ? evidence
+          : { ...evidence, state: "needs-revalidation" as const },
+      );
+      nextExecution.state = "implementing";
+      nextExecution.pendingCompletion = null;
+      nextExecution.migration.reconciledAt = request.reconciledAt;
+      nextExecution.migration.reconciliation = { operationId: request.operationId, requestHash };
+      const timestamp = chronologicalRoadmapTimestamp(phase, request.reconciledAt);
+      phase.updatedAt = timestamp;
+      document.updatedAt = timestamp;
+      const next = await this.commitDocument(paths, current, document, {
+        validationMode: "validated",
+        context: "Phase execution reconciliation created invalid Notes",
+      });
+      return {
+        status: "reconciled",
+        revision: next.revision,
+        phaseId: phase.id,
+        ...reconciliationSummary(phase),
+        snapshot: toSnapshot(next),
+        phase: structuredClone(phase),
+      };
+    });
+  }
   async checkpointPhaseExecutionStep(
     cwd: string,
     request: ProjectNotesExecutionStepRequest,

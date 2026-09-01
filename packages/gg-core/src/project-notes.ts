@@ -158,6 +158,7 @@ export interface NotesPhaseExecutionV1 {
   migration: {
     source: "native" | "legacy-session";
     reconciledAt: string | null;
+    reconciliation?: { operationId: string; requestHash: string };
   };
 }
 
@@ -805,6 +806,8 @@ const PENDING_COMPLETION_KEYS = [
 ];
 const RUN_JOURNAL_KEYS = ["sessionPath", "generation"];
 const EXECUTION_MIGRATION_KEYS = ["source", "reconciledAt"];
+const EXECUTION_RECONCILIATION_KEYS = ["operationId", "requestHash"];
+const EXECUTION_MIGRATION_RECONCILIATION_KEYS = [...EXECUTION_MIGRATION_KEYS, "reconciliation"];
 const PHASE_EXECUTION_KEYS = [
   "version",
   "state",
@@ -1730,7 +1733,7 @@ export function validateNotesPhaseExecution(
   if (sessionError) return sessionError;
   if (
     !isRecordWithKeys(value.migration, EXECUTION_MIGRATION_KEYS) &&
-    !isRecordWithKeys(value.migration, EXECUTION_MIGRATION_KEYS)
+    !isRecordWithKeys(value.migration, EXECUTION_MIGRATION_RECONCILIATION_KEYS)
   ) {
     return validationError(`${pathPrefix}.migration`, "invalid migration marker");
   }
@@ -1740,7 +1743,20 @@ export function validateNotesPhaseExecution(
   if (!isNullableTimestamp(value.migration.reconciledAt)) {
     return validationError(`${pathPrefix}.migration.reconciledAt`, "expected an ISO timestamp or null");
   }
-
+  if ("reconciliation" in value.migration) {
+    if (!isRecordWithKeys(value.migration.reconciliation, EXECUTION_RECONCILIATION_KEYS)) {
+      return validationError(`${pathPrefix}.migration.reconciliation`, "invalid reconciliation marker");
+    }
+    if (!isBoundedNonEmptyString(value.migration.reconciliation.operationId, 256)) {
+      return validationError(`${pathPrefix}.migration.reconciliation.operationId`, "expected a bounded operation ID");
+    }
+    if (!isSha256(value.migration.reconciliation.requestHash)) {
+      return validationError(`${pathPrefix}.migration.reconciliation.requestHash`, "expected a lowercase SHA-256 hash");
+    }
+    if (value.migration.reconciledAt === null) {
+      return validationError(`${pathPrefix}.migration.reconciledAt`, "required with reconciliation metadata");
+    }
+  }
   return null;
 }
 

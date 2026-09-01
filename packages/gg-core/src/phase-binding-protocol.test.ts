@@ -3,6 +3,8 @@ import {
   isPhaseBindingOutcome,
   isPhaseBindingProtocolRequest,
   isPhaseBindingRequest,
+  isPhaseExecutionReconciliationOutcome,
+  isPhaseExecutionReconciliationRequestV3,
   isPhaseLease,
   isPhaseLeaseOutcome,
   isPhaseLeaseRequest,
@@ -196,6 +198,83 @@ describe("phase lease protocol", () => {
         phaseId: "phase-2",
         lease,
       }),
+    ).toBe(false);
+  });
+});
+
+describe("phase execution reconciliation protocol", () => {
+  const repository = {
+    projectKey: "c:/work/project",
+    identityHash: "1".repeat(64),
+    rootCommit: "2".repeat(40),
+  };
+  const workspace = {
+    version: 1 as const,
+    repository,
+    headCommit: "3".repeat(40),
+    worktreeDigest: "4".repeat(64),
+    clean: true,
+  };
+  const reconciliation = {
+    version: 3,
+    action: "reconcile-execution",
+    phaseId: "phase-1",
+    expectedProjectKey: repository.projectKey,
+    expectedRevision: 7,
+    operationId: "reconcile-1",
+    repository,
+    plan: {
+      planId: "plan-1",
+      contentHash: "5".repeat(64),
+      snapshotPath: ".gg/plans/plan-1.md",
+      approvedAt: "2026-08-31T12:00:00.000Z",
+      approvedRevision: 6,
+      baseCommit: "2".repeat(40),
+    },
+    workspace,
+  };
+
+  it("accepts only exact, fully fenced requests", () => {
+    expect(isPhaseExecutionReconciliationRequestV3(reconciliation)).toBe(true);
+    expect(isPhaseExecutionReconciliationRequestV3({ ...reconciliation, extra: true })).toBe(false);
+    expect(
+      isPhaseExecutionReconciliationRequestV3({
+        ...reconciliation,
+        plan: { ...reconciliation.plan, contentHash: "wrong" },
+      }),
+    ).toBe(false);
+    expect(
+      isPhaseExecutionReconciliationRequestV3({
+        ...reconciliation,
+        workspace: { ...workspace, worktreeDigest: "wrong" },
+      }),
+    ).toBe(false);
+    expect(
+      isPhaseExecutionReconciliationRequestV3({
+        ...reconciliation,
+        workspace: {
+          ...workspace,
+          repository: { ...repository, identityHash: "9".repeat(64) },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts exact success and denial outcomes", () => {
+    expect(
+      isPhaseExecutionReconciliationOutcome({
+        status: "reconciled",
+        revision: 8,
+        phaseId: "phase-1",
+        preservedStepIds: ["step-1"],
+        revalidationStepIds: ["step-2"],
+        revalidationEvidenceCount: 1,
+        reconciledAt: "2026-08-31T12:01:00.000Z",
+      }),
+    ).toBe(true);
+    expect(isPhaseExecutionReconciliationOutcome({ status: "workspace-mismatch" })).toBe(true);
+    expect(
+      isPhaseExecutionReconciliationOutcome({ status: "workspace-mismatch", revision: 8 }),
     ).toBe(false);
   });
 });

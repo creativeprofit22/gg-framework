@@ -9,6 +9,8 @@ import {
 import type {
   PhaseBindingOutcome,
   PhaseBindingRequest,
+  PhaseExecutionReconciliationOutcome,
+  PhaseExecutionReconciliationRequestV3,
   PhaseLeaseHolderV1,
   PhaseLeaseOutcome,
   PhaseLeaseRequestV2,
@@ -27,6 +29,9 @@ import type {
   ProjectNotesRepository,
 } from "./project-notes-repository.js";
 import {
+  captureGitWorkspaceSnapshot,
+  isGitAncestor,
+  resolveExecutionPlanSnapshot,
 } from "./roadmap-phase-execution.js";
 import type {
   PhaseLeaseFenceInput,
@@ -48,6 +53,10 @@ export interface PhaseBindingSession {
 export interface AppSidecarPhaseBindingService {
   bind(request: PhaseBindingRequest, session: PhaseBindingSession): Promise<PhaseBindingOutcome>;
   lease(request: PhaseLeaseRequestV2, session: PhaseBindingSession): Promise<PhaseLeaseOutcome>;
+  reconcilePhaseExecution(
+    request: PhaseExecutionReconciliationRequestV3,
+    session: PhaseBindingSession,
+  ): Promise<PhaseExecutionReconciliationOutcome>;
   withLeaseFence<T>(
     session: PhaseBindingSession,
     operation: () => Promise<T>,
@@ -58,7 +67,7 @@ export interface AppSidecarPhaseBindingService {
 export interface AppSidecarPhaseBindingOptions {
   repository: Pick<
     ProjectNotesRepository,
-    "load" | "bindPhaseToCurrentSession"
+    "load" | "bindPhaseToCurrentSession" | "reconcilePhaseExecution"
   >;
   onCommittedSnapshot?: (snapshot: ProjectNotesSnapshot) => void;
   leaseRepository?: Pick<
@@ -70,6 +79,9 @@ export interface AppSidecarPhaseBindingOptions {
   processStartToken?: string;
   predecessorProof?: RoadmapPhaseLeasePredecessorProofV1;
   now?: () => string;
+  captureWorkspace?: typeof captureGitWorkspaceSnapshot;
+  resolvePlanSnapshot?: typeof resolveExecutionPlanSnapshot;
+  isAncestor?: typeof isGitAncestor;
 }
 
 export function createAppSidecarPhaseBindingService(
@@ -136,7 +148,9 @@ export function createAppSidecarPhaseBindingService(
       return executePhaseLease(options, request, session);
     },
 
-
+    async reconcilePhaseExecution(request, session) {
+      return executePhaseExecutionReconciliation(options, request, session, now);
+    },
     async withLeaseFence(session, operation) {
       if (!options.leaseRepository) return { status: "executed", value: await operation() };
       const state = session.getState();
@@ -340,6 +354,71 @@ function publicHolderMatches(
   );
 }
 
+async function executePhaseExecutionReconciliation(
+  options: AppSidecarPhaseBindingOptions,
+  request: PhaseExecutionReconciliationRequestV3,
+  session: PhaseBindingSession,
+  now: () => string,
+): Promise<PhaseExecutionReconciliationOutcome> {
+  const marker = session.getRoadmapPhaseLeaseMarker?.();
+  if (
+    !options.leaseRepository ||
+    !marker ||
+    marker.phaseId !== request.phaseId ||
+    marker.projectKey !== request.expectedProjectKey ||
+    marker.planId !== request.plan.planId ||
+    marker.planHash !== request.plan.contentHash
+  ) {
+    return { status: "phase-lease-lost" };
+  }
+  const state = session.getState();
+  const loaded = await options.repository.load(state.cwd);
+  if (loaded.status !== "ok") return loaded;
+  const phase = loaded.snapshot.document.phases.find((candidate) => candidate.id === request.phaseId);
+  if (!phase) return { status: "phase-not-found" };
+  if (!phase.execution?.plan) return { status: "execution-missing" };
+
+  const resolvePlanSnapshot = options.resolvePlanSnapshot ?? resolveExecutionPlanSnapshot;
+  const resolvedPlan = await resolvePlanSnapshot({ cwd: state.cwd, plan: phase.execution.plan });
+  if (resolvedPlan.status !== "ready") return { status: "plan-hash-mismatch" };
+
+  const captureWorkspace = options.captureWorkspace ?? captureGitWorkspaceSnapshot;
+  let currentWorkspace;
+  try {
+    currentWorkspace = await captureWorkspace(state.cwd, loaded.snapshot.projectKey);
+  } catch {
+    return { status: "workspace-mismatch" };
+  }
+  const isAncestor = options.isAncestor ?? isGitAncestor;
+  const cleanAncestorStepIds = (
+    await Promise.all(
+      phase.execution.plan.steps.map(async (step) =>
+        step.state === "completed" &&
+        step.workspace?.clean &&
+        (await isAncestor(state.cwd, step.workspace.headCommit, currentWorkspace.headCommit))
+          ? step.id
+          : null,
+      ),
+    )
+  ).filter((stepId): stepId is string => stepId !== null);
+
+  const commit = () =>
+    options.repository.reconcilePhaseExecution(state.cwd, {
+      ...request,
+      currentWorkspace,
+      cleanAncestorStepIds,
+      reconciledAt: now(),
+    });
+  const fenced = await executeLeaseFence(options, session, commit);
+  if (fenced.status !== "executed") {
+    return { status: fenced.status === "corrupt" ? "lease-corrupt" : fenced.status };
+  }
+  const outcome = fenced.value;
+  if (outcome.status !== "reconciled") return outcome;
+  options.onCommittedSnapshot?.(outcome.snapshot);
+  const { snapshot: _snapshot, phase: _phase, ...publicOutcome } = outcome;
+  return publicOutcome;
+}
 
 async function executeLeaseFence<T>(
   options: AppSidecarPhaseBindingOptions,

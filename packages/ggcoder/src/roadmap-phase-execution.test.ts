@@ -1,9 +1,16 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { approvedPlanArtifactContent } from "./app-sidecar-plan-gate.js";
-import { createApprovedPlan, resolveExecutionPlanSnapshot, sha256 } from "./roadmap-phase-execution.js";
+import {
+  captureGitWorkspaceSnapshot,
+  createApprovedPlan,
+  reconcilePlanSteps,
+  resolveExecutionPlanSnapshot,
+  sha256,
+} from "./roadmap-phase-execution.js";
 
 let repository: string;
 
@@ -13,6 +20,50 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await fs.rm(repository, { recursive: true, force: true });
+});
+
+describe("durable roadmap plan reconciliation", () => {
+  it("preserves clean ancestor and exact dirty steps, invalidating uncertain work", async () => {
+    const git = (...args: string[]): string =>
+      execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+    git("init", "--quiet");
+    git("config", "user.name", "Roadmap Test");
+    git("config", "user.email", "roadmap@example.invalid");
+    await fs.writeFile(path.join(repository, "tracked.txt"), "initial\n");
+    git("add", "tracked.txt");
+    git("commit", "--quiet", "-m", "initial");
+
+    const clean = await captureGitWorkspaceSnapshot(repository, "project-key");
+    const cleanStep = {
+      id: "1".repeat(64),
+      index: 1,
+      text: "Clean step",
+      state: "completed" as const,
+      completedAt: "2026-08-30T10:00:00.000Z",
+      workspace: clean,
+    };
+    await fs.writeFile(path.join(repository, "descendant.txt"), "descendant\n");
+    git("add", "descendant.txt");
+    git("commit", "--quiet", "-m", "descendant");
+    const descendant = await captureGitWorkspaceSnapshot(repository, "project-key");
+    const preserved = reconcilePlanSteps(
+      [cleanStep],
+      descendant,
+      (ancestor, current) => ancestor === clean.headCommit && current === descendant.headCommit,
+    );
+    expect(preserved.needsRevalidation).toEqual([]);
+
+    await fs.writeFile(path.join(repository, "dirty.txt"), "dirty\n");
+    const dirty = await captureGitWorkspaceSnapshot(repository, "project-key");
+    const dirtyStep = { ...cleanStep, workspace: dirty };
+    expect(reconcilePlanSteps([dirtyStep], dirty, () => false).needsRevalidation).toEqual([]);
+
+    await fs.writeFile(path.join(repository, "dirty.txt"), "changed\n");
+    const changed = await captureGitWorkspaceSnapshot(repository, "project-key");
+    const invalidated = reconcilePlanSteps([dirtyStep], changed, () => false);
+    expect(invalidated.steps[0]!.state).toBe("needs-revalidation");
+    expect(invalidated.needsRevalidation).toEqual([dirtyStep.id]);
+  });
 });
 
 describe("approved plan snapshot resume", () => {

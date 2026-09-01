@@ -36,11 +36,13 @@ import {
   validateNotesCompletionReviewFields,
   validateNotesDocumentV3,
   validateNotesImplementationCheckpointFields,
+  validateNotesPhaseExecution,
   validateNotesReferenceProjection,
   validateNotesSessionLink,
   type NotesDocumentV2,
   type NotesDocumentV3,
   type NotesPhase,
+  type NotesPhaseExecutionV1,
   type NotesPhaseStatus,
   type NotesRoadmapDirectPhaseAdvancementCheckpoint,
   type NotesRoadmapImplementationCheckpoint,
@@ -168,6 +170,59 @@ function legacyV2(): NotesDocumentV2 {
     handoff: { text: "Continue", updatedAt: NOW, readAt: null },
     updatedAt: NOW,
     legacyImportedAt: null,
+  };
+}
+
+function durableExecution(): NotesPhaseExecutionV1 {
+  const repository = {
+    projectKey: "c:/work/project",
+    identityHash: "b".repeat(64),
+    rootCommit: "c".repeat(40),
+  };
+  const workspace = {
+    version: 1 as const,
+    repository,
+    headCommit: "d".repeat(40),
+    worktreeDigest: "e".repeat(64),
+    clean: true,
+  };
+  return {
+    version: 1,
+    state: "implementing",
+    repository,
+    plan: {
+      planId: "plan-1",
+      contentHash: "f".repeat(64),
+      snapshotPath: ".gg/plans/approved/plan-1.md",
+      approvedAt: NOW,
+      approvedRevision: 4,
+      baseCommit: workspace.headCommit,
+      steps: [
+        {
+          id: "a".repeat(64),
+          index: 1,
+          text: "Implement durable execution",
+          state: "completed",
+          completedAt: NOW,
+          workspace,
+        },
+      ],
+    },
+    evidence: [
+      {
+        commandHash: "1".repeat(64),
+        commandDisplay: "pnpm test",
+        exitCode: 0,
+        classifierVersion: "roadmap-v1",
+        verdict: "approved",
+        criterionId: "criterion-1",
+        observedAt: NOW,
+        workspace,
+      },
+    ],
+    pendingCompletion: null,
+    lastSession: CURRENT_SESSION,
+    migration: { source: "native", reconciledAt: NOW },
   };
 }
 
@@ -1180,5 +1235,48 @@ describe("project Notes contract", () => {
     review.unmetGateCodes = ["stale-session"];
 
     expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+  });
+});
+
+describe("durable phase execution contracts", () => {
+  it("accepts additive execution while preserving legacy v3 phases", async () => {
+    const legacy = await fixture();
+    expect(validateNotesDocumentV3(legacy)).toEqual({ ok: true, document: legacy });
+
+    const document = structuredClone(legacy);
+    document.phases[0]!.execution = durableExecution();
+    expect(validateNotesDocumentV3(document)).toEqual({ ok: true, document });
+  });
+
+  it.each([
+    ["identity hash", (execution: NotesPhaseExecutionV1) => { execution.repository.identityHash = "BAD"; }],
+    ["absolute snapshot", (execution: NotesPhaseExecutionV1) => { execution.plan!.snapshotPath = "C:\\plans\\plan.md"; }],
+    ["renumbered step", (execution: NotesPhaseExecutionV1) => { execution.plan!.steps[0]!.index = 2; }],
+    ["duplicate step", (execution: NotesPhaseExecutionV1) => { execution.plan!.steps.push(execution.plan!.steps[0]!); }],
+    ["cross-repository workspace", (execution: NotesPhaseExecutionV1) => {
+      const workspace = execution.plan!.steps[0]!.workspace!;
+      workspace.repository = { ...workspace.repository, identityHash: "2".repeat(64) };
+    }],
+    ["malformed timestamp", (execution: NotesPhaseExecutionV1) => { execution.plan!.approvedAt = "today"; }],
+    ["unknown field", (execution: NotesPhaseExecutionV1) => {
+      (execution as unknown as Record<string, unknown>).extra = true;
+    }],
+  ])("rejects malformed %s", (_label, mutate) => {
+    const execution = durableExecution();
+    mutate(execution);
+    expect(validateNotesPhaseExecution(execution)).not.toBeNull();
+  });
+
+  it("accepts explicit evidence revalidation and idempotency metadata", () => {
+    const execution = durableExecution();
+    execution.evidence[0]!.state = "needs-revalidation";
+    execution.migration.reconciliation = {
+      operationId: "reconcile-1",
+      requestHash: "2".repeat(64),
+    };
+    expect(validateNotesPhaseExecution(execution)).toBeNull();
+
+    execution.migration.reconciledAt = null;
+    expect(validateNotesPhaseExecution(execution)).not.toBeNull();
   });
 });

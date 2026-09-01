@@ -531,4 +531,176 @@ describe("Project Notes durable phase execution", () => {
     });
   });
 
+  it("atomically reconciles exact fences and makes retries idempotent", async () => {
+    const plan = approvedPlan();
+    const phaseId = document.phases[0]!.id;
+    const dirtyWorkspace = { ...workspace, worktreeDigest: "6".repeat(64), clean: false };
+    const currentWorkspace = {
+      ...workspace,
+      headCommit: "5".repeat(40),
+      worktreeDigest: "7".repeat(64),
+    };
+    await approve();
+    await repository.checkpointPhaseExecutionStep(cwd, {
+      phaseId,
+      expectedRevision: 2,
+      planHash: plan.contentHash,
+      stepId: plan.steps[0]!.id,
+      completedAt: NOW,
+      workspace,
+    });
+    await repository.checkpointPhaseExecutionStep(cwd, {
+      phaseId,
+      expectedRevision: 3,
+      planHash: plan.contentHash,
+      stepId: plan.steps[1]!.id,
+      completedAt: "2026-08-30T10:01:00.000Z",
+      workspace: dirtyWorkspace,
+    });
+    await repository.recordPhaseExecutionEvidence(cwd, {
+      phaseId,
+      expectedRevision: 4,
+      planHash: plan.contentHash,
+      evidence: {
+        commandHash: "8".repeat(64),
+        commandDisplay: "pnpm test",
+        exitCode: 0,
+        classifierVersion: "roadmap-v1",
+        verdict: "approved",
+        criterionId: "criterion-1",
+        observedAt: "2026-08-30T10:02:00.000Z",
+        workspace: dirtyWorkspace,
+      },
+    });
+    await repository.markPhaseExecutionNeedsReconciliation(cwd, {
+      phaseId,
+      expectedRevision: 5,
+      planHash: plan.contentHash,
+      timestamp: "2026-08-30T10:03:00.000Z",
+    });
+    const { steps: _steps, ...planExpectation } = plan;
+    const request = {
+      version: 3 as const,
+      action: "reconcile-execution" as const,
+      phaseId,
+      expectedProjectKey: canonicalProjectKey(cwd),
+      expectedRevision: 6,
+      operationId: "reconcile-1",
+      repository: identity,
+      plan: planExpectation,
+      workspace: currentWorkspace,
+      currentWorkspace,
+      cleanAncestorStepIds: [plan.steps[0]!.id],
+      reconciledAt: "2026-08-30T10:04:00.000Z",
+    };
+
+    await expect(repository.reconcilePhaseExecution(cwd, request)).resolves.toMatchObject({
+      status: "reconciled",
+      revision: 7,
+      phaseId,
+      preservedStepIds: [plan.steps[0]!.id],
+      revalidationStepIds: [plan.steps[1]!.id],
+      revalidationEvidenceCount: 1,
+      reconciledAt: request.reconciledAt,
+      snapshot: { revision: 7 },
+    });
+    await expect(repository.reconcilePhaseExecution(cwd, request)).resolves.toMatchObject({
+      status: "duplicate",
+      revision: 7,
+    });
+    await expect(
+      repository.reconcilePhaseExecution(cwd, {
+        ...request,
+        workspace: { ...currentWorkspace, worktreeDigest: "9".repeat(64) },
+      }),
+    ).resolves.toEqual({ status: "operation-conflict", revision: 7 });
+
+    await expect(
+      repository.reconcilePhaseExecution(cwd, {
+        ...request,
+        currentWorkspace: { ...currentWorkspace, worktreeDigest: "9".repeat(64) },
+      }),
+    ).resolves.toEqual({
+      status: "duplicate",
+      revision: 7,
+      phaseId,
+      preservedStepIds: [plan.steps[0]!.id],
+      revalidationStepIds: [plan.steps[1]!.id],
+      revalidationEvidenceCount: 1,
+      reconciledAt: request.reconciledAt,
+    });
+
+    const loaded = await repository.load(cwd);
+    expect(loaded.status).toBe("ok");
+    if (loaded.status !== "ok") throw new Error("Expected reconciled Notes");
+    expect(loaded.snapshot.document.phases[0]!.execution).toMatchObject({
+      state: "implementing",
+      pendingCompletion: null,
+      migration: {
+        reconciledAt: request.reconciledAt,
+        reconciliation: { operationId: request.operationId },
+      },
+      evidence: [{ state: "needs-revalidation" }],
+    });
+  });
+
+  it("denies stale repository, plan, hash, and workspace fences without writing", async () => {
+    const plan = approvedPlan();
+    const phaseId = document.phases[0]!.id;
+    await approve();
+    await repository.markPhaseExecutionNeedsReconciliation(cwd, {
+      phaseId,
+      expectedRevision: 2,
+      planHash: plan.contentHash,
+      timestamp: "2026-08-30T10:03:00.000Z",
+    });
+    const { steps: _steps, ...planExpectation } = plan;
+    const request = {
+      version: 3 as const,
+      action: "reconcile-execution" as const,
+      phaseId,
+      expectedProjectKey: canonicalProjectKey(cwd),
+      expectedRevision: 3,
+      operationId: "reconcile-denial",
+      repository: identity,
+      plan: planExpectation,
+      workspace,
+      currentWorkspace: workspace,
+      cleanAncestorStepIds: [],
+      reconciledAt: "2026-08-30T10:04:00.000Z",
+    };
+
+    await expect(
+      repository.reconcilePhaseExecution(cwd, { ...request, expectedRevision: 2 }),
+    ).resolves.toEqual({ status: "stale-revision", revision: 3 });
+    await expect(
+      repository.reconcilePhaseExecution(cwd, {
+        ...request,
+        repository: { ...identity, identityHash: "9".repeat(64) },
+      }),
+    ).resolves.toEqual({ status: "repository-mismatch" });
+    await expect(
+      repository.reconcilePhaseExecution(cwd, {
+        ...request,
+        plan: { ...planExpectation, planId: "wrong-plan" },
+      }),
+    ).resolves.toEqual({ status: "plan-mismatch" });
+    await expect(
+      repository.reconcilePhaseExecution(cwd, {
+        ...request,
+        plan: { ...planExpectation, contentHash: "9".repeat(64) },
+      }),
+    ).resolves.toEqual({ status: "plan-hash-mismatch" });
+    await expect(
+      repository.reconcilePhaseExecution(cwd, {
+        ...request,
+        workspace: { ...workspace, worktreeDigest: "9".repeat(64) },
+      }),
+    ).resolves.toEqual({ status: "workspace-mismatch" });
+
+    await expect(repository.load(cwd)).resolves.toMatchObject({
+      status: "ok",
+      snapshot: { revision: 3 },
+    });
+  });
 });

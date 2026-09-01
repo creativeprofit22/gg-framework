@@ -10,6 +10,7 @@ import {
 } from "@kenkaiiii/gg-core/project-notes";
 import type {
   PhaseBindingRequest,
+  PhaseExecutionReconciliationRequestV3,
   PhaseLeaseRequestV2,
 } from "@kenkaiiii/gg-core/phase-binding-protocol";
 import {
@@ -190,6 +191,7 @@ describe("app sidecar phase binding service", () => {
       repository: {
         load: (project) => repository.load(project),
         bindPhaseToCurrentSession,
+        reconcilePhaseExecution: repository.reconcilePhaseExecution.bind(repository),
       },
       onCommittedSnapshot,
     });
@@ -212,6 +214,7 @@ describe("app sidecar phase binding service", () => {
       repository: {
         load: (project) => repository.load(project),
         bindPhaseToCurrentSession,
+        reconcilePhaseExecution: repository.reconcilePhaseExecution.bind(repository),
       },
     });
     const session = new FakeSession(cwd, sessionB);
@@ -573,4 +576,135 @@ describe("app sidecar phase binding service", () => {
     });
   });
 
+  it("reconciles through the held lease and returns the exact public outcome", async () => {
+    const { cwd, repository, agentDir } = await setup("reconciliation-success");
+    const stepId = "6".repeat(64);
+    const repositoryIdentity = {
+      projectKey: canonicalProjectKey(cwd),
+      identityHash: "1".repeat(64),
+      rootCommit: "2".repeat(40),
+    };
+    const workspace = {
+      version: 1 as const,
+      repository: repositoryIdentity,
+      headCommit: "3".repeat(40),
+      worktreeDigest: "4".repeat(64),
+      clean: true,
+    };
+    const plan = {
+      planId: "plan-1",
+      contentHash: "5".repeat(64),
+      snapshotPath: ".gg/plans/plan-1.md",
+      approvedAt: "2026-08-31T10:00:00.000Z",
+      approvedRevision: 1,
+      baseCommit: repositoryIdentity.rootCommit,
+      steps: [
+        {
+          id: stepId,
+          index: 1,
+          text: "Preserve completed work",
+          state: "completed" as const,
+          completedAt: "2026-08-31T10:01:00.000Z",
+          workspace,
+        },
+      ],
+    };
+    await expect(
+      repository.importLegacyPhaseExecution(cwd, {
+        operationId: "legacy-migration:phase-1",
+        phaseId: "phase-1",
+        expectedRevision: 1,
+        execution: {
+          version: 1,
+          state: "needs-reconciliation",
+          repository: repositoryIdentity,
+          plan,
+          evidence: [],
+          pendingCompletion: null,
+          lastSession: sessionA,
+          migration: { source: "legacy-session", reconciledAt: null },
+        },
+      }),
+    ).resolves.toMatchObject({ status: "committed", snapshot: { revision: 2 } });
+
+    const leaseRepository = new RoadmapPhaseLeaseRepository(agentDir, {
+      now: () => new Date("2026-08-31T10:02:00.000Z"),
+      createId: () => "lease-reconcile",
+    });
+    const onCommittedSnapshot = vi.fn();
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository,
+      daemonInstanceId: "daemon-reconcile",
+      processId: 123,
+      processStartToken: "start-reconcile",
+      now: () => "2026-08-31T10:03:00.000Z",
+      captureWorkspace: async () => workspace,
+      resolvePlanSnapshot: async () => ({
+        status: "ready",
+        path: plan.snapshotPath,
+        content: "# Plan",
+        recovered: false,
+      }),
+      isAncestor: async () => true,
+      onCommittedSnapshot,
+    });
+    const session = new FakeSession(cwd, sessionB);
+    await expect(
+      service.lease(
+        { ...leaseRequest(cwd, "acquire-reconcile"), expectedRevision: 2, planId: plan.planId },
+        session,
+      ),
+    ).resolves.toMatchObject({ status: "acquired", roadmapRevision: 3 });
+    const reconciliation: PhaseExecutionReconciliationRequestV3 = {
+      version: 3,
+      action: "reconcile-execution",
+      phaseId: "phase-1",
+      expectedProjectKey: canonicalProjectKey(cwd),
+      expectedRevision: 3,
+      operationId: "reconcile-1",
+      repository: repositoryIdentity,
+      plan: {
+        planId: plan.planId,
+        contentHash: plan.contentHash,
+        snapshotPath: plan.snapshotPath,
+        approvedAt: plan.approvedAt,
+        approvedRevision: plan.approvedRevision,
+        baseCommit: plan.baseCommit,
+      },
+      workspace,
+    };
+
+    await expect(service.reconcilePhaseExecution(reconciliation, session)).resolves.toEqual({
+      status: "reconciled",
+      revision: 4,
+      phaseId: "phase-1",
+      preservedStepIds: [stepId],
+      revalidationStepIds: [],
+      revalidationEvidenceCount: 0,
+      reconciledAt: "2026-08-31T10:03:00.000Z",
+    });
+    expect(onCommittedSnapshot).toHaveBeenCalledTimes(2);
+    expect(onCommittedSnapshot).toHaveBeenLastCalledWith(
+      expect.objectContaining({ revision: 4 }),
+    );
+  });
+
+  it("denies reconciliation before the repository write when the lease fence is absent", async () => {
+    const { cwd, repository, agentDir } = await setup("reconciliation-fence");
+    const service = createAppSidecarPhaseBindingService({
+      repository,
+      leaseRepository: new RoadmapPhaseLeaseRepository(agentDir),
+      daemonInstanceId: "daemon-fence",
+      processId: 123,
+      processStartToken: "start-fence",
+    });
+    const session = new FakeSession(cwd, sessionB);
+    const reconcile = vi.spyOn(repository, "reconcilePhaseExecution");
+
+    await expect(service.reconcilePhaseExecution({} as never, session)).resolves.toEqual({
+      status: "phase-lease-lost",
+    });
+    expect(reconcile).not.toHaveBeenCalled();
+  });
 });

@@ -318,14 +318,14 @@ describe("Installed Smoke runtime contract", () => {
     expect(executeInstaller).toHaveBeenCalledWith(installer, ["/S", "/NS", `/D=${stageRoot}`]);
   });
 
-  it("requires the disposable registration and uninstaller under the stage root", () => {
+  it("requires the disposable quoted NSIS registration under the stage root", () => {
     const root = mkdtempSync(join(tmpdir(), "gg-installed-smoke-registration-"));
     temporaryDirectories.push(root);
     const stageRoot = join(root, "package");
     mkdirSync(stageRoot);
     writeFileSync(join(stageRoot, "uninstall.exe"), "uninstaller");
 
-    expect(assertInstalledSmokeRegistration({ InstallLocation: stageRoot }, stageRoot)).toBe(
+    expect(assertInstalledSmokeRegistration({ InstallLocation: `"${stageRoot}"` }, stageRoot)).toBe(
       join(stageRoot, "uninstall.exe"),
     );
     expect(() =>

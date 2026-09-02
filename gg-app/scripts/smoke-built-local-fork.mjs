@@ -58,7 +58,8 @@ function asArray(value) {
 }
 
 function canonicalPath(path) {
-  const absolute = resolve(path);
+  const normalized = path.startsWith('"') && path.endsWith('"') ? path.slice(1, -1) : path;
+  const absolute = resolve(normalized);
   return existsSync(absolute) ? realpathSync.native(absolute) : absolute;
 }
 
@@ -204,7 +205,7 @@ async function cleanupOnly() {
     console.log("CLEANUP PASS: no Installed Smoke registration remains");
     return;
   }
-  const stageRoot = resolve(registration.InstallLocation ?? "");
+  const stageRoot = canonicalPath(registration.InstallLocation ?? "");
   const smokeRoot = smokeRootForInstallDirectory(stageRoot);
   await uninstallInstalledSmoke(stageRoot);
   await removeTemporaryDirectory(smokeRoot);

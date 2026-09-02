@@ -17,6 +17,7 @@ import {
   assertSystemPathsUnchanged,
   installedSmokeInstallerArgs,
   installVerifiedSmoke,
+  smokeRevisionExpectations,
 } from "./smoke-built-local-fork.mjs";
 
 const temporaryDirectories = [];
@@ -147,7 +148,34 @@ describe("Installed Smoke manifest trust boundary", () => {
     expect(execute).toHaveBeenCalledOnce();
   });
 
-  it("rejects stale revisions and installers outside the allowed NSIS root", () => {
+  it("rejects malformed source revisions", () => {
+    const { manifestPath, manifest } = fixture();
+    rewriteManifest(manifestPath, { ...manifest, sourceRevision: "A".repeat(40) });
+
+    expect(() => validateInstalledSmokeManifest(manifestPath)).toThrow(
+      "40-character lowercase Git SHA",
+    );
+  });
+
+  it("rejects stale revisions before any process inspection or execution", () => {
+    const { root, manifestPath } = fixture();
+    const inspectSystemPaths = vi.fn();
+    const execute = vi.fn();
+
+    expect(() =>
+      runInstalledSmokePreflight({
+        manifestPath,
+        stageRoot: join(root, "stage"),
+        inspectSystemPaths,
+        execute,
+        validationOptions: { expectedRevision: "d".repeat(40) },
+      }),
+    ).toThrow("does not match the checked-out revision");
+    expect(inspectSystemPaths).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects installers outside the allowed NSIS root", () => {
     const { root, manifestPath } = fixture();
 
     expect(() =>
@@ -155,16 +183,17 @@ describe("Installed Smoke manifest trust boundary", () => {
         allowedInstallerRoot: join(root, "elsewhere"),
       }),
     ).toThrow("outside the NSIS output directory");
-    expect(() =>
-      validateInstalledSmokeManifest(manifestPath, {
-        allowedInstallerRoot: root,
-        expectedRevision: "d".repeat(40),
-      }),
-    ).toThrow("does not match the checked-out revision");
   });
 });
 
 describe("Installed Smoke runtime contract", () => {
+  it("derives footer and evidence identity from the installed revision", () => {
+    expect(smokeRevisionExpectations("d".repeat(40))).toEqual({
+      expectedIdentity: "◆ Supah Coder Local Fork · ddddddd",
+      shortRevision: "ddddddd",
+    });
+  });
+
   it("places silent switches before the final NSIS install-directory switch", () => {
     const stageRoot = join(tmpdir(), "gg-installed-smoke-test", "package");
     expect(installedSmokeInstallerArgs(stageRoot)).toEqual(["/S", "/NS", `/D=${stageRoot}`]);

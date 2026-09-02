@@ -44,6 +44,9 @@ export function validateInstalledSmokeManifest(manifestPath, options = {}) {
   if (options.allowedInstallerRoot && !pathIsWithin(options.allowedInstallerRoot, manifest.path)) {
     throw new Error("Installed Smoke installer is outside the NSIS output directory.");
   }
+  if (!/^[0-9a-f]{40}$/.test(manifest.sourceRevision)) {
+    throw new Error("Installed Smoke source revision must be a 40-character lowercase Git SHA.");
+  }
   if (options.expectedRevision && manifest.sourceRevision !== options.expectedRevision) {
     throw new Error("Installed Smoke manifest does not match the checked-out revision.");
   }

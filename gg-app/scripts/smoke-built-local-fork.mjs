@@ -28,6 +28,14 @@ function fail(message) {
   throw new Error(message);
 }
 
+export function smokeRevisionExpectations(sourceRevision) {
+  const shortRevision = sourceRevision.slice(0, 7);
+  return {
+    expectedIdentity: `◆ Supah Coder Local Fork · ${shortRevision}`,
+    shortRevision,
+  };
+}
+
 function powershell(script, environment = {}) {
   const encoded = Buffer.from(
     `$ErrorActionPreference = "Stop"\n$ProgressPreference = "SilentlyContinue"\n${script}`,

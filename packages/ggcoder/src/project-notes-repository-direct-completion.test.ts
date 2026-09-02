@@ -2,10 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type * as ProjectNotesModule from "@kenkaiiii/gg-core/project-notes";
 import type { NotesDocumentV3, NotesRoadmapStatusUpdate } from "@kenkaiiii/gg-core/project-notes";
 
 vi.mock("@kenkaiiii/gg-core/project-notes", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@kenkaiiii/gg-core/project-notes")>();
+  const actual = await importOriginal<typeof ProjectNotesModule>();
   return {
     ...actual,
     // Isolate the repository authority check from the document-load validation gate.

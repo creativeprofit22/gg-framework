@@ -7,12 +7,8 @@ import {
   AppSidecarCancellationPersistence,
   handleCancellationPersistenceRetryRoute,
 } from "./app-sidecar-cancellation.js";
-import {
-  commitImplementationRunStart,
-  commitPlanApprovalCheckpoint,
-} from "./app-sidecar-phase-checkpoint.js";
+import { commitPlanApprovalCheckpoint } from "./app-sidecar-phase-checkpoint.js";
 import { AppSidecarPhaseCandidateStore } from "./app-sidecar-phase-candidates.js";
-import { restorePhaseImplementationPlanEvidence } from "./app-sidecar-phase-completion.js";
 import {
   launchBoundPhase,
   type BoundPhaseCandidate,
@@ -441,12 +437,6 @@ async function setup(migrate = true) {
   const repository = new ProjectNotesRepository(path.join(root, ".gg"));
   if (migrate) await repository.migrate(cwd, document());
   return { repository, cwd, root };
-}
-
-async function currentRevision(repository: ProjectNotesRepository, cwd: string): Promise<number> {
-  const loaded = await repository.load(cwd);
-  if (loaded.status !== "ok") throw new Error(`Project Notes load failed: ${loaded.status}`);
-  return loaded.snapshot.revision;
 }
 
 async function updatePhase(

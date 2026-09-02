@@ -11,10 +11,7 @@ import {
   programmaticLifecycleStateV1Schema,
   programmaticProfileEnvelopeV1Schema,
 } from "../core/programmatic/contracts.js";
-import {
-  PROGRAMMATIC_STATE_PATH,
-  runProgrammaticScan,
-} from "../core/programmatic/lifecycle.js";
+import { PROGRAMMATIC_STATE_PATH, runProgrammaticScan } from "../core/programmatic/lifecycle.js";
 import { PROGRAMMATIC_PROFILE_PATH } from "../core/programmatic/inventory.js";
 import {
   buildProgrammaticProfileProposal,

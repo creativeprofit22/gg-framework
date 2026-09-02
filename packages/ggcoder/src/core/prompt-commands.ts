@@ -3,10 +3,7 @@
  * into the agent loop. Each command maps to a full prompt the agent executes.
  */
 
-import {
-  SLASH_COMMAND_INPUT_NONE,
-  type SlashCommandInputPolicy,
-} from "@kenkaiiii/gg-core";
+import { SLASH_COMMAND_INPUT_NONE, type SlashCommandInputPolicy } from "@kenkaiiii/gg-core";
 import { isGgApp } from "./runtime-mode.js";
 
 export interface PromptCommand {

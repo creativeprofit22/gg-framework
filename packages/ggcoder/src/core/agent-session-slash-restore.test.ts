@@ -151,8 +151,9 @@ describe("slash-command restore", () => {
     expect(providerUserPrompts).not.toContain(expect.stringContaining("## User Instructions"));
     expect(agentLoopMock).toHaveBeenCalledTimes(1);
     expect(output).toEqual(
-      Array.from({ length: rejectedInputs.length + 1 }, () =>
-        "/programmatic accepts no arguments, file references, or attachments.\n",
+      Array.from(
+        { length: rejectedInputs.length + 1 },
+        () => "/programmatic accepts no arguments, file references, or attachments.\n",
       ),
     );
     await session.dispose();
@@ -171,7 +172,9 @@ describe("slash-command restore", () => {
     await session.prompt("/expand focus area");
 
     const body = session.getMessages().find((message) => message.role === "user")!.content;
-    expect(body).toBe(`${getPromptCommand("expand")!.prompt}\n\n## User Instructions\n\nfocus area`);
+    expect(body).toBe(
+      `${getPromptCommand("expand")!.prompt}\n\n## User Instructions\n\nfocus area`,
+    );
     expect(agentLoopMock).toHaveBeenCalledTimes(1);
     await session.dispose();
   }, 20_000);

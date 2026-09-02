@@ -1,9 +1,6 @@
 import { z } from "zod";
 import type { AgentTool } from "@kenkaiiii/gg-agent";
-import {
-  PROGRAMMATIC_STATE_PATH,
-  runProgrammaticScan,
-} from "../core/programmatic/lifecycle.js";
+import { PROGRAMMATIC_STATE_PATH, runProgrammaticScan } from "../core/programmatic/lifecycle.js";
 import { containedPath, stableJson } from "../core/tauri-package/paths.js";
 import { isPlanModeActive } from "../core/runtime-mode.js";
 

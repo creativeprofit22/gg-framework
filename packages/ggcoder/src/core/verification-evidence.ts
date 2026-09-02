@@ -295,7 +295,9 @@ function resultText(result: ToolResult): string {
 }
 
 export function roadmapCriterionId(index: number, criterion: string): string {
-  return createHash("sha256").update(`${index}\0${criterion.trim().replace(/\s+/g, " ")}`).digest("hex");
+  return createHash("sha256")
+    .update(`${index}\0${criterion.trim().replace(/\s+/g, " ")}`)
+    .digest("hex");
 }
 
 const GENERIC_VERIFICATION_COMMAND_DISPLAY = "Approved verification command";
@@ -360,7 +362,9 @@ function tokenizeVerificationDisplay(command: string): VerificationDisplayToken[
 
 function isSensitiveCommandName(value: string): boolean {
   const name = value.replace(/^--?/, "");
-  return SENSITIVE_COMMAND_NAME.test(name) || /(?:Auth|Token|Password|Secret|Credential|Key)$/.test(name);
+  return (
+    SENSITIVE_COMMAND_NAME.test(name) || /(?:Auth|Token|Password|Secret|Credential|Key)$/.test(name)
+  );
 }
 
 function renderVerificationDisplayToken(token: VerificationDisplayToken): string {
@@ -455,12 +459,15 @@ export function evaluateDurableVerificationEvidence(input: {
     const criterion = input.doneWhen[offset] ?? "";
     const criterionId = roadmapCriterionId(offset + 1, criterion);
     const candidates = input.evidence.filter((item) => item.criterionId === criterionId);
-    const current = [...candidates].reverse().find((item) =>
-      item.exitCode === 0 &&
-      item.verdict === "approved" &&
-      item.classifierVersion === classifierVersion &&
-      workspaceEvidenceMatches(item.workspace, input.workspace),
-    );
+    const current = [...candidates]
+      .reverse()
+      .find(
+        (item) =>
+          item.exitCode === 0 &&
+          item.verdict === "approved" &&
+          item.classifierVersion === classifierVersion &&
+          workspaceEvidenceMatches(item.workspace, input.workspace),
+      );
     if (!current) {
       (candidates.length > 0 ? staleCriterionIds : missingCriterionIds).push(criterionId);
       continue;
@@ -489,13 +496,15 @@ function workspaceEvidenceMatches(
   left: NotesWorkspaceSnapshotV1,
   right: NotesWorkspaceSnapshotV1,
 ): boolean {
-  return left.version === right.version &&
+  return (
+    left.version === right.version &&
     left.repository.projectKey === right.repository.projectKey &&
     left.repository.identityHash === right.repository.identityHash &&
     left.repository.rootCommit === right.repository.rootCommit &&
     left.headCommit === right.headCommit &&
     left.worktreeDigest === right.worktreeDigest &&
-    left.clean === right.clean;
+    left.clean === right.clean
+  );
 }
 
 /** Extract harness-owned evidence from completed bash calls in a transcript. */

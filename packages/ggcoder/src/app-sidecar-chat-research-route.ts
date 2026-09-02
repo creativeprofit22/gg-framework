@@ -24,7 +24,12 @@ export function appSidecarChatCommandsResponse(
   mode: "code" | "chat",
 ): SlashCommandsResponse | null {
   return mode === "chat"
-    ? { commands: APP_SIDECAR_CHAT_COMMANDS.map((command) => ({ ...command, aliases: [...command.aliases] })) }
+    ? {
+        commands: APP_SIDECAR_CHAT_COMMANDS.map((command) => ({
+          ...command,
+          aliases: [...command.aliases],
+        })),
+      }
     : null;
 }
 

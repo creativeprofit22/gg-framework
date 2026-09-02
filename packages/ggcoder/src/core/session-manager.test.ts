@@ -142,7 +142,9 @@ describe("SessionManager required phase markers", () => {
       data: marker,
     });
     const loaded = await manager.load(session.path);
-    expect(manager.getRoadmapPhaseLeaseMarker(loaded.entries, { projectKey: "/repo" })).toEqual(marker);
+    expect(manager.getRoadmapPhaseLeaseMarker(loaded.entries, { projectKey: "/repo" })).toEqual(
+      marker,
+    );
   });
 });
 
@@ -930,19 +932,33 @@ describe("approved plan consumption", () => {
     const content = "# Plan\n\n## Steps\n1. Implement it.";
     const entries: SessionEntry[] = [
       {
-        type: "custom", kind: ACTIVE_PHASE_CONTEXT_KIND, id: "phase-4", parentId: null,
-        timestamp: "2026-08-30T10:00:00.000Z", data: phaseContext("phase-4", "phase-4.jsonl"),
+        type: "custom",
+        kind: ACTIVE_PHASE_CONTEXT_KIND,
+        id: "phase-4",
+        parentId: null,
+        timestamp: "2026-08-30T10:00:00.000Z",
+        data: phaseContext("phase-4", "phase-4.jsonl"),
       },
       {
-        type: "custom", kind: APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND, id: "approved", parentId: null,
+        type: "custom",
+        kind: APPROVED_PLAN_CONSUMPTION_CUSTOM_KIND,
+        id: "approved",
+        parentId: null,
         timestamp: "2026-08-30T10:01:00.000Z",
         data: {
-          version: 1, checkpointId: "5ab5bc79-2d1b-4578-b6d3-7035a4723a91", generation: 1,
-          content, contentHash: approvedPlanContentHash(content), state: "approval-committed",
+          version: 1,
+          checkpointId: "5ab5bc79-2d1b-4578-b6d3-7035a4723a91",
+          generation: 1,
+          content,
+          contentHash: approvedPlanContentHash(content),
+          state: "approval-committed",
         },
       },
       {
-        type: "custom", kind: ACTIVE_PHASE_CONTEXT_KIND, id: "phase-5", parentId: null,
+        type: "custom",
+        kind: ACTIVE_PHASE_CONTEXT_KIND,
+        id: "phase-5",
+        parentId: null,
         timestamp: "2026-08-30T10:02:00.000Z",
         data: phaseContext("a639ff7d-64bf-4abe-a38e-cf6cae0acac2", "phase-5.jsonl"),
       },

@@ -234,21 +234,25 @@ export const programmaticLifecycleRecordV1Schema = z
       value.opportunity.identity.detectorId === value.lifecycle.opportunity.detectorId &&
       value.opportunity.identity.key === value.lifecycle.opportunity.key &&
       value.opportunity.identity.path === value.lifecycle.opportunity.path,
-    { path: ["lifecycle", "opportunity"], message: "lifecycle identity must match opportunity identity" },
+    {
+      path: ["lifecycle", "opportunity"],
+      message: "lifecycle identity must match opportunity identity",
+    },
   );
 
 export const programmaticLifecycleStateV1Schema = z
   .strictObject({
     version: versionSchema,
     configurationFingerprint: configurationFingerprintV1Schema,
-    records: z
-      .array(programmaticLifecycleRecordV1Schema)
-      .max(PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT),
+    records: z.array(programmaticLifecycleRecordV1Schema).max(PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT),
   })
-  .refine((value) => isStrictlyAscending(value.records.map(({ opportunity }) => opportunity.identity.id)), {
-    path: ["records"],
-    message: "opportunity IDs must be unique and sorted ascending",
-  });
+  .refine(
+    (value) => isStrictlyAscending(value.records.map(({ opportunity }) => opportunity.identity.id)),
+    {
+      path: ["records"],
+      message: "opportunity IDs must be unique and sorted ascending",
+    },
+  );
 
 export const programmaticScanSummaryV1Schema = z.strictObject({
   new: nonnegativeSafeIntegerSchema,

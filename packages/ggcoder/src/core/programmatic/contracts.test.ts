@@ -498,9 +498,9 @@ describe("aggregate lifecycle contracts", () => {
   it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1])(
     "rejects invalid scan summary count %j",
     (count) => {
-      expect(programmaticScanSummaryV1Schema.safeParse({ ...scanSummary, failed: count }).success).toBe(
-        false,
-      );
+      expect(
+        programmaticScanSummaryV1Schema.safeParse({ ...scanSummary, failed: count }).success,
+      ).toBe(false);
     },
   );
 });

@@ -154,10 +154,7 @@ describe("Lifecycle reconciliation preserves stable IDs and user decisions acros
       fingerprint,
       [],
     );
-    expect(returned.state.records.map(({ presence }) => presence)).toEqual([
-      "present",
-      "present",
-    ]);
+    expect(returned.state.records.map(({ presence }) => presence)).toEqual(["present", "present"]);
     expect(returned.state.records.map(({ lifecycle }) => lifecycle.state)).toEqual([
       "dismissed",
       "completed",
@@ -235,9 +232,7 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
           ...(failure === "validation"
             ? {
                 readFile: async (filePath) =>
-                  filePath.endsWith(stateTemporary)
-                    ? Buffer.from("{}")
-                    : readFile(filePath),
+                  filePath.endsWith(stateTemporary) ? Buffer.from("{}") : readFile(filePath),
               }
             : {}),
           ...(failure === "rename"
@@ -288,12 +283,7 @@ describe("State persistence is atomic, schema-versioned, bounded, and recoverabl
     });
 
     expect(() =>
-      reconcileProgrammaticLifecycle(
-        full,
-        discovery(opportunity("f".repeat(64))),
-        fingerprint,
-        [],
-      ),
+      reconcileProgrammaticLifecycle(full, discovery(opportunity("f".repeat(64))), fingerprint, []),
     ).toThrow("record limit exceeded");
   });
 });
@@ -342,12 +332,9 @@ describe("Targeted automated tests cover first scan, identical rescan, changed e
   it("sorts records and summaries deterministically regardless of discovery input construction", () => {
     const first = opportunity("a".repeat(64));
     const second = opportunity("b".repeat(64));
-    const result = reconcileProgrammaticLifecycle(
-      null,
-      discovery(second, first),
-      fingerprint,
-      [second.identity.id],
-    );
+    const result = reconcileProgrammaticLifecycle(null, discovery(second, first), fingerprint, [
+      second.identity.id,
+    ]);
 
     expect(result.state.records.map(({ opportunity: item }) => item.identity.id)).toEqual([
       first.identity.id,

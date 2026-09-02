@@ -27,16 +27,20 @@ describe("durable verification evidence", () => {
 
   it("binds classifier-approved commands to exact criterion and workspace identities", () => {
     const evidence = createDurableVerificationEvidence({
-      coverage: [{
-        criterionIndex: 1,
-        criterion: "Tests pass",
-        evidence: "pnpm test",
-        command: "pnpm test",
-      }],
+      coverage: [
+        {
+          criterionIndex: 1,
+          criterion: "Tests pass",
+          evidence: "pnpm test",
+          command: "pnpm test",
+        },
+      ],
       workspace,
       observedAt: "2026-08-30T10:00:00.000Z",
     });
-    expect(evaluateDurableVerificationEvidence({ doneWhen: ["Tests pass"], evidence, workspace })).toMatchObject({
+    expect(
+      evaluateDurableVerificationEvidence({ doneWhen: ["Tests pass"], evidence, workspace }),
+    ).toMatchObject({
       ready: true,
       staleCriterionIds: [],
       missingCriterionIds: [],

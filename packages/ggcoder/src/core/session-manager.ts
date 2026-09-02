@@ -1799,9 +1799,10 @@ export class SessionManager {
       if (entry.type !== "custom" || entry.kind !== ROADMAP_PHASE_LEASE_KIND) continue;
       const parsed = parseRoadmapPhaseLeaseMarker(entry.data, expected);
       if (parsed) marker = parsed;
-      else log("WARN", "session", "Ignoring malformed Roadmap phase lease metadata", {
-        entryId: entry.id,
-      });
+      else
+        log("WARN", "session", "Ignoring malformed Roadmap phase lease metadata", {
+          entryId: entry.id,
+        });
     }
     return marker;
   }

@@ -118,41 +118,52 @@ export function reconcileProgrammaticLifecycle(
   fingerprint: ConfigurationFingerprintV1,
   unverifiedIds: readonly string[],
 ): { state: ProgrammaticLifecycleStateV1; summary: ProgrammaticScanSummaryV1 } {
-  const validatedPrevious = previous === null ? null : programmaticLifecycleStateV1Schema.parse(previous);
+  const validatedPrevious =
+    previous === null ? null : programmaticLifecycleStateV1Schema.parse(previous);
   const validatedDiscovery = opportunityDiscoveryResultV1Schema.parse(discovery);
   const validatedFingerprint = configurationFingerprintV1Schema.parse(fingerprint);
   const currentIds = new Set(validatedDiscovery.opportunities.map(({ identity }) => identity.id));
   const unverified = new Set(unverifiedIds);
-  if (unverified.size !== unverifiedIds.length || [...unverified].some((id) => !currentIds.has(id))) {
+  if (
+    unverified.size !== unverifiedIds.length ||
+    [...unverified].some((id) => !currentIds.has(id))
+  ) {
     throw new Error("Unverified opportunity IDs must be unique current opportunity IDs");
   }
 
   const previousById = new Map(
     validatedPrevious?.records.map((record) => [record.opportunity.identity.id, record]) ?? [],
   );
-  const records: ProgrammaticLifecycleRecordV1[] = validatedDiscovery.opportunities.map((opportunity) => {
-    const existing = previousById.get(opportunity.identity.id);
-    previousById.delete(opportunity.identity.id);
-    return {
-      version: PROGRAMMATIC_CONTRACT_VERSION,
-      opportunity,
-      lifecycle: existing?.lifecycle ?? {
+  const records: ProgrammaticLifecycleRecordV1[] = validatedDiscovery.opportunities.map(
+    (opportunity) => {
+      const existing = previousById.get(opportunity.identity.id);
+      previousById.delete(opportunity.identity.id);
+      return {
         version: PROGRAMMATIC_CONTRACT_VERSION,
-        opportunity: opportunity.identity,
-        state: "discovered" as const,
-      },
-      presence: "present" as const,
-    };
-  });
+        opportunity,
+        lifecycle: existing?.lifecycle ?? {
+          version: PROGRAMMATIC_CONTRACT_VERSION,
+          opportunity: opportunity.identity,
+          state: "discovered" as const,
+        },
+        presence: "present" as const,
+      };
+    },
+  );
   records.push(
-    ...[...previousById.values()].map((record) => ({ ...record, presence: "disappeared" as const })),
+    ...[...previousById.values()].map((record) => ({
+      ...record,
+      presence: "disappeared" as const,
+    })),
   );
   records.sort((left, right) =>
     compareText(left.opportunity.identity.id, right.opportunity.identity.id),
   );
   // simplification: overflow fails closed at 1,000 records; a later contract migration may archive history.
   if (records.length > PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT) {
-    throw new Error(`Programmatic lifecycle record limit exceeded (${PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT})`);
+    throw new Error(
+      `Programmatic lifecycle record limit exceeded (${PROGRAMMATIC_LIFECYCLE_RECORD_LIMIT})`,
+    );
   }
 
   const state = programmaticLifecycleStateV1Schema.parse({
@@ -161,10 +172,14 @@ export function reconcileProgrammaticLifecycle(
     records,
   });
   const present = state.records.filter((record) => record.presence === "present");
-  const knownIds = new Set(validatedPrevious?.records.map(({ opportunity }) => opportunity.identity.id));
+  const knownIds = new Set(
+    validatedPrevious?.records.map(({ opportunity }) => opportunity.identity.id),
+  );
   const summary = programmaticScanSummaryV1Schema.parse({
-    new: validatedDiscovery.opportunities.filter(({ identity }) => !knownIds.has(identity.id)).length,
-    unchanged: validatedDiscovery.opportunities.filter(({ identity }) => knownIds.has(identity.id)).length,
+    new: validatedDiscovery.opportunities.filter(({ identity }) => !knownIds.has(identity.id))
+      .length,
+    unchanged: validatedDiscovery.opportunities.filter(({ identity }) => knownIds.has(identity.id))
+      .length,
     active: present.filter(({ lifecycle }) =>
       ["discovered", "queued", "running"].includes(lifecycle.state),
     ).length,
@@ -324,7 +339,9 @@ export async function runProgrammaticScan(
     const inventory = await buildProgrammaticInventory(root, {
       operations: options.inventoryOperations,
     });
-    fingerprint = configurationFingerprintV1Schema.parse(inventory.inventory.configurationFingerprint);
+    fingerprint = configurationFingerprintV1Schema.parse(
+      inventory.inventory.configurationFingerprint,
+    );
     if (
       loadedProfile.envelope.configurationFingerprint.version !== fingerprint.version ||
       loadedProfile.envelope.configurationFingerprint.sha256 !== fingerprint.sha256
@@ -344,13 +361,16 @@ export async function runProgrammaticScan(
     );
     discovery = opportunityDiscoveryResultV1Schema.parse({
       version: PROGRAMMATIC_CONTRACT_VERSION,
-      opportunities: discovered.opportunities.filter(({ identity }) => configured.has(identity.detectorId)),
+      opportunities: discovered.opportunities.filter(({ identity }) =>
+        configured.has(identity.detectorId),
+      ),
     });
     unverifiedIds = discovery.opportunities
       .filter((opportunity) => {
         const specialist = configured.get(opportunity.identity.detectorId);
         return (
-          opportunity.route.status !== "routable" || opportunity.route.specialistCommand !== specialist
+          opportunity.route.status !== "routable" ||
+          opportunity.route.specialistCommand !== specialist
         );
       })
       .map(({ identity }) => identity.id);
@@ -362,8 +382,7 @@ export async function runProgrammaticScan(
   try {
     return await withFileLock(statePath, async () => {
       await rejectLinks(root, ".gg/programmatic");
-      const revalidateProfile = () =>
-        ensureProfileUnchanged(root, operations, loadedProfile.bytes);
+      const revalidateProfile = () => ensureProfileUnchanged(root, operations, loadedProfile.bytes);
       const revalidateCommit = () =>
         ensureCommitInputsUnchanged(
           root,

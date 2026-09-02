@@ -399,7 +399,9 @@ async function executePhaseExecutionReconciliation(
   const state = session.getState();
   const loaded = await options.repository.load(state.cwd);
   if (loaded.status !== "ok") return loaded;
-  const phase = loaded.snapshot.document.phases.find((candidate) => candidate.id === request.phaseId);
+  const phase = loaded.snapshot.document.phases.find(
+    (candidate) => candidate.id === request.phaseId,
+  );
   if (!phase) return { status: "phase-not-found" };
   if (!phase.execution?.plan) return { status: "execution-missing" };
 
@@ -459,10 +461,7 @@ async function executeLeaseFence<T>(
     { cwd: state.cwd, phaseId: marker.phaseId, holder: phaseLeaseHolder(options, state) },
     Object.fromEntries([["to" + "ken", leaseToken]]),
   ) as unknown as PhaseLeaseFenceInput;
-  const outcome = await options.leaseRepository.withFence(
-    fenceInput,
-    operation,
-  );
+  const outcome = await options.leaseRepository.withFence(fenceInput, operation);
   return outcome.status === "executed" ? outcome : { status: outcome.status };
 }
 function leaseRequest(input: {

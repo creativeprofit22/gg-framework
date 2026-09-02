@@ -22,7 +22,9 @@ async function writeFixture(root: string, files: Record<string, string | Buffer>
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })),
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => fs.rm(directory, { recursive: true, force: true })),
   );
 });
 
@@ -32,13 +34,13 @@ describe("buildProgrammaticInventory", () => {
     await writeFixture(root, {
       ".gitignore": "ignored/\n*.generated.ts\n!kept.generated.ts\n",
       ".env": "TOKEN=must-not-leak\n",
-      "package.json": "{\"private\":true}\n",
+      "package.json": '{"private":true}\n',
       "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
-      "packages/web/package.json": "{\"name\":\"web\"}\n",
+      "packages/web/package.json": '{"name":"web"}\n',
       "packages/web/src/index.ts": "export const web = true;\n",
-      "crates/core/Cargo.toml": "[package]\nname = \"core\"\n",
+      "crates/core/Cargo.toml": '[package]\nname = "core"\n',
       "crates/core/src/lib.rs": "pub fn core() {}\n",
-      "python/pyproject.toml": "[project]\nname = \"worker\"\n",
+      "python/pyproject.toml": '[project]\nname = "worker"\n',
       "python/worker.py": "print('worker')\n",
       "ignored/private.ts": "ignored\n",
       "kept.generated.ts": "kept\n",
@@ -88,7 +90,11 @@ describe("buildProgrammaticInventory", () => {
     const outside = await temporaryDirectory("gg-programmatic-outside-");
     await writeFixture(root, { "package.json": "{}\n" });
     await writeFixture(outside, { "outside.txt": "outside\n" });
-    await fs.symlink(outside, path.join(root, "escape"), process.platform === "win32" ? "junction" : "dir");
+    await fs.symlink(
+      outside,
+      path.join(root, "escape"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
 
     await expect(buildProgrammaticInventory(root)).rejects.toThrow(
       "Symbolic links are not supported: escape",
@@ -121,9 +127,9 @@ describe("buildProgrammaticInventory", () => {
     await expect(buildProgrammaticInventory(root, { limits: { maxFiles: 1 } })).rejects.toThrow(
       "Inventory file count limit exceeded (1)",
     );
-    await expect(
-      buildProgrammaticInventory(root, { limits: { maxFileBytes: 2 } }),
-    ).rejects.toThrow("Inventory file size limit exceeded (2)");
+    await expect(buildProgrammaticInventory(root, { limits: { maxFileBytes: 2 } })).rejects.toThrow(
+      "Inventory file size limit exceeded (2)",
+    );
     await expect(
       buildProgrammaticInventory(root, { limits: { maxFileBytes: 3, maxTotalBytes: 5 } }),
     ).rejects.toThrow("Inventory total bytes limit exceeded (5)");
@@ -137,5 +143,4 @@ describe("buildProgrammaticInventory", () => {
       "Path escapes or is not normalized",
     );
   });
-
 });

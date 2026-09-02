@@ -11,11 +11,13 @@ describe("A touched-files-only bloat audit confirms lifecycle rules are centrali
       /export interface ProgrammaticLifecycleOperations \{([\s\S]*?)^\}/m,
     )?.[1];
 
-    expect(`${lifecycle}\n${scanTool}`.match(/^export function reconcileProgrammaticLifecycle\(/gm)).toHaveLength(
-      1,
-    );
+    expect(
+      `${lifecycle}\n${scanTool}`.match(/^export function reconcileProgrammaticLifecycle\(/gm),
+    ).toHaveLength(1);
     expect(lifecycle.match(/\breconcileProgrammaticLifecycle\(/g)).toHaveLength(2);
-    expect(scanTool).not.toMatch(/\breconcileProgrammaticLifecycle\b|\.lifecycle\b|\.records\b|\.presence\b/);
+    expect(scanTool).not.toMatch(
+      /\breconcileProgrammaticLifecycle\b|\.lifecycle\b|\.records\b|\.presence\b/,
+    );
     expect(operations).toBeDefined();
     expect([...(operations ?? "").matchAll(/^\s{2}(\w+)\(/gm)].map((match) => match[1])).toEqual([
       "lstat",

@@ -142,9 +142,7 @@ describe("selectRoadmapAdvancement", () => {
     "rejects %s direct completion evidence",
     (kind) => {
       const source = completedWithDirectCheckpoint();
-      const verification = source.roadmapEvents.find(
-        (event) => event.type === "status-update",
-      );
+      const verification = source.roadmapEvents.find((event) => event.type === "status-update");
       const implementation = source.roadmapEvents.find(
         (event) => event.type === "implementation-checkpoint",
       );

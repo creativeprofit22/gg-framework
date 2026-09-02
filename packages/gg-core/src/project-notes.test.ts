@@ -1249,18 +1249,49 @@ describe("durable phase execution contracts", () => {
   });
 
   it.each([
-    ["identity hash", (execution: NotesPhaseExecutionV1) => { execution.repository.identityHash = "BAD"; }],
-    ["absolute snapshot", (execution: NotesPhaseExecutionV1) => { execution.plan!.snapshotPath = "C:\\plans\\plan.md"; }],
-    ["renumbered step", (execution: NotesPhaseExecutionV1) => { execution.plan!.steps[0]!.index = 2; }],
-    ["duplicate step", (execution: NotesPhaseExecutionV1) => { execution.plan!.steps.push(execution.plan!.steps[0]!); }],
-    ["cross-repository workspace", (execution: NotesPhaseExecutionV1) => {
-      const workspace = execution.plan!.steps[0]!.workspace!;
-      workspace.repository = { ...workspace.repository, identityHash: "2".repeat(64) };
-    }],
-    ["malformed timestamp", (execution: NotesPhaseExecutionV1) => { execution.plan!.approvedAt = "today"; }],
-    ["unknown field", (execution: NotesPhaseExecutionV1) => {
-      (execution as unknown as Record<string, unknown>).extra = true;
-    }],
+    [
+      "identity hash",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.repository.identityHash = "BAD";
+      },
+    ],
+    [
+      "absolute snapshot",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.plan!.snapshotPath = "C:\\plans\\plan.md";
+      },
+    ],
+    [
+      "renumbered step",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.plan!.steps[0]!.index = 2;
+      },
+    ],
+    [
+      "duplicate step",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.plan!.steps.push(execution.plan!.steps[0]!);
+      },
+    ],
+    [
+      "cross-repository workspace",
+      (execution: NotesPhaseExecutionV1) => {
+        const workspace = execution.plan!.steps[0]!.workspace!;
+        workspace.repository = { ...workspace.repository, identityHash: "2".repeat(64) };
+      },
+    ],
+    [
+      "malformed timestamp",
+      (execution: NotesPhaseExecutionV1) => {
+        execution.plan!.approvedAt = "today";
+      },
+    ],
+    [
+      "unknown field",
+      (execution: NotesPhaseExecutionV1) => {
+        (execution as unknown as Record<string, unknown>).extra = true;
+      },
+    ],
   ])("rejects malformed %s", (_label, mutate) => {
     const execution = durableExecution();
     mutate(execution);

@@ -543,9 +543,7 @@ export function isNotesDirectCompletionAuthority(
     );
   const verification = [...priorEvents]
     .reverse()
-    .find(
-      (event): event is NotesRoadmapStatusUpdate => event.type === "status-update",
-    );
+    .find((event): event is NotesRoadmapStatusUpdate => event.type === "status-update");
   if (!implementation || !verification) return false;
 
   const implementationIndex = phase.roadmapEvents.indexOf(implementation);
@@ -769,13 +767,7 @@ const LEGACY_V3_PHASE_REQUIRED_KEYS = LEGACY_PHASE_KEYS.filter(
 );
 const SESSION_KEYS = ["sessionId", "sessionPath"];
 const REPOSITORY_IDENTITY_KEYS = ["projectKey", "identityHash", "rootCommit"];
-const WORKSPACE_SNAPSHOT_KEYS = [
-  "version",
-  "repository",
-  "headCommit",
-  "worktreeDigest",
-  "clean",
-];
+const WORKSPACE_SNAPSHOT_KEYS = ["version", "repository", "headCommit", "worktreeDigest", "clean"];
 const PLAN_STEP_KEYS = ["id", "index", "text", "state", "completedAt", "workspace"];
 const APPROVED_PLAN_KEYS = [
   "planId",
@@ -1690,8 +1682,10 @@ export function validateNotesPhaseExecution(
   const repository = value.repository as unknown as NotesRepositoryIdentityV1;
   const planError = validateApprovedPlan(value.plan, `${pathPrefix}.plan`, repository);
   if (planError) return planError;
-  if ((value.state === "needs-plan" && value.plan !== null) ||
-      (value.state !== "needs-plan" && value.state !== "needs-reconciliation" && value.plan === null)) {
+  if (
+    (value.state === "needs-plan" && value.plan !== null) ||
+    (value.state !== "needs-plan" && value.state !== "needs-reconciliation" && value.plan === null)
+  ) {
     return validationError(`${pathPrefix}.plan`, "plan does not match execution state");
   }
   if (!Array.isArray(value.evidence)) {
@@ -1715,19 +1709,22 @@ export function validateNotesPhaseExecution(
   const plan = value.plan as NotesApprovedPlanV1 | null;
   if (
     (value.state === "completion-pending" && pendingCompletion === null) ||
-    ((value.state === "needs-plan" || value.state === "implementing" ||
-      value.state === "needs-reconciliation") && pendingCompletion !== null)
+    ((value.state === "needs-plan" ||
+      value.state === "implementing" ||
+      value.state === "needs-reconciliation") &&
+      pendingCompletion !== null)
   ) {
     return validationError(
       `${pathPrefix}.pendingCompletion`,
       "pending completion does not match state",
     );
   }
-  if (pendingCompletion !== null && plan !== null && pendingCompletion.planHash !== plan.contentHash) {
-    return validationError(
-      `${pathPrefix}.pendingCompletion.planHash`,
-      "must match approved plan",
-    );
+  if (
+    pendingCompletion !== null &&
+    plan !== null &&
+    pendingCompletion.planHash !== plan.contentHash
+  ) {
+    return validationError(`${pathPrefix}.pendingCompletion.planHash`, "must match approved plan");
   }
   const sessionError = validateNotesSessionLink(value.lastSession, `${pathPrefix}.lastSession`);
   if (sessionError) return sessionError;
@@ -1741,20 +1738,35 @@ export function validateNotesPhaseExecution(
     return validationError(`${pathPrefix}.migration.source`, "unknown migration source");
   }
   if (!isNullableTimestamp(value.migration.reconciledAt)) {
-    return validationError(`${pathPrefix}.migration.reconciledAt`, "expected an ISO timestamp or null");
+    return validationError(
+      `${pathPrefix}.migration.reconciledAt`,
+      "expected an ISO timestamp or null",
+    );
   }
   if ("reconciliation" in value.migration) {
     if (!isRecordWithKeys(value.migration.reconciliation, EXECUTION_RECONCILIATION_KEYS)) {
-      return validationError(`${pathPrefix}.migration.reconciliation`, "invalid reconciliation marker");
+      return validationError(
+        `${pathPrefix}.migration.reconciliation`,
+        "invalid reconciliation marker",
+      );
     }
     if (!isBoundedNonEmptyString(value.migration.reconciliation.operationId, 256)) {
-      return validationError(`${pathPrefix}.migration.reconciliation.operationId`, "expected a bounded operation ID");
+      return validationError(
+        `${pathPrefix}.migration.reconciliation.operationId`,
+        "expected a bounded operation ID",
+      );
     }
     if (!isSha256(value.migration.reconciliation.requestHash)) {
-      return validationError(`${pathPrefix}.migration.reconciliation.requestHash`, "expected a lowercase SHA-256 hash");
+      return validationError(
+        `${pathPrefix}.migration.reconciliation.requestHash`,
+        "expected a lowercase SHA-256 hash",
+      );
     }
     if (value.migration.reconciledAt === null) {
-      return validationError(`${pathPrefix}.migration.reconciledAt`, "required with reconciliation metadata");
+      return validationError(
+        `${pathPrefix}.migration.reconciledAt`,
+        "required with reconciliation metadata",
+      );
     }
   }
   return null;
@@ -1790,7 +1802,12 @@ function validateWorkspaceSnapshot(
   if (value.version !== 1) return validationError(`${pathPrefix}.version`, "expected 1");
   const repositoryError = validateRepositoryIdentity(value.repository, `${pathPrefix}.repository`);
   if (repositoryError) return repositoryError;
-  if (!sameRepositoryIdentity(value.repository as unknown as NotesRepositoryIdentityV1, expectedRepository)) {
+  if (
+    !sameRepositoryIdentity(
+      value.repository as unknown as NotesRepositoryIdentityV1,
+      expectedRepository,
+    )
+  ) {
     return validationError(`${pathPrefix}.repository`, "must match phase repository");
   }
   if (!isGitCommit(value.headCommit)) {
@@ -1874,7 +1891,11 @@ function validateApprovedPlan(
       return validationError(`${stepPath}.completedAt`, "expected an ISO timestamp or null");
     }
     if (step.workspace !== null) {
-      const workspaceError = validateWorkspaceSnapshot(step.workspace, `${stepPath}.workspace`, repository);
+      const workspaceError = validateWorkspaceSnapshot(
+        step.workspace,
+        `${stepPath}.workspace`,
+        repository,
+      );
       if (workspaceError) return workspaceError;
     }
     if (step.state === "pending" && (step.completedAt !== null || step.workspace !== null)) {
@@ -1908,7 +1929,10 @@ function validateVerificationEvidence(
     return validationError(`${pathPrefix}.exitCode`, "expected a non-negative exit code");
   }
   if (!isBoundedNonEmptyString(value.classifierVersion, 64)) {
-    return validationError(`${pathPrefix}.classifierVersion`, "expected a bounded classifier version");
+    return validationError(
+      `${pathPrefix}.classifierVersion`,
+      "expected a bounded classifier version",
+    );
   }
   if (value.verdict !== "approved" && value.verdict !== "rejected") {
     return validationError(`${pathPrefix}.verdict`, "unknown classifier verdict");
@@ -1919,11 +1943,7 @@ function validateVerificationEvidence(
   if (!isTimestamp(value.observedAt)) {
     return validationError(`${pathPrefix}.observedAt`, "expected an ISO timestamp");
   }
-  if (
-    "state" in value &&
-    value.state !== "current" &&
-    value.state !== "needs-revalidation"
-  ) {
+  if ("state" in value && value.state !== "current" && value.state !== "needs-revalidation") {
     return validationError(`${pathPrefix}.state`, "unknown evidence state");
   }
   return validateWorkspaceSnapshot(value.workspace, `${pathPrefix}.workspace`, repository);
@@ -1951,7 +1971,10 @@ function validatePendingCompletion(
     return validationError(`${pathPrefix}.runJournal.sessionPath`, "expected a path or null");
   }
   if (!isNonNegativeSafeInteger(value.runJournal.generation)) {
-    return validationError(`${pathPrefix}.runJournal.generation`, "expected a non-negative generation");
+    return validationError(
+      `${pathPrefix}.runJournal.generation`,
+      "expected a non-negative generation",
+    );
   }
   if (!isSha256(value.planHash)) {
     return validationError(`${pathPrefix}.planHash`, "expected a lowercase SHA-256 hash");
@@ -1996,10 +2019,7 @@ function validatePhase(
   const sessionError = validateNotesSessionLink(value.session, `${pathPrefix}.session`);
   if (sessionError) return sessionError;
   if ("execution" in value) {
-    const executionError = validateNotesPhaseExecution(
-      value.execution,
-      `${pathPrefix}.execution`,
-    );
+    const executionError = validateNotesPhaseExecution(value.execution, `${pathPrefix}.execution`);
     if (executionError) return executionError;
   }
   const reminderError = validateReminder(value.reminder, `${pathPrefix}.reminder`);
@@ -2884,8 +2904,7 @@ function validateRoadmapEvents(
           );
         }
       } else {
-        const directCheckpoint =
-          record as unknown as NotesRoadmapDirectPhaseAdvancementCheckpoint;
+        const directCheckpoint = record as unknown as NotesRoadmapDirectPhaseAdvancementCheckpoint;
         if (
           !isNotesDirectCompletionAuthority(
             {

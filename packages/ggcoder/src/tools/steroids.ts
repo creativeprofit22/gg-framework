@@ -146,13 +146,13 @@ export function buildSteroidsArgs(a: Params): string[] {
   return args;
 }
 
-const DESCRIPTION = `Read real, current open-source code from a local corpus before writing anything non-trivial. Offline, no limits.
+const DESCRIPTION = `Read real, current open-source code from a local corpus. REQUIRED before the first edit/write on any nontrivial task: search (literal tokens), then show the matching file, then build from it. Offline, no limits.
 Actions:
 - search: regex across every repo (fixed=true for literal). Filter by repo/language/path/tag; perRepo=1 for breadth.
 - define: where a symbol is defined, corpus-wide (no repo filter; ts/js/py/go/rust/java only). For one repo or other languages use search with repo + a definition pattern.
 - show: read a file (from/to for a region; search results carry line numbers).
 - files: files indexed for one repo. repos: indexed repos, one line each (tag/limit to narrow).
-- discover: find good GitHub repos; query is 'topic:X language:Y' or 2-3 keywords, never a sentence. add=true indexes everything found (ask the user first).
+- discover: find good GitHub repos; query is 'topic:X language:Y' or 2-3 keywords, never a sentence (4+ words returns nothing). found=0: retry ONCE with 2 words or a topic: form before giving up. add=true indexes everything found (ask the user first).
 - add: index specific repos (owner/name list); the way to take a chosen subset of discover results.
 - recent: upstream changes in the last N hours.
 repo/language are case-insensitive; a path without globs is a prefix ('src' = 'src/**').
@@ -189,19 +189,17 @@ export function compactRepos(json: string): string {
   );
 }
 
-export function createSteroidsTool(
-  bin: string,
-  planModeRef?: { current: boolean },
-): AgentTool<typeof SteroidsParams> {
+// Indexing (`add`, `discover --add`) is deliberately NOT gated on plan mode:
+// it writes to the corpus, not the workspace, and the prompt requires user
+// approval of the repo list first. A plan needs the corpus filled to be a
+// plan from real code rather than memory.
+export function createSteroidsTool(bin: string): AgentTool<typeof SteroidsParams> {
   return {
     name: "steroids",
     description: DESCRIPTION,
     parameters: SteroidsParams,
     async execute(args, context) {
       const indexes = args.action === "add" || (args.action === "discover" && args.add);
-      if (indexes && planModeRef?.current) {
-        return "Error: cannot index repos in plan mode. Run discover without `add` for now.";
-      }
       let argv: string[];
       try {
         argv = buildSteroidsArgs(args);

@@ -151,7 +151,9 @@ describe("tool tiering in the system prompt", () => {
     // again for the alignment guardrails (facts-vs-decisions, batched
     // questions) — see the size-budget test in system-prompt.test.ts. Raised
     // once more when `steroids` joined the core tier (its hint + the Research
-    // staple sentence); the index block cap is still the tiering guard.
-    expect(prompt.length).toBeLessThan(12_700);
+    // staple sentence), and again when steroids became the proactive source
+    // of truth (corpus-gap and not-installed fallbacks); the index block cap
+    // is still the tiering guard.
+    expect(prompt.length).toBeLessThan(13_100);
   });
 });

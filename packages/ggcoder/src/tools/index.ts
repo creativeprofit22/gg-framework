@@ -251,7 +251,7 @@ export async function createTools(
 
   // Local corpus of real repos; only when the CLI is actually on this machine.
   const steroidsBin = opts?.steroidsBin === undefined ? findSteroidsBinary() : opts.steroidsBin;
-  if (steroidsBin) tools.push(createSteroidsTool(steroidsBin, planModeRef));
+  if (steroidsBin) tools.push(createSteroidsTool(steroidsBin));
 
   // Add web search tool for providers without reliable native web search
   if (opts?.provider && opts.provider !== "anthropic") {

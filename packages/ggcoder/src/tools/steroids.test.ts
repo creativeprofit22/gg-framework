@@ -79,20 +79,15 @@ describe("compactRepos", () => {
 });
 
 describe("steroids tool", () => {
-  it("refuses discover --add in plan mode", async () => {
-    const tool = createSteroidsTool("/nonexistent/steroids", { current: true });
-    const out = await tool.execute({ action: "discover", query: "topic:x", add: true }, {
-      signal: new AbortController().signal,
-    } as never);
-    expect(out).toMatch(/plan mode/);
-  });
-
-  it("refuses add in plan mode", async () => {
-    const tool = createSteroidsTool("/nonexistent/steroids", { current: true });
+  it("never refuses indexing on plan-mode grounds (corpus is not the workspace)", async () => {
+    // A plan grounded in real code needs the corpus filled first; the user
+    // approves the repo list via the prompt, so no plan-mode gate here.
+    const tool = createSteroidsTool("/nonexistent/steroids");
     const out = await tool.execute({ action: "add", repos: ["go-chi/chi"] }, {
       signal: new AbortController().signal,
     } as never);
-    expect(out).toMatch(/plan mode/);
+    expect(out).not.toMatch(/plan mode/);
+    expect(out).toMatch(/^Error: steroids add failed/);
   });
 
   it("reports a missing binary as a tool error, not a throw", async () => {

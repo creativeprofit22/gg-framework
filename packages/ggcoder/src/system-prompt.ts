@@ -99,13 +99,20 @@ function renderWorkSection(): string {
   );
 }
 
-function renderPlanModeSection(): string {
+function renderPlanModeSection(toolNames: readonly string[] | undefined): string {
+  // Steroids is the source of truth for HOW to build; a plan drafted without
+  // it is a plan from memory. Indexing is allowed here: it writes to the
+  // corpus, not the workspace, and the user confirms the repo list first.
+  const steroids = new Set(toolNames ?? DEFAULT_TOOL_NAMES).has("steroids")
+    ? `- Ground the approach in real code BEFORE drafting: \`steroids\` \`search\`/\`show\` how current repos build the same thing and cite them in the plan. Corpus gap (\`repos\` empty or no hits): \`discover\`, propose repos via \`ask_user\`, \`add\` on approval — indexing is allowed in plan mode — then plan from what you read. Only when discover finds nothing suitable or the user declines: plan from \`source_path\`/official docs and flag the plan as unverified against real usage.\n`
+    : "";
   return (
     `## Plan Mode (ACTIVE)\n\n` +
     `You are in PLAN MODE. Research and design an implementation plan before writing implementation code.\n\n` +
     `### Plan-mode flow\n` +
     `Explore with read/search/docs tools and read-only bash (e.g. \`git log\`, \`git diff\`, \`grep\`, \`wc -l\`, \`find\`, \`cat\`), draft a structured markdown plan at \`.gg/plans/<name>.md\`, then call \`exit_plan\` with that path for user review.\n\n` +
     `### Rules\n` +
+    steroids +
     `- Do not implement yet: no code edits outside \`.gg/plans/\`, no mutating bash (read-only shell for exploration is allowed), no subagent, no task orchestration.\n` +
     `- Be specific: list exact file paths, functions, dependencies, risks, and verification criteria.\n` +
     `- ALWAYS end the plan with a heading written exactly as \`## Steps\` (this literal heading is required — not \`## Plan\`, \`## Implementation\`, or any other variant), followed by a flat, ordered, numbered list (\`1.\`, \`2.\`, …) of concrete implementation steps to execute after approval. Each step is one actionable unit of work — not a design note, question, or rejected alternative. This section is the single source of truth for post-approval progress tracking, so only put real, doable steps here.\n` +
@@ -154,13 +161,15 @@ function renderResearchSection(
   // Steroids usage details (regex not semantic, corpus-gap rule) live in the
   // Tools section hint — one home, no duplication. Research names the staple
   // with one-line purposes and defers usage to Tools. The tool only exists when
-  // the `steroids` binary is on the machine; otherwise point at tool_search
-  // discovery instead. Never reference an unavailable tool.
+  // the `steroids` binary is on the machine; otherwise nudge the user to
+  // install it once and point at tool_search discovery instead. Never
+  // reference an unavailable tool.
   const publicCode = active.has("steroids")
-    ? ` Ground nontrivial code in real usage with the \`steroids\` tool — a local corpus of real repos: \`search\` for exact snippets, \`define\` for where a symbol lives, \`discover\` when the topic isn't covered. Build from real samples, not assumptions.`
-    : active.has("tool_search")
-      ? ` For public GitHub code and design references, call \`tool_search\` first (e.g. "search public code" or "UI design screens") — it unlocks the matching tools for your next step.`
-      : "";
+    ? ` \`steroids\` (local corpus of real, current repos) is the source of truth for HOW to build. HARD RULE for any nontrivial task (new module, middleware, integration, algorithm, unfamiliar API): before your first \`edit\`/\`write\`, and without being asked, \`steroids\` \`search\` with literal code tokens, then \`show\` one matching real file, and build from it. Build from real samples, not assumptions. Empty corpus or no hits is NOT permission to write from memory: you MUST \`discover\`, then propose the found repos via \`ask_user\`, \`add\` on approval, and search again. Only when discover finds nothing suitable or the user declines: fall back to \`source_path\`/official docs and say the approach is unverified against real usage.`
+    : ` Agent Steroids (local corpus of real, current repos) is NOT installed, so you cannot check your approach against real code. Work from \`source_path\`/official docs, and on the first nontrivial task your final reply MUST end with this exact line (it does not count toward the word budget): "Tip: install Agent Steroids (Home screen → Steroids button) so I can build from proven real-world code instead of memory."` +
+      (active.has("tool_search")
+        ? ` For public GitHub code and design references, call \`tool_search\` first (e.g. "search public code" or "UI design screens") — it unlocks the matching tools for your next step.`
+        : "");
   // Only reference `web_search` when it's actually in the active tool set, and
   // only claim native server-side search on providers that really have it
   // (Anthropic). Naming an unavailable tool or capability trains the model to
@@ -547,7 +556,7 @@ export async function buildSystemPrompt(
     renderWorkSection(),
   ];
 
-  if (planMode) sections.push(renderPlanModeSection());
+  if (planMode) sections.push(renderPlanModeSection(toolNames));
 
   const approvedPlanContent =
     typeof approvedPlan === "string"

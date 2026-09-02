@@ -354,7 +354,7 @@ describe("buildSystemPrompt", () => {
       "Do not rely on memory for APIs",
       "Use `source_path`",
       "web_search` then `web_fetch",
-      "`steroids` tool",
+      "`steroids` (local corpus of real, current repos) is the source of truth for HOW to build",
       "Build from real samples, not assumptions",
       "Local corpus of real, current open-source repos",
       "regex, NOT semantic",
@@ -400,6 +400,33 @@ describe("buildSystemPrompt", () => {
     expect(tools.length).toBeLessThan(600);
   });
 
+  it("makes steroids the proactive source of truth before planning and coding", async () => {
+    const cwd = await makeProject();
+    const normal = await buildSystemPrompt(cwd, undefined, false, undefined, ["steroids"]);
+    expect(normal).toContain("source of truth for HOW to build");
+    expect(normal).toContain("before your first `edit`/`write`, and without being asked");
+    expect(normal).toContain("NOT permission to write from memory");
+    expect(normal).toContain("propose the found repos via `ask_user`, `add` on approval");
+
+    const plan = await buildSystemPrompt(cwd, undefined, true, undefined, ["steroids"]);
+    expect(plan).toContain("Ground the approach in real code BEFORE drafting");
+    expect(plan).toContain("indexing is allowed in plan mode");
+
+    // Never name a tool the model can't call; instead nudge the user to install
+    // the corpus once, and keep going from docs/dependency source.
+    const noCorpus = await buildSystemPrompt(cwd, undefined, true, undefined, ["read", "bash"]);
+    expect(noCorpus).not.toContain("BEFORE drafting");
+    expect(noCorpus).toContain(
+      "Agent Steroids (local corpus of real, current repos) is NOT installed",
+    );
+    expect(noCorpus).toContain("Tip: install Agent Steroids (Home screen → Steroids button)");
+
+    // Corpus present but discover finds nothing (or user declines): fall back
+    // honestly rather than stall or fake certainty.
+    expect(normal).toContain("say the approach is unverified against real usage");
+    expect(plan).toContain("flag the plan as unverified against real usage");
+  });
+
   it("routes public-code research guidance through tool_search when MCP tools are deferred", async () => {
     const cwd = await makeProject();
     // No steroids binary on this machine, tool_search is active.
@@ -409,14 +436,14 @@ describe("buildSystemPrompt", () => {
       "tool_search",
     ]);
     // Research section must not name tools the model can't call yet…
-    expect(deferred).not.toContain("`steroids` tool");
+    expect(deferred).not.toContain("source of truth for HOW to build");
     // …and must point discovery at tool_search instead (research + tools hint).
     expect(deferred).toContain("call `tool_search` first");
     expect(deferred).toContain("Check the catalog BEFORE concluding");
 
     // Neither steroids nor tool_search active: the public-code sentence is omitted.
     const bare = await buildSystemPrompt(cwd, undefined, false, undefined, ["read", "bash"]);
-    expect(bare).not.toContain("`steroids` tool");
+    expect(bare).not.toContain("source of truth for HOW to build");
     expect(bare).not.toContain("tool_search");
   });
 
@@ -528,9 +555,15 @@ describe("buildSystemPrompt", () => {
     // batched questions with recommended answers) — misalignment is the most
     // common failure mode, and these two lines are the always-on floor the
     // `clarify` skill then deepens on demand.
-    expect(measurements.normal.characters).toBeLessThan(9_000);
-    expect(measurements.planMode.characters).toBeLessThan(10_200);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(13_400);
+    // Raised for the proactive steroids rule (ground plans and code in real
+    // code first; fill the corpus on approval; honest fallback when the corpus
+    // is missing or has no fit). The blunt wording ("HARD RULE", "NOT
+    // permission to write from memory", verbatim install tip) is what moved
+    // GLM-5.3 from 0/3 to 3/3 on the gap and not-installed scenarios in
+    // experiments/prompt-bench/steroids-bench.ts — the softer draft scored 0.
+    expect(measurements.normal.characters).toBeLessThan(9_300);
+    expect(measurements.planMode.characters).toBeLessThan(11_000);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(13_700);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -571,7 +604,8 @@ describe("buildSystemPrompt", () => {
     // Raised again with the 2026-08 guardrail additions (see size-budget test).
     // Lowered for the shorter native steroids staple sentence in Research.
     // And again for the alignment guardrails (see size-budget test).
-    expect(audit.size.characters).toBeLessThan(13_100);
+    // And for the proactive steroids rule (see size-budget test).
+    expect(audit.size.characters).toBeLessThan(13_400);
     expect(audit.size.sections).toBeGreaterThanOrEqual(8);
   });
 

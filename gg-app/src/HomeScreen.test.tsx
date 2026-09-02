@@ -17,6 +17,8 @@ const agentMocks = vi.hoisted(() => ({
   stopServe: vi.fn(),
   openWhatsNewWindow: vi.fn(),
   getProgress: vi.fn().mockResolvedValue(null),
+  getSteroidsStatus: vi.fn().mockResolvedValue({ installed: false, connected: false }),
+  onSteroidsChange: vi.fn(() => vi.fn()),
   setRemoteActive: vi.fn().mockResolvedValue(undefined),
 }));
 

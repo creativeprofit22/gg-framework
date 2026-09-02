@@ -113,9 +113,7 @@ export function childSubAgentEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.P
   return { ...env, [SUB_AGENT_DEPTH_ENV]: String(currentSubAgentDepth(env) + 1) };
 }
 
-export function resolveSubAgentCliEntry(env: NodeJS.ProcessEnv = process.env): string {
-  const monitoredEntry = env.GG_SUBAGENT_WORKER_ENTRY;
-  if (monitoredEntry) return monitoredEntry;
+export function resolveSubAgentCliEntry(): string {
   const cliPath = fileURLToPath(new URL("../cli.js", import.meta.url));
   return existsSync(cliPath) ? cliPath : process.argv[1];
 }

@@ -294,7 +294,7 @@ export function formatError(err: unknown): FormattedError {
         statusCode: err.statusCode,
         ...(err.requestId ? { requestId: err.requestId } : {}),
         guidance:
-          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5 via the model selector — same underlying model, generally available.",
+          "Request access via your Anthropic account team (see platform.claude.com/docs/en/about-claude/models/overview), or switch to Claude Fable 5.1 via the model selector — same underlying model, generally available.",
       };
     }
     if (isUsageLimitError(err)) {

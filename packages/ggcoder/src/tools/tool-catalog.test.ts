@@ -47,6 +47,7 @@ const OPT_IN_TOOLS = new Set([
   "enter_plan", // needs onEnterPlan callback
   "exit_plan", // needs onExitPlan callback
   "generate_image", // gated on OpenAI auth
+  "steroids", // gated on the `steroids` binary being on this machine
 ]);
 
 /** Deterministic JSON: object keys sorted at every depth, stable stringification. */
@@ -65,7 +66,7 @@ async function buildCatalog(): Promise<
   // embed cwd (verified — factories use static description text).
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gg-tool-catalog-"));
   try {
-    const { tools } = await createTools(cwd);
+    const { tools } = await createTools(cwd, { steroidsBin: null });
     return tools.map((tool) => {
       const entry = {
         name: tool.name,

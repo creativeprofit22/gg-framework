@@ -175,8 +175,11 @@ export function HomeBackdrop(): React.ReactElement {
     // windows open, letting all of them run a canvas at 60fps starves the GPU
     // compositor and causes intermittent rendering failures (black frames,
     // frozen/bunched canvases). Pausing unfocused windows cuts concurrent
-    // rendering from N to 1.
-    startLoop();
+    // rendering from N to 1. Always paint one frame so an unfocused window is
+    // not blank; only a focused one keeps looping — a window restored at launch
+    // never gets a blur event, so an unconditional start would run forever.
+    draw();
+    if (document.hasFocus()) startLoop();
     window.addEventListener("focus", startLoop);
     window.addEventListener("blur", stopLoop);
 

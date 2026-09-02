@@ -22,7 +22,7 @@ import type { MCPServerConfig } from "./types.js";
  *
  * The regression this file exists to catch: Ken's two factories originally
  * omitted `onMcpElicit`, which made them headless, which split the pool, which
- * produced a SECOND kencode-search process per daemon — measured, before the
+ * produced a SECOND stdio server process per daemon — measured, before the
  * fix, as 2 processes for 6 sessions instead of 1. Nothing else failed, which is
  * exactly why it needs a test.
  */
@@ -106,7 +106,7 @@ describe("app-sidecar wires every window session for elicitation", () => {
 });
 
 describe("pool keying for a window's three sessions", () => {
-  const config: MCPServerConfig = { name: "kencode-search", command: "npx" };
+  const config: MCPServerConfig = { name: "example-server", command: "npx" };
 
   function connector(spawns: { count: number }): SharedConnector {
     spawns.count += 1;

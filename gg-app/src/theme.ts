@@ -25,6 +25,9 @@ export const theme = {
 
   // Accent — periwinkle, luminous enough to carry near-black text on a fill.
   primary: "#b0b6ff",
+  // The ink that fill carries. Anything placed ON a primary surface (a badge
+  // inside a selected pill, for one) has to switch to this or it is unreadable.
+  onPrimary: "#0c0e26",
   secondary: "#b0b6ff",
   success: "#7fe89a",
   warning: "#f0cf63",

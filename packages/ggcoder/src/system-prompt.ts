@@ -8,6 +8,7 @@ import { stripBom } from "./utils/text.js";
 import { resolveShell } from "./core/shell.js";
 import { renderStylePacksSection } from "./core/style-packs/index.js";
 import { detectVerifyCommands, renderVerifySection } from "./core/verify-commands.js";
+import { detectPlatformClis, renderPlatformClisSection } from "./core/platform-clis.js";
 import { extractPlanSteps } from "./utils/plan-steps.js";
 import type { Provider } from "@kenkaiiii/gg-ai";
 
@@ -150,14 +151,13 @@ function renderResearchSection(
   provider: Provider | undefined,
 ): string {
   const active = new Set(toolNames ?? DEFAULT_TOOL_NAMES);
-  // Kencode usage details (literal/RE2, broad→narrow, path semantics) live in
-  // the Tools section hints — one home, no duplication. Research names the
-  // staple with one-line purposes and defers usage to Tools. With deferred MCP
-  // loading the kencode tools sit in the tool_search catalog until promoted, so
-  // point at discovery instead of naming tools the model can't call yet. Never
-  // reference an unavailable tool.
-  const publicCode = active.has("mcp__kencode-search__searchCode")
-    ? ` Ground nontrivial code in real usage with the kencode-search MCP — millions of GitHub repos, searchable for how it's actually done: \`mcp__kencode-search__searchCode\` for exact snippets, \`referenceSources\` for curated reference repos, \`discoverRepos\` for current/top repos (usage in Tools below). Build from real samples, not assumptions.`
+  // Steroids usage details (regex not semantic, corpus-gap rule) live in the
+  // Tools section hint — one home, no duplication. Research names the staple
+  // with one-line purposes and defers usage to Tools. The tool only exists when
+  // the `steroids` binary is on the machine; otherwise point at tool_search
+  // discovery instead. Never reference an unavailable tool.
+  const publicCode = active.has("steroids")
+    ? ` Ground nontrivial code in real usage with the \`steroids\` tool — a local corpus of real repos: \`search\` for exact snippets, \`define\` for where a symbol lives, \`discover\` when the topic isn't covered. Build from real samples, not assumptions.`
     : active.has("tool_search")
       ? ` For public GitHub code and design references, call \`tool_search\` first (e.g. "search public code" or "UI design screens") — it unlocks the matching tools for your next step.`
       : "";
@@ -497,6 +497,8 @@ export async function buildSubAgentSystemPrompt(
       await collectProjectContext(opts.cwd, limits),
     );
     if (projectContextSection) sections.push(projectContextSection);
+    const platformClis = renderPlatformClisSection(detectPlatformClis(opts.cwd));
+    if (platformClis) sections.push(platformClis);
   }
 
   sections.push(
@@ -583,6 +585,11 @@ export async function buildSystemPrompt(
     const skillsSection = formatSkillsForPrompt(skills, limits);
     if (skillsSection) sections.push(skillsSection);
   }
+
+  // Hosted-platform CLIs (railway, vercel, gh, ...) the project uses. Stable
+  // per host+project, so it sits in the cached body next to Environment.
+  const platformClis = renderPlatformClisSection(detectPlatformClis(cwd));
+  if (platformClis) sections.push(platformClis);
 
   sections.push(renderEnvironmentSection(cwd, environment), renderUncachedDateSuffix());
 

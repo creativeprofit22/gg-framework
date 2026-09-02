@@ -36,9 +36,7 @@ function seedNpxCache(
 
 describe("parseNpxPackage", () => {
   it("extracts the package from `npx -y <pkg>`", () => {
-    expect(parseNpxPackage("npx", ["-y", "@kenkaiiii/kencode-search"])).toBe(
-      "@kenkaiiii/kencode-search",
-    );
+    expect(parseNpxPackage("npx", ["-y", "@scope/example-server"])).toBe("@scope/example-server");
   });
 
   it("extracts the package from a full npx path", () => {
@@ -61,11 +59,9 @@ describe("parseNpxPackage", () => {
 });
 
 describe("findPackageBinScript", () => {
-  it("resolves the kencode-search bin script from ggcoder's install", () => {
-    // kencode-search is a ggcoder dependency, so its bin must resolve from here.
-    const script = findPackageBinScript("@kenkaiiii/kencode-search", "kencode-search");
-    expect(script).toBeTruthy();
-    expect(script).toMatch(/kencode-search[/\\].*index\.js$/);
+  it("resolves a bundled dependency's bin script from ggcoder's install", () => {
+    const script = findPackageBinScript("opensrc", "opensrc");
+    expect(script).toMatch(/opensrc[/\\].*opensrc\.js$/);
   });
 
   it("returns null for an unknown package", () => {
@@ -75,20 +71,14 @@ describe("findPackageBinScript", () => {
 
 describe("resolveStdioCommand", () => {
   it("rewrites a dependency-backed npx server to `node <binScript>`", () => {
-    const out = resolveStdioCommand("npx", ["-y", "@kenkaiiii/kencode-search"]);
+    const out = resolveStdioCommand("npx", ["-y", "opensrc"]);
     expect(out.command).toBe(process.execPath);
     expect(out.args).toHaveLength(1);
-    expect(out.args[0]).toMatch(/kencode-search[/\\].*index\.js$/);
+    expect(out.args[0]).toMatch(/opensrc[/\\].*opensrc\.js$/);
   });
 
   it("forwards server args that follow the package spec", () => {
-    const out = resolveStdioCommand("npx", [
-      "-y",
-      "@kenkaiiii/kencode-search",
-      "--",
-      "--flag",
-      "value",
-    ]);
+    const out = resolveStdioCommand("npx", ["-y", "opensrc", "--", "--flag", "value"]);
     expect(out.command).toBe(process.execPath);
     // [binScript, "--flag", "value"] — the `--` separator is dropped.
     expect(out.args.slice(1)).toEqual(["--flag", "value"]);

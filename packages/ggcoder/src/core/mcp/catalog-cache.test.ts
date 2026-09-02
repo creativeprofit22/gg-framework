@@ -9,7 +9,7 @@ let dir: string;
 let file: string;
 
 const server: MCPServerConfig = {
-  name: "kencode-search",
+  name: "example-server",
   command: "node",
   args: ["server.js"],
 };
@@ -111,6 +111,7 @@ describe("McpCatalogCache", () => {
     const cache = new McpCatalogCache(file);
     expect((await cache.entriesFor([server])).size).toBe(0);
 
+    // Recover by overwriting with the exact v2 source identity.
     await cache.save(server, [{ toolName: "search", description: "x" }]);
     expect((await cache.entriesFor([server])).size).toBe(1);
   });
@@ -183,6 +184,19 @@ describe("McpCatalogCache", () => {
     expect(entries.get(other.name)?.tools).toEqual([
       { toolName: "lookup:exact/source", description: "lookup" },
     ]);
+  });
+
+  it("preserves concurrent writes through one cache instance", async () => {
+    const cache = new McpCatalogCache(file);
+    const other: MCPServerConfig = { name: "other", command: "node", args: ["o.js"] };
+
+    await Promise.all([
+      cache.save(server, [{ toolName: "search", description: "search" }]),
+      cache.save(other, [{ toolName: "lookup", description: "lookup" }]),
+    ]);
+
+    const entries = await cache.entriesFor([server, other]);
+    expect([...entries.keys()].sort()).toEqual(["example-server", "other"]);
   });
 
   it("clears a server's entry", async () => {

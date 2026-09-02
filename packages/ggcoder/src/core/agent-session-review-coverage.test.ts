@@ -165,7 +165,43 @@ describe("AgentSession Ideal review coverage gate", () => {
     expect(seen).toEqual(["armed:true"]);
 
     expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Ideal?");
+    // Still armed after the hook: coverage is outstanding, so a stop right now
+    // injects again and the next candidate answer is another draft. Disarm only
+    // lands once the read evidence is complete.
+    expect(seen).toEqual(["armed:true", "hook:ideal"]);
+
+    internal.reviewCoverage.recordRead("src/a.ts");
+    internal.refreshIdealReviewArmed();
     expect(seen).toEqual(["armed:true", "hook:ideal", "armed:false"]);
+  });
+
+  it("announces the coverage follow-up so the draft it replaces is never painted", () => {
+    // The duplicate-final-answer bug: the coverage retry injected silently, so
+    // clients had nothing to hold or discard and painted the pre-coverage answer
+    // on top of the reviewed one.
+    const cwd = makeWorkspace(["src/a.ts"]);
+    const internal = makeReviewSession(cwd, ["src/a.ts"]);
+    const seen: string[] = [];
+    internal.eventBus.on("hook_armed", (d) => seen.push(`armed:${d.armed}`));
+    internal.eventBus.on("hook", (d) => seen.push(`hook:${d.kind}`));
+
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("Ideal?");
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("coverage is incomplete");
+    // Arming lands after the hook here only because nothing computed it earlier
+    // in this test; what matters is that it is on while coverage is outstanding.
+    expect(seen).toEqual(["hook:ideal", "armed:true", "hook:ideal"]);
+
+    // Escalation is an injection too: announce, then disarm as the gate closes.
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("coverage is incomplete");
+    expect(internal.getHookFollowUpMessages()?.[0]?.content).toContain("could not verify");
+    expect(seen).toEqual([
+      "hook:ideal",
+      "armed:true",
+      "hook:ideal",
+      "hook:ideal",
+      "hook:ideal",
+      "armed:false",
+    ]);
   });
 
   it("arms for a run that only crosses the gate on the draft turn's own turn_end", () => {

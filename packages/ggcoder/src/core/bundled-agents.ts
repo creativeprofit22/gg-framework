@@ -56,7 +56,7 @@ You answer questions the code alone can't settle — dependency behavior, API co
 When given a research task:
 1. Pin down the question — what must be resolved, and what counts as proof
 2. Ground it in the code — read the call sites and conventions that matter here
-3. Verify against authoritative sources — \`source_path\` for the installed dependency's real source, \`web_fetch\` for official docs and changelogs, the kencode-search tools for real public usage. Never assert an API, flag, or default from memory
+3. Verify against authoritative sources — \`source_path\` for the installed dependency's real source, \`web_fetch\` for official docs and changelogs, the \`steroids\` tool for real public usage. Never assert an API, flag, or default from memory
 4. Reconcile — where does this repo agree with or diverge from the source?
 
 Structure the answer as:
@@ -232,8 +232,7 @@ export const BUNDLED_AGENTS: AgentDefinition[] = [
       "source_path",
       "web_fetch",
       "web_search",
-      "mcp__kencode-search__searchCode",
-      "mcp__kencode-search__referenceSources",
+      "steroids",
     ],
     model: "inherit",
     systemPrompt: RESEARCHER_PROMPT,
@@ -261,7 +260,17 @@ export const BUNDLED_AGENTS: AgentDefinition[] = [
     name: "skeptic",
     description:
       "Use to triage security findings before reporting them: re-verifies each claimed source→sink path in the code and returns CONFIRMED / DROP / DOWNGRADE with the reason. Pair it with `auditor` output. Read-only.",
-    tools: ["read", "grep", "find", "ls", "code_search", "bash", "web_fetch", "web_search"],
+    tools: [
+      "read",
+      "grep",
+      "find",
+      "ls",
+      "code_search",
+      "bash",
+      "web_fetch",
+      "web_search",
+      "steroids",
+    ],
     model: "inherit",
     systemPrompt: SKEPTIC_PROMPT,
     source: "bundled",

@@ -144,15 +144,27 @@ describe("AgentSession environment drift", () => {
     }
   }, 20_000);
 
-  it("says nothing under a verbatim custom prompt, which has no Environment section", async () => {
+  it("tells a verbatim custom prompt about an added root, since its prompt never rebuilds", async () => {
+    // Ken's sessions run a fixed prompt. `/add-dir` widens the write guard for
+    // them like anyone else, so staying silent let Ken write into a folder it
+    // had never been told existed. This note is their only channel.
     const { session, internals } = await makeSession({ systemPrompt: "verbatim prompt" });
+    const sibling = await fs.mkdtemp(path.join(os.tmpdir(), "env-delta-custom-"));
     try {
-      await internals.settingsManager.set("networkMode", "allowlist");
-      await internals.settingsManager.set("networkAllow", ["api.internal.example"]);
+      expect(internals.getHookSteeringMessages()).toBeNull();
+      expect(await session.addDirectory(sibling)).toMatchObject({ ok: true });
 
+      const messages = internals.getHookSteeringMessages();
+      expect(messages).toHaveLength(1);
+      expect(messages![0]!.content).toContain(path.resolve(sibling));
+
+      // The custom prompt is still verbatim — the fix is append-only.
+      expect(session.getMessages()[0]?.content).toBe("verbatim prompt");
+      // And delivered once, not on every poll.
       expect(internals.getHookSteeringMessages()).toBeNull();
     } finally {
       await session.dispose();
+      await fs.rm(sibling, { recursive: true, force: true });
     }
   }, 20_000);
 });

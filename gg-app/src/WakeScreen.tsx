@@ -133,7 +133,9 @@ function MatrixRain(): React.ReactElement {
       cancelAnimationFrame(raf);
       raf = 0;
     }
-    startLoop();
+    // A window restored at launch never receives a blur event, so an
+    // unconditional start would loop forever in the background.
+    if (document.hasFocus()) startLoop();
 
     function onVisible(): void {
       if (document.visibilityState === "visible") {

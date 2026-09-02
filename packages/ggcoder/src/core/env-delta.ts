@@ -62,13 +62,18 @@ export function buildEnvDeltaMessage(
 
   if (lines.length === 0) return null;
 
+  // Deliberately self-contained: it states the new facts instead of pointing at
+  // "the Environment section above". A verbatim custom prompt (Ken's sessions)
+  // has no such section, and this is the ONLY way those sessions ever hear
+  // about an added root — their prompt is never rebuilt. Wording that referred
+  // to a section the model cannot see is what kept them in the dark.
   return {
     role: "user",
     provenance: { source: "runtime", kind: "notification", visibility: "hidden" },
     content:
-      "Environment update. The Environment section near the top of your instructions was " +
-      "written when this session started and is now out of date:\n" +
+      "Environment update. These facts changed after your instructions were written, " +
+      "and these values are now the correct ones:\n" +
       lines.join("\n") +
-      "\nTrust these values over that section. Do not restate this note; just proceed.",
+      "\nTrust them over anything earlier that disagrees. Do not restate this note; just proceed.",
   };
 }

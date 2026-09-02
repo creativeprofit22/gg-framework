@@ -644,8 +644,8 @@ describe("toAnthropicThinking", () => {
     });
   });
 
-  it("treats Fable 5 and Mythos 5 as adaptive thinking models (max, xhigh clamps to high)", () => {
-    for (const model of ["claude-fable-5", "claude-mythos-5"]) {
+  it("treats the Fable and Mythos line as adaptive thinking models (max, xhigh clamps to high)", () => {
+    for (const model of ["claude-fable-5-1", "claude-fable-5", "claude-mythos-5"]) {
       const result = toAnthropicThinking("max", MAX_TOKENS, model);
       expect(result.outputConfig).toEqual({ effort: "max" });
       expect((result.thinking as { type: string }).type).toBe("adaptive");

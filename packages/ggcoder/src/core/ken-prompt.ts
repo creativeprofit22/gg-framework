@@ -40,7 +40,7 @@ function renderUncachedDateSuffix(): string {
 /**
  * Build Ken Kai's system prompt. No tool/work sections of the GG Coder coding
  * prompt — Ken is an advisor, not a coding agent. His read-only tools (read,
- * grep, find, ls, source_path, web_fetch, web_search, screenshot, kencode-search)
+ * grep, find, ls, source_path, web_fetch, web_search, screenshot, steroids)
  * are listed by the session's own Tools section; this prompt teaches him how to
  * think and how to format what he hands back.
  */
@@ -179,9 +179,9 @@ function renderSkeptical(): string {
     `unverified, you go check it yourself rather than trust it, and you tell the ` +
     `user what you found.\n\n` +
     `Verify with your tools every time an answer depends on a fact:\n` +
-    `- kencode-search (mcp__kencode-search__*): search real code across millions of ` +
-    `public repos, find reference repos, discover top projects. This is your go-to. ` +
-    `Base advice on how proven projects actually do it.\n` +
+    `- steroids: a local corpus of real, current repos — search for exact code, ` +
+    `define to find where a symbol lives, discover to fill a gap. This is your ` +
+    `go-to. Base advice on how proven projects actually do it.\n` +
     `- web_search + web_fetch: official docs, current APIs, real versions and flags.\n` +
     `- read / grep / find / ls / source_path: the user's actual code and their ` +
     `installed dependency source.\n` +
@@ -202,7 +202,7 @@ function renderTaste(): string {
     `trendy, and sprawling almost every time.\n\n` +
     `When the user asks what to use, a library, a framework, a whole stack, you do ` +
     `not answer from memory or hype. You research current best practice as of ` +
-    `today's date (it's at the end of this prompt) using kencode-search and the ` +
+    `today's date (it's at the end of this prompt) using steroids and the ` +
     `web, look at what strong projects actually reach for right now, weigh the real ` +
     `tradeoffs, then recommend the lean option that fits THIS project. The ` +
     `ecosystem moves fast, so last year's right answer can be this year's mistake.\n\n` +
@@ -318,7 +318,7 @@ function renderAutopilotContract(): string {
     `plan.\n` +
     `- Transcript lines labeled "Ken autopilot (injected)" are YOUR own earlier ` +
     `fix prompts, not user asks. Judge only against the original user request.\n` +
-    `- You are read-only. Use read/grep/find/ls/web/kencode-search ONLY when a fact ` +
+    `- You are read-only. Use read/grep/find/ls/web/steroids ONLY when a fact ` +
     `is truly in doubt; otherwise judge from the transcript and answer. Every wasted ` +
     `tool call costs tokens.\n` +
     `- Never wrap the verdict in prose or a code fence, and never add commentary ` +

@@ -23,21 +23,21 @@ const src = (rel: string) => fs.readFileSync(path.join(__dirname, "..", rel), "u
  * These assertions pin each link so a future refactor can't quietly drop one.
  */
 describe("agent MCP whitelist passthrough", () => {
-  it("derives the whitelist from an agent that asks for kencode-search", () => {
+  it("derives the whitelist from an agent that asks for an MCP server", () => {
     const agent = parseAgentFile(
       [
         "---",
         "name: prospector",
         "description: real-code researcher",
-        "tools: read, grep, mcp__kencode-search__searchCode, mcp__kencode-search__discoverRepos",
+        "tools: read, grep, mcp__example-server__searchCode, mcp__example-server__discoverRepos",
         "---",
         "You find real code.",
       ].join("\n"),
       "global",
     );
 
-    expect(agent.tools).toContain("mcp__kencode-search__searchCode");
-    expect(mcpServersForAgent(agent.tools)).toEqual(["kencode-search"]);
+    expect(agent.tools).toContain("mcp__example-server__searchCode");
+    expect(mcpServersForAgent(agent.tools)).toEqual(["example-server"]);
   });
 
   it("the blocking subagent spawn forwards --mcp-servers", () => {

@@ -641,7 +641,7 @@ export function toAnthropicToolChoice(choice: ToolChoice): Anthropic.ToolChoice 
 }
 
 /**
- * Anthropic models with built-in adaptive thinking (Fable 5, Mythos 5,
+ * Anthropic models with built-in adaptive thinking (Fable 5.x, Mythos 5.x,
  * Opus 5, Opus 4.8/4.7/4.6, Sonnet 5). Matches both dashed (`opus-4-8`) and
  * dotted (`opus-4.8`) forms so callers don't have to enumerate variants. These
  * models don't need the `interleaved-thinking` beta header — it's built in.

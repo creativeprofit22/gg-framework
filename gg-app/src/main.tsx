@@ -1,6 +1,3 @@
-// Error Mom must initialize before every other webview dependency so startup
-// failures are reported too.
-import { errorMom } from "./error-mom";
 import ReactDOM from "react-dom/client";
 import { error as logError, attachConsole } from "@tauri-apps/plugin-log";
 import App from "./App";
@@ -27,11 +24,9 @@ window.addEventListener("unhandledrejection", (e) => {
 // first render so CSS can gate the macOS-only traffic-light insets.
 tagPlatform();
 
+// React render/effect failures land in the shared log file like window errors do.
 function captureReactError(culprit: string, error: unknown, componentStack?: string): void {
-  errorMom.captureError(error, {
-    culprit,
-    ...(componentStack ? { context: { componentStack } } : {}),
-  });
+  void logError(`${culprit}: ${String(error)}${componentStack ? `\n${componentStack}` : ""}`);
 }
 
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement, {

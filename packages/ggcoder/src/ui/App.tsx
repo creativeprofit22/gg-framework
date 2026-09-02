@@ -195,15 +195,7 @@ export {
 } from "./item-helpers.js";
 
 /** Tools that get aggregated into a single compact group when possible. */
-const AGGREGATABLE_TOOLS = new Set([
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "mcp__kencode-search__searchCode",
-  "mcp__kencode-search__referenceSources",
-  "mcp__kencode-search__discoverRepos",
-]);
+const AGGREGATABLE_TOOLS = new Set(["read", "grep", "find", "ls", "steroids"]);
 
 const RUNNING_INDICATOR_ANIMATION_MS = 1_200;
 
@@ -2362,8 +2354,8 @@ export function App(props: AppProps) {
           // Reconnect MCP servers ONLY when the resolved server set actually
           // changes. GLM is the only provider with a different set (Z.AI
           // servers), so a switch that doesn't involve GLM on either side
-          // keeps the identical set — tearing down a live stdio child (e.g.
-          // kencode-search) and re-spawning `npx` there only risks a failed
+          // keeps the identical set — tearing down a live stdio child and
+          // re-spawning `npx` there only risks a failed
           // re-spawn that would silently drop the tools.
           const glmInvolved = newProvider === "glm" || prevProvider === "glm";
           if (props.mcpManager && glmInvolved) {

@@ -51,12 +51,8 @@ export const TOOL_PROMPT_HINTS: Record<string, string> = {
     "lack a capability.",
   generate_image:
     "Generate or edit images via OpenAI's gpt-image-2. Only when the user explicitly asks — never proactively. Pass `image` to edit an existing file.",
-  "mcp__kencode-search__referenceSources":
-    "Get curated, categorized reference repos for examples, inspiration, architecture, UI, agents, SaaS, workflows, and domain patterns. Repo-only starting points; fetch docs/source, then verify code with searchCode.",
-  "mcp__kencode-search__discoverRepos":
-    "Search GitHub repos live by keyword/language/topic/stars/recency. Use for current/top repos or long-tail discovery; returns metadata, not snippets. Follow with docs/source and searchCode.",
-  "mcp__kencode-search__searchCode":
-    "Verify public GitHub code by literal text or RE2 regex; NOT semantic. Put code/import/API tokens in `query`; `path` is a literal file-path substring, not a concept. Start broad/peek, then narrow by repo/path. RE2 multi-line needs `(?s)`.",
+  steroids:
+    "Local corpus of real, current open-source repos. `search` (regex, NOT semantic) for how projects do X, `define` for where a symbol lives, `show` to read the file. Topic not covered = corpus gap: run `discover`, don't retry variants.",
 };
 
 /**
@@ -131,6 +127,7 @@ export const BUILTIN_TOOL_NAMES: readonly string[] = [
   "skill",
   "source_path",
   "spawn_agent",
+  "steroids",
   "subagent",
   "task_output",
   "task_send",
@@ -167,7 +164,5 @@ export const DEFAULT_TOOL_NAMES: readonly string[] = [
   "subagent",
   "skill",
   "generate_image",
-  "mcp__kencode-search__referenceSources",
-  "mcp__kencode-search__discoverRepos",
-  "mcp__kencode-search__searchCode",
+  "steroids",
 ];

@@ -410,8 +410,16 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
   }, [setItems]);
 
   const pushItem = useCallback(
-    (item: Item) => {
-      setItems((prev) => [...prev, item]);
+    (item: Item, opts?: { skipIfSameAsLast?: boolean }) => {
+      setItems((prev) => {
+        if (opts?.skipIfSameAsLast) {
+          const last = prev[prev.length - 1];
+          if (last && last.kind === item.kind && last.kind === "hook" && item.kind === "hook") {
+            if (last.hook === item.hook) return prev;
+          }
+        }
+        return [...prev, item];
+      });
     },
     [setItems],
   );
@@ -1311,7 +1319,12 @@ export function useAgentEvents(deps: AgentEventsDeps): AgentEvents {
               releaseHeldText();
               endStreamingText();
             }
-            pushItem({ kind: "hook", id: nextId(), hook: kind });
+            // One review can inject several times (the read-coverage retries
+            // and their escalation), and each injection announces itself so the
+            // draft it supersedes is discarded. The DISCARD must happen every
+            // time; the notice is the same sentence, so stacking identical
+            // copies just tells the user the same thing four times.
+            pushItem({ kind: "hook", id: nextId(), hook: kind }, { skipIfSameAsLast: true });
           }
           break;
         }

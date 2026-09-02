@@ -3522,9 +3522,8 @@ export function AgentPane(props: AgentPaneProps): React.ReactElement {
                   setState((s) => (s ? { ...s, autopilot: next } : s));
                   void setAutopilot(next);
                   setKenPowerBanner(next ? "on" : "off");
-                  // Dedicated cues for turning autopilot on/off (not the generic
-                  // click, suppressed via data-suppress-click-sound).
-                  playSound(next ? "autopilotOn" : "autopilotOff");
+                  // The upstream sound set no longer ships dedicated autopilot assets.
+                  playSound(next ? "done" : "click");
                 }}
               />
               <button

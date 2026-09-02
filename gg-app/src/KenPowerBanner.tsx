@@ -37,17 +37,14 @@ export function KenPowerBanner({ mode, onDone }: Props): React.ReactElement {
   const lines = mode === "on" ? KEN_IS_ON : KEN_IS_OFF;
   return (
     <div className="ken-power-overlay" aria-hidden="true">
-      {/* Keyed on `mode` so flipping the toggle again mid-animation remounts
-          this node instead of restyling it in place — the slide-in/out
-          animation always plays from a clean start, even on a rapid
-          on/off/on flip. */}
+      {/* Keyed on `mode` so rapid toggles restart the complete animation. */}
       <div
         key={mode}
         className={`ken-power-banner ken-power-banner-${mode}`}
         onAnimationEnd={onDone}
       >
-        {lines.map((line, i) => (
-          <div className="ken-power-banner-line" key={i}>
+        {lines.map((line, index) => (
+          <div className="ken-power-banner-line" key={index}>
             {line}
           </div>
         ))}

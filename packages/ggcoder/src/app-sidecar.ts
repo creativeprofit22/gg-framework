@@ -197,6 +197,7 @@ import {
 import { enrichProcessPath } from "./core/shell-path.js";
 import { downscaleForPreview, shrinkToFit, validateVisionImage } from "./utils/image.js";
 import { startServeMode, type ServeController } from "./modes/serve-mode.js";
+import { installSteroids, probeSteroids } from "./core/steroids.js";
 import { loadTelegramConfig, saveTelegramConfig, verifyBotToken } from "./core/telegram-config.js";
 import {
   loadServers,
@@ -514,7 +515,6 @@ async function persistModelSelection(
     await sm.set("defaultProvider", provider as Settings["defaultProvider"]);
     await sm.set("defaultModel", model);
   } catch (err) {
-    captureSidecarError(err, "app-sidecar.settings.persist-model");
     log("WARN", "app-sidecar", "failed to persist model selection", { err: String(err) });
   }
 }
@@ -533,7 +533,6 @@ async function persistThinkingLevel(
     await sm.set("thinkingEnabled", !!level);
     if (level) await sm.set("thinkingLevel", level);
   } catch (err) {
-    captureSidecarError(err, "app-sidecar.settings.persist-thinking");
     log("WARN", "app-sidecar", "failed to persist thinking level", { err: String(err) });
   }
 }
@@ -952,10 +951,6 @@ async function runJsonModeIfRequested(): Promise<boolean> {
     allowedMcpServers,
     promptCacheKey: values["prompt-cache-key"],
   }).catch(async (err: unknown) => {
-    captureSidecarError(err, "app-sidecar.json-mode", {
-      provider: String(values.provider ?? "anthropic"),
-    });
-    await flushSidecarErrors();
     process.stderr.write((err instanceof Error ? err.message : String(err)) + "\n");
     process.exit(1);
   });
@@ -1317,9 +1312,6 @@ async function main(): Promise<void> {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (shouldCaptureUsagePollingError(error)) {
-        captureSidecarError(error, "app-sidecar.usage.fetch", { provider });
-      }
       let backoffMs: number | undefined;
       if (error instanceof SubscriptionUsageError && error.status === 429) {
         backoffMs = Math.min(
@@ -1400,28 +1392,28 @@ async function main(): Promise<void> {
       const url = req.url ?? "/";
       const method = req.method ?? "GET";
 
-      // Answer preflights with a bare 204 but grant NO origins — the webview
-      // reaches the daemon through the Rust proxy, never cross-origin, so any
-      // browser page's preflight must fail here.
-      if (method === "OPTIONS") {
-        res.writeHead(204);
-        res.end();
-        return;
-      }
+    // Answer preflights with a bare 204 but grant NO origins — the webview
+    // reaches the daemon through the Rust proxy, never cross-origin, so any
+    // browser page's preflight must fail here.
+    if (method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
 
-      // Host allowlist. The daemon binds 127.0.0.1 only; rejecting any other
-      // Host blocks DNS rebinding, where a web page's request arrives with
-      // the attacker's hostname (browsers cannot spoof Host).
-      const reqHost = req.headers.host ?? "";
-      if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqHost)) {
-        daemonJson(res, 403, { error: "forbidden host" });
-        return;
-      }
+    // Host allowlist. The daemon binds 127.0.0.1 only; rejecting any other
+    // Host blocks DNS rebinding, where a web page's request arrives with
+    // the attacker's hostname (browsers cannot spoof Host).
+    const reqHost = req.headers.host ?? "";
+    if (!/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqHost)) {
+      daemonJson(res, 403, { error: "forbidden host" });
+      return;
+    }
 
-      if (req.headers["x-gg-token"] !== authToken) {
-        daemonJson(res, 401, { error: "unauthorized" });
-        return;
-      }
+    if (req.headers["x-gg-token"] !== authToken) {
+      daemonJson(res, 401, { error: "unauthorized" });
+      return;
+    }
 
       // ── Daemon-level routes (session lifecycle) ──────────────────────────
       // Secret-free two-phase reload: reserve while Rust persists native config,
@@ -1841,7 +1833,6 @@ async function createProgressManager(
       lastSeenNonce = updated.lastEvent?.nonce ?? null;
       broadcastAll(buildSnapshot(updated), originId);
     } catch (err) {
-      captureSidecarError(err, "app-sidecar.progress.award");
       log("DEBUG", "app-sidecar", "progress award failed", {
         message: err instanceof Error ? err.message : String(err),
       });
@@ -1871,7 +1862,6 @@ async function createProgressManager(
     watcher.unref();
     progressWatcher = watcher;
   } catch (err) {
-    captureSidecarError(err, "app-sidecar.progress.watch");
     log("DEBUG", "app-sidecar", "progress watch unavailable", {
       message: err instanceof Error ? err.message : String(err),
     });
@@ -2115,10 +2105,7 @@ async function createSession(
           "Start a new session to reset the context.",
         )
         // /model: handle each phrasing pattern
-        .replaceAll(
-          /switch to claude-fable-5 with \/model/gi,
-          "switch to claude-fable-5 using the model selector",
-        )
+        .replaceAll(/switch to (\S+) with \/model/gi, "switch to $1 using the model selector")
         .replaceAll(/Switch with \/model\./gi, "Switch using the model selector.")
         .replaceAll(
           /try a different model with \/model\./gi,
@@ -2367,7 +2354,6 @@ async function createSession(
         chatAgent = nextAgent;
         broadcast("chat_agent_change", { chatAgent: nextAgent });
         await session.persistAppMarker("agent_handoff", { chatAgent: nextAgent }).catch((error) => {
-          captureSidecarError(error, "app-sidecar.chat-agent.persist-handoff");
           log("WARN", "app-sidecar", "agent handoff marker persist failed", {
             message: error instanceof Error ? error.message : String(error),
           });
@@ -2897,7 +2883,6 @@ async function createSession(
       .catch(() => false)
       .then(() => syncApprovedPlanProgress(generation))
       .catch((error) => {
-        captureSidecarError(error, "app-sidecar.plan.refresh-progress");
         log("WARN", "app-sidecar", "plan progress refresh failed", {
           message: error instanceof Error ? error.message : String(error),
         });
@@ -3798,7 +3783,6 @@ async function createSession(
         } catch (error) {
           // Keep tracking when prompt cleanup fails; hiding the widget here
           // would claim completion while the approved-plan contract remained.
-          captureSidecarError(error, "app-sidecar.plan.cleanup");
           log("WARN", "app-sidecar", "completed plan cleanup failed", {
             message: error instanceof Error ? error.message : String(error),
           });
@@ -4812,7 +4796,6 @@ ${checkpoints}`;
         .snapshot()
         .then((snapshot) => json(res, 200, snapshot))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.memory.snapshot");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -4829,7 +4812,6 @@ ${checkpoints}`;
         .then(() => memoryStore.snapshot())
         .then((snapshot) => json(res, 200, snapshot))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.memory.forget");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -4840,7 +4822,6 @@ ${checkpoints}`;
         .snapshot()
         .then((snapshot) => json(res, 200, snapshot))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.jiwa.snapshot");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -4857,7 +4838,6 @@ ${checkpoints}`;
         .then(() => jiwaStore.snapshot())
         .then((snapshot) => json(res, 200, snapshot))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.jiwa.forget");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -4903,7 +4883,6 @@ ${checkpoints}`;
       void listInstalledPlugins(paths.extensionsDir)
         .then((plugins) => json(res, 200, { plugins }))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.plugins.list");
           json(res, 500, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -4921,7 +4900,6 @@ ${checkpoints}`;
           const plugin = await installPlugin(bundlePath, paths.extensionsDir);
           json(res, 200, { plugin, restartRequired: true });
         } catch (error) {
-          captureSidecarError(error, "app-sidecar.plugins.install");
           json(res, 400, { error: error instanceof Error ? error.message : String(error) });
         }
       });
@@ -4933,7 +4911,6 @@ ${checkpoints}`;
       void removePlugin(pluginId, paths.extensionsDir)
         .then(() => json(res, 200, { removed: pluginId, restartRequired: true }))
         .catch((error) => {
-          captureSidecarError(error, "app-sidecar.plugins.remove");
           json(res, 400, { error: error instanceof Error ? error.message : String(error) });
         });
       return;
@@ -5017,7 +4994,6 @@ ${checkpoints}`;
           await fs.mkdir(dir, { recursive: true });
           json(res, 200, { path: dir });
         } catch (err) {
-          captureSidecarError(err, "app-sidecar.project.create");
           json(res, 500, { error: err instanceof Error ? err.message : String(err) });
         }
       });
@@ -5052,7 +5028,6 @@ ${checkpoints}`;
           await saveAppSettings(settings);
           json(res, 200, { hidden: Array.from(current) });
         } catch (err) {
-          captureSidecarError(err, "app-sidecar.projects.hidden");
           json(res, 500, { error: err instanceof Error ? err.message : String(err) });
         }
       });
@@ -5072,7 +5047,6 @@ ${checkpoints}`;
         )
         .then((projects) => json(res, 200, { projects }))
         .catch((err) => {
-          captureSidecarError(err, "app-sidecar.projects.discover");
           log("ERROR", "app-sidecar", "discoverProjects failed", {
             message: err instanceof Error ? err.message : String(err),
           });
@@ -5092,10 +5066,7 @@ ${checkpoints}`;
       // agent or request the combined, recency-sorted "all" listing.
       void listSidecarSessions(target, requestedAgent, paths.sessionsDir)
         .then((sessions) => json(res, 200, { sessions }))
-        .catch((error) => {
-          captureSidecarError(error, "app-sidecar.sessions.list");
-          json(res, 200, { sessions: [] });
-        });
+        .catch(() => json(res, 200, { sessions: [] }));
       return;
     }
 
@@ -5104,7 +5075,6 @@ ${checkpoints}`;
       void searchProjectFiles(cwd, q)
         .then((files) => json(res, 200, { files }))
         .catch((err) => {
-          captureSidecarError(err, "app-sidecar.files.search");
           log("ERROR", "app-sidecar", "searchProjectFiles failed", {
             message: err instanceof Error ? err.message : String(err),
           });
@@ -5940,7 +5910,6 @@ ${checkpoints}`;
           json(res, 200, result);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          captureSidecarError(err, "app-sidecar.prompt-enhancer");
           log("ERROR", "app-sidecar", "enhance failed", { message });
           json(res, 500, { error: message });
         }
@@ -6788,7 +6757,6 @@ ${checkpoints}`;
             // The OAuth provider's models just became selectable everywhere.
             broadcastAll("models_change", {});
           } catch (err) {
-            captureSidecarError(err, "app-sidecar.auth.oauth", { provider });
             // Deliberately session-scoped: this is the outcome of ONE window's
             // attempt. Another window that never pressed Connect has nothing to
             // show an error about, and its modal correctly still offers login.
@@ -7184,7 +7152,6 @@ ${checkpoints}`;
           json(res, 200, { running: true });
         } catch (err) {
           serveController = null;
-          captureSidecarError(err, "app-sidecar.serve.start", { provider: st.provider });
           json(res, 400, { error: err instanceof Error ? err.message : String(err) });
         }
       })();
@@ -7204,6 +7171,25 @@ ${checkpoints}`;
       return;
     }
 
+    // ── Agent Steroids (local code corpus) ───────────────────────────────
+    if (method === "GET" && url === "/steroids") {
+      void probeSteroids().then((status) => json(res, 200, status));
+      return;
+    }
+
+    if (method === "POST" && url === "/steroids/install") {
+      void installSteroids()
+        .then((status) => {
+          broadcast("steroids_change", status);
+          log("INFO", "app-sidecar", "steroids installed", { version: status.version });
+          json(res, 200, status);
+        })
+        .catch((err: unknown) => {
+          json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        });
+      return;
+    }
+
     // ── MCP server management (mirrors `ggcoder mcp`) ──────────────────
     // `targetCwd` (project scope) overrides the window cwd so a server can be
     // added/removed for ANY discovered project, not just this window's. Global
@@ -7213,7 +7199,6 @@ ${checkpoints}`;
       void buildMcpRows(targetCwd, paths.settingsFile)
         .then((servers) => json(res, 200, { servers }))
         .catch((err) => {
-          captureSidecarError(err, "app-sidecar.mcp.list");
           log("ERROR", "app-sidecar", "buildMcpRows failed", {
             message: err instanceof Error ? err.message : String(err),
           });
@@ -7408,7 +7393,6 @@ ${checkpoints}`;
             });
           }
         } catch (err) {
-          captureSidecarError(err, "app-sidecar.mcp.login", { server: name });
           broadcast("mcp_auth_error", {
             name,
             message: "The OAuth flow did not complete. Retry sign-in.",

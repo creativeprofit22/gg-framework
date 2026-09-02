@@ -1,5 +1,50 @@
 # @kenkaiiii/ggcoder
 
+## 5.53.0
+
+### Minor Changes
+
+- Add the native `steroids` tool (Agent Steroids local code corpus: search, define, show, files, repos, discover, recent, add) and the `/steroids` command that profiles the project, discovers matching repos and indexes the ones you pick. Replaces the kencode-search MCP default. Removes the Error Mom error reporter.
+
+### Patch Changes
+
+- @kenkaiiii/gg-ai@5.53.0
+- @kenkaiiii/gg-agent@5.53.0
+- @kenkaiiii/gg-core@5.53.0
+
+## 5.52.0
+
+### Minor Changes
+
+- 17ca096: Add Claude Fable 5.1 (`claude-fable-5-1`, released 2026-09-01) to the model registry — 1M context, 128k output, image input, always-on adaptive thinking on the low→max ladder (no xhigh), $10/$50 MTok with cache reads at $0.25/MTok. It replaces Fable 5, which is retired from the registry and the model picker — a session still pinned to it falls back to the provider default on next start. Fable 5.1 rejects forced tool use (`tool_choice` `any`/`tool`) with a 400; gg-coder only ever sends `auto`/`none`, so no call path changes.
+
+  The login screen now derives its provider rows from `AUTH_PROVIDERS` instead of keeping a second hardcoded copy, and a new test pins every provider description to the model registry — which caught two stale ones: Z.AI now lists GLM-5.3-Flash alongside GLM-5.3, and OpenRouter names Qwen3.6-Plus rather than just "multi-provider gateway".
+
+### Patch Changes
+
+- Updated dependencies [17ca096]
+  - @kenkaiiii/gg-ai@5.52.0
+  - @kenkaiiii/gg-core@5.52.0
+  - @kenkaiiii/gg-agent@5.52.0
+
+## 5.51.4
+
+### Patch Changes
+
+- Block symlink escapes from the workspace write guard, and tell custom-prompt sessions when a root is added
+  - @kenkaiiii/gg-ai@5.51.4
+  - @kenkaiiii/gg-agent@5.51.4
+  - @kenkaiiii/gg-core@5.51.4
+
+## 5.51.3
+
+### Patch Changes
+
+- Fix a duplicate final response when the Ideal review's coverage gate re-injects: the pre-coverage draft now stays held until the reviewed answer lands, and repeated injections announce themselves without stacking identical notices.
+  - @kenkaiiii/gg-ai@5.51.3
+  - @kenkaiiii/gg-agent@5.51.3
+  - @kenkaiiii/gg-core@5.51.3
+
 ## 5.51.2
 
 ### Patch Changes

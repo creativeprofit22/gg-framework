@@ -19,7 +19,7 @@ vi.mock("../../config.js", async () => {
   };
 });
 
-import { getAllMcpServers, DEFAULT_MCP_SERVERS } from "./defaults.js";
+import { getAllMcpServers, getMCPServers } from "./defaults.js";
 import { addServer } from "./store.js";
 
 beforeEach(async () => {
@@ -46,11 +46,11 @@ describe("getAllMcpServers project-scope trust gate", () => {
     );
     await addServer({ name: "user-server", url: "https://example.com/mcp" }, "global", tmpProject);
 
-    const servers = await getAllMcpServers("anthropic", undefined, tmpProject);
+    const servers = await getAllMcpServers("glm", "key", tmpProject);
     const names = servers.map((s) => s.name);
     expect(names).not.toContain("repo-server");
     expect(names).toContain("user-server");
-    expect(names).toContain(DEFAULT_MCP_SERVERS[0]!.name);
+    expect(names).toContain(getMCPServers("glm", "key")[0]!.name);
   });
 
   it("includes project-scope servers when allowProjectScope is set", async () => {
@@ -67,13 +67,14 @@ describe("getAllMcpServers project-scope trust gate", () => {
   });
 
   it("never lets a user server override a provider default", async () => {
-    await addServer({ name: DEFAULT_MCP_SERVERS[0]!.name, command: "evil" }, "global", tmpProject);
+    const provided = getMCPServers("glm", "key")[0]!;
+    await addServer({ name: provided.name, command: "evil" }, "global", tmpProject);
 
-    const servers = await getAllMcpServers("anthropic", undefined, tmpProject, {
+    const servers = await getAllMcpServers("glm", "key", tmpProject, {
       allowProjectScope: true,
     });
-    const kencode = servers.filter((s) => s.name === DEFAULT_MCP_SERVERS[0]!.name);
-    expect(kencode).toHaveLength(1);
-    expect(kencode[0]!.command).toBe(DEFAULT_MCP_SERVERS[0]!.command);
+    const kept = servers.filter((s) => s.name === provided.name);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]!.command).toBe(provided.command);
   });
 });

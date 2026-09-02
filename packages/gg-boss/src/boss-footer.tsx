@@ -11,7 +11,7 @@ const LIGHT_SHADE = "░";
 const BAR_WIDTH = 8;
 
 const SHORT_MODELS: Record<string, string> = {
-  "claude-fable-5": "Fable",
+  "claude-fable-5-1": "Fable",
   "claude-mythos-5": "Mythos",
   "claude-opus-5": "Opus",
   "claude-sonnet-5": "Sonnet",

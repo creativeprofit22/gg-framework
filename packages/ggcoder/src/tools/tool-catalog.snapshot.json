@@ -413,6 +413,16 @@
       "hash": "d23ce2b659da9757aa12e81fba12ebb536ee15359605191cc52310a825ca2551"
     },
     {
+      "name": "programmatic_scan",
+      "description": "Run the approved fixed-profile programmatic scanner once, reconcile lifecycle state, and return bounded summary counts. Accepts no paths, commands, scanners, opportunities, or lifecycle actions.",
+      "schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "hash": "64e5b2e4f4c1a8819587b425f1026a813a0abe0bac04ae06358f3ea1044d2919"
+    },
+    {
       "name": "read",
       "description": "Read a file's contents. Returns numbered lines (cat -n style). Output is truncated to 2000 lines or 50KB (whichever is hit first). If truncated, use offset/limit to read remaining sections. Reads images natively. Other binary files return a notice instead of content.",
       "schema": {

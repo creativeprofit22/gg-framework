@@ -16,10 +16,10 @@ describe("mcpServersForAgent", () => {
       mcpServersForAgent([
         "read",
         "grep",
-        "mcp__kencode-search__searchCode",
-        "mcp__kencode-search__discoverRepos",
+        "mcp__example-server__searchCode",
+        "mcp__example-server__discoverRepos",
       ]),
-    ).toEqual(["kencode-search"]);
+    ).toEqual(["example-server"]);
   });
 
   it("returns an empty list when no MCP tools are requested", () => {
@@ -42,14 +42,14 @@ describe("mcpServersForAgent", () => {
         "---",
         "name: scout",
         "description: researcher",
-        "tools: read, grep, mcp__kencode-search__searchCode",
+        "tools: read, grep, mcp__example-server__searchCode",
         "---",
         "You scout.",
       ].join("\n"),
       "project",
     );
 
-    expect(mcpServersForAgent(agent.tools)).toEqual(["kencode-search"]);
+    expect(mcpServersForAgent(agent.tools)).toEqual(["example-server"]);
   });
 });
 
@@ -115,7 +115,7 @@ describe("validateAgentTools", () => {
   it("accepts built-in and mcp__<server>__<tool> names", () => {
     expect(
       validateAgentTools(
-        { ...base, tools: ["read", "code_search", "mcp__kencode-search__searchCode"] },
+        { ...base, tools: ["read", "code_search", "mcp__example-server__searchCode"] },
         "test",
       ),
     ).toEqual([]);
@@ -164,9 +164,11 @@ describe("bundled agents", () => {
     }
   });
 
-  it("gives the researcher live code search so it cannot fall back to training data", () => {
+  it("gives the researcher the steroids corpus so it cannot fall back to training data", () => {
     const researcher = BUNDLED_AGENTS.find((a) => a.name === "researcher")!;
-    expect(mcpServersForAgent(researcher.tools)).toEqual(["kencode-search"]);
+    expect(researcher.tools).toContain("steroids");
+    // Native tool: no MCP server needs connecting for it.
+    expect(mcpServersForAgent(researcher.tools)).toEqual([]);
   });
 
   it("does not shadow bundled agents unless the user defines that name", async () => {

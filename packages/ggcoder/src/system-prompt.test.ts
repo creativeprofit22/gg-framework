@@ -316,9 +316,7 @@ describe("buildSystemPrompt", () => {
       "web_search",
       "web_fetch",
       "source_path",
-      "mcp__kencode-search__referenceSources",
-      "mcp__kencode-search__discoverRepos",
-      "mcp__kencode-search__searchCode",
+      "steroids",
     ]);
 
     for (const required of [
@@ -356,11 +354,11 @@ describe("buildSystemPrompt", () => {
       "Do not rely on memory for APIs",
       "Use `source_path`",
       "web_search` then `web_fetch",
-      "mcp__kencode-search__searchCode",
+      "`steroids` tool",
       "Build from real samples, not assumptions",
-      "curated, categorized reference repos",
-      "Search GitHub repos live",
-      "literal text or RE2 regex; NOT semantic",
+      "Local corpus of real, current open-source repos",
+      "regex, NOT semantic",
+      "Topic not covered = corpus gap",
       "Skip checks after simple edits",
       "At coherent checkpoints or after risky/non-obvious changes",
       "run one targeted check",
@@ -389,43 +387,36 @@ describe("buildSystemPrompt", () => {
     expect(prompt).not.toContain("Run only targeted verification needed for the change");
   });
 
-  it("keeps kencode guidance concise while separating repo discovery from exact search", async () => {
+  it("keeps steroids guidance concise: regex search, symbol lookup, corpus-gap rule", async () => {
     const cwd = await makeProject();
-    const prompt = await buildSystemPrompt(cwd, undefined, false, undefined, [
-      "mcp__kencode-search__referenceSources",
-      "mcp__kencode-search__discoverRepos",
-      "mcp__kencode-search__searchCode",
-    ]);
+    const prompt = await buildSystemPrompt(cwd, undefined, false, undefined, ["steroids"]);
     const tools = toolsSection(prompt);
 
-    expect(tools).toContain("curated, categorized reference repos");
-    expect(tools).toContain("Search GitHub repos live");
-    expect(tools).toContain("returns metadata, not snippets");
-    expect(tools).toContain("literal text or RE2 regex");
-    expect(tools).toContain("NOT semantic");
-    expect(tools).toContain("path` is a literal file-path substring");
-    expect(tools).not.toContain("zero hits, every time");
-    expect(tools.length).toBeLessThan(950);
+    expect(tools).toContain("Local corpus of real, current open-source repos");
+    expect(tools).toContain("regex, NOT semantic");
+    expect(tools).toContain("`define` for where a symbol lives");
+    expect(tools).toContain("Topic not covered = corpus gap");
+    expect(tools).toContain("don't retry variants");
+    expect(tools.length).toBeLessThan(600);
   });
 
   it("routes public-code research guidance through tool_search when MCP tools are deferred", async () => {
     const cwd = await makeProject();
-    // Deferred MCP loading: kencode tools live in the catalog, tool_search is active.
+    // No steroids binary on this machine, tool_search is active.
     const deferred = await buildSystemPrompt(cwd, undefined, false, undefined, [
       "read",
       "bash",
       "tool_search",
     ]);
     // Research section must not name tools the model can't call yet…
-    expect(deferred).not.toContain("kencode-search tools");
-    expect(deferred).not.toContain("ReferenceSources");
+    expect(deferred).not.toContain("`steroids` tool");
     // …and must point discovery at tool_search instead (research + tools hint).
     expect(deferred).toContain("call `tool_search` first");
     expect(deferred).toContain("Check the catalog BEFORE concluding");
 
-    // Neither kencode nor tool_search active: the public-code sentence is omitted.
+    // Neither steroids nor tool_search active: the public-code sentence is omitted.
     const bare = await buildSystemPrompt(cwd, undefined, false, undefined, ["read", "bash"]);
-    expect(bare).not.toContain("kencode-search tools");
+    expect(bare).not.toContain("`steroids` tool");
     expect(bare).not.toContain("tool_search");
   });
 
@@ -439,9 +430,7 @@ describe("buildSystemPrompt", () => {
       "web_search",
       "web_fetch",
       "source_path",
-      "mcp__kencode-search__referenceSources",
-      "mcp__kencode-search__discoverRepos",
-      "mcp__kencode-search__searchCode",
+      "steroids",
     ];
     const normalPrompt = await buildSystemPrompt(
       normalCwd,
@@ -496,9 +485,7 @@ describe("buildSystemPrompt", () => {
         "web_fetch",
         "source_path",
         "skill",
-        "mcp__kencode-search__referenceSources",
-        "mcp__kencode-search__discoverRepos",
-        "mcp__kencode-search__searchCode",
+        "steroids",
       ],
       new Set<LanguageId>(["typescript"]),
     );
@@ -535,15 +522,15 @@ describe("buildSystemPrompt", () => {
     // Raised with the 2026-08 guardrail additions (git safety, anti-fake-green,
     // reproduce-first, circuit-breaker, question-vs-fix, no-variants, test
     // guidance) — each line field-verified as load-bearing across Tier-1 agents.
-    // Raised once more for the explicit kencode-search staple sentence in
-    // Research (names the MCP tools + build-from-samples philosophy).
+    // Lowered when the public-code MCP sentence became the shorter native
+    // `steroids` staple in Research (actions + build-from-samples philosophy).
     // Raised for the alignment guardrails (facts-vs-decisions sorting,
     // batched questions with recommended answers) — misalignment is the most
     // common failure mode, and these two lines are the always-on floor the
     // `clarify` skill then deepens on demand.
-    expect(measurements.normal.characters).toBeLessThan(9_600);
-    expect(measurements.planMode.characters).toBeLessThan(10_800);
-    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(14_000);
+    expect(measurements.normal.characters).toBeLessThan(9_000);
+    expect(measurements.planMode.characters).toBeLessThan(10_200);
+    expect(measurements.typescriptProjectContextToolsSkills.characters).toBeLessThan(13_400);
     expect(measurements.planMode.characters).toBeGreaterThan(measurements.normal.characters);
     expect(measurements.typescriptProjectContextToolsSkills.characters).toBeGreaterThan(
       measurements.normal.characters,
@@ -570,9 +557,7 @@ describe("buildSystemPrompt", () => {
         "web_fetch",
         "source_path",
         "skill",
-        "mcp__kencode-search__referenceSources",
-        "mcp__kencode-search__discoverRepos",
-        "mcp__kencode-search__searchCode",
+        "steroids",
       ],
       new Set<LanguageId>(["typescript"]),
     );
@@ -584,9 +569,9 @@ describe("buildSystemPrompt", () => {
     // Raised with the Code Quality minimization ladder — see the size-budget
     // test above for the measured return that justifies the spend.
     // Raised again with the 2026-08 guardrail additions (see size-budget test).
-    // And again for the kencode-search staple sentence in Research.
+    // Lowered for the shorter native steroids staple sentence in Research.
     // And again for the alignment guardrails (see size-budget test).
-    expect(audit.size.characters).toBeLessThan(13_700);
+    expect(audit.size.characters).toBeLessThan(13_100);
     expect(audit.size.sections).toBeGreaterThanOrEqual(8);
   });
 

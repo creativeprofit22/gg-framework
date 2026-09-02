@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { McpCatalogCache } from "./catalog-cache.js";
 import { MCPClientManager, type MCPConnectResult, type MCPServerStateChange } from "./client.js";
-import { DEFAULT_MCP_SERVERS } from "./defaults.js";
+import { getMCPServers } from "./defaults.js";
 import {
   isShareableServer,
   SharedMcpPool,
@@ -112,8 +112,8 @@ describe("isShareableServer", () => {
     expect(isShareableServer({ name: "s", url: "https://x.test/mcp", shared: true })).toBe(false);
   });
 
-  it("shares every default server, kencode-search included", () => {
-    const stdio = DEFAULT_MCP_SERVERS.filter((s) => s.command);
+  it("shares every provider-default stdio server", () => {
+    const stdio = getMCPServers("glm", "key").filter((s) => s.command);
     expect(stdio.length).toBeGreaterThan(0);
     expect(stdio.every((s) => isShareableServer(s))).toBe(true);
   });

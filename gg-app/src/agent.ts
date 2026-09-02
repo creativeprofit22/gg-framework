@@ -2415,6 +2415,42 @@ export async function stopServe(): Promise<void> {
   await invoke("agent_serve_stop", { paneId: "primary" });
 }
 
+// ── Agent Steroids (local code corpus) ────────────────────────
+
+export interface SteroidsStatus {
+  installed: boolean;
+  /** Installed, runs, and the corpus holds at least one repo. */
+  connected: boolean;
+  version?: string;
+  repos?: number;
+  documents?: number;
+  path?: string;
+  error?: string;
+}
+
+/** Probe the `steroids` CLI. Never throws — an unreachable sidecar reads as "not installed". */
+export async function getSteroidsStatus(): Promise<SteroidsStatus> {
+  try {
+    return await invoke<SteroidsStatus>("agent_steroids_status");
+  } catch (e) {
+    await logError(`agent_steroids_status failed: ${String(e)}`);
+    return { installed: false, connected: false };
+  }
+}
+
+/** Download + verify + install the `steroids` binary. Throws with a user-facing message. */
+export async function installSteroids(): Promise<SteroidsStatus> {
+  await waitForReady();
+  return await invoke<SteroidsStatus>("agent_steroids_install");
+}
+
+/** Fires after an install completes in ANY window. */
+export function onSteroidsChange(cb: (status: SteroidsStatus) => void): () => void {
+  return subscribe((e) => {
+    if (e.type === "steroids_change") cb(e.data as SteroidsStatus);
+  });
+}
+
 // ── MCP server management (mirrors `ggcoder mcp`) ────────────
 
 export interface McpAuthDoneEvent extends SidecarEvent {

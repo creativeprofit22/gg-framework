@@ -3,7 +3,6 @@ import { AgentSession } from "../core/agent-session.js";
 import { isAbortError } from "@kenkaiiii/gg-agent";
 import { formatUserError } from "../utils/error-handler.js";
 import { closeLogger } from "../core/logger.js";
-import { captureSidecarError, flushSidecarErrors } from "../core/sidecar-error-reporter.js";
 import { SUB_AGENT_MAX_TURN_EXTENSIONS } from "../tools/subagent-shared.js";
 
 export interface JsonModeOptions {
@@ -64,8 +63,8 @@ export const JSON_MODE_FLUSH_TIMEOUT_MS = 2000;
  * End a finished one-shot JSON-mode run, flushing stdout first.
  *
  * Returning from `main()` is not enough. In the desktop build the sub-agent
- * worker entry IS the app-sidecar bundle (`GG_SUBAGENT_WORKER_ENTRY` defaults
- * to `process.argv[1]`, and no `cli.js` ships in the app — see
+ * worker entry IS the app-sidecar bundle (no `cli.js` ships in the app, so
+ * `resolveSubAgentCliEntry` falls back to `process.argv[1]` — see
  * json-mode-flag-parity.test.ts), whose module graph installs long-lived
  * handles at import time. Those keep the event loop alive forever, so a child
  * that had already emitted `agent_done` sat idle until the parent's timeout
@@ -171,11 +170,6 @@ export async function runJsonMode(options: JsonModeOptions): Promise<void> {
       emitJson({ type: "error", message: "Interrupted" });
       process.exit(130);
     }
-    captureSidecarError(err, "json-mode.run", {
-      provider: options.provider,
-      model: options.model,
-    });
-    await flushSidecarErrors();
     process.stderr.write(formatUserError(err) + "\n");
     process.exit(1);
   } finally {

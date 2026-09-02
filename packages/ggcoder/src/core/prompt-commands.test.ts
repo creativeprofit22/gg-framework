@@ -44,19 +44,24 @@ describe("prompt commands", () => {
     expect(compare?.prompt).toContain("Add exactly one task per finding");
     expect(compare?.prompt).toContain("finding type (MISSING, DIVERGENT, or INCOMPLETE)");
     expect(compare?.prompt).toContain("exact file and line");
-    expect(compare?.prompt).toContain("multi-repo kencode-search evidence");
     expect(compare?.prompt).toContain("concrete correction");
     expect(compare?.prompt).toContain("Press Ctrl+T to open the task list");
   });
 
-  it("tells commands that name kencode tools how to unlock deferred MCP", () => {
-    // `deferredMcpTools` defaults to true, so `mcp__kencode-search__*` sits in
-    // the tool_search catalog until promoted. A command that hard-names it must
-    // say how to unlock it, or the call fails on a default install.
+  it("defines /steroids as profile, discover, ask, then index only what was chosen", () => {
+    const cmd = PROMPT_COMMANDS.find((command) => command.name === "steroids");
+    expect(cmd?.prompt).toContain("Profile the project");
+    expect(cmd?.prompt).toContain("`discover` queries WITHOUT `add`");
+    expect(cmd?.prompt).toContain("`ask_user` tool");
+    expect(cmd?.prompt).toContain("Do not index anything until the user answers");
+    expect(cmd?.prompt).toContain("`steroids` `add`");
+  });
+
+  it("routes real-code comparison through the native steroids tool", () => {
     for (const name of ["compare", "expand"]) {
       const cmd = PROMPT_COMMANDS.find((command) => command.name === name);
-      expect(cmd?.prompt, name).toContain("mcp__kencode-search__");
-      expect(cmd?.prompt, name).toContain("call `tool_search`");
+      expect(cmd?.prompt, name).toContain("`steroids`");
+      expect(cmd?.prompt, name).not.toContain("kencode");
     }
   });
 

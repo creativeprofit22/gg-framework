@@ -547,6 +547,43 @@ describe("useAgentEvents", () => {
     ]);
   });
 
+  it("discards every repeated draft but shows the review notice once", () => {
+    // One review injects up to four times. Each injection must kill its draft,
+    // while duplicate notices remain collapsed.
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Draft two" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+      hook.result.current.handleEvent(ev("text_delta", { text: "Draft three" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+    });
+    expect(getItems()).toEqual([expect.objectContaining({ kind: "hook", hook: "ideal" })]);
+
+    act(() => {
+      hook.result.current.handleEvent(ev("text_delta", { text: "Reviewed final" }));
+      hook.result.current.endStreamingText();
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+      expect.objectContaining({ kind: "assistant", text: "Reviewed final" }),
+    ]);
+  });
+
+  it("still shows a second notice when a DIFFERENT hook follows", () => {
+    const { hook, getItems } = setup();
+
+    act(() => {
+      hook.result.current.handleEvent(ev("hook", { kind: "verification" }));
+      hook.result.current.handleEvent(ev("hook", { kind: "ideal" }));
+    });
+    expect(getItems()).toEqual([
+      expect.objectContaining({ kind: "hook", hook: "verification" }),
+      expect.objectContaining({ kind: "hook", hook: "ideal" }),
+    ]);
+  });
+
   it("never paints the draft while the Ideal review is armed", () => {
     const { hook, getItems } = setup();
 

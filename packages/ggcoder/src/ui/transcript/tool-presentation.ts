@@ -19,18 +19,10 @@ export interface ToolPalette {
 
 export function getToolTone(name: string): ToolTone {
   if (["read", "ls"].includes(name)) return "read";
-  if (["grep", "find", "mcp__kencode-search__searchCode"].includes(name)) return "search";
+  if (["grep", "find", "steroids"].includes(name)) return "search";
   if (["write", "edit"].includes(name)) return "write";
   if (["bash", "task_output", "task_stop"].includes(name)) return "run";
-  if (
-    [
-      "web_fetch",
-      "web_search",
-      "mcp__kencode-search__referenceSources",
-      "mcp__kencode-search__discoverRepos",
-    ].includes(name)
-  )
-    return "web";
+  if (["web_fetch", "web_search"].includes(name)) return "web";
   if (["subagent", "skill"].includes(name)) return "agent";
   if (["tasks"].includes(name)) return "state";
   if (["source_path"].includes(name)) return "source";

@@ -22,6 +22,40 @@ export interface ChangelogEntry {
 /** Newest first. Prepended by the `/release` flow. */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "0.57.0",
+    date: "2026-09-02",
+    items: [
+      "Your agent stops writing last year's code. I plugged in `Agent Steroids`: a corpus of real, current open-source repos on your own disk that it reads before it writes, offline and with no rate limits. Hit the new `Steroids` button on Home to install it in one click, then run `/steroids` and I profile your project, hunt down the repos that match it, and index only the ones you pick.",
+      "GG Coder now knows which platform CLIs you already have. It spots `31` tools like `railway`, `vercel` and `gh` in your project and drives them for logs, deploys and env vars instead of sending you off to a dashboard.",
+      "Background windows finally sit still. Every decorative animation and canvas loop pauses the moment a window loses focus, so a stack of open projects no longer burns CPU and battery while you work in one of them.",
+    ],
+  },
+  {
+    version: "0.56.0",
+    date: "2026-09-02",
+    items: [
+      "`Claude Fable 5.1` just landed and it is yours right now. Anthropic's newest and sharpest model, with a `1 million` token memory and thinking that dials itself up when the problem gets hard. Pick it in the model selector and go.",
+      "The connect screen finally tells you the truth about what you are signing into. Every provider now lists the exact models you get, so `Z.AI` shows its Flash sibling and `OpenRouter` names the model it actually runs instead of hiding behind a label.",
+    ],
+  },
+  {
+    version: "0.55.5",
+    date: "2026-09-02",
+    items: [
+      "Every question I ask you now looks the same: one clean stack of options, whatever I am asking. No chips on one question and rows on the next, no stray `Something else` link, no send button to hunt for. Answer in any order, change an early pick while you think about the rest, and the last answer sends it.",
+      "Flipping `Autopilot` on and off finally feels as good as it sounds. The blocky sign and the flat black slab behind it are gone, replaced by one calm glowing line over your chat, and I muted the loud toggle chimes.",
+      "Your files stay exactly where you put them. A repo can no longer hide a shortcut in a folder and trick me into writing outside your project, into things like `~/.ssh` or your shell config. If something does get blocked, I now tell you precisely which path redirected where.",
+      "Hand me a new folder mid-chat and I actually know about it. `/add-dir` used to go unheard in my sessions, so I would turn around and refuse to work in the very folder you just gave me.",
+    ],
+  },
+  {
+    version: "0.55.4",
+    date: "2026-08-31",
+    items: [
+      "No more double answers. When I double-check my own work before replying, my rough first draft used to slip onto the screen and sit there right above the polished one. Now you only ever see the final answer, and I stop repeating the same `reviewing` notice over and over while I dig through the files.",
+    ],
+  },
+  {
     version: "0.55.3",
     date: "2026-08-29",
     items: [

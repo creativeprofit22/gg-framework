@@ -35,9 +35,9 @@ export const CORE_TOOL_NAMES: readonly string[] = [
   "code_nav",
   "web_search",
   "web_fetch",
-  // The app and orchestrator expose task handoff directly; preserve that local
-  // contract instead of requiring capability discovery before task completion.
+  // Task handoff and the local code corpus are frequent app/orchestrator paths.
   "tasks",
+  "steroids",
   "task_output",
   "task_send",
   "task_stop",

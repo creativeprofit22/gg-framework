@@ -308,9 +308,9 @@ export interface AgentSessionOptions {
    * MCP server names whose tools are allowed in an allow-listed session. Only
    * meaningful alongside `allowedTools`. With it set, the session connects ONLY
    * these named MCP servers (not the full configured set) and every tool they
-   * expose (`mcp__<server>__*`) passes the allow-list. The Ken mentor agent uses
-   * this to get `kencode-search` for real-code research while still being barred
-   * from every mutating tool. Empty/undefined → an allow-listed session skips
+   * expose (`mcp__<server>__*`) passes the allow-list, so a read-only agent can
+   * be handed one research server while still being barred from every mutating
+   * tool. Empty/undefined → an allow-listed session skips
    * MCP entirely (its dynamic tool names could never match a fixed allow-list).
    */
   allowedMcpServers?: string[];
@@ -931,6 +931,7 @@ export class AgentSession {
   }
 
   /**
+  /**
    * Whether a tool name is permitted for this session. With no `allowedTools`,
    * everything passes (default behavior). Otherwise, the exact provider-facing
    * name is checked against `allowedTools` first. MCP server allow-listing then
@@ -1001,8 +1002,7 @@ export class AgentSession {
     const acquiredLeases = new Set<SharedMcpClientLease>();
     // Allow-listed (read-only advisory) sessions enforce a fixed tool set by
     // name. An MCP server is only connected when its name is explicitly
-    // whitelisted via `allowedMcpServers` (the Ken mentor agent does this for
-    // `kencode-search` so it can research real code). With no whitelist, skip
+    // whitelisted via `allowedMcpServers`. With no whitelist, skip
     // MCP entirely — dynamic `mcp__server__tool` names could never match a fixed
     // allow-list, and connecting would waste resources spawning stdio servers.
     const mcpWhitelist = this.opts.allowedMcpServers;
@@ -1791,17 +1791,22 @@ export class AgentSession {
    * Mirrors the TUI's getSteeringMessages ordering.
    */
   private getHookSteeringMessages(): Message[] | null {
-    // Environment drift: settings can move the network allowlist mid-session
-    // with no prompt rebuild, leaving the cached Environment section describing
-    // hosts that are no longer the real policy. Correcting it by appending is
-    // ~30 tokens; re-rendering the prompt would invalidate every cached byte
-    // from that section onward. Unconditional and cheap: identical facts
-    // produce no message at all.
-    // A verbatim custom prompt has no Environment section to correct, so a
-    // note pointing at one would describe something the model cannot see.
-    const environmentDelta = this.customSystemPrompt
-      ? null
-      : buildEnvDeltaMessage(this.renderedEnvironment, this.promptEnvironment());
+    // Environment drift: settings can move the network allowlist mid-session,
+    // and `/add-dir` can widen the workspace, with no prompt rebuild — leaving
+    // the cached Environment section describing facts that are no longer real.
+    // Correcting it by appending is ~30 tokens; re-rendering the prompt would
+    // invalidate every cached byte from that section onward. Unconditional and
+    // cheap: identical facts produce no message at all.
+    //
+    // This runs for a verbatim custom prompt TOO. Those sessions (Ken's) never
+    // rebuild their prompt, so this note is the only channel that can tell them
+    // a root was added — skipping it meant Ken could write into a folder it had
+    // never been told about. The note states the facts outright rather than
+    // referring to a section such a prompt does not have.
+    const environmentDelta = buildEnvDeltaMessage(
+      this.renderedEnvironment,
+      this.promptEnvironment(),
+    );
     if (environmentDelta) {
       // The model has now been told; only a further change re-triggers this.
       this.renderedEnvironment = this.promptEnvironment();
@@ -1974,6 +1979,14 @@ export class AgentSession {
    */
   private wouldInjectIdealReview(): boolean {
     if (this.opts.selfCorrectionHooks === false || this.idealReviewSuppressed) return false;
+    // Mid-review a stop still injects: the coverage follow-up while files are
+    // unread, or its escalation once the budget is spent. Both make the model
+    // answer again, so the candidate answer is a draft exactly as it is before
+    // the review starts — without arming here it paints and the reviewed answer
+    // lands under it as a duplicate.
+    if (this.idealReviewPhase === "reviewing") {
+      return this.reviewCoverage.evidence().missing.length > 0;
+    }
     if (this.idealReviewPhase !== "idle") return false;
     if (!this.settingsManager.get("idealReviewEnabled")) return false;
     if (evaluateIdealReview({ ...this.hookStats, turns: this.hookStats.turns + 1 }).shouldReview) {
@@ -2095,8 +2108,20 @@ export class AgentSession {
         lspMissing: lspEvidence.missing,
       });
       if (coverage.missing.length > 0) {
+        // Announce like any other pre-final injection: this follow-up makes the
+        // model answer again, so the answer it interrupts is a draft and the
+        // hook event is what tells clients to discard it. Injecting silently is
+        // what let the pre-coverage answer paint above the reviewed one.
+        this.eventBus.emit("hook", {
+          kind: "ideal",
+          coverageExpected: coverage.expected,
+          coverageMissing: coverage.missing,
+        });
         if (this.reviewCoverageInjected < MAX_REVIEW_COVERAGE_INJECTIONS) {
           this.reviewCoverageInjected += 1;
+          // Stays armed (coverage is still outstanding) — this call is here so a
+          // client that missed the earlier edge is armed before the next draft.
+          this.refreshIdealReviewArmed();
           return [
             this.withReviewLspEvidence(buildReviewCoverageMessage(coverage.missing), lspEvidence),
           ];
@@ -2104,6 +2129,9 @@ export class AgentSession {
         // Budget spent: close the gate so the run cannot spin on a file that
         // never becomes readable, and require the gap be reported to the user.
         this.idealReviewPhase = "complete";
+        // The gate is shut, so this is the real disarm: the answer to the
+        // escalation is final and streams live.
+        this.refreshIdealReviewArmed();
         log("INFO", "ideal", "Ideal review coverage escalated after retry budget", {
           injected: String(this.reviewCoverageInjected),
           missing: coverage.missing,
@@ -2131,10 +2159,12 @@ export class AgentSession {
       coverageExpected: coverage.expected,
       coverageMissing: coverage.missing,
     });
-    // Disarm strictly AFTER the hook event. Clients release held text on
+    // Recompute strictly AFTER the hook event: clients release held text on
     // disarm, so the reverse order would paint the draft and then delete it —
-    // the exact flash arming exists to prevent. Leaving `idle` is what lets the
-    // reviewed final answer stream live instead of being held.
+    // the exact flash arming exists to prevent. Arming normally PERSISTS here,
+    // because review starts with every changed file uncovered and a stop while
+    // coverage is outstanding injects again. Disarm lands later, on the read
+    // that closes the last gap (or when the retry budget escalates).
     this.refreshIdealReviewArmed();
     log("INFO", "ideal", "Injecting ideal review before final response", {
       coverageExpected: coverage.expected,
@@ -2681,7 +2711,7 @@ export class AgentSession {
       // Reconnect MCP servers ONLY when GLM is involved on either side — GLM
       // is the only provider with a different server set (Z.AI tools), so a
       // non-GLM switch keeps the identical set. Skipping the dispose/reconnect
-      // there avoids tearing down a live stdio child (e.g. kencode-search) and
+      // there avoids tearing down a live stdio child and
       // gambling on a `npx` re-spawn that could fail and drop the tools.
       const glmInvolved = this.provider === "glm" || prevProvider === "glm";
       if (this.mcpManager && glmInvolved) {

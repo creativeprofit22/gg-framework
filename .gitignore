@@ -85,3 +85,14 @@ packages/*/.bench-*.mjs
 /*-report.md
 /fixes.md
 /*coding-agent*.md
+
+# Challenge feature: design sandbox and dev-only preview harness.
+#
+# Neither ships. `mockups/` is the standalone HTML/CSS/JS sandbox the fight's
+# visual language was designed in; `dev/` is a browser harness that mounts the
+# real ActivityBar so the offer can be eyeballed without the Tauri runtime.
+# Vite builds a single entry (index.html), so a production build never sees
+# them — a clean build emits dist/index.html and nothing else. Ignored so
+# `git add -A` cannot sweep 216KB of scratch into a release.
+/gg-app/mockups/
+/gg-app/dev/

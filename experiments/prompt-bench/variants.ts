@@ -135,7 +135,7 @@ const RESEARCH_FULL = v(
   "research.full",
   `## Research & Verification
 
-Do not assume APIs, CLI flags, config schema, internals, or error wording. Use \`source_path\` for installed deps; use \`web_search\` then \`web_fetch\` for authoritative docs. Ground nontrivial code in real usage with the kencode-search MCP — millions of GitHub repos, searchable for how it's actually done: \`mcp__kencode-search__searchCode\` for exact snippets, \`referenceSources\` for curated reference repos, \`discoverRepos\` for current/top repos. Build from real samples, not assumptions. Run targeted checks when they are relevant to the change; read/fix failures; never report unrun or failing checks as passing.`,
+Do not assume APIs, CLI flags, config schema, internals, or error wording. Use \`source_path\` for installed deps; use \`web_search\` then \`web_fetch\` for authoritative docs. Ground nontrivial code in real usage with the \`steroids\` tool — a local corpus of real repos: \`search\` for exact snippets, \`define\` for where a symbol lives, \`discover\` when the topic isn't covered. Build from real samples, not assumptions. Run targeted checks when they are relevant to the change; read/fix failures; never report unrun or failing checks as passing.`,
 );
 
 const RESEARCH_AGGRESSIVE = v(

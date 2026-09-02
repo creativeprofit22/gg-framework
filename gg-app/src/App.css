@@ -58,6 +58,12 @@
      CSS-styled chat bubbles. Marks every Ken element. */
   --ken: #62e8d8;
 
+  /* Agent Steroids — red sibling of the brand tint. Marks the Steroids
+     button, the "Roided!" stamp and the modal status dot. */
+  --steroids: #ff4d5e;
+  --steroids-deep: #c8283a;
+  --steroids-glow: rgba(255, 77, 94, 0.45);
+
   /* Shape system — generous and soft, matching the reference: pills for
      controls, heavy rounding on cards, no hairline boxes. */
   --radius-button: 8px;
@@ -488,6 +494,40 @@ select {
     animation: none;
   }
 }
+
+/* ── Unfocused windows freeze their looping decoration. ──
+   Every looping animation below forces a repaint each frame, and every repaint
+   is a round trip through WebKit's single shared GPU process ("GG Coder
+   Graphics and Media"): allocate an IOSurface, rasterize, flush, wait. One
+   window doing that is fine; seven idle windows doing it all day pinned that
+   process at 400%+ CPU on a user's machine. Only the window the user is looking
+   at animates. Paused (not `none`) so focus resumes mid-cycle without a jump.
+   One-shot reveals are deliberately NOT listed: paused at 0% with `both` they
+   would hold new content invisible in a background window. */
+.app:not(.window-focused)::before,
+.app:not(.window-focused) .home-steroids-btn,
+.app:not(.window-focused) .queued-pill,
+.app:not(.window-focused) .queued-dot,
+.app:not(.window-focused) .shimmer-text,
+.app:not(.window-focused) .command-shimmer,
+.app:not(.window-focused) .blink,
+.app:not(.window-focused) .wake-cursor,
+.app:not(.window-focused) .skeleton,
+.app:not(.window-focused) .enh-diss-skeleton .skeleton::after,
+.app:not(.window-focused) .enhance-pill.enhancing,
+.app:not(.window-focused) .update-banner::after,
+.app:not(.window-focused) .update-banner-dot,
+.app:not(.window-focused) .rank-name,
+.app:not(.window-focused) .title-usage-fill::before,
+.app:not(.window-focused) .title-usage-particle {
+  animation-play-state: paused;
+}
+/* The logo runs reveal-up THEN ggshimmer (see .home > .ascii-logo). Pause only
+   the shimmer: a one-shot reveal paused at 0% held the banner invisible whenever
+   Home mounted while another window was focused. */
+.app:not(.window-focused) .home > .ascii-logo {
+  animation-play-state: running, paused;
+}
 /* Everything else in the shell paints above the glow. Modals are portalled to
    <body> (see Modal.tsx), so they sit outside this stacking context entirely
    rather than being trapped by it. */
@@ -764,14 +804,19 @@ select {
    non-scrolling sibling wrapping `.transcript` (see that rule below), so it
    stays pinned to the visible viewport at any scroll position instead of the
    scrolled chat content. The chat head/nav above and the tool
-   panel/activity bar/input footer below stay visible and untouched. A "KEN IS
-   ON"/"KEN IS OFF" ASCII banner
-   (same ANSI-Shadow block font as the GG CODER home logo) materializes with
+   panel/activity bar/input footer below stay visible and untouched. A "Ken is
+   on."/"Ken is off." line (app font, same size as the wake screen's typed
+   line) materializes with
    the same scale+fade "flash" the app already uses for the zoom-level HUD
    (see `.zoom-overlay-card`/`zoom-overlay-in`) instead of sliding across the
-   pane — a small, on-brand pop in place, held, then a soft dissolve out. Sits
-   over the same dark surface as the chat background so it reads as an
-   overlay, not a new screen. Purely decorative — clicks pass through to
+   pane — a small, on-brand pop in place, held, then a soft dissolve out.
+
+   The overlay itself paints NO fill. An opaque `--bg` rectangle read as a flat
+   black slab because it covered the app's ambient glow (`.app::before`, which
+   sits behind the whole shell) instead of matching the surrounding chrome.
+   Rather than re-creating that glow here, the transcript underneath simply
+   fades out (see the sibling rule below) so what shows through IS the app
+   background — glow included. Purely decorative — clicks pass through to
    whatever is underneath. */
 .ken-power-overlay {
   position: absolute;
@@ -787,43 +832,30 @@ select {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  background: var(--bg);
+  /* Mirror `.transcript`'s vertical padding so the line lands on exactly the
+     same optical centre as the wake screen's, which centres inside that padded
+     box — without it the banner sits ~6px lower than the line it replaces. */
+  padding: 4px 0 16px;
   pointer-events: none;
 }
+/* The banner is only in the DOM while it plays, so this sibling selector is
+   the whole show/hide mechanism — no extra state or class plumbing. */
+.ken-power-overlay ~ .transcript {
+  opacity: 0;
+}
+/* Styled as the wake screen's line (`.wake-text`), so the two things the app
+   says to you in the empty chat body look like one voice — same mono face,
+   size, tracking, ink and blue halo. Only the entrance differs: the wake line
+   types itself, this one flashes in and dissolves. */
 .ken-power-banner {
-  font-family: var(--sans);
-  font-size: clamp(7px, 1.7vw, 12px);
-  line-height: 1.05;
+  font-family: var(--mono);
+  font-size: 18px;
+  letter-spacing: 0.02em;
+  color: var(--text);
+  text-shadow: 0 0 12px rgba(77, 157, 255, 0.35);
   white-space: pre;
   text-align: center;
   animation: ken-power-flash 1150ms cubic-bezier(0.22, 1, 0.36, 1) both;
-}
-.ken-power-banner-line {
-  white-space: pre;
-}
-/* ON: vibrant Ken-teal shimmer sweep + soft glow, mirroring the home logo's
-   gradient treatment but in Ken's color. */
-.ken-power-banner-on {
-  background: linear-gradient(
-    100deg,
-    #3fa9bd 0%,
-    #5ad1e6 25%,
-    #a6f0ff 50%,
-    #5ad1e6 75%,
-    #3fa9bd 100%
-  );
-  background-size: 220% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--ken) 45%, transparent));
-  animation:
-    ken-power-flash 1150ms cubic-bezier(0.22, 1, 0.36, 1) both,
-    ggshimmer 1.4s linear infinite;
-}
-/* OFF: flat, dim — no shimmer, signals the loop is stopped. */
-.ken-power-banner-off {
-  color: var(--text-dim);
 }
 /* Scale-and-fade "power flash": pops in slightly undersized (like the zoom
    HUD), rests at full size while held, then grows a touch further as it
@@ -847,8 +879,7 @@ select {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ken-power-banner,
-  .ken-power-banner-on {
+  .ken-power-banner {
     animation: ken-power-fade 900ms ease both;
   }
 }
@@ -919,6 +950,39 @@ select {
   flex: 0 0 auto;
   width: 36px;
   height: 36px;
+}
+/* Steroids button: red shimmer pill (same sweep mechanism as .ascii-logo).
+   Not connected → glowing + pulsing so the missing upgrade is impossible to
+   miss; connected → calm red pill, no pulse. */
+.home-steroids-btn {
+  border-color: transparent;
+  color: #fff;
+  background: linear-gradient(
+    100deg,
+    var(--steroids-deep) 0%,
+    var(--steroids) 50%,
+    var(--steroids-deep) 100%
+  );
+  background-size: 220% 100%;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  animation: ggshimmer 3s linear infinite;
+}
+.home-steroids-btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.home-steroids-btn.is-unroided {
+  box-shadow:
+    0 0 0 1px var(--steroids),
+    0 0 18px var(--steroids-glow);
+  animation:
+    ggshimmer 3s linear infinite,
+    glow-pulse 3.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-steroids-btn,
+  .home-steroids-btn.is-unroided {
+    animation: none;
+  }
 }
 /* Serve button while live: glossy green pill, so "on" reads at a glance. */
 .home-serve-active {
@@ -3194,6 +3258,8 @@ select {
   padding: 4px calc(var(--rail) - var(--scrollbar)) 16px var(--rail);
   white-space: pre-wrap;
   word-break: break-word;
+  /* Fades out under the Ken power banner (see `.ken-power-overlay`). */
+  transition: opacity 200ms ease;
 }
 
 /* NOTE: `content-visibility: auto` was tried here as a long-session perf win but
@@ -10594,7 +10660,9 @@ select {
 }
 .ask-closed {
   font-size: 12.5px;
-  color: var(--text-dim);
+  /* Dim measured 3.37:1 on the bare transcript canvas this line sits on, under
+     the 4.5:1 floor. Muted clears it and still reads as the quietest row. */
+  color: var(--text-muted);
 }
 .ask-subq-q {
   margin: 0 0 7px;
@@ -10616,7 +10684,9 @@ select {
   font-family: var(--sans);
   font-size: 11px;
   font-weight: 500;
-  color: var(--text-dim);
+  /* Dim measured 2.84:1 on the band's surface. These numbers are permanent now
+     that answered questions stay on screen, so they have to clear 4.5:1. */
+  color: var(--text-muted);
 }
 /* Several questions in one band: numbered, each resolving on its own. */
 /* Separator between questions. --border (7% alpha white) vanishes against the
@@ -10628,14 +10698,13 @@ select {
   border-top: 1px solid var(--border-strong);
 }
 
+/* One shape for every question. Options stack full-width instead of flowing as
+   inline chips: a two-word yes/no laid out as chips read as a different
+   component from a hinted choice laid out as rows, and a chip row also could not
+   survive a 480px window once a label grew. Stacking always is the cheaper
+   answer than a rule deciding which questions get which layout. */
 .ask-options {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-/* Rows: same pills, stacked full-width, for labels too long to sit in a line. */
-.ask-options.rows {
   flex-direction: column;
   align-items: stretch;
   gap: 5px;
@@ -10643,19 +10712,23 @@ select {
      sizes to the LONGEST row rather than each row sizing independently. */
   min-width: 100%;
 }
-.ask-options.rows .btn {
+/* AFFORDANCE, and it belongs to EVERY option. `.btn-ghost` fills with
+   --surface-2, which is exactly the band's own background: an option had no
+   edge, no fill of its own and no hover, so the choices read as static text with
+   numbers in front of them. Each one gets its own raised surface plus a
+   hairline, so it reads as a control before it is touched — the border doubles
+   as the division between rows, which a bare divider line could not do (a
+   divider separates list items; an edge says "press me").
+
+   This was once scoped to stacked rows alone, which is why a short yes/no
+   confirm — the one shape that rendered as chips — looked like a different
+   component from every other question the app asks. */
+.ask-options .btn {
   justify-content: flex-start;
   align-items: flex-start;
   text-align: left;
   border-radius: var(--radius-button);
   padding: 9px 12px;
-  /* AFFORDANCE. `.btn-ghost` fills with --surface-2, which is exactly the
-     band's own background: the rows had no edge, no fill of their own and no
-     hover, so a stack of choices read as static text with numbers in front of
-     it. Each row gets its own raised surface plus a hairline, so it reads as a
-     control before it is touched — the border doubles as the division between
-     rows, which a bare divider line could not do (a divider separates list
-     items; an edge says "press me"). */
   background: var(--surface-3);
   border-color: var(--border-strong);
   transition:
@@ -10663,41 +10736,49 @@ select {
     border-color var(--t-fast),
     color var(--t-fast);
 }
-.ask-options.rows .btn:hover:not(:disabled) {
+.ask-options .btn:hover:not(:disabled) {
   background: color-mix(in srgb, var(--primary) 10%, var(--surface-3));
   border-color: color-mix(in srgb, var(--primary) 42%, transparent);
 }
-/* Pressed: the row dips back toward its resting fill so the click is confirmed
-   even when the answer re-renders the band immediately. */
-.ask-options.rows .btn:active:not(:disabled) {
+/* Pressed: the option dips back toward its resting fill so the click is
+   confirmed even when the answer re-renders the band immediately. */
+.ask-options .btn:active:not(:disabled) {
   background: color-mix(in srgb, var(--primary) 16%, var(--surface-3));
 }
-.ask-options.rows .btn:focus-visible {
+.ask-options .btn:focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
-/* Selected (multi-select) keeps the primary fill from `.btn-primary`; only the
-   edge needs re-stating so it doesn't inherit the ghost hairline. */
-.ask-options.rows .btn.btn-primary {
+/* Selected. In a band of several questions this fill IS the answered state: the
+   question stays on screen with its pick filled, so it can be changed while the
+   others are still being decided. The fill and its ink have to be re-stated (not
+   inherited from `.btn-primary`) because the rule above is the more specific
+   selector and would otherwise leave near-black label text on the dark row. */
+.ask-options .btn.btn-primary {
+  background: var(--primary);
+  color: var(--on-primary);
   border-color: transparent;
 }
-/* A row's index and badge sit on the label's first line, not centred against
-   the whole two-line block. */
-.ask-options.rows .ask-num,
-/* The badge is a separate idea from the label, so it needs more air than the
-   button's own 8px inline gap gives it. In chip layouts that means a real left
-   margin; in rows it is pushed to the far edge anyway. */
-.ask-options .badge {
-  margin-left: 10px;
+.ask-options .btn.btn-primary:hover:not(:disabled) {
+  background: var(--primary-hi);
+  border-color: transparent;
 }
-.ask-options.rows .badge {
+/* The index and the badge sit on the label's FIRST line, not centred against a
+   two-line block, so they align with the text they belong to. */
+.ask-options .ask-num {
+  margin-top: 1px;
+  margin-right: 2px;
+}
+/* The badge is a separate idea from the label, so it is pushed to the far edge
+   rather than trailing it with the button's own 8px gap. */
+.ask-options .badge {
   margin-top: 1px;
   margin-left: auto;
 }
 /* `margin-left: auto` only guarantees air while the row is short. Once the hint
    line runs long the badge is pushed back until just the button's own 8px gap
    is left, and the two read as one run of text — so reserve the rest here. */
-.ask-options.rows .ask-row-main {
+.ask-options .ask-row-main {
   padding-inline-end: 14px;
 }
 .ask-row-main {
@@ -10715,6 +10796,12 @@ select {
      floor for text this size. Muted clears it. */
   color: var(--text-muted);
 }
+/* Selected: the fill is a light periwinkle, so the row's muted grey hint drops
+   to ~1.6:1 on it. Both the hint and the accelerator index switch to the fill's
+   own near-black ink, softened rather than lightened. */
+.btn-primary .ask-row-hint {
+  color: color-mix(in srgb, var(--on-primary) 78%, var(--primary));
+}
 /* Accelerator index. Dim and unboxed — a hint, never competing with the label. */
 .ask-num {
   font-family: var(--sans);
@@ -10723,33 +10810,12 @@ select {
   color: var(--text-muted);
 }
 .btn-primary .ask-num {
-  color: rgba(255, 255, 255, 0.6);
+  color: color-mix(in srgb, var(--on-primary) 70%, var(--primary));
 }
-/* Free text is the escape hatch, so it is the quietest thing in the band. */
-.ask-escape {
-  padding: 0;
-  font-family: var(--sans);
-  font-size: 12.5px;
-  color: var(--text-muted);
-  background: none;
-  border: none;
-  cursor: pointer;
-  transition: color var(--t-out);
-}
-.ask-escape:hover {
-  color: var(--text);
-  text-decoration: underline;
-  transition: color var(--t-in);
-}
+/* The band's only footer: a multi-select's confirm. Everything else that used
+   to live down here (a free-text link, a send button, an answered counter) is
+   gone — the options are the whole interface. */
 .ask-foot {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
   margin-top: 10px;
-}
-.ask-hint {
-  font-family: var(--sans);
-  font-size: 11px;
-  color: var(--text-muted);
 }

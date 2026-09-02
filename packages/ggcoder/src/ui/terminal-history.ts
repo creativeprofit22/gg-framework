@@ -11,7 +11,7 @@ import { BLACK_CIRCLE, RETURN_SYMBOL } from "./constants/figures.js";
 import { SPINNER_FRAMES } from "./spinner-frames.js";
 import type { Theme } from "./theme/theme.js";
 import { getUserMessageDisplayParts } from "./utils/user-message-display.js";
-import { buildToolGroupSummary } from "./tool-group-summary.js";
+import { buildToolGroupSummary, steroidsQuery } from "./tool-group-summary.js";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { renderMarkdownToAnsiLines } from "./utils/markdown-renderer.js";
@@ -1032,6 +1032,7 @@ function getToolHeaderParts(
     case "tasks":
       return { label: displayName, detail: String(args.action ?? "") };
     default:
+      if (name === "steroids") return { label: displayName, detail: steroidsQuery(args) };
       return { label: displayName, detail: name.startsWith("mcp__") ? getMCPDetailArg(args) : "" };
   }
 }
@@ -1189,7 +1190,7 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
       return firstLine.length > 60 ? `${firstLine.slice(0, 57)}…` : firstLine;
     }
     default: {
-      if (!name.startsWith("mcp__")) return "";
+      if (name !== "steroids" && !name.startsWith("mcp__")) return "";
       const lines = result.split("\n").filter((lineText) => lineText.length > 0);
       if (lines.length === 0) return "no results";
       const first = lines[0] ?? "";

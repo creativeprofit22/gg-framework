@@ -24,25 +24,20 @@ const KEN_ALLOWED_TOOLS = [
   "web_fetch",
   "web_search",
   "screenshot",
+  "steroids",
 ];
-const KEN_ALLOWED_MCP_SERVERS = ["kencode-search"];
 
-// Mirror of AgentSession.isToolAllowed (which is private): a tool passes when
-// its name is in the allow-list, OR it's an mcp__<server>__<tool> whose server
-// is whitelisted. Kept in lockstep so this test tracks the real filter.
+// Mirror of AgentSession.isToolAllowed (which is private): Ken whitelists no
+// MCP server, so a tool passes only when its name is in the allow-list.
 function isToolAllowed(name: string): boolean {
-  if (KEN_ALLOWED_TOOLS.includes(name)) return true;
-  if (name.startsWith("mcp__")) {
-    const server = name.slice("mcp__".length).split("__")[0];
-    return KEN_ALLOWED_MCP_SERVERS.includes(server);
-  }
-  return false;
+  return KEN_ALLOWED_TOOLS.includes(name);
 }
 
 describe("Ken allowedTools filter", () => {
   it("excludes every mutating tool from the Ken set", async () => {
     const { tools, processManager, lspManager } = await createTools(os.tmpdir(), {
       lspDiagnostics: false,
+      steroidsBin: "/nonexistent/steroids",
     });
     try {
       const kenTools = tools.filter((t) => isToolAllowed(t.name)).map((t) => t.name);
@@ -52,7 +47,7 @@ describe("Ken allowedTools filter", () => {
         expect(kenTools).not.toContain(banned);
       }
       // The read-only research/vision tools must survive.
-      for (const allowed of ["read", "grep", "find", "ls", "screenshot"]) {
+      for (const allowed of ["read", "grep", "find", "ls", "screenshot", "steroids"]) {
         expect(kenTools).toContain(allowed);
       }
     } finally {
@@ -61,13 +56,11 @@ describe("Ken allowedTools filter", () => {
     }
   });
 
-  it("allows whitelisted kencode-search MCP tools but blocks other MCP tools", () => {
-    // kencode-search is Ken's research server: all its tools pass.
-    expect(isToolAllowed("mcp__kencode-search__searchCode")).toBe(true);
-    expect(isToolAllowed("mcp__kencode-search__referenceSources")).toBe(true);
-    expect(isToolAllowed("mcp__kencode-search__discoverRepos")).toBe(true);
-    // A non-whitelisted MCP server (e.g. a user-configured one) is blocked,
-    // even if it exposes an innocuous-looking name.
+  it("allows the native steroids tool but blocks every MCP tool", () => {
+    // steroids is Ken's research corpus: a native tool, no MCP server needed.
+    expect(isToolAllowed("steroids")).toBe(true);
+    // Any MCP server (e.g. a user-configured one) is blocked, even if it
+    // exposes an innocuous-looking name.
     expect(isToolAllowed("mcp__some-other-server__searchCode")).toBe(false);
     expect(isToolAllowed("mcp__filesystem__write_file")).toBe(false);
   });

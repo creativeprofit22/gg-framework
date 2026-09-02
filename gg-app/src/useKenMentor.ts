@@ -136,7 +136,7 @@ export function useKenMentor(opts: {
         // the tool starts a fresh paragraph instead of gluing onto the pre-tool
         // text ("...work.Local tools..."). Mirrors the build session's
         // tool_call_start / server_tool_call handling. Covers both client tools
-        // (read/grep/kencode-search) and Anthropic's native server web_search.
+        // (read/grep/steroids) and Anthropic's native server web_search.
         case "ken_tool_call_start":
         case "ken_server_tool_call":
           // Close any open thinking span (mirrors the build's finalizeThinking on

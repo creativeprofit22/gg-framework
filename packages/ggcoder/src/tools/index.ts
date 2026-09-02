@@ -33,6 +33,8 @@ import { createScreenshotTool } from "./screenshot.js";
 import { createGenerateImageTool, type GenerateImageAuth } from "./generate-image.js";
 import { createEnterPlanTool } from "./enter-plan.js";
 import { createExitPlanTool } from "./exit-plan.js";
+import { createSteroidsTool } from "./steroids.js";
+import { findSteroidsBinary } from "../core/steroids.js";
 import { localOperations, type ToolOperations } from "./operations.js";
 import type { ReadTracker } from "./read-tracker.js";
 import type { WriteGuardSettings } from "../core/workspace-guard.js";
@@ -121,6 +123,12 @@ export interface CreateToolsOptions {
    * (grepUseRipgrep). Defaults to enabled when omitted.
    */
   getUseExternalGrep?: () => boolean;
+  /**
+   * Path to the Agent Steroids `steroids` binary. `null` hides the tool;
+   * omitted means detect it here. Callers that already probed pass it in so
+   * detection happens once.
+   */
+  steroidsBin?: string | null;
   /**
    * Push queue for out-of-band notifications (child completions, background
    * process progress). When provided, producers enqueue here and the session
@@ -240,6 +248,10 @@ export async function createTools(
     createTasksTool(cwd),
     createScreenshotTool(cwd),
   ];
+
+  // Local corpus of real repos; only when the CLI is actually on this machine.
+  const steroidsBin = opts?.steroidsBin === undefined ? findSteroidsBinary() : opts.steroidsBin;
+  if (steroidsBin) tools.push(createSteroidsTool(steroidsBin, planModeRef));
 
   // Add web search tool for providers without reliable native web search
   if (opts?.provider && opts.provider !== "anthropic") {

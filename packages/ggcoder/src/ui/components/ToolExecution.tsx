@@ -1,6 +1,7 @@
 import React, { memo } from "react";
 import { Text, Box } from "ink";
 import { useTheme, type Theme } from "../theme/theme.js";
+import { steroidsQuery } from "../tool-group-summary.js";
 import { Spinner } from "./Spinner.js";
 import { ToolUseLoader } from "./ToolUseLoader.js";
 import { MessageResponse } from "./MessageResponse.js";
@@ -543,6 +544,7 @@ function getToolHeaderParts(
       return { label: displayName, detail: action };
     }
     default: {
+      if (name === "steroids") return { label: displayName, detail: steroidsQuery(args) };
       if (name.startsWith("mcp__")) {
         // Pick the most meaningful arg as the detail (skip long blobs)
         const detail = getMCPDetailArg(args);
@@ -553,9 +555,14 @@ function getToolHeaderParts(
   }
 }
 
+/** MCP tools and the native steroids corpus share the raw-lines result view. */
+function isExternalCodeTool(name: string): boolean {
+  return name === "steroids" || name.startsWith("mcp__");
+}
+
 function toolDisplayName(name: string): string {
   if (name.startsWith("mcp__")) {
-    // mcp__kencode-search__searchCode → "searchCode"
+    // mcp__some-server__searchCode → "searchCode"
     // mcp__zai_vision__analyze_image → "analyze_image"
     const parts = name.split("__");
     const toolFn = parts[2] ?? parts[1] ?? "mcp";
@@ -722,7 +729,7 @@ function getInlineSummary(name: string, result: string, isError: boolean): strin
       return firstLine.length > 60 ? firstLine.slice(0, 57) + "…" : firstLine;
     }
     default: {
-      if (name.startsWith("mcp__")) {
+      if (isExternalCodeTool(name)) {
         const lines = result.split("\n").filter((l) => l.length > 0);
         if (lines.length === 0) return "no results";
         // Show first meaningful line as summary for compact display
@@ -1023,7 +1030,7 @@ function buildResultBody(
       };
     }
     default: {
-      if (name.startsWith("mcp__")) {
+      if (isExternalCodeTool(name)) {
         const lines = result.split("\n").filter((l) => l.length > 0);
         if (lines.length === 0) return null;
         const { lines: display, splitAt } = sliceHeadTail(lines, MAX_OUTPUT_LINES);

@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { getAppPaths } from "../config.js";
@@ -34,9 +35,54 @@ function isWithin(root: string, target: string): boolean {
 }
 
 /**
+ * Resolve a path through symlinks, tolerating one that does not exist yet.
+ *
+ * `path.resolve` is pure string arithmetic: it collapses `..` but knows nothing
+ * about links, so `<repo>/link/x` stays textually "inside the repo" even when
+ * `link` points at the home directory. A repo we clone or open is untrusted
+ * content, and a committed symlink is a normal thing for it to carry — so a
+ * textual containment check hands any such repo a write primitive anywhere the
+ * user can write (`~/.ssh/authorized_keys`, `~/.zshrc`), with no prompt.
+ *
+ * Writes usually target a file that does not exist yet, so `realpathSync` on
+ * the full path would throw. Walk up to the nearest ancestor that DOES exist,
+ * resolve that, then re-attach the remaining segments: the existing part is
+ * where a planted link would have to live, and the non-existent tail cannot be
+ * pointing anywhere yet.
+ *
+ * simplification: this is a check-then-write, so a link swapped in between the
+ * two would still win (TOCTOU). Closing that needs the write itself to be
+ * link-safe (`O_NOFOLLOW`), which Node does not expose on `writeFile`. The
+ * planted-symlink case this blocks does not require the race; the racing one
+ * needs code already executing locally.
+ */
+function realResolve(target: string): string {
+  let current = path.resolve(target);
+  const trailing: string[] = [];
+  for (;;) {
+    try {
+      return path.resolve(realpathSync(current), ...trailing);
+    } catch {
+      const parent = path.dirname(current);
+      // Hit the filesystem root without finding anything that exists: there is
+      // no link on this path to resolve, so the textual form is already final.
+      if (parent === current) return path.resolve(target);
+      trailing.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+/**
  * Decide whether a resolved write/edit target path is allowed.
  * Allowed by default: under `cwd`, under the OS temp dir, and under the
  * agent's own state dir (~/.gg) — sessions/plans/settings must keep working.
+ *
+ * Both sides are compared AFTER symlink resolution (see {@link realResolve}):
+ * the target, so a link inside the workspace cannot point out of it, and the
+ * roots, because the OS aliases its own (macOS `/tmp` → `/private/tmp`, and
+ * `/var/folders` under it) and comparing a resolved target against an
+ * unresolved root would deny every legitimate temp-dir write.
  */
 export function resolveWriteGuard(
   cwd: string,
@@ -45,22 +91,26 @@ export function resolveWriteGuard(
 ): WriteGuardResult {
   if (settings?.allowOutsideWorkspaceWrites) return { allowed: true };
 
-  const target = path.resolve(resolvedPath);
-  const extraRoots = (settings?.additionalRoots ?? []).map((root) => path.resolve(root));
+  const target = realResolve(resolvedPath);
+  const extraRoots = (settings?.additionalRoots ?? []).map((root) => realResolve(root));
   const allowedRoots = [
-    path.resolve(cwd),
+    realResolve(cwd),
     ...extraRoots,
-    path.resolve(os.tmpdir()),
-    path.resolve(getAppPaths().agentDir),
+    realResolve(os.tmpdir()),
+    realResolve(getAppPaths().agentDir),
   ];
   for (const root of allowedRoots) {
     if (isWithin(root, target)) return { allowed: true };
   }
-  const workspaceRoots = [path.resolve(cwd), ...extraRoots].join(", ");
+  const workspaceRoots = [realResolve(cwd), ...extraRoots].join(", ");
+  // Name the redirection when there is one: "foo/link/x is outside the
+  // workspace" reads like a bug when the path visibly starts at the workspace.
+  const literal = path.resolve(resolvedPath);
+  const via = literal === target ? "" : ` (${literal} resolves there through a symlink)`;
   return {
     allowed: false,
     reason:
-      `Blocked: ${target} is outside the workspace (${workspaceRoots}). ` +
+      `Blocked: ${target} is outside the workspace (${workspaceRoots})${via}. ` +
       "Writing outside the workspace requires user approval — ask the user to confirm, " +
       "or have them enable the allowOutsideWorkspaceWrites setting.",
   };

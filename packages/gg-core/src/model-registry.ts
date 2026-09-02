@@ -39,8 +39,8 @@ export interface ModelInfo {
    *     and `ultra`; gg-ai caps at `max` — `ultra` needs a ThinkingLevel bump)
    *   - OpenAI GPT-5.5-era: `xhigh`
    *   - OpenAI Pro/Codex/old: clamped to what the model accepts
-   *   - Claude Fable 5 / Mythos 5, Opus 5 and Sonnet 5: `max` (Fable 5 /
-   *     Mythos 5 use always-on adaptive thinking, low→max ladder)
+   *   - Claude Fable 5.1 / Fable 5 / Mythos 5, Opus 5 and Sonnet 5: `max`
+   *     (the Fable / Mythos line uses always-on adaptive thinking, low→max)
    *   - Claude Haiku 4.5: `high` (no adaptive `max` tier)
    *   - Kimi K3: `max` (always-on reasoning; currently the only API effort)
    *   - xAI Grok 4.6: `xhigh` (new top rung; 4.5 caps at `high`)
@@ -75,8 +75,13 @@ export const MODELS: ModelInfo[] = [
   // Project Glasswing (limited, invitation-only) model unavailable to most
   // users. Re-enable once it's generally available.
   {
-    id: "claude-fable-5",
-    name: "Claude Fable 5",
+    // Released 2026-09-01 — replaces Fable 5 at the same $10/$50 MTok (cache
+    // reads drop to $0.25). Always-on adaptive thinking steered by effort;
+    // forced tool use is rejected with a 400, which gg-ai never sends on the
+    // Anthropic path. Fable 5 is retired here — a session that still has it
+    // saved falls back to the provider default on next start.
+    id: "claude-fable-5-1",
+    name: "Claude Fable 5.1",
     provider: "anthropic",
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
@@ -88,7 +93,7 @@ export const MODELS: ModelInfo[] = [
   },
   // {
   //   // Mythos-class model offered through Project Glasswing (limited
-  //   // availability, invitation-only). Same underlying model as Fable 5 with
+  //   // availability, invitation-only). Same underlying model as Fable 5.1 with
   //   // some safeguards lifted; kept here so approved accounts can select it.
   //   id: "claude-mythos-5",
   //   name: "Claude Mythos 5",

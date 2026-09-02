@@ -10,8 +10,8 @@ import type { MCPServerConfig } from "./types.js";
  *
  * The daemon hosts many `AgentSession`s at once — one per window, plus Ken chat
  * and Ken autopilot within each window — and each used to spawn its own child
- * for every configured stdio server. For a stateless proxy such as
- * `kencode-search` that is N identical processes doing identical work: measured
+ * for every configured stdio server. For a stateless proxy that is N identical
+ * processes doing identical work: measured
  * at 7 live children, ~43 MB each, purely duplicated.
  *
  * Sharing is the DEFAULT for stdio servers. A stdio connection has nothing

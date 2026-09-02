@@ -7,7 +7,6 @@ import {
   SUB_AGENT_MAX_TURN_EXTENSIONS,
   SUB_AGENT_TIMEOUT_MS,
 } from "../tools/subagent-shared.js";
-import { captureSidecarError, flushSidecarErrors } from "../core/sidecar-error-reporter.js";
 import { writeTurnRecord } from "../core/subagent-turn-record.js";
 
 const TIMEOUT_RECOVERY_GRACE_MS = 60_000;
@@ -274,12 +273,6 @@ export async function runSubagentWorkerMode(): Promise<void> {
         clearTimeout(turnTimer);
         const interrupted = controller.signal.aborted;
         const timedOut = abortReason === "timeout";
-        if (!interrupted) {
-          captureSidecarError(error, "subagent-worker.turn", {
-            provider: initializeOptions?.provider ?? "unknown",
-            model: initializeOptions?.model ?? "unknown",
-          });
-        }
         setState(interrupted && !timedOut ? "interrupted" : "idle");
         completeTurn({
           status: timedOut ? "failed" : interrupted ? "interrupted" : "failed",
@@ -364,7 +357,6 @@ export async function runSubagentWorkerMode(): Promise<void> {
           return;
       }
     } catch (error) {
-      captureSidecarError(error, "subagent-worker.command", { command: command.command });
       reject(command.request_id, error);
     }
   };
@@ -376,7 +368,6 @@ export async function runSubagentWorkerMode(): Promise<void> {
       command = JSON.parse(line) as WorkerCommand;
       if (!command.request_id || !command.command) throw new Error("Invalid command frame");
     } catch (error) {
-      captureSidecarError(error, "subagent-worker.protocol");
       emit({ type: "protocol_error", error: errorMessage(error) });
       return;
     }
@@ -395,5 +386,4 @@ export async function runSubagentWorkerMode(): Promise<void> {
     controller.abort();
   }
   await session?.dispose();
-  await flushSidecarErrors();
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Badge } from "./Badge";
 import { theme } from "./theme";
 import type { AskOption, AskQuestion, AskUserPrompt } from "./ask-user";
@@ -7,14 +7,19 @@ import type { AskOption, AskQuestion, AskUserPrompt } from "./ask-user";
  * The in-thread question band (design-lab: ask-band-resolved.html).
  *
  * Sits inside the reply, full-bleed and tinted, so it scrolls with history and
- * owns no app chrome. Every option is a real button — mouse is the primary
- * path; the number badges printed on each option are an accelerator, and the
- * free-text field opens on click OR on typing a character. Answering collapses
- * the band in place to a single line.
+ * owns no app chrome. Every question looks the same: one stack of full-width
+ * option rows, whatever its kind. A yes/no confirm laid out as inline chips
+ * read as a different component from a choice laid out as rows, so the chip
+ * layout is gone — there is one shape, and two questions cannot disagree.
+ *
+ * The band is free of chrome too. It offers options and nothing else: no
+ * "Something else" link, no send button, no counter. Typing any character still
+ * routes to the composer (that is the free-text path, and it never needed a
+ * button of its own), and answering the last open question commits the band.
+ *
+ * Until then every pick stays on screen as a filled row, so an answer given
+ * early can still be changed while the rest are being decided.
  */
-
-/** Past this many characters a label stops working as a chip and becomes a row. */
-const CHIP_LABEL_MAX = 24;
 
 const Check = (): React.ReactElement => (
   <svg
@@ -35,22 +40,12 @@ const Check = (): React.ReactElement => (
 
 const valueOf = (option: AskOption): string => option.value ?? option.label;
 
-/** Free text is offered everywhere except when the model opts out. */
-const allowsText = (q: AskQuestion): boolean => q.kind === "text" || q.allowOther !== false;
-
 /**
- * Chips or rows is decided from the content, never by the model: long labels
- * (or labels carrying a hint) can't survive a 480px window as pills.
+ * Free text is offered everywhere except when the model opts out. There is no
+ * button for it: a `text` question hands straight over to the composer, and on
+ * any other question typing a character does the same.
  */
-function useRows(q: AskQuestion): boolean {
-  return useMemo(
-    () =>
-      (q.options ?? []).some(
-        (option) => option.hint !== undefined || option.label.length > CHIP_LABEL_MAX,
-      ),
-    [q.options],
-  );
-}
+const allowsText = (q: AskQuestion): boolean => q.kind === "text" || q.allowOther !== false;
 
 type Answers = Record<string, string | string[]>;
 
@@ -69,7 +64,7 @@ function AnsweredLine({ text }: { text: string }): React.ReactElement {
   );
 }
 
-/** One question's controls: chips or rows, plus the route to the composer. */
+/** One question: a heading and its stack of option rows. */
 function Question({
   question,
   index,
@@ -86,10 +81,9 @@ function Question({
   onAnswer: (value: string | string[]) => void;
   onTypeInstead: () => void;
 }): React.ReactElement {
-  const rows = useRows(question);
   const options = question.options ?? [];
   const multi = question.kind === "multi";
-  const [picked, setPicked] = useState<string[]>([]);
+  const [draft, setDraft] = useState<string[]>();
 
   // A text-only question has nothing to click, so it sends the user straight to
   // the composer rather than rendering an empty band. The ref keeps that to one
@@ -102,38 +96,49 @@ function Question({
     onTypeInstead();
   }, [question.kind, question.id, onTypeInstead]);
 
-  if (answer !== undefined) {
-    return (
-      <div className="ask-subq is-done">
-        {numbered && <span className="ask-subq-num">{index}</span>}
-        <AnsweredLine text={Array.isArray(answer) ? answer.join(", ") : answer} />
-      </div>
-    );
-  }
+  // A multi-select parks its picks locally: "two of these three" is not an
+  // answer until the user says they are done, and nothing else in the band can
+  // tell a half-made selection from a finished one. Every other kind answers on
+  // the click itself, so its selection IS `answer`.
+  //
+  // `draft` starts undefined and only exists once the user touches a checkbox,
+  // so an already-answered multi (restored from history, or re-rendered while
+  // its neighbours are still open) shows the committed picks rather than an
+  // empty list.
+  const committed = Array.isArray(answer) ? answer : answer === undefined ? [] : [answer];
+  const picked = multi ? (draft ?? committed) : committed;
+  const isOn = (value: string): boolean => (multi ? picked.includes(value) : answer === value);
+  const toggle = (value: string): void => {
+    const next = picked.includes(value) ? picked.filter((v) => v !== value) : [...picked, value];
+    setDraft(next);
+    // Already confirmed once: keep the committed answer in step with what is on
+    // screen, or a later question's answer would commit the band with the stale
+    // selection while the rows show the new one.
+    if (answer !== undefined && next.length > 0) onAnswer(next);
+  };
 
   // Every option is the app's standard pill: ghost by default, primary only
   // when it is actually selected. The recommendation is marked with the shared
   // .badge, so color stays a data signal instead of decoration.
   const optionButton = (option: AskOption, position: number): React.ReactElement => {
     const value = valueOf(option);
+    const on = isOn(value);
     const index = position <= 9 ? <span className="ask-num">{position}</span> : null;
     // Green: the recommendation is the one affirmative signal in the list, and
-    // a neutral pill was indistinguishable from the row's own raised fill.
-    const tag = option.recommended ? <Badge color={theme.success}>Recommended</Badge> : null;
-    const on = multi && picked.includes(value);
+    // a neutral pill was indistinguishable from the row's own raised fill. On a
+    // selected pill it switches to the fill's own ink — light green on the
+    // periwinkle fill measures ~1.3:1, which is not a readable badge.
+    const tag = option.recommended ? (
+      <Badge color={on ? theme.onPrimary : theme.success}>Recommended</Badge>
+    ) : null;
     return (
       <button
-        key={value}
+        key={option.label}
         type="button"
         className={`btn btn-sm ${on ? "btn-primary" : "btn-ghost"}`}
-        {...(multi ? { "aria-pressed": on } : { "data-ask-option": true })}
-        onClick={() =>
-          multi
-            ? setPicked((current) =>
-                current.includes(value) ? current.filter((v) => v !== value) : [...current, value],
-              )
-            : onAnswer(value)
-        }
+        aria-pressed={on}
+        {...(multi ? {} : { "data-ask-option": true })}
+        onClick={() => (multi ? toggle(value) : onAnswer(value))}
       >
         {multi ? on && <Check /> : index}
         {option.hint ? (
@@ -149,29 +154,46 @@ function Question({
     );
   };
 
-  const escape = allowsText(question) ? (
-    <button type="button" className="ask-escape" onClick={onTypeInstead} data-ask-type>
-      Something else
-    </button>
-  ) : null;
+  // A typed answer matches no option, so it gets a row of its own rather than
+  // leaving the question looking untouched. Pressing it reopens the composer,
+  // which is also the only way back out of one.
+
+  const typed =
+    typeof answer === "string" && !options.some((option) => valueOf(option) === answer) ? (
+      <button
+        type="button"
+        className="btn btn-sm btn-primary"
+        aria-pressed="true"
+        onClick={onTypeInstead}
+      >
+        <span>{answer}</span>
+      </button>
+    ) : null;
 
   return (
-    <div className="ask-subq" data-ask-question={question.id}>
+    <div
+      className="ask-subq"
+      data-ask-question={question.id}
+      {...(answer !== undefined ? { "data-ask-answered": true } : {})}
+    >
       <p className="ask-subq-q">
         {numbered && <span className="ask-subq-num">{index}</span>}
         {question.question}
       </p>
       {question.detail && <p className="ask-detail">{question.detail}</p>}
-      {options.length > 0 && (
-        <div
-          className={`ask-options${rows ? " rows" : ""}`}
-          role="group"
-          aria-label={question.question}
-        >
+      {/* `typed` is checked too: a `text` question carries no options at all, so
+          guarding on options alone left it showing nothing but its heading once
+          answered. */}
+      {(options.length > 0 || typed) && (
+        <div className="ask-options" role="group" aria-label={question.question}>
           {options.map((option, i) => optionButton(option, i + 1))}
-          {!rows && !multi && escape}
+          {typed}
         </div>
       )}
+      {/* The one control the band keeps. A multi-select is the only kind whose
+          selection cannot commit itself: "Tests and Build" and "Tests, so far"
+          look identical, so something has to mark the end of picking. Every
+          other kind commits on the option click and needs no button. */}
       {multi && (
         <div className="ask-foot">
           <button
@@ -180,9 +202,8 @@ function Question({
             disabled={picked.length === 0}
             onClick={() => onAnswer(picked)}
           >
-            {picked.length === 0 ? "Choose at least one" : `Send ${picked.length} selected`}
+            {picked.length === 0 ? "Choose at least one" : `Confirm ${picked.length} selected`}
           </button>
-          {escape}
         </div>
       )}
     </div>
@@ -217,16 +238,6 @@ export function AskBand({
   const questions = prompt.questions;
   const done = sent === true;
 
-  const acceptAllRecommended = useCallback(() => {
-    const delta: Answers = {};
-    for (const q of questions) {
-      if (answers[q.id] !== undefined) continue;
-      const rec = q.options?.find((o) => o.recommended);
-      if (rec) delta[q.id] = valueOf(rec);
-    }
-    onAnswer(delta);
-  }, [answers, questions, onAnswer]);
-
   // Number accelerators + type-to-open. Both are deliberately inert while the
   // user is typing anywhere else (the composer is a focused textarea), so the
   // band never steals a keystroke meant for the prompt box.
@@ -245,8 +256,11 @@ export function AskBand({
       }
       const band = bandRef.current;
       if (!band) return;
-      // The first still-open question owns the keyboard.
-      const open = band.querySelector<HTMLElement>("[data-ask-question]");
+      // The first still-UNANSWERED question owns the keyboard: in a form every
+      // question stays on screen after it is answered, so plain
+      // `[data-ask-question]` would keep aiming the number keys at the first
+      // one the user already settled.
+      const open = band.querySelector<HTMLElement>("[data-ask-question]:not([data-ask-answered])");
       if (!open) return;
       if (/^[1-9]$/.test(e.key)) {
         const options = open.querySelectorAll<HTMLButtonElement>("[data-ask-option]");
@@ -259,10 +273,13 @@ export function AskBand({
       }
       // Any printed character means they want to write their own answer: send
       // them to the composer they already type in, carrying the keystroke,
-      // rather than opening a second input inside the transcript.
+      // rather than opening a second input inside the transcript. With the
+      // "Something else" button gone this is the whole free-text path, so it has
+      // to honour the opt-out the button used to enforce.
       if (e.key.length === 1 && e.key !== " ") {
         const id = open.dataset.askQuestion;
-        if (id) {
+        const question = questions.find((q) => q.id === id);
+        if (id && question && allowsText(question)) {
           e.preventDefault();
           onTypeInstead(id, e.key);
         }
@@ -270,7 +287,7 @@ export function AskBand({
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [done, cancelled, onTypeInstead]);
+  }, [done, cancelled, onTypeInstead, questions]);
 
   if (cancelled && !done) {
     return (
@@ -297,9 +314,9 @@ export function AskBand({
     );
   }
 
-  const multiQuestion = questions.length > 1;
-  const remaining = questions.filter((q) => answers[q.id] === undefined).length;
-  const hasRecommendations = questions.every((q) => q.options?.some((o) => o.recommended));
+  // Several questions are numbered so the accelerator keys have something to
+  // refer to; a lone question needs no "1.".
+  const numbered = questions.length > 1;
 
   return (
     <div className="ask-band" ref={bandRef} role="group" aria-label="GG Coder needs your answer">
@@ -308,26 +325,12 @@ export function AskBand({
           key={q.id}
           question={q}
           index={i + 1}
-          numbered={multiQuestion}
+          numbered={numbered}
           answer={answers[q.id]}
           onAnswer={(value) => onAnswer({ [q.id]: value })}
           onTypeInstead={() => onTypeInstead(q.id)}
         />
       ))}
-      {multiQuestion && (
-        <div className="ask-foot">
-          {hasRecommendations && (
-            <button type="button" className="btn btn-sm btn-ghost" onClick={acceptAllRecommended}>
-              Use every recommended answer
-            </button>
-          )}
-          <span className="ask-hint">
-            {remaining === 0
-              ? "All answered"
-              : `${questions.length - remaining} of ${questions.length} answered`}
-          </span>
-        </div>
-      )}
     </div>
   );
 }

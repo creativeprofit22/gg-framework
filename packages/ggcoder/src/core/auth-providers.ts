@@ -66,11 +66,17 @@ export interface AuthMethodMeta {
   requires?: string;
 }
 
+/**
+ * Every provider a user can connect, in login-screen order. `description`
+ * lists that provider's models and feeds both the CLI login screen and the
+ * app's provider list, so `auth-providers.test.ts` pins each one to the model
+ * registry — a registry change that isn't reflected here fails the suite.
+ */
 export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "anthropic",
     label: "Anthropic",
-    description: "Claude Fable 5, Opus 5, Sonnet 5, Haiku 4.5",
+    description: "Claude Fable 5.1, Opus 5, Sonnet 5, Haiku 4.5",
     methods: ["oauth"],
   },
   {
@@ -130,7 +136,7 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "glm",
     label: "Z.AI (GLM)",
-    description: "GLM-5.3",
+    description: "GLM-5.3, GLM-5.3-Flash",
     methods: ["apikey"],
     apiKeyLabel: "Z.AI",
   },
@@ -178,7 +184,7 @@ export const AUTH_PROVIDERS: AuthProviderMeta[] = [
   {
     value: "openrouter",
     label: "OpenRouter",
-    description: "Multi-provider gateway",
+    description: "Qwen3.6-Plus · multi-provider gateway",
     methods: ["apikey"],
     apiKeyLabel: "OpenRouter",
   },

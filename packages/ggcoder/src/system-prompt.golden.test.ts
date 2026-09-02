@@ -109,6 +109,8 @@ async function buildPrefix(): Promise<{
   const { tools, processManager } = await createTools(cwd, {
     provider: "anthropic",
     model: "claude-sonnet-5",
+    // Machine-gated: present only where the Agent Steroids binary is installed.
+    steroidsBin: null,
     // Pinned so a change to the bundled roster or skill catalog is a visible
     // diff in ITS own golden, not silent noise in this one.
     agents: [],

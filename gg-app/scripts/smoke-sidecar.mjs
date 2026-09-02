@@ -42,58 +42,6 @@ function nodeBin() {
 }
 
 /**
- * The bundled kencode-search MCP server must START from the copied
- * node_modules tree. It's spawned as a stdio child (never imported), so the
- * main bundle-load check can't catch a broken copy — v0.14.x shipped a
- * kencode-search whose MCP SDK dep tree was incomplete (pnpm symlink +
- * exports-map stub in bundle-sidecar's packageRoot) and it crashed on every
- * spawn with "Connection closed". This gate makes that class of bug fail CI.
- */
-async function smokeKencode(node) {
-  const bin = join(
-    srcTauri,
-    "sidecar",
-    "node_modules",
-    "@kenkaiiii",
-    "kencode-search",
-    "dist",
-    "index.js",
-  );
-  if (!existsSync(bin)) fail(`bundled kencode-search missing: ${bin}`);
-  const ok = await new Promise((resolve) => {
-    const child = spawn(node, [bin], { stdio: ["pipe", "pipe", "pipe"] });
-    let err = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      // Must have printed "ready" — a silently-hung child is a failure too.
-      resolve(/ready/.test(err));
-    }, 8000);
-    child.stderr.on("data", (d) => {
-      err += d.toString();
-      if (/ready/.test(err)) {
-        clearTimeout(timer);
-        child.kill("SIGKILL");
-        resolve(true);
-      }
-    });
-    child.on("exit", () => {
-      clearTimeout(timer);
-      if (!/ready/.test(err)) {
-        process.stderr.write(err);
-        resolve(false);
-      }
-    });
-    child.on("error", () => {
-      clearTimeout(timer);
-      resolve(false);
-    });
-    child.stdin.end();
-  });
-  if (!ok) fail("bundled kencode-search failed to start (broken dependency copy?)");
-  console.log("smoke: bundled kencode-search starts cleanly");
-}
-
-/**
  * TS/JS diagnostics resolve these packages by physical path and spawn the
  * language server with the bundled Node runtime. A bundle-load smoke cannot
  * detect their absence because neither package is imported by the sidecar.
@@ -175,7 +123,6 @@ async function main() {
   const node = nodeBin();
   console.log(`smoke: ${node} ${sidecar}`);
 
-  await smokeKencode(node);
   smokeTypescriptLanguageServer(node);
   smokeOpenSrc(node);
   smokeSandboxRuntime(node);
@@ -198,11 +145,10 @@ async function main() {
   // native deps (sharp) loaded on this OS. (Older bundles fataled with "Not
   // logged in" instead; that's still accepted as a legacy pass.)
   //
-  // Timeout is generous (120s): session.initialize() connects the default
-  // `kencode-search` MCP server via `npx -y …` with a 30s connect timeout, and a
-  // cold npx cache on a fresh CI runner can take the full 30s before MCP fails
-  // gracefully and boot continues to server.listen(). 30s here used to race that
-  // and time out; 120s clears it with margin.
+  // Timeout is generous (120s): session.initialize() may connect user MCP
+  // servers via `npx -y …` with a 30s connect timeout, and a cold npx cache on
+  // a fresh CI runner can take the full 30s before MCP fails gracefully and
+  // boot continues to server.listen(). 120s clears it with margin.
   const LOADED_BUT_UNAUTHED = Symbol("loaded-but-unauthed");
 
   const handshake = await new Promise((resolve, reject) => {

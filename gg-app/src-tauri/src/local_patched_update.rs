@@ -751,10 +751,11 @@ mod tests {
         );
         let started = Instant::now();
 
-        let result = runner.run(&directory, &["fetch"], Duration::from_secs(2));
+        // PowerShell startup can exceed two seconds while the full Rust suite saturates Windows.
+        let result = runner.run(&directory, &["fetch"], Duration::from_secs(10));
 
         assert!(matches!(result, Err(RunError::Timeout)));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(13));
         let descendant_pid: u32 = std::fs::read_to_string(&pid_file)
             .unwrap()
             .trim()

@@ -128,13 +128,13 @@ function findNamedFiles(root, expectedName) {
 }
 
 /**
- * Locate the extracted install layout and assert the three files that must ship
+ * Locate a packaged install layout and assert the three files that must ship
  * together. A missing `ggnode.exe` or `sidecar/app-sidecar.mjs` is exactly the
  * "app installs but does nothing" bug this smoke exists to catch.
  */
-export function discoverPackagedLayout(extractRoot) {
-  const apps = findNamedFiles(extractRoot, "gg-app.exe");
-  if (apps.length !== 1) fail(`expected one extracted gg-app.exe, found ${apps.length}`);
+export function discoverPackagedLayout(root, executableName = "gg-app.exe") {
+  const apps = findNamedFiles(root, executableName);
+  if (apps.length !== 1) fail(`expected one packaged ${executableName}, found ${apps.length}`);
   const executable = realpathSync.native(apps[0]);
   const installDir = dirname(executable);
   const node = join(installDir, "ggnode.exe");
@@ -326,7 +326,7 @@ export async function cleanupOwnedProcesses(options) {
  * `~/.gg` (auth tokens, settings, session store) and never collides with a
  * GG Coder the developer already has open.
  */
-function isolatedEnvironment(root, projectDir) {
+export function isolatedEnvironment(root, projectDir) {
   const home = join(root, "home");
   // SHGetKnownFolderPath expects the conventional profile-relative layout;
   // arbitrary APPDATA paths make Tauri's log plugin fail with UnknownPath.
@@ -356,6 +356,53 @@ function isolatedEnvironment(root, projectDir) {
   return env;
 }
 
+export async function smokePackagedLayout(layout, options) {
+  const spawnApp = options.spawnApp ?? spawn;
+  const snapshot = options.snapshot ?? processSnapshot;
+  const visiblePids = options.visiblePids ?? visibleWindowPids;
+  const exists = options.exists ?? processExists;
+  const child = spawnApp(layout.executable, [], {
+    cwd: options.projectDir,
+    env: isolatedEnvironment(options.smokeRoot, options.projectDir),
+    // Inherited pipe handles can be retained by WebView2 descendants and keep
+    // this runner alive after the owned tree has been terminated.
+    stdio: "ignore",
+    windowsHide: false,
+  });
+  const appPid = child.pid;
+  try {
+    await waitFor(
+      "packaged app window and bundled sidecar",
+      () => {
+        if (!exists(appPid)) throw new StopWaitingError("packaged app exited early");
+        const processes = snapshot();
+        const app = processes.find(
+          (entry) =>
+            entry.ProcessId === appPid &&
+            entry.ExecutablePath &&
+            normalizePath(entry.ExecutablePath) === normalizePath(layout.executable),
+        );
+        const node = processes.find(
+          (entry) =>
+            entry.ParentProcessId === appPid &&
+            entry.ExecutablePath &&
+            normalizePath(entry.ExecutablePath) === normalizePath(layout.node) &&
+            normalizeEvidence(entry.CommandLine ?? "").includes(normalizeEvidence(layout.sidecar)),
+        );
+        return app && node && visiblePids().has(appPid);
+      },
+      options.waitOptions,
+    );
+  } finally {
+    await cleanupOwnedProcesses({
+      ...(options.cleanupOptions ?? {}),
+      rootPid: appPid,
+      ownedRoots: [options.smokeRoot, layout.installDir],
+    });
+  }
+  return { appPid, packagedNode: layout.node };
+}
+
 /** `msiexec /a` = administrative install: unpack the payload, install nothing. */
 function extractMsi(msi, extractRoot, logPath) {
   mkdirSync(extractRoot, { recursive: true });
@@ -371,8 +418,8 @@ async function main() {
   const extractRoot = join(smokeRoot, "package");
   const projectDir = join(smokeRoot, "project");
   const msiLog = join(smokeRoot, "msi-extract.log");
-  let appPid;
-  let packagedNode;
+  let result;
+  let smokeError;
 
   try {
     const artifactArgument = process.argv.indexOf("--artifact");
@@ -399,64 +446,27 @@ async function main() {
     extractMsi(msi, extractRoot, msiLog);
     const layout = discoverPackagedLayout(extractRoot);
     console.log(`PACKAGE: ${relative(appDir, msi)} -> ${layout.installDir}`);
-
-    const child = spawn(layout.executable, [], {
-      cwd: projectDir,
-      env: isolatedEnvironment(smokeRoot, projectDir),
-      // Inherited pipe handles can be retained by WebView2 descendants and keep
-      // this runner alive after the owned tree has been terminated.
-      stdio: "ignore",
-      windowsHide: false,
-    });
-    appPid = child.pid;
-    packagedNode = layout.node;
-
-    await waitFor("packaged app window and bundled sidecar", () => {
-      if (!processExists(appPid)) {
-        throw new StopWaitingError("packaged app exited early");
-      }
-      const processes = processSnapshot();
-      const app = processes.find(
-        (entry) =>
-          entry.ProcessId === appPid &&
-          entry.ExecutablePath &&
-          normalizePath(entry.ExecutablePath) === normalizePath(layout.executable),
-      );
-      // The sidecar must be the PACKAGED ggnode running the PACKAGED bundle,
-      // as a child of the app — not some node the runner happened to have.
-      const node = processes.find(
-        (entry) =>
-          entry.ParentProcessId === appPid &&
-          entry.ExecutablePath &&
-          normalizePath(entry.ExecutablePath) === normalizePath(layout.node) &&
-          normalizeEvidence(entry.CommandLine ?? "").includes(normalizeEvidence(layout.sidecar)),
-      );
-      return app && node && visibleWindowPids().has(appPid);
-    });
-  } finally {
-    let processCleanupError;
-    try {
-      if (appPid) {
-        await cleanupOwnedProcesses({ rootPid: appPid, ownedRoots: [smokeRoot, extractRoot] });
-      }
-    } catch (error) {
-      processCleanupError = error;
-    }
-    try {
-      await removeTemporaryDirectory(smokeRoot);
-    } catch (directoryCleanupError) {
-      if (processCleanupError) {
-        throw new AggregateError(
-          [processCleanupError, directoryCleanupError],
-          "packaged smoke process and directory cleanup failed",
-        );
-      }
-      throw directoryCleanupError;
-    }
-    if (processCleanupError) throw processCleanupError;
+    result = await smokePackagedLayout(layout, { smokeRoot, projectDir });
+  } catch (error) {
+    smokeError = error;
   }
 
-  console.log(`SMOKE PASS: pid=${appPid} packagedNode=${packagedNode}`);
+  let cleanupError;
+  try {
+    await removeTemporaryDirectory(smokeRoot);
+  } catch (error) {
+    cleanupError = error;
+  }
+  if (smokeError && cleanupError) {
+    throw new AggregateError(
+      [smokeError, cleanupError],
+      "packaged smoke and directory cleanup failed",
+    );
+  }
+  if (smokeError) throw smokeError;
+  if (cleanupError) throw cleanupError;
+
+  console.log(`SMOKE PASS: pid=${result.appPid} packagedNode=${result.packagedNode}`);
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";

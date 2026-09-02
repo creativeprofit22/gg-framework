@@ -395,6 +395,7 @@ export const GG_APP_TARGETED_VITEST_PATHS = Object.freeze([
   "scripts/update-with-local-fixes.test.ts",
   "scripts/decisions-classifier.test.ts",
   "scripts/build-local-hotfix.test.ts",
+  "scripts/smoke-built-local-fork.test.mjs",
   "scripts/vite-config.test.ts",
   "src/brand-static.test.ts",
   "src/HomeScreen.test.tsx",

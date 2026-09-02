@@ -123,9 +123,9 @@ jobs:
   app:
     name: app · ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # 30 not 15: the Windows leg compiles the Tauri tree and builds/launches
-    # an MSI (~12 min warm; the Rust compile is much slower cold-cache).
-    timeout-minutes: 30
+    # 45 not 30: Windows also builds and installs the isolated NSIS smoke flavor
+    # after the MSI smoke; cold Rust caches remain substantially slower.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -243,6 +243,13 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: gg-app
         run: pnpm smoke:packaged
+
+      - name: Smoke installed Local Fork (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          pnpm --filter gg-app build:local-patched --installed-smoke
+          pnpm --filter gg-app smoke:installed-local-fork
 
   release-gate:
     name: Release CI gate

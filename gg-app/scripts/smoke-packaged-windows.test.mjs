@@ -16,6 +16,7 @@ import {
   discoverChangedMsi,
   discoverPackagedLayout,
   removeTemporaryDirectory,
+  smokePackagedLayout,
   snapshotMsiArtifacts,
   waitFor,
 } from "./smoke-packaged-windows.mjs";
@@ -67,6 +68,47 @@ describe("packaged Windows smoke artifact discovery", () => {
     writeFileSync(join(install, "sidecar", "app-sidecar.mjs"), "sidecar");
 
     expect(discoverPackagedLayout(root).installDir).toBe(realpathSync.native(install));
+  });
+
+  it("accepts the dedicated executable name from an installed NSIS layout", () => {
+    const root = temporaryDirectory();
+    mkdirSync(join(root, "sidecar"), { recursive: true });
+    writeFileSync(join(root, "gg-coder-local-fork-installed-smoke.exe"), "app");
+    writeFileSync(join(root, "ggnode.exe"), "node");
+    writeFileSync(join(root, "sidecar", "app-sidecar.mjs"), "sidecar");
+
+    expect(discoverPackagedLayout(root, "gg-coder-local-fork-installed-smoke.exe").installDir).toBe(
+      realpathSync.native(root),
+    );
+  });
+
+  it("reuses launch, visible-window, sidecar, and scoped cleanup checks", async () => {
+    const root = temporaryDirectory();
+    const layout = {
+      executable: join(root, "app.exe"),
+      installDir: root,
+      node: join(root, "ggnode.exe"),
+      sidecar: join(root, "sidecar", "app-sidecar.mjs"),
+    };
+    const result = await smokePackagedLayout(layout, {
+      smokeRoot: root,
+      projectDir: join(root, "project"),
+      spawnApp: () => ({ pid: 10 }),
+      exists: () => true,
+      snapshot: () => [
+        { ProcessId: 10, ExecutablePath: layout.executable },
+        {
+          ProcessId: 20,
+          ParentProcessId: 10,
+          ExecutablePath: layout.node,
+          CommandLine: layout.sidecar,
+        },
+      ],
+      visiblePids: () => new Set([10]),
+      cleanupOptions: { snapshot: () => [], exists: () => false },
+    });
+
+    expect(result).toEqual({ appPid: 10, packagedNode: layout.node });
   });
 
   it("fails when the bundled Node runtime is missing beside the app", () => {

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { finalizeSmokeLifecycle } from "./phase-25-windows-smoke-helpers.mjs";
 import {
   INSTALLED_SMOKE_IDENTITY,
   INSTALLED_SMOKE_MANIFEST_NAME,
@@ -183,6 +184,103 @@ describe("Installed Smoke manifest trust boundary", () => {
         allowedInstallerRoot: join(root, "elsewhere"),
       }),
     ).toThrow("outside the NSIS output directory");
+  });
+});
+
+describe("Installed Smoke lifecycle cleanup", () => {
+  it("does nothing when preflight never produced the staged uninstaller", async () => {
+    const operations = {
+      closeClient: vi.fn(),
+      terminateProcessTree: vi.fn(),
+      uninstall: vi.fn(),
+      waitForInstalledRemoval: vi.fn(),
+    };
+
+    await expect(
+      finalizeSmokeLifecycle(
+        {
+          client: null,
+          appPid: null,
+          executable: "C:\\smoke\\app.exe",
+          installedUninstaller: null,
+          releasePort: null,
+        },
+        operations,
+      ),
+    ).resolves.toEqual({ processTreeCleaned: true, uninstalled: false });
+    expect(operations.uninstall).not.toHaveBeenCalled();
+    expect(operations.waitForInstalledRemoval).not.toHaveBeenCalled();
+  });
+
+  it("closes CDP and the exact process tree before uninstalling the staged identity", async () => {
+    const calls = [];
+    const client = {};
+    const releasePort = vi.fn(() => calls.push("release port"));
+    const operations = {
+      closeClient: vi.fn(() => calls.push("close CDP")),
+      terminateProcessTree: vi.fn(() => calls.push("terminate tree")),
+      uninstall: vi.fn(() => calls.push("uninstall")),
+      waitForInstalledRemoval: vi.fn(() => calls.push("wait for removal")),
+    };
+
+    await expect(
+      finalizeSmokeLifecycle(
+        {
+          client,
+          appPid: 42,
+          executable: "C:\\smoke\\app.exe",
+          installedUninstaller: "C:\\smoke\\uninstall.exe",
+          releasePort,
+        },
+        operations,
+      ),
+    ).resolves.toEqual({ processTreeCleaned: true, uninstalled: true });
+    expect(operations.terminateProcessTree).toHaveBeenCalledWith(42, "C:\\smoke\\app.exe");
+    expect(operations.uninstall).toHaveBeenCalledWith("C:\\smoke\\uninstall.exe");
+    expect(calls).toEqual([
+      "close CDP",
+      "terminate tree",
+      "uninstall",
+      "wait for removal",
+      "release port",
+    ]);
+  });
+
+  it("preserves the smoke failure and reports cleanup failure", async () => {
+    const primaryError = new Error("payload hash mismatch");
+    const cleanupError = new Error("process tree remained");
+    const uninstall = vi.fn();
+
+    let thrown;
+    try {
+      await finalizeSmokeLifecycle(
+        {
+          client: {},
+          appPid: 42,
+          executable: "C:\\smoke\\app.exe",
+          installedUninstaller: "C:\\smoke\\uninstall.exe",
+          releasePort: null,
+        },
+        {
+          closeClient: vi.fn(),
+          terminateProcessTree: vi.fn(() => {
+            throw cleanupError;
+          }),
+          uninstall,
+          waitForInstalledRemoval: vi.fn(),
+        },
+        primaryError,
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect(thrown.errors[0]).toBe(primaryError);
+    expect(thrown.errors[1].errors).toContain(cleanupError);
+    expect(thrown.message).toContain("payload hash mismatch");
+    expect(thrown.message).toContain("process tree remained");
+    expect(uninstall).toHaveBeenCalledWith("C:\\smoke\\uninstall.exe");
   });
 });
 

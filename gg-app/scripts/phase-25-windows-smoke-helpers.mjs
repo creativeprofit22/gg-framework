@@ -123,6 +123,54 @@ export function sanitizedSmokeEnvironment(baseEnvironment, paths, fixtureVariabl
   };
 }
 
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export async function finalizeSmokeLifecycle(state, operations, primaryError = null) {
+  const cleanupErrors = [];
+  const attempt = async (operation) => {
+    try {
+      await operation();
+      return true;
+    } catch (error) {
+      cleanupErrors.push(error);
+      return false;
+    }
+  };
+
+  if (state.client) await attempt(() => operations.closeClient(state.client));
+  let processTreeCleaned = !state.appPid;
+  if (state.appPid) {
+    processTreeCleaned = await attempt(() =>
+      operations.terminateProcessTree(state.appPid, state.executable),
+    );
+  }
+  let uninstalled = false;
+  if (state.installedUninstaller) {
+    await attempt(() => operations.uninstall(state.installedUninstaller));
+    uninstalled = await attempt(() => operations.waitForInstalledRemoval());
+  }
+  if (state.releasePort) await attempt(state.releasePort);
+
+  if (cleanupErrors.length) {
+    const cleanupSummary = cleanupErrors.map(errorMessage).join("; ");
+    const cleanupError = new AggregateError(
+      cleanupErrors,
+      `Smoke cleanup failed: ${cleanupSummary}`,
+    );
+    if (primaryError) {
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        `Smoke failed: ${errorMessage(primaryError)}; cleanup also failed: ${cleanupSummary}`,
+      );
+    }
+    throw cleanupError;
+  }
+  if (primaryError) throw primaryError;
+  return { processTreeCleaned, uninstalled };
+}
+
 export async function reserveHeldTcpPort() {
   const server = net.createServer();
   await new Promise((resolveListen, reject) => {

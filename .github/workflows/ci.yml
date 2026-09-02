@@ -227,6 +227,12 @@ jobs:
         working-directory: gg-app/src-tauri
         run: cargo test
 
+      - name: Cross-pane project isolation native smoke
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 15
+        run: pnpm --filter gg-app smoke:cross-pane-project-isolation-dev
+
       # Windows-only, and the ONLY job that exercises real installer output.
       # `smoke-sidecar` above proves the bundled runtime loads, but it launches
       # the sidecar directly — it cannot catch what actually breaks for a
